@@ -166,7 +166,8 @@ class ConfigManager:
             default_thinking_budget = 10000
 
         # Allow override via environment variables
-        max_tokens = self.getenv_int("MAX_TOKENS", default_max_tokens)
+        max_tokens_limit = self.getenv_int("MAX_TOKENS_REASONING_LIMIT", MAX_TOKENS_REASONING_LIMIT)
+        max_tokens = self.getenv_int("MAX_TOKENS", min(default_max_tokens, max_tokens_limit))
         thinking_budget = self.getenv_int("THINKING_BUDGET", default_thinking_budget)
 
         return {
@@ -692,6 +693,8 @@ class ConfigManager:
                     "azure_endpoint": self.getenv("AZURE_API_BASE"),
                     "api_version": self.getenv("AZURE_API_VERSION"),
                 }
+            elif mem0_provider == "ollama":
+                embedder_config["config"]["model"] = model_name
         elif server == "gemini":
             raise ValueError(f"Unsupported provider: {server}")
         elif server == "bedrock":
@@ -738,6 +741,8 @@ class ConfigManager:
                     "azure_endpoint": self.getenv("AZURE_API_BASE"),
                     "api_version": self.getenv("AZURE_API_VERSION"),
                 }
+            if mem0_llm_provider == "ollama":
+                llm_config["config"]["model"] = model_name
         elif server == "gemini":
             raise ValueError(f"Unsupported provider: {server}")
         elif server == "bedrock":
