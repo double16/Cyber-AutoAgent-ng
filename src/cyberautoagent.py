@@ -71,6 +71,7 @@ from modules.prompts.factory import get_reflection_snapshot
 from modules.tools import browser, channel_close_all
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
+from modules.utils.text_reducer import reduce_lines_lossy, collapse_first_repeated_sequence
 
 load_dotenv()
 
@@ -689,9 +690,12 @@ def main():
         step0_retry = 2
         # the number of consecutive action-less results
         actionless_step_count = 0
+        max_tokens_retry_count = 0
 
         # SDK-aligned execution loop with continuation support
         while not interrupted:
+            last_step = callback_handler.current_step
+            last_tool_call_count = sum(callback_handler.tool_counts.values(), start=0)
             try:
                 print_status(
                     f"Agent processing: {current_message[:100]}{' ...' if len(current_message) > 100 else ''}",
@@ -699,14 +703,13 @@ def main():
                 )
                 logger.debug(f"Agent processing: {current_message}")
 
-                last_step = callback_handler.current_step
-
                 _strip_continue_messages(agent)
                 _ensure_prompt_within_budget(agent)
                 # Execute agent with current message
                 result = agent(current_message)
 
                 logger.debug(f"Agent result: {repr(result)}")
+                max_tokens_retry_count = 0
 
                 # Pass the metrics from the result to the callback handler
                 if (
@@ -729,8 +732,12 @@ def main():
 
                 # Ensure step is incremented and detect lack of progress
                 if callback_handler and callback_handler.current_step == last_step:
-                    actionless_step_count += 1
+                    callback_handler.current_step += 1
                     tool_total_count = sum(callback_handler.tool_counts.values())
+                    if tool_total_count > last_tool_call_count:
+                        actionless_step_count = 0
+                    else:
+                        actionless_step_count += 1
                     logger.debug(
                         "Incrementing step because agent returned but callback_handler did not, actionless_step_count=%d, pending_step_header=%s, tool_total_count=%d, reasoning_emitted_since_last_step_header=%s",
                         actionless_step_count,
@@ -738,7 +745,6 @@ def main():
                         tool_total_count,
                         str(getattr(callback_handler, '_reasoning_emitted_since_last_step_header', None))
                     )
-                    callback_handler.current_step += 1
                 else:
                     actionless_step_count = 0
 
@@ -795,7 +801,11 @@ def main():
                         max_steps=callback_handler.max_steps,
                         plan_current_phase=None,
                     )
-                    current_message = f"<continue_instructions>\n{reflection_snapshot}\n<continue_instructions>"
+                    extra_message = ""
+                    if actionless_step_count > 0:
+                        logger.warning("Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
+                        extra_message += f"Re-emit your last response as valid tool calls. No prose. No XML. At least one tool call is required to progress.\n"
+                    current_message = f"<continue_instructions>\n{extra_message}{reflection_snapshot}\n<continue_instructions>"
                 else:
                     break
 
@@ -821,12 +831,60 @@ def main():
 
             except Exception as error:
                 # Handle other termination scenarios
-                logger.debug("Termination exception", exc_info=error)
                 error_str = str(error).lower()
                 if isinstance(error, MaxTokensReachedException) or "maxtokensreached" in error_str or "max_tokens" in error_str:
+                    # if there is a response or reasoning text, reduce it and add as an assistant message, then try again
+                    if last_step != callback_handler.current_step:
+                        # progress was made
+                        max_tokens_retry_count = 0
+                    if callback_handler and max_tokens_retry_count < 2:
+                        # sometimes the max_tokens response includes the response, otherwise we'll look for reasoning text
+                        truncated_message = ""
+                        replace_last_message = False
+                        if agent.messages[-1].get("role", "") == "assistant":
+                            truncated_message = "".join([block.get("text", "") for block in agent.messages[-1].get("content", [])])
+                            replace_last_message = bool(truncated_message)
+                        if not truncated_message:
+                            truncated_message = "".join(callback_handler.reasoning_buffer).strip()
+                            truncated_message_prefix = truncated_message[:1000]
+                            replace_last_message = truncated_message and any([block.get("text", "").startswith(truncated_message_prefix) for block in agent.messages[-1].get("content", [])])
+                        reduced_text = reduce_lines_lossy(
+                            collapse_first_repeated_sequence(truncated_message),
+                            similarity_threshold=0.5, max_lines=40
+                        ).to_text().strip()
+                        max_tokens_retry_count += 1
+                        if reduced_text:
+                            reduced_message = {"role": "assistant", "content": [{"type": "text", "text": reduced_text}]}
+                            if replace_last_message:
+                                agent.messages[-1] = reduced_message
+                            else:
+                                agent.messages.append(reduced_message)
+                        reflection_snapshot = get_reflection_snapshot(
+                            current_step=callback_handler.current_step,
+                            max_steps=callback_handler.max_steps,
+                            plan_current_phase=None,
+                        )
+                        current_message = f"""<continue_instructions>
+You are continuing from a prior run that entered a repetitive reasoning loop.
+
+## CONSTRAINTS
+- Do NOT restate repeated points from the reduced notes.
+- Output must be structured, actionable, and short.
+- Avoid meta commentary about "looping" beyond what's required to recover.
+
+{reflection_snapshot}
+<continue_instructions>"""
+                        try:
+                            callback_handler._emit_accumulated_reasoning(force=True)
+                        except Exception:
+                            pass
+                        logger.warning("Model token limit reached, retrying with reduced text")
+                        continue
+
                     print_status(
                         "Token limit reached - generating final report", "WARNING"
                     )
+                    logger.debug("Termination exception", exc_info=error)
                     try:
                         if callback_handler:
                             callback_handler.emit_termination(
@@ -838,7 +896,10 @@ def main():
                             )
                     except Exception as max_tokens_finish_error:
                         logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
-                elif "event loop cycle stop requested" in error_str:
+                    break
+
+                logger.debug("Termination exception", exc_info=error)
+                if "event loop cycle stop requested" in error_str:
                     # Extract the reason from the error message
                     reason_match = re.search(r"Reason: (.+?)(?:\\n|$)", str(error))
                     reason = (

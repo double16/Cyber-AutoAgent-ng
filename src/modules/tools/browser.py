@@ -2,6 +2,7 @@ import asyncio
 import base64
 import contextlib
 import csv
+import contextvars
 import datetime
 import functools
 import json
@@ -35,6 +36,7 @@ from strands import tool
 from tldextract import tldextract
 
 logger = logging.getLogger(__name__)
+_BROWSER_OP_DEPTH = contextvars.ContextVar("browser_op_depth", default=0)
 _TOON_PREVIEW_LIMIT = 10
 _BROWSER_RETRIABLE_ERRORS = (
     "Execution context was destroyed",
@@ -360,6 +362,12 @@ class BrowserService(EventEmitter):
         # Dedicated event loop running in its own thread via ThreadPoolExecutor
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_ready = threading.Event()
+        # Serialize Playwright/Stagehand operations; created/used only on the browser loop
+        self._op_lock: Optional[asyncio.Lock] = None
+        # Debug counters for verifying single-flight execution on the browser loop
+        self._active_ops: int = 0
+        self._active_ops_peak: int = 0
+        self._active_ops_violations: int = 0
 
         def _loop_runner() -> None:
             loop = asyncio.new_event_loop()
@@ -379,10 +387,78 @@ class BrowserService(EventEmitter):
             self.stagehand.llm = LLMClientJSONResponsePatch(self.stagehand.llm)
 
     async def run_in_browser_loop(self, coro_factory):
-        """Run the coroutine produced by coro_factory on the dedicated browser event loop."""
+        """Run a coroutine factory on the dedicated browser event loop.
+
+        NOTE: Scheduling on a single event loop does *not* imply single-flight execution.
+        Tools may call this concurrently; Playwright/Stagehand page/context operations
+        are not safe to run concurrently. We therefore serialize all operations with an
+        asyncio.Lock that is created and used only on the browser loop.
+        """
         if self._loop is None:
             raise RuntimeError("BrowserService event loop not initialized")
-        cfut = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
+
+        async def _run_with_depth():
+            depth = _BROWSER_OP_DEPTH.get()
+            token = _BROWSER_OP_DEPTH.set(depth + 1)
+            try:
+                logger.debug("[BROWSER] begin coroutine %s", coro_factory.__qualname__)
+                return await coro_factory()
+            finally:
+                logger.debug("[BROWSER] end coroutine %s", coro_factory.__qualname__)
+                _BROWSER_OP_DEPTH.reset(token)
+
+        async def _runner():
+            # lazily create lock to ensure it's not used in another event loop
+            if self._op_lock is None:
+                self._op_lock = asyncio.Lock()
+            # Log that we're about to wait for the single-flight lock.
+            logger.debug(
+                "[BROWSER] waiting for op_lock (depth=%d) %s",
+                _BROWSER_OP_DEPTH.get(),
+                coro_factory.__qualname__,
+            )
+            async with self._op_lock:
+                logger.debug(
+                    "[BROWSER] acquired op_lock (depth=%d) %s",
+                    _BROWSER_OP_DEPTH.get(),
+                    coro_factory.__qualname__,
+                )
+                # Count *executing* operations (not queued/waiting). Should never exceed 1.
+                self._active_ops += 1
+                if self._active_ops > self._active_ops_peak:
+                    self._active_ops_peak = self._active_ops
+                if self._active_ops > 1:
+                    self._active_ops_violations += 1
+                    logger.warning(
+                        "[BROWSER] concurrent browser ops detected (active=%d, peak=%d, violations=%d)",
+                        self._active_ops,
+                        self._active_ops_peak,
+                        self._active_ops_violations,
+                    )
+                try:
+                    return await _run_with_depth()
+                finally:
+                    logger.debug(
+                        "[BROWSER] released op_lock (depth=%d) %s",
+                        _BROWSER_OP_DEPTH.get(),
+                        coro_factory.__qualname__,
+                    )
+                    self._active_ops -= 1
+
+        # If we're already on the browser loop, run directly (prevents deadlock)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        if running is self._loop:
+            # If we're already inside a browser op on this loop, do NOT re-acquire the lock
+            # (asyncio.Lock is not re-entrant). Nested calls should run directly.
+            if _BROWSER_OP_DEPTH.get() > 0:
+                return await _run_with_depth()
+            return await _runner()
+
+        cfut = asyncio.run_coroutine_threadsafe(_runner(), self._loop)
         return await asyncio.wrap_future(cfut)
 
     @asynccontextmanager
@@ -451,8 +527,12 @@ class BrowserService(EventEmitter):
 
             async def handle_dialog(dialog: Dialog):
                 """Auto accept all dialogs"""
-                await dialog.accept()
-                await self.emit_async("dialog", dialog)
+
+                async def _accept_and_emit():
+                    await dialog.accept()
+                    await self.emit_async("dialog", dialog)
+
+                await self.run_in_browser_loop(_accept_and_emit)
 
             async def handle_download(download: Download):
                 """Auto-save downloads to artifacts_dir"""
@@ -460,8 +540,12 @@ class BrowserService(EventEmitter):
                     self.artifacts_dir,
                     f"download_{time.time_ns()}_{download.suggested_filename}",
                 )
-                await download.save_as(download_path)
-                await self.emit_async("download", download_path)
+
+                async def _save_and_emit():
+                    await download.save_as(download_path)
+                    await self.emit_async("download", download_path)
+
+                await self.run_in_browser_loop(_save_and_emit)
 
             self.page.on("dialog", handle_dialog)
             self.page.on("download", handle_download)
@@ -902,16 +986,14 @@ class BrowserService(EventEmitter):
 
             Parameters:
                 msg (ConsoleMessage): The console message to be captured.
-
-            Raises:
-                None
-
-            Returns:
-                None
             """
-            args: list[Any] = []
-            for arg in msg.args:
-                args.append(await arg.json_value())
+            async def _extract_args() -> list[Any]:
+                extracted: list[Any] = []
+                for arg in msg.args:
+                    extracted.append(await arg.json_value())
+                return extracted
+
+            args = await self.run_in_browser_loop(_extract_args)
             collector.logs.append(
                 {
                     "type": msg.type,
@@ -1032,11 +1114,26 @@ def close_browser():
         logger.debug("Closing BrowserService")
         with _BROWSER_LOCK:
             try:
-                asyncio.run_coroutine_threadsafe(_BROWSER.stagehand.close(), _BROWSER._loop).result(10)
+                if _BROWSER._loop is None:
+                    raise RuntimeError("BrowserService event loop not initialized")
+
+                async def _close_impl():
+                    if _BROWSER._op_lock is None:
+                        _BROWSER._op_lock = asyncio.Lock()
+                    async with _BROWSER._op_lock:
+                        logger.debug(
+                            "[BROWSER] close stats: active=%d peak=%d violations=%d",
+                            _BROWSER._active_ops,
+                            _BROWSER._active_ops_peak,
+                            _BROWSER._active_ops_violations,
+                        )
+                        await _BROWSER.stagehand.close()
+
+                asyncio.run_coroutine_threadsafe(_close_impl(), _BROWSER._loop).result(10)
             except Exception:
                 logger.exception("Closing BrowserService")
             logger.debug("Stopping BrowserService event loop")
-            _BROWSER._loop.stop()
+            _BROWSER._loop.call_soon_threadsafe(_BROWSER._loop.stop)
         logger.debug("BrowserService stopped")
         _BROWSER = None
 
@@ -1127,7 +1224,6 @@ async def browser_set_headers(headers: Optional[dict[str, str]] = None):
             await browser.context.set_extra_http_headers(headers)
 
         await browser.run_in_browser_loop(_impl)
-        log_heap_stats()
         return f"Applied {len(headers)} extra HTTP header(s) to the browser context"
 
 
@@ -1299,7 +1395,6 @@ async def browser_goto_url(url: str):
                 if reset_notice:
                     payload = f"{reset_notice}\n{payload}"
                 logger.info("[BROWSER] returning payload %s", payload)
-                log_heap_stats()
                 return payload
             except TimeoutError:
                 # Navigation timed out: perform a light reset once, then fallback
@@ -1312,7 +1407,6 @@ async def browser_goto_url(url: str):
                     continue
                 # Fallback to HTTP fetch
                 logger.info("[BROWSER] navigation timeout")
-                log_heap_stats()
                 return await _http_fallback("navigation timeout")
             except Exception as exc:
                 message = str(exc)
@@ -1333,10 +1427,8 @@ async def browser_goto_url(url: str):
                     message,
                     exc_info=exc,
                 )
-                log_heap_stats()
                 return await _http_fallback(message or "navigation error")
         logger.info("[BROWSER] retry attempts exhausted")
-        log_heap_stats()
         return await _http_fallback("retry attempts exhausted")
 
 
@@ -1363,7 +1455,6 @@ async def browser_get_page_html() -> str:
         with open(html_artifact_file, "w", encoding="utf-8") as f:
             f.write(page_html)
         logger.info("browser_get_page_html: %s", html_artifact_file)
-        log_heap_stats()
         return f"HTML content saved to artifact: {html_artifact_file}"
 
 
@@ -1393,7 +1484,6 @@ async def browser_evaluate_js(expression: str):
 
         retval = await browser.run_in_browser_loop(_impl)
         logger.info("browser_evaluate_js: %s = %s", expression, retval)
-        log_heap_stats()
         return retval
 
 
@@ -1440,7 +1530,6 @@ async def browser_get_cookies():
             writer.writerow(dict(cookie))
 
         logger.info("browser_get_cookies: %s", csv_buffer.getvalue())
-        log_heap_stats()
         return csv_buffer.getvalue()
 
 
@@ -1496,7 +1585,6 @@ async def browser_perform_action(action: str):
 
         observations, summary = await browser.run_in_browser_loop(_impl)
         logger.info("browser_perform_action: %s done", action)
-        log_heap_stats()
         return f"<observations>\n{observations}\n</observations>\n{summary}"
 
 
@@ -1530,16 +1618,5 @@ async def browser_observe_page(instruction: Optional[str] = None) -> list[str]:
             return [observation.description for observation in observations]
 
         retval = await browser.run_in_browser_loop(_impl)
-        log_heap_stats()
         logger.info("browser_observe_page: %s", retval)
         return retval
-
-
-def log_heap_stats():
-    if logger.isEnabledFor(logging.DEBUG):
-        try:
-            from guppy import hpy
-            h = hpy()
-            logger.debug(h.heap()[0:12])
-        except ImportError:
-            logger.debug("Install guppy3 for heap analysis")

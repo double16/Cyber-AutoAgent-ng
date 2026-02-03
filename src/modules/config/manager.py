@@ -166,7 +166,8 @@ class ConfigManager:
             default_thinking_budget = 10000
 
         # Allow override via environment variables
-        max_tokens = self.getenv_int("MAX_TOKENS", default_max_tokens)
+        max_tokens_limit = self.getenv_int("MAX_TOKENS_REASONING_LIMIT", MAX_TOKENS_REASONING_LIMIT)
+        max_tokens = self.getenv_int("MAX_TOKENS", min(default_max_tokens, max_tokens_limit))
         thinking_budget = self.getenv_int("THINKING_BUDGET", default_thinking_budget)
 
         return {
@@ -565,7 +566,6 @@ class ConfigManager:
             operation_root: Root directory of the operation
             module: Module name (e.g., 'web', 'ctf')
         """
-        import shutil
         from pathlib import Path
 
         optimized_path = Path(operation_root) / "execution_prompt_optimized.txt"
@@ -587,21 +587,16 @@ class ConfigManager:
         module_loader = get_module_loader()
 
         # Try to find the execution prompt file using the loader's plugins directory
-        master_path = None
-        candidate = module_loader.plugins_dir / module / "execution_prompt.md"
-        if candidate.exists() and candidate.is_file():
-            master_path = candidate
+        candidate_content = module_loader.load_module_execution_prompt(module)
 
         # If module-specific prompt not found and not already trying web, fall back
-        if master_path is None and module != "web":
+        if (candidate_content is None or len(candidate_content) < 100) and module != "web":
             logger.warning(
                 "Module %s execution prompt not found, falling back to web", module
             )
-            candidate = module_loader.plugins_dir / "web" / "execution_prompt.md"
-            if candidate.exists() and candidate.is_file():
-                master_path = candidate
+            candidate_content = module_loader.load_module_execution_prompt("web")
 
-        if master_path is None or not master_path.exists():
+        if candidate_content is None or len(candidate_content) < 100:
             logger.error("No execution prompt found for module %s", module)
             # Create a minimal prompt instead of failing silently
             optimized_path.write_text(
@@ -609,28 +604,10 @@ class ConfigManager:
             )
             return
 
-        # Check if master file has meaningful content
-        master_size = master_path.stat().st_size
-        if master_size < 100:  # Less than 100 bytes is likely a placeholder
-            logger.error(
-                "Master execution prompt at %s appears to be empty or placeholder (size: %d bytes)",
-                master_path,
-                master_size,
-            )
-            # Create a minimal template instead
-            optimized_path.write_text(
-                f"# {module.upper()} Module Execution Prompt\n"
-                f"# Master prompt appears empty - using minimal template\n"
-            )
-            return
-
         try:
-            # Use shutil.copy() instead of copy2() to avoid preserving timestamps
-            # This ensures file modification time reflects when it was actually copied
-            shutil.copy(master_path, optimized_path)
+            optimized_path.write_text(candidate_content)
             logger.info(
-                "Copied master execution prompt from %s to %s",
-                master_path,
+                "Copied master execution prompt to %s",
                 optimized_path,
             )
         except Exception as e:
@@ -692,6 +669,8 @@ class ConfigManager:
                     "azure_endpoint": self.getenv("AZURE_API_BASE"),
                     "api_version": self.getenv("AZURE_API_VERSION"),
                 }
+            elif mem0_provider == "ollama":
+                embedder_config["config"]["model"] = model_name
         elif server == "gemini":
             raise ValueError(f"Unsupported provider: {server}")
         elif server == "bedrock":
@@ -738,6 +717,8 @@ class ConfigManager:
                     "azure_endpoint": self.getenv("AZURE_API_BASE"),
                     "api_version": self.getenv("AZURE_API_VERSION"),
                 }
+            if mem0_llm_provider == "ollama":
+                llm_config["config"]["model"] = model_name
         elif server == "gemini":
             raise ValueError(f"Unsupported provider: {server}")
         elif server == "bedrock":

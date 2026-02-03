@@ -40,13 +40,39 @@ operation_plugins/
 
 ## Component Functions
 
-### Specialist Agents (General Module)
+### Specialist Agents (Web Module)
 The `web` module currently ships with a `validation_specialist` tool that spins up its own Strands `Agent` to run the seven-gate validation checklist before a finding is accepted. The tool lives under `tools/validation_specialist.py` and follows a repeatable pattern:
 
-- `_create_specialist_model()` pulls the same provider/model configuration used by the main agent.
-- The `@tool` entry point builds a Strands `Agent` with a focused system prompt plus the minimal tool set (`shell`, `http_request`, etc.) required for validation.
+- An `agent_factory` property is injected on the `@tool` function. It is a function that builds a Strands `Agent` using the swarm model configuration, with the necessary components for context window management and observability.
+- An agent is built with a focused system prompt plus the minimal tool set (`shell`, `http_request`, etc.) required for validation.
 
 You can add additional specialists (e.g., SQLi, XSS, SSRF) by copying this file, adjusting the prompt/available tools, and registering the new tool name in `module.yaml`. The runtime orchestration automatically exposes any `tools/*.py` entry that uses this pattern.
+
+The `agent_factory` function allows custom model configuration, such as purpose-built models for the specialist.
+
+```python
+import json
+from strands import tool
+from typing import Dict, Any
+
+@tool
+def custom_tool() -> Dict[str, Any]:
+    agent_factory = getattr(custom_tool, "agent_factory", None)
+    assert agent_factory is not None
+
+    agent = agent_factory(
+        name="...",
+        agent_type="custom_tool",
+        model_spec={"model_settings": {"model_id": "purpose-built-model", "params": {"temperature": 0.8}}},
+        # remaining arguments are passed to strands.Agent constructor
+        system_prompt="...",
+        tools=[tool1, tool2],
+    )
+    agent()
+    result = agent("...")
+    result_text = str(result)
+    return json.loads(result_text)
+```
 
 ### module.yaml
 Defines module metadata and capabilities:
@@ -59,6 +85,8 @@ version: 1.0.0
 cognitive_level: 4              # Sophistication rating (1-5)
 capabilities:
   - capability_description
+extend:
+  - web
 tools:
   - tool_name
   - 'browser_*'
@@ -124,9 +152,10 @@ system_prompt = f"""
 Modules are discovered from multiple sources:
 
 **Search Paths:**
-1. Built-in: `src/modules/operation_plugins/`
-2. User-defined: `~/.cyberagent/modules/`
-3. Custom: `CYBERAGENT_MODULE_PATHS` environment variable
+1. Python CLI Custom: `CYBER_PLUGIN_PATH` environment variable, multiple paths separated by `:`
+2. Docker Custom: `./external_plugins/`        (mounted by docker-compose.yml)
+3. User-defined: `~/.cyber-autoagent/modules/` (mounted by docker-compose.yml)
+4. Built-in: `src/modules/operation_plugins/`
 
 **Validation Requirements:**
 - Valid `module.yaml` file
@@ -200,8 +229,8 @@ Report prompts guide structure and emphasis:
 ### Directory Setup
 
 ```bash
-mkdir -p ~/.cyberagent/modules/custom_module/tools
-cd ~/.cyberagent/modules/custom_module
+mkdir -p ~/.cyber-autoagent/modules/custom_module/tools
+cd ~/.cyber-autoagent/modules/custom_module
 ```
 
 ### Minimal Module
@@ -244,6 +273,28 @@ def custom_scanner(target: str, depth: int = 3) -> str:
     # Scanner implementation
     return f"Scan completed: {target}"
 ```
+
+### Extending Other Modules
+
+A module may extend from one or more modules. The module "inherits" the prompts and custom tools from other modules. This
+allows specific customizations to existing modules. If a module does not provide a prompt or tool, it is used from the
+inherited modules.
+
+```yaml
+extend:
+  - web
+  - some_other_module
+```
+
+In the example above, the module `web` is checked, then `some_other_module`.
+
+The following are inherited:
+- `execution_prompt.md`
+- `report_prompt.md`
+- `tools`  # The tools property is NOT inherited. If missing, all built-in and custom tools are included.
+- tools/   # The tools directory is inherited from all modules. If two custom tools have the same name, the first in the extend list is used.
+
+Extending modules, is transitive, i.e. my_custom_ctf → ctf → web.
 
 ## Development Guidelines
 
