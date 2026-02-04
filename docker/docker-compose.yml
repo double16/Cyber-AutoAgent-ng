@@ -2,7 +2,7 @@ services:
   cyber-autoagent:
     image: cyber-autoagent:latest
     build:
-      # requires tools image to be built: `docker build -t cyber-autoagent-tools -f Dockerfile.tools ..`
+      # requires tools image to be built: `docker build --pull -t cyber-autoagent-tools -f Dockerfile.tools ..`
       context: ../
       dockerfile: docker/Dockerfile
       args:

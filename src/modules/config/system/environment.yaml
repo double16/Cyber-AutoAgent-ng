@@ -2,96 +2,133 @@ cyber_tools:
   # Core scanners and recon
   nmap:
     description: "Network discovery and security auditing"
+    # the tools container would need elevated caps for nmap to run
+    #canary: "nmap --help"
   nikto:
     description: "Web server scanner"
+    canary: "nikto --help"
   sqlmap:
     description: "SQL injection detection and exploitation"
+    canary: "sqlmap --help"
   gobuster:
     description: "Directory/file brute-forcer"
+    canary: "gobuster -h"
   whatweb:
     description: "Web technology fingerprinting"
+    canary: "whatweb -h"
   wafw00f:
     description: "WAF fingerprinting"
+    canary: "wafw00f -h"
 
   # Web app scanners (GUI/CLI)
   zaproxy:
     description: "OWASP ZAP web scanner (CLI/API)"
+    canary: "zaproxy -h"
 
   # GraphQL-specific tools
   clairvoyance:
     description: "GraphQL schema enumeration and introspection"
+    canary: "clairvoyance --help"
   graphql-inspector:
     description: "GraphQL schema analysis and validation"
+    canary: "graphql-inspector --help"
 
   # JWT manipulation tools
   jwt-tool:
     description: "JWT analysis and manipulation toolkit"
+    canary: "jwt-tool --help"
 
   # Template injection tools
-  tplmap:
+  sstimap:
     description: "Server-Side Template Injection scanner"
+    canary: "sstimap --help"
 
   # Cookie/Session manipulation
   cookiecutter:
     description: "Cookie template generation tool"
+    canary: "cookiecutter --help"
 
   # ProjectDiscovery ecosystem
   nuclei:
     description: "Templated vulnerability scanner"
+    canary: "nuclei -h"
   naabu:
     description: "Fast TCP port scanner (SYN/CONNECT)"
+    canary: "naabu -h"
   amass:
     description: "In-depth DNS enumeration and attack surface mapping"
+    canary: "amass -h"
   subfinder:
     description: "Passive subdomain discovery"
+    canary: "subfinder -h"
 
   # Web fuzzing & dirs
   ffuf:
     description: "Fast web fuzzer"
+    canary: "ffuf -h"
   feroxbuster:
     description: "Fast recursive content discovery"
+    canary: "feroxbuster -h"
   dirb:
     description: "HTTP(S) web content scanner"
   arjun:
     description: "HTTP parameter discovery suite"
+    canary: "arjun -h"
   wapiti:
     description: "Web vulnerability scanner"
+    canary: "wapiti -h"
   wfuzz:
     description: "Web application bruteforcer"
+    canary: "wfuzz -h"
   wpscan:
     description: "WordPress security scanner"
+    canary: "wpscan -h"
   corsy:
     description: "Scan websites for Cross-Origin Resource Sharing (CORS) misconfigurations"
+    canary: "corsy --help"
   paramspider:
     description: "Mining URLs from dark corners of Web Archives for bug hunting/fuzzing/further probing"
+    canary: "paramspider --help"
   qsreplace:
     description: "Replace all query string values with a user-supplied value"
+    canary: "qsreplace -h"
 
   # Web recon helpers
   gospider:
     description: "Web spider for finding URLs and endpoints"
+    canary: "gospider -h"
   httprobe:
     description: "Probes for working HTTP and HTTPS servers"
+    canary: "httprobe -h"
   subjack:
     description: "Subdomain takeover tool"
+    canary: "subjack -h"
   knockpy:
     description: "DNS subdomain scanner"
+    canary: "knockpy -h"
   assetfinder:
     description: "Subdomain discovery (tomnomnom)"
+    canary: "assetfinder -h"
   httpx:
     description: "HTTP probing and technology detection (ProjectDiscovery)"
+    canary: "httpx --help"
   katana:
     description: "Fast web crawler (ProjectDiscovery)"
+    canary: "katana -h"
   semgrep:
     description: "Static source code analysis"
+    canary: "semgrep -h"
 
   # DNS/Recon
   dnsrecon:
     description: "DNS reconnaissance"
+    canary: "dnsrecon -h"
   dnsenum:
     description: "DNS enumeration"
   theharvester:
     description: "Emails, subdomains, IPs and URLs OSINT"
+    command: "theHarvester"
+    canary: "theHarvester -h"
 
   # Network scanning
   masscan:
@@ -100,42 +137,52 @@ cyber_tools:
   # SMB/NetBIOS
   smbclient:
     description: "Samba SMB/CIFS client"
+    canary: "smbclient --help"
   smbmap:
     description: "Enumerate Samba share drives across domains"
+    canary: "smbmap --help"
   nbtscan:
     description: "NetBIOS name network scanner"
 
   # SNMP/Discovery
   arp-scan:
     description: "ARP scanning and fingerprinting"
+    canary: "arp-scan -h"
   ike-scan:
     description: "VPN IKE scanner"
+    canary: "ike-scan -h"
   onesixtyone:
     description: "Fast SNMP scanner"
   snmpcheck:
     description: "SNMP enumerator"
     command: "snmp-check"
+    canary: "snmp-check -h"
   netdiscover:
     description: "Active/passive ARP reconnaissance"
 
   # Utilities
   hping3:
     description: "TCP/IP packet assembler/analyzer"
+    canary: "hping3 -h"
   socat:
     description: "Multipurpose relay (SOcket CAT)"
+    canary: "socat -h"
   proxychains4:
     description: "Force any TCP connection through proxy"
   sslscan:
     description: "SSL/TLS scanner"
+    canary: "sslscan -h"
 
   # Frameworks and cracking
   metasploit:
     description: "Penetration testing framework"
     command: "msfconsole"
+    canary: "msfconsole -h"
   msfvenom:
     description: "Payload generator for Metasploit"
   john:
     description: "John the Ripper password cracker"
+    canary: "john -h"
 
   # Networking suites
   iproute2:
@@ -146,113 +193,147 @@ cyber_tools:
     command: "netstat"
   tshark:
     description: "Captures and analyzes packets off the wire or pcap files supporting too many protocols to list."
+    canary: "tshark -h"
 
   # Basics
   netcat:
     description: "Network utility for reading/writing data"
     command: "nc"
+    canary: "nc -h"
   curl:
     description: "HTTP client for web requests"
+    canary: "curl -h"
   tcpdump:
     description: "Network packet capture"
+    canary: "tcpdump -h"
 
   # Binary Exploitation & Reversing
   gdb:
     description: "GNU Debugger"
+    canary: "gdb -h"
   ltrace:
     description: "Library call tracer"
+    canary: "ltrace -h"
   strace:
     description: "System call tracer"
+    canary: "strace -h"
   radare2:
     description: "Reverse engineering framework"
+    canary: "radare2 -h"
   ROPgadget:
     description: "ROP gadget finder"
     command: "ROPgadget"
+    canary: "ROPgadget --help"
   ropper:
     description: "ROP gadget finder and binary information"
+    canary: "ropper -h"
 
   # Steganography & Forensics
   steghide:
     description: "Steganography tool"
+    canary: "steghide --help"
   binwalk:
     description: "Firmware analysis tool"
+    canary: "binwalk --help"
   foremost:
     description: "File carving tool"
+    canary: "foremost -h"
   zsteg:
     description: "PNG/BMP steganography"
+    canary: "zsteg -h"
 
   # Deserialization
   ysoserial:
     description: "Java deserialization payload generator"
   phpggc:
     description: "PHP generic gadget chains"
+    canary: "phpggc --help"
 
   # SSRF
   gopherus:
     description: "SSRF payload generator"
+    canary: "gopherus --help"
 
   # Tunneling & OOB
   interactsh-client:
     description: "OOB interaction client"
+    canary: "interactsh-client --help"
   ligolo-proxy:
     description: "Advanced tunneling tool (Ligolo-ng)"
     command: "proxy"
+    canary: "proxy --help"
   chisel:
     description: "Fast TCP/UDP tunnel over HTTP"
 
   # Password Cracking
   hashcat:
     description: "Advanced password recovery"
+    canary: "hashcat -h"
   kerbrute:
     description: "Kerberos pre-auth brute-forcing"
+    canary: "kerbrute -h"
 
   # Windows/AD
   enum4linux:
     description: "SMB enumeration tool"
+    canary: "enum4linux -h"
   netexec:
     description: "Network service exploitation (SMB/WinRM/etc)"
     command: "nxc"
+    canary: "nxc -h"
   evil-winrm:
     description: "WinRM shell access"
+    canary: "evil-winrm --help"
 
   # XSS Advanced
   xsstrike:
     description: "Advanced XSS detection suite"
+    canary: "xsstrike --help"
   dalfox:
     description: "Parameter analysis and XSS scanning"
+    canary: "dalfox --help"
 
   # Privilege Escalation
   linpeas:
     description: "Linux Privilege Escalation Awesome Script"
+    canary: "linpeas -h"
   pwncat-cs:
     description: "Advanced reverse shell handler"
+    canary: "pwncat-cs --help"
 
   # C2 & Post-Exploitation
   sliver:
     description: "Command and Control framework"
     command: "sliver-client"
+    canary: "sliver-client -h"
 
   # Active Directory Advanced
   bloodhound-python:
     description: "AD ingestor for BloodHound"
+    canary: "bloodhound-python -h"
   certipy:
     description: "Active Directory Certificate Services abuse"
+    canary: "certipy -h"
   coercer:
     description: "Active Directory coercion attacks"
+    canary: "coercer -h"
   responder:
     description: "LLMNR/NBT-NS poisoner"
+    canary: "responder --help"
 
   # Secrets & Git
   trufflehog:
     description: "Find leaked credentials"
+    canary: "trufflehog -h"
   gitdumper:
     description: "Dump git repositories from websites"
 
   # Cryptography & Forensics
-#  rsactftool:
-#    # requires python 3.9
-#    description: "RSA attack tool"
+  rsactftool:
+    description: "RSA attack tool"
+    command: "rsacrack"
+    canary: "rsacrack --help"
   volatility:
     description: "Memory forensics framework"
     command: "vol"
-
+    canary: "vol -h"

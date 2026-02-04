@@ -6,7 +6,7 @@ Configure `.env` with the desired provider, model and other settings.
 
 ```shell
 cd docker
-docker build -t cyber-autoagent-tools -f Dockerfile.tools ..
+docker build --pull -t cyber-autoagent-tools -f Dockerfile.tools ..
 
 docker compose --env-file ../.env up -d
 # OR
