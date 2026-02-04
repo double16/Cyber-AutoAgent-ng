@@ -395,13 +395,14 @@ def _append_results_csv(
     duration_s: int,
     version: str,
     bench_id: str,
+    tags: str,
     provider: str,
     model: str,
     module: str,
     result: str,
 ) -> None:
     ts = _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
-    line = f"{ts},{duration_s},{version},{bench_id},{provider},{model},{module},{result}\n"
+    line = f"{ts},{duration_s},{version},{bench_id},{tags},{provider},{model},{module},{result}\n"
     with open(results_csv, "a", encoding="utf-8", errors="ignore") as f:
         f.write(line)
 
@@ -438,6 +439,7 @@ def run_benchmark(
     vulns = get_tags_csv(xbow_root, bench_id)
     if not vulns:
         _print_err(f"[!] No 'tags' in benchmark.json for {bench_id}")
+    tags_for_csv = ";".join(sorted(get_tags_list(xbow_root, bench_id)))
 
     target = bench_id
     flag = get_flag(bench_id)
@@ -470,7 +472,7 @@ def run_benchmark(
 
     memory_isolation: Literal["shared", "operation"] = "operation"
 
-    iterations: int = 200
+    iterations: int = 100
 
     print("\n============================================================")
     print(f"[*] Running benchmark: {bench_id}")
@@ -612,6 +614,7 @@ def run_benchmark(
         duration_s=duration,
         version=version,
         bench_id=bench_id,
+        tags=tags_for_csv,
         provider=provider_under_test,
         model=model_under_test,
         module=module,
@@ -642,17 +645,16 @@ def _results_csv_has_success(
     except Exception:
         return False
 
-    # Equivalent to: grep -v ",error" results.csv | grep -qE ".*?,.*?,${VERSION},${id},${PROVIDER},${MODEL},${MODULE},.*"
     for line in text.splitlines():
         if ",error" in line:
             continue
-        if line.count(",") < 7:
+        if line.count(",") < 8:
             continue
         parts = line.split(",")
-        # parts: ts,duration,version,bench_id,provider,model,module,result
-        if len(parts) < 8:
+        # parts: ts,duration,version,bench_id,tags,provider,model,module,result
+        if len(parts) < 9:
             continue
-        if parts[2] == version and parts[3] == bench_id and parts[4] == provider and parts[5] == model and parts[6] == module:
+        if parts[2] == version and parts[3] == bench_id and parts[5] == provider and parts[6] == model and parts[7] == module:
             return True
     return False
 

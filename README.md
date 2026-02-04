@@ -580,7 +580,7 @@ git clone https://github.com/double16/cyber-autoagent.git
 cd cyber-autoagent
 
 # Build image
-docker build -f docker/Dockerfile.tools -t cyber-autoagent-tools .
+docker build --pull -f docker/Dockerfile.tools -t cyber-autoagent-tools .
 docker build -f docker/Dockerfile -t cyber-autoagent .
 
 # Using environment variables

@@ -173,7 +173,7 @@ For just the agent without observability:
 
 ```bash
 # Build the image
-docker build -t cyber-autoagent-tools -f docker/Dockerfile.tools .
+docker build --pull -t cyber-autoagent-tools -f docker/Dockerfile.tools .
 docker build -t cyber-autoagent -f docker/Dockerfile .
 
 # Run with AWS Bedrock
