@@ -109,7 +109,7 @@ export MEM0_LLM_MODEL=azure/gpt-4o  # Separate LLM for memory system
 ```bash
 ollama serve
 ollama pull qwen3-coder:30b-a3b-q4_K_M
-ollama pull mxbai-embed-large
+ollama pull mxbai-embed-large:latest
 ```
 
 **LiteLLM:**
@@ -419,7 +419,7 @@ Requirements: Python 3.11+, dependencies installed
 ### Docker Standalone
 
 ```bash
-docker build -t cyber-autoagent-tools -f Dockerfile.tools ..
+docker build --pull -t cyber-autoagent-tools -f Dockerfile.tools ..
 docker build -t cyber-autoagent ..
 
 docker run --rm \
@@ -550,11 +550,11 @@ If vulnerabilities are discovered during authorized testing:
 
 ## Additional Resources
 
-| Resource              | Location                                                                                 |
-|-----------------------|------------------------------------------------------------------------------------------|
-| Architecture Guide    | [architecture.md](architecture.md)                                                       |
-| Memory System         | [memory.md](memory.md)                                                                   |
-| Deployment Guide      | [deployment.md](deployment.md)                                                           |
-| Module Development    | [../src/modules/operation_plugins/README.md](../src/modules/operation_plugins/README.md) |
-| Terminal Architecture | [terminal-frontend.md](terminal-frontend.md)                                             |
-| GitHub Issues         | Report bugs and request features                                                         |
+| Resource              | Location                                     |
+|-----------------------|----------------------------------------------|
+| Architecture Guide    | [architecture.md](architecture.md)           |
+| Memory System         | [memory.md](memory.md)                       |
+| Deployment Guide      | [deployment.md](deployment.md)               |
+| Module Development    | [operation_plugins.md](operation_plugins.md) |
+| Terminal Architecture | [terminal-frontend.md](terminal-frontend.md) |
+| GitHub Issues         | Report bugs and request features             |

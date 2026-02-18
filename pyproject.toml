@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cyber-autoagent"
-version = "0.6.0"
+version = "0.7.0"
 description = "Cyber-AutoAgent: Autonomous AI agent for ethical security assessments"
 readme = "README.md"
 authors = [
@@ -78,10 +78,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/double16/cyber-autoagent"
-Repository = "https://github.com/double16/cyber-autoagent"
-Documentation = "https://github.com/double16/cyber-autoagent#readme"
-"Bug Tracker" = "https://github.com/double16/cyber-autoagent/issues"
+Homepage = "https://github.com/bvcyber/Cyber-AutoAgent-ng"
+Repository = "https://github.com/bvcyber/Cyber-AutoAgent-ng"
+Documentation = "https://github.com/bvcyber/Cyber-AutoAgent-ng#readme"
+"Bug Tracker" = "https://github.com/bvcyber/Cyber-AutoAgent-ng/issues"
 
 [project.scripts]
 caa = "cyberautoagent:main"
