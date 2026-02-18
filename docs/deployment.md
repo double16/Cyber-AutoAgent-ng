@@ -64,7 +64,7 @@ docker run -it --rm \
   -e AZURE_API_BASE=https://your-endpoint.openai.azure.com/ \
   -e CYBER_AGENT_LLM_MODEL=azure/gpt-5 \
   -v $(pwd)/outputs:/app/outputs \
-  cyberautoagent:latest
+  cyber-autoagent:latest
 ```
 
 **Direct Python Execution (Override Entrypoint):**
@@ -77,7 +77,7 @@ docker run --rm --entrypoint python \
   -e CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large \
   -e REASONING_EFFORT=medium \
   -v $(pwd)/outputs:/app/outputs \
-  cyberautoagent:latest \
+  cyber-autoagent:latest \
   src/cyberautoagent.py \
   --target https://example.com \
   --objective "Security assessment" \
@@ -146,7 +146,7 @@ Cyber-AutoAgent supports **300+ LLM providers** via LiteLLM. Examples:
 
 ```bash
 # Clone the repository
-git clone https://github.com/double16/cyber-autoagent.git
+git clone https://github.com/bvcyber/Cyber-AutoAgent-ng.git
 cd cyber-autoagent
 
 # Build and run with Docker Compose (includes observability)
@@ -455,9 +455,8 @@ export OPENAI_API_KEY=your_moonshot_key  # Mem0 compatibility
 ### Ollama with Context Window Fallbacks
 ```bash
 export OLLAMA_HOST=http://localhost:11434
-export OLLAMA_API_BASE=http://localhost:11434
 export CYBER_AGENT_LLM_MODEL=qwen3-coder:30b-a3b-q4_K_M
-export CYBER_AGENT_EMBEDDING_MODEL=nomic-embed-text
+export CYBER_AGENT_EMBEDDING_MODEL=nomic-embed-text:latest
 export CYBER_CONTEXT_WINDOW_FALLBACKS='[
   {"qwen3-coder:30b": ["qwen3-coder:14b", "llama3.2:3b"]}
 ]'

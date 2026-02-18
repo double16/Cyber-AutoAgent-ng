@@ -60,6 +60,14 @@ def _b64(input) -> str:
     return base64.b64encode(input_bytes).decode('ascii')
 
 
+def _coerce_str(arg: bytes | str | None) -> str:
+    if arg is None:
+        return ""
+    if isinstance(arg, str):
+        return arg
+    if isinstance(arg, bytes):
+        return arg.decode('utf-8', errors='ignore')
+    return str(arg)
 
 
 @dataclass
@@ -85,7 +93,7 @@ def advanced_payload_coordinator(
     When to call:
     - You have a target URL (optionally authenticated via cookies/headers) and need fast confirmation/triage of
       XSS, CORS misconfig, SSTI, command injection, or LDAP injection on likely parameters.
-    - Use "param_discovery" when you do not know parameters. Use "xss" or "cors" for focused checks.
+    - Use "param_discovery" when you do not know parameters. Use "xss", "ssti", "command_injection", "ldap_injection", or "cors" for focused checks.
     - Use "comprehensive" after initial recon/endpoint selection to prioritize exploit paths.
     - Not for crawling: call this after you have selected a concrete endpoint/URL to test.
 
@@ -113,6 +121,11 @@ def advanced_payload_coordinator(
         raise ValueError("target_url is required")
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
+
+    if test_type not in ["xss", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors",
+                         "comprehensive"]:
+        test_type = "comprehensive"
+    test_type = test_type.lower()
 
     request_config = RequestConfig(
         target_url=target_url,
@@ -147,7 +160,7 @@ def advanced_payload_coordinator(
         results["tools"] = tools_setup
 
         # Parameter discovery and expansion
-        if test_type in ["xss", "param_discovery", "comprehensive"]:
+        if test_type in ["xss", "ssti", "command_injection", "ldap_injection", "param_discovery", "comprehensive"]:
             discovered_params = _advanced_parameter_discovery(request_config, parameters, tools=tools_setup["tools"])
             if not discovered_params and request_config.http_method == "GET":
                 # try again with POST
@@ -194,11 +207,21 @@ def advanced_payload_coordinator(
             results["vulnerabilities"].extend(cors_issues)
 
         # Advanced injection coordination (non-SQL)
-        if test_type == "comprehensive":
+        if test_type in ["ssti", "command_injection", "ldap_injection", "comprehensive"]:
+            if test_type == "ssti":
+                focus_injection_types = {"SSTI"}
+            elif test_type == "command_injection":
+                focus_injection_types = {"Command Injection"}
+            elif test_type == "ldap_injection":
+                focus_injection_types = {"LDAP Injection"}
+            else:
+                focus_injection_types = None
+
             injection_results = _coordinate_injection_testing(
                 request_config,
                 results.get("parameters_discovered", []),
                 tools=tools_setup["tools"],
+                focus_injection_types=focus_injection_types,
             )
             injection_vulns = [r for r in injection_results if r.get("vulnerable", False)]
             if not injection_vulns and request_config.http_method == "GET":
@@ -207,6 +230,7 @@ def advanced_payload_coordinator(
                     request_config,
                     results.get("parameters_discovered", []),
                     tools=tools_setup["tools"],
+                    focus_injection_types=focus_injection_types,
                 )
                 injection_vulns = [r for r in injection_results_post if r.get("vulnerable", False)]
                 if injection_vulns:
@@ -344,7 +368,7 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
                     if result.stdout:
                         arjun_out = result.stdout
         except subprocess.TimeoutExpired as e:
-            arjun_out = e.stdout
+            arjun_out = _coerce_str(e.stdout)
         except Exception:
             pass
         if arjun_out:
@@ -693,7 +717,7 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
                 dalfox_out = result.stdout
 
         except subprocess.TimeoutExpired as e:
-            dalfox_out = e.stdout
+            dalfox_out = _coerce_str(e.stdout)
             dalfox_timeout = True
         except Exception:
             pass
@@ -898,11 +922,32 @@ def _test_cors_configurations(request_config: RequestConfig, tools: List[str] = 
     return cors_results
 
 
-def _coordinate_injection_testing(request_config: RequestConfig, parameters: List[str], tools: List[str] = None) -> \
-List[Dict[str, Any]]:
+def _coordinate_injection_testing(
+        request_config: RequestConfig,
+        parameters: List[str],
+        tools: List[str] = None,
+        focus_injection_types: set[str] | None = None,
+) -> List[Dict[str, Any]]:
     """Coordinate advanced injection testing (beyond SQL)"""
     tools = [] if tools is None else tools
     target_url = request_config.target_url
+
+    # Normalize and check focus_injection_types
+    focus = {t.strip() for t in (focus_injection_types or set()) if t and str(t).strip()}
+    if focus:
+        # Normalize common aliases just in case.
+        normalized: set[str] = set()
+        for t in focus:
+            tl = t.lower()
+            if tl in {"ssti", "template_injection", "template"}:
+                normalized.add("SSTI")
+            elif tl in {"cmd", "command", "command_injection"}:
+                normalized.add("Command Injection")
+            elif tl in {"ldap", "ldap_injection"}:
+                normalized.add("LDAP Injection")
+            else:
+                normalized.add(t)
+        focus = normalized
 
     injection_results = []
 
@@ -947,12 +992,15 @@ List[Dict[str, Any]]:
         ("LDAP Injection", ldap_payloads),
     ]
 
+    if focus:
+        injection_types = [(t, payloads) for (t, payloads) in injection_types if t in focus]
+
     # Test each parameter with different injection types
     parameters_under_test = set(parameters.copy())  # parameters[:5]   # Limit to first 5 parameters
 
     # SSTImap
     # XBEN-044-24 is a good test case. Target the '/' endpoint, 'name' parameter, POST method.
-    if "sstimap" in tools:
+    if "sstimap" in tools and (not focus or "SSTI" in focus):
         sstimap_out = ""
         sstimap_timeout = False
         try:
@@ -987,7 +1035,7 @@ List[Dict[str, Any]]:
                 if result.returncode == 0 and result.stdout:
                     sstimap_out = result.stdout
         except subprocess.TimeoutExpired as e:
-            sstimap_out = e.stdout
+            sstimap_out = _coerce_str(e.stdout)
             sstimap_timeout = True
         except Exception:
             pass
@@ -1004,12 +1052,12 @@ List[Dict[str, Any]]:
                 # Mark that this parameter was found vulnerable so we don't add a negative summary later.
                 injection_results.append(f)
                 parameters_under_test.discard(param)
-                if not sstimap_timeout:
-                    injection_types = list(filter(lambda x: x[0] != "SSTI", injection_types))
+                if not sstimap_timeout and focus:
+                    injection_types = [x for x in injection_types if x[0] != "SSTI"]
 
     # command injection
     # XBEN-073-24
-    if "commix" in tools and parameters_under_test:
+    if "commix" in tools and parameters_under_test and (not focus or "Command Injection" in focus):
         commix_out = ""
         commix_timeout = False
         try:
@@ -1028,7 +1076,6 @@ List[Dict[str, Any]]:
                 "--answers=marker=Y,system=N,shell=N,cookie=Y,classic=N,skip=Y",
                 "--random-agent",
                 "--level", "3",
-                # "--smart",
                 "--disable-coloring",
                 f"--time-limit={time_limit-10}",
                 "-u", test_url,
@@ -1055,7 +1102,7 @@ List[Dict[str, Any]]:
             if result.returncode == 0 and result.stdout:
                 commix_out = result.stdout
         except subprocess.TimeoutExpired as e:
-            commix_out = e.stdout
+            commix_out = _coerce_str(e.stdout)
             commix_timeout = True
         except Exception:
             pass
@@ -1076,15 +1123,14 @@ List[Dict[str, Any]]:
                             "tool": "commix",
                         }
                     )
-                    if not commix_timeout:
-                        injection_types = list(filter(lambda x: x[0] != "Command Injection", injection_types))
+                    if not commix_timeout and focus:
+                        injection_types = [x for x in injection_types if x[0] != "Command Injection"]
 
     for param in parameters_under_test:
         found_for_param = False
         for injection_type, payloads in injection_types:
             for payload in payloads:
                 try:
-                    # Create test URL
                     test_url = _add_or_replace_query_param(target_url, param, payload)
                     response = _requests_get_text(target_url, {param: payload}, request_config, timeout=10)
                     if response is not None:
@@ -1369,7 +1415,7 @@ def main() -> int:
         "--test-type",
         dest="test_type",
         default="comprehensive",
-        choices=["xss", "param_discovery", "cors", "comprehensive"],
+        choices=["xss", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors", "comprehensive"],
         help="Type of testing to run (default: comprehensive)",
     )
     parser.add_argument(

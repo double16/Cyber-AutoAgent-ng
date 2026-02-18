@@ -54,7 +54,7 @@ from modules.handlers.conversation_budget import (
     PRESERVE_FIRST_DEFAULT,
 )
 from modules.handlers.react import ReactBridgeHandler
-from modules.handlers.tool_call_repair_hook import ToolCallRepairHook
+from modules.handlers.agent_repair_hook import AgentRepairHook
 from modules.handlers.tool_router import ToolRouterHook
 from modules.config.models.capabilities import get_capabilities
 from modules.handlers.utils import print_status, sanitize_target_name, get_tool_name
@@ -834,7 +834,7 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
         artifact_threshold=artifact_threshold,
     )
 
-    tool_call_repair_hook = ToolCallRepairHook()
+    tool_call_repair_hook = AgentRepairHook()
 
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
     hooks: List[HookProvider] = [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]
@@ -861,7 +861,7 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
 
     agent_logger.debug("Creating autonomous agent")
 
-    # Update conversation window size from SDK config (kept for reference)
+    # Update conversation window size and limits from SDK config
     try:
         if config_manager.getenv("CYBER_CONVERSATION_WINDOW"):
             window_size = max(10, config_manager.getenv_int("CYBER_CONVERSATION_WINDOW", 100))
@@ -879,14 +879,20 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
     except (TypeError, ValueError):
         window_size = 80
 
+    preserve_recent_messages=PRESERVE_LAST_DEFAULT
+    preserve_first_messages=PRESERVE_FIRST_DEFAULT
+    if not config_manager.getenv("CYBER_CONVERSATION_PRESERVE_LAST"):
+        if prompt_token_limit <= 49_152:
+            preserve_recent_messages = 2
+
     # Create and register conversation manager for all agents (including swarm children)
     # Use environment variables for preservation to enable effective pruning
     # Keep preserve_last low (5) to allow pruning: first (1) + last (5) = 6 preserved out of 120 window
     conversation_manager = MappingConversationManager(
         window_size=window_size,
         summary_ratio=0.3,
-        preserve_recent_messages=PRESERVE_LAST_DEFAULT,  # Env default: 5 (reduced from 12)
-        preserve_first_messages=PRESERVE_FIRST_DEFAULT,  # Env default: 1 (scripts often use 3)
+        preserve_recent_messages=preserve_recent_messages,
+        preserve_first_messages=preserve_first_messages,
         tool_result_mapper=LargeToolResultMapper(
             # computed previously
             max_tool_chars=TOOL_COMPRESS_THRESHOLD,

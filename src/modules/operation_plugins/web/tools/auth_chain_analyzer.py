@@ -19,6 +19,16 @@ from strands import tool
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+def _coerce_str(arg: bytes | str | None) -> str:
+    if arg is None:
+        return ""
+    if isinstance(arg, str):
+        return arg
+    if isinstance(arg, bytes):
+        return arg.decode('utf-8', errors='ignore')
+    return str(arg)
+
+
 @tool
 def auth_chain_analyzer(target_url: str, auth_type: str = "auto") -> str:
     """
@@ -56,6 +66,10 @@ def auth_chain_analyzer(target_url: str, auth_type: str = "auto") -> str:
         raise ValueError("target_url is required")
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
+
+    if auth_type not in ["jwt", "oauth", "saml", "session", "auto"]:
+        auth_type = "auto"
+    auth_type = auth_type.lower()
 
     results = {
         "target": target_url,
@@ -582,7 +596,7 @@ def _discover_auth_endpoints(target_url: str) -> List[Dict[str, Any]]:
         if result.returncode == 0:
             feroxbuster_out = result.stdout
     except subprocess.TimeoutExpired as e:
-        feroxbuster_out = e.stdout
+        feroxbuster_out = _coerce_str(e.stdout)
     except Exception:
         pass
     finally:
