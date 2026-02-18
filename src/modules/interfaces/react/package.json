@@ -64,7 +64,7 @@
     "jest-environment-jsdom": "^30.2.0",
     "jsdom": "^27.4.0",
     "react-dom": "^19.1.1",
-    "react-test-renderer": "^19.1.1",
+    "react-test-renderer": "^19.2.4",
     "ts-jest": "^29.4.6",
     "tsx": "^4.6.2",
     "typescript": "^5.9.2"
