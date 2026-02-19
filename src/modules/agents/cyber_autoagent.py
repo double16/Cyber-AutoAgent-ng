@@ -28,6 +28,7 @@ from strands_tools import (
     http_request,
     python_repl,
     stop,
+    environment,
 )
 
 from modules import prompts, __version__
@@ -499,6 +500,7 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
         stop,
         sleep,
         python_repl,
+        environment,  # environment is referenced by other strands tools
     ]
 
     if enable_prompt_optimization:

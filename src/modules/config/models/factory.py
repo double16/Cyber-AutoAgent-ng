@@ -544,8 +544,12 @@ def create_ollama_model(
         Exception: If model creation fails
     """
     from strands.models.ollama import OllamaModel
-    from modules.agents.patches import patch_ollama_model_token_usage
+    from modules.agents.patches import patch_ollama_model_token_usage, patch_ollama_model_json_toolcalls
     patch_ollama_model_token_usage()
+
+    # The AgentRepairHook will detect and patch. For models we know need the patch, do it before model use.
+    if "qwen2.5" in model_id or "llama3" in model_id:
+        patch_ollama_model_json_toolcalls()
 
     # Get centralized configuration
     config_manager = _get_config_manager()
