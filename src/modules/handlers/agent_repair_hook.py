@@ -11,13 +11,16 @@ from modules.config.system.logger import get_logger
 from modules.prompts.factory import get_reflection_snapshot
 from modules.utils.text_reducer import reduce_lines_lossy, collapse_first_repeated_sequence
 
+from modules.agents.patches import _JSON_FENCE_RE, _JSON_BARE_RE, patch_ollama_model_json_toolcalls
+
+
 logger = get_logger("Handlers.AgentRepairHook")
 
 _XML_TOOLCALL_RE = re.compile(r"<(?:function|parameter)=[^>]+>.*?</function>", re.DOTALL)
 
 _TOOL_CALLS_RETRY_STATE_KEY = "force_openai_toolcalls_retry"
 _REASONING_LOOP_RETRY_STATE_KEY = "reasoning_loop_retry"
-
+_JSON_TOOL_CALL_PATCH_ATTEMPT = False
 
 class AgentRepairHook(HookProvider):
     """
@@ -40,6 +43,7 @@ class AgentRepairHook(HookProvider):
         - If we detect XML-ish tool call markup, request a retry.
         - If we detect reasoning loop exceeds max tokens, request a retry.
         """
+        global _JSON_TOOL_CALL_PATCH_ATTEMPT
         if event is None:
             return
 
@@ -121,6 +125,22 @@ class AgentRepairHook(HookProvider):
                     continue
                 if not assistant_text:
                     continue
+
+                # Look for tool call using json "name" and "arguments"/"parameters"
+                if not _JSON_TOOL_CALL_PATCH_ATTEMPT:
+                    json_tool_call_candidate = None
+                    if json_m := _JSON_FENCE_RE.search(assistant_text):
+                        json_tool_call_candidate = json_m.group(1)
+                    elif json_m := _JSON_BARE_RE.search(assistant_text):
+                        json_tool_call_candidate = json_m.group(1)
+                    if json_tool_call_candidate is not None \
+                            and '"name"' in json_tool_call_candidate \
+                            and ('"arguments"' in json_tool_call_candidate or '"parameters"' in json_tool_call_candidate):
+                        _JSON_TOOL_CALL_PATCH_ATTEMPT = True
+                        if patch_ollama_model_json_toolcalls():
+                            logger.info("Detected JSON style tool calls, patched model and retry")
+                            event.retry = True
+                            return
 
                 if _XML_TOOLCALL_RE.search(assistant_text):
                     # Mark for one retry and ask Strands to redo the model call

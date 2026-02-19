@@ -1,5 +1,6 @@
 import json
 import subprocess
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Any, Dict, Optional
@@ -95,7 +96,8 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
             keywords: space separated keywords for filtering the tools returned (Optional)
         """
         separator = "=" * 80
-        keywords = list(filter(bool, [w.strip().lower() for w in (keywords or "").split()]))
+        parts = re.split(r"[\s,;]+", (keywords or ""))
+        keywords = [w.strip().lower() for w in parts if w.strip()]
         found_tools = []
         catalog = ""
         all_tools = agent.tool_registry.get_all_tools_config()
