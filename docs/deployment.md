@@ -190,7 +190,6 @@ docker run --rm \
 # Run with Ollama (local)
 docker run --rm \
   -e OLLAMA_HOST=http://host.docker.internal:11434 \
-  -e OLLAMA_API_BASE=http://host.docker.internal:11434 \
   -v $(pwd)/outputs:/app/outputs \
   cyber-autoagent \
   --target "testsite.local" \

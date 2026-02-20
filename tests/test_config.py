@@ -219,7 +219,7 @@ class TestConfigManager:
 
             assert config.server_type == "ollama"
             assert config.llm.provider == ModelProvider.OLLAMA
-            assert config.llm.model_id == "llama3.2:3b"
+            assert config.llm.model_id == "qwen3-coder:30b-a3b-q4_K_M"
             assert config.embedding.provider == ModelProvider.OLLAMA
             assert config.embedding.model_id == "mxbai-embed-large:latest"
             assert config.region == "ollama"
@@ -261,7 +261,7 @@ class TestConfigManager:
 
         assert isinstance(config, LLMConfig)
         assert config.provider == ModelProvider.OLLAMA
-        assert config.model_id == "llama3.2:3b"
+        assert config.model_id == "qwen3-coder:30b-a3b-q4_K_M"
 
     def test_get_embedding_config(self):
         """Test getting embedding configuration."""
@@ -299,10 +299,9 @@ class TestConfigManager:
         local_config = self.config_manager.get_swarm_config("ollama")
         assert isinstance(local_config, SwarmConfig)
         assert local_config.llm.provider == ModelProvider.OLLAMA
-        assert local_config.llm.model_id == "llama3.2:3b"
+        assert local_config.llm.model_id == "qwen3-coder:30b-a3b-q4_K_M"
         assert local_config.llm.temperature == 0.7
-        # Swarm max_tokens now uses models.dev safe defaults (50% of limit, fallback 4096)
-        assert local_config.llm.max_tokens == 4096
+        assert local_config.llm.max_tokens == 6000
 
         # Test remote swarm config
         remote_config = self.config_manager.get_swarm_config("bedrock")
@@ -976,7 +975,7 @@ class TestGlobalFunctions:
         assert "llm_model" in config
         assert "embedding_model" in config
         assert "embedding_dims" in config
-        assert config["llm_model"] == "llama3.2:3b"
+        assert config["llm_model"] == "qwen3-coder:30b-a3b-q4_K_M"
         assert config["embedding_model"] == "mxbai-embed-large:latest"
         assert config["embedding_dims"] == 1024
 

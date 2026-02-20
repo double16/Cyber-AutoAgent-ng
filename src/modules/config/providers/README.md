@@ -96,7 +96,7 @@ export CYBER_AGENT_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0
 - Models pulled locally (`ollama pull model_name`)
 
 **Host Detection:**
-- Environment: `OLLAMA_HOST=http://custom-host:11434`, `OLLAMA_API_BASE=http://custom-host:11434`
+- Environment: `OLLAMA_HOST=http://custom-host:11434`
 - Default: `http://localhost:11434`
 - Docker: `http://host.docker.internal:11434` (auto-detected)
 
