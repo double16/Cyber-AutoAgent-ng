@@ -796,12 +796,20 @@ class ModulePromptLoader:
 
     @lru_cache
     def _find_module_dir(self, module_name: str) -> Optional[Path]:
-        """Find the first matching module directory in plugin roots."""
+        """Find the first matching module directory in plugin roots.
+
+        Performs a deep search using **/module_name/module.yaml or
+        **/module_name/module.yml so that modules can be nested inside
+        sub-directories (e.g. external_plugins/collection/web/).
+        """
         for base in self.plugin_dirs:
             try:
-                mdir = (base / module_name)
-                if mdir.exists() and mdir.is_dir():
-                    return mdir
+                # Deep search: locate any module.yaml/module.yml nested under module_name
+                for yaml_fname in ("module.yaml", "module.yml"):
+                    for yaml_file in base.rglob(f"{module_name}/{yaml_fname}"):
+                        mdir = yaml_file.parent
+                        if mdir.is_dir():
+                            return mdir
             except Exception:
                 continue
         return None
@@ -872,30 +880,29 @@ class ModulePromptLoader:
     def _find_prompt_path(self, module_name: str, filename: str) -> Tuple[Optional[Path], Optional[Path]]:
         """Find a prompt file for a module across plugin roots.
 
+        Uses the module's directory to resolve the prompt file within it.
+
         Returns (path, module_dir).
         """
-        for base in self.plugin_dirs:
-            try:
-                p = base / module_name / filename
-                if p.exists() and p.is_file():
-                    return p, p.parent
-            except Exception:
-                continue
+        mdir = self._find_module_dir(module_name)
+        if mdir:
+            p = mdir / filename
+            if p.exists() and p.is_file():
+                return p, mdir
         return None, None
 
     def _find_tools_dir(self, module_name: str) -> Tuple[Optional[Path], Optional[Path]]:
         """Find tools directory for a module across plugin roots.
 
+        Uses the module's directory to resolve the tools/ sub-directory within it.
+
         Returns (tools_dir, module_dir).
         """
-        for base in self.plugin_dirs:
-            try:
-                mdir = base / module_name
-                td = mdir / "tools"
-                if td.exists() and td.is_dir():
-                    return td, mdir
-            except Exception:
-                continue
+        mdir = self._find_module_dir(module_name)
+        if mdir:
+            td = mdir / "tools"
+            if td.exists() and td.is_dir():
+                return td, mdir
         return None, None
 
     def _read_tools_allowlist(self, module_dir: Optional[Path]) -> Optional[List[str]]:
