@@ -538,10 +538,11 @@ ollama pull llama3.2:3b
 ollama pull mxbai-embed-large:latest
 ```
 
-Ollama defaults to a context window size of 4096. This can be changed for all models (https://docs.ollama.com/faq#how-can-i-specify-the-context-window-size):
+Ollama defaults to a context window size based on VRAM. This can be set at runtime using the OLLAMA_CONTEXT_LENGTH env
+var or the the docker compose `.env` file.
 
 ```bash
-OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+export OLLAMA_CONTEXT_LENGTH=32768
 ```
 
 The context window can be specified for a specific model by creating a derived model and setting the `num_ctx` parameter.

@@ -132,7 +132,6 @@ def check_if_rebuild_needed(self, event: BeforeModelInvocationEvent):
 def _auto_optimize_execution_prompt(self):
     # Phase 1: Retrieve recent memories without preprocessing
     recent_memories = memory.list_memories(
-        user_id="cyber_agent",
         limit=30
     )
 
@@ -310,7 +309,6 @@ def _query_memory_overview(self) -> Optional[Dict[str, Any]]:
 
     # Retrieve recent memories for contextual analysis
     results = self.memory.list_memories(
-        user_id="cyber_agent",
         limit=30
     )
 

@@ -47,9 +47,9 @@ class TestGetSystemPrompt:
             has_memory_path=True,
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
         assert 'mem0_list(' in prompt
-        assert "Build upon previous discoveries" in prompt
+        assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_with_existing_memories(self):
         """Test system prompt with existing memories detected"""
@@ -61,9 +61,9 @@ class TestGetSystemPrompt:
             has_existing_memories=True,
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
         assert 'mem0_list(' in prompt
-        assert "Build upon previous discoveries" in prompt
+        assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_with_both_memory_flags(self):
         """Test system prompt with both memory path and existing memories"""
@@ -76,9 +76,9 @@ class TestGetSystemPrompt:
             has_existing_memories=True,
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
         assert 'mem0_list(' in prompt
-        assert "Build upon previous discoveries" in prompt
+        assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_no_memory_flags(self):
         """Test system prompt without memory flags"""
@@ -92,8 +92,7 @@ class TestGetSystemPrompt:
         )
 
         assert "CRITICAL FIRST ACTION" in prompt
-        assert "Starting fresh assessment with no previous context" in prompt
-        assert "Do NOT check memory on fresh operations" in prompt
+        assert "Create a strategic plan via" in prompt
 
     @patch("modules.prompts.factory.load_prompt_template")
     def test_get_system_prompt_with_tools_context(self, mock_load_prompt_template):
@@ -123,6 +122,8 @@ class TestGetSystemPrompt:
     def test_get_system_prompt_with_output_config(self):
         """Test system prompt with output configuration"""
         output_config = {
+            "artifacts_path": "/custom/artifacts",
+            "tools_path": "/custom/tools_path",
             "base_dir": "/custom/output",
             "target_name": "test_target",
             "enable_unified_output": True,
@@ -136,10 +137,10 @@ class TestGetSystemPrompt:
             output_config=output_config,
         )
 
-        # OUTPUT DIRECTORY STRUCTURE section removed from prompts
-        # Verify the prompt still contains essential elements
+        assert "/custom/artifacts" in prompt
+        assert "/custom/tools_path" in prompt
         assert "test.com" in prompt
-        assert "## MEMORY CONTEXT" in prompt
+        assert "CRITICAL FIRST ACTION" in prompt
 
     def test_get_system_prompt_with_overlay_block(self, tmp_path):
         """Overlay file should render adaptive directives block."""
@@ -243,7 +244,7 @@ class TestMemoryInstructions:
             has_existing_memories=False,  # Should be ignored
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
 
     def test_memory_instruction_existing_only(self):
         """Test memory instruction when only existing memories are detected"""
@@ -256,7 +257,7 @@ class TestMemoryInstructions:
             has_existing_memories=True,
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
 
     def test_memory_instruction_fresh_operation(self):
         """Test memory instruction for fresh operations"""
@@ -270,7 +271,7 @@ class TestMemoryInstructions:
         )
 
         assert "CRITICAL FIRST ACTION" in prompt
-        assert "Starting fresh assessment with no previous context" in prompt
+        assert "Create a strategic plan" in prompt
 
 
 class TestReflectionSnapshot:

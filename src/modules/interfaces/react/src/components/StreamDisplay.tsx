@@ -21,6 +21,9 @@ import type { Config } from '../contexts/ConfigContext.js';
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
 let cachedProjectRoot: string | null | undefined;
 
+// Tracks the most recently-started task title so it can be shown in the ThinkingIndicator.
+let activeTaskTitle: string | null = null;
+
 const resolveProjectRoot = (): string | null => {
   if (cachedProjectRoot !== undefined) {
     return cachedProjectRoot;
@@ -84,6 +87,8 @@ export type AdditionalStreamEvent =
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
+  | { type: 'task_started'; task_uid?: string; title?: string; status?: string; [key: string]: any }
+  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; [key: string]: any }
   | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; [key: string]: any };
 
 // Combined event type supporting both SDK-aligned and additional events
@@ -613,6 +618,19 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         </Box>
       );
       
+    case 'task_started': {
+      const title = event.title;
+      if (typeof title === 'string' && title.trim().length > 0) {
+        activeTaskTitle = title.trim();
+      }
+      return null;
+    }
+
+    case 'task_done': {
+      activeTaskTitle = null;
+      return null;
+    }
+
     case 'thinking':
       return (
         <ThinkingIndicator
@@ -620,9 +638,10 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
           startTime={event.startTime}
           enabled={animationsEnabled}
           message={event.message ?? null}
+          taskTitle={activeTaskTitle ?? null}
         />
       );
-      
+
     case 'thinking_end':
       // Don't render anything - this just signals to stop showing thinking indicator
       return null;

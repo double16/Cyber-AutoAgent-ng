@@ -81,6 +81,8 @@ export interface Config {
   sagemakerBaseUrl?: string;
   /** Ollama server host URL for local model serving */
   ollamaHost?: string;
+  /** Ollama server context length */
+  ollamaContextLength?: number;
   /** Ollama server timeout */
   ollamaTimeout?: number;
 
@@ -355,6 +357,7 @@ export const defaultConfig: Config = {
   awsExternalId: process.env.AWS_EXTERNAL_ID,
   sagemakerBaseUrl: process.env.SAGEMAKER_BASE_URL,
   ollamaHost: process.env.OLLAMA_HOST || 'http://localhost:11434',
+  ollamaContextLength: parseInt(process.env.OLLAMA_CONTEXT_LENGTH) || null,
   ollamaTimeout: parseFloat(process.env.OLLAMA_TIMEOUT) || 120,
 
   // Model Pricing (per 1K tokens)

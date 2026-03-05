@@ -75,7 +75,7 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
     Run focused recon for a target and return agent-ready JSON.
 
     Input:
-    - Accepts domain or URL; normalizes to domain.
+    - Accepts URL or domain; normalizes to domain or IP address.
 
     Reuse vs run:
     - Reuse existing `recon_result_v1` for same target if sufficient.
@@ -94,17 +94,17 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
     - key phase errors indicate partial results
 
     Modes (`recon_type`):
-    - subdomain: subdomain enumeration only
-    - web: live host probing + basic tech fingerprint
-    - comprehensive: subdomain + live hosts + endpoint/js/parameter discovery + prioritization
+    - subdomain: subdomain enumeration only (skipped if target is an IP address)
+    - fingerprint: live host probing + basic tech fingerprint
+    - comprehensive: subdomain + live hosts + basic tech fingerprint + endpoint/js/parameter discovery + prioritization (includes modes subdomain + fingerprint)
 
     Return:
     JSON string with keys:
     - subdomains, live_hosts, technologies, endpoints, js_files, parameters
     - intelligence (ranked targets/hidden services)
-    - tasks (capability-tagged next steps)
-    - recommendations (machine directives)
-    - meta (limits + coverage), errors (per-phase)
+    - next_steps
+    - recommendations
+    - metadata (limits + coverage), errors (per-phase)
     """
     if not target:
         raise ValueError("target is required")
@@ -120,7 +120,7 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
     if not target:
         raise ValueError("target is required")
 
-    if recon_type not in ["subdomain", "web", "comprehensive"]:
+    if recon_type not in ["subdomain", "fingerprint", "comprehensive"]:
         recon_type = "comprehensive"
     recon_type = recon_type.lower()
 
@@ -141,7 +141,7 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
             "ranked_hidden_services": [],
         },
         "errors": [],
-        "tasks": [],
+        "next_steps": [],
         "meta": {
             "format": "recon_result_v1",
             "generated_by": "specialized_recon_orchestrator",
@@ -204,13 +204,13 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
                 )
 
         # Phase 3: Live host detection and technology fingerprinting
-        if recon_type in ["web", "comprehensive"]:
+        if recon_type in ["fingerprint", "comprehensive"]:
             try:
                 live_analysis = _analyze_live_hosts(results["subdomains"] or [target], errors=results["errors"])
                 results["live_hosts"] = live_analysis["hosts"]
                 results["technologies"] = live_analysis["technologies"]
                 # Update meta coverage after Phase 3 if only web recon runs
-                if recon_type == "web":
+                if recon_type == "fingerprint":
                     results["meta"]["coverage"].update(
                         {
                             "subdomains_discovered": len(results.get("subdomains", []) or []),
@@ -252,9 +252,9 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
 
         # Task plan
         try:
-            results["tasks"] = _generate_recon_tasks(results)
+            results["next_steps"] = _generate_recon_tasks(results)
         except Exception as e:
-            _err("tasks", str(e))
+            _err("next_steps", str(e))
 
         # Recommendations
         try:
@@ -1335,7 +1335,7 @@ def main() -> int:
         "--recon-type",
         dest="recon_type",
         default="comprehensive",
-        choices=["subdomain", "web", "comprehensive"],
+        choices=["subdomain", "fingerprint", "comprehensive"],
         help="Type of recon to run (default: comprehensive)",
     )
 

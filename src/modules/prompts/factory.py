@@ -327,9 +327,6 @@ def _read_module_yaml_for_tags(module_dir: Path) -> List[str]:
     return tags
 
 
-# --- Template and Utility Functions ---
-
-
 def load_prompt_template(template_name: str) -> str:
     """Load a prompt template, optionally via Langfuse when enabled.
 
@@ -399,55 +396,13 @@ def _extract_domain_lens(module_prompt: str) -> Dict[str, str]:
     return domain_lens
 
 
-# --- Memory Context Guidance (centralized) ---
-
-
-def _plan_first_directive(has_existing_memories: bool) -> str:
-    """Return the plan-first directive block used in memory context.
-
-    This centralizes wording so tests and UX remain stable.
-    """
-    # Category guidance included in both branches to reinforce proper usage
-    # NOTE: category is REQUIRED - store will error if missing
-    category_guidance = (
-        'CATEGORY RULE: Exploit/vuln confirmed → category="finding" | '
-        'Recon/failed attempt → category="observation" | '
-        'WRONG category = empty report!\n'
-        'NOTE: category is REQUIRED - missing category will raise error. '
-        'Always specify metadata={"category": "finding"} or "observation"'
-    )
-
-    if has_existing_memories:
-        return dedent(
-            f"""
-**CRITICAL FIRST ACTION**: Load all memories with mem0_list()
-NEXT: Retrieve the active plan with mem0_get_plan(); if none, create one via mem0_store_plan() before other tools
-{category_guidance}"""
-        ).strip()
-    else:
-        return dedent(
-            f"""
-Starting fresh assessment with no previous context
-Do NOT check memory on fresh operations (no retrieval of prior data)
-CRITICAL FIRST ACTION: Create a strategic plan via mem0_store_plan(plan={{...}})
-Then begin reconnaissance and target information gathering guided by the plan
-Store all findings immediately with category="finding" (NOT "observation" for exploits!)
-{category_guidance}"""
-        ).strip()
-
-
 def get_memory_context_guidance(
     *,
     has_memory_path: bool,
     has_existing_memories: bool,
     memory_overview: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Return memory context guidance text used in system prompts.
-
-    Matches expectations from tests by including specific phrases/assertions.
-    """
-    lines: List[str] = ["## MEMORY CONTEXT"]
-
+    """Return memory context guidance text used in system prompts."""
     # Determine memory count if available
     total_count = 0
     if isinstance(memory_overview, dict):
@@ -458,22 +413,22 @@ def get_memory_context_guidance(
                 total_count = 0
 
     if not has_memory_path and not has_existing_memories:
-        # Fresh operation guidance (centralized)
-        lines.append(_plan_first_directive(False))
+        # Fresh operation guidance
+        return """**CRITICAL FIRST ACTION**: Create a strategic plan via mem0_store_plan().
+"""
     else:
         # Continuing assessment guidance
         count_str = str(total_count) if total_count else "0"
-        lines.append(f"Continuing assessment with {count_str} existing memories")
-        # Centralized plan-first directive for existing memory case
-        lines.append(_plan_first_directive(True))
-        lines.append("Analyze retrieved memories before taking any actions")
-        lines.append("Avoid repeating work already completed")
-        lines.append("Build upon previous discoveries")
-
-    return "\n".join(lines)
-
-
-# --- Core System Prompt Builders (minimal, robust) ---
+        return f"""Continuing assessment with {count_str} existing memories.
+**CRITICAL FIRST ACTIONS**
+  1. Load all memories: mem0_list().
+  2. Load the plan: mem0_get_plan(). If none, create it immediately via mem0_store_plan() before other tools.
+  3. Perform a Memory Intake Pass:
+    - Summarize what’s already known (key facts + evidence paths).
+    - Identify unknown / next questions.
+    - Mark duplicates and do not recreate tasks/work already completed.
+    - Create tasks based on prior discoveries.
+"""
 
 
 def _format_overlay_directives(payload: Any) -> List[str]:
@@ -641,7 +596,7 @@ def get_system_prompt(
     # Inject Environmental Context if present
     env_context_str = ""
     if tools_context:
-        env_context_str = f"**ENVIRONMENTAL CONTEXT**:\n{tools_context}"
+        env_context_str = f"# ENVIRONMENTAL CONTEXT\n{tools_context}"
     prompt = prompt.replace("{{ environmental_context }}", env_context_str)
 
     # 7. Append Overlay (Adaptive Directives)
@@ -749,9 +704,6 @@ def get_report_agent_prompt() -> str:
     raise FileNotFoundError("Missing report_agent_prompt.md")
 
 
-# --- Module Prompt Loader ---
-
-
 class ModulePromptLoader:
     """Lightweight loader for module-specific prompts (execution/report)."""
 
@@ -789,7 +741,6 @@ class ModulePromptLoader:
         self.last_loaded_execution_prompt_source: Optional[str] = None
         self.last_loaded_report_prompt_source: Optional[str] = None
 
-    # --- Module inheritance helpers ---
 
     @lru_cache
     def _find_module_dir(self, module_name: str) -> Optional[Path]:
@@ -1081,9 +1032,6 @@ class ModulePromptLoader:
 def get_module_loader() -> ModulePromptLoader:
     """Return a module prompt loader instance."""
     return ModulePromptLoader()
-
-
-# --- Report Generation Functions ---
 
 
 def _get_current_date() -> str:

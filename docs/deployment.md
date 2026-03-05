@@ -190,6 +190,7 @@ docker run --rm \
 # Run with Ollama (local)
 docker run --rm \
   -e OLLAMA_HOST=http://host.docker.internal:11434 \
+  -e OLLAMA_CONTEXT_LENGTH=32768 \
   -v $(pwd)/outputs:/app/outputs \
   cyber-autoagent \
   --target "testsite.local" \
@@ -318,7 +319,8 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `AWS_ACCESS_KEY_ID`               | AWS credentials for Bedrock                       | For Bedrock provider          |
 | `AWS_SECRET_ACCESS_KEY`           | AWS credentials for Bedrock                       | For Bedrock provider          |
 | `AWS_REGION`                      | AWS region (default: us-east-1)                   | For Bedrock provider          |
-| `OLLAMA_HOST`,`OLLAMA_API_BASE`   | Ollama API endpoint                               | For Ollama provider           |
+| `OLLAMA_HOST`                     | Ollama API endpoint                               | For Ollama provider           |
+| `OLLAMA_CONTEXT_LENGTH`           | Ollama model context length                       | No, Ollama default            |
 | `OLLAMA_TIMEOUT`                  | Ollama API timeout in seconds                     | No (default: 120)             |
 | `AZURE_API_KEY`                   | Azure OpenAI API key                              | For Azure/LiteLLM             |
 | `AZURE_API_BASE`                  | Azure endpoint URL                                | For Azure/LiteLLM             |
@@ -458,6 +460,7 @@ export OPENAI_API_KEY=your_moonshot_key  # Mem0 compatibility
 ### Ollama with Context Window Fallbacks
 ```bash
 export OLLAMA_HOST=http://localhost:11434
+export OLLAMA_CONTEXT_LENGTH=32768
 export CYBER_AGENT_LLM_MODEL=qwen3-coder:30b-a3b-q4_K_M
 export CYBER_AGENT_EMBEDDING_MODEL=nomic-embed-text:latest
 export CYBER_CONTEXT_WINDOW_FALLBACKS='[

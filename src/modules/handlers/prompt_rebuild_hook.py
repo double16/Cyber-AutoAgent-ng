@@ -355,7 +355,6 @@ class PromptRebuildHook(HookProvider):
             if self.memory and hasattr(self.memory, "list_memories"):
                 try:
                     memories = self.memory.list_memories(
-                        user_id="cyber_agent",
                         run_id=self.operation_id,
                         limit=100
                     )
@@ -421,7 +420,7 @@ Without category='finding', your work will NOT appear in the final report.
             # Retrieve recent memories for contextual analysis
             results = []
             if hasattr(self.memory, "list_memories"):
-                memories = self.memory.list_memories(user_id="cyber_agent")
+                memories = self.memory.list_memories()
                 # Handle both dict and list return types
                 if isinstance(memories, dict):
                     results = (
@@ -434,10 +433,10 @@ Without category='finding', your work will NOT appear in the final report.
                 # Limit to 30 most recent
                 results = results[:30] if results else []
             elif hasattr(self.memory, "get_all"):
-                results = self.memory.get_all(user_id="cyber_agent")[:30]
+                results = self.memory.get_all()[:30]
             else:
                 # Fallback to search_memories with empty query
-                results = self.memory.search_memories(query="", user_id="cyber_agent")[
+                results = self.memory.search_memories(query="")[
                     :30
                 ]
 
@@ -472,14 +471,14 @@ Without category='finding', your work will NOT appear in the final report.
         try:
             # Use get_active_plan if available (more direct)
             if hasattr(self.memory, "get_active_plan"):
-                active_plan = self.memory.get_active_plan(user_id="cyber_agent", operation_id=self.operation_id)
+                active_plan = self.memory.get_active_plan(operation_id=self.operation_id)
                 if active_plan:
                     # Return raw memory content for LLM interpretation
                     return str(active_plan.get("memory", ""))
 
             # Otherwise, search for any plan-like memory
             results = self.memory.search_memories(
-                query="plan objective phase", user_id="cyber_agent"
+                query="plan objective phase"
             )[:1]
 
             if results:
@@ -572,7 +571,6 @@ Without category='finding', your work will NOT appear in the final report.
                 cross_operation = memory_is_cross_operation()
                 # Try to get all recent memories
                 recent_memories = self.memory.list_memories(
-                    user_id="cyber_agent",
                     run_id=self.operation_id if not cross_operation else None,
                 )
             except Exception as e:

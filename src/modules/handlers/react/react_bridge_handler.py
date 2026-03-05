@@ -28,9 +28,11 @@ from modules.config.system.logger import get_logger
 from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
+from ...utils.text_reducer import collapse_first_repeated_sequence
 
 logger = get_logger("Handlers.ReactBridge")
 
+_DEFAULT_REASONING_DEDUPE_TTL_S = 20.0
 
 @dataclass
 class _ReasoningSeenHolder:
@@ -51,6 +53,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         self,
         max_steps: int = 100,
         operation_id: str = None,
+        provider_id: str = None,
         model_id: str = None,
         swarm_model_id: str = None,
         emitter: EventEmitter = None,
@@ -81,6 +84,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Initialize emitter with operation context
         self.emitter = emitter or get_emitter(operation_id=self.operation_id)
         self.start_time = time.time()
+        self.provider_id = provider_id
         self.model_id = model_id
         self.swarm_model_id = swarm_model_id or model_id
         self.init_context = init_context or {}
@@ -132,12 +136,15 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         # Recent reasoning dedupe per agent (TTL-based to prevent repeated summaries)
         self._recent_reasoning_by_agent = {}
+        reasoning_dedupe_ttl_s = _DEFAULT_REASONING_DEDUPE_TTL_S
+        if "ollama" in self.provider_id or "ollama/" in self.model_id:
+            reasoning_dedupe_ttl_s = 90.0
         try:
             self._recent_reasoning_ttl = float(
-                os.getenv("REASONING_DEDUPE_TTL_S", "20")
+                os.getenv("REASONING_DEDUPE_TTL_S", str(reasoning_dedupe_ttl_s))
             )
         except Exception:
-            self._recent_reasoning_ttl = 20.0
+            self._recent_reasoning_ttl = reasoning_dedupe_ttl_s
 
         # Ensure each numeric step has exactly one reasoning block (after initial pre-step reasoning)
         self._reasoning_required_for_current_step = (
@@ -488,18 +495,19 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         try:
             agent_key = self.current_swarm_agent or "main"
             # Normalize whitespace to compare fragments robustly
-            norm = re.sub(r"\s+", " ", str(text)).strip()
-            if not norm:
+            norm = re.sub(r"\s+", " ", str(text))
+            if not norm.strip():
+                self._accumulate_reasoning_text(text)
                 return
             now = time.time()
             recent = self._recent_reasoning_by_agent.get(agent_key, {})
             # Prune expired entries
             if recent:
                 for k, ts in list(recent.items()):
-                    if now - ts > getattr(self, "_recent_reasoning_ttl", 20.0):
+                    if now - ts > getattr(self, "_recent_reasoning_ttl", _DEFAULT_REASONING_DEDUPE_TTL_S):
                         del recent[k]
             # Skip if we've seen this fragment very recently for this agent
-            if norm in recent:
+            if ' ' in norm and len(norm) > 10 and norm in recent:
                 return
             recent[norm] = now
             self._recent_reasoning_by_agent[agent_key] = recent
@@ -518,6 +526,31 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
     def _tool_use_id(self, tool_use: Dict[str, Any]) -> str:
         return tool_use.get("_toolUseId") or tool_use.get("id") or tool_use.get("toolUseId")
+
+    def _extract_active_task_payload(self, text: str) -> Optional[Dict[str, Any]]:
+        """Extract JSON payload inside the last <active_task...>...</active_task> block."""
+        try:
+            if not isinstance(text, str) or "<active_task" not in text:
+                return None
+            matches = re.findall(r"<active_task[^>]*>(.*?)</active_task>", text, flags=re.S)
+            if not matches:
+                return None
+            payload_str = (matches[-1] or "").strip()
+            if not payload_str:
+                return None
+            return json.loads(payload_str)
+        except Exception:
+            return None
+
+    def _extract_task_from_active_task_payload(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            if not isinstance(payload, dict):
+                return None
+            if isinstance(payload.get("task"), dict):
+                return payload.get("task")
+            return None
+        except Exception:
+            return None
 
     def _handle_tool_announcement(self, tool_use: Dict[str, Any]) -> None:
         # Swarm context agent inference
@@ -1206,6 +1239,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Also check for swarm timeout or failure patterns
         if self.in_swarm_operation and buffered_output:
             # Look for timeout indicators
+            # TODO: the logic here needs to be better
             if "300001ms" in buffered_output or "timeout" in buffered_output.lower():
                 self.emit_ui_event(
                     {
@@ -1336,7 +1370,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         # Update live metrics for memory operations and evidence collection
         try:
-            if tool_name in {"mem0_store", "mem0_store_plan"} and success:
+            if tool_name in {"mem0_store", "mem0_store_plan", "mem0_create_tasks"} and success:
                 # Increment memory operation count on successful store/store_plan actions
                 if isinstance(tool_input, dict):
                     # Count both store and store_plan as memory operations
@@ -1603,6 +1637,56 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             if self.in_swarm_operation and self.reasoning_buffer:
                 self._emit_accumulated_reasoning(force=True)
             return
+
+        # Task lifecycle events
+        try:
+            # Avoid double-emitting per tool invocation
+            if not hasattr(self, "_task_event_emitted_by_tooluse"):
+                self._task_event_emitted_by_tooluse = set()
+
+            if tool_use_id and tool_use_id not in self._task_event_emitted_by_tooluse:
+                # task_started: on mem0_get_active_task or mem0_task_done tool results
+                if tool_name in {"mem0_get_active_task", "mem0_task_done"}:
+                    payload = self._extract_active_task_payload(output_text)
+                    if isinstance(payload, dict):
+                        # task_done first
+                        if isinstance(payload, dict) and isinstance(payload.get("closed"), dict):
+                            closed_uid = payload["closed"].get("task_uid")
+                            closed_title = payload["closed"].get("title")
+                            closed_status = payload["closed"].get("status")
+                            if closed_uid:
+                                self.emit_ui_event(
+                                    {
+                                        "type": "task_done",
+                                        "task_uid": str(closed_uid),
+                                        "title": str(closed_title or ""),
+                                        "status": str(closed_status or ""),
+                                    }
+                                )
+
+                        task_obj = self._extract_task_from_active_task_payload(payload)
+                        if isinstance(task_obj, dict):
+                            # task_started
+                            task_uid = str(task_obj.get("task_uid") or "").strip()
+                            title = str(task_obj.get("title") or "").strip()
+                            status_val = str(task_obj.get("status") or "").strip()
+                            if task_uid:
+                                prev_uid = getattr(self, "_last_emitted_active_task_uid", None)
+                                if prev_uid != task_uid:
+                                    self._last_emitted_active_task_uid = task_uid
+                                    self.emit_ui_event(
+                                        {
+                                            "type": "task_started",
+                                            "task_uid": task_uid,
+                                            "title": title,
+                                            "status": status_val,
+                                        }
+                                    )
+
+                self._task_event_emitted_by_tooluse.add(tool_use_id)
+        except Exception:
+            # Never allow task event parsing to break tool result processing
+            pass
 
         # Check if we already processed this exact output
         output_key = f"{tool_use_id or ''}:{hash(output_text.strip())}"
@@ -1912,7 +1996,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             if not s:
                 return s
             # Grab segments ending with . ! ? : (plus following whitespace) or the tail
-            # TODO: "reasoning" text becomes confusing, look at text_reducer.collapse_first_repeated_sequence
             parts = re.findall(r".*?(?:[\.!\?:](?=\s)|$)\s*", s, flags=re.S)
             out = []
             prev_norm = None
@@ -1938,12 +2021,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         if text.strip().lower() == "reasoning":
             return
 
-        # Collapse immediate repeated sentences within the same chunk
-        try:
-            text = self._collapse_repeated_sentences(text)
-        except Exception:
-            pass
-
         # Merge with previous fragment to avoid duplicate prefixes (e.g., "Great" then "Great! I can...")
         try:
             if self.reasoning_buffer:
@@ -1951,16 +2028,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 last_norm = str(last_chunk).strip()
                 cur_norm = str(text).strip()
                 if last_norm and cur_norm:
-                    if cur_norm.startswith(last_norm) and len(cur_norm) > len(
-                        last_norm
-                    ):
+                    if ' ' in cur_norm and cur_norm.startswith(last_norm) and len(cur_norm) > len(last_norm):
                         # Replace last short fragment with the longer current one
                         self.reasoning_buffer[-1] = text
-                    elif last_norm.startswith(cur_norm) and len(last_norm) > len(
-                        cur_norm
-                    ):
-                        # Current is a shorter prefix of last; drop it
-                        pass
                     else:
                         self.reasoning_buffer.append(text)
                 else:
@@ -2180,7 +2250,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         if not self.reasoning_buffer:
             return
 
-        combined_reasoning = "".join(self.reasoning_buffer).strip()
+        combined_reasoning = collapse_first_repeated_sequence("".join(self.reasoning_buffer)).strip()
         if not combined_reasoning:
             # Nothing meaningful; clear and return
             self.reasoning_buffer = []
@@ -2211,10 +2281,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         except Exception:
             pass
         # Update last flush time for streaming control
-        try:
-            self._last_reasoning_flush = time.time()
-        except Exception:
-            self._last_reasoning_flush = 0
+        self._last_reasoning_flush = time.time()
 
         # Clear after successful emission
         self.reasoning_buffer = []

@@ -58,9 +58,10 @@ import logging
 import os
 import re
 import threading
+import uuid
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Literal, Union
+from typing import Any, Dict, List, Optional, Tuple, Literal, Union, Iterable
 
 import boto3
 from mem0 import Memory as Mem0Memory
@@ -76,7 +77,7 @@ from modules.config.types import get_default_base_dir
 logger = get_logger("Tools.Memory")
 
 # Global configuration and client
-_MEMORY_CONFIG = None
+_MEMORY_CONFIG: Optional[Dict[str, str]] = None
 _MEMORY_CLIENT: Optional["Mem0ServiceClient"] = None
 
 # Thread lock for FAISS write safety (prevents corruption during concurrent writes)
@@ -84,6 +85,90 @@ _FAISS_WRITE_LOCK = threading.Lock()
 
 
 PlanStatus = Literal["active", "pending", "done"]
+TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
+
+
+def _normalize_evidence(val: Any) -> List[str]:
+    if val is None:
+        return []
+
+    def _to_s(x: Any) -> str:
+        if x is None:
+            return ""
+        if isinstance(x, str):
+            return x.strip()
+        # Prefer stable JSON for dict-like evidence
+        if isinstance(x, dict):
+            try:
+                return json.dumps(x, sort_keys=True)
+            except Exception:
+                return str(x).strip()
+        return str(x).strip()
+
+    if isinstance(val, list):
+        out: List[str] = []
+        for x in val:
+            s = _to_s(x)
+            if s:
+                out.append(s)
+        return out
+
+    s = _to_s(val)
+    return [s] if s else []
+
+
+@dataclass(frozen=True)
+class Task:
+    """A single unit of work tied to an execution-prompt phase.
+
+    Stored as a memory item with metadata.category == "task".
+    Updates are written as new memories sharing the same task_uid.
+    """
+
+    task_uid: str
+    title: str
+    objective: str
+    phase: int
+    status: TaskStatus
+    status_reason: Optional[str] = None
+    evidence: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_uid, str) or not self.task_uid.strip():
+            raise ValueError("task_uid must be a non-empty string")
+        if not isinstance(self.title, str) or not self.title.strip():
+            raise ValueError("title must be a non-empty string")
+        if not isinstance(self.objective, str) or not self.objective.strip():
+            raise ValueError("objective must be a non-empty string")
+        if not isinstance(self.phase, int) or self.phase <= 0:
+            raise ValueError("phase must be a positive int")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
+            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked")
+
+    @staticmethod
+    def from_obj(obj: Any) -> "Task":
+        if not isinstance(obj, dict):
+            raise ValueError("task must be an object/dict")
+        return Task(
+            task_uid=str(obj.get("task_uid", "")),
+            title=str(obj.get("title", "")),
+            objective=str(obj.get("objective", "")),
+            evidence=_normalize_evidence(obj.get("evidence", None)),
+            phase=int(obj.get("phase")),
+            status=str(obj.get("status", "pending")),
+            status_reason=str(obj.get("status_reason", "")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_uid": self.task_uid,
+            "title": self.title,
+            "objective": self.objective,
+            "evidence": self.evidence,
+            "phase": self.phase,
+            "status": self.status,
+            "status_reason": self.status_reason,
+        }
 
 
 @dataclass(frozen=True)
@@ -112,7 +197,7 @@ class PlanPhase:
         return PlanPhase(
             id=int(obj.get("id")),
             title=str(obj.get("title", "")),
-            status=str(obj.get("status", "")),  # validated in __post_init__
+            status=str(obj.get("status", "pending")),  # validated in __post_init__
             criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
         )
 
@@ -192,6 +277,12 @@ class OperationPlan:
         }
 
 
+def _user_id(user_id: Optional[str] = None) -> str:
+    if user_id:
+        return user_id
+    return (_MEMORY_CONFIG or {}).get("user_id", "cyber-agent")
+
+
 def _sanitize_toon_value(value: Any) -> str:
     text = "" if value is None else str(value)
     text = text.replace("\n", " ").replace("\r", " ").strip()
@@ -224,6 +315,22 @@ def _format_plan_as_toon(plan_content: Dict[str, Any]) -> str:
     return "\n".join([*overview_lines, *phase_lines]).strip()
 
 
+def _format_task_as_toon(task_content: Dict[str, Any]) -> str:
+    title = _sanitize_toon_value(task_content.get("title", ""))
+    objective = _sanitize_toon_value(task_content.get("objective", ""))
+    ev_list = task_content.get("evidence", [])
+    evidence = "|".join(_sanitize_toon_value(e) for e in ev_list)
+    phase = _sanitize_toon_value(task_content.get("phase", ""))
+    status = _sanitize_toon_value(task_content.get("status", ""))
+    status_reason = _sanitize_toon_value(task_content.get("status_reason", ""))
+    task_uid = _sanitize_toon_value(task_content.get("task_uid", ""))
+    lines = [
+        "task[1]{task_uid,title,objective,evidence,phase,status,status_reason}:",
+        f"  {task_uid},{title},{objective},{evidence},{phase},{status},{status_reason}",
+    ]
+    return "\n".join(lines).strip()
+
+
 def memory_sort_by_create_time(m: Dict[str, Any]) -> str:
     return str(m.get("created_at", ""))
 
@@ -243,11 +350,11 @@ def _ensure_memory_client() -> "Mem0ServiceClient":
     return _MEMORY_CLIENT
 
 
+# TODO: consider making mem0_store take a list of (content, metadata). Agents handle one tool call with a list better than multiple tool calls.
 @tool
 def mem0_store(
     content: str,
     metadata: Dict[str, Any],
-    user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> str:
     """Store a single memory entry.
@@ -312,17 +419,16 @@ def mem0_store(
         - CRITICAL: Never store status="verified" until submission API returns success
         - Memory contamination: status="solved" + validation_status="hypothesis" = contradiction/hallucination
 
+    After substantial observation/finding → run Task Capture Pass before calling mem0_get_active_task().
+
     Args:
-        content: Content string with [FINDING] or [OBSERVATION] markers
-        user_id: User ID (defaults to 'cyber_agent')
+        content: Content string with [FINDING] or [OBSERVATION] markers (store artifact paths, no large blobs)
         agent_id: Agent ID
         metadata: Dict with category (required), severity, technique, status, etc.
 
     Returns:
         JSON/text with operation result.
     """
-    action = "mem0_store"
-
     def _normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
         """Normalize confidence to a percentage string, optionally capping at cap_to."""
         try:
@@ -367,11 +473,9 @@ def mem0_store(
         return True
 
     if not content:
-        raise ValueError("content is required for store action")
+        raise ValueError("content is required")
 
-    # Use simple user_id if not provided
-    if not user_id and not agent_id:
-        user_id = "cyber_agent"
+    user_id = _user_id()
 
     # Clean content to prevent JSON issues
     cleaned_content = (
@@ -582,7 +686,6 @@ def mem0_store(
 @tool
 def mem0_store_plan(
     plan: Union[OperationPlan, str, Dict],
-    user_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Store the current operation plan.
@@ -592,18 +695,24 @@ def mem0_store_plan(
 
     Args:
         plan: {"objective":"...", "current_phase":X, "total_phases":N, "phases":[{"id":1, "title":"...", "status":"...", "criteria":"..."}, ...]}
-        user_id: User identifier
 
     Returns:
         JSON/text response with operation result
     """
     try:
         client = _ensure_memory_client()
-        if not user_id:
-            user_id = "cyber_agent"
+        user_id = _user_id()
         if isinstance(plan, str):
+            plan = plan.strip()
             try:
-                plan_obj = OperationPlan.from_obj(json.loads(plan))
+                try:
+                    plan_obj = OperationPlan.from_obj(json.loads(plan))
+                except ValueError as e1:
+                    # commonly there is an extra }
+                    if plan.endswith("}}"):
+                        plan_obj = OperationPlan.from_obj(json.loads(plan[0:-1]))
+                    else:
+                        raise e1
             except ValueError as e:
                 raise ValueError(
                     f"store_plan requires JSON object/dict with fields: objective, current_phase, total_phases, phases. "
@@ -629,7 +738,6 @@ def mem0_store_plan(
 
 @tool
 def mem0_get_plan(
-    user_id: Optional[str] = None,
     cross_operation: bool = False,
 ) -> Optional[Dict]:
     """Get the most recent active plan.
@@ -640,8 +748,7 @@ def mem0_get_plan(
     Returns the full plan memory dict or null if none found.
     """
     client = _ensure_memory_client()
-    if not user_id:
-        user_id = "cyber_agent"
+    user_id = _user_id()
     op_id = None if cross_operation else os.getenv("CYBER_OPERATION_ID")
     plan = client.get_active_plan(user_id=user_id, operation_id=op_id)
     if not plan:
@@ -656,6 +763,207 @@ def mem0_get_plan(
             raise ValueError(f"plan_parse_failed: {parse_exc}, plan: {plan_json}")
 
     return None
+
+
+@dataclass
+class TaskCreate:
+    title: str
+    objective: str
+    phase: Optional[int]
+    status: TaskStatus
+    evidence: Any = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError("title required")
+        if not self.objective.strip():
+            raise ValueError("objective required")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
+            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked")
+        # Coerce evidence to List[str] to tolerate dict/list-of-dict inputs from models
+        self.evidence = _normalize_evidence(self.evidence)
+
+    @staticmethod
+    def from_obj(obj: Any) -> "TaskCreate":
+        if obj.__class__.__name__ == "TaskCreate":
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("task must be an object/dict")
+        return TaskCreate(
+            title=str(obj.get("title", "")),
+            objective=str(obj.get("objective", "")),
+            evidence=obj.get("evidence", None),
+            phase=obj.get("phase"),
+            status=str(obj.get("status", "pending")),
+        )
+
+
+def _get_plan_current_phase() -> int:
+    client = _ensure_memory_client()
+    user_id = _user_id()
+
+    plan = client.get_active_plan(user_id=user_id, operation_id=os.getenv("CYBER_OPERATION_ID"))
+    if not plan:
+        raise ValueError("no_active_plan")
+
+    plan_json = (plan.get("metadata", {}) or {}).get("plan_json")
+    if not isinstance(plan_json, dict):
+        raise ValueError("plan_missing_plan_json")
+
+    parsed = OperationPlan.from_obj(plan_json)
+    current_phase = int(parsed.current_phase)
+    return current_phase
+
+
+@tool
+def mem0_create_tasks(
+        tasks: List[TaskCreate],
+) -> str:
+    """Create one or more tasks.
+
+    Rules:
+    - If phase is omitted, uses the active plan's current_phase.
+    - If status="active", any other active task in the same operation is demoted to pending.
+    - If you identified N candidates, create N tasks (do not merge).
+
+    Args:
+        A JSON array of task dict.
+
+    Returns:
+        store result.
+    """
+
+    # validate input, TaskCreate has post init validation
+    if not tasks:
+        raise ValueError("must have at least one task")
+    tasks = [TaskCreate.from_obj(task) for task in tasks]
+
+    client = _ensure_memory_client()
+    user_id = _user_id()
+
+    try:
+        current_phase = _get_plan_current_phase()
+    except Exception:
+        current_phase = 1
+
+    all_results = dict()
+    for new_task in tasks:
+        # Default phase to active plan's current phase when available
+        try:
+            eff_phase = max(current_phase, int(new_task.phase or current_phase))
+        except ValueError:
+            eff_phase = current_phase
+
+        task_uid = str(uuid.uuid4())
+        task = Task(
+            task_uid=task_uid,
+            title=str(new_task.title).strip(),
+            objective=str(new_task.objective).strip(),
+            evidence=new_task.evidence,
+            phase=eff_phase,
+            status=new_task.status,
+        )
+        result = client.store_task(task=task, user_id=user_id)
+
+        # scrub task from result or agent may decide to execute
+        result_stack = [result]
+        while result_stack:
+            el = result_stack.pop()
+            if isinstance(el, Dict):
+                for k, v in list(el.items()):
+                    if v is None:
+                        el.pop(k)
+                    elif isinstance(v, str):
+                        if "[TASK]" in v:
+                            el.pop(k)
+                    else:
+                        result_stack.append(v)
+            elif isinstance(el, Iterable) and not isinstance(el, str):
+                result_stack.extend(el)
+
+        all_results = {key: value + all_results.get(key, []) for key, value in result.items()}
+
+    return json.dumps(all_results, indent=2, sort_keys=True)
+
+
+def _active_task_message(active_task: Optional[Task] = None, activated: bool = True,
+                         closed_task: Optional[Task] = None) -> str:
+    if closed_task:
+        closed_info = {"closed": {"task_uid": closed_task.task_uid, "status": closed_task.status}}
+    else:
+        closed_info = {}
+
+    if active_task is None:
+        return f"""<active_task phase="1" status="none">
+{json.dumps({"task": None, "activated": False} | closed_info)}
+</active_task>
+"""
+    return f"""<active_task phase="{active_task.phase}" status="{active_task.status}">
+{json.dumps({"task": active_task.to_dict()} | closed_info | {"activated": activated}, indent=2, sort_keys=True)}
+</active_task>
+"""
+
+
+@tool
+def mem0_task_done(
+        status: Literal["done", "partial_failure", "blocked"],
+        task_uid: Optional[str] = None,
+        reason: Optional[str] = None,
+) -> str:
+    """Mark a task as done/partial_failure/blocked and activate the next pending task in the current plan phase.
+
+    Behavior:
+    - Phase is taken from the active plan's current_phase.
+    - If task_uid is omitted, the current active task for that phase is selected.
+    - After updating the task, the next pending task in the SAME phase becomes active.
+
+    Returns:
+        Returns the next active task. The closed task id is included under closed.task_uid.
+    """
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    current_phase = _get_plan_current_phase()
+
+    if status not in ["done", "partial_failure", "blocked"]:
+        status = "done"
+
+    updated, next_active = client.advance_task_in_phase(
+        user_id=user_id,
+        phase=current_phase,
+        new_status=status,
+        new_status_reason=reason,
+        task_uid=task_uid,
+    )
+
+    return _active_task_message(next_active, next_active is not None, updated)
+
+
+@tool
+def mem0_get_active_task() -> str:
+    """Get the task to execute for the active plan's current_phase. Call mem0_task_done when:
+    - task objective is achieved, status=done
+    - objective is not able to be achieved within budget, status=partial_failure
+    - objective can not be achieved, status=blocked
+
+    Returns:
+        The active task.
+    """
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    current_phase = _get_plan_current_phase()
+
+    task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
+    return _active_task_message(task, activated)
+
+
+@tool
+def mem0_list_uncompleted_tasks() -> List[Task]:
+    """List all uncompleted tasks for the current plan phase."""
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    current_phase = _get_plan_current_phase()
+
+    return client.list_tasks(user_id=user_id, phase=current_phase, status=["pending", "active"])
 
 
 @tool
@@ -679,14 +987,10 @@ def mem0_get(
 
 @tool
 def mem0_list(
-    user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     cross_operation: bool = False,
 ) -> str:
     """List memories for a user/agent.
-
-    Defaults:
-    - If user_id and agent_id are both omitted, user_id defaults to "cyber_agent".
 
     OPERATION SCOPING:
     - Default: scoped to current operation via run_id (CYBER_OPERATION_ID).
@@ -707,9 +1011,7 @@ def mem0_list(
         except Exception:
             list_limit = 100
 
-        # Use simple user_id if not provided
-        if not user_id and not agent_id:
-            user_id = "cyber_agent"
+        user_id = _user_id()
 
         # Scope to current operation unless cross_operation=True
         op_id = None if cross_operation else os.getenv("CYBER_OPERATION_ID")
@@ -718,8 +1020,7 @@ def mem0_list(
         )
 
         # Debug logging to understand the response structure
-        logger.debug("Memory list raw response type: %s", type(memories))
-        logger.debug("Memory list raw response: %s", memories)
+        logger.debug("Memory list raw response type: %s, response: %s", type(memories), memories)
 
         # Normalize to list with better error handling
         if memories is None:
@@ -757,7 +1058,6 @@ def mem0_list(
 def mem0_retrieve(
     query: str,
     metadata: Optional[Dict[str, Any]] = None,
-    user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     cross_operation: bool = False,
 ) -> str:
@@ -787,11 +1087,13 @@ def mem0_retrieve(
     """
     try:
         if not query:
-            raise ValueError("query is required for retrieve action")
+            raise ValueError("query is required")
 
         # Get operation ID for scoped retrieval (matches how store_memory scopes data)
         # If cross_operation=True, don't scope to current operation (enables cross-learning)
         op_id = None if cross_operation else os.getenv("CYBER_OPERATION_ID")
+
+        user_id = _user_id()
 
         # Debug: Log retrieval parameters
         logger.debug(
@@ -810,7 +1112,7 @@ def mem0_retrieve(
             query=query,
             filters=metadata,  # Pass metadata as filters for category/status filtering
             limit=100,
-            user_id=user_id or "cyber_agent",
+            user_id=user_id,
             agent_id=agent_id,
             run_id=op_id,  # None if cross_operation=True for cross-learning
         )
@@ -1409,6 +1711,7 @@ class Mem0ServiceClient:
         Uses run_id for mem0's native operation isolation instead of manual metadata filtering.
         This provides O(log n) indexed lookups vs O(n) local filtering.
         """
+        user_id = _user_id(user_id)
         if not user_id and not agent_id:
             raise ValueError("Either user_id or agent_id must be provided")
 
@@ -1490,6 +1793,7 @@ class Mem0ServiceClient:
 
         Falls back gracefully if backend doesn't support limit/page/run_id.
         """
+        user_id = _user_id(user_id)
         if not user_id and not agent_id:
             raise ValueError("Either user_id or agent_id must be provided")
 
@@ -1554,6 +1858,7 @@ class Mem0ServiceClient:
             run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Search memories using semantic search."""
+        user_id = _user_id(user_id)
         if not user_id and not agent_id:
             raise ValueError("Either user_id or agent_id must be provided")
 
@@ -1562,7 +1867,7 @@ class Mem0ServiceClient:
             query=query,
             filters=None,
             limit=20,
-            user_id=user_id or "cyber_agent",
+            user_id=user_id,
             agent_id=agent_id,
             run_id=run_id,
         )
@@ -1573,7 +1878,7 @@ class Mem0ServiceClient:
         filters: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         *,
-        user_id: str = "cyber_agent",
+            user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
@@ -1591,6 +1896,7 @@ class Mem0ServiceClient:
             List of memory dictionaries with 'memory' and 'metadata' fields
         """
 
+        user_id = _user_id(user_id)
         filters = filters or {}
         top_k = max(int(limit or 100), 1)
 
@@ -1706,7 +2012,7 @@ class Mem0ServiceClient:
                 return
 
             # Get and display overview
-            overview = self.get_memory_overview(user_id="cyber_agent")
+            overview = self.get_memory_overview(user_id=_user_id())
 
             if overview.get("error"):
                 print(
@@ -1750,7 +2056,7 @@ class Mem0ServiceClient:
     def store_plan(
         self,
         plan: OperationPlan,
-        user_id: str = "cyber_agent",
+            user_id: Optional[str] = None,
         metadata: Optional[Dict] = None,
     ) -> Dict:
         """Store a strategic plan in memory with category='plan'.
@@ -1763,6 +2069,8 @@ class Mem0ServiceClient:
         Returns:
             Memory storage result
         """
+        user_id = _user_id(user_id)
+
         # Check if all phases complete and add reminder
         all_done = all(p.status == "done" for p in plan.phases)
         add_stop_reminder = False
@@ -1845,7 +2153,7 @@ class Mem0ServiceClient:
         self,
         reflection_content: str,
         plan_id: Optional[str] = None,
-        user_id: str = "cyber_agent",
+            user_id: Optional[str] = None,
         metadata: Optional[Dict] = None,
     ) -> Dict:
         """Store a reflection on findings and plan progress.
@@ -1859,6 +2167,8 @@ class Mem0ServiceClient:
         Returns:
             Memory storage result with plan evaluation reminder
         """
+        user_id = _user_id(user_id)
+
         reflection_metadata = metadata or {}
         reflection_metadata.update(
             {
@@ -1889,7 +2199,9 @@ class Mem0ServiceClient:
         return result
 
     def get_active_plan(
-        self, user_id: str = "cyber_agent", operation_id: Optional[str] = None
+            self,
+            user_id: Optional[str] = None,
+            operation_id: Optional[str] = None
     ) -> Optional[Dict]:
         """Get the most recent active plan, preferring the current operation.
 
@@ -1904,6 +2216,8 @@ class Mem0ServiceClient:
         Returns:
             Most recent active plan or None if no plans found
         """
+        user_id = _user_id(user_id)
+
         try:
             # Use run_id scoping to get operation-specific plans
             all_memories = self.list_memories(user_id=user_id, run_id=operation_id, limit=100)
@@ -1944,11 +2258,319 @@ class Mem0ServiceClient:
             logger.error(f"Error retrieving active plan: {e}")
             return None
 
+    def _select_latest_by_uid(
+            self, entries: List[Dict[str, Any]], uid_key: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """Group entries by uid_key and keep the newest by created_at."""
+        latest: Dict[str, Dict[str, Any]] = {}
+        for e in entries or []:
+            meta = e.get("metadata", {}) or {}
+            uid = str(meta.get(uid_key, "") or "")
+            if not uid:
+                continue
+            prev = latest.get(uid)
+            if not prev:
+                latest[uid] = e
+                continue
+            if memory_sort_by_create_time(e) >= memory_sort_by_create_time(prev):
+                latest[uid] = e
+        return latest
+
+    def _list_tasks_latest(
+            self,
+            *,
+            user_id: str,
+            run_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Return latest-version task memories for a run_id (operation)."""
+        all_memories = self.list_memories(user_id=user_id, run_id=run_id, limit=200)
+        raw: List[Dict[str, Any]] = all_memories if isinstance(all_memories, list) else []
+
+        task_entries: List[Dict[str, Any]] = []
+        for m in raw:
+            meta = m.get("metadata", {}) or {}
+            if str(meta.get("category", "")) != "task":
+                continue
+            # Must have task_uid to be updatable
+            if not str(meta.get("task_uid", "") or "").strip():
+                continue
+            task_entries.append(m)
+
+        latest = self._select_latest_by_uid(task_entries, "task_uid")
+        # return stable ordering (created_at desc)
+        latest_list = list(latest.values())
+        latest_list.sort(key=memory_sort_by_create_time, reverse=True)
+        return latest_list
+
+    def _task_from_memory(self, mem: Dict[str, Any]) -> Optional[Task]:
+        meta = (mem.get("metadata", {}) or {})
+        try:
+            return Task(
+                task_uid=str(meta.get("task_uid", "")),
+                title=str(meta.get("title", "")),
+                objective=str(meta.get("objective", "")),
+                evidence=meta.get("evidence", None),
+                phase=int(meta.get("phase")),
+                status=str(meta.get("status", "pending")),
+                status_reason=str(meta.get("status_reason", "")),
+            )
+        except Exception:
+            return None
+
+    def store_task(
+            self,
+            *,
+            task: Task,
+            user_id: Optional[str] = None,
+            metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict:
+        """Store (or update) a task as a new memory entry.
+
+        This is append-only. Updates are new memories with the same task_uid.
+        Enforces: only one active task per operation (run_id).
+        """
+        user_id = _user_id(user_id)
+        op_id = os.getenv("CYBER_OPERATION_ID")
+
+        task_meta = metadata.copy() if isinstance(metadata, dict) else {}
+        task_meta.update(
+            {
+                "category": "task",
+                "task_uid": task.task_uid,
+                "title": task.title,
+                "objective": task.objective,
+                "evidence": task.evidence,
+                "phase": int(task.phase),
+                "status": task.status,
+                "status_reason": task.status_reason,
+                "created_at": datetime.now().isoformat(),
+                "type": "task",
+            }
+        )
+        if op_id:
+            task_meta["operation_id"] = op_id
+
+        # Enforce only one active task per operation by demoting any existing active task
+        if task.status == "active":
+            try:
+                latest_tasks = self._list_tasks_latest(user_id=user_id, run_id=op_id)
+                for tmem in latest_tasks:
+                    tmeta = tmem.get("metadata", {}) or {}
+                    if str(tmeta.get("status", "")) != "active":
+                        continue
+                    if str(tmeta.get("task_uid", "")) == task.task_uid:
+                        continue
+                    # Demote by writing a new version
+                    demoted = Task(
+                        task_uid=str(tmeta.get("task_uid")),
+                        title=str(tmeta.get("title", "")),
+                        objective=str(tmeta.get("objective", "")),
+                        evidence=tmeta.get("evidence", None),
+                        phase=int(tmeta.get("phase")),
+                        status="pending",
+                        status_reason="demoted",
+                    )
+                    demote_meta = {k: v for k, v in tmeta.items() if k not in ("created_at",)}
+                    self.store_task(task=demoted, user_id=user_id, metadata=demote_meta)
+            except Exception as e:
+                logger.debug("Could not enforce single active task: %s", e)
+
+        task_dict = task.to_dict()
+        task_content_str = _format_task_as_toon(task_dict)
+        return self.store_memory(
+            content=f"[TASK] {task_content_str}",
+            user_id=user_id,
+            metadata=task_meta,
+        )
+
+    def advance_task_in_phase(
+            self,
+            *,
+            user_id: str,
+            phase: int,
+            new_status: Literal["done", "partial_failure", "blocked"],
+            new_status_reason: Optional[str] = None,
+            task_uid: Optional[str] = None,
+    ) -> Tuple[Optional[Task], Optional[Task]]:
+        """Update a task in a given phase and activate the next pending task in that phase.
+
+        Returns: (updated_task, next_active_task)
+        """
+        op_id = os.getenv("CYBER_OPERATION_ID")
+        latest_tasks = self._list_tasks_latest(user_id=user_id, run_id=op_id)
+
+        phase_tasks: List[Task] = []
+        for mem in latest_tasks:
+            t = self._task_from_memory(mem)
+            if not t:
+                continue
+            if int(t.phase) != int(phase):
+                continue
+            phase_tasks.append(t)
+
+        # Pick target task: explicit uid, else current active
+        target: Optional[Task] = None
+        if task_uid:
+            for t in phase_tasks:
+                if t.task_uid == task_uid:
+                    target = t
+                    break
+        else:
+            for t in phase_tasks:
+                if t.status == "active":
+                    target = t
+                    break
+
+        updated: Optional[Task] = None
+        if target:
+            updated = Task(
+                task_uid=target.task_uid,
+                title=target.title,
+                objective=target.objective,
+                evidence=target.evidence,
+                phase=int(target.phase),
+                status=new_status,
+                status_reason=new_status_reason,
+            )
+            # Preserve any existing metadata beyond the standard fields by pulling the latest memory meta
+            try:
+                for mem in latest_tasks:
+                    meta = mem.get("metadata", {}) or {}
+                    if str(meta.get("task_uid", "")) == target.task_uid:
+                        preserve = {k: v for k, v in meta.items() if k not in ("created_at", "status")}
+                        self.store_task(task=updated, user_id=user_id, metadata=preserve)
+                        break
+                else:
+                    self.store_task(task=updated, user_id=user_id)
+            except Exception:
+                self.store_task(task=updated, user_id=user_id)
+
+        # Activate next pending task in this phase
+        pending = [t for t in phase_tasks if t.status == "pending"]
+        pending.sort(key=lambda t: t.task_uid)  # stable but arbitrary
+
+        next_active: Optional[Task] = None
+        if pending:
+            cand = pending[0]
+            next_active = Task(
+                task_uid=cand.task_uid,
+                title=cand.title,
+                objective=cand.objective,
+                evidence=cand.evidence,
+                phase=int(cand.phase),
+                status="active",
+                status_reason="",
+            )
+            try:
+                for mem in latest_tasks:
+                    meta = mem.get("metadata", {}) or {}
+                    if str(meta.get("task_uid", "")) == cand.task_uid:
+                        preserve = {k: v for k, v in meta.items() if k not in ("created_at", "status")}
+                        self.store_task(task=next_active, user_id=user_id, metadata=preserve)
+                        break
+                else:
+                    self.store_task(task=next_active, user_id=user_id)
+            except Exception:
+                self.store_task(task=next_active, user_id=user_id)
+
+        return updated, next_active
+
+    @staticmethod
+    def _mem_created_at(mem: Dict[str, Any]) -> str:
+        """Best-effort created_at extraction (metadata preferred, then top-level)."""
+        meta = mem.get("metadata", {}) or {}
+        return str(meta.get("created_at") or mem.get("created_at") or "")
+
+    def get_or_activate_next_task_in_phase(
+            self,
+            *,
+            user_id: str,
+            phase: int,
+    ) -> Tuple[Optional[Task], bool]:
+        """Return the active task for a phase, or promote the next pending task to active.
+
+        Returns: (task or None, activated_bool)
+        """
+        op_id = os.getenv("CYBER_OPERATION_ID")
+        latest_tasks = self._list_tasks_latest(user_id=user_id, run_id=op_id)
+
+        # Filter memories to this phase
+        phase_mems: List[Dict[str, Any]] = []
+        for mem in latest_tasks:
+            meta = mem.get("metadata", {}) or {}
+            try:
+                if int(meta.get("phase")) != int(phase):
+                    continue
+            except Exception:
+                continue
+            phase_mems.append(mem)
+
+        # Prefer existing active
+        for mem in phase_mems:
+            meta = mem.get("metadata", {}) or {}
+            if str(meta.get("status", "")) == "active":
+                t = self._task_from_memory(mem)
+                if t:
+                    return t, False
+
+        # Otherwise promote earliest-created pending
+        pending_mems: List[Dict[str, Any]] = []
+        for mem in phase_mems:
+            meta = mem.get("metadata", {}) or {}
+            if str(meta.get("status", "")) == "pending":
+                pending_mems.append(mem)
+
+        if not pending_mems:
+            return None, False
+
+        pending_mems.sort(key=self._mem_created_at)
+        cand_mem = pending_mems[0]
+        cand = self._task_from_memory(cand_mem)
+        if not cand:
+            return None, False
+
+        next_active = Task(
+            task_uid=cand.task_uid,
+            title=cand.title,
+            objective=cand.objective,
+            evidence=cand.evidence,
+            phase=int(cand.phase),
+            status="active",
+            status_reason="",
+        )
+
+        # Preserve any existing metadata beyond status/created_at
+        meta = cand_mem.get("metadata", {}) or {}
+        preserve = {k: v for k, v in meta.items() if k not in ("created_at", "status")}
+        self.store_task(task=next_active, user_id=user_id, metadata=preserve)
+        return next_active, True
+
+    def list_tasks(
+            self,
+            *,
+            user_id: str,
+            phase: int,
+            status: Optional[List[str]] = None,
+    ):
+        op_id = os.getenv("CYBER_OPERATION_ID")
+        latest_tasks = self._list_tasks_latest(user_id=user_id, run_id=op_id)
+        result = []
+        for mem in latest_tasks:
+            meta = mem.get("metadata", {}) or {}
+            try:
+                if int(meta.get("phase")) != int(phase):
+                    continue
+            except Exception:
+                continue
+            if not status or str(meta.get("status", "")) in status:
+                result.append(self._task_from_memory(mem))
+        return result
+
     def reflect_on_findings(
         self,
         recent_findings: List[Dict],
         current_plan: Optional[Dict] = None,
-        user_id: str = "cyber_agent",
+            user_id: Optional[str] = None,
     ) -> str:
         """Generate reflection prompt based on recent findings and current plan.
 
@@ -1962,6 +2584,8 @@ class Mem0ServiceClient:
         """
         if not recent_findings:
             return "No recent findings to reflect on."
+
+        user_id = _user_id(user_id)
 
         # Summarize recent findings
         findings_summary = []
@@ -2006,7 +2630,7 @@ Include: objective, current_phase=1, phases with clear criteria for each.
 
         return reflection_prompt
 
-    def get_memory_overview(self, user_id: str = "cyber_agent") -> Dict:
+    def get_memory_overview(self, user_id: Optional[str] = None) -> Dict:
         """Get overview of memories for startup display.
 
         Args:
@@ -2015,6 +2639,7 @@ Include: objective, current_phase=1, phases with clear criteria for each.
         Returns:
             Dictionary containing memory overview data
         """
+        user_id = _user_id(user_id)
         try:
             # Get all memories for the user
             logger.debug("Getting memory overview for user_id: %s", user_id)
@@ -2107,9 +2732,13 @@ def initialize_memory_system(
     # Create enhanced config with operation context
     enhanced_config = config.copy() if config else {}
     enhanced_config["operation_id"] = (
-        operation_id or f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            operation_id or os.environ["CYBER_OPERATION_ID"] or f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
-    enhanced_config["target_name"] = target_name or "default_target"
+    enhanced_config["target_name"] = target_name or os.environ["CYBER_TARGET_NAME"] or "default_target"
+    if enhanced_config["target_name"] == "default_target":
+        enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["operation_id"]}"'
+    else:
+        enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["target_name"]}"'
 
     # Expose operation context for downstream components that rely on env
     try:
@@ -2120,9 +2749,10 @@ def initialize_memory_system(
     _MEMORY_CONFIG = enhanced_config
     _MEMORY_CLIENT = Mem0ServiceClient(enhanced_config, has_existing_memories, silent)
     logger.info(
-        "Memory system initialized for operation %s, target: %s",
+        "Memory system initialized for operation %s, target: %s, user: %s",
         enhanced_config["operation_id"],
         enhanced_config["target_name"],
+        enhanced_config["user_id"],
     )
 
 

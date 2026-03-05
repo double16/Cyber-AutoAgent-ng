@@ -307,7 +307,7 @@ export class OperationManager {
     return true;
   }
 
-  // Update token usage (with optional cache token support)
+  // Update token usage (with optional cache token support). Values are cumulative.
   updateTokenUsage(
     operationId: string,
     inputTokens: number,
@@ -319,10 +319,18 @@ export class OperationManager {
     const operation = this.operations.get(operationId);
     if (!operation) return;
 
-    operation.cost.inputTokens += inputTokens;
-    operation.cost.outputTokens += outputTokens;
-    operation.cost.cacheReadTokens += cacheReadTokens;
-    operation.cost.cacheWriteTokens += cacheWriteTokens;
+    if (inputTokens > operation.cost.inputTokens) {
+        operation.cost.inputTokens = inputTokens;
+    }
+    if (outputTokens > operation.cost.outputTokens) {
+        operation.cost.outputTokens = outputTokens;
+    }
+    if (cacheReadTokens > operation.cost.cacheReadTokens) {
+        operation.cost.cacheReadTokens = cacheReadTokens;
+    }
+    if (cacheWriteTokens > operation.cost.cacheWriteTokens) {
+        operation.cost.cacheWriteTokens = cacheWriteTokens;
+    }
     operation.cost.tokensUsed = operation.cost.inputTokens + operation.cost.outputTokens;
     operation.cost.estimatedCost = cost;
   }

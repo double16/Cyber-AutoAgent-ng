@@ -11,6 +11,10 @@ from modules.tools.memory import (
     mem0_delete,
     mem0_store_plan,
     mem0_get_plan,
+    mem0_create_tasks,
+    mem0_list_uncompleted_tasks,
+    mem0_task_done,
+    mem0_get_active_task,
 )
 from modules.tools.browser import (
     initialize_browser,
@@ -52,6 +56,10 @@ __all__ = [
     "mem0_delete",
     "mem0_store_plan",
     "mem0_get_plan",
+    "mem0_create_tasks",
+    "mem0_list_uncompleted_tasks",
+    "mem0_task_done",
+    "mem0_get_active_task",
     "initialize_memory_system",
     "get_memory_client",
     "Mem0ServiceClient",

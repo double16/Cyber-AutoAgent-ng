@@ -216,50 +216,18 @@ async def channel_create_forward(
         env: Dict[str, str] = None,
 ) -> CreateForwardResult:
     """
-Forward Channel Instructions
+    Create a forward channel backed by a local subprocess that connects to the target (e.g., nc/ssh).
 
-To create and use a forward channel backed by a local subprocess (stdout and stderr merged), follow this sequence of tool calls:
+    Use when you must control raw bytes over TCP and protocol tools won’t work.
+    Workflow: channel_create_forward(command=...) → save channel_id → channel_poll for output → channel_send → channel_close.
+    Important: runs locally (not on target). Command must be non-interactive and connect only to in-scope target.
 
-  1. **Create forward channel**
-     - Tool: `channel_create_forward`
-     - Args: `command=['nc target.local 8080']`
-     - Response: use the returned `channel_id`.
-
-  2. **Check status (optional)**
-     - Tool: `channel_status`
-     - Args: `channel_id`
-     - Use to confirm readiness if needed.
-
-  3. **Receive output**
-     - Tool: `channel_poll`
-     - Args: `channel_id`, `timeout=5`, `min_events=1`
-
-  4. **Send data**
-     - Tool: `channel_send`
-     - Args: `channel_id`, `mode='text'`, `data='help'`, `append_newline=True`
-
-  5. **Close channel**
-     - Tool: `channel_close`
-     - Args: `channel_id`
-
-Args:
-    command: Command to execute in a bash shell, shell expansion is supported.
-      Example: 'sshpass -p passw0rd ssh user@host'.
-      Usage: channel_create_forward → save channel_id → loop channel_poll for output →
-      channel_send to write stdin → channel_close when done.
-    env: Dict of environment variables
-
-Returns:
-    Dict of the channel ID information:
-        {
-            "channel_id": "channel_2374823764",
-            "kind": "forward",
-            "created_at": 473847387.0,
-            "pid", "123"
-        }
-
-Important:
-  - Commands are run on the local machine, not the target. Only use commands that will connect to the target such as ssh, nc, etc.
+    Args:
+        command: Command to execute in a bash shell, shell expansion is supported.
+          Example: 'sshpass -p passw0rd ssh user@host'.
+          Usage: channel_create_forward → save channel_id → loop channel_poll for output →
+          channel_send to write stdin → channel_close when done.
+        env: Dict of environment variables
 """
 
     mgr = _mgr()
@@ -297,54 +265,12 @@ async def channel_create_reverse(
         target: Optional[str] = None,
 ) -> CreateReverseResult:
     """
-Channel Management Instructions
+    Create a reverse channel listener for a single inbound client connection.
 
-To create and use a reverse channel for one duplex client, follow this sequence of tool calls:
-
-  1. **Create reverse channel**
-     - Tool: `channel_create_reverse`
-     - Args: `listener_host='0.0.0.0'`, `listener_port=0`
-     - Response: use `listen_port` from the result.
-
-  2. **Check status**
-     - Tool: `channel_status`
-     - Args: `channel_id`
-     - Use this to confirm if the channel is listening or connected.
-
-  3. **Wait for client**
-     - The remote connects to `listener_host:listen_port`.
-     - Keep polling status until it equals `"client_connected"`.
-
-  4. **Send data**
-     - Tool: `channel_send`
-     - Args: `channel_id`, `mode='text'`, `data='ping'`, `append_newline=True`
-
-  5. **Receive data**
-     - Tool: `channel_poll`
-     - Args: `channel_id`, `timeout=5`, `min_events=1`
-     - Look for `"output"` events in the response.
-
-  6. **Close channel**
-     - Tool: `channel_close`
-     - Args: `channel_id`
-
-Args:
-    listener_host: the IP address to listen on, defaults to "0.0.0.0" for all interfaces
-    listener_port: the port to listen on, defaults to 0 to choose an available port
-    target: the name or IP address of the target, used to select a reachable network address
-
-Returns:
-    Dict of the channel ID information:
-        {
-            "channel_id": "channel_2374823764",
-            "kind": "reverse",
-            "created_at": 473847387.0,
-        }
-
-Important:
-  - It is best to leave the port set to 0 so the tool can choose a free port. The target may have networking filtering,
-    in which case specifying the port of a common service like 443 may be helpful.
-  - The target argument is helpful for determining which network interface to bind.
+    Use only when the target will connect back (rare; ensure scope allows).
+    Workflow: channel_create_reverse(...) → wait for client_connected via channel_status/poll → channel_send/ channel_poll → channel_close.
+    Notes: listener_port=0 preferred unless you must choose a common port. Keep channel_id.
+      The target argument is helpful for determining which network interface to bind.
 """
     if target and listener_host == "0.0.0.0":
         listener_host, *_ = pick_local_addr(target)
@@ -404,31 +330,14 @@ async def channel_poll(
         min_events: int = 0
 ) -> PollResult:
     """
-Long-poll for events from a channel; events are consumed on delivery.
+    Long-poll for channel events; events are consumed on delivery.
 
-Usage:
-    loop:
-      r = channel_poll(channel_id, timeout=5, min_events=1)
-      for e in r.events: if e.stream=='output': decode e.data_b64
+    Use in a loop after channel_create_* to read output/status. Decode output from data_b64 when stream='output'.
 
-Args:
-    timeout: Long-poll timeout (seconds). 0 = return immediately.
-    max_events: Upper bound on events returned this call. 1 - 10000
-    min_events: Early-return threshold. Set to 1 to wait on first event. 0 - 10000
-
-Returns:
-    Dict of events:
-    {
-        "channel_id": "echoed channel id",
-        "closed": bool,
-        "events": [
-          {
-            "ts": float,  # timestamp
-            "stream": "output|status",  # 'output' has bytes (data_b64). 'status' has a human-readable note.
-            "data_b64": "",  # "Base64 bytes for 'output' events."
-            "note": ""
-          }
-        ]
+    Args:
+        timeout: Long-poll timeout (seconds). 0 = return immediately.
+        max_events: Upper bound on events returned this call. 1 - 10000
+        min_events: Early-return threshold. Set to 1 to wait on first event. 0 - 10000
     """
 
     ch = _mgr().get(channel_id)
@@ -468,24 +377,10 @@ async def channel_send(
         append_newline: bool = False,
 ) -> SendResult:
     """
-Write bytes to a channel's stdin (forward → subprocess, reverse → connected client).
+    Send data to a channel.
 
-Usage:
-    channel_send(channel_id, mode='text', data='ls -la', append_newline=True)
-    channel_send(channel_id, mode='base64', data='<b64>')
-
-Args:
-    channel_id: channel ID
-    mode: 'text' = UTF-8 (optionally add newline). 'base64' = raw bytes from base64.
-    data: Payload for stdin. Base64 when mode='base64'.
-    append_newline: If true and mode='text', append '\n' before sending.
-
-Returns:
-    Dict of results
-    {
-        "channel_id": "echoed channel id",
-        "bytes_sent": int  # Bytes written to stdin.
-    }
+    Args: channel_id, data, mode=text|base64, append_newline (text mode).
+    Use after channel_status shows ready_for_send=true.
     """
     ch = _mgr().get(channel_id)
     payload = base64.b64decode(data) if mode == "base64" else (
@@ -521,22 +416,9 @@ async def channel_status(
         channel_id: str
 ) -> StatusResult:
     """
-Check whether a channel is established and ready for send/receive.
-Usage:
-    s = channel_status(channel_id)
-    if s.connected and s.ready_for_send:
-    channel_send(channel_id, mode='text', data='ping', append_newline=True)
-Args:
-    channel_id: channel ID
-Returns:
-    Dict of channel status
-    {
-        "channel_id": str = Field(description="Echo channel id.")
-        "kind": "forward|reverse"],
-        "connected": bool, # Forward: True if process started and not closed., Reverse: True if a client is currently connected.
-        "ready_for_send": bool,  # True if writing to stdin should succeed now., Forward: stdin pipe open; Reverse: client connected.
-        "details": {}
-    }
+    Get channel status (connected/ready_for_send + details).
+
+    Use before sending, and to detect reverse client_connected state.
     """
     ch = _mgr().get(channel_id)
 
@@ -580,10 +462,7 @@ async def channel_close(
         channel_id: str
 ) -> CloseResult:
     """
-Close a specific channel; safe to call multiple times.
-Usage: channel_close(channel_id)
-Args:
-    channel_id: channel ID
+    Close a channel (idempotent). Always close when done to avoid leaking subprocess/listeners.
     """
     ok = await _mgr().close(channel_id)
     return CloseResult(channel_id=channel_id, success=ok)

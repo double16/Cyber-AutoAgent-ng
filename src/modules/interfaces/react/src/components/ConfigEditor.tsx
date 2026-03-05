@@ -73,9 +73,9 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'embeddingModel', label: 'Embedding Model', type: 'text', section: 'Models' },
   { key: 'evaluationModel', label: 'Evaluation Model', type: 'text', section: 'Models' },
   { key: 'swarmModel', label: 'Swarm Model', type: 'text', section: 'Models' },
-  { key: 'rateLimitTokensPerMinute', label: 'Tokens/Minute', type: 'number', section: 'Models' },
-  { key: 'rateLimitRequestsPerMinute', label: 'Requests/Minute', type: 'number', section: 'Models' },
-  { key: 'rateLimitConcurrency', label: 'Concurrent Requests', type: 'number', section: 'Models' },
+  { key: 'rateLimitTokensPerMinute', label: 'Limit Tokens/Minute', type: 'number', section: 'Models' },
+  { key: 'rateLimitRequestsPerMinute', label: 'Limit Requests/Minute', type: 'number', section: 'Models' },
+  { key: 'rateLimitConcurrency', label: 'Limit Concurrent Requests', type: 'number', section: 'Models' },
 
   // Models - Credentials (shown in Models section based on provider)
   { key: 'awsAccessKeyId', label: 'AWS Access Key ID', type: 'password', section: 'Models' },
@@ -111,6 +111,7 @@ const CONFIG_FIELDS: ConfigField[] = [
     description: 'Override runtime URL for private/VPC SageMaker endpoints.'
   },
   { key: 'ollamaHost', label: 'Ollama Host', type: 'text', section: 'Models' },
+  { key: 'ollamaContextLength', label: 'Ollama Context Length', type: 'number', section: 'Models' },
   { key: 'ollamaTimeout', label: 'Ollama Timeout', type: 'number', section: 'Models' },
   { key: 'openaiApiKey', label: 'OpenAI API Key', type: 'password', section: 'Models' },
   { key: 'anthropicApiKey', label: 'Anthropic API Key', type: 'password', section: 'Models' },
@@ -744,7 +745,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
           ];
           return bedrockFields.includes(f.key);
         } else if (config.modelProvider === 'ollama') {
-          return ['ollamaHost', 'ollamaTimeout', 'temperature', 'maxTokens'].includes(f.key);
+          return ['ollamaHost', 'ollamaContextLength', 'ollamaTimeout', 'temperature', 'maxTokens'].includes(f.key);
         } else if (config.modelProvider === 'litellm') {
           const litellmFields = [
             'openaiApiKey', 'anthropicApiKey', 'geminiApiKey', 'xaiApiKey', 'cohereApiKey',

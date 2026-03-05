@@ -48,6 +48,7 @@ services:
 
       # Ollama Configuration (Ollama Provider)
       - OLLAMA_HOST=${OLLAMA_HOST}
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}
       - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT}
 
       # LiteLLM Provider API Keys

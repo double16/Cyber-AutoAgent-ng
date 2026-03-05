@@ -2,7 +2,7 @@
 import unittest
 
 from modules.config.models.factory import get_model_timeout
-from strands.models.ollama import OllamaModel
+from modules.config.models.ollama import OllamaModel
 
 
 class GetModelTimeoutTests(unittest.TestCase):

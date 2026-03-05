@@ -27,19 +27,19 @@ class _FakeOllamaEventData:
 
 def _install_fake_ollama_module(monkeypatch, *, cls):
     """
-    Install a fake `strands.models.ollama` module into sys.modules with an OllamaModel class.
+    Install a fake `modules.config.models.ollama` module into sys.modules with an OllamaModel class.
     Returns the module object.
     """
     # Ensure package chain exists.
     strands_mod = sys.modules.get("strands") or types.ModuleType("strands")
     models_mod = sys.modules.get("strands.models") or types.ModuleType("strands.models")
-    ollama_mod = types.ModuleType("strands.models.ollama")
+    ollama_mod = types.ModuleType("modules.config.models.ollama")
 
     setattr(ollama_mod, "OllamaModel", cls)
 
     monkeypatch.setitem(sys.modules, "strands", strands_mod)
     monkeypatch.setitem(sys.modules, "strands.models", models_mod)
-    monkeypatch.setitem(sys.modules, "strands.models.ollama", ollama_mod)
+    monkeypatch.setitem(sys.modules, "modules.config.models.ollama", ollama_mod)
     return ollama_mod
 
 

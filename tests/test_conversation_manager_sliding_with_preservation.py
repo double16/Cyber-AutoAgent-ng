@@ -41,6 +41,10 @@ def _fake_super_reduce_noop(self, agent, e=None, **kwargs):
     self.removed_message_count = 0
 
 
+def _make_message(text):
+    return {"role": "assistant", "content": [{"type": "text", "text": text}]}
+
+
 def test_reduce_context_preserves_first_messages_and_does_not_overflow(monkeypatch, caplog):
     """
     Happy path: super reduces enough that after re-inserting preserved messages,
@@ -53,7 +57,7 @@ def test_reduce_context_preserves_first_messages_and_does_not_overflow(monkeypat
         _make_fake_super_reduce(window_size=4),
     )
 
-    original = [f"m{i}" for i in range(10)]
+    original = [_make_message(f"m{i}") for i in range(10)]
     agent = DummyAgent(messages=original.copy())
 
     mgr = SlidingWindowConversationManagerWithPreservation(
@@ -86,7 +90,7 @@ def test_reduce_context_raises_when_unable_to_trim(monkeypatch):
         _fake_super_reduce_noop,
     )
 
-    original = [f"m{i}" for i in range(10)]
+    original = [_make_message(f"m{i}") for i in range(10)]
     agent = DummyAgent(messages=original.copy())
 
     mgr = SlidingWindowConversationManagerWithPreservation(
@@ -108,7 +112,7 @@ def test_reduce_context_no_preservation_delegates_to_super(monkeypatch):
         _make_fake_super_reduce(window_size=4),
     )
 
-    original = [f"m{i}" for i in range(10)]
+    original = [_make_message(f"m{i}") for i in range(10)]
     agent = DummyAgent(messages=original.copy())
 
     mgr = SlidingWindowConversationManagerWithPreservation(

@@ -238,8 +238,6 @@ def _retrieve_evidence_from_memory(_operation_id: str) -> List[Dict[str, Any]]:
             # Note: Use simple list format for FAISS compatibility (not {"in": [...]} syntax)
             op_scoped_memories = memory_client.search(
                 query="findings evidence observations discoveries signals",
-                user_id="cyber_agent",
-                agent_id="cyber_agent",
                 run_id=_operation_id if not cross_operation else None,
                 filters={
                     "category": ["finding", "signal", "observation", "discovery"]

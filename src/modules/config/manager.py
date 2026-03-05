@@ -18,11 +18,13 @@ Key Components:
 import json
 import os
 from functools import lru_cache
+from math import ceil
 from typing import Any, Dict, List, Optional, Tuple
 
 import litellm
 import ollama
 
+from modules.config.models.factory import _resolve_prompt_token_limit
 from modules.handlers.utils import get_output_path, sanitize_target_name
 from modules.config.system.logger import get_logger
 from modules.config.models.dev_client import get_models_client
@@ -238,6 +240,9 @@ class ConfigManager:
         provider_config = self.get_server_config(provider)
         llm_config = provider_config.llm
         max_tokens_limit = self.getenv_int("MAX_TOKENS_LIMIT", MAX_TOKENS_LIMIT)
+        input_tokens = _resolve_prompt_token_limit(provider, model_id)
+        if input_tokens:
+            max_tokens_limit = min(max_tokens_limit, ceil(input_tokens / 6))
 
         return {
             "model_id": model_id,

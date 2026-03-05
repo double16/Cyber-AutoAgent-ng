@@ -232,6 +232,10 @@ class ModelCapabilitiesResolver:
 
         # Check Ollama capabilities
         if base_provider == "ollama":
+            # "reasoning_effort" is included in the config no matter if the model supports it
+            if "reasoning_effort" in allowed_params:
+                allowed_params.remove("reasoning_effort")
+
             env_reader = EnvironmentReader()
             ollama_client = ollama.Client(host=get_ollama_host(env_reader), timeout=get_ollama_timeout(env_reader))
 
@@ -242,9 +246,15 @@ class ModelCapabilitiesResolver:
                         allowed_params.extend(["tools", "tool_choice"])
                     if "thinking" in show_response.capabilities:
                         allowed_params.append("thinking")
+                        if "gpt-oss" in model:
+                            allowed_params.append("reasoning_effort")
+                    else:
+                        if "thinking" in allowed_params:
+                            allowed_params.remove("thinking")
+
             except Exception as e:
                 logger.warning(
-                    f"OllamaError: Error getting model info for {model}. Set Ollama API Base via `OLLAMA_API_BASE` environment variable."
+                    f"OllamaError: Error getting model info for {model}. Set Ollama API Base via `OLLAMA_HOST` environment variable."
                 )
 
         lowered = {p.lower() for p in allowed_params}

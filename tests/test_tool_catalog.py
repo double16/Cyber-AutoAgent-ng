@@ -252,3 +252,9 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch,
     assert "**Tools found**:" not in text
     assert "**Command line tools found**:" not in text
     assert "**NO RESULTS**\nkeywords: nothing_to_see_here" in text
+
+    text = tool_catalog("web_recon")
+    assert "command: httpx" in text
+    assert "command: nmap" not in text
+    assert "**Tools found**:" not in text
+    assert "**Command line tools found**:" not in text

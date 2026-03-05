@@ -467,7 +467,7 @@ def test_generate_auth_recommendations_prioritizes_confirmed_bypass():
     steps = aca._generate_auth_recommendations(results)
     assert steps
     assert any(s.get("priority") == 1 and "EXPLOIT_CONFIRMED" in s.get("id", "") for s in steps)
-    assert any(s.get("id") == "TASK_POST_BYPASS_IDOR_PIVOT" and s.get("priority") == 2 for s in steps)
+    assert any(s.get("id") == "POST_BYPASS_IDOR_PIVOT" and s.get("priority") == 2 for s in steps)
 
 
 def test_generate_auth_recommendations_fallback_when_no_signal():
@@ -482,5 +482,5 @@ def test_generate_auth_recommendations_fallback_when_no_signal():
 
     steps = aca._generate_auth_recommendations(results)
     assert len(steps) == 1
-    assert steps[0]["id"] == "TASK_BROADEN_DISCOVERY"
+    assert steps[0]["id"] == "BROADEN_DISCOVERY"
     assert steps[0]["priority"] == 1

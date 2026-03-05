@@ -690,6 +690,7 @@ export class PythonExecutionService extends EventEmitter {
         ...(config.sagemakerBaseUrl ? { SAGEMAKER_BASE_URL: config.sagemakerBaseUrl } : {}),
         // Ollama Configuration
         ...(config.ollamaHost ? { OLLAMA_HOST: config.ollamaHost } : {}),
+        ...(config.ollamaContextLength ? { OLLAMA_CONTEXT_LENGTH: String(config.ollamaContextLength) } : {}),
         ...(config.ollamaTimeout ? { OLLAMA_TIMEOUT: String(config.ollamaTimeout) } : {}),
         // LiteLLM Configuration (only set if provided)
         ...(config.openaiApiKey ? { OPENAI_API_KEY: config.openaiApiKey } : {}),

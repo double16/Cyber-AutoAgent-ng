@@ -56,7 +56,7 @@ from modules.config.system.environment import auto_setup, clean_operation_memory
 from modules.config.manager import get_config_manager
 from modules.config.types import get_default_base_dir
 from modules.handlers.base import StepLimitReached
-from modules.handlers.conversation_budget import _strip_continue_messages
+from modules.handlers.conversation_budget import strip_reflection_snapshot_messages
 from modules.handlers.utils import (
     Colors,
     get_output_path,
@@ -696,8 +696,11 @@ def main():
                 )
                 logger.debug(f"Agent processing: {current_message}")
 
-                _strip_continue_messages(agent)
+                # trim context
+                if "<reflection_snapshot>" in current_message:
+                    strip_reflection_snapshot_messages(agent)
                 _ensure_prompt_within_budget(agent)
+
                 # Execute agent with current message
                 result = agent(current_message)
 
@@ -796,8 +799,8 @@ def main():
                     extra_message = ""
                     if actionless_step_count > 0:
                         logger.warning("Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
-                        extra_message += f"Re-emit your last response as valid tool calls. No prose. No XML. At least one tool call is required to progress.\n"
-                    current_message = f"<continue_instructions>\n{extra_message}{reflection_snapshot}\n<continue_instructions>"
+                        extra_message += f"Re-emit your last response as valid tool calls. No prose. No XML. At least one tool call is required to progress towards the objective. Reflect on next steps to reach the objective.\n"
+                    current_message = f"<reflection_snapshot>\n{extra_message}{reflection_snapshot}\n</reflection_snapshot>"
                 else:
                     break
 
