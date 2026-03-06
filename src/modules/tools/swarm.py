@@ -147,8 +147,7 @@ def swarm(
             - system_prompt (str): Agent's system prompt defining its role and expertise
             - tools (List[str]): List of tool names available to this agent (optional)
             - model_provider (str): Model provider for this agent (optional, inherits from parent)
-            - model_settings (Dict): Model configuration for this agent (optional)
-        max_handoffs/max_iterations/execution_timeout/node_timeout: Safeguards (defaults enforced server-side).
+            - model_settings (Dict): Model configuration for this agent: temperature (optional)
 
     Returns:
         Dict with status and content summarizing agent contributions.

@@ -253,7 +253,7 @@ Settings are applied in this priority order:
 
 **Example:**
 ```bash
-# Default: temperature=0.95 (from provider defaults)
+# Default: temperature=0.5 (from provider defaults)
 # Override via environment: CYBER_LLM_TEMPERATURE=0.8
 # Override via CLI: create_agent(..., temperature=0.7)
 # Result: Uses 0.7 (CLI has highest priority)

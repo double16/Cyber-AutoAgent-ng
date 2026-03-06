@@ -9,7 +9,7 @@ import pytest
 def _minimal_server_config():
     # Create a minimal server_config with required nested attributes
     return SimpleNamespace(
-        llm=SimpleNamespace(model_id="gpt-4o", max_tokens=256000, temperature=0.95),
+        llm=SimpleNamespace(model_id="gpt-4o", max_tokens=256000, temperature=0.45),
         output=SimpleNamespace(base_dir="./outputs"),
         swarm=SimpleNamespace(llm=SimpleNamespace(model_id="gpt-4o")),
         sdk=SimpleNamespace(conversation_window_size=64),

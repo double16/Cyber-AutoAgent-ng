@@ -16,6 +16,7 @@ import ollama
 
 from strands.models import Model
 
+from modules.config.models import DEFAULT_TEMPERATURE_EXECUTION
 from modules.config.providers import get_ollama_host, split_litellm_model_id
 from modules.config.providers.ollama_config import get_ollama_timeout
 from modules.config.system import EnvironmentReader
@@ -405,7 +406,7 @@ def _get_parameters_by_role(provider: str, model_id: str, role: Optional[LLMRole
                 )
                 llm_max = 4096
     except Exception:
-        llm_temp = config.get("temperature", 0.95)
+        llm_temp = config.get("temperature", DEFAULT_TEMPERATURE_EXECUTION)
         llm_max = config.get("max_tokens", 4096)
         role = "unknown"
 

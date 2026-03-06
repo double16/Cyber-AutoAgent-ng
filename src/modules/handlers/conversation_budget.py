@@ -1661,7 +1661,7 @@ def estimate_prompt_tokens(
 
 
 def _strip_reasoning_content(agent: Agent, force: bool = False, preserve_recent_messages: Optional[int] = None) -> None:
-    # Check agent._allow_reasoning_content attribute (set by _supports_reasoning_model())
+    # Check agent._allow_reasoning_content attribute
     # True: Keep reasoning blocks (reasoning-capable models)
     # False: Strip reasoning blocks (non-reasoning models)
     if getattr(agent, "_allow_reasoning_content", True) and not force:

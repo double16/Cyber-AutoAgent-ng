@@ -343,7 +343,7 @@ export const defaultConfig: Config = {
   embeddingModel: 'amazon.titan-embed-text-v2:0',
   evaluationModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   swarmModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
-  temperature: 0.95,
+  temperature: 0.5,
   awsRegion: process.env.AWS_REGION || 'us-east-1',
   awsBearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK,
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,

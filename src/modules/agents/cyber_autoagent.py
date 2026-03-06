@@ -398,12 +398,10 @@ def create_agent(
             tool_count += len(tool_names)
             module_tools_context = f"""
 ### MODULE-SPECIFIC TOOLS
+Preferred over command line.
 
-Available {config.module} module tools (preferred over command line):
-{", ".join(tool_names)}
-
-{"Ready to use:" if loaded_module_tools else "Load these tools when needed:"}
-{chr(10).join(f"- {example}" for example in tool_examples)}
+{"Ready to use:" if loaded_module_tools else "Load when needed:"}
+{chr(10).join(f"  - {example}" for example in tool_examples)}
 """
         else:
             print_status(
@@ -419,16 +417,9 @@ Available {config.module} module tools (preferred over command line):
         tools_context = f"""
 ### COMMAND LINE PROGRAMS
 
-Use the **shell** tool for bash commands.
-
-**Command line tool selection rules**
-- Use a purpose-built tool when scanning/enumerating many targets or endpoints.
-- Use `curl` only for single requests, reproductions, or crafted edge-cases.
-- Use `grep/sed/awk/jq` only for small transformations after purpose-built tools produce raw output.
-
-### Capabilities → Preferred tools → Fallbacks
-
-These tools are known to be installed.
+- Use the **shell** tool for command line programs.
+- Capabilities → Preferred tools → Fallbacks
+- These programs are known to be installed.
 """
         for cap, cap_prefs in tools_by_caps.items():
             tools_context += f"\n- **{cap}**\n"
@@ -465,7 +456,7 @@ Prefer MCP tools over command line tools that offer similar capabilities.
         full_tools_context = f"""
 ## TOOLS
 
-Guidance and tool names in prompts are illustrative, not prescriptive. Always check availability and prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
+Prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
 
 """ + full_tools_context
 

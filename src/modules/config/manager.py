@@ -68,9 +68,9 @@ litellm.respect_retry_after_header = True
 
 logger = get_logger("Config.Manager")
 
-# Clamp model max tokens (a.k.a. output limit) to give more space to input.
+# Clamp model max tokens (a.k.a. output limit) to give more space to input and drive action.
 MAX_TOKENS_LIMIT = 12_000
-# Clamp thinking model max tokens (a.k.a. output limit) to give more space to input.
+# Clamp thinking model max tokens (a.k.a. output limit) to give more space to input and drive action.
 MAX_TOKENS_REASONING_LIMIT = 32_000
 
 

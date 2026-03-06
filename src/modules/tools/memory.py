@@ -358,7 +358,6 @@ def mem0_store(
     agent_id: Optional[str] = None,
 ) -> str:
     """Store a single memory entry.
-
     Use this for atomic entries (ONE finding/observation per call). Prefer storing immediately after you confirm something.
 
     REQUIRED:
@@ -387,10 +386,7 @@ def mem0_store(
     - metadata.status: hypothesis/unverified/verified (only use verified after external validation)
     - metadata.validation_status: hypothesis/unverified/verified
     - metadata.technique: short snake_case identifier
-    - metadata.proof_pack for HIGH/CRITICAL when available
-
-    OPERATION SCOPING:
-    - Automatically scoped to the current operation via run_id (CYBER_OPERATION_ID).
+    - metadata.proof_pack: artifact path for HIGH/CRITICAL when available
 
     QUICK START:
         # Store finding ONLY after verification succeeds
@@ -409,17 +405,13 @@ def mem0_store(
         3. Use category="finding" for exploits/flags (required for reports)
         4. Include severity="HIGH" minimum (CRITICAL for auth bypass, RCE, data exfil)
         5. Add technique metadata for pattern-based cross-learning queries
-        6. Store observations every 5-10 steps (category="observation")
 
     STATUS VERIFICATION (prevent hallucination):
         - status="hypothesis" → Flag extracted but NOT verified (requires testing/submission)
         - status="unverified" → Flag in artifact, grep verified, but NOT submitted
         - status="verified" → Flag submission accepted (ONLY use after external validation success)
         - FORBIDDEN: status="solved" (ambiguous - use "verified" or "hypothesis")
-        - CRITICAL: Never store status="verified" until submission API returns success
         - Memory contamination: status="solved" + validation_status="hypothesis" = contradiction/hallucination
-
-    After substantial observation/finding → run Task Capture Pass before calling mem0_get_active_task().
 
     Args:
         content: Content string with [FINDING] or [OBSERVATION] markers (store artifact paths, no large blobs)

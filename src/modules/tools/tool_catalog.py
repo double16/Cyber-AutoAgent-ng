@@ -88,7 +88,7 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
     @tool(name="tool_catalog")
     def tool_catalog(keywords: Optional[str] = None) -> str:
         """
-        List available tools + schemas to pick the best next tool.
+        List available tools to pick the best next tool.
 
         Call when:
         - Unsure which tool fits (confidence <80%).
@@ -120,21 +120,14 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
                     continue
             found_tools.append(tool_name)
 
+            tool_desc = tool_spec.get("description", "")
+            if len(tool_desc) > 200:
+                tool_desc = tool_desc[:200] + " ..."
             catalog += f"""
 {separator}
 name: {tool_name}
 
-{tool_spec.get("description")}
-
-input schema:
-{json.dumps(tool_spec.get("inputSchema"), indent=2, sort_keys=True, ensure_ascii=False)}
-"""
-            output_schema = tool_spec.get("outputSchema", None)
-            if output_schema:
-                catalog += f"""
-
-output schema:
-{json.dumps(output_schema, indent=2, sort_keys=True, ensure_ascii=False)}
+{tool_desc}
 
 {separator}
 """
@@ -145,13 +138,6 @@ output schema:
 # COMMAND LINE PROGRAMS
 
 Use the **shell** tool to invoke the following command line programs in a bash shell.
-
-**Example**:
-{{"tool":"shell","args":{{"command":"nmap -sV ...","timeout":600}}}}
-{{"tool":"shell","args":{{"command":"nuclei ...","timeout":300}}}}
-
-Always use options that reduce progress output, but not suppress meaningful output. If possible, use options that save output to
-a file in the ARTIFACTS DIRECTORY and silence program output.
 """
             cyber_tools = _get_cyber_tools()
             for shell_command in shell_commands:

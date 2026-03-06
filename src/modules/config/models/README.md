@@ -32,7 +32,6 @@ model = create_bedrock_model(
 Model capability detection and limit resolution.
 
 **Functions:**
-- `supports_reasoning_model(model_id)` - Check for extended reasoning support
 - `get_capabilities(model_id, default_provider)` - Get model capabilities from models.dev
 - `get_model_input_limit(model_id, provider)` - Get context window limit
 - `get_provider_default_limit(provider)` - Get provider-specific default limits
@@ -41,14 +40,7 @@ Model capability detection and limit resolution.
 - OpenAI: GPT-5 family, O-series (o3/o4, mini variants)
 - Anthropic: Claude Sonnet 4/4.5, Opus
 - Moonshot: Kimi K2 thinking variants
-
-```python
-from modules.config.models import supports_reasoning_model
-
-if supports_reasoning_model("azure/gpt-5"):
-    # Enable extended reasoning features
-    pass
-```
+- Ollama: qwenN, gpt-oss
 
 ### dev_client.py
 Models.dev API client with caching and fallback for authoritative model metadata.
@@ -142,11 +134,7 @@ litellm_model = create_litellm_model(
 ### Checking Capabilities
 
 ```python
-from modules.config.models import supports_reasoning_model, get_capabilities
-
-# Quick reasoning check
-if supports_reasoning_model("azure/gpt-5"):
-    print("Extended reasoning available")
+from modules.config.models import get_capabilities
 
 # Comprehensive capabilities
 caps = get_capabilities("azure/gpt-5", "litellm")

@@ -16,6 +16,7 @@ from modules.config.manager import (
     get_model_config,
     get_ollama_host, MAX_TOKENS_LIMIT,
 )
+from modules.config.models import DEFAULT_TEMPERATURE_EXECUTION
 from modules.config.types import (
     EmbeddingConfig,
     EvaluationConfig,
@@ -75,10 +76,10 @@ class TestLLMConfig:
     def test_default_parameters(self):
         """Test LLM config with default parameters."""
         config = LLMConfig(provider=ModelProvider.OLLAMA, model_id="llama3.2:3b")
-        assert config.temperature == 0.95
+        assert config.temperature == DEFAULT_TEMPERATURE_EXECUTION
         assert config.max_tokens == 4096
         assert config.top_p is None  # Default is None (optional parameter)
-        assert config.parameters["temperature"] == 0.95
+        assert config.parameters["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
         assert config.parameters["max_tokens"] == 4096
         assert "top_p" not in config.parameters  # Only included when explicitly set
 
@@ -1087,13 +1088,13 @@ class TestEnvironmentIntegration:
         standard_config = config_manager.get_standard_model_config(
             "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "us-east-1", "bedrock"
         )
-        assert standard_config["temperature"] == 0.95
+        assert standard_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
         assert standard_config["max_tokens"] == MAX_TOKENS_LIMIT  # clamped
         # top_p is now optional (not included for Anthropic models to avoid conflicts)
 
         # Test local model configuration
         local_config = config_manager.get_local_model_config("llama3.2:3b", "ollama")
-        assert local_config["temperature"] == 0.95
+        assert local_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
         assert local_config["max_tokens"] == 5462
         assert "host" in local_config
         assert local_config["host"].startswith("http://")

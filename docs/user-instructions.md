@@ -52,8 +52,8 @@ npm start
 2. Select **Provider**: `litellm` (supports 300+ models)
 3. Configure **LLM Settings**:
    - Model ID: `azure/gpt-5`, `moonshot/kimi-k2-thinking`, `openrouter/openrouter/polaris-alpha`
-   - Temperature: `1.0` (for reasoning models) or `0.95` (default)
-   - Max Tokens: `32000`
+   - Temperature: `0.7` (for reasoning models) or `0.5` (default)
+   - Max Tokens: `12000`
    - Reasoning Effort: `medium` (for GPT-5/o1 models)
 4. Configure **Embedding Model**: `azure/text-embedding-3-large`
 5. Add **Provider Credentials**:

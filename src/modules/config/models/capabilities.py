@@ -66,7 +66,7 @@ def _split_prefix(model_id: str) -> Tuple[str, str]:
     return "", model_id
 
 
-def supports_reasoning_model(model_id: Optional[str]) -> bool:
+def _static_supports_reasoning_model(model_id: Optional[str]) -> bool:
     """Return True if the model is known to support extended reasoning blocks.
 
     This is a fast explicit check for models with native reasoning support.
@@ -115,9 +115,6 @@ def supports_reasoning_model(model_id: Optional[str]) -> bool:
         "-opus",  # covers bedrock/other provider dash-separated ids
     )
     return any(marker in mid for marker in anthropic_allow_markers)
-
-
-# --- Capabilities ---------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -178,7 +175,7 @@ class ModelCapabilitiesResolver:
 
         # Priority 2: Static patterns (known models, when models.dev unavailable)
         if not supports_reason:
-            supports_reason = supports_reasoning_model(model)
+            supports_reason = _static_supports_reasoning_model(model)
             if supports_reason:
                 logger.debug("Using static pattern: model=%s reasoning=%s", model, True)
 
@@ -533,7 +530,6 @@ __all__ = [
     "Capabilities",
     "ModelCapabilitiesResolver",
     "get_capabilities",
-    "supports_reasoning_model",
     # Limits
     "get_model_input_limit",
     "get_model_output_limit",

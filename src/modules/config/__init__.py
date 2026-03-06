@@ -24,7 +24,7 @@ from modules.config.models import (
     create_bedrock_model,
     create_ollama_model,
     create_litellm_model,
-    supports_reasoning_model,
+    get_capabilities,
 )
 
 __all__ = [
@@ -50,7 +50,7 @@ __all__ = [
     "align_mem0_config",
     "check_existing_memories",
     # Model capabilities
-    "supports_reasoning_model",
+    "get_capabilities",
     # Logging
     "configure_sdk_logging",
 ]

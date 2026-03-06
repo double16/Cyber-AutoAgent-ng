@@ -22,24 +22,16 @@
     - Extract relevant: `grep -E "password|hash|Database:" <artifacts_path>/sqlmap_output.txt`
 - Install missing tools: `apt install tool` or `pip install package` (no sudo needed in container)
 - Timeout handling: On timeout → reduce scope, break into smaller operations
+- Selection Rules:
+    - Purpose-built tool when scanning/enumerating many targets or endpoints.
+    - `curl` only for single requests, reproductions, or crafted edge-cases.
+    - `grep/sed/awk/jq` only for small transformations after purpose-built tools produce raw output.
 
 **python_repl**
 - Usage: Rapid PoC prototyping, batch multiple tests. NO TIMEOUT (avoid >600s operations)
 - File writes: MUST use absolute paths from OPERATION ARTIFACTS DIRECTORY (relative paths write to project root)
 - Promotion trigger: POC works + logic needed >2 times → MUST promote via editor+load_tool to OPERATION TOOLS DIRECTORY
 - Results: Store all outputs as artifacts with descriptive names
-
-**browser_* tools**
-- Purpose: Interact with web apps requiring JavaScript execution, DOM rendering, or session/cookie-based authentication
-- When to use: SPAs with dynamic content, login flows, client-side rendering, testing XSS/CSRF in browser context
-- When NOT: Static pages, API endpoints, simple HTTP requests (use http_request instead)
-- Constraints: Single browser instance, sequential execution only (NO concurrent tool calls), state persists across calls
-- Actions: Each action must be atomic (one click OR one input, never combined). "Click login then enter password" is WRONG - split into separate calls
-- Auto-captured artifacts: Network logs (HAR), console logs, dialogs, downloads → `<artifacts_path>/*.{har,log,html}`
-- Network logs: If a tool returns HAR file, use `jq` to extract ONLY relevant data. HAR files maybe large.
-- Large outputs: Logs & HTML snapshots saved to artifacts, use shell grep/sed to extract relevant data, store only paths in findings
-- Integration: Extract cookies/tokens → use with http_request for API testing, or evaluate JS for localStorage/session data
-- Anti-pattern: Using browser when http_request suffices (wastes resources, slower, more complex)
 
 **swarm**
 - Use when:
@@ -87,7 +79,7 @@
 - "New confidence after applying formula?" → If <50%: pivot required
 - "Pivot to what?" → Target constraint learned, NOT iterate same method
 
-**Minimal Action Principle**: What's LEAST I can do to learn MOST? Check memory before repeating. One variable per test isolates cause.
+**Minimal Action Principle**: For the current task, use the least-cost step that maximizes learning. This does not justify reducing candidate coverage.
 
 **Validation After Every Tool**: "Intended outcome achieved? Constraint learned? Confidence update? Next action?"
 
