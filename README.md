@@ -1,14 +1,14 @@
 <div align="center">
 
-![GitHub License](https://img.shields.io/github/license/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/bvcyber/Cyber-AutoAgent-ng/ci.yml?branch=main&style=flat-square)
-![GitHub issues](https://img.shields.io/github/issues/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub pull requests](https://img.shields.io/github/issues-pr/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub contributors](https://img.shields.io/github/contributors/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub stars](https://img.shields.io/github/stars/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub forks](https://img.shields.io/github/forks/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub License](https://img.shields.io/github/license/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/double16/Cyber-AutoAgent-ng/ci.yml?branch=main&style=flat-square)
+![GitHub issues](https://img.shields.io/github/issues/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/m/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub contributors](https://img.shields.io/github/contributors/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub stars](https://img.shields.io/github/stars/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub forks](https://img.shields.io/github/forks/double16/Cyber-AutoAgent-ng?style=flat-square)
 
 **[!] EXPERIMENTAL SOFTWARE - USE ONLY IN AUTHORIZED, SAFE, SANDBOXED ENVIRONMENTS [!]**
 
@@ -61,7 +61,7 @@ The React-based terminal interface is now the **default UI**, providing interact
 
 ```bash
 # Clone and setup
-git clone https://github.com/bvcyber/Cyber-AutoAgent-ng.git
+git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd Cyber-AutoAgent
 
 # Install in editable mode
@@ -573,7 +573,7 @@ As of Feb 2026, these models are known to work with varying degrees of success:
 
 ```bash
 # Clone repository
-git clone https://github.com/bvcyber/Cyber-AutoAgent-ng.git
+git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd cyber-autoagent
 
 # Build image
@@ -598,7 +598,7 @@ docker run --rm \
 
 ```bash
 # Clone repository
-git clone https://github.com/bvcyber/Cyber-AutoAgent-ng.git
+git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd cyber-autoagent
 
 # Create virtual environment
