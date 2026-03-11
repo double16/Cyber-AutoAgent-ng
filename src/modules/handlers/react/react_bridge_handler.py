@@ -1371,9 +1371,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Update live metrics for memory operations and evidence collection
         try:
             if tool_name in {"mem0_store", "mem0_store_plan", "mem0_create_tasks"} and success:
-                # Increment memory operation count on successful store/store_plan actions
+                # Increment memory operation count on successful storage actions
                 if isinstance(tool_input, dict):
-                    # Count both store and store_plan as memory operations
                     self.memory_ops += 1
                     # Only count evidence for store actions with report-generating categories.
                     # Categories per memory.py: finding, signal, observation, discovery

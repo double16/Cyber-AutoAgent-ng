@@ -69,7 +69,7 @@ def test_pruning_conversation_manager_falls_back_to_summary(monkeypatch):
         window_size=10, summary_ratio=0.5, preserve_recent_messages=2
     )
     # More messages to give room for summarization
-    agent = _AgentStub([_make_message(f"msg{i}") for i in range(5)])
+    agent = _AgentStub([_make_message(f"objective")] + [_make_message(f"msg{i}") for i in range(5)])
 
     # Force sliding reduction to raise overflow so summarization path executes
     def _raise_overflow(*_args, **_kwargs):
@@ -88,7 +88,8 @@ def test_pruning_conversation_manager_falls_back_to_summary(monkeypatch):
     manager.reduce_context(agent)
 
     # After summarization: summary + preserved messages
-    assert agent.messages[0] is summary_message or "summary" in str(agent.messages[0])
+    assert "objective" in str(agent.messages[0])
+    assert agent.messages[1] is summary_message or "summary" in str(agent.messages[1])
 
 
 def test_reduce_context_raises_when_exhausted(monkeypatch):

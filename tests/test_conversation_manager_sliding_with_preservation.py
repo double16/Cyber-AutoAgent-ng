@@ -122,5 +122,5 @@ def test_reduce_context_no_preservation_delegates_to_super(monkeypatch):
 
     mgr.reduce_context(agent)
 
-    assert agent.messages == original[-4:]
-    assert mgr.removed_message_count == 6
+    assert agent.messages == original[0:1] + original[-4:]
+    assert mgr.removed_message_count == 5

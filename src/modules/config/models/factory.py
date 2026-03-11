@@ -16,12 +16,15 @@ import ollama
 
 from strands.models import Model
 
-from modules.config.models import DEFAULT_TEMPERATURE_EXECUTION
 from modules.config.providers import get_ollama_host, split_litellm_model_id
 from modules.config.providers.ollama_config import get_ollama_timeout
 from modules.config.system import EnvironmentReader
 from modules.config.system.logger import get_logger
 from modules.config.system.defaults import LLMRoleType
+from modules.config.types import (
+    DEFAULT_TEMPERATURE_EXECUTION,
+    DEFAULT_TEMPERATURE_SWARM,
+)
 from modules.config.models.capabilities import (
     get_model_input_limit,
     get_provider_default_limit,

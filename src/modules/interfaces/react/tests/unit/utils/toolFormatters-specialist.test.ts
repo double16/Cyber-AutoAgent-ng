@@ -130,7 +130,7 @@ describe('Specialist tool formatters', () => {
       expect(formatted).toContain('SQLi');
     });
 
-    it('shows TOON plan preview for store_plan', async () => {
+    it('shows TOON plan preview for mem0_store_plan', async () => {
       const mod: any = await import('../../../src/utils/toolFormatters.js');
       const { toolFormatters } = mod;
 

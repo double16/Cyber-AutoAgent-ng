@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Literal
 
-from modules.config.models import DEFAULT_TEMPERATURE_EXECUTION
+# 0.2–0.5
+DEFAULT_TEMPERATURE_EXECUTION = 0.5
+DEFAULT_TEMPERATURE_SWARM = 0.4
+DEFAULT_TEMPERATURE_EXPLOITATION = 0.6
 
 LITELLM_EMBEDDING_DEFAULTS: Dict[str, Tuple[str, int]] = {
     "openai": ("openai/text-embedding-3-small", 1536),

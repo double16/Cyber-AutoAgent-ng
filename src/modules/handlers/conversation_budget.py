@@ -608,55 +608,20 @@ class SlidingWindowConversationManagerWithPreservation(SlidingWindowConversation
         self.preserve_first_messages = preserve_first_messages
 
     def reduce_context(self, agent: "Agent", e: Exception | None = None, **kwargs: Any) -> None:
-        # Preserve the first N messages (if configured) AND the latest active_task marker + related evidence messages.
+        # Preserve the first message, any configured N messages AND the latest active_task marker + related evidence messages + latest plan
         before_messages = list(agent.messages)
         before_reduce_count = len(before_messages)
-
-        preserve_n = max(0, int(self.preserve_first_messages or 0))
-        preserve = before_messages[:preserve_n]
-
-        protected_indices = _protected_indices_for_active_task(before_messages)
-        protected_msgs = [before_messages[i] for i in sorted(protected_indices) if 0 <= i < len(before_messages)]
 
         super().reduce_context(agent, e, **kwargs)
         messages = agent.messages
 
-        def _msg_key(m: dict[str, Any]) -> str:
-            role = str(m.get("role", ""))
-            joined = "\n".join(_iter_message_texts(m))
-            # Limit size to keep hashing cheap / stable
-            return role + "|" + joined[:512]
-
-        existing_keys = {_msg_key(m) for m in messages}
-        preserved_count = 0
-
-        # Re-insert the preserved first messages at the front
-        for idx, msg in enumerate(preserve):
-            if len(messages) <= idx:
-                messages.append(msg)
-                preserved_count += 1
-                self.removed_message_count -= 1
-            else:
-                if messages[idx] != msg:
-                    messages.insert(idx, msg)
-                    preserved_count += 1
-                    self.removed_message_count -= 1
-
-        # Re-insert protected messages (active_task + evidence refs) just after the preserved-first zone.
-        # Keep relative order as they appeared originally.
-        insert_at = min(len(messages), preserve_n)
-        for pm in protected_msgs:
-            k = _msg_key(pm)
-            if k in existing_keys:
-                continue
-            # Avoid runaway growth if reduction failed to free space
-            if len(messages) >= before_reduce_count:
-                break
-            messages.insert(insert_at, pm)
-            insert_at += 1
-            existing_keys.add(k)
-            preserved_count += 1
-            self.removed_message_count -= 1
+        preserved_count = _restore_preserved_messages(
+            messages,
+            before_messages,
+            self.preserve_first_messages,
+            max_total_messages=before_reduce_count - 1,
+        )
+        self.removed_message_count -= preserved_count
 
         after_reduce_count = len(agent.messages)
         logger.info("Preserved %d messages after sliding manager reduction", preserved_count)
@@ -905,7 +870,8 @@ class MappingConversationManager(SummarizingConversationManager):
         e: Optional[Exception] = None,
         **kwargs: Any,
     ) -> None:
-        messages = getattr(agent, "messages", [])
+        messages = agent.messages
+        before_reduce_messages = list(messages)
         window_size = getattr(self._sliding, "window_size", 100) if self._sliding else 100
         model_id = get_model_id_from_agent(agent) if agent is not None else ""
 
@@ -995,6 +961,19 @@ class MappingConversationManager(SummarizingConversationManager):
             stage = "summarizing"
             logger.warning("Sliding window overflow; invoking summarizing fallback")
             super().reduce_context(agent, e or overflow_exc, **kwargs)
+
+            restored_count = _restore_preserved_messages(
+                agent.messages,
+                before_reduce_messages,
+                self.preserve_first,
+                max_total_messages=max(1, before_msgs - 1),
+            )
+            if restored_count > 0:
+                logger.info(
+                    "Restored %d preserved message(s) after summarizing fallback",
+                    restored_count,
+                )
+
         after_msgs = _count_agent_messages(agent)
         after_tokens = safe_estimate_tokens(agent)
 
@@ -1716,7 +1695,7 @@ def strip_reflection_snapshot_messages(agent: Agent) -> None:
         for block in content:
             if not isinstance(block, dict):
                 continue
-            if block.get("text", "").startswith("<reflection_snapshot>"):
+            if "<reflection_snapshot>" in block.get("text", ""):
                 return False
         return True
 
@@ -1765,12 +1744,14 @@ def _iter_message_texts(message: Dict[str, Any]) -> List[str]:
     return out
 
 
+_RE_ACTIVE_TASK = re.compile(r"<active_task[^>]*>(.*?)</active_task>", flags=re.S)
+
 def _find_active_task_payload_in_text(text: str) -> Optional[Dict[str, Any]]:
     """Extract JSON payload from the last <active_task...>...</active_task> block in text."""
     try:
         if not isinstance(text, str) or "<active_task" not in text:
             return None
-        matches = re.findall(r"<active_task[^>]*>(.*?)</active_task>", text, flags=re.S)
+        matches = _RE_ACTIVE_TASK.findall(text)
         if not matches:
             return None
         payload_str = (matches[-1] or "").strip()
@@ -1792,6 +1773,37 @@ def _get_latest_active_task(messages: List[Dict[str, Any]]) -> Tuple[Optional[in
         if isinstance(payload, dict):
             return i, payload
     return None, None
+
+
+_PLAN_TOOL_NAMES = {"mem0_get_plan", "mem0_store_plan"}
+
+
+def _is_plan_tool_result_message(message: Dict[str, Any]) -> bool:
+    """True if message contains a toolResult for mem0_get_plan or mem0_store_plan.
+
+    We match on toolResult.toolUseId (Strands) and also allow toolResult._toolUseId when present.
+    """
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        tr = block.get("toolResult")
+        if not isinstance(tr, dict):
+            continue
+        tool_use_id = tr.get("toolUseId") or tr.get("_toolUseId")
+        if isinstance(tool_use_id, str) and tool_use_id in _PLAN_TOOL_NAMES:
+            return True
+    return False
+
+
+def _get_latest_plan_tool_result(messages: List[Dict[str, Any]]) -> Optional[int]:
+    """Return the index of the most recent plan toolResult message, else None."""
+    for i in range(len(messages) - 1, -1, -1):
+        if _is_plan_tool_result_message(messages[i]):
+            return i
+    return None
 
 
 def _evidence_match_tokens(evidence: List[str]) -> List[str]:
@@ -1850,8 +1862,13 @@ def _message_has_tool_result(message: Dict[str, Any]) -> bool:
 
 
 def _protected_indices_for_active_task(messages: List[Dict[str, Any]]) -> set[int]:
-    """Indices to preserve: latest active_task marker + evidence-referencing messages + tool pairs."""
+    """Indices to preserve: latest plan tool result message, latest active_task marker + evidence-referencing messages + tool pairs."""
     protected: set[int] = set()
+
+    # Preserve the most recent plan toolResult message
+    plan_idx = _get_latest_plan_tool_result(messages)
+    if plan_idx is not None:
+        protected.add(plan_idx)
 
     idx, payload = _get_latest_active_task(messages)
     if idx is None or not isinstance(payload, dict):
@@ -1888,21 +1905,88 @@ def _protected_indices_for_active_task(messages: List[Dict[str, Any]]) -> set[in
     return protected
 
 
+def _message_preservation_key(message: Dict[str, Any]) -> str:
+    """Build a stable key for de-duplication when restoring preserved messages."""
+    role = str(message.get("role", ""))
+    joined = "\n".join(_iter_message_texts(message))
+    return role + "|" + joined[:512]
+
+
+def _restore_preserved_messages(
+        messages: List[Dict[str, Any]],
+        before_messages: List[Dict[str, Any]],
+        preserve_first_messages: int,
+        *,
+        max_total_messages: Optional[int] = None,
+) -> int:
+    """Restore preserved first messages and protected state messages after reduction.
+
+    Always preserves the very first message in full, plus any additionally configured
+    leading messages and the latest protected active-task / plan related messages.
+    """
+    if not isinstance(messages, list) or not isinstance(before_messages, list) or not before_messages:
+        return 0
+
+    preserve_n = max(1, int(preserve_first_messages or 0))
+    preserve = before_messages[:preserve_n]
+
+    protected_indices = _protected_indices_for_active_task(before_messages)
+    protected_msgs = [
+        before_messages[i]
+        for i in sorted(protected_indices)
+        if 0 <= i < len(before_messages)
+    ]
+
+    existing_keys = {_message_preservation_key(m) for m in messages}
+    preserved_count = 0
+
+    # Re-insert preserved first messages at the front.
+    for idx, msg in enumerate(preserve):
+        key = _message_preservation_key(msg)
+        if key in existing_keys:
+            continue
+        if len(messages) <= idx:
+            messages.append(msg)
+        else:
+            messages.insert(idx, msg)
+        existing_keys.add(key)
+        preserved_count += 1
+        # MUST have the first message, it is the operation objective
+        if max_total_messages is not None and len(messages) >= max_total_messages:
+            break
+
+    # Re-insert protected messages just after the preserved-first zone.
+    insert_at = min(len(messages), preserve_n)
+    for pm in protected_msgs:
+        key = _message_preservation_key(pm)
+        if key in existing_keys:
+            continue
+        if max_total_messages is not None and len(messages) >= max_total_messages:
+            break
+        messages.insert(insert_at, pm)
+        insert_at += 1
+        existing_keys.add(key)
+        preserved_count += 1
+
+    return preserved_count
+
+
 def _dedupe_state_markers(agent: Agent) -> None:
-    """Remove all <reflection_snapshot> messages and keep only the most recent <active_task ...> message."""
+    """Remove all <reflection_snapshot> messages and keep only the most recent <active_task ...> and plan tool result message."""
 
     messages = getattr(agent, "messages", [])
     if not isinstance(messages, list) or not messages:
         return
 
     last_active_idx, _ = _get_latest_active_task(messages)
+    last_plan_idx = _get_latest_plan_tool_result(messages)
 
     def _should_keep(message: dict[str, Any], idx: int) -> bool:
         texts = _iter_message_texts(message)
 
         # Remove reflection_snapshot markers regardless of where they appear
         for t in texts:
-            if isinstance(t, str) and t.startswith("<reflection_snapshot>"):
+            if isinstance(t, str) and "<reflection_snapshot>" in t:
                 return False
 
         joined = "\n".join(texts)
@@ -1910,6 +1994,10 @@ def _dedupe_state_markers(agent: Agent) -> None:
             payload = _find_active_task_payload_in_text(joined)
             if payload is not None:
                 return last_active_idx is not None and idx == last_active_idx
+
+        # Dedupe plan tool result messages, keeping only the most recent one
+        if _is_plan_tool_result_message(message):
+            return last_plan_idx is not None and idx == last_plan_idx
 
         return True
 

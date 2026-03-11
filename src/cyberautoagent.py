@@ -68,7 +68,7 @@ from modules.handlers.utils import (
     dumpstacks,
 )
 from modules.prompts.factory import get_reflection_snapshot
-from modules.tools import browser, channel_close_all
+from modules.tools import browser, channel_close_all, mem0_get_active_task
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
 
@@ -799,8 +799,13 @@ def main():
                     extra_message = ""
                     if actionless_step_count > 0:
                         logger.warning("Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
-                        extra_message += f"Re-emit your last response as valid tool calls. No prose. No XML. At least one tool call is required to progress towards the objective. Reflect on next steps to reach the objective.\n"
-                    current_message = f"<reflection_snapshot>\n{extra_message}{reflection_snapshot}\n</reflection_snapshot>"
+                        active_task = mem0_get_active_task() or ""
+                        if "ACTION" not in reflection_snapshot:
+                            if 'status="active"' in active_task:
+                                extra_message += f"**MANDITORY**: The operation is not complete. There are tasks pending. Continue by executing this task:\n{active_task}\n"
+                            else:
+                                extra_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress.\n"
+                    current_message = f"{extra_message}<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
                 else:
                     break
 

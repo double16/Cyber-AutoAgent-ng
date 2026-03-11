@@ -700,7 +700,7 @@ WORKING TACTICS: {focus_tactics}
 <analysis_focus>
 Look for these BEHAVIORAL patterns in evidence (not just keywords):
 
-1. **Checkpoint Skipping**: 20%/40%/60%/80% budget intervals passed without get_plan calls
+1. **Checkpoint Skipping**: 20%/40%/60%/80% budget intervals passed without `mem0_get_plan` calls
 2. **Repeated Technique**: Same approach 5+ times without pivot
 3. **Premature Stop**: stop() invoked at <95% budget without objective achieved
 4. **Phase 4 Missed**: Extraction events (hash/credentials/token) without immediate direct-use testing
@@ -714,9 +714,9 @@ If NO patterns → Return prompt UNCHANGED (conservative behavior when no eviden
 <strengthening_strategies>
 When evidence confirms violation, apply STRUCTURAL changes (not just add "MANDATORY"):
 
-**A. Checkpoint Protocol Weak** (agent passed checkpoint without get_plan):
-TRANSFORM: "FIRST tool call MUST be: mem0_get_plan()"
-TO: "BEFORE selecting next tool, complete:\nSTEP 1: mem0_get_plan()\nSTEP 2: Answer validation questions\nSTEP 3: Update plan\nSTEP 4: ONLY AFTER above: Select next tool"
+**A. Checkpoint Protocol Weak** (agent passed checkpoint without `mem0_get_plan`):
+TRANSFORM: "FIRST tool call MUST be: `mem0_get_plan()`"
+TO: "BEFORE selecting next tool, complete:\nSTEP 1: `mem0_get_plan()`\nSTEP 2: Answer validation questions\nSTEP 3: Update plan\nSTEP 4: ONLY AFTER above: Select next tool"
 RATIONALE: Sequential steps create completion structure, numbered gates harder to skip
 
 **B. Technique Fixation** (5+ iterations same approach):
@@ -853,7 +853,7 @@ WORKING TACTICS: {focus_str}
 <your_task>
 PHASE 1 - BEHAVIORAL ANALYSIS:
 Scan evidence for the 6 behavioral patterns listed in your system prompt:
-- Checkpoint skipping (20%/40%/60%/80% budget intervals without get_plan)
+- Checkpoint skipping (20%/40%/60%/80% budget intervals without `mem0_get_plan`)
 - Repeated technique (5+ iterations same approach)
 - Premature stop (<95% budget without objective)
 - Phase 4 missed (extraction without direct-use testing)

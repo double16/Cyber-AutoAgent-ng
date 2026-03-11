@@ -8,12 +8,13 @@ and provider-specific settings across Bedrock, Ollama, and LiteLLM.
 
 from typing import Any, Dict, Literal
 
-from modules.config.models import DEFAULT_TEMPERATURE_EXECUTION, DEFAULT_TEMPERATURE_SWARM
 from modules.config.types import (
     EmbeddingConfig,
     LLMConfig,
     MemoryLLMConfig,
     ModelProvider,
+    DEFAULT_TEMPERATURE_EXECUTION,
+    DEFAULT_TEMPERATURE_SWARM,
 )
 
 LLMRoleType = Literal["primary", "swarm", "report", "evaluation", "unknown"]
@@ -52,7 +53,7 @@ def build_ollama_defaults() -> Dict[str, Any]:
             provider=ModelProvider.OLLAMA,
             model_id="qwen3-coder:30b-a3b-q4_K_M",
             temperature=DEFAULT_TEMPERATURE_EXECUTION,
-            max_tokens=8192,
+            max_tokens=6144,
         ),
         "embedding": EmbeddingConfig(
             provider=ModelProvider.OLLAMA,
@@ -76,7 +77,7 @@ def build_ollama_defaults() -> Dict[str, Any]:
             provider=ModelProvider.OLLAMA,
             model_id="qwen3-coder:30b-a3b-q4_K_M",
             temperature=DEFAULT_TEMPERATURE_SWARM,
-            max_tokens=8192,
+            max_tokens=6144,
         ),
         "host": None,  # Will be resolved dynamically
         "region": "ollama",

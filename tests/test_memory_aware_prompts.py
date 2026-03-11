@@ -391,7 +391,8 @@ class TestMemoryAwarePromptIntegration:
 
         # Verify all components are present
         assert "**Target**: vulnerable.com" in result or "Target: vulnerable.com" in result
-        assert "comprehensive penetration test" in result
+        # objective has been removed to not duplicate with conversation, it is also confusing to the agent
+        assert "comprehensive penetration test" not in result
         assert "OP_20240101_120000" in result
         assert "Continuing assessment with 3 existing memories" in result
         assert (

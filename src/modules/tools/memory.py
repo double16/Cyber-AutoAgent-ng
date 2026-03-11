@@ -15,13 +15,14 @@ Key Features:
    • get: Retrieve specific memories by memory ID
    • retrieve: Perform semantic search across all memories
 
-2. Safety Features:
-   • User confirmation for mutative operations
+2. Task Management:
+   • Work is broken into small tasks per phase with activation managed by these tools.
+
+3. Safety Features:
    • Content previews before storage
    • Warning messages before deletion
-   • BYPASS_TOOL_CONSENT mode for bypassing confirmations in tests
 
-3. Advanced Capabilities:
+4. Advanced Capabilities:
    • Automatic memory ID generation
    • Structured memory storage with metadata
    • Semantic search with relevance filtering
@@ -29,28 +30,16 @@ Key Features:
    • Support for both user and agent memories
    • Multiple vector database backends (OpenSearch, Mem0 Platform, FAISS)
 
-4. Error Handling:
+5. Error Handling:
    • Memory ID validation
    • Parameter validation
    • Graceful API error handling
    • Clear error messages
 
-5. Configurable Components:
+6. Configurable Components:
    • Embedder (AWS Bedrock, Ollama, OpenAI)
    • LLM (AWS Bedrock, Ollama, OpenAI)
    • Vector Store (FAISS, OpenSearch, Mem0 Platform)
-
-Plan & Reflection:
-- Plan lifecycle: store_plan (create), get_plan (retrieve), update via store_plan (new version)
-- Evaluation cadence: Every ~20 steps → get_plan, assess criteria, update phases if satisfied
-- Phase transitions: Criteria met → status="done", advance current_phase, next status="active", store_plan
-- Post-reflection: Evaluate plan, update if phase complete or pivot needed
-- Stuck detection: Phase >40% budget → force advance with context note
-
-Adaptation Tracking:
-- After failed attempts: store("[OBSERVATION] Approach X blocked at endpoint Y", metadata={"category": "observation", "blocker": "WAF", "retry_count": n})
-- Include what was blocked (script tags, specific chars, etc.) and next strategy
-- After 3 retries with same approach, mandatory pivot to different technique
 """
 
 import json
@@ -2185,7 +2174,7 @@ class Mem0ServiceClient:
 
         # Add plan evaluation reminder
         result["_reminder"] = (
-            "Reflection stored. Now: get_plan → check if phase criteria met or pivot needed → update if yes"
+            "Reflection stored. Now: `mem0_get_plan` → check if phase criteria met or pivot needed → update if yes"
         )
 
         return result
@@ -2407,7 +2396,8 @@ class Mem0ServiceClient:
                 if t.task_uid == task_uid:
                     target = t
                     break
-        else:
+        # sometimes the model gets confused about which UID in the operation belongs to the task
+        if target is None:
             for t in phase_tasks:
                 if t.status == "active":
                     target = t
@@ -2604,19 +2594,19 @@ class Mem0ServiceClient:
 Active plan: {plan_content}
 
 **Required Actions:**
-1. Is current phase criteria satisfied? If YES → mark status="done", advance current_phase, store_plan
-2. Should we pivot strategy? If YES → update phases with new approach, store_plan
+1. Is current phase criteria satisfied? If YES → mark status="done", advance current_phase, `mem0_store_plan`
+2. Should we pivot strategy? If YES → update phases with new approach, `mem0_store_plan`
 3. Phase stuck >40% budget? If YES → force advance to next phase
 4. Deploy swarms if multiple vectors or <70% budget with no progress
 
-After analysis: get_plan → evaluate → update phases if needed → store_plan → continue
+After analysis: `mem0_get_plan` → evaluate → update phases if needed → `mem0_store_plan` → continue
 """
         else:
             reflection_prompt += """
 No active plan found.
 
 **Required Action:**
-Create strategic plan NOW with store_plan before continuing.
+Create strategic plan NOW with `mem0_store_plan` before continuing.
 Include: objective, current_phase=1, phases with clear criteria for each.
 """
 

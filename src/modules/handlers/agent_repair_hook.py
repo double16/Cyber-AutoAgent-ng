@@ -234,14 +234,14 @@ class AgentRepairHook(HookProvider):
                 messages.append({
                     "role": "system",
                     "content": [{"type": "text", "text": (
-                        f"""<reflection_snapshot>
-You are continuing from a prior run that entered a repetitive reasoning loop.
+                        f"""You are continuing from a prior run that entered a repetitive reasoning loop.
 
 ## CONSTRAINTS
 - Do NOT restate repeated points from the reduced notes.
 - Output must be structured, actionable, and short.
 - Avoid meta commentary about "looping" beyond what's required to recover.
 
+<reflection_snapshot>
 {reflection_snapshot}
 </reflection_snapshot>"""
                     )}]

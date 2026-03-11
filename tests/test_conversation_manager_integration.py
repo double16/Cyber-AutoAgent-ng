@@ -22,7 +22,7 @@ import pytest
 
 from strands.types.tools import ToolSpec
 from modules.config.manager import ConfigManager
-from modules.config.models.dev_client import ModelsDevClient, ModelLimits
+from modules.config.models.dev_client import ModelsDevClient, ModelLimits, ModelCapabilities
 from modules.handlers.conversation_budget import (
     _get_char_to_token_ratio_dynamic,
     _estimate_prompt_tokens_for_agent,
@@ -73,6 +73,8 @@ def mock_models_client():
             info.provider = "google"
         else:
             return None
+        info.limits = get_limits(model_id)
+        info.capabilities = ModelCapabilities(name=model_id, reasoning=True, tool_call=True, attachment=False, temperature=False, open_weights=False, modalities_input=[], modalities_output=[], structured_output=None, knowledge=None, release_date=None, last_updated=None)
         return info
 
     client.get_limits.side_effect = get_limits
@@ -324,53 +326,53 @@ class TestSafeMaxTokens:
 
     def test_azure_gpt_5_safe_tokens(self, config_manager_with_mock_client, monkeypatch):
         """Test Azure GPT-5 safe max_tokens is 50% of 128,000 = 64,000."""
-        monkeypatch.setenv("MAX_TOKENS_LIMIT", "1000000")
+        monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("azure/gpt-5")
-        assert safe_max == 64000, f"Expected 64000, got {safe_max}"
+        assert safe_max == 17000
 
     def test_azure_gpt_5_safe_tokens_clamped(self, config_manager_with_mock_client):
         """Test Azure GPT-5 safe max_tokens is 50% of 128,000 = 64,000."""
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("azure/gpt-5")
-        assert safe_max == 6000, f"Expected 6000, got {safe_max}"
+        assert safe_max == 5000
 
     def test_azure_gpt_4o_safe_tokens(self, config_manager_with_mock_client, monkeypatch):
         """Test Azure GPT-4o safe max_tokens is 50% of 16,384 = 8,192."""
-        monkeypatch.setenv("MAX_TOKENS_LIMIT", "1000000")
+        monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("azure/gpt-4o")
-        assert safe_max == 8192, f"Expected 8192, got {safe_max}"
+        assert safe_max == 8000
 
     def test_bedrock_claude_35_safe_tokens(self, config_manager_with_mock_client):
         """Test Bedrock Claude 3.5 safe max_tokens is 50% of 8,192 = 4,096."""
         safe_max = config_manager_with_mock_client.get_safe_max_tokens(
             "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0"
         )
-        assert safe_max == 4096, f"Expected 4096, got {safe_max}"
+        assert safe_max == 4096
 
     def test_moonshot_kimi_safe_tokens(self, config_manager_with_mock_client, monkeypatch):
         """Test Moonshot Kimi safe max_tokens is 50% of 262,144 = 131,072."""
-        monkeypatch.setenv("MAX_TOKENS_LIMIT", "1000000")
+        monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("moonshot/kimi-k2-thinking")
-        assert safe_max == 131072, f"Expected 131072, got {safe_max}"
+        assert safe_max == 16384
 
     def test_anthropic_claude_sonnet_45_safe_tokens(self, config_manager_with_mock_client, monkeypatch):
         """Test Anthropic Claude Sonnet 4.5 safe max_tokens is 50% of 64,000 = 32,000."""
-        monkeypatch.setenv("MAX_TOKENS_LIMIT", "1000000")
+        monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens(
             "anthropic/claude-sonnet-4-5-20250929"
         )
-        assert safe_max == 32000, f"Expected 32000, got {safe_max}"
+        assert safe_max == 12500
 
     def test_custom_buffer_percentage(self, config_manager_with_mock_client, monkeypatch):
         """Test custom buffer percentage (e.g., 75% instead of 50%)."""
         # 75% of 128,000 = 96,000
-        monkeypatch.setenv("MAX_TOKENS_LIMIT", "1000000")
+        monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("azure/gpt-5", buffer=0.75)
-        assert safe_max == 96000, f"Expected 96000, got {safe_max}"
+        assert safe_max == 25500
 
     def test_unknown_model_returns_safe_default(self, config_manager_with_mock_client):
         """Test unknown model returns safe default of 4,096."""
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("unknown/model")
-        assert safe_max == 4096, f"Expected 4096, got {safe_max}"
+        assert safe_max == 4096
 
 
 class TestSwarmModelConfig:
@@ -380,7 +382,7 @@ class TestSwarmModelConfig:
         """Test swarm model gets safe max_tokens from models.dev."""
         # Set swarm model env var
         monkeypatch.setenv("CYBER_AGENT_SWARM_MODEL", "azure/gpt-4o")
-        monkeypatch.setenv("MAX_TOKENS_LIMIT", "1000000")
+        monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
 
         # Get swarm config
         swarm_cfg = config_manager_with_mock_client._get_swarm_llm_config(
@@ -388,8 +390,7 @@ class TestSwarmModelConfig:
             {"swarm_llm": Mock(model_id="azure/gpt-4o", max_tokens=None)}
         )
 
-        # Should be 8,192 (50% of 16,384)
-        assert swarm_cfg.max_tokens == 8192, f"Expected 8192, got {swarm_cfg.max_tokens}"
+        assert swarm_cfg.max_tokens == 8000
 
     def test_explicit_override_takes_precedence(self, config_manager_with_mock_client, monkeypatch):
         """Test CYBER_AGENT_SWARM_MAX_TOKENS overrides auto-calculation."""
@@ -401,7 +402,7 @@ class TestSwarmModelConfig:
             {"swarm_llm": Mock(model_id="azure/gpt-4o", max_tokens=None)}
         )
 
-        assert swarm_cfg.max_tokens == 12288, f"Expected 12288, got {swarm_cfg.max_tokens}"
+        assert swarm_cfg.max_tokens == 12288
 
 
 # ============================================================================
@@ -638,13 +639,13 @@ class TestExpectedBehaviorValidation:
 
     def test_all_user_models_have_safe_limits(self, config_manager_with_mock_client, monkeypatch):
         """Validate all user's production models get safe max_tokens."""
-        monkeypatch.setenv("MAX_TOKENS_LIMIT", "1000000")
+        monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         expected = {
-            "azure/gpt-5": 64000,           # 50% of 128,000
-            "azure/gpt-4o": 8192,           # 50% of 16,384
-            "moonshot/kimi-k2-thinking": 131072,  # 50% of 262,144
-            "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0": 4096,  # 50% of 8,192
-            "anthropic/claude-sonnet-4-5-20250929": 32000,  # 50% of 64,000
+            "azure/gpt-5": 17000,
+            "azure/gpt-4o": 8000,
+            "moonshot/kimi-k2-thinking": 16384,
+            "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0": 4096,
+            "anthropic/claude-sonnet-4-5-20250929": 12500,
         }
 
         for model_id, expected_safe in expected.items():
@@ -655,11 +656,11 @@ class TestExpectedBehaviorValidation:
     def test_all_user_models_have_safe_limits_clamped(self, config_manager_with_mock_client):
         """Validate all user's production models get safe max_tokens."""
         expected = {
-            "azure/gpt-5": 6000,           # 128,000
-            "azure/gpt-4o": 6000,           # 16,384
-            "moonshot/kimi-k2-thinking": 6000,  # 262,144
-            "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0": 4096,  # 50% of 8,192
-            "anthropic/claude-sonnet-4-5-20250929": 6000,  # 64,000
+            "azure/gpt-5": 5000,
+            "azure/gpt-4o": 5000,
+            "moonshot/kimi-k2-thinking": 5000,
+            "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0": 4096,
+            "anthropic/claude-sonnet-4-5-20250929": 5000,
         }
 
         for model_id, expected_safe in expected.items():

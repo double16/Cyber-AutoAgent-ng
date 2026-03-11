@@ -21,9 +21,6 @@ __all__ = [
     "create_ollama_model",
     "create_litellm_model",
     "create_strands_model",
-    "DEFAULT_TEMPERATURE_EXECUTION",
-    "DEFAULT_TEMPERATURE_SWARM",
-    "DEFAULT_TEMPERATURE_EXPLOITATION",
     # Capabilities
     "get_capabilities",
     "get_model_input_limit",
@@ -33,8 +30,3 @@ __all__ = [
     # Models.dev client
     "get_models_client",
 ]
-
-# 0.2–0.5
-DEFAULT_TEMPERATURE_EXECUTION = 0.5
-DEFAULT_TEMPERATURE_SWARM = 0.4
-DEFAULT_TEMPERATURE_EXPLOITATION = 0.6

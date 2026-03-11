@@ -149,10 +149,11 @@ def test_tool_catalog_wrapper_lists_agent_tools_and_schemas(monkeypatch, tmp_pat
     text = tool_catalog()
     assert "# TOOL CATALOG" in text
     assert "name: validation_specialist" in text
-    assert "input schema:" in text
+    # simplified, schemas are included in tool descriptions
+    assert "input schema:" not in text
     # Pretty JSON should be present (indent=2 => newline + two spaces)
-    assert "\n  \"type\": \"object\"" in text
-    assert "output schema:" in text
+    assert "\n  \"type\": \"object\"" not in text
+    assert "output schema:" not in text
 
 
 def test_tool_catalog_wrapper_filters_by_keywords_for_agent_tool(monkeypatch, tmp_path):

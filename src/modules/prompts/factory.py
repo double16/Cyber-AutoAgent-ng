@@ -618,8 +618,9 @@ def get_reflection_snapshot(current_step: int, max_steps: int, plan_current_phas
         _checkpoints = [int(max_steps * pct) for pct in [0.2, 0.4, 0.6, 0.8]]
         _next_checkpoint = next((cp for cp in _checkpoints if cp > current_step), max_steps)
         _steps_until = max(0, _next_checkpoint - current_step)
+        remaining_steps = max(0, max_steps - current_step)
 
-        lines = [f"Budget Used: {_budget_pct}% ({current_step}/{max_steps})"]
+        lines = [f"Budget Used: {_budget_pct}%, step {current_step}/{max_steps}, {remaining_steps} remaining steps"]
 
         # Checkpoint-specific actionable guidance
         if current_step in _checkpoints or (current_step > 0 and current_step == _checkpoints[0]):
@@ -628,14 +629,14 @@ def get_reflection_snapshot(current_step: int, max_steps: int, plan_current_phas
             lines.append(f"**CHECKPOINT {checkpoint_pct}% REACHED**")
 
             if checkpoint_pct == 20:
-                lines.append("ACTION: Call get_plan. Evaluate: What capabilities gained? Phase 1 criteria met?")
+                lines.append("ACTION: Call `mem0_get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?")
             elif checkpoint_pct == 40:
-                lines.append("ACTION: Call get_plan. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW.")
+                lines.append("ACTION: Call `mem0_get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW.")
             elif checkpoint_pct == 60:
                 lines.append(
-                    "ACTION: Call get_plan. If stuck (no findings), deploy swarm with different approach classes.")
+                    "ACTION: Call `mem0_get_plan`. If stuck (no findings), deploy swarm with different approach classes.")
             elif checkpoint_pct == 80:
-                lines.append("ACTION: Call get_plan. Focus ONLY on highest-confidence path. No new exploration.")
+                lines.append("ACTION: Call `mem0_get_plan`. Focus ONLY on highest-confidence path. No new exploration.")
         else:
             lines.append(f"Next Checkpoint: Step {_next_checkpoint} (in {_steps_until} steps)")
             # Add warning if close to checkpoint
