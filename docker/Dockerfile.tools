@@ -313,7 +313,7 @@ RUN pipx install --global bloodhound && \
 
 # Install opengrep (fork of semgrep that is more open)
 RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then OPENGREP_ARCH="x86_64"; elif [ "$ARCH" = "aarch64" ]; then OPENGREP_ARCH="aarch64"; else OPENGREP_ARCH="x86_64"; fi && \
+    if [ "$ARCH" = "x86_64" ]; then OPENGREP_ARCH="x86"; else OPENGREP_ARCH="${ARCH}"; fi && \
     OPENGREP_VERSION=$(curl -s https://api.github.com/repos/opengrep/opengrep/releases/latest | grep "tag_name" | cut -d ":" -f 2 | tr -d " ,\"") && \
     curl -L "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" -o /usr/local/bin/opengrep && \
     chmod +x /usr/local/bin/opengrep
