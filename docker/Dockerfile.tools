@@ -16,7 +16,8 @@ RUN /tmp/apt_proxy_configure.sh && \
     if [ "$BUILDPLATFORM" = "linux/arm64" ]; then apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross; fi
 ENV CGO_ENABLED=1
 ADD docker/packages-go.sh /tmp
-RUN /tmp/packages-go.sh
+RUN --mount=type=cache,target=/usr/local/share/go-build-cache --mount=type=cache,target=/usr/local/share/go \
+    /tmp/packages-go.sh
 
 FROM --platform=$BUILDPLATFORM ubuntu:24.04 AS cargobuild
 ARG TARGETARCH
@@ -28,7 +29,8 @@ RUN /tmp/apt_proxy_configure.sh
 ADD docker/setup-cargo.sh /tmp
 RUN /tmp/setup-cargo.sh
 ADD docker/packages-cargo.sh /tmp
-RUN /tmp/packages-cargo.sh
+RUN --mount=type=cache,target=/usr/local/share/cargo \
+    /tmp/packages-cargo.sh
 
 FROM kalilinux/kali-rolling
 
@@ -386,6 +388,6 @@ RUN amass -h || true
 
 # Validate expected tools are present in the PATH
 COPY docker/tools_check.sh src/modules/config/system/environment.yaml /tmp
-RUN bash /tmp/tools_check.sh && \
+RUN bash /tmp/tools_check.sh 2>&1 | tee /var/log/tools_check.log && \
     /tmp/apt_proxy_clean.sh && \
     rm -rf /tmp/* /var/tmp/*

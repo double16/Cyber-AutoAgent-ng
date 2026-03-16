@@ -5,9 +5,7 @@ set -xe
 export GOPATH=/usr/local/share/go
 export TARGET_DIR=/usr/local/bin
 mkdir -p "${TARGET_DIR}"
-if [ -z "$GOARCH" ]; then
-  export GOBIN="${TARGET_DIR}"
-fi
+export GOBIN="${TARGET_DIR}"
 export GOCACHE=/usr/local/share/go-build-cache
 export GOFLAGS="-ldflags=-s -w"
 
@@ -47,7 +45,7 @@ github.com/tomnomnom/qsreplace@latest \
 		go install ${GOPKG}
 	done
 
-	git clone --depth=1 --single-branch --branch v1.8.2 https://github.com/microsoft/go-sqlcmd.git
+	git clone --depth=1 --single-branch --branch v1.10.0 https://github.com/microsoft/go-sqlcmd.git
 	pushd go-sqlcmd
 	# license copy fails (?)
 	bash ./build/build.sh || true
@@ -56,7 +54,7 @@ github.com/tomnomnom/qsreplace@latest \
 	  cp go-sqlcmd/sqlcmd "${TARGET_DIR}"
 	fi
 
-  if [ -n "$GOARCH" ]; then
+  if [ -d "${GOPATH}/bin" ]; then
 	  find "${GOPATH}/bin" -type f -exec cp {} "${TARGET_DIR}" \;
 	fi
 fi
