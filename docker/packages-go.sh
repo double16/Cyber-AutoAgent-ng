@@ -5,7 +5,9 @@ set -xe
 export GOPATH=/usr/local/share/go
 export TARGET_DIR=/usr/local/bin
 mkdir -p "${TARGET_DIR}"
-export GOBIN="${TARGET_DIR}"
+if [ "$BUILDPLATFORM" == "linux/$TARGETARCH" ]; then
+  export GOBIN="${TARGET_DIR}"
+fi
 export GOCACHE=/usr/local/share/go-build-cache
 export GOFLAGS="-ldflags=-s -w"
 
@@ -53,10 +55,10 @@ github.com/tomnomnom/qsreplace@latest \
 	if [ -x go-sqlcmd/sqlcmd ]; then
 	  cp go-sqlcmd/sqlcmd "${TARGET_DIR}"
 	fi
+fi
 
-  if [ -d "${GOPATH}/bin" ]; then
-	  find "${GOPATH}/bin" -type f -exec cp {} "${TARGET_DIR}" \;
-	fi
+if [ -d "${GOPATH}/bin/linux_${TARGETARCH}" ]; then
+  find "${GOPATH}/bin/linux_${TARGETARCH}" -type f -exec cp {} "${TARGET_DIR}" \;
 fi
 
 test -x ${TARGET_DIR}/katana
