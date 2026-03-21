@@ -665,7 +665,7 @@ def patch_ollama_model_token_usage(
 
 def patch_ollama_model_json_toolcalls(
         *,
-        module_name: str = "strands.models.ollama",
+        module_name: str = "modules.config.models.ollama",
         cls_name: str = "OllamaModel",
         validate: bool = True,
 ) -> bool:

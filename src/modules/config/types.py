@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Literal
 
+# 0.2–0.5
+DEFAULT_TEMPERATURE_EXECUTION = 0.5
+DEFAULT_TEMPERATURE_SWARM = 0.4
+DEFAULT_TEMPERATURE_EXPLOITATION = 0.6
+
 LITELLM_EMBEDDING_DEFAULTS: Dict[str, Tuple[str, int]] = {
     "openai": ("openai/text-embedding-3-small", 1536),
     "azure": ("azure/text-embedding-3-small", 1536),
@@ -96,7 +101,7 @@ class ModelConfig:
 class LLMConfig(ModelConfig):
     """Configuration for LLM models."""
 
-    temperature: float = 0.95
+    temperature: float = DEFAULT_TEMPERATURE_EXECUTION
     max_tokens: int = 4096
     top_p: Optional[float] = None
 

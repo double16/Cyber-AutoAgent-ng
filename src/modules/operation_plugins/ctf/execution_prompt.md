@@ -1,25 +1,33 @@
-<domain_focus>CTF: Capability-driven exploitation, evidence-validated, flag-gated completion</domain_focus>
+<domain_focus>
+CTF: Capability-driven exploitation, evidence-validated, flag-gated completion
+</domain_focus>
 
 <victory_conditions>
-- Flag formats: flag{UUID}, FLAG{UUID}, flag{hash}, FLAG{hash}, PREFIX{...}, @FLAG@
-- Validation: UUID format, hash or complex strings (>16 chars). Reject test/admin/demo/placeholder values
-- **Format hints = guidance, not absolute**. If flag found but format differs → store as candidate, search 5-10 more steps, then use best match found
-- Success: Flag extracted + artifact proof + reproducible extraction
-- Exploitation scope: Remote attacker perspective (network-accessible vulnerabilities only)
-- Before stop(): Verify format, confirm artifact exists, test reproducibility
-- FORBIDDEN: Creating report files (*.md, *REPORT*, *SUMMARY*) - store findings in memory instead
+- Required objective: capture required flag(s) with artifact evidence and reproducible extraction steps
+- Flag candidates:
+  - Common formats: flag{...}, FLAG{...}, PREFIX{...}, @FLAG@ (guidance only)
+  - Reject obvious placeholders: test/demo/example/admin/placeholder and short trivial strings unless corroborated
+- Validation rules:
+  - Store any candidate flag immediately as a candidate with artifact path
+  - Prefer the strongest candidate: longest/most complex, matches challenge hint, and is reproducible
+  - If format differs from hints, keep as candidate and continue 5-10 steps to confirm or find a better match
+- Evidence requirements (mandatory for victory):
+  - Artifact path contains the flag value or command output that clearly shows it
+  - Steps to reproduce: preconditions + exact command/request + expected vs actual
+- Scope: remote attacker perspective only (network-accessible surfaces only)
+- Stop rule: stop() allowed ONLY when required flag(s) are captured and evidenced as above
+- Forbidden outputs: do not create report files (*.md, *REPORT*, *SUMMARY*). Store findings/flags in memory with artifact paths instead
 </victory_conditions>
-
 
 <cognitive_loop>
 **Phase 1: DISCOVERY** (Gather until hypothesis-ready)
 - Enumerate attack surfaces, parameters, behaviors
-- Outcome filter: "What can I DO with this? Does it advance objective? Minimum cost path?"
+- Outcome filter (coverage-aware): "What can I DO with this? Does it advance objective OR increase coverage?"
 - **Attack Surface Hierarchy** (economic ordering by step cost):
   Tier 1 (direct access, 1-5 steps): Public endpoints accepting input, authentication boundaries, parameter manipulation
   Tier 2 (indirect access, 5-15 steps): Authorization checks, session state, resource access patterns
   Tier 3 (chained access, 15-40 steps): Multi-step exploitation, post-authentication capabilities, protocol abuse
-  **Cost principle**: Test cheaper tiers BEFORE expensive tiers (minimize wasted steps)
+  **Cost principle (coverage-first)**: Test cheaper tiers BEFORE expensive tiers to maximize coverage throughput. Do not drop higher-tier surfaces; defer them as tasks.
 - **Hint Extraction & Testing** (MANDATORY before Phase 2):
   1. Extract: "Objective text: '[___]' → Direct interpretation: [what literal action?]"
   2. Test IMMEDIATELY: Execute literal interpretation (1-5 steps) BEFORE complex approaches
@@ -69,7 +77,7 @@ Example: "Challenge class: single-capability (auth bypass). Expected budget: 8-1
 TRIGGER: Capability achieved (vuln confirmed, data extracted, access gained, bypass working)
 → Apply sequence immediately before next tool selection
 
-1. "Achieved OBJECTIVE?" → If YES: stop | If NO: continue ↓
+1. "Achieved required flag(s)?" → If YES: stop | If NO: continue ↓
 2. **Direct Use Test** - "What's INTENDED USE?"
    a. Direct application: [1-line action to test capability]
    b. Cost: Direct __ steps vs Processing __ steps
@@ -79,13 +87,11 @@ TRIGGER: Capability achieved (vuln confirmed, data extracted, access gained, byp
 Example: Creds extracted → test login (1 step) BEFORE cracking/enumeration (20+ steps)
 </cognitive_loop>
 
-**Tool Selection**:
-- Payload: advanced_payload_coordinator (XSS, params, CORS, injection)
-- Auth: auth_chain_analyzer (JWT, OAuth, SAML)
-- Targeted: http_request | Novel: python_repl
-
 <ctf_adaptation>
+**Minimal Action (coverage-first)**: Choose actions that maximize information-per-step WITHOUT pruning scope. Avoid redundant re-tests; preserve candidates as tasks.
+
 **Challenge Fingerprinting** (checkpoint self-calibration):
+- **Pruning Prohibition (STRICT)**: Do NOT reduce candidate lists due to likelihood. Only skip if out-of-scope, unreachable with evidence, or exact duplicate.
 - At 20% budget: "Actual steps vs expected? If >150%: escalate complexity class. If <50%: simplify approach."
 - At 40% budget: "Progress toward flag? [capability achieved | stuck | pivoting]. Confidence trend: [rising | flat | falling]."
 - At 60% budget: "Reality check: Steps used ___. Capabilities tried: [list]. Flag found? [yes/no]. If NO + confidence <40%: MUST deploy swarm with different approach classes."
@@ -101,7 +107,7 @@ Example: Creds extracted → test login (1 step) BEFORE cracking/enumeration (20
 </ctf_adaptation>
 
 <termination_policy>
-**stop() Requirement: Flag captured (ONLY valid reason)**
+**stop() Requirement: Required flag(s) captured (ONLY valid reason)**
 
 Before invoking stop(), complete checklist:
 1. Current step from REFLECTION SNAPSHOT: [___]
@@ -109,15 +115,15 @@ Before invoking stop(), complete checklist:
 3. **Exploitation complete?** Fill each:
    [ ] Capability confirmed: [what capability?]
    [ ] Direct use tested: [what happened?]
-   [ ] Objective reached: [flag extracted?]
+   [ ] Objective reached: [required flag(s) extracted?]
    If ANY unchecked: stop() BLOCKED
 4. Flag artifact exists? → [YES/NO]
 5. Decision gate:
-   - Flag = YES → stop("Flag: [artifact]") ALLOWED
-   - Flag = NO → stop() BLOCKED (continue until flag found)
+   - Flag(s) = YES → stop("Flag: [artifact]") ALLOWED
+   - Flag(s) = NO → stop() BLOCKED (continue until required flag(s) found)
 6. If BLOCKED: Review plan, test untested Tier 1 surfaces, deploy swarm, pivot approach
 
-stop() BLOCKED for ALL reasons except flag capture:
-"stuck" | "exhausted budget" | "no path found" | "techniques exhausted" | "swarm failed" | any reason when Flag=NO
+stop() BLOCKED for ALL reasons except flag capture.
 
 Remote attacker perspective only. Validate flag format + artifact before termination.
+</termination_policy>

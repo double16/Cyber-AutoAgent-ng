@@ -1207,14 +1207,23 @@ def form_har_body(content_type: str, data: bytes):
 @tool
 async def browser_set_headers(headers: Optional[dict[str, str]] = None):
     """
-    Set headers that need to be sent with all requests from the browser
+    Set extra headers for subsequent requests made by the shared browser session.
 
-    Parameters:
-        headers (dict[str, str]): the headers to be sent with all requests
+    Use this tool when browser traffic must include specific headers across a
+    stateful browser flow.
 
     Notes:
-        - Accepts an empty object. If omitted or empty, no changes are applied and a helpful
-          message is returned so the agent can call again with a non-empty map.
+        - Headers apply to the shared browser context for later browser calls.
+        - Browser state persists across calls.
+        - Prefer `http_request` if you only need a one-off HTTP request with
+          custom headers.
+        - Accepts an empty object. If omitted or empty, no changes are applied
+          and a helpful message is returned so the agent can call again with a
+          non-empty map.
+
+    Parameters:
+        headers (dict[str, str]): The headers to be sent with all browser
+            requests.
     """
     async with get_browser() as browser:
         if not headers:
@@ -1230,18 +1239,33 @@ async def browser_set_headers(headers: Optional[dict[str, str]] = None):
 @tool
 async def browser_goto_url(url: str):
     """
-    Navigate the browser to a specified URL and capture network responses.
+    Open a URL in the shared browser session.
 
-    Use this tool when you need to open a URL in a browser. This is useful for SPAs where the full page is only rendered
-    with javascript and requires a browser to access.
+    Use this tool for pages that require JavaScript execution, DOM rendering,
+    login state, cookies, or other browser context to access correctly. Best
+    for SPAs, client-side rendered apps, authenticated flows, and browser-
+    context testing such as XSS or CSRF verification.
+
+    Do not use this tool for simple API endpoints, static pages, or
+    straightforward HTTP requests where `http_request` is sufficient.
+
+    Notes:
+        - Browser state persists across calls.
+        - Browser tools share a single browser instance and should be treated as
+          sequential and stateful.
+        - Navigation automatically captures relevant browser artifacts such as
+          network traffic, console logs, dialogs, and downloads.
+        - Large artifacts may be saved to disk; inspect only relevant portions
+          with shell tools.
+        - If a HAR artifact is returned, extract only needed entries, for
+          example with `jq`.
 
     Args:
-        url: The URL to navigate to.
+        url: URL to open.
 
     Returns:
-        - Any Network requests, dialogs, console logs and downloads captured during the navigation.
-        - Observations of the current page state after the navigation.
-        - If navigation fails due to timeouts/blocks, an HTTP fallback summary (headers and key files) is returned.
+        Observations about the rendered page plus captured interaction and
+        network metadata.
     """
     logger.info("[BROWSER] entered goto url %s", url)
     async with get_browser() as browser:
@@ -1435,12 +1459,20 @@ async def browser_goto_url(url: str):
 @tool
 async def browser_get_page_html() -> str:
     """
-    Get the HTML content of the current page in the browser.
+    Save the current rendered page HTML to an artifact file.
 
-    Use this tool to retrieve the HTML content of the current page in the browser.
+    Use this tool when you need the fully rendered DOM after JavaScript
+    execution, not just the original server response.
+
+    Notes:
+        - HTML can be large; prefer inspecting the saved artifact with shell
+          tools such as `grep` or `sed` instead of storing large excerpts in
+          findings.
+        - Store artifact paths and extract only relevant snippets.
+        - Prefer `http_request` for simple static response inspection.
 
     Returns:
-        The path of the downloaded HTML file artifact.
+        The artifact path containing the current page HTML.
     """
     logger.info("browser_get_page_html")
     async with get_browser() as browser:
@@ -1461,9 +1493,17 @@ async def browser_get_page_html() -> str:
 @tool
 async def browser_evaluate_js(expression: str):
     """
-    Evaluate a javascript expression in the current page in the browser.
+    Evaluate JavaScript in the current page context.
 
-    Use this tool if you want to run some javascript in the browser.
+    Use this tool when data is only available in browser context, such as
+    localStorage, sessionStorage, DOM state, runtime variables, or tokens
+    exposed to client-side code.
+
+    Notes:
+        - Useful for extracting tokens or state to reuse with `http_request`.
+        - Prefer `http_request` instead of browser JS when direct HTTP
+          interaction is sufficient.
+        - Browser state persists across calls.
 
     Examples:
         - `() => document.location.href`
@@ -1471,7 +1511,8 @@ async def browser_evaluate_js(expression: str):
         - `() => JSON.stringify(localStorage)`
 
     Args:
-        expression (str): The javascript expression to evaluate. The expression has to be a function that returns a value.
+        expression (str): The javascript expression to evaluate. The expression
+            has to be a function that returns a value.
 
     Returns:
         The result of the javascript expression.
@@ -1490,15 +1531,22 @@ async def browser_evaluate_js(expression: str):
 @tool
 async def browser_get_cookies():
     """
-    Get the current active cookies from the browser
+    Return the active browser cookies for the current shared session.
 
-    Use this tool to get all available cookies from the browser.
+    Use this tool to extract authenticated session material after login or
+    navigation. Cookies returned here can be reused with `http_request` for
+    direct API testing.
+
+    Notes:
+        - Browser state persists across calls.
+        - Prefer this after completing browser-based login or other
+          session-establishing flows.
 
     Returns:
-        str: A string in CSV format containing all the browser cookies, including
-             attributes such as 'name', 'value', 'domain', 'path', 'expires',
-             'httpOnly', 'secure', and 'sameSite'. If no cookies are found,
-             a message string indicating this is returned.
+        str: A string in CSV format containing all the browser cookies,
+             including attributes such as 'name', 'value', 'domain', 'path',
+             'expires', 'httpOnly', 'secure', and 'sameSite'. If no cookies are
+             found, a message string indicating this is returned.
     """
     logger.info("browser_get_cookies")
     async with get_browser() as browser:
@@ -1536,26 +1584,39 @@ async def browser_get_cookies():
 @tool
 async def browser_perform_action(action: str):
     """
-    Perform an action on the current page in the browser.
+    Perform one atomic interaction on the current page in the shared browser
+    session.
 
-    Use this tool to perform an action on the current page in the browser.
+    Use this tool after browser navigation when the page requires browser-driven
+    interaction, such as clicking controls, typing into a field, selecting from
+    a menu, or progressing through an authenticated or JavaScript-rendered flow.
+
+    Constraints:
+        - Exactly one atomic action per call.
+        - Allowed: one click, one input, one selection, one submit.
+        - Not allowed: combined actions in one instruction.
+        - Wrong: "Click login then enter password"
+        - Correct: separate calls such as "Click login" and then "Enter
+          password into the password field"
 
     Notes:
-        - The instruction should perform only one atomic action on the page. Examples, `Single click on a specific element`, `Type into a single input field`.
-        - Do not combine multiple instructions into one. `Click and type` is wrong. `Type and click on first suggestion` is wrong.
-        - If there are two similar elements, be specific about which one to interact with.
-        - Do not mix two actions in one instruction. For example, if you are clicking on a button and then typing into an input field, do not combine them into one instruction. Instead, create two separate instructions: one for the click action and another for the typing action.
+        - Browser state persists across calls.
+        - Treat browser interactions as sequential and stateful.
+        - Relevant network traffic, console logs, dialogs, and downloads are
+          captured automatically.
+        - Large captured outputs may be saved as artifacts; inspect only the
+          relevant portions.
 
     Examples:
-        - Click on the sign in button
-        - Enter john.doe into the username input field
-        - Enter SecretPassword into the password input field
-        - Click on the submit button
-        - Click on Cars from the dropdown menu
+        - Click the sign-in button
+        - Enter john.doe into the username field
+        - Enter SecretPassword into the password field
+        - Click the submit button
+        - Select Cars from the dropdown
 
     Returns:
-        - Any Network requests, dialogs, console logs and downloads captured during the interaction.
-        - Observations of the current page state after the interaction.
+        Observations of page state after the action plus captured interaction
+        metadata.
     """
     logger.info("browser_perform_action: %s", action)
     async with get_browser() as browser:
@@ -1591,9 +1652,16 @@ async def browser_perform_action(action: str):
 @tool
 async def browser_observe_page(instruction: Optional[str] = None) -> list[str]:
     """
-    Observes the page and returns a list of descriptions of interesting elements on the page.
+    Observe the current rendered page and describe relevant elements.
 
-    Use this tool if you want to see what a page contains or if you're looking for something specific on the page.
+    Use this tool to inspect a JavaScript-rendered page, discover interactive
+    elements, forms, links, or identify targets for the next browser action.
+
+    Notes:
+        - Best for rendered DOM discovery in SPAs or authenticated browser
+          flows.
+        - Prefer `http_request` for static content or direct API inspection.
+        - Browser state persists across calls.
 
     Examples:
         - All interactive elements on the page
@@ -1603,8 +1671,8 @@ async def browser_observe_page(instruction: Optional[str] = None) -> list[str]:
         - The links to edit user information
 
     Args:
-        instruction (Optional[str]): An optional instruction or directive to filter
-            or specify the observations required from the page.
+        instruction (Optional[str]): An optional instruction or directive to
+            filter or specify the observations required from the page.
 
     Returns:
         List[str]: A list of descriptions derived from the observations recorded

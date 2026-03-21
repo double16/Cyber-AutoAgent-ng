@@ -1,0 +1,51 @@
+volumes:
+  dvwa:
+
+networks:
+  dvwa:
+
+services:
+  dvwa:
+    build: .
+    image: ghcr.io/digininja/dvwa:latest
+    # Change `always` to `build` to build from local source
+    pull_policy: always
+    environment:
+      - DB_SERVER=db
+      - DEFAULT_SECURITY_LEVEL=low
+      - DISABLE_AUTHENTICATION=true
+    depends_on:
+      - db
+    # Uncomment the next 2 lines to serve local source
+    # volumes:
+    #   - ./:/var/www/html
+    networks:
+      - dvwa
+    ports:
+      - 4280:80
+    restart: unless-stopped
+
+  db:
+    image: docker.io/library/mariadb:10
+    environment:
+      - MYSQL_ROOT_PASSWORD=dvwa
+      - MYSQL_DATABASE=dvwa
+      - MYSQL_USER=dvwa
+      - MYSQL_PASSWORD=p@ssw0rd
+    volumes:
+      - dvwa:/var/lib/mysql
+    networks:
+      - dvwa
+    restart: unless-stopped
+
+  owasp-vuln-app:
+    image: sasanlabs/owasp-vulnerableapp:latest
+    pull_policy: always
+    ports:
+      - 19090:9090
+    restart: unless-stopped
+
+  juice-shop:
+    image: bkimminich/juice-shop
+    ports:
+      - 4001:3000

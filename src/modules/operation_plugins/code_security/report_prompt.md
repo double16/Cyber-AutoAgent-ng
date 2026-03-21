@@ -238,7 +238,7 @@ Business Logic Flaws:          ██       3 findings
 **Tools Used**:
 - Dependency Scanning: `npm audit`, `safety`, `govulncheck`
 - Secret Detection: `gitleaks`, `trufflehog`
-- SAST: `semgrep`, `bandit`, `gosec`, `eslint-plugin-security`
+- SAST: `opengrep`, `bandit`, `gosec`, `eslint-plugin-security`
 - Manual Review: High-risk files and authentication logic
 
 **Coverage**:

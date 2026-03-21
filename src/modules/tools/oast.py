@@ -812,10 +812,9 @@ async def close_oast_providers():
 @tool
 async def oast_health(target: str) -> HealthOutput:
     """
-    Check the health/reachability of the currently configured OAST provider.
+    Check reachability/health of the configured OAST provider (sanity check).
 
-    Args:
-        target: the IP address (preferred) or host name of the target, used to select a reachable network address
+    Use when: OOB expected but no callbacks arrive; run before deep OAST testing.
     """
     try:
         provider = get_oast_provider(target)
@@ -828,21 +827,11 @@ async def oast_health(target: str) -> HealthOutput:
 @tool
 async def oast_endpoints(target: str) -> Endpoints:
     """
-    Get the endpoints that can be used to test out-of-band interactions from the target (always known as OAST).
-    The result is a map of supported service types to endpoint. Service types include http, https, dns, email, etc.
+    Get OAST callback endpoints (http/https/dns/email/etc) for out-of-band vuln verification.
 
-    Invoke this tool when the user wants to use out-of-band services to verify vulnerabilities or run exploits such as
-    XSS, blind command injection, etc.
-
-    After using one of the endpoints in the target, the oast.poll tool is used to poll for interactions with the endpoints.
-    Payloads in the query string or POST data will be available from the oast.poll tool call. If the email service is
-    supported, any emails send to the email address will be available in the oast.poll tool.
-
-    For XSS testing, the payload can be used to exfiltrate sensitive information such as cookies and localStorage by
-    passing the values in a query string or POST data.
-
-    Args:
-        target: the IP address (preferred) or host name of the target, used to select a reachable network address
+    Use when: blind interactions (blind XSS/SSRF/command injection), or you need external callback proof.
+    Workflow: oast_endpoints(target) → embed returned endpoint in payload → trigger in target → oast_poll(target, timeout=…) to confirm.
+    Notes: prefer target as IP (listener selection). Keep payload small; store evidence as artifact paths.
     """
     return await get_oast_provider(target).init()
 
@@ -853,13 +842,11 @@ async def oast_poll(
         timeout: float = 30.0,
 ) -> PollOutput:
     """
-    Retrieve new interactions with the OAST service since the last poll.
+    Poll OAST provider for new callbacks since last poll.
 
-    Invoke this tool when the user wants to check for interactions from the target to the OAST service.
-
-    Args:
-        target: the IP address (preferred) or host name of the target, used to select a reachable network address
-        timeout: The number of seconds to wait for interactions. A value of 0 returns immediately with any pending interactions.
+    Use after triggering a payload that should cause an OOB request.
+    Args: target (prefer IP), timeout seconds (0 = return immediately).
+    Return: list of interactions (treat as evidence; store artifacts, don’t paste huge blobs into memory).
     """
     provider = get_oast_provider(target)
     timeout = max(0.0, min(600.0, timeout))
@@ -889,9 +876,11 @@ async def oast_register_http_response(
         inp: Union[str, RegisterHttpResponseInput]
 ) -> None:
     """
-    Register a dynamic HTTP response for the OAST http/https endpoint when a matching request is received.
-    Args:
-        target: the IP address (preferred) or host name of the target, used to select a reachable network address
+    Register a dynamic HTTP/HTTPS response for the OAST endpoint.
+
+    Use when you need a controlled response body for multi-step OOB flows (webhook-style).
+    Typical: register → inject URL → poll for request evidence.
+    Keep match criteria narrow (target/target_prefix). Clear when done.
     """
     provider = get_oast_provider(target)
     if isinstance(inp, str):
@@ -909,9 +898,9 @@ async def oast_clear_http_responses(
         inp: Optional[Union[str, ClearHttpResponsesInput]] = ClearHttpResponsesInput()
 ) -> None:
     """
-    Clear registered dynamic HTTP responses for the OAST provider.
-    Args:
-        target: the IP address (preferred) or host name of the target, used to select a reachable network address
+    Clear any registered dynamic OAST HTTP/HTTPS responses for this target.
+
+    Use after finishing an OOB test suite or before a new suite to avoid stale responders.
     """
     provider = get_oast_provider(target)
     if inp is None:

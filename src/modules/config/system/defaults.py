@@ -13,6 +13,8 @@ from modules.config.types import (
     LLMConfig,
     MemoryLLMConfig,
     ModelProvider,
+    DEFAULT_TEMPERATURE_EXECUTION,
+    DEFAULT_TEMPERATURE_SWARM,
 )
 
 LLMRoleType = Literal["primary", "swarm", "report", "evaluation", "unknown"]
@@ -50,8 +52,8 @@ def build_ollama_defaults() -> Dict[str, Any]:
         "llm": LLMConfig(
             provider=ModelProvider.OLLAMA,
             model_id="qwen3-coder:30b-a3b-q4_K_M",
-            temperature=0.95,
-            max_tokens=8192,
+            temperature=DEFAULT_TEMPERATURE_EXECUTION,
+            max_tokens=6144,
         ),
         "embedding": EmbeddingConfig(
             provider=ModelProvider.OLLAMA,
@@ -74,8 +76,8 @@ def build_ollama_defaults() -> Dict[str, Any]:
         "swarm_llm": LLMConfig(
             provider=ModelProvider.OLLAMA,
             model_id="qwen3-coder:30b-a3b-q4_K_M",
-            temperature=0.7,
-            max_tokens=8192,
+            temperature=DEFAULT_TEMPERATURE_SWARM,
+            max_tokens=6144,
         ),
         "host": None,  # Will be resolved dynamically
         "region": "ollama",
@@ -92,7 +94,7 @@ def build_bedrock_defaults() -> Dict[str, Any]:
         "llm": LLMConfig(
             provider=ModelProvider.AWS_BEDROCK,
             model_id="global.anthropic.claude-opus-4-5-20251101-v1:0",  # Latest Opus 4.5 with effort parameter support (cross-region)
-            temperature=0.95,
+            temperature=DEFAULT_TEMPERATURE_EXECUTION,
             max_tokens=64000,  # Opus 4.5 has 64K output limit
             # top_p removed - global.* models reject both temperature and top_p
         ),
@@ -117,7 +119,7 @@ def build_bedrock_defaults() -> Dict[str, Any]:
         "swarm_llm": LLMConfig(
             provider=ModelProvider.AWS_BEDROCK,
             model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-            temperature=0.7,
+            temperature=DEFAULT_TEMPERATURE_SWARM,
             max_tokens=4096,
         ),
         "host": None,
@@ -138,7 +140,7 @@ def build_litellm_defaults() -> Dict[str, Any]:
         "llm": LLMConfig(
             provider=ModelProvider.LITELLM,
             model_id="bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0",  # Latest Opus 4.5 with effort parameter support (cross-region)
-            temperature=0.95,
+            temperature=DEFAULT_TEMPERATURE_EXECUTION,
             max_tokens=64000,  # Opus 4.5 has 64K output limit
 
         ),
@@ -163,7 +165,7 @@ def build_litellm_defaults() -> Dict[str, Any]:
         "swarm_llm": LLMConfig(
             provider=ModelProvider.LITELLM,
             model_id="bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-            temperature=0.7,
+            temperature=DEFAULT_TEMPERATURE_SWARM,
             max_tokens=4096,
         ),
         "host": None,
@@ -184,7 +186,7 @@ def build_gemini_defaults() -> Dict[str, Any]:
         "llm": LLMConfig(
             provider=ModelProvider.GEMINI,
             model_id="gemini-3-pro-preview",
-            temperature=0.95,
+            temperature=DEFAULT_TEMPERATURE_EXECUTION,
             max_tokens=65536,
         ),
         "embedding": EmbeddingConfig(
@@ -208,7 +210,7 @@ def build_gemini_defaults() -> Dict[str, Any]:
         "swarm_llm": LLMConfig(
             provider=ModelProvider.GEMINI,
             model_id="gemini-2.0-flash-001",
-            temperature=0.7,
+            temperature=DEFAULT_TEMPERATURE_SWARM,
             max_tokens=4096,
         ),
         "host": None,

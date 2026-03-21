@@ -16,6 +16,7 @@ interface ThinkingIndicatorProps {
   toolName?: string;
   toolCategory?: string;
   enabled?: boolean;
+  taskTitle?: string;
 }
 
 // Fun thinking phrases that cycle through
@@ -73,6 +74,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
   context,
   startTime,
   message,
+  taskTitle,
   enabled = true
 }) => {
   const theme = themeManager.getCurrentTheme();
@@ -114,7 +116,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
     return `${minutes}m ${secs}s`;
   };
 
-  const displayMessage = message || getContextMessage(context, phraseIndex);
+  const displayMessage = (taskTitle ? (taskTitle + ' - ') : '') + (message || getContextMessage(context, phraseIndex));
 
   return (
     <Box flexDirection="column">

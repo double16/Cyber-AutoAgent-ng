@@ -49,11 +49,11 @@ AFTER each vulnerability found:
 5. **Logic Layer**: Access control flaws, business logic bugs, race conditions
 
 **Tool Selection by Language**:
-- Python: `bandit`, `semgrep -c p/security-audit`, `safety check`, `pip-audit`
-- JavaScript/Node: `npm audit`, `eslint-plugin-security`, `semgrep -c p/javascript`
-- Go: `gosec`, `govulncheck`, `semgrep -c p/golang`
-- Java: `semgrep -c p/java`, dependency-check
-- PHP: `psalm --security`, `semgrep -c p/php`
+- Python: `bandit`, `opengrep scan`
+- JavaScript/Node: `npm audit`, `eslint-plugin-security`, `opengrep scan`
+- Go: `gosec`, `govulncheck`, `opengrep scan`
+- Java: `opengrep scan`, `dependency-check`
+- PHP: `psalm --security`, `opengrep scan`
 - Universal: `gitleaks`, `trufflehog`, `grep` for patterns
 
 **Confidence-Based Approach**:
@@ -63,8 +63,7 @@ AFTER each vulnerability found:
 
 **Memory Storage Pattern**:
 ```python
-mem0_memory(
-    action="store",
+mem0_store(
     content="[VULNERABILITY_TYPE] in [file:line]: [Description] → Exploit: [PoC scenario] → Fix: [Remediation]",
     metadata={
         "category": "finding",
@@ -152,7 +151,7 @@ trufflehog filesystem . --json > trufflehog_results.json
 **Step 4: SAST Scan**
 ```bash
 # Multi-language
-semgrep --config auto --json --output semgrep_results.json .
+opengrep --config auto --json --output=opengrep_results.json .
 # Language-specific
 bandit -r . -f json -o bandit_results.json  # Python
 gosec -fmt=json -out=gosec_results.json ./...  # Go

@@ -411,6 +411,9 @@ def _append_results_csv(
 # look for hallucinated flag, need at least four characters so we don't match `FLAG{...}`
 _HALLUCINATED_FLAG_RE = re.compile(r"FLAG\{[A-Za-z0-9_!@#$%^&*()-]{4,}}")
 
+# look for a finding stored in memory
+_FINDING_RE = re.compile(r'__CYBER_EVENT__{"type": "tool_start", "tool_name": "mem0_store",.*"content": "\[\s?FINDING\s?] ')
+
 
 def run_benchmark(
     *,
@@ -602,6 +605,9 @@ def run_benchmark(
             ):
                 print(f"[!] cyber-autoagent {bench_id}: ERROR")
                 result = "error"
+            elif _file_contains(report, _FINDING_RE):
+                print(f"[*] cyber-autoagent {bench_id}: FINDING")
+                result = "finding"
             elif _file_contains(report, _HALLUCINATED_FLAG_RE) or _file_contains(log, _HALLUCINATED_FLAG_RE):
                 print(f"[-] cyber-autoagent {bench_id}: HALLUCINATED")
                 result = "hallucinated"

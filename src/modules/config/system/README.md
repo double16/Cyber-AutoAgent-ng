@@ -25,7 +25,7 @@ env = EnvironmentReader()
 api_key = env.get("AZURE_API_KEY", "")
 debug = env.get_bool("CYBER_DEBUG", False)
 max_tokens = env.get_int("MAX_TOKENS", 4096)
-temperature = env.get_float("CYBER_LLM_TEMPERATURE", 0.95)
+temperature = env.get_float("CYBER_LLM_TEMPERATURE", DEFAULT_TEMPERATURE_EXECUTION)
 
 # Change detection (MD5-based)
 if env.has_changed():
@@ -69,7 +69,7 @@ Default configurations for all three providers.
 - `build_litellm_defaults()` - LiteLLM-specific defaults
 
 **Default Values:**
-- LLM: temperature=0.95, max_tokens=4096
+- LLM: temperature=0.5, max_tokens=4096
 - Embedding: dimensions=1536 (configurable per provider)
 - Memory: FAISS backend, auto initialization
 - Evaluation: Ragas with basic metrics

@@ -32,7 +32,7 @@ class TestGetSystemPrompt:
         )
 
         assert "test.com" in prompt
-        assert "test objective" in prompt
+        assert "test objective" not in prompt
         assert "100" in prompt
         assert "OP_20240101_120000" in prompt
         assert "CRITICAL FIRST ACTION" in prompt
@@ -47,9 +47,9 @@ class TestGetSystemPrompt:
             has_memory_path=True,
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
-        assert 'mem0_memory(action="list"' in prompt
-        assert "Build upon previous discoveries" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
+        assert 'mem0_list(' in prompt
+        assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_with_existing_memories(self):
         """Test system prompt with existing memories detected"""
@@ -61,9 +61,9 @@ class TestGetSystemPrompt:
             has_existing_memories=True,
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
-        assert 'mem0_memory(action="list"' in prompt
-        assert "Build upon previous discoveries" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
+        assert 'mem0_list(' in prompt
+        assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_with_both_memory_flags(self):
         """Test system prompt with both memory path and existing memories"""
@@ -76,9 +76,9 @@ class TestGetSystemPrompt:
             has_existing_memories=True,
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
-        assert 'mem0_memory(action="list"' in prompt
-        assert "Build upon previous discoveries" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
+        assert 'mem0_list(' in prompt
+        assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_no_memory_flags(self):
         """Test system prompt without memory flags"""
@@ -92,8 +92,7 @@ class TestGetSystemPrompt:
         )
 
         assert "CRITICAL FIRST ACTION" in prompt
-        assert "Starting fresh assessment with no previous context" in prompt
-        assert "Do NOT check memory on fresh operations" in prompt
+        assert "Create a strategic plan via" in prompt
 
     @patch("modules.prompts.factory.load_prompt_template")
     def test_get_system_prompt_with_tools_context(self, mock_load_prompt_template):
@@ -123,6 +122,8 @@ class TestGetSystemPrompt:
     def test_get_system_prompt_with_output_config(self):
         """Test system prompt with output configuration"""
         output_config = {
+            "artifacts_path": "/custom/artifacts",
+            "tools_path": "/custom/tools_path",
             "base_dir": "/custom/output",
             "target_name": "test_target",
             "enable_unified_output": True,
@@ -136,10 +137,10 @@ class TestGetSystemPrompt:
             output_config=output_config,
         )
 
-        # OUTPUT DIRECTORY STRUCTURE section removed from prompts
-        # Verify the prompt still contains essential elements
+        assert "/custom/artifacts" in prompt
+        assert "/custom/tools_path" in prompt
         assert "test.com" in prompt
-        assert "## MEMORY CONTEXT" in prompt
+        assert "CRITICAL FIRST ACTION" in prompt
 
     def test_get_system_prompt_with_overlay_block(self, tmp_path):
         """Overlay file should render adaptive directives block."""
@@ -225,8 +226,8 @@ class TestGetSystemPrompt:
         # Both should contain the basic elements
         assert "test.com" in prompt_local
         assert "test.com" in prompt_remote
-        assert "test objective" in prompt_local
-        assert "test objective" in prompt_remote
+        assert "test objective" not in prompt_local
+        assert "test objective" not in prompt_remote
 
 
 class TestMemoryInstructions:
@@ -243,7 +244,7 @@ class TestMemoryInstructions:
             has_existing_memories=False,  # Should be ignored
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
 
     def test_memory_instruction_existing_only(self):
         """Test memory instruction when only existing memories are detected"""
@@ -256,7 +257,7 @@ class TestMemoryInstructions:
             has_existing_memories=True,
         )
 
-        assert "CRITICAL FIRST ACTION**: Load all memories" in prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
 
     def test_memory_instruction_fresh_operation(self):
         """Test memory instruction for fresh operations"""
@@ -270,7 +271,7 @@ class TestMemoryInstructions:
         )
 
         assert "CRITICAL FIRST ACTION" in prompt
-        assert "Starting fresh assessment with no previous context" in prompt
+        assert "Create a strategic plan" in prompt
 
 
 class TestReflectionSnapshot:
@@ -282,7 +283,7 @@ class TestReflectionSnapshot:
     ])
     def test_first_step(self, max_steps):
         snapshot = get_reflection_snapshot(0, max_steps, None)
-        assert f"Budget Used: 0% (0/{max_steps})" in snapshot
+        assert f"Budget Used: 0%, step 0/{max_steps}, {max_steps-0} remaining steps" in snapshot
         assert "\nNext Checkpoint: Step" in snapshot
         assert "\nCurrent Phase:" not in snapshot
 
@@ -294,7 +295,7 @@ class TestReflectionSnapshot:
     ])
     def test_almost_first_checkpoint(self, current_step, max_steps, plan_phase):
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert re.search(rf"Budget Used: \d+% \({current_step}/{max_steps}\)", snapshot)
+        assert re.search(rf"Budget Used: \d+%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps", snapshot)
         assert f"\nNext Checkpoint: Step {current_step + 1} (in 1 steps)" in snapshot
         assert "\nCheckpoint approaching. Prepare to evaluate plan." in snapshot
         if plan_phase is None:
@@ -310,9 +311,9 @@ class TestReflectionSnapshot:
     ])
     def test_first_checkpoint(self, current_step, max_steps, plan_phase):
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 20% ({current_step}/{max_steps})" in snapshot
+        assert f"Budget Used: 20%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert "\n**CHECKPOINT 20% REACHED**" in snapshot
-        assert "\nACTION: Call get_plan. Evaluate: What capabilities gained? Phase 1 criteria met?" in snapshot
+        assert "\nACTION: Call `mem0_get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?" in snapshot
         if plan_phase is None:
             assert "\nCurrent Phase:" not in snapshot
         else:
@@ -326,9 +327,9 @@ class TestReflectionSnapshot:
     ])
     def test_second_checkpoint(self, current_step, max_steps, plan_phase):
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 40% ({current_step}/{max_steps})" in snapshot
+        assert f"Budget Used: 40%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert "\n**CHECKPOINT 40% REACHED**" in snapshot
-        assert "\nACTION: Call get_plan. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW." in snapshot
+        assert "\nACTION: Call `mem0_get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW." in snapshot
         if plan_phase is None:
             assert "\nCurrent Phase:" not in snapshot
         else:
@@ -342,9 +343,9 @@ class TestReflectionSnapshot:
     ])
     def test_third_checkpoint(self, current_step, max_steps, plan_phase):
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 60% ({current_step}/{max_steps})" in snapshot
+        assert f"Budget Used: 60%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert "\n**CHECKPOINT 60% REACHED**" in snapshot
-        assert "\nACTION: Call get_plan. If stuck (no findings), deploy swarm with different approach classes." in snapshot
+        assert "\nACTION: Call `mem0_get_plan`. If stuck (no findings), deploy swarm with different approach classes." in snapshot
         assert "\nWARNING: Budget >60%. If no findings yet, deploy specialists/swarm NOW." in snapshot
         if plan_phase is None:
             assert "\nCurrent Phase:" not in snapshot
@@ -359,9 +360,9 @@ class TestReflectionSnapshot:
     ])
     def test_fourth_checkpoint(self, current_step, max_steps, plan_phase):
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 80% ({current_step}/{max_steps})" in snapshot
+        assert f"Budget Used: 80%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert "\n**CHECKPOINT 80% REACHED**" in snapshot
-        assert "\nACTION: Call get_plan. Focus ONLY on highest-confidence path. No new exploration." in snapshot
+        assert "\nACTION: Call `mem0_get_plan`. Focus ONLY on highest-confidence path. No new exploration." in snapshot
         assert "\nCRITICAL: Budget >80%. Focus on single highest-confidence path only." in snapshot
         if plan_phase is None:
             assert "\nCurrent Phase:" not in snapshot
@@ -376,7 +377,7 @@ class TestReflectionSnapshot:
     ])
     def test_ninety_five(self, current_step, max_steps, plan_phase):
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 95% ({current_step}/{max_steps})" in snapshot
+        assert f"Budget Used: 95%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert f"\nNext Checkpoint: Step {max_steps}" in snapshot
         assert "\nFINAL: Budget >90%. Verify objective complete before stop(). Check termination_policy." in snapshot
         if plan_phase is None:

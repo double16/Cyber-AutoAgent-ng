@@ -5,7 +5,7 @@ set -xe
 export GOPATH=/usr/local/share/go
 export TARGET_DIR=/usr/local/bin
 mkdir -p "${TARGET_DIR}"
-if [ -z "$GOARCH" ]; then
+if [ "$BUILDPLATFORM" == "linux/$TARGETARCH" ]; then
   export GOBIN="${TARGET_DIR}"
 fi
 export GOCACHE=/usr/local/share/go-build-cache
@@ -47,7 +47,7 @@ github.com/tomnomnom/qsreplace@latest \
 		go install ${GOPKG}
 	done
 
-	git clone --depth=1 --single-branch --branch v1.8.2 https://github.com/microsoft/go-sqlcmd.git
+	git clone --depth=1 --single-branch --branch v1.10.0 https://github.com/microsoft/go-sqlcmd.git
 	pushd go-sqlcmd
 	# license copy fails (?)
 	bash ./build/build.sh || true
@@ -55,10 +55,10 @@ github.com/tomnomnom/qsreplace@latest \
 	if [ -x go-sqlcmd/sqlcmd ]; then
 	  cp go-sqlcmd/sqlcmd "${TARGET_DIR}"
 	fi
+fi
 
-  if [ -n "$GOARCH" ]; then
-	  find "${GOPATH}/bin" -type f -exec cp {} "${TARGET_DIR}" \;
-	fi
+if [ -d "${GOPATH}/bin/linux_${TARGETARCH}" ]; then
+  find "${GOPATH}/bin/linux_${TARGETARCH}" -type f -exec cp {} "${TARGET_DIR}" \;
 fi
 
 test -x ${TARGET_DIR}/katana

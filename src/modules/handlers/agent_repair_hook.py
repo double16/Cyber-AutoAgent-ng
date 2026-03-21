@@ -30,6 +30,10 @@ class AgentRepairHook(HookProvider):
 
     Case two:
     Reasoning loop exceeds max tokens.
+
+    Case three:
+    Ollama fails to parse tool_calls due to malformed JSON emitted by the model.
+    Example: ollama._types.ResponseError: error parsing tool call: ... invalid character '}' after object key
     """
 
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
@@ -50,6 +54,26 @@ class AgentRepairHook(HookProvider):
         try:
             agent = event.agent
             callback_handler = getattr(agent, "callback_handler", None)
+
+            # Ollama fails to parse tool_calls due to malformed JSON emitted by the model.
+            if event.exception is not None:
+                error_str = str(event.exception)
+                error_str_l = error_str.lower()
+                if (
+                    "error parsing tool call" in error_str_l
+                    or "invalid character" in error_str_l
+                    or "parse tool call" in error_str_l
+                ):
+                    state = self._state_bag(event)
+                    if not state.get(_TOOL_CALLS_RETRY_STATE_KEY):
+                        state[_TOOL_CALLS_RETRY_STATE_KEY] = True
+                        event.retry = True
+                        logger.warning(
+                            "Detected tool-call JSON parse error in step %s; retrying once with stricter tool_call JSON instruction (%s)",
+                            str(callback_handler.current_step) if callback_handler else "?",
+                            error_str[:200].replace("\n", " "),
+                        )
+                    return
 
             max_tokens_reached = False
             if event.stop_response is not None and event.stop_response.stop_reason == "max_tokens":
@@ -178,9 +202,13 @@ class AgentRepairHook(HookProvider):
                 messages.append({
                     "role": "system",
                     "content": [{"type": "text", "text": (
-                        "IMPORTANT: Tool calls must be emitted using OpenAI-style tool calling only "
+                        "IMPORTANT: Your previous output contained a malformed tool call that could not be parsed. "
+                        "Tool calls must be emitted using OpenAI-style tool calling only "
                         "(tool_calls with JSON arguments). Do NOT output tool calls in XML/HTML/text "
-                        "such as <function=...> or <parameter=...>. If you need a tool, emit a proper tool call."
+                        "such as <function=...> or <parameter=...>, markdown code fences, or additional text. "
+                        "For each tool call, the arguments MUST be strictly valid JSON (no trailing commas, no comments, "
+                        "no extra braces, no partial objects, no stray characters). "
+                        "Retry and emit ONLY valid OpenAI-style tool_calls. "
                     )}]
                 })
                 logger.warning("Injected tool-call format correction into retry model call")
@@ -206,16 +234,16 @@ class AgentRepairHook(HookProvider):
                 messages.append({
                     "role": "system",
                     "content": [{"type": "text", "text": (
-                        f"""<continue_instructions>
-You are continuing from a prior run that entered a repetitive reasoning loop.
+                        f"""You are continuing from a prior run that entered a repetitive reasoning loop.
 
 ## CONSTRAINTS
 - Do NOT restate repeated points from the reduced notes.
 - Output must be structured, actionable, and short.
 - Avoid meta commentary about "looping" beyond what's required to recover.
 
+<reflection_snapshot>
 {reflection_snapshot}
-<continue_instructions>"""
+</reflection_snapshot>"""
                     )}]
                 })
                 try:

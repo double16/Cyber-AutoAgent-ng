@@ -91,12 +91,12 @@ def advanced_payload_coordinator(
         headers: Dict[str, str] = None,
 ) -> str:
     """
-    Run coordinated payload-based web vuln testing (XSS/CORS/SSTI/command/LDAP) against a single URL.
+    Run coordinated payload-based web vuln testing (XSS/CORS/LFI/SSTI/command/LDAP) against a single URL.
 
     When to call:
     - You have a target URL (optionally authenticated via cookies/headers) and need fast confirmation/triage of
-      XSS, CORS misconfig, SSTI, command injection, or LDAP injection on likely parameters.
-    - Use "param_discovery" when you do not know parameters. Use "xss", "ssti", "command_injection", "ldap_injection", or "cors" for focused checks.
+      XSS, CORS misconfig, LFI, SSTI, command injection, or LDAP injection on likely parameters.
+    - Use "param_discovery" when you do not know parameters. Use "xss", "lfi", "ssti", "command_injection", "ldap_injection", or "cors" for focused checks.
     - Use "comprehensive" after initial recon/endpoint selection to prioritize exploit paths.
     - Not for crawling: call this after you have selected a concrete endpoint/URL to test.
 
@@ -125,7 +125,18 @@ def advanced_payload_coordinator(
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
 
-    if test_type not in ["xss", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors",
+    # normalize test types
+    test_type = test_type.lower() if test_type else "comprehensive"
+    if test_type in {"local_file", "local_file_inclusion"}:
+        test_type = "lfi"
+    elif test_type in {"template_injection", "template"}:
+        test_type = "ssti"
+    elif test_type in {"cmd", "command", "command_injection"}:
+        test_type = "command_injection"
+    elif test_type in {"ldap", "ldap_injection"}:
+        test_type = "ldap_injection"
+
+    if test_type not in ["xss", "lfi", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors",
                          "comprehensive"]:
         test_type = "comprehensive"
     test_type = test_type.lower()
@@ -163,7 +174,7 @@ def advanced_payload_coordinator(
         results["tools"] = tools_setup
 
         # Parameter discovery and expansion
-        if test_type in ["xss", "ssti", "command_injection", "ldap_injection", "param_discovery", "comprehensive"]:
+        if test_type in ["xss", "lfi", "ssti", "command_injection", "ldap_injection", "param_discovery", "comprehensive"]:
             discovered_params = _advanced_parameter_discovery(request_config, parameters, tools=tools_setup["tools"])
             if not discovered_params and request_config.http_method == "GET":
                 # try again with POST
@@ -210,8 +221,10 @@ def advanced_payload_coordinator(
             results["vulnerabilities"].extend(cors_issues)
 
         # Advanced injection coordination (non-SQL)
-        if test_type in ["ssti", "command_injection", "ldap_injection", "comprehensive"]:
-            if test_type == "ssti":
+        if test_type in ["lfi", "ssti", "command_injection", "ldap_injection", "comprehensive"]:
+            if test_type == "lfi":
+                focus_injection_types = {"LFI"}
+            elif test_type == "ssti":
                 focus_injection_types = {"SSTI"}
             elif test_type == "command_injection":
                 focus_injection_types = {"Command Injection"}
@@ -280,6 +293,7 @@ def _setup_payload_tools() -> Dict[str, Any]:
         ("arjun", None),  # Python tool
         ("corsy", None),  # Python tool
         ("paramspider", None),  # Python tool
+        ("lfimap", None),  # Python tool
         ("sstimap", None),  # Python tool
         ("commix", None),  # Python tool
     ]
@@ -673,6 +687,131 @@ def _parse_sstimap_output(stdout: str) -> List[Dict[str, Any]]:
     return findings
 
 
+# Helper: Parse lfimap output into vulnerability findings
+def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict[str, Any]]:
+    """Parse lfimap plain-text output into structured vulnerability entries.
+
+    lfimap does not provide a stable machine-readable format, so this parser is intentionally
+    tolerant. It looks for successful / likely successful attack result lines and associates
+    them with the nearest preceding payload and attack context lines.
+
+    Returns a list of dicts shaped similarly to `_parse_sstimap_output` results:
+      - vulnerable: bool
+      - injection_type: "LFI"
+      - payload_type: "LFI (<attack name>)"
+      - parameter: "(unknown)"  # caller fills this when needed
+      - payload: tested payload value when available
+      - evidence: short evidence string
+      - plus optional attack_type / payload_source / injected_data
+    """
+    if not stdout:
+        return []
+
+    findings: List[Dict[str, Any]] = []
+
+    text = stdout.replace("\r\n", "\n").replace("\r", "\n")
+    text = _RE_ANSI_ESCAPE.sub("", text)
+
+    current_attack_type: str | None = None
+    current_payload: str | None = None
+    current_payload_source: str | None = None
+    current_injected_data: str | None = None
+    evidence_lines: List[str] = []
+
+    def _flush_success(success_line: str) -> None:
+        nonlocal evidence_lines
+
+        success_text = success_line.strip()
+        if not success_text:
+            return
+
+        payload_type = "LFI"
+        if current_attack_type:
+            payload_type = f"LFI ({current_attack_type})"
+
+        evidence_parts: List[str] = []
+        if current_attack_type:
+            evidence_parts.append(f"Attack: {current_attack_type}")
+        if current_payload_source and current_payload:
+            evidence_parts.append(f"{current_payload_source}: {current_payload}")
+        elif current_payload:
+            evidence_parts.append(f"Payload: {current_payload}")
+        if current_injected_data:
+            evidence_parts.append(f"Injected data: {current_injected_data}")
+        evidence_parts.extend(line.strip() for line in evidence_lines if line.strip())
+        evidence_parts.append(success_text)
+
+        param_location = "body" if http_method == "POST" else "query"
+
+        if current_attack_type:
+            findings.append(
+                {
+                    "vulnerable": True,
+                    "injection_type": "LFI",
+                    "payload_type": payload_type,
+                    "parameter": param,
+                    "param_location": param_location,
+                    "payload": current_payload,
+                    "attack_type": current_attack_type,
+                    "payload_source": current_payload_source,
+                    "injected_data": current_injected_data,
+                    "evidence": "; ".join(dict.fromkeys(evidence_parts)),
+                    "tool": "lfimap",
+                }
+            )
+
+        evidence_lines = []
+
+    for raw_line in text.splitlines():
+        line = _RE_ANSI_ESCAPE.sub("", raw_line).strip()
+        if not line:
+            continue
+
+        lower_line = line.lower()
+
+        if line.startswith("[!]"):
+            current_attack_type = None
+            current_payload = None
+            current_payload_source = None
+            current_injected_data = None
+            evidence_lines = []
+            continue
+
+        if lower_line.startswith("[*] starting ") and lower_line.endswith(" attack..."):
+            current_attack_type = line[13:-10].strip()
+            current_payload = None
+            current_payload_source = None
+            current_injected_data = None
+            evidence_lines = []
+            continue
+
+        if lower_line.startswith("[*] testing ") and ":" in line:
+            payload_splits = line[4:].split(" payload:", 1)
+            if len(payload_splits) == 2:
+                label, value = payload_splits
+                current_payload_source = label.strip()
+                current_payload = value.strip()
+                evidence_lines.append(line)
+            else:
+                print("Maybe incorrect pattern: "+lower_line)
+            continue
+
+        if lower_line.startswith("[*] injecting post data:"):
+            current_injected_data = line.split(":", 1)[1].strip()
+            evidence_lines.append(line)
+            continue
+
+        if line.startswith("[+]") and "successful!" in lower_line:
+            _flush_success(line)
+            continue
+
+        if line.startswith("[*]") or line.startswith("[-]"):
+            evidence_lines.append(line)
+            continue
+
+    return findings
+
+
 def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str], tools: List[str] = None) -> List[
     Dict[str, Any]]:
     """Coordinate XSS testing using advanced payloads and techniques"""
@@ -976,23 +1115,7 @@ def _coordinate_injection_testing(
     """Coordinate advanced injection testing (beyond SQL)"""
     tools = [] if tools is None else tools
     target_url = request_config.target_url
-
-    # Normalize and check focus_injection_types
     focus = {t.strip() for t in (focus_injection_types or set()) if t and str(t).strip()}
-    if focus:
-        # Normalize common aliases just in case.
-        normalized: set[str] = set()
-        for t in focus:
-            tl = t.lower()
-            if tl in {"ssti", "template_injection", "template"}:
-                normalized.add("SSTI")
-            elif tl in {"cmd", "command", "command_injection"}:
-                normalized.add("Command Injection")
-            elif tl in {"ldap", "ldap_injection"}:
-                normalized.add("LDAP Injection")
-            else:
-                normalized.add(t)
-        focus = normalized
 
     injection_results = []
 
@@ -1031,7 +1154,18 @@ def _coordinate_injection_testing(
     if not ldap_payloads:
         ldap_payloads = ["*", "*)(&", "*))%00", "admin*)((|userPassword=*)", "*))(|(objectClass=*"]
 
+    lfi_lists = ["/usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt", "/usr/share/seclists/Fuzzing/LFI/LFI-LFISuite-pathtotest.txt"]
+    lfi_payloads = []
+    for lfi_list in lfi_lists:
+        if os.path.exists(lfi_list):
+            with open(lfi_list, "r") as f:
+                lfi_payloads = f.read().splitlines()
+                break
+    if not lfi_payloads:
+        lfi_payloads = ["../../../../etc/passwd"]
+
     injection_types = [
+        ("LFI", lfi_payloads),
         ("SSTI", template_payloads),
         ("Command Injection", command_payloads),
         ("LDAP Injection", ldap_payloads),
@@ -1099,6 +1233,59 @@ def _coordinate_injection_testing(
                     parameters_under_test.discard(param)
                     if not sstimap_timeout and focus:
                         injection_types = [x for x in injection_types if x[0] != "SSTI"]
+
+    # lfimap
+    if "lfimap" in tools and (not focus or "LFI" in focus):
+        for param in parameters_under_test.copy():
+            if request_config.inject_in_body():
+                test_url = target_url
+            else:
+                test_url = _add_or_replace_query_param(target_url, param, "FUZZ")
+
+            lfimap_out = ""
+            lfimap_timeout = False
+            try:
+                cmd = [
+                    "lfimap",
+                    "--browser-user-agent", "chrome",
+                    "--url", test_url,
+                    "--method-type", request_config.http_method,
+                    "--param", param,
+                ]
+
+                if request_config.inject_in_body():
+                    cmd.extend(["--post-data", f"{param}=FUZZ"])
+
+                if request_config.cookies:
+                    cmd.extend(["--cookies", "; ".join([f"{name}={value}" for name, value in request_config.cookies.items()])])
+
+                if request_config.headers:
+                    cmd.extend(["--headers", "; ".join([f"{name}={value}" for name, value in request_config.headers.items()])])
+
+                result = subprocess.run(cmd, capture_output=True, text=True, input=(100 * "exit\n"), timeout=300)
+
+                if result.returncode == 0 and result.stdout:
+                    lfimap_out = result.stdout
+            except subprocess.TimeoutExpired as e:
+                lfimap_out = _coerce_str(e.stdout)
+                lfimap_timeout = True
+            except Exception:
+                pass
+
+            if lfimap_out:
+                lfi_findings = _parse_lfimap_output("page", "POST", lfimap_out)
+                # Attach URL context and ensure parameter consistency with the param under test.
+                for f in lfi_findings:
+                    # Prefer the parsed parameter, but if it's missing/unknown, use our loop param.
+                    if not f.get("parameter") or f.get("parameter") == "page":
+                        f["parameter"] = param
+                    f["url"] = test_url
+                    f["method"] = request_config.http_method
+                    # Mark that this parameter was found vulnerable so we don't add a negative summary later.
+                    injection_results.append(f)
+                    parameters_under_test.discard(param)
+                    if not lfimap_timeout and focus:
+                        injection_types = [x for x in injection_types if x[0] != "LFI"]
 
     # command injection
     # XBEN-073-24
@@ -1462,7 +1649,7 @@ def main() -> int:
         "--test-type",
         dest="test_type",
         default="comprehensive",
-        choices=["xss", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors", "comprehensive"],
+        choices=["xss", "lfi", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors", "comprehensive"],
         help="Type of testing to run (default: comprehensive)",
     )
     parser.add_argument(

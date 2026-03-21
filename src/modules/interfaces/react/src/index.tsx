@@ -304,14 +304,43 @@ const runAutoAssessment = async () => {
       // Execute assessment and wait for completion
       const handle = await executionService.execute(assessmentParams, finalConfig);
 
+      let lastMetricsUpdate = "";
+      let lastTaskTitle = "";
+
       // In auto-run mode, listen to events and display them to console
       // This provides real-time progress visibility during assessment
       executionService.on('event', (event: any) => {
         if (event.type === 'output' && event.content) {
           loggingService.info(event.content);
         }
-        if (event.type === 'rate_limit' && event.sleep_time) {
-          loggingService.info(` Rate limit: waiting for ${Math.ceil(event.sleep_time)} seconds`);
+        else if (event.type === 'rate_limit' && event.sleep_time) {
+          loggingService.info(`⌛ Rate limit: waiting for ${Math.ceil(event.sleep_time)} seconds`);
+        }
+        else if (event.type === 'metrics_update') {
+            const metricsUpdateKey = event.metrics.tokens+"|"+event.metrics.inputTokens+"|"+event.metrics.outputToken+"|"+event.metrics.cost;
+            if (lastMetricsUpdate != metricsUpdateKey) {
+                lastMetricsUpdate = metricsUpdateKey;
+                loggingService.info(`💰 Cost: ${event.metrics.tokens.toLocaleString()} (${event.metrics.inputTokens.toLocaleString()} input + ${event.metrics.outputTokens.toLocaleString()} output) | $ ${event.metrics.cost.toFixed(6)}`);
+            }
+        }
+        else if (event.type === 'task_started') {
+            lastTaskTitle = event.title;
+            loggingService.info(`🚀 Starting task ${event.title ? `"${event.title}"` : ''}`);
+        }
+        else if (event.type === 'task_done') {
+            const eventTitle = event.title || lastTaskTitle;
+            lastTaskTitle = "";
+            switch (event.status) {
+                case 'partial_failure':
+                    loggingService.info(`⚠️ Task ${eventTitle ? `"${eventTitle}" ` : ''}failed`);
+                    break;
+                case 'blocked':
+                    loggingService.info(`🧱 Task ${eventTitle ? `"${eventTitle}" ` : ''}blocked`);
+                    break;
+                default:
+                    loggingService.info(`✓ Task ${eventTitle ? `"${eventTitle}" ` : ''}done`);
+                    break;
+            }
         }
       });
 

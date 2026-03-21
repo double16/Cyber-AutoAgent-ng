@@ -9,6 +9,8 @@ applying provider-specific settings, and managing credentials.
 import dataclasses
 import logging
 import os
+import sys
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import ollama
@@ -20,6 +22,10 @@ from modules.config.providers.ollama_config import get_ollama_timeout
 from modules.config.system import EnvironmentReader
 from modules.config.system.logger import get_logger
 from modules.config.system.defaults import LLMRoleType
+from modules.config.types import (
+    DEFAULT_TEMPERATURE_EXECUTION,
+    DEFAULT_TEMPERATURE_SWARM,
+)
 from modules.config.models.capabilities import (
     get_model_input_limit,
     get_provider_default_limit,
@@ -136,6 +142,8 @@ def _get_prompt_limit_from_model(model_id: Optional[str]) -> Optional[int]:
     return None
 
 
+# TODO: include input tokens in LLMConfig
+@lru_cache
 def _resolve_prompt_token_limit(
     provider: str, model_id: Optional[str]
 ) -> Optional[int]:
@@ -169,20 +177,20 @@ def _resolve_prompt_token_limit(
     except Exception:
         pass
 
-    # Priority 2: Static model registry (known models with verified limits)
-    limit = get_model_input_limit(model_id) if model_id else None
-    if limit:
-        logger.info(
-            "Using static registry input limit=%d for model %s", limit, model_id
-        )
-        return limit
+    prompt_token_clamp = PROMPT_TOKEN_FALLBACK_LIMIT if PROMPT_TOKEN_FALLBACK_LIMIT > 0 else sys.maxsize
 
-    # Priority 3: Ollama metadata
+    # Priority 2: Ollama metadata
     if provider == "ollama" and model_id:
         env_reader = EnvironmentReader()
+
+        num_ctx = env_reader.get_int("OLLAMA_CONTEXT_LENGTH", 0)
+        if num_ctx >= 2048:
+            return min(num_ctx, prompt_token_clamp)
+
         ollama_client = ollama.Client(host=get_ollama_host(env_reader), timeout=get_ollama_timeout(env_reader))
 
         try:
+            # check if num_ctx is defined in the model
             show_response = ollama_client.show(model=model_id)
             if show_response.parameters:
                 ollama_parameters = dict()
@@ -190,12 +198,30 @@ def _resolve_prompt_token_limit(
                     k, v = line.split(sep=None, maxsplit=1)
                     ollama_parameters[k] = v
                 if "num_ctx" in ollama_parameters:
-                    return int(ollama_parameters["num_ctx"])
+                    return min(int(ollama_parameters["num_ctx"]), prompt_token_clamp)
 
-        except Exception as e:
+            # ensure model is loaded, then inspect running process info
+            ollama_client.generate(
+                model=model_id,
+                prompt=" ",
+                options={"num_predict": 1},
+            )
+            for m in ollama_client.ps().models:
+                if m.model == model_id:
+                    return min(m.context_length, prompt_token_clamp)
+
+        except Exception:
             logger.warning(
                 f"OllamaError: Error getting model info for {model_id}."
             )
+
+    # Priority 3: Static model registry (known models with verified limits)
+    limit = get_model_input_limit(model_id) if model_id else None
+    if limit:
+        logger.info(
+            "Using static registry input limit=%d for model %s", limit, model_id
+        )
+        return min(limit, prompt_token_clamp)
 
     # Priority 4: LiteLLM automatic detection (check max_input_tokens)
     if provider == "litellm" and model_id:
@@ -204,7 +230,7 @@ def _resolve_prompt_token_limit(
             logger.info(
                 "Using LiteLLM detected input limit=%d for model %s", limit, model_id
             )
-            return limit
+            return min(limit, prompt_token_clamp)
 
     # Priority 5: CYBER_CONTEXT_LIMIT (explicit context limit config)
     if PROMPT_TOKEN_FALLBACK_LIMIT > 0:
@@ -225,7 +251,7 @@ def _resolve_prompt_token_limit(
             provider,
             model_id,
         )
-        return provider_default
+        return min(provider_default, prompt_token_clamp)
 
     # No limit could be determined - warn and return None
     logger.warning(
@@ -313,7 +339,7 @@ def _handle_model_creation_error(provider: str, error: Exception) -> None:
             "Ensure Ollama is installed: https://ollama.ai",
             "Start Ollama: ollama serve",
             "Pull required models (see config.py file)",
-            "Set OLLAMA_HOST=http://<IP>:11434",
+            "Set OLLAMA_HOST=http://<IP>:11434, OLLAMA_CONTEXT_LENGTH=32768",
         ],
         "bedrock": [
             "Check AWS credentials and region settings",
@@ -386,9 +412,12 @@ def _get_parameters_by_role(provider: str, model_id: str, role: Optional[LLMRole
                 )
                 llm_max = 4096
     except Exception:
-        llm_temp = config.get("temperature", 0.95)
+        llm_temp = config.get("temperature", DEFAULT_TEMPERATURE_EXECUTION)
         llm_max = config.get("max_tokens", 4096)
         role = "unknown"
+
+    if "max_tokens" in config:
+        llm_max = min(llm_max, config.get("max_tokens"))
 
     return _CreateModelParameters(
         llm_temp=llm_temp,
@@ -396,8 +425,6 @@ def _get_parameters_by_role(provider: str, model_id: str, role: Optional[LLMRole
         role=role,
     )
 
-
-# TODO: limit max_tokens based on role. Do we really need 64000 output tokens? Is reasoning output considered output tokens?
 
 def create_bedrock_model(
     model_id: str,
@@ -543,9 +570,10 @@ def create_ollama_model(
     Raises:
         Exception: If model creation fails
     """
-    from strands.models.ollama import OllamaModel
+    from modules.config.models import get_capabilities
+    from modules.config.models.ollama import OllamaModel
     from modules.agents.patches import patch_ollama_model_token_usage, patch_ollama_model_json_toolcalls
-    patch_ollama_model_token_usage()
+    # patch_ollama_model_token_usage()
 
     # The AgentRepairHook will detect and patch. For models we know need the patch, do it before model use.
     if "qwen2.5" in model_id or "llama3" in model_id:
@@ -554,22 +582,35 @@ def create_ollama_model(
     # Get centralized configuration
     config_manager = _get_config_manager()
     config = config_manager.get_local_model_config(model_id, provider)
+    capabilities = get_capabilities(provider, model_id)
 
     create_parameters = _get_parameters_by_role(provider, model_id, role, config)
     llm_temp = create_parameters.llm_temp
     llm_max = create_parameters.llm_max
     role = create_parameters.role
 
-    # Observability: one-liner
-    try:
-        logger.info(
-            "Model build: role=%s provider=ollama model=%s max_tokens=%s",
-            role,
-            config.get("model_id"),
-            llm_max,
-        )
-    except Exception:
-        pass
+    logger.info(
+        "Model build: role=%s provider=ollama model=%s max_tokens=%s",
+        role,
+        config.get("model_id"),
+        llm_max,
+    )
+
+    additional_args = dict()
+    if role in ["primary", "swarm"]:
+        if capabilities.pass_reasoning_effort:
+            additional_args["think"] = "medium"
+        elif capabilities.supports_reasoning:
+            additional_args["think"] = True
+
+    options = dict()
+    if os.getenv("OLLAMA_CONTEXT_LENGTH"):
+        try:
+            num_ctx = int(os.getenv("OLLAMA_CONTEXT_LENGTH"))
+            if num_ctx >= 2048:
+                options["num_ctx"] = num_ctx
+        except Exception:
+            pass
 
     model = OllamaModel(
         host=config["host"],
@@ -579,6 +620,8 @@ def create_ollama_model(
         ollama_client_args={
             "timeout": config["timeout"],
         },
+        additional_args=additional_args,
+        options=options,
     )
     setattr(model, "_output_tokens", llm_max)
     return model
@@ -892,8 +935,29 @@ def get_model_id_from_model(model) -> str:
     return model_id
 
 
+def get_provider_from_agent(agent) -> str:
+    provider = ""
+    model = getattr(agent, "model", None)
+    if model is not None:
+        provider = get_provider_from_model(model)
+    return provider
+
+
+def get_provider_from_model(model) -> Optional[str]:
+    clazz = model.__class__.__name__.lower()
+    if "ollama" in clazz:
+        return "ollama"
+    elif "litellm" in clazz:
+        return "litellm"
+    elif "bedrock" in clazz:
+        return "bedrock"
+    elif "gemini" in clazz:
+        return "gemini"
+    return None
+
+
 def get_model_timeout(model: Optional[Model] = None, default_timeout: Optional[int] = None) -> Optional[int]:
-    from strands.models.ollama import OllamaModel
+    from modules.config.models.ollama import OllamaModel
 
     if model is None:
         return default_timeout
@@ -926,7 +990,7 @@ def configure_model_rate_limits(provider: Optional[str] = None):
     )
 
     if provider == "ollama":
-        from strands.models.ollama import OllamaModel
+        from modules.config.models.ollama import OllamaModel
         from langchain_ollama import ChatOllama
         limiter = ThreadSafeRateLimiter(rate_limit_config)
         patch_model_provider_class(OllamaModel, limiter)

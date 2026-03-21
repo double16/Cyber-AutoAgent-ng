@@ -18,11 +18,13 @@ Key Components:
 import json
 import os
 from functools import lru_cache
+from math import ceil
 from typing import Any, Dict, List, Optional, Tuple
 
 import litellm
 import ollama
 
+from modules.config.models.factory import _resolve_prompt_token_limit
 from modules.handlers.utils import get_output_path, sanitize_target_name
 from modules.config.system.logger import get_logger
 from modules.config.models.dev_client import get_models_client
@@ -66,10 +68,13 @@ litellm.respect_retry_after_header = True
 
 logger = get_logger("Config.Manager")
 
-# Clamp model max tokens (a.k.a. output limit) to give more space to input.
-MAX_TOKENS_LIMIT = 12_000
-# Clamp thinking model max tokens (a.k.a. output limit) to give more space to input.
-MAX_TOKENS_REASONING_LIMIT = 32_000
+# Clamp model max tokens (a.k.a. output limit) to give more space to input and drive action (less reasoning).
+# MAX_TOKENS_LIMIT = 12_000
+MAX_TOKENS_LIMIT = 6144
+
+# Clamp thinking model max tokens (a.k.a. output limit) to give more space to input and drive action (less reasoning).
+# MAX_TOKENS_REASONING_LIMIT = 32_000
+MAX_TOKENS_REASONING_LIMIT = 10_000
 
 
 class ConfigManager:
@@ -143,6 +148,28 @@ class ConfigManager:
         """Check if a model supports thinking capabilities."""
         return model_id in self.get_thinking_models()
 
+    def get_max_tokens(
+            self,
+            provider: str,
+            model_id: str,
+            *,
+            input_tokens: Optional[int] = None,
+            supports_reasoning: bool = False
+    ) -> int:
+        from modules.config import get_capabilities
+
+        if supports_reasoning or (provider and get_capabilities(provider, model_id).supports_reasoning):
+            max_tokens_limit = self.getenv_int("MAX_TOKENS_REASONING_LIMIT", MAX_TOKENS_REASONING_LIMIT)
+        else:
+            max_tokens_limit = self.getenv_int("MAX_TOKENS_LIMIT", MAX_TOKENS_LIMIT)
+
+        if input_tokens is None and provider:
+            input_tokens = _resolve_prompt_token_limit(provider, model_id)
+        if input_tokens:
+            max_tokens_limit = min(max_tokens_limit, ceil(input_tokens / 8))
+
+        return max_tokens_limit
+
     def get_thinking_model_config(
         self, model_id: str, region_name: str
     ) -> Dict[str, Any]:
@@ -187,14 +214,17 @@ class ConfigManager:
         """Get configuration for standard (non-thinking) models."""
         provider_config = self.get_server_config(provider)
         llm_config = provider_config.llm
-        max_tokens_limit = self.getenv_int("MAX_TOKENS_LIMIT", MAX_TOKENS_LIMIT)
+        max_tokens = min(llm_config.max_tokens, self.get_max_tokens(provider, model_id))
 
         config = {
             "model_id": model_id,
             "region_name": region_name,
             "temperature": llm_config.temperature,
-            "max_tokens": min(llm_config.max_tokens, max_tokens_limit),
+            "max_tokens": max_tokens,
         }
+
+        if "max_tokens" in llm_config.parameters:
+            llm_config.parameters["max_tokens"] = max_tokens
 
         # Only include top_p if set (avoid conflicts with providers like Anthropic)
         if llm_config.top_p is not None:
@@ -237,14 +267,14 @@ class ConfigManager:
         """Get configuration for local Ollama models."""
         provider_config = self.get_server_config(provider)
         llm_config = provider_config.llm
-        max_tokens_limit = self.getenv_int("MAX_TOKENS_LIMIT", MAX_TOKENS_LIMIT)
+        max_tokens = min(llm_config.max_tokens, self.get_max_tokens(provider, model_id))
 
         return {
             "model_id": model_id,
             "host": self.get_ollama_host(),
             "timeout": self.get_ollama_timeout(),
             "temperature": llm_config.temperature,
-            "max_tokens": min(llm_config.max_tokens, max_tokens_limit),
+            "max_tokens": max_tokens,
         }
 
     # Default configs now built by build_default_configs() from defaults.py
@@ -305,11 +335,9 @@ class ConfigManager:
             # Update main LLM
             if "llm" in defaults and isinstance(defaults["llm"], LLMConfig):
                 defaults["llm"].model_id = user_model
-            # Update memory LLM
-            if "memory_llm" in defaults and isinstance(
-                defaults["memory_llm"], MemoryLLMConfig
-            ):
-                defaults["memory_llm"].model_id = user_model
+            # Update swarm LLM
+            if "swarm_llm" in defaults and isinstance(defaults["swarm_llm"], LLMConfig):
+                defaults["swarm_llm"].model_id = user_model
             # Update evaluation LLM
             if "evaluation_llm" in defaults and isinstance(
                 defaults["evaluation_llm"], LLMConfig
@@ -786,6 +814,7 @@ class ConfigManager:
         server_config = self.get_server_config(server)
 
         if server == "ollama":
+            os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
             os.environ["MEM0_LLM_PROVIDER"] = "ollama"
             os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
             os.environ["MEM0_EMBEDDING_MODEL"] = server_config.memory.embedder.model_id
@@ -844,14 +873,10 @@ class ConfigManager:
                     llm_cfg.parameters["max_tokens"] = max_tokens
             else:
                 # apply limit to max tokens so we use the space for input context
-                if self.is_thinking_model(llm_cfg.model_id):
-                    max_tokens_limit = self.getenv_int("MAX_TOKENS_REASONING_LIMIT", MAX_TOKENS_REASONING_LIMIT)
-                else:
-                    max_tokens_limit = self.getenv_int("MAX_TOKENS_LIMIT", MAX_TOKENS_LIMIT)
+                max_tokens_limit = self.get_max_tokens(llm_cfg.provider.value, llm_cfg.model_id)
                 if 0 < max_tokens_limit < llm_cfg.max_tokens:
                     llm_cfg.max_tokens = max_tokens_limit
                     llm_cfg.parameters["max_tokens"] = max_tokens_limit
-
 
         embedding_model = self.getenv("CYBER_AGENT_EMBEDDING_MODEL")
         if embedding_model and isinstance(defaults.get("embedding"), EmbeddingConfig):
@@ -952,16 +977,17 @@ class ConfigManager:
             if self.models_client is None:
                 raise ValueError("models.dev client not available")
 
-            limits = self.models_client.get_limits(model_id)
-            if limits and limits.output > 0:
-                max_tokens_limit = self.getenv_int("MAX_TOKENS_LIMIT", MAX_TOKENS_LIMIT)
-                output_limit = min(limits.output, max_tokens_limit)
-                safe = int(output_limit * buffer)
-                logger.debug(
-                    "Safe max_tokens from models.dev: model=%s, limit=%d, safe=%d (%.0f%%)",
-                    model_id, output_limit, safe, buffer * 100
-                )
-                return safe
+            info = self.models_client.get_model_info(model_id)
+            if info:
+                if info.limits and info.limits.output > 0:
+                    max_tokens_limit = self.get_max_tokens("", model_id, input_tokens=info.limits.context, supports_reasoning=info.capabilities.reasoning)
+                    output_limit = min(info.limits.output, max_tokens_limit)
+                    safe = int(output_limit * buffer)
+                    logger.debug(
+                        "Safe max_tokens from models.dev: model=%s, limit=%d, safe=%d (%.0f%%)",
+                        model_id, output_limit, safe, buffer * 100
+                    )
+                    return safe
         except (ValueError, KeyError, AttributeError) as e:
             logger.debug("models.dev lookup failed for %s: %s", model_id, e)
         except Exception as e:
@@ -1205,8 +1231,6 @@ def check_existing_memories(target: str, _provider: str = "bedrock") -> bool:
         True if existing memories are detected, False otherwise
     """
     try:
-        from modules.handlers.utils import sanitize_target_name
-
         # Sanitize target name for consistent path handling
         target_name = sanitize_target_name(target)
 

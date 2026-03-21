@@ -81,6 +81,8 @@ export interface Config {
   sagemakerBaseUrl?: string;
   /** Ollama server host URL for local model serving */
   ollamaHost?: string;
+  /** Ollama server context length */
+  ollamaContextLength?: number;
   /** Ollama server timeout */
   ollamaTimeout?: number;
 
@@ -341,7 +343,7 @@ export const defaultConfig: Config = {
   embeddingModel: 'amazon.titan-embed-text-v2:0',
   evaluationModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   swarmModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
-  temperature: 0.95,
+  temperature: 0.5,
   awsRegion: process.env.AWS_REGION || 'us-east-1',
   awsBearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK,
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -355,6 +357,7 @@ export const defaultConfig: Config = {
   awsExternalId: process.env.AWS_EXTERNAL_ID,
   sagemakerBaseUrl: process.env.SAGEMAKER_BASE_URL,
   ollamaHost: process.env.OLLAMA_HOST || 'http://localhost:11434',
+  ollamaContextLength: parseInt(process.env.OLLAMA_CONTEXT_LENGTH) || null,
   ollamaTimeout: parseFloat(process.env.OLLAMA_TIMEOUT) || 120,
 
   // Model Pricing (per 1K tokens)

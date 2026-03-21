@@ -327,9 +327,6 @@ def _read_module_yaml_for_tags(module_dir: Path) -> List[str]:
     return tags
 
 
-# --- Template and Utility Functions ---
-
-
 def load_prompt_template(template_name: str) -> str:
     """Load a prompt template, optionally via Langfuse when enabled.
 
@@ -399,58 +396,13 @@ def _extract_domain_lens(module_prompt: str) -> Dict[str, str]:
     return domain_lens
 
 
-# --- Memory Context Guidance (centralized) ---
-
-
-def _plan_first_directive(has_existing_memories: bool) -> str:
-    """Return the plan-first directive block used in memory context.
-
-    This centralizes wording so tests and UX remain stable.
-    """
-    # Category guidance included in both branches to reinforce proper usage
-    # NOTE: category is REQUIRED - store will error if missing
-    category_guidance = (
-        'CATEGORY RULE: Exploit/vuln confirmed → category="finding" | '
-        'Recon/failed attempt → category="observation" | '
-        'WRONG category = empty report!\n'
-        'NOTE: category is REQUIRED - missing category will raise error. '
-        'Always specify metadata={"category": "finding"} or "observation"'
-    )
-
-    if has_existing_memories:
-        return dedent(
-            f"""
-            **CRITICAL FIRST ACTION**: Load all memories with mem0_memory(action="list", user_id="cyber_agent")
-            NEXT: Retrieve the active plan with mem0_memory(action="get_plan"); if none, create one via mem0_memory(action="store_plan") before other tools
-            {category_guidance}
-            """
-        ).strip()
-    else:
-        return dedent(
-            f"""
-            Starting fresh assessment with no previous context
-            Do NOT check memory on fresh operations (no retrieval of prior data)
-            CRITICAL FIRST ACTION: Create a strategic plan via mem0_memory(action="store_plan", content={{...}})
-            Format: content={{objective, current_phase, total_phases, phases: [{{id, title, status, criteria}}]}}
-            Then begin reconnaissance and target information gathering guided by the plan
-            Store all findings immediately with category="finding" (NOT "observation" for exploits!)
-            {category_guidance}
-            """
-        ).strip()
-
-
 def get_memory_context_guidance(
     *,
     has_memory_path: bool,
     has_existing_memories: bool,
     memory_overview: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Return memory context guidance text used in system prompts.
-
-    Matches expectations from tests by including specific phrases/assertions.
-    """
-    lines: List[str] = ["## MEMORY CONTEXT"]
-
+    """Return memory context guidance text used in system prompts."""
     # Determine memory count if available
     total_count = 0
     if isinstance(memory_overview, dict):
@@ -461,22 +413,22 @@ def get_memory_context_guidance(
                 total_count = 0
 
     if not has_memory_path and not has_existing_memories:
-        # Fresh operation guidance (centralized)
-        lines.append(_plan_first_directive(False))
+        # Fresh operation guidance
+        return """**CRITICAL FIRST ACTION**: Create a strategic plan via mem0_store_plan().
+"""
     else:
         # Continuing assessment guidance
         count_str = str(total_count) if total_count else "0"
-        lines.append(f"Continuing assessment with {count_str} existing memories")
-        # Centralized plan-first directive for existing memory case
-        lines.append(_plan_first_directive(True))
-        lines.append("Analyze retrieved memories before taking any actions")
-        lines.append("Avoid repeating work already completed")
-        lines.append("Build upon previous discoveries")
-
-    return "\n".join(lines)
-
-
-# --- Core System Prompt Builders (minimal, robust) ---
+        return f"""Continuing assessment with {count_str} existing memories.
+**CRITICAL FIRST ACTIONS**
+  1. Load all memories: mem0_list().
+  2. Load the plan: mem0_get_plan(). If none, create it immediately via mem0_store_plan() before other tools.
+  3. Perform a Memory Intake Pass:
+    - Summarize what’s already known (key facts + evidence paths).
+    - Identify unknown / next questions.
+    - Mark duplicates and do not recreate tasks/work already completed.
+    - Create tasks based on prior discoveries.
+"""
 
 
 def _format_overlay_directives(payload: Any) -> List[str]:
@@ -644,7 +596,7 @@ def get_system_prompt(
     # Inject Environmental Context if present
     env_context_str = ""
     if tools_context:
-        env_context_str = f"**ENVIRONMENTAL CONTEXT**:\n{tools_context}"
+        env_context_str = f"# ENVIRONMENTAL CONTEXT\n{tools_context}"
     prompt = prompt.replace("{{ environmental_context }}", env_context_str)
 
     # 7. Append Overlay (Adaptive Directives)
@@ -666,8 +618,9 @@ def get_reflection_snapshot(current_step: int, max_steps: int, plan_current_phas
         _checkpoints = [int(max_steps * pct) for pct in [0.2, 0.4, 0.6, 0.8]]
         _next_checkpoint = next((cp for cp in _checkpoints if cp > current_step), max_steps)
         _steps_until = max(0, _next_checkpoint - current_step)
+        remaining_steps = max(0, max_steps - current_step)
 
-        lines = [f"Budget Used: {_budget_pct}% ({current_step}/{max_steps})"]
+        lines = [f"Budget Used: {_budget_pct}%, step {current_step}/{max_steps}, {remaining_steps} remaining steps"]
 
         # Checkpoint-specific actionable guidance
         if current_step in _checkpoints or (current_step > 0 and current_step == _checkpoints[0]):
@@ -676,14 +629,14 @@ def get_reflection_snapshot(current_step: int, max_steps: int, plan_current_phas
             lines.append(f"**CHECKPOINT {checkpoint_pct}% REACHED**")
 
             if checkpoint_pct == 20:
-                lines.append("ACTION: Call get_plan. Evaluate: What capabilities gained? Phase 1 criteria met?")
+                lines.append("ACTION: Call `mem0_get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?")
             elif checkpoint_pct == 40:
-                lines.append("ACTION: Call get_plan. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW.")
+                lines.append("ACTION: Call `mem0_get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW.")
             elif checkpoint_pct == 60:
                 lines.append(
-                    "ACTION: Call get_plan. If stuck (no findings), deploy swarm with different approach classes.")
+                    "ACTION: Call `mem0_get_plan`. If stuck (no findings), deploy swarm with different approach classes.")
             elif checkpoint_pct == 80:
-                lines.append("ACTION: Call get_plan. Focus ONLY on highest-confidence path. No new exploration.")
+                lines.append("ACTION: Call `mem0_get_plan`. Focus ONLY on highest-confidence path. No new exploration.")
         else:
             lines.append(f"Next Checkpoint: Step {_next_checkpoint} (in {_steps_until} steps)")
             # Add warning if close to checkpoint
@@ -752,9 +705,6 @@ def get_report_agent_prompt() -> str:
     raise FileNotFoundError("Missing report_agent_prompt.md")
 
 
-# --- Module Prompt Loader ---
-
-
 class ModulePromptLoader:
     """Lightweight loader for module-specific prompts (execution/report)."""
 
@@ -792,7 +742,6 @@ class ModulePromptLoader:
         self.last_loaded_execution_prompt_source: Optional[str] = None
         self.last_loaded_report_prompt_source: Optional[str] = None
 
-    # --- Module inheritance helpers ---
 
     @lru_cache
     def _find_module_dir(self, module_name: str) -> Optional[Path]:
@@ -1084,9 +1033,6 @@ class ModulePromptLoader:
 def get_module_loader() -> ModulePromptLoader:
     """Return a module prompt loader instance."""
     return ModulePromptLoader()
-
-
-# --- Report Generation Functions ---
 
 
 def _get_current_date() -> str:

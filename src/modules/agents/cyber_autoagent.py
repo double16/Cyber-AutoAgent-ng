@@ -67,7 +67,17 @@ from modules.tools.mcp import (
 from modules.tools.memory import (
     get_memory_client,
     initialize_memory_system,
-    mem0_memory,
+    mem0_store,
+    mem0_get,
+    mem0_retrieve,
+    mem0_list,
+    mem0_delete,
+    mem0_store_plan,
+    mem0_get_plan,
+    mem0_create_tasks,
+    mem0_list_uncompleted_tasks,
+    mem0_task_done,
+    mem0_get_active_task,
 )
 from modules.tools.browser import (
     initialize_browser,
@@ -288,9 +298,7 @@ def create_agent(
         try:
             memory_client = get_memory_client()
             if memory_client:
-                memory_overview = memory_client.get_memory_overview(
-                    user_id="cyber_agent"
-                )
+                memory_overview = memory_client.get_memory_overview()
         except Exception as e:
             agent_logger.debug(
                 "Could not get memory overview for system prompt: %s", str(e)
@@ -368,7 +376,7 @@ def create_agent(
                 # Tools are pre-loaded
                 for tool_name in tool_names:
                     tool_examples.append(
-                        f"{tool_name}()  # Pre-loaded and ready to use"
+                        f"{tool_name}(...)"
                     )
             else:
                 # Fallback to load_tool instructions using discovered absolute paths
@@ -390,12 +398,10 @@ def create_agent(
             tool_count += len(tool_names)
             module_tools_context = f"""
 ### MODULE-SPECIFIC TOOLS
+Preferred over command line.
 
-Available {config.module} module tools:
-{", ".join(tool_names)}
-
-{"Ready to use:" if loaded_module_tools else "Load these tools when needed:"}
-{chr(10).join(f"- {example}" for example in tool_examples)}
+{"Ready to use:" if loaded_module_tools else "Load when needed:"}
+{chr(10).join(f"  - {example}" for example in tool_examples)}
 """
         else:
             print_status(
@@ -411,14 +417,9 @@ Available {config.module} module tools:
         tools_context = f"""
 ### COMMAND LINE PROGRAMS
 
-Use the **shell** tool for bash commands.
-
-**Command line tool selection rules**
-- Use a purpose-built tool when scanning/enumerating many targets or endpoints.
-- Use `curl` only for single requests, reproductions, or crafted edge-cases.
-- Use `grep/sed/awk/jq` only for small transformations after purpose-built tools produce raw output.
-
-### Capabilities → Preferred tools → Fallbacks
+- Use the **shell** tool for command line programs.
+- Capabilities → Preferred tools → Fallbacks
+- These programs are known to be installed.
 """
         for cap, cap_prefs in tools_by_caps.items():
             tools_context += f"\n- **{cap}**\n"
@@ -455,7 +456,7 @@ Prefer MCP tools over command line tools that offer similar capabilities.
         full_tools_context = f"""
 ## TOOLS
 
-Guidance and tool names in prompts are illustrative, not prescriptive. Always check availability and prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
+Prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
 
 """ + full_tools_context
 
@@ -496,7 +497,17 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
         shell,
         editor,
         load_tool,
-        mem0_memory,
+        mem0_store,
+        mem0_get,
+        mem0_retrieve,
+        mem0_list,
+        mem0_delete,
+        mem0_store_plan,
+        mem0_get_plan,
+        mem0_create_tasks,
+        mem0_list_uncompleted_tasks,
+        mem0_task_done,
+        mem0_get_active_task,
         stop,
         sleep,
         python_repl,
@@ -584,7 +595,7 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
     try:
         memory_client = get_memory_client(silent=True)
         if memory_client:
-            active_plan = memory_client.get_active_plan(user_id="cyber_agent", operation_id=operation_id)
+            active_plan = memory_client.get_active_plan(operation_id=operation_id)
             if active_plan:
                 # First try to get JSON from metadata
                 plan_json = active_plan.get("metadata", {}).get("plan_json")
@@ -779,6 +790,7 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
     callback_handler = ReactBridgeHandler(
         max_steps=config.max_steps,
         operation_id=operation_id,
+        provider_id=config.provider,
         model_id=config.model_id,
         swarm_model_id=server_config.swarm.llm.model_id,
         init_context={

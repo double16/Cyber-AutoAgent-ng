@@ -162,7 +162,6 @@ def build_report_sections(
             try:
                 # Use run_id scoping to get operation-specific memories
                 memories = memory_client.list_memories(
-                    user_id="cyber_agent",
                     run_id=operation_id if not cross_operation else None,
                     limit=100,
                 )

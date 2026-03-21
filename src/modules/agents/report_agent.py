@@ -13,7 +13,7 @@ from strands import Agent
 from strands.handlers import PrintingCallbackHandler
 from strands.models import BedrockModel
 from strands.models.litellm import LiteLLMModel
-from strands.models.ollama import OllamaModel
+from modules.config.models.ollama import OllamaModel
 
 from modules.config.manager import get_config_manager
 from modules.config.models.factory import create_gemini_model
@@ -192,7 +192,3 @@ class ReportGenerator:
             callback_handler=NoOpCallbackHandler(),
             hooks=[ToolUseIdHook()],
         )
-
-
-# For backward compatibility - in case anything is importing ReportAgent
-ReportAgent = ReportGenerator

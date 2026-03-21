@@ -6,7 +6,8 @@ from modules.handlers.conversation_budget import (
     _ensure_prompt_within_budget,
     _estimate_prompt_tokens_for_agent,
     _strip_reasoning_content,
-    _strip_continue_messages,
+    _dedupe_state_markers,
+    strip_reflection_snapshot_messages,
 )
 
 
@@ -131,10 +132,84 @@ def test_strip_reasoning_content_removes_preserving_recent_messages(message_coun
     assert len(agent.messages[0]["content"]) > 0
 
 
-def test_strip_continue_messages():
-    messages = [_make_message(''), _make_message("<continue_instructions>\n"), _make_message("xyz")]
+def test_dedupe_state_markers_strips_reflection_snapshot():
+    messages = [_make_message(''), _make_message("<reflection_snapshot>\n"), _make_message("xyz")]
     agent = AgentStub(messages)
-    _strip_continue_messages(agent)
+    _dedupe_state_markers(agent)
+    assert len(agent.messages) == 2
+    assert agent.messages[0]["content"][0]["text"] == ''
+    assert agent.messages[1]["content"][0]["text"] == 'xyz'
+
+
+def test_dedupe_state_markers_keeps_only_most_recent_active_task():
+    messages = [
+        _make_message("pre"),
+        _make_message("<active_task version=\"1\">{\"task\":{\"task_uid\":\"1\"}}</active_task>"),
+        _make_message("mid"),
+        _make_message("<active_task version=\"1\">{\"task\":{\"task_uid\":\"2\"}}</active_task>"),
+        _make_message("post"),
+    ]
+    agent = AgentStub(messages)
+    _dedupe_state_markers(agent)
+
+    # Only the most recent active_task message should remain
+    texts = [m["content"][0]["text"] for m in agent.messages]
+    assert "<active_task" in "".join(texts)
+    assert sum(1 for t in texts if t.startswith("<active_task")) == 1
+    assert any("task_uid\":\"2\"" in t for t in texts)
+    assert not any("task_uid\":\"1\"" in t for t in texts)
+
+
+def test_dedupe_state_markers_strips_reflection_and_retains_active_task():
+    messages = [
+        _make_message("a"),
+        _make_message("<reflection_snapshot>\nBudget Used: 10%\n</reflection_snapshot>"),
+        _make_message("<active_task version=\"1\">{\"task\":{\"task_uid\":\"X\"}}</active_task>"),
+        _make_message("**ACTION**: Call `mem0_get_active_task()`.\n<reflection_snapshot>\nBudget Used: 20%\n</reflection_snapshot>"),
+        _make_message("b"),
+    ]
+    agent = AgentStub(messages)
+    _dedupe_state_markers(agent)
+
+    texts = [m["content"][0]["text"] for m in agent.messages]
+    assert all(not t.startswith("<reflection_snapshot>") for t in texts)
+    assert sum(1 for t in texts if t.startswith("<active_task")) == 1
+    assert any("task_uid\":\"X\"" in t for t in texts)
+
+
+def test_dedupe_state_markers_no_active_task_strips_reflection_only():
+    messages = [
+        _make_message("a"),
+        _make_message("<reflection_snapshot>\nBudget Used: 10%\n</reflection_snapshot>"),
+        _make_message("b"),
+    ]
+    agent = AgentStub(messages)
+    _dedupe_state_markers(agent)
+
+    texts = [m["content"][0]["text"] for m in agent.messages]
+    assert texts == ["a", "b"]
+
+
+def test_dedupe_state_markers_removes_older_active_task_even_if_interleaved():
+    messages = [
+        _make_message("<active_task version=\"1\">{\"task\":{\"task_uid\":\"OLD\"}}</active_task>"),
+        _make_message("x"),
+        _make_message("<active_task version=\"1\">{\"task\":{\"task_uid\":\"NEW\"}}</active_task>"),
+        _make_message("y"),
+    ]
+    agent = AgentStub(messages)
+    _dedupe_state_markers(agent)
+
+    texts = [m["content"][0]["text"] for m in agent.messages]
+    assert sum(1 for t in texts if t.startswith("<active_task")) == 1
+    assert any("task_uid\":\"NEW\"" in t for t in texts)
+    assert not any("task_uid\":\"OLD\"" in t for t in texts)
+
+
+def test_strip_reflection_snapshot_messages():
+    messages = [_make_message(''), _make_message("<reflection_snapshot>\n"), _make_message("xyz")]
+    agent = AgentStub(messages)
+    strip_reflection_snapshot_messages(agent)
     assert len(agent.messages) == 2
     assert agent.messages[0]["content"][0]["text"] == ''
     assert agent.messages[1]["content"][0]["text"] == 'xyz'

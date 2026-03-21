@@ -1,131 +1,21 @@
-"""Swarm intelligence tool for coordinating custom AI agent teams.
+"""
+Swarm tool: run a small team of specialized agents under shared context.
 
-This module implements a flexible swarm intelligence system that enables users to define
-custom teams of specialized AI agents that collaborate autonomously through shared context
-and tool-based coordination. Built on the Strands SDK Swarm multi-agent pattern.
-
-Key Features:
--------------
-1. Custom Agent Teams:
-   • User-defined agent specifications with individual system prompts
-   • Per-agent tool configuration and model settings
-   • Complete control over agent specializations and capabilities
-
-2. Autonomous Coordination:
-   • Built on Strands SDK's native Swarm multi-agent pattern
-   • Automatic injection of coordination tools (handoff_to_agent, complete_swarm_task)
-   • Shared working memory and context across all agents
-   • Self-organizing collaboration without central control
-
-3. Advanced Configuration:
-   • Individual model settings per agent
-   • Customizable tool access for each agent
-   • Comprehensive timeout and safety mechanisms
-   • Rich execution metrics and detailed status tracking
-
-4. Emergent Collective Intelligence:
-   • Agents autonomously decide when to collaborate or handoff
-   • Shared context enables building upon each other's work
-   • Dynamic task distribution based on agent capabilities
-   • Self-completion when task objectives are achieved
-
-Usage with Strands Agent:
-```python
-from strands import Agent
-from modules.tools.swarm import swarm
-
-agent = Agent(tools=[swarm])
-
-# Define custom agent team
-result = agent.tool.swarm(
-    task="Develop a comprehensive product launch strategy",
-    agents=[
-        {
-            "name": "market_researcher",
-            "system_prompt": (
-                "You are a market research specialist. Focus on market analysis, "
-                "customer insights, and competitive landscape."
-            ),
-            "tools": ["retrieve", "calculator"]
-        },
-        {
-            "name": "product_strategist",
-            "system_prompt": (
-                "You are a product strategy specialist. Focus on positioning, "
-                "value propositions, and go-to-market planning."
-            ),
-            "tools": ["file_write", "calculator"]
-        },
-        {
-            "name": "creative_director",
-            "system_prompt": (
-                "You are a creative marketing specialist. Focus on campaigns, "
-                "branding, messaging, and creative concepts."
-            ),
-            "tools": ["generate_image", "file_write"]
-        }
-    ]
-)
-```
-
-The swarm tool provides maximum flexibility for creating specialized agent teams that work
-together autonomously to solve complex, multi-faceted problems.
+Wraps Strands SDK Swarm to enable hypothesis-diverse parallel exploration when a single agent is stuck
+or when multiple capability classes should be tested in parallel. Keep teams small and prompts task-focused.
 """
 
 import logging
 import traceback
 from typing import Any, Dict, List, Optional, Callable
 
-from rich.box import ROUNDED
-from rich.console import Console
-from rich.panel import Panel
 from strands import Agent, ToolContext, tool
 from strands.multiagent import Swarm
-
-from strands_tools.utils import console_util
 
 from modules.config import get_config_manager
 from modules.config.models.factory import get_model_timeout
 
 logger = logging.getLogger(__name__)
-
-
-#
-# This has been copied from strands-agents-tools because as of 2025-10-12 the Agent constructor hasn't been updated to
-# populate the model. Therefore, it defaults to bedrock.
-#
-
-def create_rich_status_panel(console: Console, result: Any) -> str:
-    """
-    Create a rich formatted status panel for swarm execution results.
-
-    Args:
-        console: Rich console for output capture
-        result: SwarmResult object from swarm execution
-
-    Returns:
-        str: Formatted panel as a string for display
-    """
-    content = []
-    content.append(f"[bold blue]Status:[/bold blue] {result.status}")
-    content.append(f"[bold blue]Execution Time:[/bold blue] {result.execution_time}ms")
-    content.append(f"[bold blue]Agents Involved:[/bold blue] {result.execution_count}")
-
-    if hasattr(result, "node_history") and result.node_history:
-        agent_chain = " → ".join([node.node_id for node in result.node_history])
-        content.append(f"[bold blue]Agent Chain:[/bold blue] {agent_chain}")
-
-    if hasattr(result, "accumulated_usage") and result.accumulated_usage:
-        usage = result.accumulated_usage
-        content.append("\n[bold magenta]Token Usage:[/bold magenta]")
-        content.append(f"  [bold green]Input:[/bold green] {usage.get('inputTokens', 0):,}")
-        content.append(f"  [bold green]Output:[/bold green] {usage.get('outputTokens', 0):,}")
-        content.append(f"  [bold green]Total:[/bold green] {usage.get('totalTokens', 0):,}")
-
-    panel = Panel("\n".join(content), title="🤖 Swarm Execution Results", box=ROUNDED)
-    with console.capture() as capture:
-        console.print(panel)
-    return capture.get()
 
 
 def _create_custom_agents(
@@ -232,154 +122,38 @@ def swarm(
         repetitive_handoff_min_unique_agents: int = 3,
         tool_context: ToolContext = None,
 ) -> Dict[str, Any]:
-    """Create and coordinate a custom team of AI agents for collaborative task solving.
+    """Run a coordinated multi-agent swarm for parallel exploration.
 
-    This function leverages the Strands SDK's Swarm multi-agent pattern to create custom teams
-    of specialized AI agents with individual configurations. Each agent can have its own system
-    prompt, tools, and model settings, enabling precise control over team composition.
+    Call when:
+    - You need parallel testing across DIFFERENT capability classes (e.g., auth vs injection vs logic), or
+    - You are stuck after multiple pivots and need hypothesis-diverse exploration.
 
-    How It Works:
-    ------------
-    1. Custom Agent Creation:
-       • Each agent is created with individual specifications
-       • Unique system prompts define each agent's role and expertise
-       • Per-agent tool access controls what each agent can do
-       • Individual model settings for optimization
+    Do NOT call for:
+    - Single-thread work, minor payload variations, or tasks one tool can complete.
 
-    2. Autonomous Coordination:
-       • Agents automatically receive coordination tools (handoff_to_agent, complete_swarm_task)
-       • Shared working memory maintains context across all handoffs
-       • Agents decide when to collaborate based on task requirements
-       • Self-organizing collaboration without central control
+    How to use:
+    - Provide a clear `task` with scope, objective, and stop conditions.
+    - Use 2–3 agents max. Each agent MUST have a distinct approach and an explicit handoff trigger.
+    - Each agent system_prompt should specify: focus area, expected output, and WHEN to handoff.
+    - Handoff requirement: Agents MUST explicitly call `handoff_to_agent('name', 'context')`. Without handoffs, swarm degenerates to sequential execution.
 
-    3. Flexible Team Composition:
-       • Assign specialized tools to relevant agents only
-       • Custom temperature and model settings per agent
-       • Support for any number of agents with unique roles
-
-    4. Safety and Control:
-       • Comprehensive timeout mechanisms prevent infinite loops
-       • Handoff limits ensure efficient resource usage
-       • Repetitive behavior detection prevents endless agent exchanges
-       • Rich execution metrics for performance insights
+    Failure diagnosis:
+    - If 0 iterations / no progress: no handoffs or prompts too similar → rewrite prompts with explicit handoff triggers.
 
     Args:
-        task: The main task to be processed by the agent team.
+        task: Swarm objective to execute.
         agents: List of agent specification dictionaries. Each dictionary can contain:
-            - name (str): Agent name/identifier (optional, auto-generated if not provided)
+            - name (str): Agent name
             - system_prompt (str): Agent's system prompt defining its role and expertise
             - tools (List[str]): List of tool names available to this agent (optional)
             - model_provider (str): Model provider for this agent (optional, inherits from parent)
-            - model_settings (Dict): Model configuration for this agent (optional)
-            - inherit_parent_prompt (bool): Whether to append parent agent's system prompt (optional)
-        max_handoffs: Maximum number of handoffs between agents (default: 20).
-        max_iterations: Maximum total iterations across all agents (default: 20).
-        execution_timeout: Maximum total execution time in seconds (default: 900).
-        node_timeout: Maximum time per agent in seconds (default: 300).
-        repetitive_handoff_detection_window: Number of recent handoffs to analyze for repetitive behavior (default: 8).
-        repetitive_handoff_min_unique_agents: Minimum number of unique agents required in the
-            detection window (default: 3).
+            - model_settings (Dict): Model configuration for this agent: temperature (optional)
 
     Returns:
-        Dict containing status and response content in the format:
-        {
-            "status": "success|error",
-            "content": [{"text": "Comprehensive results from agent team collaboration"}]
-        }
-
-        Success case: Returns detailed results from swarm execution with agent contributions
-        Error case: Returns information about what went wrong during processing
-
-    Example Usage:
-    -------------
-    ```python
-    # Research and development team
-    result = agent.tool.swarm(
-        task="Research and design a sustainable energy solution for rural communities",
-        agents=[
-            {
-                "name": "researcher",
-                "system_prompt": "You are a renewable energy specialist. Focus on feasibility and impact.",
-                "tools": ["retrieve", "calculator"]
-            },
-            {
-                "name": "engineer",
-                "system_prompt": "You are an engineering specialist. Focus on implementation and costs.",
-                "tools": ["calculator", "file_write"]
-            },
-            {
-                "name": "community_expert",
-                "system_prompt": "You are a community specialist. Focus on social impact and adoption.",
-                "tools": ["retrieve", "file_write"]
-            }
-        ]
-    )
-
-    # Creative content team
-    result = agent.tool.swarm(
-        task="Create a comprehensive brand identity and marketing campaign",
-        agents=[
-            {
-                "name": "brand_strategist",
-                "system_prompt": "You are a brand strategist. Focus on positioning and messaging.",
-                "tools": ["retrieve", "file_write"]
-            },
-            {
-                "name": "creative_director",
-                "system_prompt": "You are a creative director. Focus on visual concepts and campaigns.",
-                "tools": ["generate_image", "file_write"],
-                "model_provider": "ollama",
-                "model_settings": {"model_id": "purpose-built-model", "params": {"temperature": 0.8}}
-            },
-            {
-                "name": "copywriter",
-                "system_prompt": "You are a copywriter. Focus on messaging and marketing copy.",
-                "tools": ["file_write"],
-                "model_settings": {"params": {"temperature": 0.7}}
-            }
-        ],
-        execution_timeout=1200  # Extended timeout for creative work
-    )
-
-    # Minimal team with inheritance
-    result = agent.tool.swarm(
-        task="Analyze quarterly financial performance",
-        agents=[
-            {
-                "system_prompt": "You are a financial analyst specializing in performance metrics and trend analysis.",
-                "tools": ["calculator", "file_write"],
-                "inherit_parent_prompt": True
-            },
-            {
-                "system_prompt": "You are a business strategist focusing on insights and recommendations.",
-                "tools": ["file_write"],
-                "inherit_parent_prompt": True
-            }
-        ]
-    )
-
-    # Custom repetitive handoff detection
-    result = agent.tool.swarm(
-        task="Complex multi-step analysis requiring tight collaboration",
-        agents=[...],
-        repetitive_handoff_detection_window=12,  # Look at more recent handoffs
-        repetitive_handoff_min_unique_agents=4,  # Require more variety in agent participation
-    )
-    ```
-
-    Notes:
-        - Built on Strands SDK's native Swarm multi-agent pattern
-        - Each agent can use different models and tools for optimal performance
-        - Agents coordinate autonomously through injected coordination tools
-        - Shared context enables true collective intelligence
-        - Safety mechanisms prevent infinite loops and resource exhaustion
-        - Rich execution metrics provide insights into team collaboration
-        - Supports complex multi-modal tasks and diverse expertise areas
-        - Tool filtering ensures agents only get tools that exist in parent registry
+        Dict with status and content summarizing agent contributions.
     """
     agent_factory = getattr(swarm, "agent_factory", None)
     assert agent_factory is not None
-    console = console_util.create()
     swarm_agents: Optional[list[Agent]] = None
     agent = tool_context.agent if tool_context else None
 
@@ -438,9 +212,6 @@ def swarm(
 
         # Execute the swarm
         result = sdk_swarm(task)
-
-        # Create rich status display
-        create_rich_status_panel(console, result)
 
         # Extract and format results
         response_parts = []
