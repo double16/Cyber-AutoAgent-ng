@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+import requests
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -239,3 +240,13 @@ def pytest_addoption(parser):
 def pytest_runtest_setup(item):
     if "browser" in item.keywords and not item.config.getoption("--browser"):
         pytest.skip("Test requires --browser option to run.")
+
+    if "ollama" in item.keywords:
+        ollama_host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+        if "://" not in ollama_host:
+            ollama_host = "http://" + ollama_host
+        try:
+            r = requests.get(f"{ollama_host}/api/tags", timeout=5)
+            r.raise_for_status()
+        except (requests.RequestException, ValueError):
+            pytest.skip(f"Skipping tests: Ollama is not available at {ollama_host}", allow_module_level=True)

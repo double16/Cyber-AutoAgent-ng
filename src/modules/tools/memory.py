@@ -312,10 +312,9 @@ def _format_task_as_toon(task_content: Dict[str, Any]) -> str:
     phase = _sanitize_toon_value(task_content.get("phase", ""))
     status = _sanitize_toon_value(task_content.get("status", ""))
     status_reason = _sanitize_toon_value(task_content.get("status_reason", ""))
-    task_uid = _sanitize_toon_value(task_content.get("task_uid", ""))
     lines = [
-        "task[1]{task_uid,title,objective,evidence,phase,status,status_reason}:",
-        f"  {task_uid},{title},{objective},{evidence},{phase},{status},{status_reason}",
+        "task[1]{title,objective,evidence,phase,status,status_reason}:",
+        f"  {title},{objective},{evidence},{phase},{status},{status_reason}",
     ]
     return "\n".join(lines).strip()
 
@@ -379,7 +378,7 @@ def mem0_store(
 
     QUICK START:
         # Store finding ONLY after verification succeeds
-        mem0_store(content="[FINDING] XSS Vulnerability confirmed on [URL] endpoint with name parameter. - Technique: stored_xss",
+        mem0_store(content="[FINDING] XSS Vulnerability confirmed on /contactus endpoint with name parameter. - Technique: stored_xss",
             metadata={"category": "finding", "severity": "HIGH",
                       "status": "verified", "validation_status": "verified",
                       "technique": "stored_xss", "artifact_hash": "sha256_of_artifact"})
@@ -720,7 +719,7 @@ def mem0_store_plan(
 @tool
 def mem0_get_plan(
     cross_operation: bool = False,
-) -> Optional[Dict]:
+) -> Optional[OperationPlan]:
     """Get the most recent active plan.
 
     By default, this is scoped to the current operation (CYBER_OPERATION_ID).
@@ -821,6 +820,7 @@ def mem0_create_tasks(
 
     client = _ensure_memory_client()
     user_id = _user_id()
+    op_id = os.getenv("CYBER_OPERATION_ID")
 
     try:
         current_phase = _get_plan_current_phase()
@@ -844,7 +844,25 @@ def mem0_create_tasks(
             phase=eff_phase,
             status=new_task.status,
         )
-        result = client.store_task(task=task, user_id=user_id)
+
+        # look for duplicate
+        result = None
+        try:
+            task_query = "[TASK] " + _format_task_as_toon(task.to_dict())
+            task_search = client.mem0.search(query=task_query, user_id=user_id, run_id=op_id, limit=4,
+                                             filters={"category": "task"})
+            if task_search.get("results"):
+                task_best_match = task_search["results"][0]
+                task_best_score = task_best_match.get("score", 1.0)
+                if task_best_score < 0.2:
+                    logger.debug(
+                        f"Found task duplicate with score {task_best_score}: {task_query} ~= {task_best_match.get('memory')}")
+                    result = {"results": [{"role": "user", "event": "DUPLICATE", "id": task_best_match.get("id")}]}
+        except Exception as e:  # pragma: no cover - provider specific
+            logger.debug(f"Searching for duplicate task: {str(e)}", exc_info=e)
+
+        if not result:
+            result = client.store_task(task=task, user_id=user_id)
 
         # scrub task from result or agent may decide to execute
         result_stack = [result]
@@ -862,20 +880,24 @@ def mem0_create_tasks(
             elif isinstance(el, Iterable) and not isinstance(el, str):
                 result_stack.extend(el)
 
-        all_results = {key: value + all_results.get(key, []) for key, value in result.items()}
+        all_results = {key: all_results.get(key, []) + value for key, value in result.items()}
 
     return json.dumps(all_results, indent=2, sort_keys=True)
 
 
-def _active_task_message(active_task: Optional[Task] = None, activated: bool = True,
-                         closed_task: Optional[Task] = None) -> str:
+def _active_task_message(
+        active_task: Optional[Task] = None,
+        activated: bool = True,
+        closed_task: Optional[Task] = None,
+        current_phase: Optional[int] = None,
+) -> str:
     if closed_task:
         closed_info = {"closed": {"task_uid": closed_task.task_uid, "status": closed_task.status}}
     else:
         closed_info = {}
 
     if active_task is None:
-        return f"""<active_task phase="1" status="none">
+        return f"""<active_task phase="{current_phase}" status="none">
 {json.dumps({"task": None, "activated": False} | closed_info)}
 </active_task>
 """
@@ -903,7 +925,10 @@ def mem0_task_done(
     """
     client = _ensure_memory_client()
     user_id = _user_id()
-    current_phase = _get_plan_current_phase()
+    try:
+        current_phase = _get_plan_current_phase()
+    except ValueError:
+        return _active_task_message()
 
     if status not in ["done", "partial_failure", "blocked"]:
         status = "done"
@@ -916,7 +941,7 @@ def mem0_task_done(
         task_uid=task_uid,
     )
 
-    return _active_task_message(next_active, next_active is not None, updated)
+    return _active_task_message(next_active, next_active is not None, updated, current_phase=current_phase)
 
 
 @tool
@@ -931,10 +956,14 @@ def mem0_get_active_task() -> str:
     """
     client = _ensure_memory_client()
     user_id = _user_id()
-    current_phase = _get_plan_current_phase()
+    try:
+        current_phase = _get_plan_current_phase()
 
-    task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
-    return _active_task_message(task, activated)
+        task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
+        return _active_task_message(task, activated, current_phase=current_phase)
+    except ValueError:
+        # no active plan
+        return _active_task_message(None, False, current_phase=current_phase)
 
 
 @tool
@@ -942,9 +971,12 @@ def mem0_list_uncompleted_tasks() -> List[Task]:
     """List all uncompleted tasks for the current plan phase."""
     client = _ensure_memory_client()
     user_id = _user_id()
-    current_phase = _get_plan_current_phase()
-
-    return client.list_tasks(user_id=user_id, phase=current_phase, status=["pending", "active"])
+    try:
+        current_phase = _get_plan_current_phase()
+        return client.list_tasks(user_id=user_id, phase=current_phase, status=["pending", "active"])
+    except ValueError:
+        # no active plan
+        return []
 
 
 @tool
@@ -966,10 +998,31 @@ def mem0_get(
         return f"Error: {str(e)}"
 
 
+def _memory_list_for_agent(memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    pruned = []
+    seen_ids = set()
+    memories.sort(key=memory_sort_by_create_time, reverse=True)
+    for result in memories:
+        memory = result.get("memory", "")
+        if not memory:
+            continue
+        category = result.get("metadata", {}).get("category", "")
+        if category == "plan":
+            durable_id = "plan"
+        else:
+            durable_id = result.get("metadata", {}).get("task_uid", "")
+        if durable_id:
+            if durable_id in seen_ids:
+                continue
+            seen_ids.add(durable_id)
+        pruned.append({"id": result.get("id", ""), "memory": memory})
+    return pruned
+
+
 @tool
 def mem0_list(
     agent_id: Optional[str] = None,
-    cross_operation: bool = False,
+        cross_operation: Optional[bool] = None,
 ) -> str:
     """List memories for a user/agent.
 
@@ -995,6 +1048,8 @@ def mem0_list(
         user_id = _user_id()
 
         # Scope to current operation unless cross_operation=True
+        if cross_operation is None:
+            cross_operation = memory_is_cross_operation()
         op_id = None if cross_operation else os.getenv("CYBER_OPERATION_ID")
         memories = client.list_memories(
             user_id, agent_id, limit=list_limit, run_id=op_id
@@ -1003,34 +1058,12 @@ def mem0_list(
         # Debug logging to understand the response structure
         logger.debug("Memory list raw response type: %s, response: %s", type(memories), memories)
 
-        # Normalize to list with better error handling
-        if memories is None:
-            results_list = []
-            logger.debug("memories is None, returning empty list")
-        elif isinstance(memories, list):
-            results_list = memories
-            logger.debug("memories is list with %d items", len(memories))
-        elif isinstance(memories, dict):
-            # Check for different possible dict structures
-            if "results" in memories:
-                results_list = memories.get("results", [])
-                logger.debug("Found 'results' key with %d items", len(results_list))
-            elif "memories" in memories:
-                results_list = memories.get("memories", [])
-                logger.debug(
-                    "Found 'memories' key with %d items", len(results_list)
-                )
-            else:
-                # If dict doesn't have expected keys, treat as single memory
-                results_list = [memories] if memories else []
-                logger.debug(
-                    "Dict without expected keys, treating as single memory: %d items",
-                    len(results_list),
-                )
-        else:
-            results_list = []
-            logger.debug("Unexpected response type: %s", type(memories))
-        return json.dumps(results_list, indent=2)
+        results_list = memories or []
+        logger.debug("memories is list with %d items", len(memories))
+
+        if not results_list:
+            return ""
+        return json.dumps(_memory_list_for_agent(results_list), indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -1098,15 +1131,7 @@ def mem0_retrieve(
             run_id=op_id,  # None if cross_operation=True for cross-learning
         )
 
-        # Normalize to list with better error handling
-        if memories is None:
-            results_list = []
-        elif isinstance(memories, list):
-            results_list = memories
-        elif isinstance(memories, dict):
-            results_list = memories.get("results", [])
-        else:
-            results_list = []
+        results_list = memories or []
 
         # Debug: Verify categories in retrieved memories
         if results_list:
@@ -1121,7 +1146,7 @@ def mem0_retrieve(
             )
         else:
             logger.warning("RETRIEVE returned 0 results for query='%s'", query)
-        return json.dumps(results_list, indent=2)
+        return json.dumps(_memory_list_for_agent(results_list), indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -1901,6 +1926,7 @@ class Mem0ServiceClient:
                     search_kwargs[size_kw] = top_k
                     results = self.mem0.search(query=query, **search_kwargs)
                     normalised = self._normalise_results_list(results)
+                    # TODO: group plan and task to latest by uid and return latest
                     if normalised:
                         return normalised[:top_k]
                 except TypeError:
@@ -2326,6 +2352,7 @@ class Mem0ServiceClient:
                 "status_reason": task.status_reason,
                 "created_at": datetime.now().isoformat(),
                 "type": "task",
+                "active": True,
             }
         )
         if op_id:
@@ -2352,6 +2379,7 @@ class Mem0ServiceClient:
                         status_reason="demoted",
                     )
                     demote_meta = {k: v for k, v in tmeta.items() if k not in ("created_at",)}
+                    demote_meta["active"] = False
                     self.store_task(task=demoted, user_id=user_id, metadata=demote_meta)
             except Exception as e:
                 logger.debug("Could not enforce single active task: %s", e)
@@ -2714,9 +2742,9 @@ def initialize_memory_system(
     # Create enhanced config with operation context
     enhanced_config = config.copy() if config else {}
     enhanced_config["operation_id"] = (
-            operation_id or os.environ["CYBER_OPERATION_ID"] or f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            operation_id or os.environ.get("CYBER_OPERATION_ID", f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     )
-    enhanced_config["target_name"] = target_name or os.environ["CYBER_TARGET_NAME"] or "default_target"
+    enhanced_config["target_name"] = target_name or os.environ.get("CYBER_TARGET_NAME", "default_target")
     if enhanced_config["target_name"] == "default_target":
         enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["operation_id"]}"'
     else:

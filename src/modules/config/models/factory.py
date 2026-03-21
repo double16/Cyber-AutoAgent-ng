@@ -9,6 +9,7 @@ applying provider-specific settings, and managing credentials.
 import dataclasses
 import logging
 import os
+import sys
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -176,13 +177,15 @@ def _resolve_prompt_token_limit(
     except Exception:
         pass
 
+    prompt_token_clamp = PROMPT_TOKEN_FALLBACK_LIMIT if PROMPT_TOKEN_FALLBACK_LIMIT > 0 else sys.maxsize
+
     # Priority 2: Ollama metadata
     if provider == "ollama" and model_id:
         env_reader = EnvironmentReader()
 
         num_ctx = env_reader.get_int("OLLAMA_CONTEXT_LENGTH", 0)
         if num_ctx >= 2048:
-            return num_ctx
+            return min(num_ctx, prompt_token_clamp)
 
         ollama_client = ollama.Client(host=get_ollama_host(env_reader), timeout=get_ollama_timeout(env_reader))
 
@@ -195,7 +198,7 @@ def _resolve_prompt_token_limit(
                     k, v = line.split(sep=None, maxsplit=1)
                     ollama_parameters[k] = v
                 if "num_ctx" in ollama_parameters:
-                    return int(ollama_parameters["num_ctx"])
+                    return min(int(ollama_parameters["num_ctx"]), prompt_token_clamp)
 
             # ensure model is loaded, then inspect running process info
             ollama_client.generate(
@@ -205,7 +208,7 @@ def _resolve_prompt_token_limit(
             )
             for m in ollama_client.ps().models:
                 if m.model == model_id:
-                    return m.context_length
+                    return min(m.context_length, prompt_token_clamp)
 
         except Exception:
             logger.warning(
@@ -218,7 +221,7 @@ def _resolve_prompt_token_limit(
         logger.info(
             "Using static registry input limit=%d for model %s", limit, model_id
         )
-        return limit
+        return min(limit, prompt_token_clamp)
 
     # Priority 4: LiteLLM automatic detection (check max_input_tokens)
     if provider == "litellm" and model_id:
@@ -227,7 +230,7 @@ def _resolve_prompt_token_limit(
             logger.info(
                 "Using LiteLLM detected input limit=%d for model %s", limit, model_id
             )
-            return limit
+            return min(limit, prompt_token_clamp)
 
     # Priority 5: CYBER_CONTEXT_LIMIT (explicit context limit config)
     if PROMPT_TOKEN_FALLBACK_LIMIT > 0:
@@ -248,7 +251,7 @@ def _resolve_prompt_token_limit(
             provider,
             model_id,
         )
-        return provider_default
+        return min(provider_default, prompt_token_clamp)
 
     # No limit could be determined - warn and return None
     logger.warning(

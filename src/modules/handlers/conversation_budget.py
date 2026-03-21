@@ -744,7 +744,7 @@ class MappingConversationManager(SummarizingConversationManager):
 
         This is called when window is exceeded to guarantee message count stays bounded.
         Tool pairs (toolUse + toolResult) are kept together to avoid API errors:
-        - 'messages with role tool must be a response to a preceeding message with tool_calls'
+        - 'messages with role tool must be a response to a preceding message with tool_calls'
         - 'toolResult blocks exceeds the number of toolUse blocks of previous turn'
         """
         messages = getattr(agent, "messages", [])
@@ -765,7 +765,7 @@ class MappingConversationManager(SummarizingConversationManager):
             return
 
         # Build set of indices to remove, ensuring we remove complete tool pairs
-        protected_indices = _protected_indices_for_active_task(messages)
+        protected_indices = _protected_indices_for_active_state(messages)
         indices_to_remove: set[int] = set()
         removed_count = 0
 
@@ -773,52 +773,30 @@ class MappingConversationManager(SummarizingConversationManager):
         idx = start_idx
         while idx < end_idx and removed_count < count:
             msg = messages[idx]
-            if idx in protected_indices:
-                idx += 1
-                continue
-            content = msg.get("content", [])
 
-            # Check if this message contains toolUse (assistant message)
-            has_tool_use = any(
-                isinstance(block, dict) and "toolUse" in block
-                for block in content
-                if isinstance(block, dict)
-            )
-
-            # Check if this message contains toolResult (user message)
-            has_tool_result = any(
-                isinstance(block, dict) and "toolResult" in block
-                for block in content
-                if isinstance(block, dict)
-            )
+            has_tool_use = _message_has_tool_use(msg)
+            has_tool_result = _message_has_tool_result(msg)
 
             if has_tool_use:
                 # This is assistant message with toolUse.
                 # Only remove it if we can also remove its paired toolResult within the prunable range.
                 next_idx = idx + 1
 
-                if idx in protected_indices or next_idx in protected_indices:
-                    idx += 1
-                    continue
-
                 # If the paired toolResult would fall outside the prunable range, skip this toolUse
                 # to avoid orphaning tool turns.
                 if next_idx >= end_idx or next_idx >= len(messages):
-                    idx += 1
+                    idx = next_idx + 1
                     continue
 
                 next_msg = messages[next_idx]
-                next_content = next_msg.get("content", [])
-                next_has_result = any(
-                    isinstance(block, dict) and "toolResult" in block
-                    for block in next_content
-                    if isinstance(block, dict)
-                )
+                next_has_result = _message_has_tool_result(next_msg)
 
                 if next_has_result:
-                    indices_to_remove.add(idx)
-                    indices_to_remove.add(next_idx)
-                    removed_count += 2
+                    if idx not in protected_indices and next_idx not in protected_indices:
+                        indices_to_remove.add(idx)
+                        indices_to_remove.add(next_idx)
+                        removed_count += 2
+
                     idx = next_idx + 1
                     continue
 
@@ -827,13 +805,15 @@ class MappingConversationManager(SummarizingConversationManager):
                 continue
 
             elif has_tool_result:
-                # Orphaned toolResult - should not happen but remove it safely
-                indices_to_remove.add(idx)
-                removed_count += 1
+                if idx == 0 or not _message_has_tool_use(messages[idx - 1]):
+                    # Orphaned toolResult - should not happen but remove it safely
+                    indices_to_remove.add(idx)
+                    removed_count += 1
             else:
                 # Regular message without tool content - safe to remove
-                indices_to_remove.add(idx)
-                removed_count += 1
+                if idx not in protected_indices:
+                    indices_to_remove.add(idx)
+                    removed_count += 1
 
             idx += 1
 
@@ -1726,6 +1706,13 @@ def _iter_message_texts(message: Dict[str, Any]) -> List[str]:
         if isinstance(bl_json, str) and bl_json:
             out.append(_json_to_compact_str(bl_json))
 
+        # Tool use blocks
+        tool_use = block.get("toolUse")
+        if isinstance(tool_use, dict):
+            tool_input = tool_use.get("input")
+            if tool_input:
+                out.append(_json_to_compact_str(tool_input))
+
         # Tool result text blocks
         tool_result = block.get("toolResult")
         if isinstance(tool_result, dict):
@@ -1792,9 +1779,15 @@ def _is_plan_tool_result_message(message: Dict[str, Any]) -> bool:
         tr = block.get("toolResult")
         if not isinstance(tr, dict):
             continue
-        tool_use_id = tr.get("toolUseId") or tr.get("_toolUseId")
-        if isinstance(tool_use_id, str) and tool_use_id in _PLAN_TOOL_NAMES:
+        tool_name = tr.get("name") or tr.get("_toolUseId") or tr.get("toolUseId")
+        if isinstance(tool_name, str) and tool_name in _PLAN_TOOL_NAMES:
             return True
+        try:
+            if "[PLAN] plan_overview" in json.dumps(tr.get("content", "")):
+                return True
+        except Exception:
+            pass
+
     return False
 
 
@@ -1861,7 +1854,7 @@ def _message_has_tool_result(message: Dict[str, Any]) -> bool:
     return any(isinstance(b, dict) and "toolResult" in b for b in content)
 
 
-def _protected_indices_for_active_task(messages: List[Dict[str, Any]]) -> set[int]:
+def _protected_indices_for_active_state(messages: List[Dict[str, Any]]) -> set[int]:
     """Indices to preserve: latest plan tool result message, latest active_task marker + evidence-referencing messages + tool pairs."""
     protected: set[int] = set()
 
@@ -1907,9 +1900,33 @@ def _protected_indices_for_active_task(messages: List[Dict[str, Any]]) -> set[in
 
 def _message_preservation_key(message: Dict[str, Any]) -> str:
     """Build a stable key for de-duplication when restoring preserved messages."""
-    role = str(message.get("role", ""))
+    idents = [str(message.get("role", ""))]
+
+    content = message.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+
+            # Tool use blocks
+            tool_use = block.get("toolUse")
+            if isinstance(tool_use, dict):
+                tool_id = tool_use.get("id") or tool_use.get("toolUseId") or ""
+                tool_name = tool_use.get("name") or tool_use.get("toolUseId") or ""
+                if tool_id:
+                    idents.append(tool_id)
+                if tool_name:
+                    idents.append(tool_name)
+
+            # Tool result text blocks
+            tool_result = block.get("toolResult")
+            if isinstance(tool_result, dict):
+                tool_id = tool_result.get("id") or tool_result.get("toolUseId") or ""
+                if tool_id:
+                    idents.append(tool_id)
+
     joined = "\n".join(_iter_message_texts(message))
-    return role + "|" + joined[:512]
+    return "|".join(idents) + "|" + joined[:512]
 
 
 def _restore_preserved_messages(
@@ -1930,7 +1947,7 @@ def _restore_preserved_messages(
     preserve_n = max(1, int(preserve_first_messages or 0))
     preserve = before_messages[:preserve_n]
 
-    protected_indices = _protected_indices_for_active_task(before_messages)
+    protected_indices = _protected_indices_for_active_state(before_messages)
     protected_msgs = [
         before_messages[i]
         for i in sorted(protected_indices)
@@ -1978,30 +1995,73 @@ def _dedupe_state_markers(agent: Agent) -> None:
     if not isinstance(messages, list) or not messages:
         return
 
-    last_active_idx, _ = _get_latest_active_task(messages)
-    last_plan_idx = _get_latest_plan_tool_result(messages)
+    protected_indices = _protected_indices_for_active_state(messages)
+    indices_to_remove: set[int] = set()
 
-    def _should_keep(message: dict[str, Any], idx: int) -> bool:
+    def _dedupe_candidate(message: Dict[str, Any]) -> bool:
         texts = _iter_message_texts(message)
+        joined = "\n".join(texts)
 
         # Remove reflection_snapshot markers regardless of where they appear
-        for t in texts:
-            if isinstance(t, str) and "<reflection_snapshot>" in t:
-                return False
+        if "<reflection_snapshot>" in joined:
+            return True
 
-        joined = "\n".join(texts)
         if "<active_task" in joined:
             payload = _find_active_task_payload_in_text(joined)
             if payload is not None:
-                return last_active_idx is not None and idx == last_active_idx
+                return True
 
-        # Dedupe plan tool result messages, keeping only the most recent one
         if _is_plan_tool_result_message(message):
-            return last_plan_idx is not None and idx == last_plan_idx
+            return True
 
-        return True
+        return False
 
-    messages[:] = [msg for idx, msg in enumerate(messages) if _should_keep(msg, idx)]
+    idx = 0
+    while idx < len(messages):
+        msg = messages[idx]
+
+        has_tool_use = _message_has_tool_use(msg)
+
+        if has_tool_use:
+            # This is assistant message with toolUse.
+            # Only remove it if we can also remove its paired toolResult within the prunable range.
+            next_idx = idx + 1
+
+            # If the paired toolResult would fall outside the prunable range, skip this toolUse
+            # to avoid orphaning tool turns.
+            if next_idx >= len(messages):
+                idx = next_idx + 1
+                continue
+
+            next_msg = messages[next_idx]
+            next_has_result = _message_has_tool_result(next_msg)
+
+            if next_has_result:
+                if idx not in protected_indices and next_idx not in protected_indices and _dedupe_candidate(next_msg):
+                    indices_to_remove.add(idx)
+                    indices_to_remove.add(next_idx)
+
+                idx = next_idx + 1
+                continue
+
+        else:
+            # Regular message without tool content
+            if idx not in protected_indices and _dedupe_candidate(msg):
+                indices_to_remove.add(idx)
+
+        idx += 1
+
+    if not indices_to_remove:
+        return
+
+    # Build new message list, skipping marked indices
+    new_messages: list[Message] = [
+        msg for i, msg in enumerate(messages)
+        if i not in indices_to_remove
+    ]
+
+    # In-place modification per SDK contract
+    agent.messages[:] = new_messages
 
 
 def _ensure_prompt_within_budget(agent: Agent) -> None:

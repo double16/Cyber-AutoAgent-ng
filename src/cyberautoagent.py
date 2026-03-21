@@ -42,6 +42,7 @@ from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ReadTimeout as RequestsReadTimeout
 from strands.telemetry.config import StrandsTelemetry
+from strands.types.content import Message
 from strands.types.exceptions import MaxTokensReachedException
 
 import litellm
@@ -56,7 +57,7 @@ from modules.config.system.environment import auto_setup, clean_operation_memory
 from modules.config.manager import get_config_manager
 from modules.config.types import get_default_base_dir
 from modules.handlers.base import StepLimitReached
-from modules.handlers.conversation_budget import strip_reflection_snapshot_messages
+from modules.handlers.conversation_budget import strip_reflection_snapshot_messages, _dedupe_state_markers
 from modules.handlers.utils import (
     Colors,
     get_output_path,
@@ -68,7 +69,7 @@ from modules.handlers.utils import (
     dumpstacks,
 )
 from modules.prompts.factory import get_reflection_snapshot
-from modules.tools import browser, channel_close_all, mem0_get_active_task
+from modules.tools import browser, channel_close_all, mem0_get_active_task, mem0_get_plan, mem0_list
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
 
@@ -588,6 +589,7 @@ def main():
     logger.info("Provider: %s", args.provider)
     logger.info("Model: %s", server_config.llm.model_id)
     logger.info("Temperature: %s", server_config.llm.temperature)
+    # FIXME: set server_config.llm.max_tokens earlier, this isn't the real max tokens
     logger.info("Max tokens: %d", server_config.llm.max_tokens)
     if server_config.llm.top_p is not None:
         logger.info("Top P: %s", server_config.llm.top_p)
@@ -797,15 +799,62 @@ def main():
                         plan_current_phase=None,
                     )
                     extra_message = ""
+
                     if actionless_step_count > 0:
-                        logger.warning("Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
-                        active_task = mem0_get_active_task() or ""
-                        if "ACTION" not in reflection_snapshot:
-                            if 'status="active"' in active_task:
-                                extra_message += f"**MANDITORY**: The operation is not complete. There are tasks pending. Continue by executing this task:\n{active_task}\n"
+                        if actionless_step_count == 1:
+                            logger.warning(
+                                "Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
+
+                            # remove trailing assistant messages, they may encourage the agent to consider the operation complete
+                            while len(agent.messages) > 3:
+                                tool_block_count = 0
+                                for block in agent.messages[-1].get("content", []):
+                                    if not isinstance(block, dict):
+                                        continue
+                                    if "toolUse" in block or "toolResult" in block:
+                                        tool_block_count += 1
+                                if tool_block_count == 0:
+                                    agent.messages.pop()
+                                else:
+                                    break
+
+                            extra_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
+                        else:
+                            active_plan = mem0_get_plan() or ""
+                            if active_plan and active_plan.get("assessment_complete"):
+                                # plan is complete, legit exit
+                                break
+
+                            active_task = mem0_get_active_task() or ""
+                            memories = mem0_list()
+                            if memories.startswith("Error:"):
+                                memories = ""
+                            # TODO: consider summarizing the memories to reduce content size and increase understanding
+
+                            logger.warning(
+                                "Attempting to rebuild context because no tool calls were detected in last execution loop.")
+
+                            if not active_plan:
+                                agent.messages[:] = [Message(role="user", content=[{"text": initial_prompt}])]
+                                if memories:
+                                    agent.messages.append(Message(role="user",
+                                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
+                                extra_message += f"**MANDITORY ACTION**: You have missed an important step, create a strategic plan via mem0_store_plan()."
                             else:
-                                extra_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress.\n"
-                    current_message = f"{extra_message}<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
+                                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT\n{active_plan}"}])]
+                                if memories:
+                                    agent.messages.append(Message(role="user",
+                                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
+
+                                if 'status="active"' in active_task:
+                                    agent.messages.append(Message(role="user", content=[{"text": active_task}]))
+                                    extra_message += f"**MANDITORY ACTION**: The operation is not complete. There are tasks pending. Continue by executing the active task."
+                                elif active_plan:
+                                    extra_message += f"**MANDITORY ACTION**: Move to next plan phase if current phase criteria met."
+
+                    current_message = f"<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
+                    if extra_message:
+                        current_message = extra_message + "\n\n" + current_message
                 else:
                     break
 

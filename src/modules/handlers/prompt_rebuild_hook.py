@@ -470,13 +470,13 @@ Without category='finding', your work will NOT appear in the final report.
 
         try:
             # Use get_active_plan if available (more direct)
-            if hasattr(self.memory, "get_active_plan"):
-                active_plan = self.memory.get_active_plan(operation_id=self.operation_id)
-                if active_plan:
-                    # Return raw memory content for LLM interpretation
-                    return str(active_plan.get("memory", ""))
+            active_plan = self.memory.get_active_plan(operation_id=self.operation_id)
+            if active_plan:
+                # Return raw memory content for LLM interpretation
+                return str(active_plan.get("memory", ""))
 
             # Otherwise, search for any plan-like memory
+            # TODO: is this necessary??
             results = self.memory.search_memories(
                 query="plan objective phase"
             )[:1]
