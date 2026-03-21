@@ -323,6 +323,7 @@ RUN pipx install --global bloodhound && \
     # GraphQL Clairvoyance - GraphQL schema enumeration
     pipx install --global clairvoyance && \
     pipx install --global xsstrike && \
+    pipx install --global lfimap-ng && \
     # Install Volatility3 (Memory Forensics) - Optional
     pipx install --global volatility3 && \
     # Install PwnCat-CS (Advanced Reverse Shell Handler)

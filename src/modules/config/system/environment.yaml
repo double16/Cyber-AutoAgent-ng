@@ -81,6 +81,11 @@ cyber_tools:
     preference: preferred
     caps: [injection_testing, exploitation_framework]
     canary: "commix --help"
+  lfimap:
+    description: "Local File Inclusion Exploitation Framework."
+    preference: preferred
+    caps: [file_inclusion]
+    canary: "lfimap --help"
   idor-forge:
     description: "Detection and exploitation of Insecure Direct Object Reference (IDOR) vulnerabilities."
     preference: preferred
