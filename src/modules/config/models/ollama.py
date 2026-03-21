@@ -278,18 +278,26 @@ class OllamaModel(Model):
                 return {"messageStop": {"stopReason": reason}}
 
             case "metadata":
-                return {
-                    "metadata": {
-                        "usage": {
-                            "inputTokens": int(event["data"].prompt_eval_count),
-                            "outputTokens": int(event["data"].eval_count),
-                            "totalTokens": int(event["data"].eval_count) + int(event["data"].prompt_eval_count),
+                prompt_eval_count = event["data"].prompt_eval_count
+                eval_count = event["data"].eval_count
+                total_duration = event["data"].total_duration
+                if prompt_eval_count is None or eval_count is None or total_duration is None:
+                    return {}
+                try:
+                    return {
+                        "metadata": {
+                            "usage": {
+                                "inputTokens": int(prompt_eval_count),
+                                "outputTokens": int(eval_count),
+                                "totalTokens": int(eval_count) + int(prompt_eval_count),
+                            },
+                            "metrics": {
+                                "latencyMs": int(total_duration / 1e6),
+                            },
                         },
-                        "metrics": {
-                            "latencyMs": int(event["data"].total_duration / 1e6),
-                        },
-                    },
-                }
+                    }
+                except (ValueError, TypeError):
+                    return {}
 
             case _:
                 raise RuntimeError(f"chunk_type=<{event['chunk_type']} | unknown type")
