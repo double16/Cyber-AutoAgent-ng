@@ -100,10 +100,6 @@ Operation: {{ operation_id }}
 
 </planning_and_reflection>
 
-<reflection_snapshot>
-{{ reflection_snapshot }}
-</reflection_snapshot>
-
 <task_management>
 **Purpose**: Externalized work queue. Exactly one task is active at a time. You may CREATE tasks for any phase, but you may ACTIVATE/EXECUTE tasks only when `task.phase == current_phase`.
 

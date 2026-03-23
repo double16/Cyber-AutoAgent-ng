@@ -232,6 +232,7 @@ sequenceDiagram
     participant E as Evidence
     participant L as Observability
     participant R as Evaluator
+    participant S as Tasks
 
     U->>A: Start Assessment
     A->>L: Initialize Trace
@@ -246,14 +247,16 @@ sequenceDiagram
         A->>L: Log Tool Execution
         A->>E: Store Findings
         A->>L: Log Evidence Storage
+        A->>S: Create Durable Tasks
 
         alt Critical Discovery
-            A->>T: Exploit Immediately
+            A->>S: Create Task
             T-->>A: Access Gained
             A->>E: Store Evidence
             A->>L: Log Exploitation
         end
 
+        A->>A: Check Tasks
         A->>A: Check Progress
 
         alt Success
@@ -276,7 +279,7 @@ sequenceDiagram
 - **Intelligent Analysis**: Agent continuously analyzes situation using metacognitive reasoning
 - **Dynamic Tool Selection**: Chooses appropriate tools based on confidence and findings
 - **Evidence Collection**: All discoveries stored in persistent memory with categorization
-- **Immediate Exploitation**: Critical vulnerabilities trigger immediate exploitation attempts
+- **Durable Tasks**: Durable tasks in long-term memory, enabling sustained multi-phase operations without losing threads.
 - **Automated Evaluation**: System scores tool selection, evidence quality, and methodology
 - **Report Generation**: Final analysis combines findings with performance metrics
 
@@ -377,13 +380,14 @@ Cyber-AutoAgent supports multiple model providers for maximum flexibility:
 
 ### Comparison
 
-| Feature         | Bedrock      | Ollama             | LiteLLM            |
-|-----------------|--------------|--------------------|--------------------|
-| Cost            | Pay per call | Free               | Varies by provider |
-| Performance     | High         | Hardware dependent | Provider dependent |
-| Offline Use     | No           | Yes                | No                 |
-| Setup           | Easy         | Higher             | Medium             |
-| Model Selection | 100+ models  | Limited            | 100+ models        |
+| Feature         | Bedrock               | Ollama             | LiteLLM              |
+|-----------------|-----------------------|--------------------|----------------------|
+| Cost            | Pay per call          | Free               | Varies by provider   |
+| Performance     | High                  | Hardware dependent | Provider dependent   |
+| Privacy         | Shared Responsibility | Yes                | Varies by provider   |
+| Offline Use     | No                    | Yes                | No                   |
+| Setup           | Easy                  | Higher             | Medium               |
+| Model Selection | 100+ models           | Limited            | 100+ models          |
 
 ## Observability & Evaluation
 
