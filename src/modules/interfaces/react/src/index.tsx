@@ -57,10 +57,10 @@ const cli = meow(`
     $ cyber-react [options]
 
   Options
-    --target, -t         Target system/network to assess
-    --objective, -o      Security assessment objective
-    --module, -m         Security module to use (default: web)
-    --iterations, -i     Maximum tool executions (default: 50)
+    --target, -t        Target system/network to assess
+    --objective, -o     Security assessment objective
+    --module, -m        Security module to use (default: web)
+    --iterations, -i    Maximum tool executions (default: 50)
     --auto-run          Start assessment immediately without UI
     --auto-approve      Auto-approve tool executions (no confirmations)
     --memory-mode       Memory mode: auto (default) or fresh
@@ -70,6 +70,8 @@ const cli = meow(`
     --observability     Enable observability tracing (default: false)
     --debug, -d         Enable debug mode
     --headless          Run in headless mode for scripting
+    --continue          Continue a previous operation, optionally by operation ID, defaults to last operation
+    --report            Re-generate a report, optionally by operation ID, defaults to last operation
     --deployment-mode   Deployment mode: local-cli, single-container, full-stack
     --mcp-enabled       Enable MCP servers
     --mcp-conns         Define MCP servers using JSON
@@ -130,6 +132,16 @@ const cli = meow(`
     headless: {
       type: 'boolean',
       default: false
+    },
+    continue: {
+      type: 'string',
+      isMultiple: false,
+      isRequired: false,
+    },
+    report: {
+      type: 'string',
+      isMultiple: false,
+      isRequired: false,
     },
     deploymentMode: {
       type: 'string',
@@ -298,7 +310,9 @@ const runAutoAssessment = async () => {
       const assessmentParams = {
         module: cli.flags.module,
         target: cli.flags.target,
-        objective: cli.flags.objective || `Comprehensive ${cli.flags.module} security assessment`
+        objective: cli.flags.objective || `Comprehensive ${cli.flags.module} security assessment`,
+        continueOperation: cli.flags.continue,
+        reportOnly: cli.flags.report,
       };
 
       // Execute assessment and wait for completion

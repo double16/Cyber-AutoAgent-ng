@@ -504,6 +504,46 @@ cyber-react \
   --headless
 ```
 
+### Continue Assessment
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --continue
+```
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --continue OP_20260320_101501
+```
+
+### Re-generate Report
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --report
+```
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --report OP_20260320_101501
+```
+
 ## Best Practices
 
 ### Assessment Workflow

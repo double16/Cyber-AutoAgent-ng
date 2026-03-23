@@ -641,7 +641,19 @@ export class PythonExecutionService extends EventEmitter {
         '--iterations', String(config.iterations || 100),
         '--provider', config.modelProvider || 'bedrock',
       ];
-      
+
+      if (params.continueOperation === true || params.continueOperation === "") {
+        args.push('--continue');
+      } else if (params.continueOperation) {
+        args.push('--continue', params.continueOperation);
+      }
+
+      if (params.reportOnly === true || params.reportOnly === "") {
+        args.push('--report');
+      } else if (params.reportOnly) {
+        args.push('--report', params.reportOnly);
+      }
+
       if (config.modelId) {
         args.push('--model', config.modelId);
       }

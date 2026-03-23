@@ -22,6 +22,8 @@ export interface Operation {
   logs: OperationLog[];
   cost: CostInfo;
   model: string;
+  continueOperation?: string | boolean;
+  reportOnly?: string | boolean;
 }
 
 export interface OperationLog {
@@ -183,7 +185,14 @@ export class OperationManager {
   }
 
   // Start a new operation
-  startOperation(module: string, target: string, objective: string, model: string): Operation {
+  startOperation(
+      module: string,
+      target: string,
+      objective: string,
+      model: string,
+      continueOperation?: string | boolean,
+      reportOnly?: string | boolean,
+  ): Operation {
     // Reset session cost for new operation to prevent accumulation across operations
     this.sessionCost = {
       tokensUsed: 0,
@@ -216,7 +225,9 @@ export class OperationManager {
         cacheWriteTokens: 0,
         modelPricing: this.getModelPricing(model)
       },
-      model
+      model,
+      continueOperation,
+      reportOnly,
     };
 
     this.operations.set(operation.id, operation);
