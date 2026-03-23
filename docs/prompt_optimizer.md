@@ -399,6 +399,7 @@ outputs/<target>/OP_<id>/
 ├── execution_prompt_optimized.txt  # Copied from module template, then evolves
 ├── adaptive_prompt.json            # Optional overlay directives
 ├── security_assessment_report.md   # Final assessment report
+├── security_assessment_report.json # Final assessment report data (can be used in other tools)
 ├── cyber_operations.log            # Operation log with all events
 ├── artifacts/                      # Ad-hoc files created during operation
 └── tools/                          # Custom tools created by agent

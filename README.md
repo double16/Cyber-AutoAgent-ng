@@ -816,8 +816,9 @@ cyber-autoagent/
 ├── outputs/                  # Unified output directory (auto-created)
 │   └── <target>/             # Target-specific organization
 │       ├── OP_<id>/          # Operation-specific files
-│       │   ├── security_assessment_report.md  # Security findings (when generated)
-│       │   ├── cyber_operations.log           # Operation log
+│       │   ├── security_assessment_report.md   # Final assessment report (when generated)
+│       │   ├── security_assessment_report.json # Final assessment report data (when generated, can be used in other tools)
+│       │   ├── cyber_operations.log            # Operation log
 │       │   ├── artifacts/  # Ad-hoc files
 │       │   └── tools/      # Custom tools created by agent
 │       └── memory/         # Cross-operation memory

@@ -36,7 +36,7 @@ class ReportGenerator:
     """Factory for a report-generation Agent with a single builder tool.
 
     The agent is configured with a concise system prompt and the
-    build_report_sections tool. Output is returned to the caller.
+    output of the build_report_sections function. Output is returned to the caller.
     """
 
     @staticmethod
@@ -120,6 +120,7 @@ class ReportGenerator:
                 ollama_client_args={
                     "timeout": cfg.get_ollama_timeout(),
                 },
+                options=cfg.get_ollama_options(),
             )
             setattr(model, "_output_tokens", llm_cfg.max_tokens)
         else:  # litellm
@@ -140,9 +141,6 @@ class ReportGenerator:
             model = LiteLLMModel(model_id=mid, params=params, client_args=client_args)
             setattr(model, "_output_tokens", llm_max)
 
-        # Import the report builder tool
-        from modules.tools.report_builder import build_report_sections
-
         # Create agent with report-specific configuration
         trace_attrs = {
             # Core identification - CRITICAL for trace continuity
@@ -153,6 +151,7 @@ class ReportGenerator:
             # Tags for filtering and categorization
             "langfuse.tags": [
                 "Cyber-AutoAgent",
+                prov,
                 operation_id,
             ],
             "langfuse.environment": cfg.getenv(
@@ -187,7 +186,6 @@ class ReportGenerator:
             model=model,
             name=f"Cyber-ReportGenerator {operation_id}",
             system_prompt=get_report_agent_system_prompt(),
-            tools=[build_report_sections],
             trace_attributes=trace_attrs if operation_id else None,
             callback_handler=NoOpCallbackHandler(),
             hooks=[ToolUseIdHook()],

@@ -250,6 +250,7 @@ outputs/
 └── <target>/
     ├── OP_<timestamp>/
     │   ├── security_assessment_report.md    # Assessment report
+    │   ├── security_assessment_report.json  # Assessment report data (can be used in other tools)
     │   ├── logs/
     │   │   └── cyber_operations.log
     │   └── utils/

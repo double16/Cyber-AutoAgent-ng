@@ -414,15 +414,15 @@ def get_memory_context_guidance(
 
     if not has_memory_path and not has_existing_memories:
         # Fresh operation guidance
-        return """**CRITICAL FIRST ACTION**: Create a strategic plan via mem0_store_plan().
+        return """**CRITICAL FIRST ACTION**: Create a strategic plan via `mem0_store_plan()`.
 """
     else:
         # Continuing assessment guidance
         count_str = str(total_count) if total_count else "0"
         return f"""Continuing assessment with {count_str} existing memories.
 **CRITICAL FIRST ACTIONS**
-  1. Load all memories: mem0_list().
-  2. Load the plan: mem0_get_plan(). If none, create it immediately via mem0_store_plan() before other tools.
+  1. Load all memories: `mem0_list()`.
+  2. Load the plan: `mem0_get_plan()`. If none, create it immediately via `mem0_store_plan()` before other tools.
   3. Perform a Memory Intake Pass:
     - Summarize what’s already known (key facts + evidence paths).
     - Identify unknown / next questions.
@@ -589,7 +589,7 @@ def get_system_prompt(
     prompt = prompt.replace("{{ max_steps }}", str(max_steps))
     prompt = prompt.replace("{{ remaining_steps }}", str(remaining_steps))
     prompt = prompt.replace("{{ memory_context }}", memory_context_text)
-    prompt = prompt.replace("{{ reflection_snapshot }}", reflection_snapshot)
+    prompt = prompt.replace("{{ reflection_snapshot }}", reflection_snapshot)  # reflection_snapshot is done with each step, not necessary in the system prompt
     prompt = prompt.replace("{{ tools_guide }}", tools_guide_text)
     prompt = prompt.replace("{{ operation_paths }}", operation_paths_block)
 

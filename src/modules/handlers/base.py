@@ -7,14 +7,17 @@ used across different handler components.
 
 import os
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 
 # Environment configuration
+
 # Helper function to detect if running in Docker
+@lru_cache(maxsize=1)
 def is_docker():
     """Check if running inside a Docker container."""
-    return os.path.exists("/.dockerenv") or os.path.exists("/app")
+    return os.path.exists("/.dockerenv") or os.environ.get("CONTAINER") == "docker" or os.path.exists("/app")
 
 
 # Use langfuse-web:3000 when in Docker, localhost:3000 otherwise

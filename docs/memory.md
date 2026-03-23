@@ -215,9 +215,10 @@ mem0_store_plan(
 ### Operation Output Structure
 ```
 ./outputs/<target>/<operation_id>/
-├── artifacts/                     # Operation artifacts
-├── security_assessment_report.md  # Final assessment report
-└── logs/                          # Operation logs
+├── artifacts/                      # Operation artifacts
+├── security_assessment_report.md   # Final assessment report
+├── security_assessment_report.json # Final assessment report data (can be used in other tools)
+└── logs/                           # Operation logs
     └── cyber_operations.log
 ```
 

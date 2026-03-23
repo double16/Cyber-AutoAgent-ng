@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from modules.tools.memory import clear_memory_client
-from modules.tools.report_builder import build_report_sections
+from modules.handlers.report_generator import build_report_sections
 
 
 @pytest.fixture(autouse=True)
@@ -66,100 +66,98 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
 
         # Mock list_memories to return both tagged and untagged
         mock_client = mock_client_cls.return_value
-        mock_client.list_memories.return_value = {
-            "results": [
-                {
-                    "id": "2",
-                    "memory": f"[PLAN]{json.dumps(plan)}",
-                    "metadata": {"category": "plan", "operation_id": op_id, "active": True},
-                },
-                {
-                    "id": "100",
-                    "memory": "[VULNERABILITY] A [WHERE] /a [IMPACT] /a/impact [EVIDENCE] /a/evidence [STEPS] /a/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "CRITICAL", "confidence": "90",
-                                 "validation_status": "verified"},
-                },
-                {
-                    "id": "200",
-                    "memory": "[VULNERABILITY] B [WHERE] /b [IMPACT] /b/impact [EVIDENCE] /b/evidence [STEPS] /b/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "HIGH", "confidence": "40",
-                                 "validation_status": "hypothesis"},
-                },
-                {
-                    "id": "201",
-                    "memory": "[VULNERABILITY] C [WHERE] /c [IMPACT] /c/impact [EVIDENCE] /c/evidence [STEPS] /c/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "HIGH", "confidence": "90",
-                                 "validation_status": "verified"},
-                },
-                {
-                    "id": "300",
-                    "memory": "[VULNERABILITY] D [WHERE] /d [IMPACT] /d/impact [EVIDENCE] /d/evidence [STEPS] /d/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "90",
-                                 "validation_status": "verified"},
-                },
-                {
-                    "id": "301",
-                    "memory": "[VULNERABILITY] E [WHERE] /e [IMPACT] /e/impact [EVIDENCE] /e/evidence [STEPS] /e/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "80",
-                                 "validation_status": "verified"},
-                },
-                {
-                    "id": "302",
-                    "memory": "[VULNERABILITY] F [WHERE] /f [IMPACT] /f/impact [EVIDENCE] /f/evidence [STEPS] /f/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "30",
-                                 "validation_status": "hypothesis"},
-                },
-                {
-                    "id": "400",
-                    "memory": "[VULNERABILITY] G [WHERE] /g [IMPACT] /g/impact [EVIDENCE] /g/evidence [STEPS] /g/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "90",
-                                 "validation_status": "verified"},
-                },
-                {
-                    "id": "401",
-                    "memory": "[VULNERABILITY] H [WHERE] /h [IMPACT] /h/impact [EVIDENCE] /h/evidence [STEPS] /h/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "70",
-                                 "validation_status": "verified"},
-                },
-                {
-                    "id": "402",
-                    "memory": "[VULNERABILITY] I [WHERE] /i [IMPACT] /i/impact [EVIDENCE] /i/evidence [STEPS] /i/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "50",
-                                 "validation_status": "hypothesis"},
-                },
-                {
-                    "id": "403",
-                    "memory": "[VULNERABILITY] J [WHERE] /j [IMPACT] /j/impact [EVIDENCE] /j/evidence [STEPS] /j/steps",
-                    "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "20",
-                                 "validation_status": "hypothesis"},
-                },
-                {
-                    "id": "500",
-                    "memory": "[OBSERVATION] K /k",
-                    "metadata": {"category": "observation", "operation_id": op_id},
-                },
-                {
-                    "id": "501",
-                    "memory": "[OBSERVATION] L /l",
-                    "metadata": {"category": "observation", "operation_id": op_id},
-                },
-                {
-                    "id": "502",
-                    "memory": "[OBSERVATION] M /m",
-                    "metadata": {"category": "observation"},
-                },
-                {
-                    "id": "503",
-                    "memory": "[OBSERVATION] N /n",
-                    "metadata": {"category": "observation"},
-                },
-                {
-                    "id": "504",
-                    "memory": "[OBSERVATION] O /o",
-                    "metadata": {"category": "observation"},
-                },
-            ]
-        }
+        mock_client.list_memories.return_value = [
+            {
+                "id": "2",
+                "memory": f"[PLAN]{json.dumps(plan)}",
+                "metadata": {"category": "plan", "operation_id": op_id, "active": True},
+            },
+            {
+                "id": "100",
+                "memory": "[VULNERABILITY] A [WHERE] /a [IMPACT] /a/impact [EVIDENCE] /a/evidence [STEPS] /a/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "CRITICAL", "confidence": "90",
+                             "validation_status": "verified"},
+            },
+            {
+                "id": "200",
+                "memory": "[VULNERABILITY] B [WHERE] /b [IMPACT] /b/impact [EVIDENCE] /b/evidence [STEPS] /b/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "HIGH", "confidence": "40",
+                             "validation_status": "hypothesis"},
+            },
+            {
+                "id": "201",
+                "memory": "[VULNERABILITY] C [WHERE] /c [IMPACT] /c/impact [EVIDENCE] /c/evidence [STEPS] /c/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "HIGH", "confidence": "90",
+                             "validation_status": "verified"},
+            },
+            {
+                "id": "300",
+                "memory": "[VULNERABILITY] D [WHERE] /d [IMPACT] /d/impact [EVIDENCE] /d/evidence [STEPS] /d/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "90",
+                             "validation_status": "verified"},
+            },
+            {
+                "id": "301",
+                "memory": "[VULNERABILITY] E [WHERE] /e [IMPACT] /e/impact [EVIDENCE] /e/evidence [STEPS] /e/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "80",
+                             "validation_status": "verified"},
+            },
+            {
+                "id": "302",
+                "memory": "[VULNERABILITY] F [WHERE] /f [IMPACT] /f/impact [EVIDENCE] /f/evidence [STEPS] /f/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "30",
+                             "validation_status": "hypothesis"},
+            },
+            {
+                "id": "400",
+                "memory": "[VULNERABILITY] G [WHERE] /g [IMPACT] /g/impact [EVIDENCE] /g/evidence [STEPS] /g/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "90",
+                             "validation_status": "verified"},
+            },
+            {
+                "id": "401",
+                "memory": "[VULNERABILITY] H [WHERE] /h [IMPACT] /h/impact [EVIDENCE] /h/evidence [STEPS] /h/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "70",
+                             "validation_status": "verified"},
+            },
+            {
+                "id": "402",
+                "memory": "[VULNERABILITY] I [WHERE] /i [IMPACT] /i/impact [EVIDENCE] /i/evidence [STEPS] /i/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "50",
+                             "validation_status": "hypothesis"},
+            },
+            {
+                "id": "403",
+                "memory": "[VULNERABILITY] J [WHERE] /j [IMPACT] /j/impact [EVIDENCE] /j/evidence [STEPS] /j/steps",
+                "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "20",
+                             "validation_status": "hypothesis"},
+            },
+            {
+                "id": "500",
+                "memory": "[OBSERVATION] K /k",
+                "metadata": {"category": "observation", "operation_id": op_id},
+            },
+            {
+                "id": "501",
+                "memory": "[OBSERVATION] L /l",
+                "metadata": {"category": "observation", "operation_id": op_id},
+            },
+            {
+                "id": "502",
+                "memory": "[OBSERVATION] M /m",
+                "metadata": {"category": "observation"},
+            },
+            {
+                "id": "503",
+                "memory": "[OBSERVATION] N /n",
+                "metadata": {"category": "observation"},
+            },
+            {
+                "id": "504",
+                "memory": "[OBSERVATION] O /o",
+                "metadata": {"category": "observation"},
+            },
+        ]
 
         with open(operation_dir / "cyber_operations.log", "w", encoding="utf-8") as f:
             f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 209251, "inputTokens": 208136, "outputTokens": 1115, "totalTokens": 209251, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.75, "duration": "20m 0s", "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_171", "timestamp": "2026-01-26T21:29:49.060488"}}__CYBER_EVENT_END__\n')
@@ -226,14 +224,14 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert "Adopt secure Software Development Life Cycle" in out.get("long_term_recommendations")
 
         raw_evidence = out.get("raw_evidence", [])
-        assert len(raw_evidence) == 10
+        assert len(raw_evidence) == 15
         assert all(["id" in e for e in raw_evidence])
         assert all(["severity" in e for e in raw_evidence])
         assert len(list(filter(lambda e: e["severity"] == "CRITICAL", raw_evidence))) == 1
         assert len(list(filter(lambda e: e["severity"] == "HIGH", raw_evidence))) == 2
         assert len(list(filter(lambda e: e["severity"] == "MEDIUM", raw_evidence))) == 3
         assert len(list(filter(lambda e: e["severity"] == "LOW", raw_evidence))) == 4
-        assert len(list(filter(lambda e: e["severity"] == "INFO", raw_evidence))) == 0
+        assert len(list(filter(lambda e: e["severity"] == "INFO", raw_evidence))) == 5
 
         assert out.get("tools_summary") == "- shell: 3 uses\n- python_repl: 2 uses\n- stop: 1 use"
         assert "OWASP Top 10 2021" in out.get("analysis_framework")
@@ -257,25 +255,23 @@ def test_report_builder_filters_by_operation_id(mock_client_cls):
     op_id = "OP_123"
     # Mock list_memories to return both tagged and untagged
     mock_client = mock_client_cls.return_value
-    mock_client.list_memories.return_value = {
-        "results": [
-            {
-                "id": "1",
-                "memory": "[VULNERABILITY] A [WHERE] /a",
-                "metadata": {"category": "finding", "operation_id": op_id},
-            },
-            {
-                "id": "2",
-                "memory": "[VULNERABILITY] B [WHERE] /b",
-                "metadata": {"category": "finding", "operation_id": "OP_OTHER"},
-            },
-            {
-                "id": "3",
-                "memory": "[VULNERABILITY] C [WHERE] /c",
-                "metadata": {"category": "finding"},
-            },
-        ]
-    }
+    mock_client.list_memories.return_value = [
+        {
+            "id": "1",
+            "memory": "[VULNERABILITY] A [WHERE] /a",
+            "metadata": {"category": "finding", "operation_id": op_id},
+        },
+        {
+            "id": "2",
+            "memory": "[VULNERABILITY] B [WHERE] /b",
+            "metadata": {"category": "finding", "operation_id": "OP_OTHER"},
+        },
+        {
+            "id": "3",
+            "memory": "[VULNERABILITY] C [WHERE] /c",
+            "metadata": {"category": "finding"},
+        },
+    ]
 
     out = build_report_sections(
         operation_id=op_id, target="example.com", objective="test", module="custom_module"
@@ -304,25 +300,23 @@ def test_report_builder_cross_operation(mock_client_cls):
     op_id = "OP_123"
     # Mock list_memories to return both tagged and untagged
     mock_client = mock_client_cls.return_value
-    mock_client.list_memories.return_value = {
-        "results": [
-            {
-                "id": "1",
-                "memory": "[VULNERABILITY] A [WHERE] /a",
-                "metadata": {"category": "finding", "operation_id": op_id},
-            },
-            {
-                "id": "2",
-                "memory": "[VULNERABILITY] B [WHERE] /b",
-                "metadata": {"category": "finding", "operation_id": "OP_OTHER"},
-            },
-            {
-                "id": "3",
-                "memory": "[VULNERABILITY] C [WHERE] /c",
-                "metadata": {"category": "finding"},
-            },
-        ]
-    }
+    mock_client.list_memories.return_value = [
+        {
+            "id": "1",
+            "memory": "[VULNERABILITY] A [WHERE] /a",
+            "metadata": {"category": "finding", "operation_id": op_id},
+        },
+        {
+            "id": "2",
+            "memory": "[VULNERABILITY] B [WHERE] /b",
+            "metadata": {"category": "finding", "operation_id": "OP_OTHER"},
+        },
+        {
+            "id": "3",
+            "memory": "[VULNERABILITY] C [WHERE] /c",
+            "metadata": {"category": "finding"},
+        },
+    ]
 
     out = build_report_sections(
         operation_id=op_id, target="example.com", objective="test", module="custom_module"
@@ -347,15 +341,13 @@ def test_report_builder_cross_operation(mock_client_cls):
 def test_report_builder_includes_untagged_evidence(mock_client_cls):
     op_id = "OP_456"
     mock_client = mock_client_cls.return_value
-    mock_client.list_memories.return_value = {
-        "results": [
-            {
-                "id": "10",
-                "memory": "[VULNERABILITY] Legacy [WHERE] /legacy",
-                "metadata": {"category": "finding"},
-            },
-        ]
-    }
+    mock_client.list_memories.return_value = [
+        {
+            "id": "10",
+            "memory": "[VULNERABILITY] Legacy [WHERE] /legacy",
+            "metadata": {"category": "finding"},
+        },
+    ]
 
     out = build_report_sections(
         operation_id=op_id, target="example.com", objective="test"
@@ -374,30 +366,28 @@ def test_report_builder_only_has_info_evidence(mock_client_cls):
     """Report builder should include info evidence."""
     op_id = "OP_789"
     mock_client = mock_client_cls.return_value
-    mock_client.list_memories.return_value = {
-        "results": [
-            {
-                "id": "1",
-                "memory": "[OBSERVATION] A [WHERE] /a",
-                "metadata": {"category": "observation", "operation_id": op_id},
-            },
-            {
-                "id": "2",
-                "memory": "[OBSERVATION] B [WHERE] /b",
-                "metadata": {"category": "discovery", "operation_id": op_id},
-            },
-            {
-                "id": "3",
-                "memory": "[OBSERVATION] C [WHERE] /c",
-                "metadata": {"category": "signal", "operation_id": op_id},
-            },
-        ]
-    }
+    mock_client.list_memories.return_value = [
+        {
+            "id": "1",
+            "memory": "[OBSERVATION] A [WHERE] /a",
+            "metadata": {"category": "observation", "operation_id": op_id},
+        },
+        {
+            "id": "2",
+            "memory": "[OBSERVATION] B [WHERE] /b",
+            "metadata": {"category": "discovery", "operation_id": op_id},
+        },
+        {
+            "id": "3",
+            "memory": "[OBSERVATION] C [WHERE] /c",
+            "metadata": {"category": "signal", "operation_id": op_id},
+        },
+    ]
 
     out = build_report_sections(
         operation_id=op_id, target="example.com", objective="test"
     )
-    assert out.get("raw_evidence") == [], "Raw evidence should only include findings"
+    assert len(out.get("raw_evidence")) == 3
     evidence_text = out.get("evidence_text", "")
     assert "/a" in evidence_text, "Expected matching observation from current operation"
     assert "/b" in evidence_text, "Expected matching discovery from current operation"

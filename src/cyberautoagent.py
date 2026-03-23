@@ -56,7 +56,7 @@ from modules.config.models.factory import get_model_timeout, configure_model_rat
 from modules.config.system.environment import auto_setup, clean_operation_memory, setup_logging
 from modules.config.manager import get_config_manager
 from modules.config.types import get_default_base_dir
-from modules.handlers.base import StepLimitReached
+from modules.handlers.base import StepLimitReached, is_docker
 from modules.handlers.conversation_budget import strip_reflection_snapshot_messages, _dedupe_state_markers
 from modules.handlers.utils import (
     Colors,
@@ -92,10 +92,6 @@ def detect_deployment_mode():
     Returns:
         str: 'cli' (Python CLI), 'container' (single container), or 'compose' (full stack)
     """
-
-    def is_docker():
-        """Check if running inside a Docker container."""
-        return os.path.exists("/.dockerenv") or os.path.exists("/app")
 
     def is_langfuse_available():
         """Check if Langfuse service is available."""
@@ -194,10 +190,6 @@ def setup_telemetry(logger):
 def setup_langfuse_connection(logger, deployment_mode):
     """Setup Langfuse connection parameters for remote observability."""
 
-    def is_docker():
-        """Check if running inside a Docker container."""
-        return os.path.exists("/.dockerenv") or os.path.exists("/app")
-
     # Use langfuse-web:3000 when in Docker, localhost:3000 otherwise
     default_host = (
         "http://langfuse-web:3000" if is_docker() else "http://localhost:3000"
@@ -286,7 +278,7 @@ def main():
     # Parse command line arguments first to get the confirmations flag
     parser = argparse.ArgumentParser(
         description="Cyber-AutoAgent - Autonomous Cybersecurity Assessment Tool",
-        epilog="⚠️  Use only on authorized targets in safe environments ⚠️",
+        epilog="⚠️ Use only on authorized targets in safe environments ⚠️",
     )
     parser.add_argument(
         "--module",
@@ -369,6 +361,21 @@ def main():
         help="Base directory for output artifacts (default: ./outputs)",
     )
     parser.add_argument(
+        "--continue",
+        dest="cont",
+        nargs="?",
+        type=str,
+        const=True,
+        help="Continue last operation or the passed operation",
+    )
+    parser.add_argument(
+        "--report",
+        nargs="?",
+        type=str,
+        const=True,
+        help="Generate report (without execution) of the last operation or the passed operation",
+    )
+    parser.add_argument(
         "--eval-rubric",
         action="store_true",
         help="Enable rubric-based evaluation in addition to Ragas metrics",
@@ -385,6 +392,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.cont or args.report:
+        args.memory_mode = "auto"
 
     ensure_workspace_marker_files()
 
@@ -474,19 +484,37 @@ def main():
     if args.eval_rubric:
         os.environ["EVAL_RUBRIC_ENABLED"] = "true"
 
+    # Operation ID
+    target_sanitized = sanitize_target_name(args.target)
+    operation_id = None
+    if isinstance(args.cont, str):
+        operation_id = args.cont
+    elif isinstance(args.report, str):
+        operation_id = args.report
+    elif (isinstance(args.cont, bool) and args.cont) or (isinstance(args.report, bool) and args.report):
+        # get the last operation
+        previous_operations = list(filter(
+            lambda d: d.is_dir() and d.name.startswith("OP_"),
+            os.scandir(os.path.join(server_config.output.base_dir, target_sanitized))))
+        previous_operations.sort(key=lambda e: e.name, reverse=True)
+        if previous_operations:
+            operation_id = previous_operations[0].name
+
+    if operation_id is None:
+        operation_id = f"OP_{datetime.now().strftime("%Y%m%d_%H%M%S")}"
+
+    config_overrides["operation_id"] = operation_id
+    config_overrides["target_name"] = args.target
+
+    # Expose operation ID to tools via environment for consistent evidence tagging
+    os.environ["CYBER_OPERATION_ID"] = operation_id
+
     server_config = config_manager.get_server_config(args.provider, **config_overrides)
 
     # Set mem0 environment variables based on configuration
     os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
     os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
     os.environ["MEM0_EMBEDDING_MODEL"] = server_config.embedding.model_id
-
-    # Log operation start
-    operation_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    local_operation_id = f"OP_{operation_timestamp}"
-
-    # Expose operation ID to tools via environment for consistent evidence tagging
-    os.environ["CYBER_OPERATION_ID"] = local_operation_id
 
     mcp_config = config_manager.get_mcp_config(args.provider, **config_overrides)
     if mcp_config.enabled:
@@ -497,7 +525,7 @@ def main():
     # Initialize logger using unified output system
     log_path = get_output_path(
         sanitize_target_name(args.target),
-        local_operation_id,
+        operation_id,
         "",
         server_config.output.base_dir,
     )
@@ -582,7 +610,7 @@ def main():
     # Pass memory_path to auto_setup to skip cleanup if using existing memory
     available_tools = auto_setup(skip_mem0_cleanup=bool(args.memory_path))
 
-    logger.info("Operation %s initiated", local_operation_id)
+    logger.info("Operation %s initiated", operation_id)
     logger.info("Objective: %s", args.objective)
     logger.info("Target: %s", args.target)
     logger.info("Max steps: %d", args.iterations)
@@ -607,16 +635,12 @@ def main():
         logger.info("Max completion tokens: %s", max_completion)
 
     # Display operation details with unified output information
-    target_sanitized = sanitize_target_name(args.target)
     output_base_path = get_output_path(
-        target_sanitized, operation_timestamp, "", server_config.output.base_dir
+        target_sanitized, operation_id, "", server_config.output.base_dir
     )
 
-    # Detect if running in Docker for path display
-    is_docker = os.path.exists("/.dockerenv") or os.environ.get("CONTAINER") == "docker"
-
     # Prepare path display based on environment
-    if is_docker:
+    if is_docker():
         output_path_display = f"{output_base_path}\n{Colors.BOLD}Host Path:{Colors.RESET}     {output_base_path.replace('/app/outputs', './outputs')}"
     else:
         output_path_display = output_base_path
@@ -625,7 +649,7 @@ def main():
         print_section(
             "MISSION PARAMETERS",
             f"""
-{Colors.BOLD}Operation ID:{Colors.RESET} {Colors.CYAN}{local_operation_id}{Colors.RESET}
+{Colors.BOLD}Operation ID:{Colors.RESET} {Colors.CYAN}{operation_id}{Colors.RESET}
 {Colors.BOLD}Objective:{Colors.RESET}    {Colors.YELLOW}{args.objective}{Colors.RESET}
 {Colors.BOLD}Target:{Colors.RESET}       {Colors.RED}{args.target}{Colors.RESET} (sanitized: {target_sanitized})
 {Colors.BOLD}Max Iterations:{Colors.RESET} {args.iterations} steps
@@ -649,7 +673,7 @@ def main():
             objective=args.objective,
             max_steps=args.iterations,
             available_tools=available_tools,
-            op_id=local_operation_id,
+            op_id=operation_id,
             model_id=args.model,
             region_name=args.region,
             provider=args.provider,
@@ -667,9 +691,23 @@ def main():
         print_status("Cyber-AutoAgent online and starting", "SUCCESS")
 
         # Initial user message to start the agent
-        initial_prompt = (
-            f"Conduct security assessment of {args.target} for: {args.objective}"
-        )
+        initial_prompt = f"Conduct security assessment of {args.target} for: {args.objective}"
+        current_message = initial_prompt
+
+        if args.cont:
+            active_plan = mem0_get_plan() or ""
+            active_task = mem0_get_active_task() or ""
+            memories = mem0_list()
+            if memories.startswith("Error:"):
+                memories = ""
+            if active_plan and not active_plan.get("assessment_complete"):
+                current_message = ""
+                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `mem0_get_plan()`)\n{active_plan}"}])]
+                if memories:
+                    agent.messages.append(Message(role="user",
+                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
+                if 'status="active"' in active_task:
+                    agent.messages.append(Message(role="user", content=[{"text": active_task}]))
 
         # Backward-compat helper for tests expecting get_initial_prompt to exist
         def _initial_prompt_accessor():
@@ -682,16 +720,24 @@ def main():
 
         # Execute autonomous operation
         operation_start = time.time()
-        current_message = initial_prompt
         step0_retry = 2
         # the number of consecutive action-less results
         actionless_step_count = 0
 
         # SDK-aligned execution loop with continuation support
-        while not interrupted:
+        while not interrupted and not args.report:
             last_step = callback_handler.current_step
             last_tool_call_count = sum(callback_handler.tool_counts.values(), start=0)
             try:
+                # add reflection snapshot
+                if "<reflection_snapshot>" not in current_message and not current_message.startswith(initial_prompt):
+                    reflection_snapshot = get_reflection_snapshot(
+                        current_step=callback_handler.current_step,
+                        max_steps=callback_handler.max_steps,
+                        plan_current_phase=None,
+                    )
+                    current_message = current_message + "\n\n" + f"<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
+
                 print_status(
                     f"Agent processing: {current_message[:100]}{' ...' if len(current_message) > 100 else ''}",
                     "THINKING",
@@ -699,11 +745,10 @@ def main():
                 logger.debug(f"Agent processing: {current_message}")
 
                 # trim context
-                if "<reflection_snapshot>" in current_message:
-                    strip_reflection_snapshot_messages(agent)
+                strip_reflection_snapshot_messages(agent)
                 _ensure_prompt_within_budget(agent)
 
-                # Execute agent with current message
+                # Execute agent with current message. This is a long, blocking call.
                 result = agent(current_message)
 
                 logger.debug(f"Agent result: {repr(result)}")
@@ -792,71 +837,62 @@ def main():
                     callback_handler.current_step if callback_handler else 0,
                     remaining_steps,
                 )
-                if remaining_steps > 0:
-                    reflection_snapshot = get_reflection_snapshot(
-                        current_step=callback_handler.current_step,
-                        max_steps=callback_handler.max_steps,
-                        plan_current_phase=None,
-                    )
-                    extra_message = ""
+                if remaining_steps <= 0:
+                    break
 
-                    if actionless_step_count > 0:
-                        if actionless_step_count == 1:
-                            logger.warning(
-                                "Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
+                current_message = ""
 
-                            # remove trailing assistant messages, they may encourage the agent to consider the operation complete
-                            while len(agent.messages) > 3:
-                                tool_block_count = 0
-                                for block in agent.messages[-1].get("content", []):
-                                    if not isinstance(block, dict):
-                                        continue
-                                    if "toolUse" in block or "toolResult" in block:
-                                        tool_block_count += 1
-                                if tool_block_count == 0:
-                                    agent.messages.pop()
-                                else:
-                                    break
+                if actionless_step_count > 0:
+                    if actionless_step_count == 1:
+                        logger.warning(
+                            "Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
 
-                            extra_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
-                        else:
-                            active_plan = mem0_get_plan() or ""
-                            if active_plan and active_plan.get("assessment_complete"):
-                                # plan is complete, legit exit
+                        # remove trailing assistant messages, they may encourage the agent to consider the operation complete
+                        while len(agent.messages) > 3:
+                            tool_block_count = 0
+                            for block in agent.messages[-1].get("content", []):
+                                if not isinstance(block, dict):
+                                    continue
+                                if "toolUse" in block or "toolResult" in block:
+                                    tool_block_count += 1
+                            if tool_block_count == 0:
+                                agent.messages.pop()
+                            else:
                                 break
 
-                            active_task = mem0_get_active_task() or ""
-                            memories = mem0_list()
-                            if memories.startswith("Error:"):
-                                memories = ""
-                            # TODO: consider summarizing the memories to reduce content size and increase understanding
+                        current_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
+                    else:
+                        active_plan = mem0_get_plan() or ""
+                        if active_plan and active_plan.get("assessment_complete"):
+                            # plan is complete, legit exit
+                            break
 
-                            logger.warning(
-                                "Attempting to rebuild context because no tool calls were detected in last execution loop.")
+                        active_task = mem0_get_active_task() or ""
+                        memories = mem0_list()
+                        if memories.startswith("Error:"):
+                            memories = ""
+                        # TODO: consider summarizing the memories to reduce content size and increase understanding
 
-                            if not active_plan:
-                                agent.messages[:] = [Message(role="user", content=[{"text": initial_prompt}])]
-                                if memories:
-                                    agent.messages.append(Message(role="user",
-                                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
-                                extra_message += f"**MANDITORY ACTION**: You have missed an important step, create a strategic plan via mem0_store_plan()."
-                            else:
-                                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT\n{active_plan}"}])]
-                                if memories:
-                                    agent.messages.append(Message(role="user",
-                                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
+                        logger.warning(
+                            "Attempting to rebuild context because no tool calls were detected in last execution loop.")
 
-                                if 'status="active"' in active_task:
-                                    agent.messages.append(Message(role="user", content=[{"text": active_task}]))
-                                    extra_message += f"**MANDITORY ACTION**: The operation is not complete. There are tasks pending. Continue by executing the active task."
-                                elif active_plan:
-                                    extra_message += f"**MANDITORY ACTION**: Move to next plan phase if current phase criteria met."
+                        if not active_plan:
+                            agent.messages[:] = [Message(role="user", content=[{"text": initial_prompt}])]
+                            if memories:
+                                agent.messages.append(Message(role="user",
+                                                              content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
+                            current_message += f"**MANDITORY ACTION**: You have missed an important step, create a strategic plan via mem0_store_plan()."
+                        else:
+                            agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT\n{active_plan}"}])]
+                            if memories:
+                                agent.messages.append(Message(role="user",
+                                                              content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
 
-                    current_message = f"<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
-                    if extra_message:
-                        current_message = extra_message + "\n\n" + current_message
-                else:
-                    break
+                            if 'status="active"' in active_task:
+                                agent.messages.append(Message(role="user", content=[{"text": active_task}]))
+                                current_message += f"**MANDITORY ACTION**: The operation is not complete. There are tasks pending. Continue by executing the active task."
+                            elif active_plan:
+                                current_message += f"**MANDITORY ACTION**: Move to next plan phase if current phase criteria met."
 
             except StepLimitReached:
                 # Handle step limit reached gracefully without context errors
@@ -969,7 +1005,7 @@ def main():
             # Display summary in terminal mode only
             if os.environ.get("CYBER_UI_MODE", "cli").lower() != "react":
                 print(
-                    f"{Colors.BOLD}Operation ID:{Colors.RESET}      {local_operation_id}"
+                    f"{Colors.BOLD}Operation ID:{Colors.RESET}      {operation_id}"
                 )
 
                 # Determine status based on completion
@@ -1024,6 +1060,7 @@ def main():
 
             # Show where evidence and memories are stored
             # Determine memory location based on backend and unified output structure
+            # FIXME: memory_location should be returned by the initialized memory system, not duplicated here
             target_name = sanitize_target_name(args.target)
             if os.getenv("MEM0_API_KEY"):
                 memory_location = "Mem0 Platform (cloud)"
@@ -1035,19 +1072,14 @@ def main():
             # Use unified output paths for evidence storage
             evidence_location = get_output_path(
                 sanitize_target_name(args.target),
-                local_operation_id,
+                operation_id,
                 "",  # No subdirectory - show the operation root
                 server_config.output.base_dir,
             )
 
             # Display output paths in terminal mode
             if os.environ.get("CYBER_UI_MODE", "cli").lower() != "react":
-                is_docker = (
-                    os.path.exists("/.dockerenv")
-                    or os.environ.get("CONTAINER") == "docker"
-                )
-
-                if is_docker:
+                if is_docker():
                     # Docker environment: show both container and host paths
                     host_evidence_location = evidence_location.replace(
                         "/app/outputs", "./outputs"
@@ -1113,6 +1145,7 @@ def main():
         loop.close()
 
         # Ensure log files are properly closed before exit
+        # FIXME: this looks duplicative of the above cleanup_logging()
         def close_log_outputs():
             if hasattr(sys.stdout, "close") and hasattr(sys.stdout, "log"):
                 try:
@@ -1177,8 +1210,8 @@ def main():
                 logger.debug(
                     "Calling clean_operation_memory with target_name=%s", target_name
                 )
-                clean_operation_memory(local_operation_id, target_name)
-                logger.info("Memory cleaned up for operation %s", local_operation_id)
+                clean_operation_memory(operation_id, target_name)
+                logger.info("Memory cleaned up for operation %s", operation_id)
             except Exception as cleanup_error:
                 logger.warning("Error cleaning up memory: %s", cleanup_error)
         else:
@@ -1187,7 +1220,7 @@ def main():
         # Log operation end
         end_time = time.time()
         total_time = end_time - start_time
-        logger.info("Operation %s ended after %.2fs", local_operation_id, total_time)
+        logger.info("Operation %s ended after %.2fs", operation_id, total_time)
 
         flush_traces(telemetry=telemetry)
 
