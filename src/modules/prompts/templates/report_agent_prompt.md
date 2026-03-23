@@ -12,21 +12,13 @@ Tools Used Count: {tools_count}
 </module_guidance>
 
 <report_template_instructions>
-Use the following template structure for your report. Fill in each section with data from your build_report_sections tool:
+Use the following template structure for your report.
 
 {report_template}
 </report_template_instructions>
 
 <generation_instructions>
-1. **First Step**: Call your build_report_sections tool with these parameters:
-    - operation_id: "{operation_id}"
-    - target: "{target}"
-    - objective: "{objective}"
-    - module: "{module}"
-    - steps_executed: {steps_executed}
-    - tools_used: {tools_used}
-
-2. **Second Step**: Use the data returned by your tool to fill in the template above:
+1. **First Step**: Use the data provided to fill in the template above:
     - Most sections are pre-formatted and ready for direct insertion
     - For {{attack_path_analysis}}, {{mitre_attck_mapping}}, and {{technical_appendix}}, generate from raw_evidence.
 
@@ -77,10 +69,10 @@ Use the following template structure for your report. Fill in each section with 
     - SIEM/IDS detection rules specific to the vulnerabilities found
     - Include actual payloads/commands from evidence where relevant
 
-- Use raw_evidence array which contains all parsed finding details
-- Generate content specific to the actual vulnerabilities found, not generic
+   - Use raw_evidence array which contains all parsed finding details
+   - Generate content specific to the actual vulnerabilities found, not generic
 
-3. **Final Step**: Output the complete report following the template structure exactly
+2. **Final Step**: Output the complete report following the template structure exactly
 - Start IMMEDIATELY with "# SECURITY ASSESSMENT REPORT"
 - Do NOT include any preamble text like "Now I'll generate..." or "Let me create..."
 - Do NOT explain what you're doing - just output the report directly
@@ -89,8 +81,8 @@ Use the following template structure for your report. Fill in each section with 
 **CRITICAL REQUIREMENTS**:
 - Generate a comprehensive, detailed report within the model's token limits
 - NEVER truncate findings with text like "[Additional findings truncated for length]"
-- Include ALL critical findings from the build_report_sections tool
-- Include ALL high findings from the build_report_sections tool
+- Include ALL critical findings
+- Include ALL high findings
 - If you have space, include medium and low findings as well
 - The report should be detailed and complete - do NOT abbreviate or truncate
 
@@ -100,6 +92,4 @@ Use the following template structure for your report. Fill in each section with 
 - Normalize confidence values to one decimal percent (e.g., 95.0%)
 - When financial impact is stated, label it as "Potential impact (estimated)" and add a brief assumptions note
 - If a remediation is unknown, write "TBD — requires protocol review"
-
-Remember: You MUST use your build_report_sections tool first to get the evidence and analysis data.
 </generation_instructions>

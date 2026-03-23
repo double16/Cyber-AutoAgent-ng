@@ -621,6 +621,17 @@ def mem0_store(
 
     client = _ensure_memory_client()
 
+    existing_search = client.mem0.search(query=cleaned_content, user_id=user_id, run_id=op_id, limit=1,
+                                         filters={"category": metadata.get("category")})
+    if existing_search.get("results"):
+        existing_best_match = existing_search["results"][0]
+        existing_best_score = existing_best_match.get("score", 1.0)
+        if existing_best_score < 0.1:
+            logger.debug(
+                f"Found memory duplicate with score {existing_best_score}: {existing_query} ~= {existing_best_match.get('memory')}")
+            result = [{"role": "user", "event": "DUPLICATE", "id": existing_best_match.get("id")}]
+            return json.dumps(results_list, indent=2, sort_keys=True)
+
     try:
         results = client.store_memory(
             cleaned_content, user_id, agent_id, metadata
@@ -849,7 +860,7 @@ def mem0_create_tasks(
         result = None
         try:
             task_query = "[TASK] " + _format_task_as_toon(task.to_dict())
-            task_search = client.mem0.search(query=task_query, user_id=user_id, run_id=op_id, limit=4,
+            task_search = client.mem0.search(query=task_query, user_id=user_id, run_id=op_id, limit=1,
                                              filters={"category": "task"})
             if task_search.get("results"):
                 task_best_match = task_search["results"][0]
@@ -963,7 +974,7 @@ def mem0_get_active_task() -> str:
         return _active_task_message(task, activated, current_phase=current_phase)
     except ValueError:
         # no active plan
-        return _active_task_message(None, False, current_phase=current_phase)
+        return _active_task_message(None, False)
 
 
 @tool

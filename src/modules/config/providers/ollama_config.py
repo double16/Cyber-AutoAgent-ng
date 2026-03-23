@@ -7,6 +7,7 @@ including host detection and connectivity checks.
 """
 
 import os
+from typing import Dict, Any
 
 import requests
 
@@ -53,6 +54,7 @@ def get_ollama_host(env_reader: EnvironmentReader) -> str:
     # Native execution - use localhost
     return "http://localhost:11434"
 
+
 def get_ollama_timeout(env_reader: EnvironmentReader) -> float:
     """Determine appropriate Ollama timeout based on environment.
 
@@ -75,3 +77,18 @@ def get_ollama_timeout(env_reader: EnvironmentReader) -> float:
                 "Ollama timeout not a float, falling back to 120"
             )
     return 120
+
+
+def get_ollama_options(env_reader: EnvironmentReader) -> Dict[str, Any]:
+    options = dict()
+    env_context_length = env_reader.get("OLLAMA_CONTEXT_LENGTH")
+    if env_context_length and env_context_length.strip():
+        try:
+            num_ctx = int(env_context_length)
+            if num_ctx >= 2048:
+                options["num_ctx"] = num_ctx
+        except ValueError:
+            logger.warning(
+                "OLLAMA_CONTEXT_LENGTH should be an int, ignoring"
+            )
+    return options

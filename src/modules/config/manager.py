@@ -54,6 +54,7 @@ from modules.config.providers.bedrock_config import get_default_region
 from modules.config.providers.ollama_config import (
     get_ollama_host as _get_ollama_host_from_env,
     get_ollama_timeout as _get_ollama_timeout_from_env,
+    get_ollama_options as _get_ollama_options_from_env,
 )
 from modules.config.providers.litellm_config import (
     align_litellm_defaults,
@@ -275,6 +276,7 @@ class ConfigManager:
             "timeout": self.get_ollama_timeout(),
             "temperature": llm_config.temperature,
             "max_tokens": max_tokens,
+            "options": self.get_ollama_options(),
         }
 
     # Default configs now built by build_default_configs() from defaults.py
@@ -809,6 +811,10 @@ class ConfigManager:
         """Get Ollama timeout."""
         return _get_ollama_timeout_from_env(self.env)
 
+    def get_ollama_options(self) -> Dict[str, Any]:
+        """Get Ollama options, such as num_ctx."""
+        return _get_ollama_options_from_env(self.env)
+
     def set_environment_variables(self, server: str) -> None:
         """Set environment variables for backward compatibility."""
         server_config = self.get_server_config(server)
@@ -1218,7 +1224,7 @@ def align_mem0_config(model_id: Optional[str], memory_config: dict[str, Any]) ->
         config_section["model"] = remainder_variant
 
 
-def check_existing_memories(target: str, _provider: str = "bedrock") -> bool:
+def check_existing_memories(target: str, _provider: str = "bedrock", operation_id: Optional[str] = None) -> bool:
     """Check if existing memories exist for a target.
 
     Checks FAISS, OpenSearch, or Mem0 Platform backends for existing memory.
@@ -1226,6 +1232,7 @@ def check_existing_memories(target: str, _provider: str = "bedrock") -> bool:
     Args:
         target: Target system being assessed
         _provider: Provider type for configuration (currently unused)
+        operation_id: operation ID
 
     Returns:
         True if existing memories are detected, False otherwise
@@ -1244,6 +1251,8 @@ def check_existing_memories(target: str, _provider: str = "bedrock") -> bool:
             return True
 
         else:
+            from modules.tools.memory import memory_is_cross_operation
+
             # FAISS - check if local store exists with actual memory content
             # Use default relative outputs directory for compatibility with tests
             output_dir = get_default_base_dir()
@@ -1251,9 +1260,8 @@ def check_existing_memories(target: str, _provider: str = "bedrock") -> bool:
             # Important: tests expect the sanitized target to include dot preserved (test.com)
             # Our sanitize_target_name preserves dots, so join directly
             memory_base_path = os.path.join(output_dir, target_name, "memory")
-
-            # Explicit exists() call for assertion in tests
-            os.path.exists(memory_base_path)
+            if operation_id and not memory_is_cross_operation():
+                memory_base_path = os.path.join(memory_base_path, operation_id)
 
             # Check if memory directory exists and has FAISS index files
             if os.path.exists(memory_base_path):
@@ -1264,6 +1272,9 @@ def check_existing_memories(target: str, _provider: str = "bedrock") -> bool:
                 alt_memory_base_path = os.path.join(
                     output_dir, target_name.replace(".", "_"), "memory"
                 )
+                if operation_id and not memory_is_cross_operation():
+                    alt_memory_base_path = os.path.join(alt_memory_base_path, operation_id)
+
                 alt_faiss = os.path.join(alt_memory_base_path, "mem0.faiss")
                 alt_pkl = os.path.join(alt_memory_base_path, "mem0.pkl")
 

@@ -321,6 +321,7 @@ outputs/<target>/<operation>/
 ├── logs/
 │   └── cyber_operations.log
 └── security_assessment_report.md
+└── security_assessment_report.json
 ```
 
 ### Artifact Lifecycle

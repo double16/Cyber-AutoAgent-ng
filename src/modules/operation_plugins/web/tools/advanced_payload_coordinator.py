@@ -49,6 +49,7 @@ _RE_SSTIMAP_EVIDENCE_TECHNIQUE = re.compile(r"^\s*Technique:.*$", re.MULTILINE)
 
 _RE_COMMIX_VULN = re.compile(r"parameter\s+'(.+?)'\s+is (likely |)vulnerable", re.IGNORECASE)
 
+_RE_LFIMAP_PAYLOADS = re.compile(r"testing (.+) payloads", re.IGNORECASE)
 
 def _b64(input) -> str:
     if input is None:
@@ -791,6 +792,10 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
                 label, value = payload_splits
                 current_payload_source = label.strip()
                 current_payload = value.strip()
+                evidence_lines.append(line)
+            elif m := _RE_LFIMAP_PAYLOADS.search(line):
+                current_payload = m.group(1).strip()
+                current_payload_source = current_payload.split()[0]
                 evidence_lines.append(line)
             else:
                 print("Maybe incorrect pattern: "+lower_line)

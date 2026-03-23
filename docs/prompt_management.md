@@ -236,8 +236,7 @@ sequenceDiagram
 ### Module Report Prompt Integration
 
 ```python
-# modules/tools/report_builder.py
-@tool
+# modules/handler/report_generator.py
 def build_report_sections(
     operation_id: str,
     target: str,
@@ -296,10 +295,8 @@ sequenceDiagram
     T-->>A: Structured report sections
     A->>A: Generate final report markdown
     A-->>E: Complete report with findings
-    E->>E: Write security_assessment_report.md to operation directory
+    E->>E: Write security_assessment_report.md/json to operation directory
 ```
-
-The report generation uses a dedicated `build_report_sections` tool that retrieves evidence from memory, applies module-specific domain lenses, and produces structured sections for the report agent to format.
 
 ## Module Examples
 

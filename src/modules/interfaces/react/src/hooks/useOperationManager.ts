@@ -310,7 +310,9 @@ export function useOperationManager({
         assessmentParams.module,
         assessmentParams.target,
         assessmentParams.objective || `Comprehensive ${assessmentParams.module} security assessment`,
-        applicationConfig.modelId
+        applicationConfig.modelId,
+        assessmentParams.continueOperation,
+        assessmentParams.reportOnly,
       );
 
       // Set as active operation

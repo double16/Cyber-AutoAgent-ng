@@ -96,10 +96,11 @@ sequenceDiagram
         Agent->>Tools: Execute Tool (shell/http_request/etc)
         Tools-->>Agent: Results
         Agent->>Memory: Store Findings
-        
+        Agent->>Memory: Create Tasks (current + future phases)
+
         alt Critical Finding
-            Agent->>Tools: Immediate Exploitation (shell)
             Agent->>Memory: Store Evidence
+            Agent->>Memory: Create Exploitation Tasks
         end
         
         alt Complex Task

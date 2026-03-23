@@ -250,6 +250,7 @@ outputs/
 └── <target>/
     ├── OP_<timestamp>/
     │   ├── security_assessment_report.md    # Assessment report
+    │   ├── security_assessment_report.json  # Assessment report data (can be used in other tools)
     │   ├── logs/
     │   │   └── cyber_operations.log
     │   └── utils/
@@ -501,6 +502,46 @@ cyber-react \
   --auto-run \
   --auto-approve \
   --headless
+```
+
+### Continue Assessment
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --continue
+```
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --continue OP_20260320_101501
+```
+
+### Re-generate Report
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --report
+```
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --report OP_20260320_101501
 ```
 
 ## Best Practices

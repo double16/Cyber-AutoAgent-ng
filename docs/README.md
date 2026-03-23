@@ -35,6 +35,13 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 - XML tag preservation
 - Performance improvements
 
+**[task_tracking.md](task_tracking.md)**
+- Tasks are captured from new evidence
+- Execution is single-active-task, phase-gated
+- Completion is explicit with status + reason
+- Context pruning preserves the active task and the evidence needed to continue
+- Pending work can persist across runs to enable long-lived coverage goals
+
 ### Interface and User Experience
 
 **[terminal-frontend.md](terminal-frontend.md)**

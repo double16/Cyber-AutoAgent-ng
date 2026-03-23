@@ -194,7 +194,7 @@ def create_agent(
             "Using fresh memory mode - ignoring any existing memories", "WARNING"
         )
     else:
-        has_existing_memories = check_existing_memories(config.target, config.provider)
+        has_existing_memories = check_existing_memories(config.target, config.provider, operation_id)
         # Log the result for debugging container vs local issues
         if has_existing_memories:
             print_status(

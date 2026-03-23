@@ -603,15 +603,6 @@ def create_ollama_model(
         elif capabilities.supports_reasoning:
             additional_args["think"] = True
 
-    options = dict()
-    if os.getenv("OLLAMA_CONTEXT_LENGTH"):
-        try:
-            num_ctx = int(os.getenv("OLLAMA_CONTEXT_LENGTH"))
-            if num_ctx >= 2048:
-                options["num_ctx"] = num_ctx
-        except Exception:
-            pass
-
     model = OllamaModel(
         host=config["host"],
         model_id=config["model_id"],
@@ -621,7 +612,7 @@ def create_ollama_model(
             "timeout": config["timeout"],
         },
         additional_args=additional_args,
-        options=options,
+        options=config.get("options", {}),
     )
     setattr(model, "_output_tokens", llm_max)
     return model

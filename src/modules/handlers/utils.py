@@ -17,6 +17,7 @@ import tomllib
 import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 
@@ -67,6 +68,7 @@ def get_output_path(
     return os.path.join(operation_dir, subdir) if subdir else operation_dir
 
 
+@lru_cache
 def sanitize_target_name(target: str) -> str:
     """Sanitize target string for safe filesystem usage.
 
@@ -483,3 +485,21 @@ def get_tool_name(tool) -> str:
     except AttributeError:
         tool_name = getattr(tool, "__name__", tool.__class__.__name__).split(".")[-1]
     return tool_name
+
+
+def duration_max(*values):
+    parsed = []
+    for value in values:
+        if not value:
+            continue
+        nums = [
+            float(m.group(0))
+            for token in re.split(r"[\s:]+", value.strip())
+            if token
+            for m in [re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", token)]
+            if m
+        ]
+        parsed.append((value, nums))
+
+    width = max((len(nums) for _, nums in parsed), default=0)
+    return max(parsed, key=lambda x: [0.0] * (width - len(x[1])) + x[1])[0] if parsed else None

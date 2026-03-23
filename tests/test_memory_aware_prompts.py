@@ -43,7 +43,7 @@ class TestMemoryContextGuidance:
 
         assert "Continuing assessment with 0 existing memories" in result
         assert (
-            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result
         )
 
@@ -55,7 +55,7 @@ class TestMemoryContextGuidance:
 
         assert "Continuing assessment with 0 existing memories" in result
         assert (
-            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result
         )
         assert "Memory Intake Pass" in result
@@ -86,7 +86,7 @@ class TestMemoryContextGuidance:
 
         assert "Continuing assessment with 5 existing memories" in result
         assert (
-            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result
         )
         assert "Memory Intake Pass" in result
@@ -108,7 +108,7 @@ class TestMemoryContextGuidance:
 
         assert "Continuing assessment with 0 existing memories" in result
         assert (
-            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result
         )
 
@@ -130,11 +130,11 @@ class TestMemoryAwareSystemPrompts:
             memory_overview=None,
         )
 
-        assert "Create a strategic plan via mem0_store_plan()" in result
+        assert "Create a strategic plan via `mem0_store_plan()`" in result
         # Check for target/operation in current prompt format (markdown bold)
         assert "**Target**: test.com" in result or "Target: test.com" in result
         assert "**Operation**: OP_20240101_120000" in result or "Operation: OP_20240101_120000" in result
-        assert "0/50" in result  # Budget shown as step ratio
+        assert "0/50" not in result  # Budget is kept in conversation
 
     def test_system_prompt_with_memory_path(self):
         """Test system prompt generation with memory path"""
@@ -152,7 +152,7 @@ class TestMemoryAwareSystemPrompts:
 
         assert "Continuing assessment with 0 existing memories" in result
         assert (
-            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result
         )
 
@@ -179,7 +179,7 @@ class TestMemoryAwareSystemPrompts:
 
         assert "Continuing assessment with 5 existing memories" in result
         assert (
-            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result
         )
 
@@ -215,7 +215,7 @@ class TestMemoryAwareSystemPrompts:
 
         assert "Continuing assessment with 8 existing memories" in result
         assert (
-            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result
         )
         assert "Memory Intake Pass" in result
@@ -310,28 +310,6 @@ Leverage these tools directly via shell.
         assert "test.com" in result_local
         assert "CRITICAL FIRST ACTION" in result_local
 
-    def test_system_prompt_urgency_levels(self):
-        """Test system prompt generation with different urgency levels"""
-        # High urgency (< 30 steps)
-        result_high = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            max_steps=20,
-            operation_id="OP_20240101_120000",
-        )
-
-        assert "0/20" in result_high  # Budget shown as step ratio
-
-        # Medium urgency (>= 30 steps)
-        result_medium = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            max_steps=50,
-            operation_id="OP_20240101_120000",
-        )
-
-        assert "0/50" in result_medium  # Budget shown as step ratio
-
     def test_system_prompt_memory_instructions_consistency(self):
         """Test consistency between memory context and dynamic instructions"""
         # With existing memories - should have consistent instructions
@@ -346,7 +324,7 @@ Leverage these tools directly via shell.
 
         # Should have both memory context and dynamic instruction
         assert (
-            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            '**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result_with_memories
         )
 
@@ -396,7 +374,7 @@ class TestMemoryAwarePromptIntegration:
         assert "OP_20240101_120000" in result
         assert "Continuing assessment with 3 existing memories" in result
         assert (
-            'CRITICAL FIRST ACTIONS**\n  1. Load all memories: mem0_list()'
+            'CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`'
             in result
         )
 
