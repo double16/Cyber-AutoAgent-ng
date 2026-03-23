@@ -501,7 +501,7 @@ def main():
             operation_id = previous_operations[0].name
 
     if operation_id is None:
-        operation_id = f"OP_{datetime.now().strftime("%Y%m%d_%H%M%S")}"
+        operation_id = f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     config_overrides["operation_id"] = operation_id
     config_overrides["target_name"] = args.target
