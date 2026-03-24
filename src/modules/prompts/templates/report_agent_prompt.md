@@ -68,9 +68,16 @@ Use the following template structure for your report.
     - Configuration examples to remediate the findings
     - SIEM/IDS detection rules specific to the vulnerabilities found
     - Include actual payloads/commands from evidence where relevant
+    - Use raw_evidence array which contains all parsed finding details
+    - Generate content specific to the actual vulnerabilities found, not generic
 
-   - Use raw_evidence array which contains all parsed finding details
-   - Generate content specific to the actual vulnerabilities found, not generic
+   **Methodology Appendix**: Based on operation_plan and operation_tasks, create:
+   - Operation plan: *ALL* steps in phase order
+   - Operation tasks: *ALL* tasks in phase order
+      - operation_tasks.toon_format describes the format of tasks
+      - operation_tasks.items has the actual task details
+   - Include additional details or context that might be helpful
+   - Evidence can be viewed by the editor tool to provide context
 
 2. **Final Step**: Output the complete report following the template structure exactly
 - Start IMMEDIATELY with "# SECURITY ASSESSMENT REPORT"

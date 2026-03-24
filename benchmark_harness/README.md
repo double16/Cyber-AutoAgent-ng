@@ -17,6 +17,7 @@ d
 
 Checkout one of the benchmark repos:
 - `git clone --depth=1 https://github.com/double16/validation-benchmarks.git`
+- `git clone --depth=1 https://github.com/0ca/xbow-validation-benchmarks-patched`
 - `git clone --depth=1 https://github.com/schniggie/validation-benchmarks.git`
 - `git clone --depth=1 https://github.com/xbow-engineering/validation-benchmarks.git`
 

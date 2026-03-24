@@ -64,6 +64,7 @@ For remaining findings (11+):
 - Remediation Roadmap with immediate/short/long-term actions
 - Attack Path Analysis showing exploit chains
 - Technical Appendix with detection rules
+- Methodology Appendix with operation plan and tasks
 </report_components>
 
 <output_requirements>
