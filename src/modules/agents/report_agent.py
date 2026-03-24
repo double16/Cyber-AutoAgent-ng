@@ -13,6 +13,7 @@ from strands import Agent
 from strands.handlers import PrintingCallbackHandler
 from strands.models import BedrockModel
 from strands.models.litellm import LiteLLMModel
+from strands_tools.editor import editor
 from modules.config.models.ollama import OllamaModel
 
 from modules.config.manager import get_config_manager
@@ -63,6 +64,7 @@ class ReportGenerator:
             Configured Agent instance for report generation
         """
         # Select model via central configuration, with sensible defaults
+        # do not specify max tokens, let the model use up the context
         cfg = get_config_manager()
         prov = (provider or "bedrock").lower()
         if prov == "bedrock":
@@ -82,19 +84,14 @@ class ReportGenerator:
                 max_pool_connections=100,
             )
 
-            # Use the same max_tokens budget as the primary Bedrock model
-            max_tokens = llm_cfg.max_tokens
-
             # Ensure explicit region to avoid environment inconsistencies
             region = cfg.get_server_config("bedrock").region
             model = BedrockModel(
                 model_id=mid,
                 region_name=region,
-                max_tokens=max_tokens,
                 temperature=0.3,
                 boto_client_config=boto_config,
             )
-            setattr(model, "_output_tokens", max_tokens)
         elif prov == "gemini":
             # Always use the primary model from config
             llm_cfg = cfg.get_llm_config("gemini")
@@ -116,30 +113,24 @@ class ReportGenerator:
                 host=host,
                 model_id=mid,
                 temperature=0.3,
-                max_tokens=llm_cfg.max_tokens,
                 ollama_client_args={
                     "timeout": cfg.get_ollama_timeout(),
                 },
                 options=cfg.get_ollama_options(),
             )
-            setattr(model, "_output_tokens", llm_cfg.max_tokens)
         else:  # litellm
             llm_cfg = cfg.get_llm_config("litellm")
             # Only override if explicitly provided, otherwise use config
             mid = model_id if model_id else llm_cfg.model_id
             # Pass both token params - LiteLLM drop_params removes unsupported one
-            llm_max = llm_cfg.max_tokens
             params = {
                 "temperature": 0.3,
-                "max_tokens": llm_max,
-                "max_completion_tokens": llm_max,
             }
             client_args = {
                 "num_retries": 5,
                 "timeout": 1200,
             }
             model = LiteLLMModel(model_id=mid, params=params, client_args=client_args)
-            setattr(model, "_output_tokens", llm_max)
 
         # Create agent with report-specific configuration
         trace_attrs = {
@@ -186,6 +177,7 @@ class ReportGenerator:
             model=model,
             name=f"Cyber-ReportGenerator {operation_id}",
             system_prompt=get_report_agent_system_prompt(),
+            tools=[editor],
             trace_attributes=trace_attrs if operation_id else None,
             callback_handler=NoOpCallbackHandler(),
             hooks=[ToolUseIdHook()],

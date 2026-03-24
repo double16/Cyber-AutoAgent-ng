@@ -16,6 +16,9 @@ Cyber-AutoAgent is an autonomous security assessment tool with a React-based ter
 ## Installation
 
 ```bash
+# optional to get runtime dependencies and security tools
+brew bundle
+
 cd src/modules/interfaces/react
 npm install
 npm run build
@@ -96,6 +99,8 @@ export OPENROUTER_API_KEY=your_key
 export CYBER_AGENT_LLM_MODEL=openrouter/openrouter/polaris-alpha
 export CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
 ```
+
+Finding free compatible models: https://github.com/EvanThomasLuke/Cyber-AutoAgent-OpenRouter-CompatCheck
 
 **Moonshot AI:**
 ```bash

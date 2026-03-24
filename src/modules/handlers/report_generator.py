@@ -335,6 +335,8 @@ def build_report_sections(
         # Initialize memory client and retrieve evidence and plans
         evidence = []
         operation_plan = None
+        operation_task_toon_format = None
+        operation_tasks = []
         operation_date = datetime.now().strftime("%Y-%m-%d")
         cross_operation = memory_is_cross_operation()
         manager = get_config_manager()
@@ -391,15 +393,32 @@ def build_report_sections(
             if not cross_operation:
                 logger.info(f"Filtering evidence for current operation_id: {operation_id}")
 
-            # Select the newest active plan for this operation
+            # Select the newest active plan for this operation, and collect tasks
             try:
                 plan_candidates = []
+                task_memories = []
                 for m in raw_memories:
                     meta = m.get("metadata", {}) or {}
                     if str(meta.get("category", "")) == "plan":
                         # Only include plans from current operation (no cross-op fallback)
                         if str(meta.get("operation_id", "")) == str(operation_id):
                             plan_candidates.append(m)
+                    elif str(meta.get("category", "")) == "task":
+                        task_memories.append(m)
+
+                # Sort tasks by phase ascending, then by created_at descending (latest update for same phase)
+                task_memories.sort(key=lambda x: int((x.get("metadata") or {}).get("phase", 999)))
+
+                for m in task_memories:
+                    task_content = m.get("memory", "")
+                    if task_content:
+                        task_content_split = task_content.split(':', maxsplit=1)
+                        if len(task_content_split) == 2:
+                            task_toon_format = task_content_split[0].strip()
+                            if task_toon_format.startswith("[TASK]") and task_toon_format.endswith("}"):
+                                operation_task_toon_format = task_toon_format
+                                task_content = task_content_split[1].strip()
+                        operation_tasks.append(task_content)
 
                 # Sort by created_at descending
                 plan_candidates.sort(key=memory_sort_by_create_time, reverse=True)
@@ -455,22 +474,23 @@ def build_report_sections(
                     item = base_evidence.copy()
                     sev = metadata.get("severity", "MEDIUM" if category == "finding" else "INFO")
                     conf = str(metadata.get("confidence", ""))
-                    # Parse structured markers from the content so downstream sections have clean fields
-                    parsed_evidence = _parse_structured_evidence(memory_content)
                     item.update(
                         {
                             "category": category,
                             "severity": sev,
                             "confidence": conf,
-                            "parsed": parsed_evidence
-                            if isinstance(parsed_evidence, dict)
-                            else {},
                             "validation_status": str(
                                 metadata.get("validation_status", "")
                             ).strip()
                                                  or None,
                         }
                     )
+
+                    # Parse structured markers from the content so downstream sections have clean fields
+                    parsed_evidence = _parse_structured_evidence(memory_content)
+                    if parsed_evidence and isinstance(parsed_evidence, dict):
+                        item["parsed"] = parsed_evidence
+
                     evidence.append(item)
 
             logger.info(
@@ -666,6 +686,10 @@ def build_report_sections(
             "visual_summary": "",  # LLM generates mermaid diagram
             "overview": report_content.get("overview", ""),
             "operation_plan": operation_plan_formatted,
+            "operation_tasks": {
+                "toon_format": operation_task_toon_format,
+                "items": operation_tasks,
+            },
             "evidence_text": evidence_text,
             "findings_table": findings_table,
             "critical_findings": critical_section,
@@ -760,6 +784,9 @@ def _parse_structured_evidence(content: str) -> Dict[str, str]:
             # Clean up the extracted content
             if extracted:
                 components[key] = extracted
+
+    # Remove all entries from components where the value is falsey, including strings with only whitespace
+    components = {k: v for k, v in components.items() if v and v.strip()}
 
     return components
 
