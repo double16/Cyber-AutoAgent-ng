@@ -14,7 +14,7 @@ import os
 import re
 from collections import Counter
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 from modules.agents.report_agent import ReportGenerator
 from modules.config import get_config_manager
@@ -32,7 +32,6 @@ from modules.prompts.factory import (
     get_report_observation_system_prompt,
     get_report_appendix_system_prompt,
 )
-from modules.prompts.factory import get_report_agent_prompt
 from modules.tools.memory import memory_sort_by_create_time
 from modules.tools.memory import get_memory_client, memory_is_cross_operation
 from strands.types.content import Message, ContentBlock
@@ -48,6 +47,7 @@ def generate_security_report(
     objective: str,
     operation_id: str,
     config_data: Optional[str] = None,
+    callback_handler = None,
 ) -> str:
     """
     Generate a comprehensive security assessment report based on the operation results.
@@ -115,6 +115,18 @@ def generate_security_report(
 
         # Get module report prompt if available for domain guidance
         module_report_prompt = _get_module_report_prompt(module)
+        try:
+            from modules.prompts import get_module_loader  # Dynamic import required
+            module_loader = get_module_loader()
+            module_report_agent_executive_system_prompt = get_module_loader().load_module_report_agent_executive_system_prompt(module) or ""
+            module_report_agent_finding_system_prompt = get_module_loader().load_module_report_agent_finding_system_prompt(module) or ""
+            module_report_agent_observation_system_prompt = get_module_loader().load_module_report_agent_observation_system_prompt(module) or ""
+            module_report_agent_appendix_system_prompt = get_module_loader().load_module_report_agent_appendix_system_prompt(module) or ""
+        except Exception:
+            module_report_agent_executive_system_prompt = ""
+            module_report_agent_finding_system_prompt = ""
+            module_report_agent_observation_system_prompt = ""
+            module_report_agent_appendix_system_prompt = ""
 
         output_path = get_output_path(target_name=sanitize_target_name(target), operation_id=operation_id)
         
@@ -138,7 +150,7 @@ def generate_security_report(
             model_id=model_id,
             operation_id=operation_id,
             target=target,
-            system_prompt=get_report_executive_system_prompt() + "\n" + module_guidance
+            system_prompt=get_report_executive_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_executive_system_prompt
         )
         
         exec_prompt = f"""
@@ -154,13 +166,15 @@ Use the following data:
         exec_content = _extract_text_from_result(exec_result)
 
         if exec_content:
+            # Add anchor for Table of Contents
+            exec_content = "<a name=\"executive-summary\"></a>\n" + exec_content
             with open(os.path.join(output_path, "report_executive_summary.md"), "w") as f:
                 f.write(exec_content)
             report_parts.append(exec_content)
 
         # Part 2: Detailed Findings
         logger.info("Generating Detailed Findings...")
-        findings_content = "## DETAILED VULNERABILITY ANALYSIS\n\n"
+        findings_content = "<a name=\"detailed-vulnerability-analysis\"></a>\n## DETAILED VULNERABILITY ANALYSIS\n\n"
 
         # Add summary table for remaining findings
         if sections.get("summary_table"):
@@ -179,7 +193,7 @@ Use the following data:
                 model_id=model_id,
                 operation_id=operation_id,
                 target=target,
-                system_prompt=get_report_finding_system_prompt() + "\n" + module_guidance
+                system_prompt=get_report_finding_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_finding_system_prompt
             )
             
             finding_prompt = f"""
@@ -201,7 +215,7 @@ Finding Data:
         
         # Part 3: Observations and Discoveries
         logger.info("Generating Observations and Discoveries...")
-        observations_content = "## OBSERVATIONS AND DISCOVERIES\n\n"
+        observations_content = "<a name=\"observations-and-discoveries\"></a>\n## OBSERVATIONS AND DISCOVERIES\n\n"
         has_observations = False
 
         for i, finding in enumerate(raw_findings):
@@ -213,7 +227,7 @@ Finding Data:
                     model_id=model_id,
                     operation_id=operation_id,
                     target=target,
-                    system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance
+                    system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_observation_system_prompt
                 )
                 
                 obs_prompt = f"""
@@ -241,7 +255,7 @@ Observation Data:
             model_id=model_id,
             operation_id=operation_id,
             target=target,
-            system_prompt=get_report_appendix_system_prompt() + "\n" + module_guidance
+            system_prompt=get_report_appendix_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_appendix_system_prompt
         )
 
         appendix_prompt = f"""
@@ -258,6 +272,8 @@ Use the following data:
         appendix_content = _extract_text_from_result(appendix_result)
         
         if appendix_content:
+            # Add anchor for Table of Contents
+            appendix_content = "<a name=\"assessment-methodology\"></a>\n" + appendix_content
             with open(os.path.join(output_path, "report_methodology.md"), "w") as f:
                 f.write(appendix_content)
             report_parts.append(appendix_content)
@@ -529,9 +545,12 @@ def build_report_sections(
             evidence_skipped = 0
             evidence_included = 0
 
+            logger.info(f"Processing {len(raw_memories)} memories for evidence")
+
             for memory_item in raw_memories:
                 memory_content = memory_item.get("memory", "")
                 metadata = memory_item.get("metadata", {}) or {}
+                logger.info(f"Checking memory item: id={memory_item.get('id')}, category={metadata.get('category')}, op_id={metadata.get('operation_id')}")
                 if not metadata:
                     continue
 
@@ -560,6 +579,18 @@ def build_report_sections(
                 # Findings via metadata
                 category = metadata.get("category")
                 if category in ["finding", "signal", "observation", "discovery"]:
+                    # Downgrade findings that aren't verified (not sure I'm ready for this downgrade rule yet)
+                    # if category == "finding":
+                    #     is_verified = str(metadata.get("validation_status", "")).strip().lower() == "verified"
+                    #     if not is_verified:
+                    #         logger.info(
+                    #             "Downgrading finding '%s' (id: %s) to observation: verified=%s",
+                    #             metadata.get("vulnerability") or memory_content[:30],
+                    #             memory_item.get("id"),
+                    #             is_verified,
+                    #         )
+                    #         category = "observation"
+
                     evidence_included += 1
                     item = base_evidence.copy()
                     sev = metadata.get("severity", "MEDIUM" if category == "finding" else "INFO")
@@ -623,13 +654,8 @@ def build_report_sections(
         # Load module report prompt for domain lens
         domain_lens = {}
         try:
-            from modules.prompts.factory import get_module_loader
-
-            module_loader = get_module_loader()
-            module_prompt = module_loader.load_module_report_prompt(module)
-            if module_prompt:
-                domain_lens = _extract_domain_lens(module_prompt)
-                logger.info("Loaded domain lens for module '%s'", module)
+            domain_lens = _extract_domain_lens(_get_module_report_prompt(module))
+            logger.info("Loaded domain lens for module '%s'", module)
         except Exception as e:
             logger.warning("Could not load module prompt: %s", e)
 

@@ -188,6 +188,62 @@ def test_module_prompt_loader_load_module_report_prompt(tmp_path, monkeypatch):
     assert "Report Guidance" in content
 
 
+def test_module_prompt_loader_load_module_report_agent_executive_system_prompt(tmp_path, monkeypatch):
+    # Create a report_agent_executive_system_prompt.md for module
+    module_dir = tmp_path / "operation_plugins" / "web"
+    module_dir.mkdir(parents=True)
+    (module_dir / "module.yaml").write_text("name: web\n")
+    (module_dir / "report_agent_executive_system_prompt.md").write_text("Executive System Prompt\n")
+
+    loader = ModulePromptLoader()
+    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
+
+    content = loader.load_module_report_agent_executive_system_prompt("web")
+    assert "Executive System Prompt" in content
+
+
+def test_module_prompt_loader_load_module_report_agent_finding_system_prompt(tmp_path, monkeypatch):
+    # Create a report_agent_finding_system_prompt.md for module
+    module_dir = tmp_path / "operation_plugins" / "web"
+    module_dir.mkdir(parents=True)
+    (module_dir / "module.yaml").write_text("name: web\n")
+    (module_dir / "report_agent_finding_system_prompt.md").write_text("Finding System Prompt\n")
+
+    loader = ModulePromptLoader()
+    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
+
+    content = loader.load_module_report_agent_finding_system_prompt("web")
+    assert "Finding System Prompt" in content
+
+
+def test_module_prompt_loader_load_module_report_agent_observation_system_prompt(tmp_path, monkeypatch):
+    # Create a report_agent_observation_system_prompt.md for module
+    module_dir = tmp_path / "operation_plugins" / "web"
+    module_dir.mkdir(parents=True)
+    (module_dir / "module.yaml").write_text("name: web\n")
+    (module_dir / "report_agent_observation_system_prompt.md").write_text("Observation System Prompt\n")
+
+    loader = ModulePromptLoader()
+    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
+
+    content = loader.load_module_report_agent_observation_system_prompt("web")
+    assert "Observation System Prompt" in content
+
+
+def test_module_prompt_loader_load_module_report_agent_appendix_system_prompt(tmp_path, monkeypatch):
+    # Create a report_agent_appendix_system_prompt.md for module
+    module_dir = tmp_path / "operation_plugins" / "web"
+    module_dir.mkdir(parents=True)
+    (module_dir / "module.yaml").write_text("name: web\n")
+    (module_dir / "report_agent_appendix_system_prompt.md").write_text("Appendix System Prompt\n")
+
+    loader = ModulePromptLoader()
+    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
+
+    content = loader.load_module_report_agent_appendix_system_prompt("web")
+    assert "Appendix System Prompt" in content
+
+
 def test_module_prompt_loader_load_module_report_prompt_path_order(tmp_path, monkeypatch):
     module_dir1 = tmp_path / "operation_plugins1" / "web"
     module_dir1.mkdir(parents=True)

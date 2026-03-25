@@ -338,6 +338,54 @@ def _ensure_memory_client() -> "Mem0ServiceClient":
     return _MEMORY_CLIENT
 
 
+def normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
+    """Normalize confidence to a percentage string, optionally capping at cap_to."""
+    try:
+        if isinstance(conf_val, str) and conf_val.strip().endswith("%"):
+            num = float(conf_val.strip().rstrip("%"))
+        else:
+            num = float(conf_val)
+    except Exception:
+        num = 0.0
+    if cap_to is not None:
+        num = min(num, cap_to)
+    num = max(0.0, min(100.0, num))
+    return f"{num:.1f}%"
+
+
+_RE_PROOF_PACK_FILE_PATTERN = re.compile(r"artifact(?:\s+paths?)?:\s*(\S+)", re.IGNORECASE)
+
+def _has_valid_proof_pack(finding: Any) -> bool:
+    """Validate proof_pack structure and artifact existence (fail-closed).
+
+    Expectations:
+    - proof_pack is a dict with key 'artifacts': List[str] of file paths (absolute or relative)
+    - Optional 'rationale': short string tying artifacts to impact
+    - Every listed artifact path MUST exist at validation time
+
+    Notes:
+    - No content parsing or domain heuristics are used here; presence of files only
+    - Any exception or malformed input results in False (fail-closed)
+    """
+    stack = [ finding ]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, list):
+            stack.extend(e)
+        elif isinstance(e, dict):
+            stack.extend(e.values())
+        else:
+            e_str = str(e)
+            if os.path.exists(e_str):
+                return True
+            matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
+            file_paths = [path.strip() for paths in matches for path in paths.split(',')]
+            for path in file_paths:
+                if os.path.exists(path):
+                    return True
+
+    return False
+
 # TODO: consider making mem0_store take a list of (content, metadata). Agents handle one tool call with a list better than multiple tool calls.
 @tool
 def mem0_store(
@@ -409,49 +457,6 @@ def mem0_store(
     Returns:
         JSON/text with operation result.
     """
-    def _normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
-        """Normalize confidence to a percentage string, optionally capping at cap_to."""
-        try:
-            if isinstance(conf_val, str) and conf_val.strip().endswith("%"):
-                num = float(conf_val.strip().rstrip("%"))
-            else:
-                num = float(conf_val)
-        except Exception:
-            num = 0.0
-        if cap_to is not None:
-            num = min(num, cap_to)
-        num = max(0.0, min(100.0, num))
-        return f"{num:.1f}%"
-
-    def _is_valid_proof_pack(proof: Any) -> bool:
-        """Validate proof_pack structure and artifact existence (fail-closed).
-
-        Expectations:
-        - proof_pack is a dict with key 'artifacts': List[str] of file paths (absolute or relative)
-        - Optional 'rationale': short string tying artifacts to impact
-        - Every listed artifact path MUST exist at validation time
-
-        Notes:
-        - No content parsing or domain heuristics are used here; presence of files only
-        - Any exception or malformed input results in False (fail-closed)
-        """
-        if not isinstance(proof, dict):
-            return False
-        arts = proof.get("artifacts")
-        if not isinstance(arts, list) or len(arts) == 0:
-            return False
-        # All listed artifacts must exist; relative or absolute paths supported
-        for p in arts:
-            try:
-                if not isinstance(p, str) or not p.strip():
-                    return False
-                if not os.path.exists(p):
-                    return False
-            except Exception:
-                return False
-        # Rationale is encouraged but not strictly required for validity here
-        return True
-
     if not content:
         raise ValueError("content is required")
 
@@ -555,15 +560,14 @@ def mem0_store(
         # 2. Validate proof_pack for HIGH/CRITICAL findings
         vstat = str(metadata.get("validation_status", "")).lower()
         if sev in {"HIGH", "CRITICAL"}:
-            proof = metadata.get("proof_pack")
-            if _is_valid_proof_pack(proof):
+            if _has_valid_proof_pack(metadata):
                 # Valid proof_pack exists - respect or default to unverified
                 if vstat not in {"verified", "unverified", "hypothesis"}:
                     metadata["validation_status"] = "unverified"
             else:
                 # Missing/invalid proof_pack - downgrade to hypothesis and cap confidence
                 metadata["validation_status"] = "hypothesis"
-                metadata["confidence"] = _normalize_confidence(
+                metadata["confidence"] = normalize_confidence(
                     metadata.get("confidence", "60%"), cap_to=60.0
                 )
         else:
@@ -588,7 +592,7 @@ def mem0_store(
 
         # 4. Cap confidence for pattern matches
         if metadata.get("evidence_type") == "pattern_match":
-            metadata["confidence"] = _normalize_confidence(
+            metadata["confidence"] = normalize_confidence(
                 metadata.get("confidence", "35%"), cap_to=40.0
             )
 

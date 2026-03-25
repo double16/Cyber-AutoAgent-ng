@@ -487,15 +487,20 @@ def main():
     # Operation ID
     target_sanitized = sanitize_target_name(args.target)
     operation_id = None
-    if isinstance(args.cont, str):
+    if isinstance(args.cont, str) and args.cont:
         operation_id = args.cont
-    elif isinstance(args.report, str):
+    elif isinstance(args.report, str) and args.report:
         operation_id = args.report
     elif (isinstance(args.cont, bool) and args.cont) or (isinstance(args.report, bool) and args.report):
         # get the last operation
+        base_dir = os.path.abspath(
+            args.output_dir
+            or os.getenv("CYBER_AGENT_OUTPUT_DIR")
+            or get_default_base_dir()
+        )
         previous_operations = list(filter(
             lambda d: d.is_dir() and d.name.startswith("OP_"),
-            os.scandir(os.path.join(server_config.output.base_dir, target_sanitized))))
+            os.scandir(os.path.join(base_dir, target_sanitized))))
         previous_operations.sort(key=lambda e: e.name, reverse=True)
         if previous_operations:
             operation_id = previous_operations[0].name

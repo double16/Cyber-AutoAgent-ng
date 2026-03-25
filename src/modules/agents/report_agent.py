@@ -19,7 +19,6 @@ from modules.config.models.ollama import OllamaModel
 from modules.config.manager import get_config_manager
 from modules.config.models.factory import create_gemini_model
 from modules.config.system.logger import get_logger
-from modules.prompts.factory import get_report_agent_system_prompt
 from modules.agents.patches import ToolUseIdHook
 from modules import __version__
 
@@ -41,11 +40,12 @@ class ReportGenerator:
     """
 
     def create_report_agent(
-        provider: str = "bedrock",
+        provider: str,
+        system_prompt: str,
         model_id: Optional[str] = None,
         operation_id: Optional[str] = None,
         target: Optional[str] = None,
-        system_prompt: Optional[str] = None,
+        callback_handler = None,
     ) -> Agent:
         """
         Create a clean agent instance for report generation.
@@ -174,13 +174,12 @@ class ReportGenerator:
 
         # Create a silent callback handler to prevent duplicate output
         # The report will be returned and handled by the caller
-        actual_system_prompt = system_prompt if system_prompt else get_report_agent_system_prompt()
         return Agent(
             model=model,
             name=f"Cyber-ReportGenerator {operation_id}",
-            system_prompt=actual_system_prompt,
+            system_prompt=system_prompt,
             tools=[editor],
             trace_attributes=trace_attrs if operation_id else None,
-            callback_handler=NoOpCallbackHandler(),
+            callback_handler=callback_handler or NoOpCallbackHandler(),
             hooks=[ToolUseIdHook()],
         )

@@ -35,18 +35,14 @@ _LF_SEEDED_LOCK = threading.Lock()
 
 # Mapping local template filenames -> remote Langfuse prompt names
 LF_SYSTEM_PROMPT_NAME = "cyber/system/system_prompt"
-LF_REPORT_AGENT_SYSTEM_PROMPT_NAME = "cyber/report/report_agent_system_prompt"
-LF_REPORT_AGENT_PROMPT_NAME = "cyber/report/report_agent_prompt"
 _LF_TEMPLATE_TO_NAME = {
     "system_prompt.md": LF_SYSTEM_PROMPT_NAME,
     "tools_guide.md": "cyber/system/tools_guide",
-    "report_agent_system_prompt.md": LF_REPORT_AGENT_SYSTEM_PROMPT_NAME,
-    "report_agent_prompt.md": LF_REPORT_AGENT_PROMPT_NAME,
     "report_generation_prompt.md": "cyber/report/report_generation_prompt",
-    "report_agent_system_appendix_prompt.md": "cyber/report/report_agent_system_appendix_prompt",
-    "report_agent_system_executive_prompt.md": "cyber/report/report_agent_system_executive_prompt",
-    "report_agent_system_finding_prompt.md": "cyber/report/report_agent_system_finding_prompt",
-    "report_agent_system_observation_prompt.md": "cyber/report/report_agent_system_observation_prompt",
+    "report_agent_appendix_system_prompt.md": "cyber/report/report_agent_appendix_system_prompt",
+    "report_agent_executive_system_prompt.md": "cyber/report/report_agent_executive_system_prompt",
+    "report_agent_finding_system_prompt.md": "cyber/report/report_agent_finding_system_prompt",
+    "report_agent_observation_system_prompt.md": "cyber/report/report_agent_observation_system_prompt",
 }
 
 OVERLAY_FILENAME = "adaptive_prompt.json"
@@ -689,28 +685,9 @@ def get_report_generation_prompt(
         return base
 
 
-def get_report_agent_system_prompt() -> str:
-    """Minimal system prompt for the dedicated report agent."""
-    template = load_prompt_template("report_agent_system_prompt.md")
-    if template:
-        return template
-    return (
-        "You are a reporting specialist. Produce a clear, structured security assessment report\n"
-        "with an executive summary, key findings, and remediation recommendations."
-    )
-
-
-def get_report_agent_prompt() -> str:
-    """Minimal system prompt for the dedicated report agent."""
-    template = load_prompt_template("report_agent_prompt.md")
-    if template:
-        return template
-    raise FileNotFoundError("Missing report_agent_prompt.md")
-
-
 def get_report_executive_system_prompt() -> str:
     """System prompt for the executive summary generation call."""
-    template = load_prompt_template("report_agent_system_executive_prompt.md")
+    template = load_prompt_template("report_agent_executive_system_prompt.md")
     if template:
         return template
     return "You are an executive security reporting specialist. Focus on summary and risk."
@@ -718,7 +695,7 @@ def get_report_executive_system_prompt() -> str:
 
 def get_report_finding_system_prompt() -> str:
     """System prompt for individual finding generation call."""
-    template = load_prompt_template("report_agent_system_finding_prompt.md")
+    template = load_prompt_template("report_agent_finding_system_prompt.md")
     if template:
         return template
     return "You are a technical security writer. Generate a detailed report for the provided finding."
@@ -726,7 +703,7 @@ def get_report_finding_system_prompt() -> str:
 
 def get_report_observation_system_prompt() -> str:
     """System prompt for individual observation/discovery generation call."""
-    template = load_prompt_template("report_agent_system_observation_prompt.md")
+    template = load_prompt_template("report_agent_observation_system_prompt.md")
     if template:
         return template
     return "You are a technical security writer. Generate a brief report for the provided observation or discovery."
@@ -734,7 +711,7 @@ def get_report_observation_system_prompt() -> str:
 
 def get_report_appendix_system_prompt() -> str:
     """System prompt for appendix and methodology generation call."""
-    template = load_prompt_template("report_agent_system_appendix_prompt.md")
+    template = load_prompt_template("report_agent_appendix_system_prompt.md")
     if template:
         return template
     return "You are a technical documentation specialist. Focus on appendix and methodology."
@@ -1005,6 +982,22 @@ class ModulePromptLoader:
 
     def load_module_report_prompt(self, module_name: str) -> str:
         content, self.last_loaded_report_prompt_source = self.load_module_prompt(module_name, "report", "report_prompt.md")
+        return content
+
+    def load_module_report_agent_executive_system_prompt(self, module_name: str) -> str:
+        content, self.last_loaded_report_prompt_source = self.load_module_prompt(module_name, "report_agent_executive_system", "report_agent_executive_system_prompt.md")
+        return content
+
+    def load_module_report_agent_finding_system_prompt(self, module_name: str) -> str:
+        content, self.last_loaded_report_prompt_source = self.load_module_prompt(module_name, "report_agent_finding_system", "report_agent_finding_system_prompt.md")
+        return content
+
+    def load_module_report_agent_observation_system_prompt(self, module_name: str) -> str:
+        content, self.last_loaded_report_prompt_source = self.load_module_prompt(module_name, "report_agent_observation_system", "report_agent_observation_system_prompt.md")
+        return content
+
+    def load_module_report_agent_appendix_system_prompt(self, module_name: str) -> str:
+        content, self.last_loaded_report_prompt_source = self.load_module_prompt(module_name, "report_agent_appendix_system", "report_agent_appendix_system_prompt.md")
         return content
 
     def discover_module_tools(self, module_name: str) -> Tuple[List[str], Optional[List[str]]]:

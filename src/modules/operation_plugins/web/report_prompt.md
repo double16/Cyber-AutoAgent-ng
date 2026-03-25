@@ -1,58 +1,7 @@
 <module_report_configuration>
 Module: General Web Application Security Assessment
 Focus: OWASP Top 10, authentication flaws, input validation, configuration issues
-
-**CRITICAL**: This prompt is for POST-OPERATION report generation ONLY
-- Invoked by separate report_agent AFTER main agent calls stop()
-- Main execution agent MUST NOT create summary/report files during operation
-- Reports created during execution violate termination protocol
 </module_report_configuration>
-
-<general_report_structure>
-Group findings by attack vector potential:
-1. **Immediate Risks**: Exploitable now, high impact
-2. **Systemic Issues**: Patterns indicating deeper problems
-3. **Strategic Concerns**: Architecture/design vulnerabilities
-</general_report_structure>
-
-<finding_organization>
-**Organize by Exploitation Chain Potential**:
-- Chain related vulnerabilities to show compound risk (XSS + CORS → account takeover, SQLi + file write → RCE)
-- Map technical findings to business processes (payment bypass, data exfiltration paths, privilege escalation chains)
-- Highlight where multiple small issues create critical exposure (info disclosure + weak session → full compromise)
-
-**Severity Classification** (validate before assignment):
-- CRITICAL: Runtime exploitation + no user action + immediate impact + no mitigating factors. Confidence ≥85%
-- HIGH: Exploitation proven OR strong code review + partial PoC. Requires user interaction OR chained conditions. Confidence 70-95%
-- MEDIUM: Pattern recognized, limited validation. Requires multiple conditions. Confidence 50-75%
-- LOW: Hypothesis with minimal testing. Significant exploitation barriers. Confidence <50%
-- INFO: Observations, misconfigurations, best practices. No exploit path proven
-
-Note: Environmental constraints (library unavailable, no test accounts) cap confidence at 85% - mark as "partial validation" not "unverified"
-
-**Finding Structure Requirements**:
-Each finding MUST include:
-1. Vulnerability title with exploitation context (not just type)
-2. Evidence artifacts with paths (HTTP transcripts, screenshots, PoC code)
-3. Exploitation steps with before/after state validation
-4. Business impact quantification (data exposure scope, financial impact, compliance violations)
-5. Confidence percentage with validation methodology
-6. Negative controls demonstrating proper security elsewhere
-</finding_organization>
-
-<audience_adaptation>
-General assessments serve diverse stakeholders:
-- **Executives**: Risk quantification, business impact, strategic priorities  
-- **Technical Teams**: Specific vulnerabilities, reproduction steps, patches
-- **Compliance**: Regulatory implications, audit findings, gap analysis
-</audience_adaptation>
-
-<remediation_framework>
-Structure fixes by effort vs impact:
-- **Quick Wins** (Hours): Patches, configuration changes, access controls
-- **Short Term** (Days): Service hardening, authentication upgrades, monitoring
-- **Strategic** (Weeks+): Architecture changes, segmentation, process improvements
-</remediation_framework>
 
 <domain_lens>
 DOMAIN_LENS:
@@ -64,27 +13,9 @@ long_term: Adopt secure Software Development Life Cycle (SDLC) practices, implem
 framework: OWASP Top 10 2021, NIST Cybersecurity Framework, CWE/SANS Top 25
 </domain_lens>
 
-<assessment_focus>
-- Web application vulnerabilities (XSS, SQL injection, CSRF, XXE)
-- Authentication and session management weaknesses  
-- API security and access control issues
-- Server and infrastructure misconfigurations
-- Third-party component vulnerabilities
-- Business logic flaws and data validation issues
-</assessment_focus>
-
-<evidence_requirements>
-- Clear reproduction steps for each finding
-- Proof-of-concept code demonstrating exploitability
-- Screenshots or output showing vulnerability confirmation
-- Risk ratings aligned with CVSS v3.1 scoring
-- Specific version numbers for vulnerable components
-</evidence_requirements>
-
-<report_emphasis>
-- Executive summary with business impact focus
-- Technical details with exploitation scenarios
-- Prioritized remediation roadmap
-- Compliance mapping (PCI-DSS, HIPAA, GDPR as applicable)
-- Metrics showing security posture improvement potential
-</report_emphasis>
+<audience_adaptation>
+General assessments serve diverse stakeholders:
+- **Executives**: Risk quantification, business impact, strategic priorities  
+- **Technical Teams**: Specific vulnerabilities, reproduction steps, patches
+- **Compliance**: Regulatory implications, audit findings, gap analysis
+</audience_adaptation>

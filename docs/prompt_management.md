@@ -60,10 +60,14 @@ parser.add_argument(
 ```
 src/modules/operation_plugins/  (CYBER_PLUGIN_PATH, ~/.cyber-autoagent/modules/)
 ├── web/
-│   ├── execution_prompt.md    # Domain-specific system prompt
-│   ├── report_prompt.md       # Report generation guidance
-│   ├── module.yaml            # Module configuration
-│   └── tools/                 # Module-specific tools / specialist agents
+│   ├── execution_prompt.md                        # Domain-specific system prompt
+│   ├── report_prompt.md                           # General report generation guidance
+│   ├── report_agent_executive_system_prompt.md    # Executive summary guidance
+│   ├── report_agent_finding_system_prompt.md      # Finding report guidance
+│   ├── report_agent_observation_system_prompt.md  # Observation report guidance
+│   ├── report_agent_appendix_system_prompt.md     # Report appendix guidance (additional sections can be specified)
+│   ├── module.yaml                                # Module configuration
+│   └── tools/                                     # Module-specific tools / specialist agents
 │       └── validation_specialist.py
 └── ctf/
     ├── execution_prompt.md
