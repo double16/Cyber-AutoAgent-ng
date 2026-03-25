@@ -20,7 +20,7 @@ Use the following template structure for your report.
 <generation_instructions>
 1. **First Step**: Use the data provided to fill in the template above:
     - Most sections are pre-formatted and ready for direct insertion
-    - For {{attack_path_analysis}}, {{mitre_attck_mapping}}, and {{technical_appendix}}, generate from raw_evidence.
+    - For {{attack_path_analysis}} and {{mitre_attck_mapping}}, generate from raw_evidence.
 
    **Module Report Context**: Based on module and objective, briefly describe the assessment focus
 
@@ -63,15 +63,7 @@ Use the following template structure for your report.
 
    **MITRE ATT&CK Mapping**: Generate a mapping of tactics and techniques that are explicitly supported by the raw_evidence. Only include items that are clearly justified by the findings (no speculation). If uncertain, omit or mark as TBD. Group mappings by attack path nodes when possible.
 
-   **Technical Appendix**: Based on raw_evidence and tools_used, create:
-    - Proof of concept code snippets (sanitized) from evidence field
-    - Configuration examples to remediate the findings
-    - SIEM/IDS detection rules specific to the vulnerabilities found
-    - Include actual payloads/commands from evidence where relevant
-    - Use raw_evidence array which contains all parsed finding details
-    - Generate content specific to the actual vulnerabilities found, not generic
-
-   **Methodology Appendix**: Based on operation_plan and operation_tasks, create:
+   **Assessment Methodology**: Based on operation_plan and operation_tasks, create:
    - Operation plan: *ALL* steps in phase order
    - Operation tasks: *ALL* tasks in phase order
       - operation_tasks.toon_format describes the format of tasks

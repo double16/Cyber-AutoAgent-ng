@@ -40,12 +40,12 @@ class ReportGenerator:
     output of the build_report_sections function. Output is returned to the caller.
     """
 
-    @staticmethod
     def create_report_agent(
         provider: str = "bedrock",
         model_id: Optional[str] = None,
         operation_id: Optional[str] = None,
         target: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> Agent:
         """
         Create a clean agent instance for report generation.
@@ -59,6 +59,7 @@ class ReportGenerator:
             model_id: Specific model to use (optional)
             operation_id: Operation ID for trace continuity
             target: Target system for trace metadata
+            system_prompt: Optional custom system prompt
 
         Returns:
             Configured Agent instance for report generation
@@ -173,10 +174,11 @@ class ReportGenerator:
 
         # Create a silent callback handler to prevent duplicate output
         # The report will be returned and handled by the caller
+        actual_system_prompt = system_prompt if system_prompt else get_report_agent_system_prompt()
         return Agent(
             model=model,
             name=f"Cyber-ReportGenerator {operation_id}",
-            system_prompt=get_report_agent_system_prompt(),
+            system_prompt=actual_system_prompt,
             tools=[editor],
             trace_attributes=trace_attrs if operation_id else None,
             callback_handler=NoOpCallbackHandler(),

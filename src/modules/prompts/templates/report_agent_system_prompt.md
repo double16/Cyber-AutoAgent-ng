@@ -63,8 +63,7 @@ For remaining findings (11+):
 - Risk Assessment with distribution visualization
 - Remediation Roadmap with immediate/short/long-term actions
 - Attack Path Analysis showing exploit chains
-- Technical Appendix with detection rules
-- Methodology Appendix with operation plan and tasks
+- Assessment Methodology with operation plan and tasks
 </report_components>
 
 <output_requirements>

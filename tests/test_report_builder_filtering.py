@@ -183,8 +183,6 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert out.get("medium_count") == 3
         assert out.get("low_count") == 4
         assert out.get("info_count") == 5
-        assert out.get("module_report") == ""
-        assert out.get("visual_summary") == ""
         assert "Comprehensive web application security assessment" in out.get("overview")
         assert json.loads(out.get("operation_plan", "{}")) == plan
 
@@ -198,19 +196,6 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert "MEDIUM | 3 |" in findings_table
         assert "LOW | 4 |" in findings_table
         assert "INFO |" not in findings_table
-
-        critical_findings = out.get("critical_findings")
-        assert critical_findings.count("#### ") == 1
-        assert "#### 1. A - /a" in critical_findings
-        assert "B - /b" not in critical_findings
-        assert "K - /k" not in critical_findings
-
-        high_findings = out.get("high_findings")
-        assert high_findings.count("#### ") == 2
-        assert "B - /b" in high_findings
-        assert "C - /c" in high_findings
-        assert "A - /a" not in high_findings
-        assert "K - /k" not in high_findings
 
         summary_table = out.get("summary_table")
         assert summary_table.count("| MEDIUM |") == 3

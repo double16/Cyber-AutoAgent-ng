@@ -42,8 +42,11 @@ _LF_TEMPLATE_TO_NAME = {
     "tools_guide.md": "cyber/system/tools_guide",
     "report_agent_system_prompt.md": LF_REPORT_AGENT_SYSTEM_PROMPT_NAME,
     "report_agent_prompt.md": LF_REPORT_AGENT_PROMPT_NAME,
-    "report_template.md": "cyber/report/report_template",
     "report_generation_prompt.md": "cyber/report/report_generation_prompt",
+    "report_agent_system_appendix_prompt.md": "cyber/report/report_agent_system_appendix_prompt",
+    "report_agent_system_executive_prompt.md": "cyber/report/report_agent_system_executive_prompt",
+    "report_agent_system_finding_prompt.md": "cyber/report/report_agent_system_finding_prompt",
+    "report_agent_system_observation_prompt.md": "cyber/report/report_agent_system_observation_prompt",
 }
 
 OVERLAY_FILENAME = "adaptive_prompt.json"
@@ -703,6 +706,38 @@ def get_report_agent_prompt() -> str:
     if template:
         return template
     raise FileNotFoundError("Missing report_agent_prompt.md")
+
+
+def get_report_executive_system_prompt() -> str:
+    """System prompt for the executive summary generation call."""
+    template = load_prompt_template("report_agent_system_executive_prompt.md")
+    if template:
+        return template
+    return "You are an executive security reporting specialist. Focus on summary and risk."
+
+
+def get_report_finding_system_prompt() -> str:
+    """System prompt for individual finding generation call."""
+    template = load_prompt_template("report_agent_system_finding_prompt.md")
+    if template:
+        return template
+    return "You are a technical security writer. Generate a detailed report for the provided finding."
+
+
+def get_report_observation_system_prompt() -> str:
+    """System prompt for individual observation/discovery generation call."""
+    template = load_prompt_template("report_agent_system_observation_prompt.md")
+    if template:
+        return template
+    return "You are a technical security writer. Generate a brief report for the provided observation or discovery."
+
+
+def get_report_appendix_system_prompt() -> str:
+    """System prompt for appendix and methodology generation call."""
+    template = load_prompt_template("report_agent_system_appendix_prompt.md")
+    if template:
+        return template
+    return "You are a technical documentation specialist. Focus on appendix and methodology."
 
 
 class ModulePromptLoader:
