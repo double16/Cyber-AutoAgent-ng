@@ -15,12 +15,10 @@ src/modules/prompts/
 ├── templates/
 │   ├── system_prompt.md
 │   ├── tools_guide.md
-│   ├── report_agent_system_prompt.md
-│   ├── report_agent_prompt.md
-│   ├── report_agent_system_appendix_prompt.md
-│   ├── report_agent_system_executive_prompt.md
-│   ├── report_agent_system_finding_prompt.md
-│   └── report_agent_system_observation_prompt.md
+│   ├── report_agent_executive_system_prompt.md
+│   ├── report_agent_finding_system_prompt.md
+│   ├── report_agent_observation_system_prompt.md
+│   └── report_agent_appendix_system_prompt.md
 ├── __init__.py
 ├── factory.py
 └── README.md

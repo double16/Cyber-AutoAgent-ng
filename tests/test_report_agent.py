@@ -10,15 +10,6 @@ def test_create_report_agent_custom_system_prompt(mock_bedrock, mock_agent, mock
     mock_cfg.return_value.get_llm_config.return_value.model_id = "test-model"
     mock_cfg.return_value.get_server_config.return_value.region = "us-east-1"
     
-    # Test with default system prompt
-    with patch("modules.agents.report_agent.get_report_agent_system_prompt") as mock_get_default:
-        mock_get_default.return_value = "Default System Prompt"
-        ReportGenerator.create_report_agent(provider="bedrock")
-        
-        # Verify Agent was created with default system prompt
-        args, kwargs = mock_agent.call_args
-        assert kwargs["system_prompt"] == "Default System Prompt"
-
     # Test with custom system prompt
     ReportGenerator.create_report_agent(provider="bedrock", system_prompt="Custom System Prompt")
     
@@ -33,7 +24,7 @@ def test_create_report_agent_litellm(mock_litellm, mock_agent, mock_cfg):
     # Setup mocks
     mock_cfg.return_value.get_llm_config.return_value.model_id = "test-model"
     
-    ReportGenerator.create_report_agent(provider="litellm")
+    ReportGenerator.create_report_agent(provider="litellm", system_prompt="Report Prompt")
     
     # Verify LiteLLMModel was created
     mock_litellm.assert_called()

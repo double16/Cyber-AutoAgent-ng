@@ -15,13 +15,14 @@ For the provided finding:
 3. **Confidence**: Percentage with brief justification.
 4. **Evidence**: Actual request/response or command output first.
    - For verified web/API claims, cite at least one `http_request` transcript artifact path (do not embed full content).
-5. **MITRE ATT&CK**: Mapping of tactics and techniques.
-6. **CWE**: Common Weakness Enumeration reference.
+5. **MITRE ATT&CK**: Mapping of tactics and techniques (only from supported evidence).
+6. **CWE**: Common Weakness Enumeration reference (only from supported evidence).
 7. **Impact**: 1–2 sentences on business risk and technical impact.
 8. **Remediation**: Specific, actionable steps (commands, configurations) to fix the issue.
 9. **Steps to Reproduce**: Concise sequence of steps to demonstrate the vulnerability.
-10. **[STEPS]**: brief expected vs actual + artifact path.
-11. **TECHNICAL APPENDIX**: 
+10. **Attack Path Analysis**: Evidence-based description of how this finding chains with others into a broader attack flow.
+11. **STEPS**: brief expected vs actual + artifact path from `[STEPS]` in finding data.
+12. **TECHNICAL APPENDIX**: 
     - Proof of concept code snippets (sanitized) from evidence field.
     - Configuration examples to remediate the findings.
     - SIEM/IDS detection rules specific to the vulnerabilities found.
