@@ -27,6 +27,10 @@ from modules.prompts.factory import (
     format_tools_summary,
     generate_findings_summary_table,
     safe_truncate,
+    get_report_executive_system_prompt,
+    get_report_finding_system_prompt,
+    get_report_observation_system_prompt,
+    get_report_appendix_system_prompt,
 )
 from modules.prompts.factory import get_report_agent_prompt
 from modules.tools.memory import memory_sort_by_create_time
@@ -112,100 +116,192 @@ def generate_security_report(
         # Get module report prompt if available for domain guidance
         module_report_prompt = _get_module_report_prompt(module)
 
-        # Load the report template, preferring module-specific template when available
-        from modules.prompts import load_prompt_template
+        output_path = get_output_path(target_name=sanitize_target_name(target), operation_id=operation_id)
+        
+        # Store report data for processing by other means
+        with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
+            f.write(json.dumps(sections, indent=2, sort_keys=True))
 
-        # If a module-specific report prompt exists (e.g., ctf/report_prompt.md), use it as the template
-        if module_report_prompt and str(module_report_prompt).strip():
-            report_template = module_report_prompt
-            logger.info("Using module-specific report template for module: %s", module)
-        else:
-            report_template = load_prompt_template("report_template.md")
-            logger.info("Using default security assessment report template")
-
-        # Create report agent with the builder tool
-        report_agent = ReportGenerator.create_report_agent(
-            provider=provider,
-            model_id=model_id,
-            operation_id=operation_id,
-            target=target,
-        )
-
-        # Create comprehensive prompt with template structure and module guidance
-        # Using string concatenation/format to avoid f-string issues with template placeholders
-        agent_prompt = get_report_agent_prompt()
-        # Safely format the agent prompt with runtime values
-        # Escape braces in the report template so Python format doesn't consume them
-        report_template_escaped = report_template.replace("{", "{{").replace("}", "}}")
-        tools_json = json.dumps(tools_used) if tools_used else "[]"
         module_str = module or "web"
         module_guidance = (
             module_report_prompt
             if module_report_prompt
-            else "Apply general security assessment best practices focusing on OWASP Top 10 and common vulnerability patterns."
+            else "Apply general security assessment best practices focusing on common vulnerability patterns."
         )
-        agent_prompt = agent_prompt.format(
-            target=target,
-            objective=objective,
+
+        report_parts = []
+
+        # Part 1: Executive Summary
+        logger.info("Generating Executive Summary...")
+        exec_agent = ReportGenerator.create_report_agent(
+            provider=provider,
+            model_id=model_id,
             operation_id=operation_id,
-            module=module_str,
-            steps_executed=steps_executed,
-            tools_count=len(tools_used) if tools_used else 0,
-            module_guidance=module_guidance,
-            report_template=report_template_escaped,
-            tools_used=tools_json,
+            target=target,
+            system_prompt=get_report_executive_system_prompt() + "\n" + module_guidance
         )
+        
+        exec_prompt = f"""
+Generate the Executive Summary and Risk Assessment sections.
+Target: {target}
+Objective: {objective}
+Module: {module_str}
 
-        # Generate the report using the agent
-        report_agent.messages.append(
-            Message(role="user",
-                    content=[ContentBlock(text="# REPORT DATA\n"), ContentBlock(text=json.dumps(sections))])
-        )
+Use the following data:
+{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts']})}
+"""
+        exec_result = exec_agent(exec_prompt)
+        exec_content = _extract_text_from_result(exec_result)
 
-        # Store report data for processing by other means
-        output_path = get_output_path(target_name=sanitize_target_name(target), operation_id=operation_id)
-        with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
-            f.write(json.dumps(sections, indent=2, sort_keys=True))
+        if exec_content:
+            with open(os.path.join(output_path, "report_executive_summary.md"), "w") as f:
+                f.write(exec_content)
+            report_parts.append(exec_content)
 
-        logger.info("Invoking report generation agent with structured prompt of %d characters ...", len(agent_prompt))
-        logger.debug("Report prompt\n%s", agent_prompt)
-        result = None
-        for retry in range(1,-1,-1):  # [1,0]
-            try:
-                result = report_agent(agent_prompt)
-                break
-            except Exception as e:
-                if retry == 0:
-                    raise e
-                e_str = str(e).lower()
-                if any(n in e_str for n in ["midstreamfallbackerror", "maxtokensreached", "max_tokens"]):
-                    # network errors midstream are not uncommon with litellm, they are not retried
-                    # max tokens reached may be the model got into a verbose state
-                    logger.info("Report agent failed, retrying ... %s", e_str)
+        # Part 2: Detailed Findings
+        logger.info("Generating Detailed Findings...")
+        findings_content = "## DETAILED VULNERABILITY ANALYSIS\n\n"
+
+        # Add summary table for remaining findings
+        if sections.get("summary_table"):
+            findings_content += "\n### Findings Summary\n\n" + sections.get("summary_table") + "\n\n"
+
+        raw_findings = sections.get("raw_evidence", [])
+
+        for i, finding in enumerate(raw_findings):
+            if finding.get("severity") not in ["CRITICAL", "HIGH"]:
+                if finding.get("category") != "finding":
                     continue
-                raise e
 
-        # Extract the report content
-        if result and hasattr(result, "message"):
-            content = result.message.get("content", [])
-            if content and isinstance(content, list):
-                report_text = ""
-                for block in content:
-                    if isinstance(block, dict) and "text" in block:
-                        report_text += block["text"]
+            logger.info(f"Generating report for finding {i+1}: {finding.get('content')}")
+            finding_agent = ReportGenerator.create_report_agent(
+                provider=provider,
+                model_id=model_id,
+                operation_id=operation_id,
+                target=target,
+                system_prompt=get_report_finding_system_prompt() + "\n" + module_guidance
+            )
+            
+            finding_prompt = f"""
+Generate a detailed report for the following finding.
+Target: {target}
+Finding Data:
+{json.dumps(finding)}
+"""
+            finding_result = finding_agent(finding_prompt)
+            finding_text = _extract_text_from_result(finding_result)
+            
+            if finding_text:
+                findings_content += finding_text + "\n\n"
+                finding_filename = f"finding_{i+1}_{sanitize_target_name(finding.get('title', 'finding')[:50])}.md"
+                with open(os.path.join(output_path, finding_filename), "w") as f:
+                    f.write(finding_text)
 
-                logger.info(
-                    "Report generated successfully (%d characters)", len(report_text)
+        report_parts.append(findings_content)
+        
+        # Part 3: Observations and Discoveries
+        logger.info("Generating Observations and Discoveries...")
+        observations_content = "## OBSERVATIONS AND DISCOVERIES\n\n"
+        has_observations = False
+
+        for i, finding in enumerate(raw_findings):
+            if finding.get("category") in ["signal", "observation", "discovery"]:
+                has_observations = True
+                logger.info(f"Generating report for observation {i+1}: {finding.get('content')}")
+                obs_agent = ReportGenerator.create_report_agent(
+                    provider=provider,
+                    model_id=model_id,
+                    operation_id=operation_id,
+                    target=target,
+                    system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance
                 )
-                return report_text
+                
+                obs_prompt = f"""
+Generate a brief report for the following observation/discovery.
+Target: {target}
+Observation Data:
+{json.dumps(finding)}
+"""
+                obs_result = obs_agent(obs_prompt)
+                obs_text = _extract_text_from_result(obs_result)
+                
+                if obs_text:
+                    observations_content += obs_text + "\n\n"
+                    obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
+                    with open(os.path.join(output_path, obs_filename), "w") as f:
+                        f.write(obs_text)
 
-        logger.error("Failed to generate report - no content in response")
-        return "Error: Failed to generate security assessment report"
+        if has_observations:
+            report_parts.append(observations_content)
+
+        # Part 4: Assessment Methodology
+        logger.info("Generating Assessment Methodology...")
+        appendix_agent = ReportGenerator.create_report_agent(
+            provider=provider,
+            model_id=model_id,
+            operation_id=operation_id,
+            target=target,
+            system_prompt=get_report_appendix_system_prompt() + "\n" + module_guidance
+        )
+
+        appendix_prompt = f"""
+Generate the Assessment Methodology section.
+Target: {target}
+Operation ID: {operation_id}
+Steps Executed: {steps_executed}
+Tools Used: {json.dumps(tools_used)}
+
+Use the following data:
+{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'tools_summary']})}
+"""
+        appendix_result = appendix_agent(appendix_prompt)
+        appendix_content = _extract_text_from_result(appendix_result)
+        
+        if appendix_content:
+            with open(os.path.join(output_path, "report_methodology.md"), "w") as f:
+                f.write(appendix_content)
+            report_parts.append(appendix_content)
+
+        # --- Combine everything ---
+        final_report = "# SECURITY ASSESSMENT REPORT\n\n"
+        final_report += "## TABLE OF CONTENTS\n"
+        final_report += "- [Executive Summary](#executive-summary)\n"
+        final_report += "- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n"
+        if has_observations:
+            final_report += "- [Observations and Discoveries](#observations-and-discoveries)\n"
+        final_report += "- [Assessment Methodology](#assessment-methodology)\n\n"
+        
+        final_report += "\n\n".join(report_parts)
+        
+        # Add footer
+        final_report += f"\n\n----\nReport Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nOperation ID: {operation_id}\n"
+
+        with open(os.path.join(output_path, "security_assessment_report.md"), "w") as f:
+            f.write(final_report)
+
+        logger.info("Final combined report generated: %d characters", len(final_report))
+        return final_report
 
     except Exception as e:
         logger.error("Error generating security report: %s", e, exc_info=True)
         # Don't expose internal error details to user
         return "Report generation failed. Please check logs for details."
+
+
+def _extract_text_from_result(result: Any) -> str:
+    """Extract text content from an agent result object and fix leading whitespace on headings."""
+    text = ""
+    if result and hasattr(result, "message"):
+        for block in result.message.get("content", []):
+            if isinstance(block, dict) and "text" in block:
+                text += block["text"]
+    
+    if not text:
+        return text
+
+    # Remove leading whitespace before markdown heading markers (#, ##, ...)
+    text = re.sub(r"^[ \t]+(#+ )", r"\1", text, flags=re.MULTILINE)
+    return text
 
 
 def _get_module_report_prompt(module_name: Optional[str]) -> Optional[str]:
@@ -261,14 +357,8 @@ def _trim_evidence_for_report(
     if limit <= 0 or len(items) <= limit:
         return items
 
-    sorted_items = sorted(
-        items,
-        key=lambda entry: _SEVERITY_ORDER.get(
-            str(entry.get("severity", "")).upper(), 5
-        ),
-    )
-    trimmed = sorted_items[:limit]
-    overflow = len(sorted_items) - limit
+    trimmed = items[:limit]
+    overflow = len(items) - limit
     if overflow > 0:
         trimmed.append(
             {
@@ -504,6 +594,7 @@ def build_report_sections(
             evidence = []
 
         # Format evidence for report (cap to avoid context explosions)
+        evidence.sort(key=lambda entry: _SEVERITY_ORDER.get(str(entry.get("severity", "")).upper(), 5))
         evidence = _trim_evidence_for_report(evidence, MAX_REPORT_FINDINGS)
         evidence_text = format_evidence_for_report(evidence)
 
@@ -550,18 +641,9 @@ def build_report_sections(
             objective=objective,
         )
 
-        # Separate findings for detailed vs summary treatment
-        critical_findings, high_findings, summary_findings = _prioritize_findings(
-            evidence
-        )
-
         # Generate structured finding sections - include ALL findings for comprehensive report
-        critical_section = _format_detailed_findings(critical_findings, "CRITICAL")
-        high_section = _format_detailed_findings(
-            high_findings, "HIGH"
-        )  # Include ALL high findings
         summary_table = (
-            _format_summary_table(summary_findings) if summary_findings else ""
+            _format_summary_table(evidence) if evidence else ""
         )
 
         # Format the operation plan
@@ -625,7 +707,12 @@ def build_report_sections(
                                     if "tool_name" in payload:
                                         tool_name = payload.get("tool_name")
                                         if tool_name:
-                                            tools_used_from_log.append(tool_name)
+                                            if tool_name == "shell" and "tool_input" in payload:
+                                                tool_input = payload.get("tool_input")
+                                                if "command" in tool_input:
+                                                    tools_used_from_log.append(tool_input.get("command").split()[0])
+                                            else:
+                                                tools_used_from_log.append(tool_name)
 
                             except Exception:
                                 continue
@@ -682,8 +769,6 @@ def build_report_sections(
             "medium_count": severity_counts["medium"],
             "low_count": severity_counts["low"],
             "info_count": severity_counts["info"],
-            "module_report": "",  # LLM generates from context
-            "visual_summary": "",  # LLM generates mermaid diagram
             "overview": report_content.get("overview", ""),
             "operation_plan": operation_plan_formatted,
             "operation_tasks": {
@@ -692,14 +777,12 @@ def build_report_sections(
             },
             "evidence_text": evidence_text,
             "findings_table": findings_table,
-            "critical_findings": critical_section,
-            "high_findings": high_section,
             "summary_table": summary_table,
             "analysis": report_content.get("analysis", ""),
             "immediate_recommendations": report_content.get("immediate", ""),
             "short_term_recommendations": report_content.get("short_term", ""),
             "long_term_recommendations": report_content.get("long_term", ""),
-            "raw_evidence": evidence,  # For LLM to generate attack paths and technical content
+            "raw_evidence": evidence,
             "tools_summary": tools_summary,
             "analysis_framework": domain_lens.get("framework", ""),
             "module": module,
@@ -789,29 +872,6 @@ def _parse_structured_evidence(content: str) -> Dict[str, str]:
     components = {k: v for k, v in components.items() if v and v.strip()}
 
     return components
-
-
-def _prioritize_findings(evidence: List[Dict[str, Any]]) -> tuple:
-    """
-    Separate findings by severity for structured presentation.
-
-    Returns:
-        Tuple of (critical_findings, high_findings, other_findings)
-    """
-    critical = []
-    high = []
-    other = []
-
-    for finding in evidence:
-        severity = str(finding.get("severity", "")).upper()
-        if severity == "CRITICAL":
-            critical.append(finding)
-        elif severity == "HIGH":
-            high.append(finding)
-        else:
-            other.append(finding)
-
-    return critical, high, other
 
 
 def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> str:
