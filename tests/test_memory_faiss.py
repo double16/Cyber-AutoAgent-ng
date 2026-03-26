@@ -252,6 +252,11 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
 
     _initialize_faiss_memory(memory, tmp_path, monkeypatch)
 
+    def _list_tasks():
+        # result = list(filter(lambda x: x.get("metadata", {}).get("category", "") == "task", memory._MEMORY_CLIENT.list_memories()))
+        result = memory._MEMORY_CLIENT._list_tasks_latest(user_id=memory._MEMORY_CONFIG.get("user_id"), run_id="test-op-create-tasks")
+        return result
+
     try:
         plan = {
             "objective": "Test task creation",
@@ -301,22 +306,26 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
                 ),
             ]
         )
+        assert len(_list_tasks()) == 3
 
         active_raw = memory.mem0_get_active_task()
         assert isinstance(active_raw, str)
         assert "<active_task" in active_raw
         assert 'phase="1"' in active_raw
         assert 'status="active"' in active_raw
+        assert len(_list_tasks()) == 3
 
         active_raw2 = memory.mem0_task_done("done")
         assert isinstance(active_raw2, str)
         assert active_raw != active_raw2
+        assert len(_list_tasks()) == 3
 
         active_none = memory.mem0_task_done("blocked")
         assert isinstance(active_none, str)
         assert "<active_task" in active_none
         assert 'phase="1"' in active_none
         assert 'status="none"' in active_none
+        assert len(_list_tasks()) == 3
 
         plan["current_phase"] = 2
         plan["phases"][0]["status"] = "done"
@@ -328,12 +337,17 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
         assert "<active_task" in active_raw3
         assert 'phase="2"' in active_raw3
         assert 'status="active"' in active_raw3
+        assert len(_list_tasks()) == 3
 
         active_none2 = memory.mem0_task_done("blocked")
         assert isinstance(active_none2, str)
         assert "<active_task" in active_none2
         assert 'phase="2"' in active_none2
         assert 'status="none"' in active_none2
+
+        task_memories = _list_tasks()
+        assert len(task_memories) == 3
+        assert set([task.get("metadata", {}).get("status") for task in task_memories]) == {"blocked", "done"}
 
     finally:
         memory._MEMORY_CLIENT = None

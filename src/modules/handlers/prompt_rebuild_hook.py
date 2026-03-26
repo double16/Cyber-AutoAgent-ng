@@ -28,7 +28,7 @@ from modules.config import get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.tools import Mem0ServiceClient
-from modules.tools.memory import memory_sort_by_create_time, memory_is_cross_operation
+from modules.tools.memory import memory_create_time, memory_is_cross_operation
 
 logger = get_logger("Handlers.PromptRebuildHook")
 
@@ -582,7 +582,7 @@ Without category='finding', your work will NOT appear in the final report.
                 return
 
             # Limit to 30 most recent
-            recent_memories.sort(key=memory_sort_by_create_time, reverse=True)
+            recent_memories.sort(key=memory_create_time, reverse=True)
             # limit to the latest plan
             plan_ids = list(map(lambda m: m["id"], filter(lambda m: m.get("metadata", {}).get("category", "") == "plan", recent_memories)))
             plan_id = plan_ids[0] if plan_ids else None
