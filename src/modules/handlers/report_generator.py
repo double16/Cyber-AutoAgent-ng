@@ -32,7 +32,7 @@ from modules.prompts.factory import (
     get_report_observation_system_prompt,
     get_report_appendix_system_prompt,
 )
-from modules.tools.memory import memory_sort_by_create_time
+from modules.tools.memory import memory_create_time
 from modules.tools.memory import get_memory_client, memory_is_cross_operation
 from strands.types.content import Message, ContentBlock
 
@@ -499,7 +499,7 @@ def build_report_sections(
             if not cross_operation:
                 logger.info(f"Filtering evidence for current operation_id: {operation_id}")
 
-            # Select the newest active plan for this operation, and collect tasks
+            # Select the newest active plan for this operation and collect tasks
             try:
                 plan_candidates = []
                 task_memories = []
@@ -512,8 +512,20 @@ def build_report_sections(
                     elif str(meta.get("category", "")) == "task":
                         task_memories.append(m)
 
-                # Sort tasks by phase ascending, then by created_at descending (latest update for same phase)
-                task_memories.sort(key=lambda x: int((x.get("metadata") or {}).get("phase", 999)))
+                # Sort tasks by created_at ascending
+                task_memories.sort(key=memory_create_time)
+
+                # Only keep the latest by task_uid. This should be handled by the metadata.active value, but it's not perfect
+                task_uid_map = {}
+                for m in task_memories:
+                    metadata = m.get("metadata", {}) or {}
+                    task_uid = metadata.get("task_uid")
+                    if task_uid:
+                        task_uid_map[task_uid] = m
+                task_memories = list(task_uid_map.values())
+
+                # Sort tasks by phase ascending, then by created_at
+                task_memories.sort(key=lambda x: (int((x.get("metadata") or {}).get("phase", 999)), memory_create_time(x)))
 
                 for m in task_memories:
                     task_content = m.get("memory", "")
@@ -527,7 +539,7 @@ def build_report_sections(
                         operation_tasks.append(task_content)
 
                 # Sort by created_at descending
-                plan_candidates.sort(key=memory_sort_by_create_time, reverse=True)
+                plan_candidates.sort(key=memory_create_time, reverse=True)
                 # Pick the first active one; else first candidate
                 for m in plan_candidates:
                     meta = m.get("metadata", {}) or {}

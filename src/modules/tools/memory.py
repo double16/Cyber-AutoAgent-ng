@@ -319,8 +319,10 @@ def _format_task_as_toon(task_content: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def memory_sort_by_create_time(m: Dict[str, Any]) -> str:
-    return str(m.get("created_at", ""))
+def memory_create_time(m: Dict[str, Any]) -> str:
+    """Best-effort created_at extraction (metadata preferred, then top-level)."""
+    meta = m.get("metadata", {})
+    return str(m.get("created_at", meta.get("created_at", "")))
 
 
 def memory_is_cross_operation() -> bool:
@@ -1016,7 +1018,7 @@ def mem0_get(
 def _memory_list_for_agent(memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     pruned = []
     seen_ids = set()
-    memories.sort(key=memory_sort_by_create_time, reverse=True)
+    memories.sort(key=memory_create_time, reverse=True)
     for result in memories:
         memory = result.get("memory", "")
         if not memory:
@@ -1174,10 +1176,10 @@ def mem0_delete(
     WARNING: This is destructive.
     Returns operation result.
     """
+    if not memory_id:
+        raise ValueError("memory_id is required")
     try:
         client = _ensure_memory_client()
-        if not memory_id:
-            raise ValueError("memory_id is required")
         client.delete_memory(memory_id)
         return f"Memory {memory_id} deleted successfully"
     except Exception as e:
@@ -2013,7 +2015,8 @@ class Mem0ServiceClient:
 
     def delete_memory(self, memory_id: str):
         """Delete a memory by ID."""
-        return self.mem0.delete(memory_id)
+        with _FAISS_WRITE_LOCK:
+            return self.mem0.delete(memory_id)
 
     def get_memory_history(self, memory_id: str):
         """Get the history of a memory by ID."""
@@ -2148,13 +2151,8 @@ class Mem0ServiceClient:
             if isinstance(previous_plans, list):
                 for plan in previous_plans:
                     if plan.get("id"):
-                        logger.debug(f"Deactivating plan {plan.get('id')}")
-                        # Mark as inactive
-                        self.store_memory(
-                            content=plan.get("memory", ""),
-                            user_id=user_id,
-                            metadata={**plan.get("metadata", {}), "active": False},
-                        )
+                        logger.debug(f"Deleting plan {plan.get('id')}")
+                        self.delete_memory(plan.get("id"))
         except Exception as e:
             logger.debug(f"Could not deactivate previous plans: {e}")
 
@@ -2242,22 +2240,12 @@ class Mem0ServiceClient:
 
         try:
             # Use run_id scoping to get operation-specific plans
+            # all_memories = self.search(query=None, filters={"category": "plan"}, user_id=user_id, run_id=operation_id, limit=100)
             all_memories = self.list_memories(user_id=user_id, run_id=operation_id, limit=100)
-
-            if isinstance(all_memories, dict):
-                raw = (
-                    all_memories.get("results", [])
-                    or all_memories.get("memories", [])
-                    or []
-                )
-            elif isinstance(all_memories, list):
-                raw = all_memories
-            else:
-                raw = []
 
             # Filter to plan items from current operation
             plan_items: List[Dict[str, Any]] = []
-            for m in raw:
+            for m in all_memories:
                 meta = m.get("metadata", {}) or {}
                 if str(meta.get("category", "")) != "plan":
                     continue
@@ -2267,7 +2255,7 @@ class Mem0ServiceClient:
                 return None
 
             # Sort by created_at (desc). If missing, keep original order.
-            plan_items.sort(key=memory_sort_by_create_time, reverse=True)
+            plan_items.sort(key=memory_create_time, reverse=True)
 
             # Prefer the first active plan; if none, return most recent plan
             for m in plan_items:
@@ -2294,7 +2282,7 @@ class Mem0ServiceClient:
             if not prev:
                 latest[uid] = e
                 continue
-            if memory_sort_by_create_time(e) >= memory_sort_by_create_time(prev):
+            if memory_create_time(e) >= memory_create_time(prev):
                 latest[uid] = e
         return latest
 
@@ -2305,11 +2293,11 @@ class Mem0ServiceClient:
             run_id: Optional[str],
     ) -> List[Dict[str, Any]]:
         """Return latest-version task memories for a run_id (operation)."""
-        all_memories = self.list_memories(user_id=user_id, run_id=run_id, limit=200)
-        raw: List[Dict[str, Any]] = all_memories if isinstance(all_memories, list) else []
+        all_memories = self.list_memories(user_id=user_id, run_id=run_id, limit=1000)
+        # task_memories2 = self.search(query=None, filters={"category": "task"}, user_id=user_id, run_id=run_id, limit=1000)
 
         task_entries: List[Dict[str, Any]] = []
-        for m in raw:
+        for m in all_memories:
             meta = m.get("metadata", {}) or {}
             if str(meta.get("category", "")) != "task":
                 continue
@@ -2318,10 +2306,12 @@ class Mem0ServiceClient:
                 continue
             task_entries.append(m)
 
+        # assert len(task_entries) == len(task_memories2), f"list_memories and search_memories differ in length: {len(task_entries)} vs {len(task_memories2)}"
+
         latest = self._select_latest_by_uid(task_entries, "task_uid")
         # return stable ordering (created_at desc)
         latest_list = list(latest.values())
-        latest_list.sort(key=memory_sort_by_create_time, reverse=True)
+        latest_list.sort(key=memory_create_time, reverse=True)
         return latest_list
 
     def _task_from_memory(self, mem: Dict[str, Any]) -> Optional[Task]:
@@ -2374,15 +2364,18 @@ class Mem0ServiceClient:
             task_meta["operation_id"] = op_id
 
         # Enforce only one active task per operation by demoting any existing active task
-        if task.status == "active":
-            try:
-                latest_tasks = self._list_tasks_latest(user_id=user_id, run_id=op_id)
-                for tmem in latest_tasks:
-                    tmeta = tmem.get("metadata", {}) or {}
-                    if str(tmeta.get("status", "")) != "active":
-                        continue
-                    if str(tmeta.get("task_uid", "")) == task.task_uid:
-                        continue
+        # Mark previous instance of current task active=False
+        try:
+            # all_tasks = self.search(query=None, filters={"category": "task"}, user_id=user_id, run_id=run_id, limit=1000)
+            all_tasks = list(filter(
+                lambda m: m.get("metadata", {}).get("category", "") == "task",
+                self.list_memories(user_id=user_id, run_id=op_id, limit=1000)))
+            for tmem in all_tasks:
+                tmeta = tmem.get("metadata", {}) or {}
+                if str(tmeta.get("task_uid", "")) == task.task_uid:
+                    self.delete_memory(tmem["id"])
+                    continue
+                if task.status == 'active' and str(tmeta.get("status", "")) == "active":
                     # Demote by writing a new version
                     demoted = Task(
                         task_uid=str(tmeta.get("task_uid")),
@@ -2393,11 +2386,10 @@ class Mem0ServiceClient:
                         status="pending",
                         status_reason="demoted",
                     )
-                    demote_meta = {k: v for k, v in tmeta.items() if k not in ("created_at",)}
-                    demote_meta["active"] = False
-                    self.store_task(task=demoted, user_id=user_id, metadata=demote_meta)
-            except Exception as e:
-                logger.debug("Could not enforce single active task: %s", e)
+                    self.delete_memory(tmem["id"])
+                    self.store_task(task=demoted, user_id=user_id)
+        except Exception as e:
+            logger.debug("Could not enforce single active task: %s", e)
 
         task_dict = task.to_dict()
         task_content_str = _format_task_as_toon(task_dict)
@@ -2457,21 +2449,10 @@ class Mem0ServiceClient:
                 status=new_status,
                 status_reason=new_status_reason,
             )
-            # Preserve any existing metadata beyond the standard fields by pulling the latest memory meta
-            try:
-                for mem in latest_tasks:
-                    meta = mem.get("metadata", {}) or {}
-                    if str(meta.get("task_uid", "")) == target.task_uid:
-                        preserve = {k: v for k, v in meta.items() if k not in ("created_at", "status")}
-                        self.store_task(task=updated, user_id=user_id, metadata=preserve)
-                        break
-                else:
-                    self.store_task(task=updated, user_id=user_id)
-            except Exception:
-                self.store_task(task=updated, user_id=user_id)
+            self.store_task(task=updated, user_id=user_id)
 
         # Activate next pending task in this phase
-        pending = [t for t in phase_tasks if t.status == "pending"]
+        pending = [t for t in phase_tasks if t.status == "pending" and t.task_uid != (target.task_uid if target else "")]
         pending.sort(key=lambda t: t.task_uid)  # stable but arbitrary
 
         next_active: Optional[Task] = None
@@ -2486,25 +2467,9 @@ class Mem0ServiceClient:
                 status="active",
                 status_reason="",
             )
-            try:
-                for mem in latest_tasks:
-                    meta = mem.get("metadata", {}) or {}
-                    if str(meta.get("task_uid", "")) == cand.task_uid:
-                        preserve = {k: v for k, v in meta.items() if k not in ("created_at", "status")}
-                        self.store_task(task=next_active, user_id=user_id, metadata=preserve)
-                        break
-                else:
-                    self.store_task(task=next_active, user_id=user_id)
-            except Exception:
-                self.store_task(task=next_active, user_id=user_id)
+            self.store_task(task=next_active, user_id=user_id)
 
         return updated, next_active
-
-    @staticmethod
-    def _mem_created_at(mem: Dict[str, Any]) -> str:
-        """Best-effort created_at extraction (metadata preferred, then top-level)."""
-        meta = mem.get("metadata", {}) or {}
-        return str(meta.get("created_at") or mem.get("created_at") or "")
 
     def get_or_activate_next_task_in_phase(
             self,
@@ -2548,7 +2513,7 @@ class Mem0ServiceClient:
         if not pending_mems:
             return None, False
 
-        pending_mems.sort(key=self._mem_created_at)
+        pending_mems.sort(key=memory_create_time)
         cand_mem = pending_mems[0]
         cand = self._task_from_memory(cand_mem)
         if not cand:
@@ -2564,10 +2529,7 @@ class Mem0ServiceClient:
             status_reason="",
         )
 
-        # Preserve any existing metadata beyond status/created_at
-        meta = cand_mem.get("metadata", {}) or {}
-        preserve = {k: v for k, v in meta.items() if k not in ("created_at", "status")}
-        self.store_task(task=next_active, user_id=user_id, metadata=preserve)
+        self.store_task(task=next_active, user_id=user_id)
         return next_active, True
 
     def list_tasks(
@@ -2669,24 +2631,7 @@ Include: objective, current_phase=1, phases with clear criteria for each.
             # Get all memories for the user
             logger.debug("Getting memory overview for user_id: %s", user_id)
 
-            memories_response = self.list_memories(user_id=user_id)
-            logger.debug(
-                "Memory overview raw response type: %s", type(memories_response)
-            )
-            logger.debug("Memory overview raw response: %s", memories_response)
-
-            # Parse response format
-            if isinstance(memories_response, dict):
-                raw_memories = memories_response.get(
-                    "memories", memories_response.get("results", [])
-                )
-                logger.debug("Dict response: found %d memories", len(raw_memories))
-            elif isinstance(memories_response, list):
-                raw_memories = memories_response
-                logger.debug("List response: found %d memories", len(raw_memories))
-            else:
-                raw_memories = []
-                logger.debug("Unexpected response type, using empty list")
+            raw_memories = self.list_memories(user_id=user_id)
 
             # Analyze memories
             total_count = len(raw_memories)
@@ -2710,13 +2655,12 @@ Include: objective, current_phase=1, phases with clear criteria for each.
                                 if len(memory.get("memory", "")) > 100
                                 else memory.get("memory", "")
                             ),
-                            "created_at": memory.get("created_at",
-                                                     memory.get("metadata", {}).get("created_at", "Unknown")),
+                            "created_at": memory_create_time(memory),
                         }
                     )
 
             # Sort recent findings by creation date (most recent first)
-            recent_findings.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            recent_findings.sort(key=memory_create_time, reverse=True)
 
             return {
                 "total_count": total_count,
