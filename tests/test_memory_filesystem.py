@@ -4,17 +4,18 @@ import os
 import pytest
 
 
-def _initialize_faiss_memory(memory, tmp_path, monkeypatch):
+def _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-create-tasks"):
     faiss_path = tmp_path / "mem0_faiss"
 
     # isolate global client/config for this test
     memory._MEMORY_CLIENT = None
     memory._MEMORY_CONFIG = None
+    memory._PLAN_STORE = None
 
     embedder_model = "mxbai-embed-large:latest"
     ollama_base_url = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
     monkeypatch.setenv("MEMORY_ISOLATION", "operation")
-    monkeypatch.setenv("CYBER_OPERATION_ID", "test-op-create-tasks")
+    monkeypatch.setenv("CYBER_OPERATION_ID", operation_id)
     monkeypatch.setenv("CYBER_AGENT_PROVIDER", "ollama")
     monkeypatch.setenv("CYBER_AGENT_EMBEDDING_MODEL", embedder_model)
     monkeypatch.setenv("OLLAMA_HOST", ollama_base_url)
@@ -49,10 +50,10 @@ def _initialize_faiss_memory(memory, tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_mem0_create_tasks_faiss_filesystem(tmp_path, monkeypatch):
+def test_mem0_create_tasks_filesystem(tmp_path, monkeypatch):
     from modules.tools import memory
 
-    _initialize_faiss_memory(memory, tmp_path, monkeypatch)
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-fs")
 
     try:
         plan = {
@@ -95,7 +96,7 @@ def test_mem0_create_tasks_faiss_filesystem(tmp_path, monkeypatch):
         assert not raw.startswith("Error:")
 
         payload = json.loads(raw)
-        assert isinstance(payload, dict)
+        assert isinstance(payload, list)
 
         tasks = memory.mem0_list_uncompleted_tasks()
         assert len(tasks) == 2
@@ -125,10 +126,10 @@ def test_mem0_create_tasks_faiss_filesystem(tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_mem0_create_tasks_faiss_duplicates(tmp_path, monkeypatch):
+def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
     from modules.tools import memory
 
-    _initialize_faiss_memory(memory, tmp_path, monkeypatch)
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-duplicates")
 
     try:
         plan = {
@@ -173,9 +174,9 @@ def test_mem0_create_tasks_faiss_duplicates(tmp_path, monkeypatch):
             ]
         ))
 
-        assert len(create_raw["results"]) == 2
-        assert create_raw["results"][0]["event"] == "ADD"
-        assert create_raw["results"][1]["event"] == "ADD"
+        assert len(create_raw) == 2
+        assert create_raw[0]["event"] == "ADD"
+        assert create_raw[1]["event"] == "ADD"
 
         create_dup1 = json.loads(memory.mem0_create_tasks(
             [
@@ -189,9 +190,9 @@ def test_mem0_create_tasks_faiss_duplicates(tmp_path, monkeypatch):
             ]
         ))
 
-        assert len(create_dup1["results"]) == 1
-        assert create_dup1["results"][0]["event"] == "DUPLICATE"
-        assert create_dup1["results"][0]["id"] == create_raw["results"][0]["id"]
+        assert len(create_dup1) == 1
+        assert create_dup1[0]["event"] == "DUPLICATE"
+        assert create_dup1[0]["task_uid"] == create_raw[0]["task_uid"]
 
         create_dup2 = json.loads(memory.mem0_create_tasks(
             [
@@ -212,11 +213,10 @@ def test_mem0_create_tasks_faiss_duplicates(tmp_path, monkeypatch):
             ]
         ))
 
-        assert len(create_dup2["results"]) == 2
-        assert create_dup2["results"][0]["event"] == "DUPLICATE"
-        assert create_dup2["results"][0]["id"] == create_raw["results"][1]["id"]
-        assert create_dup2["results"][1]["event"] == "DUPLICATE"
-        assert create_dup2["results"][1]["id"] == create_raw["results"][1]["id"]
+        assert len(create_dup2) == 2
+        assert create_dup2[0]["event"] == "DUPLICATE"
+        assert create_dup2[0]["task_uid"] == create_raw[1]["task_uid"]
+        assert create_dup2[1]["event"] == "ADD"  # Title is same, objective is different
 
         create_new2 = json.loads(memory.mem0_create_tasks(
             [
@@ -237,9 +237,136 @@ def test_mem0_create_tasks_faiss_duplicates(tmp_path, monkeypatch):
             ]
         ))
 
-        assert len(create_new2["results"]) == 2
-        assert create_new2["results"][0]["event"] == "ADD"
-        assert create_new2["results"][1]["event"] == "DUPLICATE"
+        assert len(create_new2) == 2
+        assert create_new2[0]["event"] == "ADD"
+        assert create_new2[1]["event"] == "DUPLICATE"
+
+        # Fuzzy duplicate check
+        create_fuzzy = json.loads(memory.mem0_create_tasks(
+            [
+                memory.TaskCreate(
+                    title="Enumerate login endpoint",
+                    # slightly different title: "Enumerate login endpoints" vs "Enumerate login endpoint"
+                    objective="Find authentication entry points.",  # slightly different objective: "." at the end
+                    phase=None,
+                    status="pending",
+                ),
+            ]
+        ))
+        assert len(create_fuzzy) == 1
+        assert create_fuzzy[0]["event"] == "DUPLICATE"
+        assert create_fuzzy[0]["task_uid"] == create_raw[0]["task_uid"]
+
+    finally:
+        memory._MEMORY_CLIENT = None
+        memory._MEMORY_CONFIG = None
+
+
+@pytest.mark.ollama
+def test_mem0_store_plan_persistence(tmp_path, monkeypatch):
+    """Verify that mem0_store_plan and mem0_get_plan use SQLite correctly."""
+    from modules.tools import memory
+
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-persistence")
+
+    try:
+        plan = {
+            "objective": "Initial Objective",
+            "current_phase": 1,
+            "total_phases": 1,
+            "phases": [
+                {
+                    "id": 1,
+                    "title": "Phase 1",
+                    "status": "active",
+                    "criteria": "Criteria 1",
+                }
+            ],
+            "assessment_complete": False,
+        }
+
+        # Store plan
+        memory.mem0_store_plan(plan)
+
+        # Retrieve plan
+        retrieved_plan = memory.mem0_get_plan().get("plan")
+        assert retrieved_plan is not None
+        assert "Initial Objective,1," in retrieved_plan
+
+        # Verify it's in SQLite
+        op_id = "test-op-persistence"
+        sqlite_plan = memory._PLAN_STORE.get_plan(op_id)
+        assert sqlite_plan is not None
+        assert sqlite_plan.objective == "Initial Objective"
+
+        # Update plan
+        plan["objective"] = "Updated Objective"
+        memory.mem0_store_plan(plan)
+
+        # Retrieve updated
+        updated_plan = memory.mem0_get_plan().get("plan")
+        assert "Updated Objective" in updated_plan
+
+        # Verify update in SQLite
+        updated_sqlite_plan = memory._PLAN_STORE.get_plan(op_id)
+        assert updated_sqlite_plan.objective == "Updated Objective"
+
+    finally:
+        memory._MEMORY_CLIENT = None
+        memory._MEMORY_CONFIG = None
+
+
+@pytest.mark.ollama
+def test_mem0_create_tasks_more_fuzzy(tmp_path, monkeypatch):
+    """Test more fuzzy matching cases for task creation."""
+    from modules.tools import memory
+
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-fuzzy-more")
+
+    try:
+        # Need a plan first
+        plan = {
+            "objective": "Test fuzzy",
+            "current_phase": 1,
+            "total_phases": 1,
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "assessment_complete": False,
+        }
+        memory.mem0_store_plan(plan)
+
+        # 1. Original task
+        memory.mem0_create_tasks([
+            memory.TaskCreate(title="Scan for open ports", objective="Identify services on the target", phase=1,
+                              status="pending")
+        ])
+
+        # 2. Case variation
+        res = json.loads(memory.mem0_create_tasks([
+            memory.TaskCreate(title="SCAN FOR OPEN PORTS", objective="identify services on the target", phase=1,
+                              status="pending")
+        ]))
+        assert res[0]["event"] == "DUPLICATE"
+
+        # 3. Minor typo/difference (within 90% threshold)
+        # "Scan for open ports" (19 chars)
+        # "Scan for open port" (18 chars) -> ratio approx 97%
+        res = json.loads(memory.mem0_create_tasks([
+            memory.TaskCreate(title="Scan for open port", objective="Identify service on the target", phase=1,
+                              status="pending")
+        ]))
+        assert res[0]["event"] == "DUPLICATE"
+
+        # 4. Significant difference
+        res = json.loads(memory.mem0_create_tasks([
+            memory.TaskCreate(title="Exploit vulnerability", objective="Gain access to the system", phase=1,
+                              status="pending")
+        ]))
+        assert res[0]["event"] == "ADD"
+
+        # 5. Check SQLite task count for this operation
+        op_id = "test-op-fuzzy-more"
+        tasks = memory._PLAN_STORE.get_tasks(op_id)
+        assert len(tasks) == 2  # One original, one "Significant difference"
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -250,11 +377,11 @@ def test_mem0_create_tasks_faiss_duplicates(tmp_path, monkeypatch):
 def test_mem0_task_lifecycle(tmp_path, monkeypatch):
     from modules.tools import memory
 
-    _initialize_faiss_memory(memory, tmp_path, monkeypatch)
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-lifecycle")
 
     def _list_tasks():
-        # result = list(filter(lambda x: x.get("metadata", {}).get("category", "") == "task", memory._MEMORY_CLIENT.list_memories()))
-        result = memory._MEMORY_CLIENT._list_tasks_latest(user_id=memory._MEMORY_CONFIG.get("user_id"), run_id="test-op-create-tasks")
+        op_id = os.getenv("CYBER_OPERATION_ID", "test-op-lifecycle")
+        result = memory._MEMORY_CLIENT._list_tasks_latest(user_id=memory._MEMORY_CONFIG.get("user_id"), run_id=op_id)
         return result
 
     try:
@@ -347,7 +474,104 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
 
         task_memories = _list_tasks()
         assert len(task_memories) == 3
-        assert set([task.get("metadata", {}).get("status") for task in task_memories]) == {"blocked", "done"}
+        assert set([task.status for task in task_memories]) == {"blocked", "done"}
+
+    finally:
+        memory._MEMORY_CLIENT = None
+        memory._MEMORY_CONFIG = None
+
+
+@pytest.mark.ollama
+def test_mem0_create_tasks_sensitive_urls(tmp_path, monkeypatch):
+    """Verify that tasks with different URLs are not considered duplicates, even if similar."""
+    from modules.tools import memory
+
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-urls")
+
+    try:
+        plan = {
+            "objective": "Test sensitive URLs",
+            "current_phase": 1,
+            "total_phases": 1,
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "assessment_complete": False,
+        }
+        memory.mem0_store_plan(plan)
+
+        # 1. Create a task with a URL
+        url1 = "http://example.com/api/v1/user/123"
+        memory.mem0_create_tasks([
+            memory.TaskCreate(
+                title=f"Check endpoint {url1}",
+                objective=f"Verify access to {url1}",
+                phase=1,
+                status="pending"
+            )
+        ])
+
+        # 2. Try to create a task with a slightly different URL (one char difference)
+        # http://example.com/api/v1/user/123 (36 chars)
+        # http://example.com/api/v1/user/124 (36 chars)
+        # Ratio will be very high (>95%)
+        url2 = "http://example.com/api/v1/user/124"
+        res = json.loads(memory.mem0_create_tasks([
+            memory.TaskCreate(
+                title=f"Check endpoint {url2}",
+                objective=f"Verify access to {url2}",
+                phase=1,
+                status="pending"
+            )
+        ]))
+
+        # EXPECTATION: This should be ADD, not DUPLICATE
+        assert res[0]["event"] == "ADD", f"Expected ADD for different URL, but got {res[0]['event']}"
+
+    finally:
+        memory._MEMORY_CLIENT = None
+        memory._MEMORY_CONFIG = None
+
+
+@pytest.mark.ollama
+def test_mem0_create_tasks_sensitive_paths(tmp_path, monkeypatch):
+    """Verify that tasks with different file paths are not considered duplicates, even if similar."""
+    from modules.tools import memory
+
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-paths")
+
+    try:
+        plan = {
+            "objective": "Test sensitive paths",
+            "current_phase": 1,
+            "total_phases": 1,
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "assessment_complete": False,
+        }
+        memory.mem0_store_plan(plan)
+
+        # 1. Create a task with a path
+        path1 = "/etc/passwd"
+        memory.mem0_create_tasks([
+            memory.TaskCreate(
+                title=f"Read file {path1}",
+                objective=f"Check permissions of {path1}",
+                phase=1,
+                status="pending"
+            )
+        ])
+
+        # 2. Try to create a task with a slightly different path
+        path2 = "/etc/shadow"
+        res = json.loads(memory.mem0_create_tasks([
+            memory.TaskCreate(
+                title=f"Read file {path2}",
+                objective=f"Check permissions of {path2}",
+                phase=1,
+                status="pending"
+            )
+        ]))
+
+        # EXPECTATION: This should be ADD, not DUPLICATE
+        assert res[0]["event"] == "ADD", f"Expected ADD for different path, but got {res[0]['event']}"
 
     finally:
         memory._MEMORY_CLIENT = None

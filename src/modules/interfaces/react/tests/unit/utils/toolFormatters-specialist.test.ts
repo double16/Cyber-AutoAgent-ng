@@ -158,12 +158,8 @@ plan_phases[3]{id,title,status,criteria}:
 
       // Simulate the actual response format from logs
       const nestedResponse = JSON.stringify({
-        results: [{
-          id: '17b1e003-6d04-4209-a1a2-b978a9bbe9f2',
-          memory: '[PLAN] plan_overview[1]{objective,current_phase,total_phases}:\n  Assess ripio.com for bug bounty,1,4\nplan_phases[4]{id,title,status,criteria}:\n  1,Discovery,active,Map attack surface\n  2,Testing,pending,Validate findings\n  3,Exploit,pending,Confirm vulnerabilities\n  4,Report,pending,Document results',
-          event: 'ADD',
-          hash: '9275c1029ef5869b64f5a80e42c7193a'
-        }]
+        status: 'success',
+        plan: 'plan_overview[1]{objective,current_phase,total_phases}:\n  Assess ripio.com for bug bounty,1,4\nplan_phases[4]{id,title,status,criteria}:\n  1,Discovery,active,Map attack surface\n  2,Testing,pending,Validate findings\n  3,Exploit,pending,Confirm vulnerabilities\n  4,Report,pending,Document results',
       });
 
       const input = {
@@ -176,7 +172,7 @@ plan_phases[3]{id,title,status,criteria}:
       expect(formatted).toContain('store_plan');
       expect(formatted).toContain('plan:');
       // The TOON parser extracts the structured plan, should see PLAN marker
-      expect(formatted).toContain('[PLAN]');
+      expect(formatted).toContain('plan_overview[');
     });
 
     it('handles nested JSON with memory field', async () => {

@@ -46,12 +46,15 @@ class JourneyTest {
       CI: 'true',
       NODE_ENV: 'test',
       CYBER_TEST_MODE: 'true',
+      CYBER_CONFIG_DIR: this.testConfigDir || join(__dirname, 'test-config'),
       ...config.env
     };
 
     // Setup test configuration if provided
     if (config.setupConfig) {
       await this.setupTestConfig(config.setupConfig);
+      // Re-apply env with the now set testConfigDir
+      env.CYBER_CONFIG_DIR = this.testConfigDir;
     }
 
     return new Promise((resolve) => {
@@ -73,7 +76,7 @@ class JourneyTest {
   }
 
   async setupTestConfig(config) {
-    const configDir = join(os.homedir(), '.cyber-autoagent');
+    const configDir = join(__dirname, 'test-config');
     const configPath = join(configDir, 'config.json');
     
     if (!fs.existsSync(configDir)) {
@@ -81,6 +84,7 @@ class JourneyTest {
     }
     
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    this.testConfigDir = configDir;
   }
 
   /**

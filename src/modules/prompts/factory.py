@@ -23,6 +23,7 @@ from urllib import parse as _urlparse
 from urllib import request as _urlreq
 
 from modules.config.system.logger import get_logger
+from modules.tools.memory import OperationPlan
 
 logger = get_logger("Prompts.Factory")
 
@@ -528,7 +529,7 @@ def get_system_prompt(
     has_memory_path: bool = False,
     tools_context: Optional[str] = None,
     output_config: Optional[Dict[str, Any]] = None,
-    plan_snapshot: Optional[str] = None,
+    plan_snapshot: Optional[OperationPlan] = None,
     plan_current_phase: Optional[int] = None,
 ) -> str:
     """Build the system prompt using the master template."""
@@ -563,9 +564,7 @@ def get_system_prompt(
         memory_overview=memory_overview,
     )
     if plan_snapshot:
-        if len(plan_snapshot) > 1000:
-            logger.warning(f"Plan snapshot is {len(plan_snapshot)} characters")
-        memory_context_text += f"\n\n## PLAN SNAPSHOT\n{plan_snapshot}"
+        memory_context_text += f"\n\n## PLAN SNAPSHOT\n{plan_snapshot.to_toon()}"
 
     # 4. Load Tools Guide
     tools_guide_text = ""

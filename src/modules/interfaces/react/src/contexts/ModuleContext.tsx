@@ -39,7 +39,12 @@ const getModuleRoots = (): string[] => {
   addRoot(path.resolve(process.cwd(), '..', '..', '..', '..', 'external_plugins'));
 
   // User module directory
-  addRoot('~/.cyber-autoagent/modules');
+  const customConfigDir = process.env.CYBER_CONFIG_DIR;
+  if (customConfigDir) {
+    addRoot(path.join(customConfigDir, 'modules'));
+  } else {
+    addRoot('~/.cyber-autoagent/modules');
+  }
 
   // Always include the built-in operation_plugins LAST
   addRoot(defaultRoot);

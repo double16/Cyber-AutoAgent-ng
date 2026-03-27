@@ -607,7 +607,10 @@ export const ConfigContext = createContext<ConfigContextType | undefined>(undefi
 export const ConfigProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [config, setConfig] = useState<Config>(defaultConfig);
   const [isConfigLoading, setIsConfigLoading] = useState(true);
-  const configFilePath = useMemo(() => path.join(os.homedir(), '.cyber-autoagent', 'config.json'), []);
+  const configFilePath = useMemo(() => {
+    const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
+    return path.join(configDir, 'config.json');
+  }, []);
 
   // Use a ref to get the latest config in callbacks without adding a dependency
   const configRef = useRef(config);

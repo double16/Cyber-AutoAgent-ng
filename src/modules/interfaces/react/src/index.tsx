@@ -158,7 +158,7 @@ const cli = meow(`
 // Emit an immediate welcome line in headless test mode to aid terminal capture timing
 try {
   if (process.env.CYBER_TEST_MODE === 'true' && cli.flags.headless && !cli.flags.autoRun) {
-    const configDir = path.join(os.homedir(), '.cyber-autoagent');
+    const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
     const configPath = path.join(configDir, 'config.json');
     const firstLaunch = !fs.existsSync(configPath);
     if (firstLaunch) {
@@ -185,7 +185,7 @@ const runAutoAssessment = async () => {
       const configOverrides: Partial<Config> = {};
 
       // Load saved configuration first to detect provider changes
-      const configDir = path.join(os.homedir(), '.cyber-autoagent');
+      const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
       const configPath = path.join(configDir, 'config.json');
       let savedConfig: Partial<Config> | undefined;
 
@@ -408,7 +408,7 @@ function renderReactApp() {
     loggingService.info('🔧 Running in headless mode');
     // Emit a fast welcome banner for first-launch so integration tests can capture it
     try {
-      const configDir = path.join(os.homedir(), '.cyber-autoagent');
+      const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
       const configPath = path.join(configDir, 'config.json');
       const firstLaunch = !fs.existsSync(configPath);
       if (firstLaunch) {

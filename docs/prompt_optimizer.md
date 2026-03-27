@@ -406,7 +406,8 @@ outputs/<target>/OP_<id>/
 
 outputs/<target>/memory/
 ├── mem0.faiss                      # FAISS vector index
-└── mem0.pkl                        # FAISS metadata
+├── mem0.pkl                        # FAISS metadata
+└── plan_store.db                   # SQLite plan/task database
 
 src/modules/operation_plugins/<module>/
 ├── execution_prompt.md             # Master template (never modified)

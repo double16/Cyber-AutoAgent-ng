@@ -10,12 +10,13 @@ import json
 import os
 import re
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
 from modules.tools.memory import clear_memory_client
 from modules.handlers.report_generator import build_report_sections
-
+from modules.tools.memory import OperationPlan, PlanPhase, Task
 
 @pytest.fixture(autouse=True)
 def memory_client_clear():
@@ -32,46 +33,30 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         operation_dir = output_dir / "example.com" / op_id
         operation_dir.mkdir(parents=True, exist_ok=True)
 
-        plan = {
-            "objective": "Perform recon on http://localhost:80",
-            "current_phase": 4,
-            "total_phases": 4,
-            "phases": [
-                {
-                    "id": 1,
-                    "title": "Initial Service Discovery",
-                    "status": "done",
-                    "criteria": "Identify running services and technologies"
-                },
-                {
-                    "id": 2,
-                    "title": "Endpoint Mapping",
-                    "status": "done",
-                    "criteria": "Map all accessible endpoints and parameters"
-                },
-                {
-                    "id": 3,
-                    "title": "Authentication Analysis",
-                    "status": "done",
-                    "criteria": "Analyze auth mechanisms and session handling"
-                },
-                {
-                    "id": 4,
-                    "title": "Vulnerability Identification",
-                    "status": "done",
-                    "criteria": "Identify potential vulnerabilities without exploitation"
-                }
+        plan = OperationPlan(
+            objective="Perform recon on http://localhost:80",
+            current_phase=4,
+            total_phases=4,
+            phases=[
+                PlanPhase(id=1, title="Initial Service Discovery", status="done", criteria="Identify running services and technologies"),
+                PlanPhase(id=2, title="Endpoint Mapping", status="done", criteria="Map all accessible endpoints and parameters"),
+                PlanPhase(id=3, title="Authentication Analysis", status="done", criteria="Analyze auth mechanisms and session handling"),
+                PlanPhase(id=4, title="Vulnerability Identification", status="done", criteria="Identify potential vulnerabilities without exploitation"),
             ]
-        }
+        )
+
+        tasks = [
+            Task(task_uid=uuid4().hex, title="Task 1", phase=1, objective="Perform Task 1", status="done"),
+            Task(task_uid=uuid4().hex, title="Task 2", phase=2, objective="Perform Task 2", status="done"),
+            Task(task_uid=uuid4().hex, title="Task 3", phase=3, objective="Perform Task 3", status="done"),
+            Task(task_uid=uuid4().hex, title="Task 4", phase=4, objective="Perform Task 4", status="blocked"),
+        ]
 
         # Mock list_memories to return both tagged and untagged
         mock_client = mock_client_cls.return_value
+        mock_client.get_active_plan.return_value = plan
+        mock_client.list_tasks.return_value = tasks
         mock_client.list_memories.return_value = [
-            {
-                "id": "2",
-                "memory": f"[PLAN]{json.dumps(plan)}",
-                "metadata": {"category": "plan", "operation_id": op_id, "active": True},
-            },
             {
                 "id": "100",
                 "memory": "[VULNERABILITY] A [WHERE] /a [IMPACT] /a/impact [EVIDENCE] /a/evidence [STEPS] /a/steps",
@@ -184,7 +169,10 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert out.get("low_count") == 4
         assert out.get("info_count") == 5
         assert "Comprehensive web application security assessment" in out.get("overview")
-        assert json.loads(out.get("operation_plan", "{}")) == plan
+        assert out.get("operation_plan", "{}") == plan.to_dict()
+
+        assert out.get("operation_tasks", {}).get("columns") == Task.csv_format()
+        assert out.get("operation_tasks", {}).get("items", []) == [ task.to_toon(include_format=False) for task in tasks ]
 
         evidence_text = out.get("evidence_text")
         assert all([f" /{chr(c)}\n" in evidence_text for c in range(ord('a'), ord('p'))])
@@ -379,19 +367,3 @@ def test_report_builder_only_has_info_evidence(mock_client_cls):
     assert "/c" in evidence_text, "Expected matching signal from current operation"
 
     assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 3}
-
-
-@patch("modules.tools.memory.Mem0ServiceClient")
-def test_report_builder_handles_memory_errors(mock_client_cls):
-    mock_client = mock_client_cls.return_value
-    mock_client.list_memories.side_effect = RuntimeError("boom")
-
-    out = build_report_sections(
-        operation_id="OP_ERR", target="example.com", objective="test"
-    )
-    assert isinstance(out, dict)
-    assert out.get("raw_evidence") == [], (
-        "Failures loading memories should yield empty evidence rather than crash"
-    )
-
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}

@@ -219,6 +219,7 @@ def test_phase_change_detection(
     mock_callback_handler, mock_memory, mock_config, setup_operation_folder
 ):
     """Test phase change detection."""
+    from modules.tools.memory import OperationPlan, PlanPhase
     hook = PromptRebuildHook(
         callback_handler=mock_callback_handler,
         memory_instance=mock_memory,
@@ -230,23 +231,38 @@ def test_phase_change_detection(
     )
 
     # First call - set initial phase to 1
-    mock_memory.get_active_plan.return_value = None  # No active plan
-    plan_data = {"memory": "Phase 1: Recon (active, 50% complete)"}
-    mock_memory.search_memories.return_value = [plan_data]
-    # This sets last_phase to 1 internally
-    assert hook._phase_changed() is False
+    mock_plan1 = OperationPlan(
+        objective="test objective",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Phase 1", status="active", criteria="Criteria 1"),
+            PlanPhase(id=2, title="Phase 2", status="pending", criteria="Criteria 2"),
+        ]
+    )
+    mock_memory.get_active_plan.return_value = mock_plan1
+    # Prime initial phase
+    hook._phase_changed()
+    assert hook.last_phase == 1
 
     # Second call - same phase (1)
-    plan_data = {"memory": "Phase 1: Recon (active, 80% complete)"}
-    mock_memory.search_memories.return_value = [plan_data]
     # Should not detect change since still phase 1
     assert hook._phase_changed() is False
 
     # Third call - phase changed to 2
-    plan_data = {"memory": "Phase 2: Exploitation (active, 0% complete)"}
-    mock_memory.search_memories.return_value = [plan_data]
+    mock_plan2 = OperationPlan(
+        objective="test objective",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Phase 1", status="done", criteria="Criteria 1"),
+            PlanPhase(id=2, title="Phase 2", status="active", criteria="Criteria 2"),
+        ]
+    )
+    mock_memory.get_active_plan.return_value = mock_plan2
     # Should detect change from 1 to 2
     assert hook._phase_changed() is True
+    assert hook.last_phase == 2
 
 
 def test_execution_prompt_modification_detection(
@@ -331,62 +347,6 @@ def test_query_memory_overview(
     # Simplified version no longer counts severity levels
 
 
-def test_query_plan_snapshot(
-    mock_callback_handler, mock_memory, mock_config, setup_operation_folder
-):
-    """Test plan snapshot query."""
-    hook = PromptRebuildHook(
-        callback_handler=mock_callback_handler,
-        memory_instance=mock_memory,
-        config=mock_config,
-        target="test-target",
-        objective="test objective",
-        operation_id="OP_TEST123",
-        max_steps=100,
-    )
-
-    # Mock memory - first check if get_active_plan exists
-    # If it does, use that; otherwise fall back to search_memories
-    mock_memory.get_active_plan.return_value = {
-        "memory": "Phase 2: Exploitation (active, 45% complete)"
-    }
-
-    snapshot = hook._query_plan_snapshot()
-
-    assert snapshot is not None
-    assert "Phase 2" in snapshot
-    assert "Exploitation" in snapshot
-    assert "active" in snapshot
-    assert "45%" in snapshot
-
-
-def test_extract_current_phase(
-    mock_callback_handler, mock_memory, mock_config, setup_operation_folder
-):
-    """Test phase extraction from snapshot."""
-    hook = PromptRebuildHook(
-        callback_handler=mock_callback_handler,
-        memory_instance=mock_memory,
-        config=mock_config,
-        target="test-target",
-        objective="test objective",
-        operation_id="OP_TEST123",
-        max_steps=100,
-    )
-
-    # Test with valid snapshot
-    snapshot = "Phase 2: Exploitation (active, 45% complete)"
-    phase = hook._extract_current_phase(snapshot)
-    assert phase == 2
-
-    # Test with None
-    phase = hook._extract_current_phase(None)
-    assert phase is None
-
-    # Test with invalid snapshot
-    snapshot = "Invalid snapshot format"
-    phase = hook._extract_current_phase(snapshot)
-    assert phase is None
 
 
 def test_rebuild_with_memory_and_plan_context(
@@ -410,10 +370,19 @@ def test_rebuild_with_memory_and_plan_context(
         {"memory": "Critical finding", "metadata": {"severity": "critical"}},
         {"memory": "High finding", "metadata": {"severity": "high"}},
     ]
-    # Mock search_memories for plan snapshot
-    mock_memory.search_memories.return_value = [
-        {"memory": "Phase 2: Exploitation (active, 30% complete)"}
-    ]
+
+    # Mock get_active_plan to return an OperationPlan object
+    from modules.tools.memory import OperationPlan, PlanPhase
+    mock_plan = OperationPlan(
+        objective="test objective",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Phase 1", status="active", criteria="Criteria 1"),
+            PlanPhase(id=2, title="Phase 2", status="pending", criteria="Criteria 2"),
+        ]
+    )
+    mock_memory.get_active_plan.return_value = mock_plan
 
     # Set current step to trigger rebuild
     mock_callback_handler.current_step = 20

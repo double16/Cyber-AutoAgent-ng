@@ -285,7 +285,6 @@ export const toolFormatters: Record<string, ToolFormatter> = {
   mem0_get: mem0_formatter("mem0_get"),
   mem0_retrieve: mem0_formatter("mem0_retrieve"),
   mem0_list: mem0_formatter("mem0_list"),
-  mem0_delete: mem0_formatter("mem0_delete"),
   mem0_store_plan: mem0_formatter("mem0_store_plan"),
   mem0_get_plan: mem0_formatter("mem0_get_plan"),
 

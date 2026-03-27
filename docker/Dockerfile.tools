@@ -84,6 +84,7 @@ RUN set -eux; \
     python3-ratelimit \
     python3-pwntools \
     python3-dotenv \
+    sqlite3 \
     python2 \
     virtualenv \
     php \

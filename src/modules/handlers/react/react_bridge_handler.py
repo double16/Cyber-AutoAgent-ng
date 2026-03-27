@@ -3265,8 +3265,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 output_dir = get_output_path(target_name, self.operation_id, "")
 
                 # Memory path depends on MEMORY_ISOLATION mode (default: "operation")
-                # - "operation" mode: outputs/<target>/memory/<operation_id>/mem0.faiss
-                # - "shared" mode: outputs/<target>/memory/mem0.faiss
+                # - "operation" mode: outputs/<target>/memory/<operation_id>/plan_store.db
+                # - "shared" mode: outputs/<target>/memory/plan_store.db
                 isolation_mode = os.environ.get("MEMORY_ISOLATION", "operation")
                 memory_base = Path(output_dir).parent / "memory"
 

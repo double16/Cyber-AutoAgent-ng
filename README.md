@@ -823,7 +823,8 @@ cyber-autoagent/
 │       │   └── tools/      # Custom tools created by agent
 │       └── memory/         # Cross-operation memory
 │           ├── mem0.faiss
-│           └── mem0.pkl
+│           ├── mem0.pkl
+│           └── plan_store.db
 └── README.md                 # This file
 ```
 

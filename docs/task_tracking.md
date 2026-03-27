@@ -1,18 +1,23 @@
 # Task Tracking System
 
-The Task Tracking System implements **phase-aware external task state** that enables long-running operations to maintain coverage, avoid context loss, and reliably progress through complex work.
+The Task Tracking System implements **phase-aware persistent state** using a local SQLite database. This enables long-running operations to maintain coverage, avoid context loss, and reliably progress through complex work by decoupling task state from ephemeral LLM context.
 
 ## Design Philosophy: Work Queues for Continuous Progress
 
 The core philosophy centers on **externalizing intent into durable tasks**, transforming ephemeral model attention into an explicit queue that survives context pruning, long tool output, and multi-phase execution.
-
-### Why Task Tracking?
 
 Long operations degrade without a durable work queue:
 - **Context Loss**: discovered threads fall out of the window as tools run and outputs accumulate
 - **Thread Collapse**: multiple distinct leads get merged into one “next step”
 - **Premature Phase Progression**: agents move phases after a single success while work remains
 - **Stop-Too-Early**: recon objectives stop after first validated vuln even when mapping tasks remain
+
+### Task Tracking Persistence
+
+Tasks and plans are stored in a dedicated SQLite database (`plan_store.db`) co-located with the operation's vector memory. This ensures:
+- **ACID Compliance**: Reliable task state transitions even during system crashes.
+- **Relational Queries**: Efficient filtering and sorting of tasks by phase, status, and creation time.
+- **Fuzzy Matching**: Duplicate detection uses fuzzy string comparison (`rapidfuzz`) to prevent redundant work when the model generates slightly different task descriptions for the same objective.
 
 ### The Task-First Approach
 

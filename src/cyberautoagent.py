@@ -1028,6 +1028,8 @@ def main():
                     status_text = f"{Colors.RED}Network Timeout / Rate Limit Reached{Colors.RESET}"
                 elif callback_handler.termination_reason == "error":
                     status_text = f"{Colors.RED}Agent Error Occurred{Colors.RESET}"
+                elif args.report:
+                    status_text = f"{Colors.BLUE}Regenerate Report{Colors.RESET}"
                 else:
                     status_text = f"{Colors.GREEN}Operation Completed{Colors.RESET}"
 

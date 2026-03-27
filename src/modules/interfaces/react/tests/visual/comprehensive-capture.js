@@ -46,16 +46,20 @@ class Journey {
     console.log('─'.repeat(70));
 
     // Set up environment
-    const env = { ...process.env, NO_COLOR: '1' };
+    const testConfigDir = join(__dirname, 'test-config');
+    const env = { 
+      ...process.env, 
+      NO_COLOR: '1',
+      CYBER_CONFIG_DIR: testConfigDir
+    };
     
     // Set up config file if needed
     if (this.config) {
-      const configDir = join(os.homedir(), '.cyber-autoagent');
-      const configPath = join(configDir, 'config.json');
+      const configPath = join(testConfigDir, 'config.json');
       
       // Create directory if it doesn't exist
-      if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true });
+      if (!fs.existsSync(testConfigDir)) {
+        fs.mkdirSync(testConfigDir, { recursive: true });
       }
       
       // Write config file

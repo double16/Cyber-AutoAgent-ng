@@ -1783,7 +1783,7 @@ def _is_plan_tool_result_message(message: Dict[str, Any]) -> bool:
         if isinstance(tool_name, str) and tool_name in _PLAN_TOOL_NAMES:
             return True
         try:
-            if "[PLAN] plan_overview" in json.dumps(tr.get("content", "")):
+            if "plan_overview[" in json.dumps(tr.get("content", "")):
                 return True
         except Exception:
             pass
