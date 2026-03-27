@@ -681,8 +681,12 @@ def build_report_sections(
                                         if tool_name:
                                             if tool_name == "shell" and "tool_input" in payload:
                                                 tool_input = payload.get("tool_input")
-                                                if "command" in tool_input:
-                                                    tools_used_from_log.append(tool_input.get("command").split()[0])
+                                                tool_command = tool_input.get("command", "")
+                                                if tool_command:
+                                                    if isinstance(tool_command, list):
+                                                        tools_used_from_log.append(tool_command[0])
+                                                    else:
+                                                        tools_used_from_log.append(str(tool_command).split()[0])
                                             else:
                                                 tools_used_from_log.append(tool_name)
 
