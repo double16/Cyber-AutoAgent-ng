@@ -88,7 +88,7 @@ sequenceDiagram
     participant Memory
     
     User->>Agent: Start Assessment
-    Agent->>Memory: Initialize (mem0_get_plan|mem0_store_plan)
+    Agent->>Memory: Initialize (get_plan|store_plan)
     Agent->>Strands: Begin Reasoning Loop
     
     loop Assessment Cycle

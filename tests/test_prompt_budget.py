@@ -165,7 +165,7 @@ def test_dedupe_state_markers_strips_reflection_and_retains_active_task():
         _make_message("a"),
         _make_message("<reflection_snapshot>\nBudget Used: 10%\n</reflection_snapshot>"),
         _make_message("<active_task version=\"1\">{\"task\":{\"task_uid\":\"X\"}}</active_task>"),
-        _make_message("**ACTION**: Call `mem0_get_active_task()`.\n<reflection_snapshot>\nBudget Used: 20%\n</reflection_snapshot>"),
+        _make_message("**ACTION**: Call `get_active_task()`.\n<reflection_snapshot>\nBudget Used: 20%\n</reflection_snapshot>"),
         _make_message("b"),
     ]
     agent = AgentStub(messages)

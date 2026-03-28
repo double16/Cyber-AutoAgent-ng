@@ -234,7 +234,7 @@ function mem0_formatter(tool_name) {
           return `${action} memories`;
         }
 
-       let content = input.plan || input.content || input.query || '';
+       let content = input.content || input.query || '';
 
        // Extract memory content from nested JSON responses
        // Memory tool results often come as: {results: [{memory: "...", ...}]}
@@ -265,19 +265,32 @@ function mem0_formatter(tool_name) {
            ? (() => { try { return JSON.stringify(content); } catch { return toSafeString(content); } })()
            : toSafeString(content);
 
-       // Try to extract TOON plan preview
-       const planPreview = getToonPlanPreview(normalizedContent);
-       const preview = planPreview ?? truncate(normalizedContent, 60);
+       const preview = truncate(normalizedContent, 60);
 
        const actionDisplay = action === 'store' ? 'storing memory'
          : action === 'retrieve' ? 'retrieving memory'
          : action;
-       const labelDisplay = planPreview || action === 'store_plan' ? 'plan'
-         : action === 'store' ? 'content'
-         : 'query';
+       const labelDisplay = action === 'store' ? 'content' : 'query';
 
        return preview ? `${actionDisplay} | ${labelDisplay}: ${preview}` : actionDisplay;
      }
+}
+
+function plan_formatter(input) {
+  let content = input.plan || '';
+
+  // Normalize content for display
+  const normalizedContent = typeof content === 'string'
+      ? content
+      : isObject(content)
+          ? (() => { try { return JSON.stringify(content); } catch { return toSafeString(content); } })()
+          : toSafeString(content);
+
+  // Try to extract TOON plan preview
+  const planPreview = getToonPlanPreview(normalizedContent);
+  const preview = planPreview ?? truncate(normalizedContent, 60);
+
+  return `plan: ${preview}`;
 }
 
 export const toolFormatters: Record<string, ToolFormatter> = {
@@ -285,8 +298,8 @@ export const toolFormatters: Record<string, ToolFormatter> = {
   mem0_get: mem0_formatter("mem0_get"),
   mem0_retrieve: mem0_formatter("mem0_retrieve"),
   mem0_list: mem0_formatter("mem0_list"),
-  mem0_store_plan: mem0_formatter("mem0_store_plan"),
-  mem0_get_plan: mem0_formatter("mem0_get_plan"),
+  store_plan: plan_formatter,
+  get_plan: plan_formatter,
 
   validation_specialist: (input) => {
     if (!input || typeof input !== 'object') {

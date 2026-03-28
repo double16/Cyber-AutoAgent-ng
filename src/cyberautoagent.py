@@ -69,7 +69,7 @@ from modules.handlers.utils import (
     dumpstacks,
 )
 from modules.prompts.factory import get_reflection_snapshot
-from modules.tools import browser, channel_close_all, mem0_get_active_task, mem0_get_plan, mem0_list
+from modules.tools import browser, channel_close_all, get_active_task, get_plan, mem0_list
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
 
@@ -700,14 +700,14 @@ def main():
         current_message = initial_prompt
 
         if args.cont:
-            active_plan = mem0_get_plan() or ""
-            active_task = mem0_get_active_task() or ""
+            active_plan = get_plan() or ""
+            active_task = get_active_task() or ""
             memories = mem0_list()
             if memories.startswith("Error:"):
                 memories = ""
             if active_plan and not active_plan.get("assessment_complete"):
                 current_message = ""
-                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `mem0_get_plan()`)\n{active_plan}"}])]
+                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `get_plan()`)\n{active_plan}"}])]
                 if memories:
                     agent.messages.append(Message(role="user",
                                                   content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
@@ -867,12 +867,12 @@ def main():
 
                         current_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
                     else:
-                        active_plan = mem0_get_plan() or ""
+                        active_plan = get_plan() or ""
                         if active_plan and active_plan.get("assessment_complete"):
                             # plan is complete, legit exit
                             break
 
-                        active_task = mem0_get_active_task() or ""
+                        active_task = get_active_task() or ""
                         memories = mem0_list()
                         if memories.startswith("Error:"):
                             memories = ""
@@ -886,7 +886,7 @@ def main():
                             if memories:
                                 agent.messages.append(Message(role="user",
                                                               content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
-                            current_message += f"**MANDITORY ACTION**: You have missed an important step, create a strategic plan via mem0_store_plan()."
+                            current_message += f"**MANDITORY ACTION**: You have missed an important step, create a strategic plan via store_plan()."
                         else:
                             agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT\n{active_plan}"}])]
                             if memories:

@@ -1370,7 +1370,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         # Update live metrics for memory operations and evidence collection
         try:
-            if tool_name in {"mem0_store", "mem0_store_plan", "mem0_create_tasks"} and success:
+            if tool_name in {"mem0_store"} and success:
                 # Increment memory operation count on successful storage actions
                 if isinstance(tool_input, dict):
                     self.memory_ops += 1
@@ -1644,8 +1644,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 self._task_event_emitted_by_tooluse = set()
 
             if tool_use_id and tool_use_id not in self._task_event_emitted_by_tooluse:
-                # task_started: on mem0_get_active_task or mem0_task_done tool results
-                if tool_name in {"mem0_get_active_task", "mem0_task_done"}:
+                # task_started: on get_active_task or task_done tool results
+                if tool_name in {"get_active_task", "task_done"}:
                     payload = self._extract_active_task_payload(output_text)
                     if isinstance(payload, dict):
                         # task_done first

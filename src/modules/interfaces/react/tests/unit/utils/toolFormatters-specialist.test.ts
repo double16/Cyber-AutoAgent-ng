@@ -130,7 +130,7 @@ describe('Specialist tool formatters', () => {
       expect(formatted).toContain('SQLi');
     });
 
-    it('shows TOON plan preview for mem0_store_plan', async () => {
+    it('shows TOON plan preview for store_plan', async () => {
       const mod: any = await import('../../../src/utils/toolFormatters.js');
       const { toolFormatters } = mod;
 
@@ -142,10 +142,10 @@ plan_phases[3]{id,title,status,criteria}:
   3,Report,pending,document results`;
 
       const input = {
-        content: plan
+        plan: plan
       };
 
-      const formatted = toolFormatters.mem0_store_plan(input);
+      const formatted = toolFormatters.store_plan(input);
 
       expect(formatted).toContain('plan:');
       expect(formatted).toContain('Complete security assessment');
@@ -163,13 +163,12 @@ plan_phases[3]{id,title,status,criteria}:
       });
 
       const input = {
-        content: nestedResponse
+        plan: nestedResponse
       };
 
-      const formatted = toolFormatters.mem0_store_plan(input);
+      const formatted = toolFormatters.store_plan(input);
 
       // Should successfully extract nested JSON and parse TOON format
-      expect(formatted).toContain('store_plan');
       expect(formatted).toContain('plan:');
       // The TOON parser extracts the structured plan, should see PLAN marker
       expect(formatted).toContain('plan_overview[');

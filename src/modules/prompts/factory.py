@@ -414,7 +414,7 @@ def get_memory_context_guidance(
 
     if not has_memory_path and not has_existing_memories:
         # Fresh operation guidance
-        return """**CRITICAL FIRST ACTION**: Create a strategic plan via `mem0_store_plan()`.
+        return """**CRITICAL FIRST ACTION**: Create a strategic plan via `store_plan()`.
 """
     else:
         # Continuing assessment guidance
@@ -422,7 +422,7 @@ def get_memory_context_guidance(
         return f"""Continuing assessment with {count_str} existing memories.
 **CRITICAL FIRST ACTIONS**
   1. Load all memories: `mem0_list()`.
-  2. Load the plan: `mem0_get_plan()`. If none, create it immediately via `mem0_store_plan()` before other tools.
+  2. Load the plan: `get_plan()`. If none, create it immediately via `store_plan()` before other tools.
   3. Perform a Memory Intake Pass:
     - Summarize what’s already known (key facts + evidence paths).
     - Identify unknown / next questions.
@@ -627,14 +627,14 @@ def get_reflection_snapshot(current_step: int, max_steps: int, plan_current_phas
             lines.append(f"**CHECKPOINT {checkpoint_pct}% REACHED**")
 
             if checkpoint_pct == 20:
-                lines.append("ACTION: Call `mem0_get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?")
+                lines.append("ACTION: Call `get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?")
             elif checkpoint_pct == 40:
-                lines.append("ACTION: Call `mem0_get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW.")
+                lines.append("ACTION: Call `get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW.")
             elif checkpoint_pct == 60:
                 lines.append(
-                    "ACTION: Call `mem0_get_plan`. If stuck (no findings), deploy swarm with different approach classes.")
+                    "ACTION: Call `get_plan`. If stuck (no findings), deploy swarm with different approach classes.")
             elif checkpoint_pct == 80:
-                lines.append("ACTION: Call `mem0_get_plan`. Focus ONLY on highest-confidence path. No new exploration.")
+                lines.append("ACTION: Call `get_plan`. Focus ONLY on highest-confidence path. No new exploration.")
         else:
             lines.append(f"Next Checkpoint: Step {_next_checkpoint} (in {_steps_until} steps)")
             # Add warning if close to checkpoint

@@ -594,7 +594,6 @@ def _has_valid_proof_pack(finding: Any) -> bool:
 
     return False
 
-# TODO: consider making mem0_store take a list of (content, metadata). Agents handle one tool call with a list better than multiple tool calls.
 @tool
 def mem0_store(
     content: str,
@@ -887,7 +886,7 @@ def mem0_store(
 
 
 @tool
-def mem0_store_plan(
+def store_plan(
     plan: Union[OperationPlan, str, Dict],
 ) -> Optional[Dict]:
     """Store the current operation plan.
@@ -924,7 +923,7 @@ def mem0_store_plan(
         plan_obj = None
     if not plan_obj:
         raise ValueError(
-            f"mem0_store_plan content must be object/dict or JSON string, got {type(plan).__name__}"
+            f"store_plan content must be object/dict or JSON string, got {type(plan).__name__}"
         )
     # TODO: detect phase change and refuse if there are remaining tasks, AND there is budget left
     results = client.store_plan(plan=plan_obj, user_id=user_id)
@@ -932,7 +931,7 @@ def mem0_store_plan(
 
 
 @tool
-def mem0_get_plan() -> Optional[Dict]:
+def get_plan() -> Optional[Dict]:
     """Get the most recent active plan.
     Returns the plan or null if none found.
     """
@@ -1007,7 +1006,7 @@ def _extract_sensitive_patterns(text: str) -> List[str]:
 
 
 @tool
-def mem0_create_tasks(tasks: List[TaskCreate]) -> str:
+def create_tasks(tasks: List[TaskCreate]) -> str:
     """Create one or more tasks.
 
     Rules:
@@ -1116,7 +1115,7 @@ def _active_task_message(
 
 
 @tool
-def mem0_task_done(
+def task_done(
         status: Literal["done", "partial_failure", "blocked"],
         task_uid: Optional[str] = None,
         reason: Optional[str] = None,
@@ -1153,8 +1152,8 @@ def mem0_task_done(
 
 
 @tool
-def mem0_get_active_task() -> str:
-    """Get the task to execute for the active plan's current_phase. Call mem0_task_done when:
+def get_active_task() -> str:
+    """Get the task to execute for the active plan's current_phase. Call task_done when:
     - task objective is achieved, status=done
     - objective is not able to be achieved within budget, status=partial_failure
     - objective can not be achieved, status=blocked
@@ -1175,7 +1174,7 @@ def mem0_get_active_task() -> str:
 
 
 @tool
-def mem0_list_uncompleted_tasks() -> List[Task]:
+def list_uncompleted_tasks() -> List[Task]:
     """List all uncompleted tasks for the current plan phase."""
     client = _ensure_memory_client()
     user_id = _user_id()

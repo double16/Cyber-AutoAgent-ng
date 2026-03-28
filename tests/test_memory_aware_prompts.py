@@ -130,7 +130,7 @@ class TestMemoryAwareSystemPrompts:
             memory_overview=None,
         )
 
-        assert "Create a strategic plan via `mem0_store_plan()`" in result
+        assert "Create a strategic plan via `store_plan()`" in result
         # Check for target/operation in current prompt format (markdown bold)
         assert "**Target**: test.com" in result or "Target: test.com" in result
         assert "**Operation**: OP_20240101_120000" in result or "Operation: OP_20240101_120000" in result

@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Callable, Sequence, List, Tuple
+from typing import Any, Dict, Optional, Callable, Sequence, List, Tuple, Set
 
 from strands import Agent
 from strands.agent.conversation_manager import (
@@ -417,6 +417,8 @@ class LargeToolResultMapper:
             if "text" in block:
                 content_types.append("text")
                 text = block["text"]
+                if text.startswith("[compressed tool result"):
+                    continue
                 if len(text) > self.truncate_at:
                     if " chars | Inline: " in text:
                         # previously truncated
@@ -869,13 +871,13 @@ class MappingConversationManager(SummarizingConversationManager):
         after_tokens = safe_estimate_tokens(agent)
         if not (before_tokens and after_tokens):
             pass
-        elif after_tokens == before_tokens:
+        elif after_tokens > (before_tokens * 0.8):
             # Remove most of the reasoning content. Thinking models require the last assistant message to include reasoning content.
             _strip_reasoning_content(agent, force=True, preserve_recent_messages=1)
             after_tokens = safe_estimate_tokens(agent)
             if after_tokens and after_tokens < before_tokens:
                 logger.info(
-                    "Context reduced via reasoning removal of all messages: est tokens %s->%s",
+                    "Context reduced via reasoning removal of all but last message: est tokens %s->%s",
                     before_tokens,
                     after_tokens,
                 )
@@ -886,15 +888,24 @@ class MappingConversationManager(SummarizingConversationManager):
                 after_tokens,
             )
 
-        # Check last message for reasoning loop and reduce it
+        # Check the last message for a reasoning loop and reduce it
         # A reasoning loop will fill up all output tokens. Our typical output isn't large, < 1000 tokens.
         # If the last assistant message is much larger, it could be a reasoning loop.
         if len(messages) > 3 and messages[-1].get("role", "") == "assistant":
-            assistant_messages_tokens = [
-                estimate_prompt_tokens(model_id, [message], None, None, None)
-                for message in messages
-                if message.get("role", "") == "assistant"
-            ]
+            assistant_messages_tokens = []
+            for message in messages:
+                if message.get("role", "") == "assistant":
+                    text = "\n".join(_iter_message_texts(message, block_limit={"text"}))
+                    if text:
+                        assistant_messages_tokens.append(
+                            estimate_prompt_tokens(
+                                model_id,
+                                [{"role": "assistant", "content": [{"type": "text", "text": text}]}],
+                                None,
+                                None,
+                                None)
+                        )
+
             assistant_messages_tokens = list(filter(bool, assistant_messages_tokens))
             if len(assistant_messages_tokens) > 5:
                 assistant_messages_tokens.sort()
@@ -1659,7 +1670,7 @@ def _strip_reasoning_content(agent: Agent, force: bool = False, preserve_recent_
         if _predicate(message)
     ]
 
-    if removed_blocks:
+    if removed_blocks and not force:
         logger.warning(
             "Removed %d reasoningContent blocks for model without reasoning support",
             removed_blocks,
@@ -1687,7 +1698,7 @@ def strip_reflection_snapshot_messages(agent: Agent) -> None:
     ]
 
 
-def _iter_message_texts(message: Dict[str, Any]) -> List[str]:
+def _iter_message_texts(message: Dict[str, Any], block_limit: Set[str] = None) -> List[str]:
     """Return all text fragments from a message (normal text + toolResult text)."""
     out: List[str] = []
     content = message.get("content")
@@ -1700,22 +1711,22 @@ def _iter_message_texts(message: Dict[str, Any]) -> List[str]:
 
         # Normal text block
         text = block.get("text")
-        if isinstance(text, str) and text:
+        if isinstance(text, str) and text and (block_limit is None or "text" in block_limit):
             out.append(text)
         bl_json = block.get("json")
-        if isinstance(bl_json, str) and bl_json:
+        if isinstance(bl_json, str) and bl_json and (block_limit is None or "json" in block_limit):
             out.append(_json_to_compact_str(bl_json))
 
         # Tool use blocks
         tool_use = block.get("toolUse")
-        if isinstance(tool_use, dict):
+        if isinstance(tool_use, dict) and (block_limit is None or "toolUse" in block_limit):
             tool_input = tool_use.get("input")
             if tool_input:
                 out.append(_json_to_compact_str(tool_input))
 
         # Tool result text blocks
         tool_result = block.get("toolResult")
-        if isinstance(tool_result, dict):
+        if isinstance(tool_result, dict) and (block_limit is None or "toolResult" in block_limit):
             tr_content = tool_result.get("content")
             if isinstance(tr_content, list):
                 for tr_block in tr_content:
@@ -1762,11 +1773,11 @@ def _get_latest_active_task(messages: List[Dict[str, Any]]) -> Tuple[Optional[in
     return None, None
 
 
-_PLAN_TOOL_NAMES = {"mem0_get_plan", "mem0_store_plan"}
+_PLAN_TOOL_NAMES = {"get_plan", "store_plan"}
 
 
 def _is_plan_tool_result_message(message: Dict[str, Any]) -> bool:
-    """True if message contains a toolResult for mem0_get_plan or mem0_store_plan.
+    """True if the message contains a toolResult for get_plan or store_plan.
 
     We match on toolResult.toolUseId (Strands) and also allow toolResult._toolUseId when present.
     """

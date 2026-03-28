@@ -53,7 +53,7 @@ plan_phases[3]{id,title,status,criteria}:
   3,Exploit,pending,extract flag`;
     const event = {
       type: 'tool_start',
-      tool_name: 'mem0_store_plan',
+      tool_name: 'store_plan',
       tool_input: { content: plan }
     };
     const { lastFrame } = render(React.createElement(EventLine, { event, animationsEnabled: false }));

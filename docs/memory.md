@@ -150,7 +150,7 @@ Plan evaluation triggers at budget checkpoints:
 
 ```python
 # Budget checkpoint workflow
-plan = mem0_get_plan()
+plan = get_plan()
 # Evaluate: Is current phase criteria met?
 # If yes: Update phase status to "done", advance current_phase
 # Store updated plan
@@ -162,8 +162,8 @@ Hierarchical planning with phase tracking:
 
 ```python
 # Plan storage (required format)
-mem0_store_plan(
-    content={
+store_plan(
+    plan={
         "objective": "Compromise web application",
         "current_phase": 1,
         "total_phases": 3,
@@ -176,7 +176,7 @@ mem0_store_plan(
 )
 
 # Plan retrieval
-current_plan = mem0_get_plan()
+current_plan = get_plan()
 ```
 
 **Required Plan Fields:**
@@ -191,8 +191,8 @@ Tactical pivots are managed through plan updates:
 
 ```python
 # Update plan with new strategy after reflection
-mem0_store_plan(
-    content={
+store_plan(
+    plan={
         "objective": "Compromise web application",
         "current_phase": 2,
         "total_phases": 3,
@@ -252,7 +252,7 @@ mem0_list()
 ### Advanced Operations
 ```python
 # Store strategic plan (dict format required)
-mem0_store_plan(
+store_plan(
     plan={
         "objective": "Compromise web application",
         "current_phase": 1,
@@ -266,10 +266,10 @@ mem0_store_plan(
 )
 
 # Get current plan
-current_plan = mem0_get_plan()
+current_plan = get_plan()
 
 # Update plan after tactical pivot
-mem0_store_plan(
+store_plan(
     plan={
         "objective": "Compromise web application",
         "current_phase": 2,

@@ -50,7 +50,7 @@ def _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="t
 
 
 @pytest.mark.ollama
-def test_mem0_create_tasks_filesystem(tmp_path, monkeypatch):
+def test_create_tasks_filesystem(tmp_path, monkeypatch):
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-fs")
@@ -70,12 +70,12 @@ def test_mem0_create_tasks_filesystem(tmp_path, monkeypatch):
             ],
             "assessment_complete": False,
         }
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
         task_1_title = "Enumerate login endpoints"
         task_2_title = "Check GraphQL schema exposure"
 
-        raw = memory.mem0_create_tasks(
+        raw = memory.create_tasks(
             [
                 memory.TaskCreate(
                     title=task_1_title,
@@ -98,13 +98,13 @@ def test_mem0_create_tasks_filesystem(tmp_path, monkeypatch):
         payload = json.loads(raw)
         assert isinstance(payload, list)
 
-        tasks = memory.mem0_list_uncompleted_tasks()
+        tasks = memory.list_uncompleted_tasks()
         assert len(tasks) == 2
         assert all(task.phase == 1 for task in tasks)
         assert all(task.status == "pending" for task in tasks)
         assert {task.title for task in tasks} == {task_1_title, task_2_title}
 
-        active_raw = memory.mem0_get_active_task()
+        active_raw = memory.get_active_task()
         assert isinstance(active_raw, str)
         assert "<active_task" in active_raw
         assert 'phase="1"' in active_raw
@@ -126,7 +126,7 @@ def test_mem0_create_tasks_filesystem(tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
+def test_create_tasks_duplicates(tmp_path, monkeypatch):
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-duplicates")
@@ -146,7 +146,7 @@ def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
             ],
             "assessment_complete": False,
         }
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
         task_1_title = "Enumerate login endpoints"
         task_1_evidence = ["outputs/OP_20260302/auth_analyzer3459734.json"]
@@ -155,7 +155,7 @@ def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
         task_3_title = "Check for SQL injection"
         task_3_evidence = ["outputs/OP_20260302/advanced_payload_coord384758374.json"]
 
-        create_raw = json.loads(memory.mem0_create_tasks(
+        create_raw = json.loads(memory.create_tasks(
             [
                 memory.TaskCreate(
                     title=task_1_title,
@@ -178,7 +178,7 @@ def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
         assert create_raw[0]["event"] == "ADD"
         assert create_raw[1]["event"] == "ADD"
 
-        create_dup1 = json.loads(memory.mem0_create_tasks(
+        create_dup1 = json.loads(memory.create_tasks(
             [
                 memory.TaskCreate(
                     title=task_1_title,
@@ -194,7 +194,7 @@ def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
         assert create_dup1[0]["event"] == "DUPLICATE"
         assert create_dup1[0]["task_uid"] == create_raw[0]["task_uid"]
 
-        create_dup2 = json.loads(memory.mem0_create_tasks(
+        create_dup2 = json.loads(memory.create_tasks(
             [
                 memory.TaskCreate(
                     title=task_2_title,
@@ -218,7 +218,7 @@ def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
         assert create_dup2[0]["task_uid"] == create_raw[1]["task_uid"]
         assert create_dup2[1]["event"] == "ADD"  # Title is same, objective is different
 
-        create_new2 = json.loads(memory.mem0_create_tasks(
+        create_new2 = json.loads(memory.create_tasks(
             [
                 memory.TaskCreate(
                     title=task_3_title,
@@ -242,7 +242,7 @@ def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
         assert create_new2[1]["event"] == "DUPLICATE"
 
         # Fuzzy duplicate check
-        create_fuzzy = json.loads(memory.mem0_create_tasks(
+        create_fuzzy = json.loads(memory.create_tasks(
             [
                 memory.TaskCreate(
                     title="Enumerate login endpoint",
@@ -263,8 +263,8 @@ def test_mem0_create_tasks_duplicates(tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_mem0_store_plan_persistence(tmp_path, monkeypatch):
-    """Verify that mem0_store_plan and mem0_get_plan use SQLite correctly."""
+def test_store_plan_persistence(tmp_path, monkeypatch):
+    """Verify that store_plan and get_plan use SQLite correctly."""
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-persistence")
@@ -286,10 +286,10 @@ def test_mem0_store_plan_persistence(tmp_path, monkeypatch):
         }
 
         # Store plan
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
         # Retrieve plan
-        retrieved_plan = memory.mem0_get_plan().get("plan")
+        retrieved_plan = memory.get_plan().get("plan")
         assert retrieved_plan is not None
         assert "Initial Objective,1," in retrieved_plan
 
@@ -301,10 +301,10 @@ def test_mem0_store_plan_persistence(tmp_path, monkeypatch):
 
         # Update plan
         plan["objective"] = "Updated Objective"
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
         # Retrieve updated
-        updated_plan = memory.mem0_get_plan().get("plan")
+        updated_plan = memory.get_plan().get("plan")
         assert "Updated Objective" in updated_plan
 
         # Verify update in SQLite
@@ -317,7 +317,7 @@ def test_mem0_store_plan_persistence(tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_mem0_create_tasks_more_fuzzy(tmp_path, monkeypatch):
+def test_create_tasks_more_fuzzy(tmp_path, monkeypatch):
     """Test more fuzzy matching cases for task creation."""
     from modules.tools import memory
 
@@ -332,16 +332,16 @@ def test_mem0_create_tasks_more_fuzzy(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
         # 1. Original task
-        memory.mem0_create_tasks([
+        memory.create_tasks([
             memory.TaskCreate(title="Scan for open ports", objective="Identify services on the target", phase=1,
                               status="pending")
         ])
 
         # 2. Case variation
-        res = json.loads(memory.mem0_create_tasks([
+        res = json.loads(memory.create_tasks([
             memory.TaskCreate(title="SCAN FOR OPEN PORTS", objective="identify services on the target", phase=1,
                               status="pending")
         ]))
@@ -350,14 +350,14 @@ def test_mem0_create_tasks_more_fuzzy(tmp_path, monkeypatch):
         # 3. Minor typo/difference (within 90% threshold)
         # "Scan for open ports" (19 chars)
         # "Scan for open port" (18 chars) -> ratio approx 97%
-        res = json.loads(memory.mem0_create_tasks([
+        res = json.loads(memory.create_tasks([
             memory.TaskCreate(title="Scan for open port", objective="Identify service on the target", phase=1,
                               status="pending")
         ]))
         assert res[0]["event"] == "DUPLICATE"
 
         # 4. Significant difference
-        res = json.loads(memory.mem0_create_tasks([
+        res = json.loads(memory.create_tasks([
             memory.TaskCreate(title="Exploit vulnerability", objective="Gain access to the system", phase=1,
                               status="pending")
         ]))
@@ -405,13 +405,13 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
             ],
             "assessment_complete": False,
         }
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
         task_1_title = "Enumerate login endpoints"
         task_2_title = "Check GraphQL schema exposure"
         task_3_title = "Check for SQL injection"
 
-        memory.mem0_create_tasks(
+        memory.create_tasks(
             [
                 memory.TaskCreate(
                     title=task_1_title,
@@ -435,19 +435,19 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
         )
         assert len(_list_tasks()) == 3
 
-        active_raw = memory.mem0_get_active_task()
+        active_raw = memory.get_active_task()
         assert isinstance(active_raw, str)
         assert "<active_task" in active_raw
         assert 'phase="1"' in active_raw
         assert 'status="active"' in active_raw
         assert len(_list_tasks()) == 3
 
-        active_raw2 = memory.mem0_task_done("done")
+        active_raw2 = memory.task_done("done")
         assert isinstance(active_raw2, str)
         assert active_raw != active_raw2
         assert len(_list_tasks()) == 3
 
-        active_none = memory.mem0_task_done("blocked")
+        active_none = memory.task_done("blocked")
         assert isinstance(active_none, str)
         assert "<active_task" in active_none
         assert 'phase="1"' in active_none
@@ -457,16 +457,16 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
         plan["current_phase"] = 2
         plan["phases"][0]["status"] = "done"
         plan["phases"][1]["status"] = "active"
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
-        active_raw3 = memory.mem0_get_active_task()
+        active_raw3 = memory.get_active_task()
         assert isinstance(active_raw3, str)
         assert "<active_task" in active_raw3
         assert 'phase="2"' in active_raw3
         assert 'status="active"' in active_raw3
         assert len(_list_tasks()) == 3
 
-        active_none2 = memory.mem0_task_done("blocked")
+        active_none2 = memory.task_done("blocked")
         assert isinstance(active_none2, str)
         assert "<active_task" in active_none2
         assert 'phase="2"' in active_none2
@@ -482,7 +482,7 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_mem0_create_tasks_sensitive_urls(tmp_path, monkeypatch):
+def test_create_tasks_sensitive_urls(tmp_path, monkeypatch):
     """Verify that tasks with different URLs are not considered duplicates, even if similar."""
     from modules.tools import memory
 
@@ -496,11 +496,11 @@ def test_mem0_create_tasks_sensitive_urls(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
         # 1. Create a task with a URL
         url1 = "http://example.com/api/v1/user/123"
-        memory.mem0_create_tasks([
+        memory.create_tasks([
             memory.TaskCreate(
                 title=f"Check endpoint {url1}",
                 objective=f"Verify access to {url1}",
@@ -514,7 +514,7 @@ def test_mem0_create_tasks_sensitive_urls(tmp_path, monkeypatch):
         # http://example.com/api/v1/user/124 (36 chars)
         # Ratio will be very high (>95%)
         url2 = "http://example.com/api/v1/user/124"
-        res = json.loads(memory.mem0_create_tasks([
+        res = json.loads(memory.create_tasks([
             memory.TaskCreate(
                 title=f"Check endpoint {url2}",
                 objective=f"Verify access to {url2}",
@@ -532,7 +532,7 @@ def test_mem0_create_tasks_sensitive_urls(tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_mem0_create_tasks_sensitive_paths(tmp_path, monkeypatch):
+def test_create_tasks_sensitive_paths(tmp_path, monkeypatch):
     """Verify that tasks with different file paths are not considered duplicates, even if similar."""
     from modules.tools import memory
 
@@ -546,11 +546,11 @@ def test_mem0_create_tasks_sensitive_paths(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.mem0_store_plan(plan)
+        memory.store_plan(plan)
 
         # 1. Create a task with a path
         path1 = "/etc/passwd"
-        memory.mem0_create_tasks([
+        memory.create_tasks([
             memory.TaskCreate(
                 title=f"Read file {path1}",
                 objective=f"Check permissions of {path1}",
@@ -561,7 +561,7 @@ def test_mem0_create_tasks_sensitive_paths(tmp_path, monkeypatch):
 
         # 2. Try to create a task with a slightly different path
         path2 = "/etc/shadow"
-        res = json.loads(memory.mem0_create_tasks([
+        res = json.loads(memory.create_tasks([
             memory.TaskCreate(
                 title=f"Read file {path2}",
                 objective=f"Check permissions of {path2}",

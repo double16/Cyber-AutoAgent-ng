@@ -793,9 +793,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         latestInput = hasEventInput ? eventInput : (hasMapInput ? mapInput : {});
       }
       
-      // Always show tool header even if args are not yet available.
+      // Always show a tool header even if args are not yet available.
       // Individual tool renderers will gracefully handle missing fields.
-      // Otherwise handle specific tool formatting
+      // Otherwise, handle specific tool formatting
       switch (event.tool_name) {
         case 'swarm':
           // Simplified swarm tool header to avoid duplication
@@ -814,12 +814,12 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
               </Box>
             </Box>
           );
-        case 'mem0_store_plan':
+        case 'store_plan':
         case 'mem0_store':
         case 'mem0_get':
         case 'mem0_retrieve':
         case 'mem0_list':
-        case 'mem0_get_plan': {
+        case 'get_plan': {
           const action = event.tool_name.substring(5);
           const rawContent = latestInput?.plan || latestInput?.content || latestInput?.query || '';
           // Ensure content is always a string (handle plan objects, etc.)
