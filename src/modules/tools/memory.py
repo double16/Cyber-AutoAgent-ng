@@ -958,8 +958,9 @@ class TaskCreate:
             raise ValueError("title required")
         if not self.objective.strip():
             raise ValueError("objective required")
-        if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
-            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked")
+        if self.status not in ("active", "pending"):
+            self.status = "pending"
+            # raise ValueError("status must be one of: active|pending")
         # Coerce evidence to List[str] to tolerate dict/list-of-dict inputs from models
         self.evidence = _normalize_evidence(self.evidence)
 

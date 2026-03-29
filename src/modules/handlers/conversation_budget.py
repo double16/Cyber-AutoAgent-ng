@@ -872,12 +872,11 @@ class MappingConversationManager(SummarizingConversationManager):
         if not (before_tokens and after_tokens):
             pass
         elif after_tokens > (before_tokens * 0.8):
-            # Remove most of the reasoning content. Thinking models require the last assistant message to include reasoning content.
-            _strip_reasoning_content(agent, force=True, preserve_recent_messages=1)
+            _strip_reasoning_content(agent, force=True)
             after_tokens = safe_estimate_tokens(agent)
             if after_tokens and after_tokens < before_tokens:
                 logger.info(
-                    "Context reduced via reasoning removal of all but last message: est tokens %s->%s",
+                    "Context reduced via reasoning removal: est tokens %s->%s",
                     before_tokens,
                     after_tokens,
                 )
@@ -1630,17 +1629,31 @@ def estimate_prompt_tokens(
     return prompt_tokens
 
 
+MAX_REASONING_BLOCKS = 3
+
+
 def _strip_reasoning_content(agent: Agent, force: bool = False, preserve_recent_messages: Optional[int] = None) -> None:
     # Check agent._allow_reasoning_content attribute
     # True: Keep reasoning blocks (reasoning-capable models)
     # False: Strip reasoning blocks (non-reasoning models)
-    if getattr(agent, "_allow_reasoning_content", True) and not force:
-        return
+    # Limit the number of messages with reasoning. It inflates context size and causes the agent to lose focus.
+    allow_reasoning_content = getattr(agent, "_allow_reasoning_content", True)
+    if allow_reasoning_content:
+        # When reasoning is allowed, we never remove all of it. Some thinking models require at least one message with reasoning.
+        if preserve_recent_messages is None:
+            if force:
+                preserve_recent_messages = 1
+            else:
+                preserve_recent_messages = MAX_REASONING_BLOCKS
+    else:
+        # remove all of it
+        preserve_recent_messages = None
 
     messages = getattr(agent, "messages", [])
     removed_blocks = 0
     end_idx = len(messages)
     if preserve_recent_messages is not None:
+        preserve_recent_messages = max(0, min(preserve_recent_messages, MAX_REASONING_BLOCKS))
         if preserve_recent_messages < len(messages):
             end_idx = len(messages) - preserve_recent_messages
         else:
@@ -1670,7 +1683,7 @@ def _strip_reasoning_content(agent: Agent, force: bool = False, preserve_recent_
         if _predicate(message)
     ]
 
-    if removed_blocks and not force:
+    if removed_blocks and not allow_reasoning_content:
         logger.warning(
             "Removed %d reasoningContent blocks for model without reasoning support",
             removed_blocks,
