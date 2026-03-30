@@ -38,15 +38,16 @@ logger = get_logger("Handlers.ReportGenerator")
 
 MAX_REPORT_FINDINGS = int(os.getenv("CYBER_REPORT_MAX_FINDINGS", "200"))
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-
+_PAGE_BREAK = """\n<div class="page-break" style="page-break-before: always;"></div>\n\n"""
 
 def generate_security_report(
     target: str,
     objective: str,
     operation_id: str,
-    config_data: Optional[str] = None,
+    config_params: Optional[Dict[str, Any]] = None,
     callback_handler = None,
-) -> str:
+    filename: Optional[str] = None,
+) -> None:
     """
     Generate a comprehensive security assessment report based on the operation results.
 
@@ -59,33 +60,27 @@ def generate_security_report(
         target: The target system that was assessed
         objective: The security assessment objective
         operation_id: The operation identifier
-        config_data: JSON string containing additional config (steps_executed, tools_used,
-                    evidence, provider, model_id, module)
+        config_params: additional config (steps_executed, tools_used, evidence, provider, model_id, module)
+        callback_handler: Optional callback handler for agent events
+        filename: Optional path to save the generated report. If not provided,
+                  a default filename in the output directory will be used.
 
     Returns:
-        The generated security assessment report as a string
+        None
 
     Example:
         generate_security_report(
             target="example.com",
             objective="Identify web application vulnerabilities",
             operation_id="OP_20240115_143022",
-            config_data='{"steps_executed": 15, "tools_used": ["nmap", "nikto"], "provider": "bedrock"}'
+            config_data='{"steps_executed": 15, "tools_used": ["nmap", "nikto"], "provider": "bedrock"}',
+            filename="/path/to/report.md"
         )
     """
     try:
         # Log the report generation request
         logger.info("Generating security report for operation: %s", operation_id)
         config_manager = get_config_manager()
-
-        # Parse config data
-        config_params = {}
-        if config_data:
-            try:
-                config_params = json.loads(config_data)
-            except json.JSONDecodeError:
-                logger.error("Invalid JSON in config_data parameter")
-                return "Report generation failed: Invalid configuration format"
 
         # Extract parameters with defaults
         steps_executed = config_params.get("steps_executed", 0)
@@ -112,7 +107,7 @@ def generate_security_report(
                 "No evidence/memories collected for operation %s - skipping report generation",
                 operation_id,
             )
-            return ""
+            return
 
         # Get module report prompt if available for domain guidance
         module_report_prompt = _get_module_report_prompt(module)
@@ -142,7 +137,7 @@ def generate_security_report(
             else "Apply general security assessment best practices focusing on common vulnerability patterns."
         )
 
-        report_parts = []
+        report_parts_files = []
 
         # Part 1: Executive Summary
         logger.info("Generating Executive Summary...")
@@ -155,7 +150,7 @@ def generate_security_report(
         )
         
         exec_prompt = f"""
-Generate the Executive Summary and Risk Assessment sections.
+Generate all the requested sections.
 Target: {target}
 Objective: {objective}
 Module: {module_str}
@@ -169,17 +164,23 @@ Use the following data:
         if exec_content:
             # Add anchor for Table of Contents
             exec_content = "<a name=\"executive-summary\"></a>\n" + exec_content
-            with open(os.path.join(output_path, "report_executive_summary.md"), "w") as f:
+            exec_summary_file = os.path.join(output_path, "report_executive_summary.md")
+            with open(exec_summary_file, "w") as f:
                 f.write(exec_content)
-            report_parts.append(exec_content)
+            report_parts_files.append(exec_summary_file)
 
         # Part 2: Detailed Findings
         logger.info("Generating Detailed Findings...")
-        findings_content = "<a name=\"detailed-vulnerability-analysis\"></a>\n## DETAILED VULNERABILITY ANALYSIS\n\n"
+        findings_header = _PAGE_BREAK + "<a name=\"detailed-vulnerability-analysis\"></a>\n## DETAILED VULNERABILITY ANALYSIS\n\n"
 
         # Add summary table for remaining findings
         if sections.get("summary_table"):
-            findings_content += "\n### Findings Summary\n\n" + sections.get("summary_table") + "\n\n"
+            findings_header += "\n### Findings Summary\n\n" + sections.get("summary_table") + "\n\n"
+
+        findings_header_file = os.path.join(output_path, "report_findings_header.md")
+        with open(findings_header_file, "w") as f:
+            f.write(findings_header)
+        report_parts_files.append(findings_header_file)
 
         raw_findings = sections.get("raw_evidence", [])
 
@@ -207,17 +208,19 @@ Finding Data:
             finding_text = _extract_text_from_result(finding_result)
             
             if finding_text:
-                findings_content += finding_text + "\n\n"
                 finding_filename = f"finding_{i+1}_{sanitize_target_name(finding.get('title', 'finding')[:50])}.md"
-                with open(os.path.join(output_path, finding_filename), "w") as f:
-                    f.write(finding_text)
+                finding_path = os.path.join(output_path, finding_filename)
+                with open(finding_path, "w") as f:
+                    f.write(_PAGE_BREAK + finding_text + "\n\n")
+                report_parts_files.append(finding_path)
 
-        report_parts.append(findings_content)
-        
         # Part 3: Observations and Discoveries
         logger.info("Generating Observations and Discoveries...")
-        observations_content = "<a name=\"observations-and-discoveries\"></a>\n## OBSERVATIONS AND DISCOVERIES\n\n"
+        observations_header = _PAGE_BREAK + "<a name=\"observations-and-discoveries\"></a>\n## OBSERVATIONS AND DISCOVERIES\n\n"
         has_observations = False
+
+        # Pre-create observation parts list to only add header if there are observations
+        observation_parts_files = []
 
         for i, finding in enumerate(raw_findings):
             if finding.get("category") in ["signal", "observation", "discovery"]:
@@ -241,13 +244,18 @@ Observation Data:
                 obs_text = _extract_text_from_result(obs_result)
                 
                 if obs_text:
-                    observations_content += obs_text + "\n\n"
                     obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
-                    with open(os.path.join(output_path, obs_filename), "w") as f:
-                        f.write(obs_text)
+                    obs_path = os.path.join(output_path, obs_filename)
+                    with open(obs_path, "w") as f:
+                        f.write(_PAGE_BREAK + obs_text + "\n\n")
+                    observation_parts_files.append(obs_path)
 
         if has_observations:
-            report_parts.append(observations_content)
+            observations_header_file = os.path.join(output_path, "report_observations_header.md")
+            with open(observations_header_file, "w") as f:
+                f.write(observations_header)
+            report_parts_files.append(observations_header_file)
+            report_parts_files.extend(observation_parts_files)
 
         # Part 4: Assessment Methodology
         logger.info("Generating Assessment Methodology...")
@@ -260,7 +268,7 @@ Observation Data:
         )
 
         appendix_prompt = f"""
-Generate the Assessment Methodology section.
+Generate all requested sections.
 Target: {target}
 Operation ID: {operation_id}
 Steps Executed: {steps_executed}
@@ -273,48 +281,56 @@ Use the following data:
         
         if appendix_content:
             # Add anchor for Table of Contents
-            appendix_content = "<a name=\"assessment-methodology\"></a>\n" + appendix_content
-            with open(os.path.join(output_path, "report_methodology.md"), "w") as f:
+            appendix_content = _PAGE_BREAK + "<a name=\"assessment-methodology\"></a>\n" + appendix_content
+            methodology_file = os.path.join(output_path, "report_methodology.md")
+            with open(methodology_file, "w") as f:
                 f.write(appendix_content)
-            report_parts.append(appendix_content)
+            report_parts_files.append(methodology_file)
 
         # --- Combine everything ---
-        final_report = "# SECURITY ASSESSMENT REPORT\n\n"
-        final_report += "## TABLE OF CONTENTS\n"
-        final_report += "- [Executive Summary](#executive-summary)\n"
-        final_report += "- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n"
-        if has_observations:
-            final_report += "- [Observations and Discoveries](#observations-and-discoveries)\n"
-        final_report += "- [Assessment Methodology](#assessment-methodology)\n\n"
-        
-        final_report += "\n\n".join(report_parts)
-        
-        # Add footer
-        main_provider = config_manager.get_provider()
-        main_models = set([
-            config_manager.get_llm_config(main_provider).model_id,
-            config_manager.get_swarm_config(main_provider).llm.model_id
-        ])
+        if not filename:
+            filename = os.path.join(output_path, "security_assessment_report.md")
 
-        final_report += f"""
+        with open(filename, "w") as final_f:
+            final_f.write("# SECURITY ASSESSMENT REPORT\n\n")
+            final_f.write("## TABLE OF CONTENTS\n")
+            final_f.write("- [Executive Summary](#executive-summary)\n")
+            final_f.write("- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n")
+            if has_observations:
+                final_f.write("- [Observations and Discoveries](#observations-and-discoveries)\n")
+            final_f.write("- [Assessment Methodology](#assessment-methodology)\n\n")
 
+            for part_file in report_parts_files:
+                with open(part_file, "r") as part_f:
+                    final_f.write(part_f.read())
+                    final_f.write("\n\n")
+
+            # Add footer
+            main_provider = config_manager.get_provider()
+            main_models = set([
+                config_manager.get_llm_config(main_provider).model_id,
+                config_manager.get_swarm_config(main_provider).llm.model_id
+            ])
+
+            footer = f"""
 ----
 Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Operation ID: {operation_id}
 Provider: {main_provider}
 Model(s): {", ".join(main_models)}
 """
+            final_f.write(footer)
 
-        with open(os.path.join(output_path, "security_assessment_report.md"), "w") as f:
-            f.write(final_report)
-
-        logger.info("Final combined report generated: %d characters", len(final_report))
-        return final_report
+        logger.info("Final combined report generated: %s", filename)
+        return
 
     except Exception as e:
         logger.error("Error generating security report: %s", e, exc_info=True)
         # Don't expose internal error details to user
-        return "Report generation failed. Please check logs for details."
+        return
+
+
+_RE_MARKDOWN_INDENTED_HEADER = re.compile(r"^[ \t]+(#+ )", re.MULTILINE)
 
 
 def _extract_text_from_result(result: Any) -> str:
@@ -328,9 +344,166 @@ def _extract_text_from_result(result: Any) -> str:
     if not text:
         return text
 
+    # Post-process mermaid diagrams to ensure node names/labels are quoted and sanitize special characters
+    text = _sanitize_mermaid_diagrams(text)
+
     # Remove leading whitespace before markdown heading markers (#, ##, ...)
-    text = re.sub(r"^[ \t]+(#+ )", r"\1", text, flags=re.MULTILINE)
+    text = _RE_MARKDOWN_INDENTED_HEADER.sub(r"\1", text)
     return text
+
+
+_RE_MERMAID_DOUBLE_ROUNDED = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\(\((?!")(.*?)(?<!")\)\)(?:\s|$|[-=])')
+_RE_MERAID_SINGLE_ROUNDED = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\((?!")(.*?)(?<!")\)(?:\s|$|[-=])')
+_RE_MERMAID_SQUARE = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\[(?!")(.*?)(?<!")\](?:\s|$|[-=])')
+_RE_MERMAID_BRACES = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\{(?!")(.*?)(?<!")\}(?:\s|$|[-=])')
+_RE_MERMAID_ANGLE = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)>(?!")(.*?)(?<!")\](?:\s|$|[-=])')
+_RE_MERAID_EDGE = re.compile(r'(--\s+)(?!")(.*?)(?<!")(\s*-->)')
+_RE_MERMAID_SEQUENCE_LABELS = re.compile(r'(->>[^:]+:\s*)(.*)')
+_RE_MERMAID_PIPE_LABELS = re.compile(r'(\|)(?!")(.*?)(?<!")(\|)')
+_RE_MERMAID_SUBGRAPH_LABEL = re.compile(r'(subgraph\s+)(.*)')
+_RE_MERMAID_BLOCK = re.compile(r'```mermaid\s*([\s\S]*?)\s*```')
+
+
+def _sanitize_mermaid_diagrams(text: str) -> str:
+    """
+    Post-process mermaid diagrams to ensure node names/labels are quoted
+    and replace special characters [](){}<>| with unicode equivalents.
+    """
+    if "```mermaid" not in text:
+        return text
+
+    replacements = {
+        # disable replacing, it's noisy and not necessary
+        # '[': '&#91;',
+        # ']': '&#93;',
+        # '(': '&#40;',
+        # ')': '&#41;',
+        # '{': '&#123;',
+        # '}': '&#125;',
+        # '<': '&#60;',
+        # '>': '&#62;',
+        # '|': '&#124;',
+        '"': '&#34;'
+    }
+
+    def replace_special_chars(label: str) -> str:
+        for char, unicode_val in replacements.items():
+            label = label.replace(char, unicode_val)
+        return label
+
+    # Function to replace special characters in a label and ensure it's quoted
+    def quote_and_sanitize(label):
+        # Extract content if already quoted, then re-quote after sanitizing
+        label = label.strip()
+        while label.startswith('"') and label.endswith('"') and len(label) >= 2:
+            label = label[1:-1]
+        return f'"{replace_special_chars(label)}"'
+
+    def process_mermaid_block(match):
+        block_content = match.group(1)
+
+        lines = block_content.splitlines()
+        processed_lines = []
+
+        for line in lines:
+            # Skip common diagram markers
+            if line.strip().lower() in ['graph td', 'graph lr', 'sequencediagram', 'flowchart td', 'flowchart lr']:
+                processed_lines.append(line)
+                continue
+
+            # 1. Double Rounded: ID((label))
+            if '((' in line and '))' in line:
+                match_node = _RE_MERMAID_DOUBLE_ROUNDED.search(line)
+                if match_node:
+                    node_id = match_node.group(1)
+                    label_content = match_node.group(2)
+                    line = line.replace(f'{node_id}(({label_content}))',
+                                      f'{node_id}(({quote_and_sanitize(label_content)}))')
+
+            # 2. Rounded: ID(label) - only if not already matched as double rounded
+            elif '(' in line and ')' in line:
+                match_node = _RE_MERAID_SINGLE_ROUNDED.search(line)
+                if match_node:
+                    node_id = match_node.group(1)
+                    label_content = match_node.group(2)
+                    line = line.replace(f'{node_id}({label_content})',
+                                      f'{node_id}({quote_and_sanitize(label_content)})')
+
+            # 3. Square: ID[label]
+            if '[' in line and ']' in line:
+                # Find the ID and the content between the FIRST [ and LAST ] on this line
+                for match_node in _RE_MERMAID_SQUARE.finditer(line):
+                    if match_node:
+                        node_id = match_node.group(1)
+                        label_content = match_node.group(2)
+                        line = line.replace(f'{node_id}[{label_content}]',
+                                          f'{node_id}[{quote_and_sanitize(label_content)}]')
+
+            # 4. Braces: ID{label}
+            if '{' in line and '}' in line:
+                for match_node in _RE_MERMAID_BRACES.finditer(line):
+                    if match_node:
+                        node_id = match_node.group(1)
+                        label_content = match_node.group(2)
+                        line = line.replace(f'{node_id}{{{label_content}}}',
+                                          f'{node_id}{{{quote_and_sanitize(label_content)}}}')
+
+            # 5. Angle: ID>label]
+            if '>' in line and ']' in line:
+                for match_node in _RE_MERMAID_ANGLE.finditer(line):
+                    if match_node:
+                        node_id = match_node.group(1)
+                        label_content = match_node.group(2)
+                        line = line.replace(f'{node_id}>{label_content}]',
+                                          f'{node_id}>{quote_and_sanitize(label_content)}]')
+
+            # 6. Edge labels: -- label -->
+            if '-- ' in line and '-->' in line:
+                match_edge = _RE_MERAID_EDGE.search(line)
+                if match_edge:
+                    prefix = match_edge.group(1)
+                    label_content = match_edge.group(2)
+                    suffix = match_edge.group(3)
+                    line = line.replace(f'{prefix}{label_content}{suffix}',
+                                      f'{prefix}{quote_and_sanitize(label_content)}{suffix}')
+
+            # 7. Sequence diagram labels: ID->>ID: label
+            if '->>' in line and ':' in line:
+                match_seq = _RE_MERMAID_SEQUENCE_LABELS.search(line)
+                if match_seq:
+                    prefix = match_seq.group(1)
+                    label_content = match_seq.group(2)
+                    line = line.replace(f'{prefix}{label_content}',
+                                      f'{prefix}{quote_and_sanitize(label_content)}')
+
+            # 8. Pipe labels: |label|
+            if '|' in line:
+                # Flowcharts can have |label| after edge
+                # We need to find the label content between pipes. 
+                # Mermaid flowcharts use |label| syntax.
+                def sub_pipe(m):
+                    content = m.group(2)
+                    if '&#124;' in content: # Already processed or contains sanitized pipe
+                        return m.group(0)
+                    return f'|{quote_and_sanitize(content)}|'
+
+                line = _RE_MERMAID_PIPE_LABELS.sub(sub_pipe, line)
+
+            # 9. subgraph label
+            if 'subgraph' in line:
+                match_seq = _RE_MERMAID_SUBGRAPH_LABEL.search(line)
+                if match_seq:
+                    prefix = match_seq.group(1)
+                    label_content = match_seq.group(2)
+                    line = line.replace(f'{prefix}{label_content}',
+                                        f'{prefix}{quote_and_sanitize(label_content)}')
+
+            processed_lines.append(line)
+
+        return f"```mermaid\n" + "\n".join(processed_lines) + "\n```"
+
+    # Match ```mermaid ... ``` blocks
+    return _RE_MERMAID_BLOCK.sub(process_mermaid_block, text)
 
 
 def _get_module_report_prompt(module_name: Optional[str]) -> Optional[str]:
@@ -746,7 +919,7 @@ def build_report_sections(
             "low_count": severity_counts["low"],
             "info_count": severity_counts["info"],
             "overview": report_content.get("overview", ""),
-            "operation_plan": operation_plan.to_dict(),
+            "operation_plan": operation_plan.to_dict() if operation_plan else "",
             "operation_tasks": {
                 "columns": Task.csv_format(),
                 "items": operation_tasks,

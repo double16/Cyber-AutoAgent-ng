@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+import asyncio
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -29,6 +30,12 @@ from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
 from ...utils.text_reducer import collapse_first_repeated_sequence
+
+from modules.handlers.utils import (
+    get_output_path,
+    sanitize_target_name,
+)
+
 
 logger = get_logger("Handlers.ReactBridge")
 
@@ -833,9 +840,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                     )
                     from modules.handlers.base import StepLimitReached
 
-                    raise StepLimitReached(
-                        f"Step limit reached: {self.current_step}/{self.max_steps}"
-                    )
+                    raise StepLimitReached(f"Step limit reached: {self.current_step}/{self.max_steps}")
 
                 # Only emit header if within step limits
                 self._emit_step_header()
@@ -1453,8 +1458,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 timeout_seconds = None
                 try:
                     # Common patterns: "timed out after 30 seconds", TimeoutExpired, etc.
-                    import re
-
                     m = re.search(
                         r"timed out after\s+(\d+)\s*seconds?",
                         clean_error,
@@ -3259,8 +3262,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             # Check if FAISS files exist with meaningful data (fallback for metrics issues)
             has_memory_data = False
             try:
-                from modules.handlers.utils import get_output_path, sanitize_target_name
-
                 target_name = sanitize_target_name(target)
                 output_dir = get_output_path(target_name, self.operation_id, "")
 
@@ -3362,103 +3363,71 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             except Exception:
                 pass
 
-            config_data = json.dumps(
-                {
-                    "steps_executed": self.current_step,
-                    "tools_used": tools_used_list,
-                    "provider": provider,
-                    "module": module,
-                    "model_id": model_id,  # Pass main model for reports
-                }
+            config_params = {
+                "steps_executed": self.current_step,
+                "tools_used": tools_used_list,
+                "provider": provider,
+                "module": module,
+                "model_id": model_id,  # Pass main model for reports
+            }
+
+            target_name = sanitize_target_name(target)
+            output_dir = get_output_path(
+                target_name, self.operation_id, ""
             )
 
-            report_content = generate_security_report(
+            # Create output directory if it doesn't exist
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+            # Save report as markdown file
+            report_path = os.path.join(
+                output_dir, "security_assessment_report.md"
+            )
+
+            generate_security_report(
                 target=target,
                 objective=objective,
                 operation_id=self.operation_id,
-                config_data=config_data,
+                config_params=config_params,
+                callback_handler=self,
+                filename=report_path,
             )
 
-            # Accept any non-empty report content
-            if isinstance(report_content, str) and report_content.strip():
+            # Read report from file
+            report_content = ""
+            if os.path.exists(report_path):
                 try:
-                    from modules.handlers.utils import (
-                        get_output_path,
-                        sanitize_target_name,
-                    )
+                    with open(report_path, "r", encoding="utf-8") as f:
+                        report_content = f.read(15000)  # 15KB threshold for IPC safety, 200 lines for event output
+                    report_content = "\n".join(report_content.split("\n")[:200])  # 200 lines for event output
+                except Exception as read_error:
+                    logger.warning(f"Could not read generated report: {read_error}")
 
-                    target_name = sanitize_target_name(target)
-                    output_dir = get_output_path(
-                        target_name, self.operation_id, ""
-                    )
+            # Accept any non-empty report content
+            if report_content:
+                self.emit_ui_event({"type": "report_content", "content": report_content})
 
-                    # Create output directory if it doesn't exist
-                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                # Also emit file path information for reference
+                self.emit_ui_event(
+                    {
+                        "type": "output",
+                        "content": f"\n{'━' * 80}\n\nASSESSMENT COMPLETE\n\nREPORT ALSO SAVED TO:\n  • {report_path}\n\nMEMORY STORED IN:\n  • {output_dir}/memory/\n\nOPERATION LOGS:\n  • {os.path.join(output_dir, 'cyber_operations.log')}\n\n{'━' * 80}\n",
+                    }
+                )
 
-                    # Save report as markdown file
-                    report_path = os.path.join(
-                        output_dir, "security_assessment_report.md"
-                    )
-                    with open(report_path, "w", encoding="utf-8") as f:
-                        f.write(report_content)
+                # Emit a completion event for clean UI transition
+                self.emit_ui_event(
+                    {
+                        "type": "assessment_complete",
+                        "operation_id": self.operation_id,
+                        "report_path": report_path,
+                    }
+                )
 
-                    # Emit report content - truncate if needed to stay under IPC buffer limits
-                    # Docker/IPC drops events >50KB silently. Truncate to ~200 lines (~12KB) and
-                    # let React's StreamDisplay.tsx handle display/truncation from there
-                    try:
-                        if len(report_content) > 15000:  # 15KB threshold for IPC safety
-                            # Truncate to first 200 lines to ensure event reaches React
-                            lines = report_content.split("\n")
-                            truncated_content = "\n".join(lines[:200])
-                            logger.info(
-                                f"Report truncated from {len(lines)} to 200 lines for IPC transmission ({len(report_content)} -> {len(truncated_content)} chars)"
-                            )
-                            self.emit_ui_event(
-                                {"type": "report_content", "content": truncated_content}
-                            )
-                        else:
-                            self.emit_ui_event(
-                                {"type": "report_content", "content": report_content}
-                            )
-                    except Exception as e:
-                        logger.warning(f"Failed to emit report content: {e}")
-                        self.emit_ui_event(
-                            {
-                                "type": "output",
-                                "content": f"Report generated: {report_path}",
-                            }
-                        )
+                if hasattr(self.emitter, "flush_immediate"):
+                    self.emitter.flush_immediate()
 
-                    # Also emit file path information for reference
-                    self.emit_ui_event(
-                        {
-                            "type": "output",
-                            "content": f"\n{'━' * 80}\n\nASSESSMENT COMPLETE\n\nREPORT ALSO SAVED TO:\n  • {report_path}\n\nMEMORY STORED IN:\n  • {output_dir}/memory/\n\nOPERATION LOGS:\n  • {os.path.join(output_dir, 'cyber_operations.log')}\n\n{'━' * 80}\n",
-                        }
-                    )
-
-                    # Emit a completion event for clean UI transition
-                    self.emit_ui_event(
-                        {
-                            "type": "assessment_complete",
-                            "operation_id": self.operation_id,
-                            "report_path": report_path,
-                        }
-                    )
-
-                    if hasattr(self.emitter, "flush_immediate"):
-                        self.emitter.flush_immediate()
-
-                    logger.info("Report saved to %s", report_path)
-
-                except Exception as save_error:
-                    logger.warning("Could not save report to file: %s", save_error)
-                    self.emit_ui_event(
-                        {
-                            "type": "output",
-                            "content": f"\n⚠️ Note: Report could not be saved to file: {save_error}",
-                        }
-                    )
+                logger.info("Report saved to %s", report_path)
             else:
                 logger.info(
                     "Report generation skipped - no evidence collected during operation"
@@ -3520,8 +3489,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
             if verbose_eval:
                 logger.debug("EVAL_DEBUG: Registered trace for evaluation")
-
-            import asyncio
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)

@@ -476,7 +476,18 @@ export const toolFormatters: Record<string, ToolFormatter> = {
     const descInfo = toolDescription ? ` | ${toolDescription}` : '';
     return `loading: ${toolName}${pathInfo}${descInfo}`;
   },
-  
+
+  create_tasks: (input) => {
+    if (!Array.isArray(input.tasks)) {
+      return 'invalid tasks input: expected an array';
+    }
+    if (input.tasks.length === 0) {
+      return 'no tasks to create';
+    }
+    const titles = input.tasks.slice(0, 10).map((task) => `• ${truncate(task.title, 50)}`).join('\n');
+    return `create ${input.tasks.length} tasks:\n${titles}`;
+  },
+
   stop: (input) => {
     return input.reason || 'Manual stop requested';
   }
