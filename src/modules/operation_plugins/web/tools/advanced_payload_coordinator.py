@@ -51,6 +51,9 @@ _RE_COMMIX_VULN = re.compile(r"parameter\s+'(.+?)'\s+is (likely |)vulnerable", r
 
 _RE_LFIMAP_PAYLOADS = re.compile(r"testing (.+) payloads", re.IGNORECASE)
 
+# [*] testing rfi with command: http://example.com/rfi_test.txt?cmd=id
+_RE_RFIMAP_PAYLOADS = re.compile(r"testing (rfi) with command\S*:\s+(.+)", re.IGNORECASE)
+
 def _b64(input) -> str:
     if input is None:
         return ""
@@ -92,13 +95,13 @@ def advanced_payload_coordinator(
         headers: Dict[str, str] = None,
 ) -> str:
     """
-    Run coordinated payload-based web vuln testing (XSS/CORS/LFI/SSTI/command/LDAP) against a single URL.
+    Run coordinated payload-based web vuln testing (XSS/CORS/LFI/SSTI/command/LDAP) against a single URL. SQLi is not supported.
 
     When to call:
     - You have a target URL (optionally authenticated via cookies/headers) and need fast confirmation/triage of
       XSS, CORS misconfig, LFI, SSTI, command injection, or LDAP injection on likely parameters.
     - Use "param_discovery" when you do not know parameters. Use "xss", "lfi", "ssti", "command_injection", "ldap_injection", or "cors" for focused checks.
-    - Use "comprehensive" after initial recon/endpoint selection to prioritize exploit paths.
+    - Use "comprehensive" after initial recon/endpoint selection to prioritize exploit paths. Comprehensive will discover parameters and run all injection tests.
     - Not for crawling: call this after you have selected a concrete endpoint/URL to test.
 
     How to call:
@@ -125,6 +128,9 @@ def advanced_payload_coordinator(
         raise ValueError("target_url is required")
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
+
+    if "sql" in test_type.lower():
+        raise ValueError("SQLi is not supported")
 
     # normalize test types
     test_type = test_type.lower() if test_type else "comprehensive"
@@ -796,6 +802,10 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
             elif m := _RE_LFIMAP_PAYLOADS.search(line):
                 current_payload = m.group(1).strip()
                 current_payload_source = current_payload.split()[0]
+                evidence_lines.append(line)
+            elif m := _RE_RFIMAP_PAYLOADS.search(line):
+                current_payload = m.group(2).strip()
+                current_payload_source = m.group(1).strip()
                 evidence_lines.append(line)
             else:
                 print("Maybe incorrect pattern: "+lower_line)

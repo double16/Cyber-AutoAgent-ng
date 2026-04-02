@@ -34,11 +34,15 @@ RUN --mount=type=cache,target=/usr/local/share/cargo \
 
 FROM kalilinux/kali-rolling
 
-LABEL org.opencontainers.image.title="Cyber-AutoAgent Tools"
+LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng Tools"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"
 LABEL org.opencontainers.image.version="0.8.0"
 LABEL org.opencontainers.image.source="https://github.com/double16/Cyber-AutoAgent-ng"
+LABEL org.opencontainers.image.url="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.authors="github.com/double16"
+LABEL org.opencontainers.image.vendor="github.com/double16"
+LABEL org.opencontainers.image.revision=""
 
 ENV DEBIAN_FRONTEND=noninteractive
 

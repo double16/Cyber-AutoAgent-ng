@@ -9,7 +9,11 @@ LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"
 LABEL org.opencontainers.image.version="0.8.0"
 LABEL org.opencontainers.image.source="https://github.com/double16/Cyber-AutoAgent-ng"
+LABEL org.opencontainers.image.url="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.authors="github.com/double16"
+LABEL org.opencontainers.image.vendor="github.com/double16"
+LABEL org.opencontainers.image.revision=""
 
 COPY docker/apt_proxy_configure.sh docker/apt_proxy_clean.sh /tmp/
 RUN /tmp/apt_proxy_configure.sh
