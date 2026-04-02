@@ -17,6 +17,8 @@ DEFAULT_TEMPERATURE_EXECUTION = 0.5
 DEFAULT_TEMPERATURE_SWARM = 0.4
 DEFAULT_TEMPERATURE_EXPLOITATION = 0.6
 
+DEFAULT_ITERATIONS = 100
+
 LITELLM_EMBEDDING_DEFAULTS: Dict[str, Tuple[str, int]] = {
     "openai": ("openai/text-embedding-3-small", 1536),
     "azure": ("azure/text-embedding-3-small", 1536),
@@ -274,7 +276,7 @@ class AgentConfig:
 
     target: str
     objective: str
-    max_steps: int = 100
+    max_steps: int = DEFAULT_ITERATIONS
     available_tools: Optional[List[str]] = None
     op_id: Optional[str] = None
     model_id: Optional[str] = None

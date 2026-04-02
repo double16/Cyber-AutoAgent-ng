@@ -115,7 +115,7 @@ def swarm(
         task: str,
         agents: List[Dict[str, Any]],
         max_handoffs: int = 20,
-        max_iterations: int = 20,
+        max_iterations: int = 30,
         execution_timeout: float = 900.0,
         node_timeout: float = 300.0,
         repetitive_handoff_detection_window: int = 8,

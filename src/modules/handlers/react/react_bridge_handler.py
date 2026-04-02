@@ -29,6 +29,7 @@ from modules.config.system.logger import get_logger
 from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
+from ...config.types import DEFAULT_ITERATIONS
 from ...utils.text_reducer import collapse_first_repeated_sequence
 
 from modules.handlers.utils import (
@@ -58,7 +59,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
     def __init__(
         self,
-        max_steps: int = 100,
+        max_steps: int = DEFAULT_ITERATIONS,
         operation_id: str = None,
         provider_id: str = None,
         model_id: str = None,
@@ -802,7 +803,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         if tool_id and tool_id not in self.announced_tools:
             # Ensure a step header will be emitted for each new tool (non-swarm)
             # IMPORTANT: Only emit header for the FIRST tool in a multi-tool response
-            # Claude 4.5 can invoke multiple tools in parallel within the same response
+            # Models can invoke multiple tools in parallel within the same response
             if not self.in_swarm_operation:
                 # Check if this is the first tool announcement since the last step header
                 if self.current_step == 0 or not hasattr(
