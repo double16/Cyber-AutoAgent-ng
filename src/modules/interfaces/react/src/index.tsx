@@ -60,7 +60,7 @@ const cli = meow(`
     --target, -t        Target system/network to assess
     --objective, -o     Security assessment objective
     --module, -m        Security module to use (default: web)
-    --iterations, -i    Maximum tool executions (default: 50)
+    --iterations, -i    Maximum tool executions (default: 100)
     --auto-run          Start assessment immediately without UI
     --auto-approve      Auto-approve tool executions (no confirmations)
     --memory-mode       Memory mode: auto (default) or fresh

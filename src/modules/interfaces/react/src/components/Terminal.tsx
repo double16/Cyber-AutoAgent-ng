@@ -586,9 +586,22 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     
     switch (event.type) {
       case 'operation_init':
-        // Reset dedup sets at operation start
+        // Reset all dedup sets and internal refs at operation start
         perToolOutputSeenRef.current.clear();
         globalOutputSeenRef.current.clear();
+        swarmAgentStepsRef.current.clear();
+        pendingReasoningsRef.current = [];
+        opSummaryBufferRef.current = [];
+        
+        // Reset timers
+        cancelDelayedThinking();
+        cancelPostToolIdleTimer();
+        cancelPostReasoningIdleTimer();
+        if (pendingReasoningTimerRef.current) {
+          clearTimeout(pendingReasoningTimerRef.current);
+          pendingReasoningTimerRef.current = null;
+        }
+
         // Cache operation metadata
         if (typeof event.max_steps === 'number') {
           opMaxStepsRef.current = event.max_steps;

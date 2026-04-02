@@ -54,6 +54,27 @@ export class EventAggregator {
     const results: DisplayStreamEvent[] = [];
     
     switch (event.type) {
+      case 'operation_init':
+            // Reset all internal state for new operation to prevent unbounded growth
+            this.displayedToolStartIds.clear();
+            this.toolStartDedupeKeyById.clear();
+            this.outputBuffer = [];
+            this.reasoningBuffer = [];
+            this.currentToolId = undefined;
+            this.lastEventType = undefined;
+            this.activeThinking = false;
+            this.activeReasoningSession = false;
+            this.pendingStepHeader = undefined;
+            this.pendingStepNumber = undefined;
+            this.hasToolForPendingStep = false;
+            this.lastEmittedStepNumber = undefined;
+            this.lastOutputContent = '';
+            this.lastOutputTime = 0;
+            this.swarmActive = false;
+            this.currentSwarmAgent = null;
+            this.swarmHandoffSequence = 0;
+            break;
+
       case 'step_header':
         // End any active reasoning session
         this.activeReasoningSession = false;

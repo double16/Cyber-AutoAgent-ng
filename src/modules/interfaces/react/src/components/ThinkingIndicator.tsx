@@ -39,15 +39,11 @@ const THINKING_PHRASES = [
   'Mapping vectors',
   'Testing theories',
   'Building game plan',
-  'Evaluating angles',
-  'Synthesizing intel',
   'Formulating tactics',
   'Calibrating approach',
   'Piecing together',
-  'Calculating odds',
   'Assembling strategy',
   'Decoding patterns',
-  'Triangulating path',
   'Optimizing route',
   'Spinning up ideas',
   'Cooking up plan'
@@ -83,7 +79,10 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
 
   // Elapsed time tracking (single interval)
   useEffect(() => {
-    if (!startTime || !enabled) return;
+    if (!startTime || !enabled) {
+      setElapsedSeconds(0);
+      return;
+    }
 
     const updateElapsed = () => {
       setElapsedSeconds(Math.floor((Date.now() - startTime) / 1000));

@@ -449,13 +449,6 @@ export class DirectDockerService extends EventEmitter {
         }
         return out;
       };
-      logger.info('Docker exec plan', {
-        args,
-        env: maskEnv(env),
-        target: params.target,
-        module: params.module,
-        mode: await ContainerManager.getInstance().getCurrentMode()
-      });
 
       // Get deployment mode for configuration and messaging decisions
       const deploymentManager = ContainerManager.getInstance();
@@ -551,6 +544,14 @@ export class DirectDockerService extends EventEmitter {
         }
       }
       env = Array.from(envMap.entries()).map(([key, value]) => `${key}=${value}`);
+
+      logger.info('Docker exec plan', {
+        args,
+        env: maskEnv(env),
+        target: params.target,
+        module: params.module,
+        mode: await ContainerManager.getInstance().getCurrentMode()
+      });
 
       // Prefer re-using the long-lived service container when available.
       // CYBER_DOCKER_REUSE defaults to true; set to `false` to force ad-hoc containers.
