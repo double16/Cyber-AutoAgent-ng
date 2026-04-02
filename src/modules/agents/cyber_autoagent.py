@@ -19,7 +19,7 @@ from strands.tools.executors import ConcurrentToolExecutor
 # These tools have the @tool decorator, the function is to be imported
 from strands_tools.editor import editor
 from strands_tools.load_tool import load_tool
-from strands_tools.shell import shell
+from modules.tools.shell import shell
 from strands_tools.sleep import sleep
 from strands_tools.tavily import tavily_search
 
