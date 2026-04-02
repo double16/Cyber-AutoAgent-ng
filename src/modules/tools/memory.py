@@ -525,6 +525,28 @@ def _sanitize_toon_value(value: Any) -> str:
     return text.replace(",", ";")
 
 
+def _active_task_message(
+        active_task: Optional[Task] = None,
+        activated: bool = True,
+        closed_task: Optional[Task] = None,
+        current_phase: Optional[int] = None,
+) -> str:
+    if closed_task:
+        closed_info = {"closed": {"task_uid": closed_task.task_uid, "status": closed_task.status}}
+    else:
+        closed_info = {}
+
+    if active_task is None:
+        return f"""<active_task phase="{current_phase}" status="none">
+{json.dumps({"task": None, "activated": False} | closed_info)}
+</active_task>
+"""
+    return f"""<active_task phase="{active_task.phase}" status="{active_task.status}">
+{json.dumps({"task": active_task.to_dict()} | closed_info | {"activated": activated}, indent=2, sort_keys=True)}
+</active_task>
+"""
+
+
 def memory_create_time(m: Dict[str, Any]) -> str:
     """Best-effort created_at extraction (metadata preferred, then top-level)."""
     meta = m.get("metadata", {})
@@ -808,22 +830,24 @@ def mem0_store(
     validation_status = str(metadata.get("validation_status", "")).lower()
 
     # If status="verified" but validation_status contradicts, fix it
-    if status_val == "verified" and validation_status and validation_status not in ("verified", "submission_accepted"):
+    if status_val == "verified" and validation_status and validation_status != "verified":
         logger.warning(
             "Inconsistent status fields: status='verified' but validation_status='%s'. "
             "Setting validation_status='verified' to prevent contradiction.",
             validation_status
         )
         metadata["validation_status"] = "verified"
+        validation_status = "verified"
 
-    # If validation_status="submission_accepted" but status isn't "verified", fix it
-    if validation_status == "submission_accepted" and status_val != "verified":
+    # If validation_status="verified" but status isn't "verified", fix it
+    if validation_status == "verified" and status_val != "verified":
         logger.warning(
-            "Inconsistent status fields: validation_status='submission_accepted' but status='%s'. "
+            "Inconsistent status fields: validation_status='verified' but status='%s'. "
             "Setting status='verified'.",
             status_val
         )
         metadata["status"] = "verified"
+        status_val = "verified"
 
     # Suppress mem0's internal error logging during operation
     mem0_logger = logging.getLogger("root")
@@ -838,10 +862,20 @@ def mem0_store(
         existing_best_match = existing_search["results"][0]
         existing_best_score = existing_best_match.get("score", 1.0)
         if existing_best_score < 0.1:
-            logger.debug(
-                f"Found memory duplicate with score {existing_best_score}: {existing_query} ~= {existing_best_match.get('memory')}")
-            result = [{"role": "user", "event": "DUPLICATE", "id": existing_best_match.get("id")}]
-            return json.dumps(results_list, indent=2, sort_keys=True)
+            # Sensitive data comparison: URLs and paths must match exactly if present
+            new_patterns = set(_extract_sensitive_patterns(cleaned_content))
+            existing_content = existing_best_match.get("memory", "")
+            existing_patterns = set(_extract_sensitive_patterns(existing_content))
+
+            if new_patterns == existing_patterns:
+                logger.debug(
+                    f"Found memory duplicate with score {existing_best_score}: {cleaned_content} ~= {existing_best_match.get('memory')}")
+                result = [{"role": "user", "event": "DUPLICATE", "id": existing_best_match.get("id")}]
+                return json.dumps(result, indent=2, sort_keys=True)
+            else:
+                logger.debug(
+                    f"Memory similarity is high ({existing_best_score}) but sensitive patterns differ. "
+                    f"New: {new_patterns}, Existing: {existing_patterns}. Not treating as duplicate.")
 
     try:
         results = client.store_memory(
@@ -1091,28 +1125,6 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
         })
 
     return json.dumps(all_results, indent=2, sort_keys=True)
-
-
-def _active_task_message(
-        active_task: Optional[Task] = None,
-        activated: bool = True,
-        closed_task: Optional[Task] = None,
-        current_phase: Optional[int] = None,
-) -> str:
-    if closed_task:
-        closed_info = {"closed": {"task_uid": closed_task.task_uid, "status": closed_task.status}}
-    else:
-        closed_info = {}
-
-    if active_task is None:
-        return f"""<active_task phase="{current_phase}" status="none">
-{json.dumps({"task": None, "activated": False} | closed_info)}
-</active_task>
-"""
-    return f"""<active_task phase="{active_task.phase}" status="{active_task.status}">
-{json.dumps({"task": active_task.to_dict()} | closed_info | {"activated": activated}, indent=2, sort_keys=True)}
-</active_task>
-"""
 
 
 @tool

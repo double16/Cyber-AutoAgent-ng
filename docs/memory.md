@@ -366,7 +366,7 @@ Structured finding format ensures consistent evidence collection:
 
 **Optional Fields:**
 - **status**: Verification state (hypothesis, unverified, verified)
-- **validation_status**: Submission state (hypothesis, submission_accepted)
+- **validation_status**: Submission state (hypothesis, unverified, verified)
 - **technique**: Exploitation technique used
 - **challenge_id**: CTF challenge identifier
 
@@ -377,7 +377,7 @@ The memory system automatically validates and corrects inconsistent status field
 ```python
 # These contradictions are auto-corrected:
 # status="verified" + validation_status="hypothesis" → validation_status="verified"
-# validation_status="submission_accepted" + status="hypothesis" → status="verified"
+# validation_status="verified" + status="hypothesis" → status="verified"
 
 # FORBIDDEN: status="solved" is ambiguous and auto-converts to "hypothesis"
 # Use status="verified" for confirmed findings
