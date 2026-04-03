@@ -25,6 +25,15 @@ services:
       - 4280:80
     restart: unless-stopped
 
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.5'
+        reservations:
+          memory: 32M
+          cpus: '0.0'
+
   db:
     image: docker.io/library/mariadb:10
     environment:
@@ -38,14 +47,25 @@ services:
       - dvwa
     restart: unless-stopped
 
-  owasp-vuln-app:
-    image: sasanlabs/owasp-vulnerableapp:latest
-    pull_policy: always
-    ports:
-      - 19090:9090
-    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.0'
 
   juice-shop:
     image: bkimminich/juice-shop
     ports:
       - 4001:3000
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+          cpus: '0.0'
