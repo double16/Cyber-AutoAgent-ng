@@ -327,6 +327,9 @@ const runAutoAssessment = async () => {
         if (event.type === 'output' && event.content) {
           loggingService.info(event.content);
         }
+        else if (event.type === 'reasoning' && event.content) {
+          loggingService.info('🧠 '+event.content);
+        }
         else if (event.type === 'rate_limit' && event.sleep_time) {
           loggingService.info(`⌛ Rate limit: waiting for ${Math.ceil(event.sleep_time)} seconds`);
         }
@@ -336,6 +339,11 @@ const runAutoAssessment = async () => {
                 lastMetricsUpdate = metricsUpdateKey;
                 loggingService.info(`💰 Cost: ${event.metrics.tokens.toLocaleString()} (${event.metrics.inputTokens.toLocaleString()} input + ${event.metrics.outputTokens.toLocaleString()} output) | $ ${event.metrics.cost.toFixed(6)}`);
             }
+        }
+        else if (event.type === 'step_header') {
+          if (Number.isInteger(event.step) && Number.isInteger(event.maxSteps)) {
+            loggingService.info(`➡️ Step ${event.step}/${event.maxSteps}`);
+          }
         }
         else if (event.type === 'task_started') {
             lastTaskTitle = event.title;
