@@ -42,6 +42,17 @@ logger = get_logger("Handlers.ReactBridge")
 
 _DEFAULT_REASONING_DEDUPE_TTL_S = 20.0
 
+# Do not increment step count for planning tools
+_PLANNING_TOOL_NAMES = {
+    "store_plan",
+    "get_plan",
+    "create_tasks",
+    "get_active_task",
+    "task_done",
+    "list_uncompleted_tasks",
+}
+
+
 @dataclass
 class _ReasoningSeenHolder:
     """Mutable per-callback holder to dedupe reasoning extraction without shared instance state."""
@@ -782,15 +793,11 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         raw_input = tool_use.get("input", {})
         tool_input = self._parse_tool_input_from_stream(raw_input)
 
-        # Special handling for stop tool: flush reasoning, mark stop, but proceed with normal tool display
+        # Special handling for stop tool: flush reasoning
         if tool_name == "stop":
-            # Flush any pending reasoning before termination
+            # Flush any pending reasoning before termination, note that the stop tool may reject termination
             if self.reasoning_buffer:
                 self._emit_accumulated_reasoning()
-            # Mark stop; SDK loop will end; we still show step header and tool header for clarity
-            self._stop_tool_used = True
-            # Do not emit termination here to preserve natural ordering (after tool header)
-            # Do not prevent deferred step header; allow standard header and tool events
 
         # Check if this is a swarm agent tool (needs immediate emission)
         is_swarm_agent_tool = (
@@ -818,7 +825,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 self._tools_in_current_step.append(tool_id)
 
             # Emit step header ONLY if pending (i.e., this is the first tool in the response)
-            if self.current_step == 0 or self.pending_step_header:
+            if (self.current_step == 0 or self.pending_step_header) and tool_name not in _PLANNING_TOOL_NAMES:
                 if self.current_step == 0:
                     # First tool ever - increment step
                     if not self.in_swarm_operation:
@@ -1006,9 +1013,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                     )
             elif tool_name == "complete_swarm_task":
                 self._track_swarm_complete()
-            elif tool_name == "stop":
-                # Mark stop; termination will be emitted on tool result to appear below tool args
-                self._stop_tool_used = True
 
         # Handle streaming updates - buffer and emit ONLY when complete
         elif tool_id in self.announced_tools and raw_input:
@@ -1358,7 +1362,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         # For stop tool, emit termination after tool header (below where output would go)
         try:
-            if tool_name == "stop" and not self._termination_emitted:
+            if tool_name == "stop" and success and not self._termination_emitted:
+                # Mark stop; SDK loop will end; we still show step header and tool header for clarity
+                self._stop_tool_used = True
                 # Use tool input reason if available
                 reason_msg = "Stop tool used - terminating"
                 try:

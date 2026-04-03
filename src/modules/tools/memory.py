@@ -57,7 +57,7 @@ import boto3
 from mem0 import Memory as Mem0Memory
 from mem0 import MemoryClient
 from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
-from strands import tool
+from strands import tool, ToolContext
 from rapidfuzz import fuzz
 
 from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
@@ -525,7 +525,7 @@ def _sanitize_toon_value(value: Any) -> str:
     return text.replace(",", ";")
 
 
-def _active_task_message(
+def active_task_message(
         active_task: Optional[Task] = None,
         activated: bool = True,
         closed_task: Optional[Task] = None,
@@ -919,9 +919,10 @@ def mem0_store(
     return json.dumps(results_list, indent=2, sort_keys=True)
 
 
-@tool
+@tool(context=True)
 def store_plan(
     plan: Union[OperationPlan, str, Dict],
+    tool_context: ToolContext = None,
 ) -> Optional[Dict]:
     """Store the current operation plan.
 
@@ -959,7 +960,26 @@ def store_plan(
         raise ValueError(
             f"store_plan content must be object/dict or JSON string, got {type(plan).__name__}"
         )
-    # TODO: detect phase change and refuse if there are remaining tasks, AND there is budget left
+
+    # detect phase change and refuse if there are remaining tasks, AND there is budget left
+    prev_plan = client.get_active_plan(user_id=user_id)
+
+    if not plan_obj.assessment_complete and prev_plan and \
+            plan_obj.current_phase != prev_plan.current_phase and \
+            tool_context and tool_context.agent and tool_context.agent.callback_handler and \
+            hasattr(tool_context.agent.callback_handler, 'current_step') and \
+            hasattr(tool_context.agent.callback_handler, 'max_steps'):
+        current_step = tool_context.agent.callback_handler.current_step
+        max_steps = tool_context.agent.callback_handler.max_steps
+        active_task, _ = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=prev_plan.current_phase)
+
+        phase_step_start = max_steps * (plan_obj.current_phase - 1) // plan_obj.total_phases
+        if active_task and current_step < phase_step_start * 0.9:
+            raise ValueError(
+                "Cannot advance phase due to activate tasks remaining.\n"
+                "**MANDATORY ACTION**: Continue by executing this active task:\n" + active_task_message(active_task)
+            )
+
     results = client.store_plan(plan=plan_obj, user_id=user_id)
     return results
 
@@ -1148,7 +1168,7 @@ def task_done(
     try:
         current_phase = _get_plan_current_phase()
     except ValueError:
-        return _active_task_message()
+        return active_task_message()
 
     if status not in ["done", "partial_failure", "blocked"]:
         status = "done"
@@ -1161,7 +1181,7 @@ def task_done(
         task_uid=task_uid,
     )
 
-    return _active_task_message(next_active, next_active is not None, updated, current_phase=current_phase)
+    return active_task_message(next_active, next_active is not None, updated, current_phase=current_phase)
 
 
 @tool
@@ -1180,10 +1200,10 @@ def get_active_task() -> str:
         current_phase = _get_plan_current_phase()
 
         task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
-        return _active_task_message(task, activated, current_phase=current_phase)
+        return active_task_message(task, activated, current_phase=current_phase)
     except ValueError:
         # no active plan
-        return _active_task_message(None, False)
+        return active_task_message(None, False)
 
 
 @tool
@@ -2376,10 +2396,11 @@ class Mem0ServiceClient:
     def get_or_activate_next_task_in_phase(
             self,
             *,
-            user_id: str,
+            user_id: Optional[str] = None,
             phase: int,
     ) -> Tuple[Optional[Task], bool]:
         """Return the active task for a phase, or promote the next pending task to active."""
+        user_id = _user_id(user_id)
         op_id = _operation_id()
         phase_tasks = _get_plan_store().get_tasks(op_id)
         phase_tasks = [t for t in phase_tasks if int(t.phase) == int(phase)]

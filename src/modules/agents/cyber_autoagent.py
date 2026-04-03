@@ -27,9 +27,9 @@ from strands_tools.tavily import tavily_search
 from strands_tools import (
     http_request,
     python_repl,
-    stop,
     environment,
 )
+from modules.tools import stop
 
 from modules import prompts, __version__
 from modules.agents.factory import AgentFactoryConfig, init_agent_factory
@@ -504,7 +504,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         list_uncompleted_tasks,
         task_done,
         get_active_task,
-        # TODO: copy out stop tool and include check for active tasks
         stop,
         sleep,
         python_repl,

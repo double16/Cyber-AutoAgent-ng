@@ -45,8 +45,10 @@ from modules.tools.oast import (
     oast_clear_http_responses,
     close_oast_providers,
 )
+from modules.tools import stop
 
 __all__ = [
+    "stop",
     "mem0_store",
     "mem0_retrieve",
     "mem0_list",
