@@ -406,6 +406,9 @@ export class DirectDockerService extends EventEmitter {
       if (config.evaluationModel) {
         env.push(`CYBER_AGENT_EVALUATION_MODEL=${config.evaluationModel}`);
       }
+      if (config.memoryModel) {
+        env.push(`MEM0_LLM_MODEL=${config.memoryModel}`);
+      }
 
       // MCP Servers
       if (config.mcp.enabled && config.mcp.connections) {

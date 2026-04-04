@@ -207,7 +207,6 @@ services:
 
       # Memory configuration
       - MEM0_API_KEY=${MEM0_API_KEY}
-      - MEM0_EMBEDDING_MODEL=${MEM0_EMBEDDING_MODEL}
       - MEM0_LLM_MODEL=${MEM0_LLM_MODEL}
       - OPENSEARCH_HOST=${OPENSEARCH_HOST}
       - MEM0_TELEMETRY=false

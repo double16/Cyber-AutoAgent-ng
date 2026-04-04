@@ -3,15 +3,16 @@
 ## v0.8.0
 
 Features:
-- Task system
+- Task system (#26, #89)
 - System prompt optimization
 - Rejection of early phase transition or termination  
 - Ollama context length set via `OLLAMA_CONTEXT_LENGTH` env var (models do not need to be extended)
 - Option for continuing an operation
-- Option for re-generate a report
+- Option for re-generate a report (#21)
 - Improved reporting with more finding detail
 - Add a methodology appendix to the report
-- Modules may be nested in directories
+- Modules may be nested in directories (#12)
+- Add memory model config to React UI (#7)
 
 Bug fixes:
 - React UI memory leak fixes

@@ -49,6 +49,8 @@ export interface Config {
   modelProvider: 'bedrock' | 'ollama' | 'litellm' | 'gemini';
   /** Main assessment model identifier (e.g., 'claude-sonnet-4', 'llama3.1:8b') */
   modelId: string;
+  /** LLM model used for memory operations */
+  memoryModel?: string;
   /** Vector embedding model for memory operations */
   embeddingModel?: string;
   /** Quality evaluation model for assessment validation */
@@ -339,9 +341,10 @@ const deploymentDefaults = getDeploymentDefaults();
 export const defaultConfig: Config = {
   // Model Provider Settings
   modelProvider: 'bedrock',
-  modelId: 'global.anthropic.claude-opus-4-5-20251101-v1:0', // Latest Opus 4.5 with effort parameter support (cross-region)
+  modelId: 'global.anthropic.claude-opus-4-5-20251101-v1:0',
   embeddingModel: 'amazon.titan-embed-text-v2:0',
   evaluationModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+  memoryModel: process.env.MEM0_LLM_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   swarmModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   temperature: 0.5,
   awsRegion: process.env.AWS_REGION || 'us-east-1',

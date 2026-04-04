@@ -733,6 +733,7 @@ export class PythonExecutionService extends EventEmitter {
         // Model Configuration - pass separate models from config
         ...(config.swarmModel ? { CYBER_AGENT_SWARM_MODEL: config.swarmModel } : {}),
         ...(config.evaluationModel ? { CYBER_AGENT_EVALUATION_MODEL: config.evaluationModel } : {}),
+        ...(config.memoryModel ? { MEM0_LLM_MODEL: config.memoryModel } : {}),
         // Model rate limits
         ...(config.rateLimitTokensPerMinute ? { CYBER_RATE_LIMIT_TOKENS_PER_MIN: String(config.rateLimitTokensPerMinute) } : {}),
         ...(config.rateLimitRequestsPerMinute ? { CYBER_RATE_LIMIT_REQ_PER_MIN: String(config.rateLimitRequestsPerMinute) } : {}),
