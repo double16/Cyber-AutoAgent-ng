@@ -200,7 +200,7 @@ def test_parse_lfimap_output_parses_multiple_successful_attacks():
     assert data_uri["param_location"] == "query"
     assert data_uri["payload"] == "data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7ID8+"
     assert data_uri["attack_type"] == "Data URI LFI"
-    assert data_uri["payload_source"] == "Testing Data URI"
+    assert data_uri["payload_source"] == "Data URI"
     assert data_uri["injected_data"] is None
     assert data_uri["tool"] == "lfimap"
     assert "Data URI LFI successful!" in data_uri["evidence"]
@@ -209,19 +209,19 @@ def test_parse_lfimap_output_parses_multiple_successful_attacks():
     assert expect_wrapper["payload_type"] == "LFI (PHP Expect Wrapper LFI)"
     assert expect_wrapper["payload"] == "expect://id"
     assert expect_wrapper["attack_type"] == "PHP Expect Wrapper LFI"
-    assert expect_wrapper["payload_source"] == "Testing initial expect://"
+    assert expect_wrapper["payload_source"] == "initial expect://"
     assert "Initial command 'id' output detected." in expect_wrapper["evidence"]
 
     glob_wrapper = findings[2]
     assert glob_wrapper["payload_type"] == "LFI (PHP Expect Wrapper LFI)"
     assert glob_wrapper["payload"] == "glob:///var/www/*"
-    assert glob_wrapper["payload_source"] == "Testing GLOB wrapper"
+    assert glob_wrapper["payload_source"] == "GLOB wrapper"
     assert "Directory content detected" in glob_wrapper["evidence"]
 
     php_input = findings[3]
     assert php_input["payload_type"] == "LFI (PHP Expect Wrapper LFI)"
     assert php_input["payload"] == "php://input"
-    assert php_input["payload_source"] == "Testing php://input"
+    assert php_input["payload_source"] == "php://input"
     assert php_input["injected_data"] == "<?php system($_GET['cmd']); ?>"
     assert "Injected data: <?php system($_GET['cmd']); ?>" in php_input["evidence"]
 
@@ -556,7 +556,7 @@ def test_coordinate_injection_testing_lfimap_parses_timeout_stdout(monkeypatch):
 [+] Data URI LFI successful! Injected code appears to be processed.
 """
 
-    def fake_run(cmd, capture_output=True, text=True, input=None, timeout=300):
+    def fake_run(cmd, bufsize=4096, capture_output=True, text=True, input=None, timeout=300):
         assert cmd and cmd[0] == "lfimap"
         raise apc.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout, output=lfimap_stdout)
 

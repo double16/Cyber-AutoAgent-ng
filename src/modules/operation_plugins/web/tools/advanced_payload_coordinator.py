@@ -49,6 +49,7 @@ _RE_SSTIMAP_EVIDENCE_TECHNIQUE = re.compile(r"^\s*Technique:.*$", re.MULTILINE)
 
 _RE_COMMIX_VULN = re.compile(r"parameter\s+'(.+?)'\s+is (likely |)vulnerable", re.IGNORECASE)
 
+_RE_LFIMAP_LINE_COMBINE = re.compile(r"\n(?!\[)", re.MULTILINE)
 _RE_LFIMAP_PAYLOADS = re.compile(r"testing (.+) payloads", re.IGNORECASE)
 
 # [*] testing rfi with command: http://example.com/rfi_test.txt?cmd=id
@@ -718,6 +719,7 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
 
     text = stdout.replace("\r\n", "\n").replace("\r", "\n")
     text = _RE_ANSI_ESCAPE.sub("", text)
+    text = _RE_LFIMAP_LINE_COMBINE.sub(" ", text)
 
     current_attack_type: str | None = None
     current_payload: str | None = None
@@ -793,7 +795,7 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
             continue
 
         if lower_line.startswith("[*] testing ") and ":" in line:
-            payload_splits = line[4:].split(" payload:", 1)
+            payload_splits = line[11:].split(" payload:", 1)
             if len(payload_splits) == 2:
                 label, value = payload_splits
                 current_payload_source = label.strip()
@@ -1250,6 +1252,7 @@ def _coordinate_injection_testing(
                         injection_types = [x for x in injection_types if x[0] != "SSTI"]
 
     # lfimap
+    # XBEN-079-24: /post.php?id=ScriptKiddie.php
     if "lfimap" in tools and (not focus or "LFI" in focus):
         for param in parameters_under_test.copy():
             if request_config.inject_in_body():
@@ -1277,7 +1280,7 @@ def _coordinate_injection_testing(
                 if request_config.headers:
                     cmd.extend(["--headers", "; ".join([f"{name}={value}" for name, value in request_config.headers.items()])])
 
-                result = subprocess.run(cmd, capture_output=True, text=True, input=(100 * "exit\n"), timeout=300)
+                result = subprocess.run(cmd, bufsize=4096, capture_output=True, text=True, input=(400 * "exit\n"), timeout=300)
 
                 if result.returncode == 0 and result.stdout:
                     lfimap_out = result.stdout
@@ -1288,11 +1291,10 @@ def _coordinate_injection_testing(
                 pass
 
             if lfimap_out:
-                lfi_findings = _parse_lfimap_output("page", "POST", lfimap_out)
+                lfi_findings = _parse_lfimap_output(param, request_config.http_method, lfimap_out)
                 # Attach URL context and ensure parameter consistency with the param under test.
                 for f in lfi_findings:
-                    # Prefer the parsed parameter, but if it's missing/unknown, use our loop param.
-                    if not f.get("parameter") or f.get("parameter") == "page":
+                    if not f.get("parameter"):
                         f["parameter"] = param
                     f["url"] = test_url
                     f["method"] = request_config.http_method
