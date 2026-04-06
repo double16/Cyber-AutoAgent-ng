@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+    #!/usr/bin/env python3
 """
 Report Generation Handler Utility for Cyber-AutoAgent
 
@@ -314,10 +314,11 @@ Use the following data:
 
             footer = f"""
 ----
-Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Operation ID: {operation_id}
-Provider: {main_provider}
-Model(s): {", ".join(main_models)}
+
+- Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+- Operation ID: {operation_id}
+- Provider: {main_provider}
+- Model(s): {", ".join(main_models)}
 """
             final_f.write(footer)
 
