@@ -63,6 +63,7 @@ from rapidfuzz import fuzz
 from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
+from modules.handlers.utils import filter_none_values
 
 # Set up logging
 logger = get_logger("Tools.Memory")
@@ -127,7 +128,7 @@ class Task:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        return filter_none_values({
             "task_uid": self.task_uid,
             "title": self.title,
             "objective": self.objective,
@@ -137,7 +138,7 @@ class Task:
             "status_reason": self.status_reason,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-        }
+        })
 
     @staticmethod
     def toon_format() -> str:
@@ -191,12 +192,12 @@ class PlanPhase:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        return filter_none_values({
             "id": self.id,
             "title": self.title,
             "status": self.status,
             "criteria": self.criteria,
-        }
+        })
 
 
 @dataclass
@@ -261,7 +262,7 @@ class OperationPlan:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        return filter_none_values({
             "objective": self.objective,
             "current_phase": self.current_phase,
             "total_phases": self.total_phases,
@@ -269,7 +270,7 @@ class OperationPlan:
             "assessment_complete": self.assessment_complete,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-        }
+        })
 
     @staticmethod
     def toon_format() -> str:
@@ -1047,6 +1048,20 @@ def _get_plan_current_phase() -> int:
 _RE_URL_PATTERN = re.compile(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*')
 _RE_PATH_PATTERN = re.compile(r'(?:(?<=^)|(?<=\s))(?:/|\./|\.\./)[a-zA-Z0-9._\-/]+')
 
+# Regex for UUID: 8-4-4-4-12 hex chars
+_RE_UUID = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+# Regex for numeric IDs: one or more digits, possibly preceded by = or /
+_RE_NUMERIC_ID = re.compile(r'(?<=/|=)\d+(?=$|/|&|\s)')
+
+
+def _normalize_id(text: str) -> str:
+    """Replace UUIDs and numeric IDs with a placeholder."""
+    # Replace UUIDs first
+    text = _RE_UUID.sub(':id', text)
+    # Replace numeric IDs
+    text = _RE_NUMERIC_ID.sub(':id', text)
+    return text
+
 
 def _extract_sensitive_patterns(text: str) -> List[str]:
     """Extract URLs and potential file paths from text for strict matching."""
@@ -1057,7 +1072,10 @@ def _extract_sensitive_patterns(text: str) -> List[str]:
     # and containing characters common in paths.
     paths = _RE_PATH_PATTERN.findall(text)
 
-    return sorted(list(set(urls + paths)))
+    # Normalize IDs in all extracted patterns
+    all_patterns = [_normalize_id(p) for p in urls + paths]
+
+    return sorted(list(set(all_patterns)))
 
 
 @tool
@@ -1143,6 +1161,7 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
             "event": "ADD",
             # "title": title,  # do not include title, the agent may be redirected
         })
+        existing_tasks.append(task)
 
     return json.dumps(all_results, indent=2, sort_keys=True)
 

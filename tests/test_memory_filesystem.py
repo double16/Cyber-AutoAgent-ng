@@ -499,7 +499,7 @@ def test_create_tasks_sensitive_urls(tmp_path, monkeypatch):
         memory.store_plan(plan)
 
         # 1. Create a task with a URL
-        url1 = "http://example.com/api/v1/user/123"
+        url1 = "http://example.com/api/v1/user/details"
         memory.create_tasks([
             memory.TaskCreate(
                 title=f"Check endpoint {url1}",
@@ -509,11 +509,8 @@ def test_create_tasks_sensitive_urls(tmp_path, monkeypatch):
             )
         ])
 
-        # 2. Try to create a task with a slightly different URL (one char difference)
-        # http://example.com/api/v1/user/123 (36 chars)
-        # http://example.com/api/v1/user/124 (36 chars)
-        # Ratio will be very high (>95%)
-        url2 = "http://example.com/api/v1/user/124"
+        # 2. Try to create a task with a slightly different URL (non-numeric difference)
+        url2 = "http://example.com/api/v1/user/profile"
         res = json.loads(memory.create_tasks([
             memory.TaskCreate(
                 title=f"Check endpoint {url2}",
@@ -523,8 +520,141 @@ def test_create_tasks_sensitive_urls(tmp_path, monkeypatch):
             )
         ]))
 
-        # EXPECTATION: This should be ADD, not DUPLICATE
         assert res[0]["event"] == "ADD", f"Expected ADD for different URL, but got {res[0]['event']}"
+
+    finally:
+        memory._MEMORY_CLIENT = None
+        memory._MEMORY_CONFIG = None
+
+
+@pytest.mark.ollama
+def test_create_tasks_parameterized_urls(tmp_path, monkeypatch):
+    """Verify that tasks with different parameters in URLs are considered duplicates."""
+    from modules.tools import memory
+
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-urls")
+
+    try:
+        plan = {
+            "objective": "Test parameterized URLs",
+            "current_phase": 1,
+            "total_phases": 1,
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "assessment_complete": False,
+        }
+        memory.store_plan(plan)
+
+        # 1. Create a task with a URL
+        url1 = "https://example.com/api/v1/user?userId=1"
+        memory.create_tasks([
+            memory.TaskCreate(
+                title=f"Check endpoint {url1}",
+                objective=f"Test endpoint {url1} for web vulnerabilities",
+                phase=1,
+                status="pending"
+            )
+        ])
+
+        # 2. Try to create a task with a different parameter value
+        url2 = "https://example.com/api/v1/user?userId=2"
+        res = json.loads(memory.create_tasks([
+            memory.TaskCreate(
+                title=f"Check endpoint {url2}",
+                objective=f"Test endpoint {url2} for web vulnerabilities",
+                phase=1,
+                status="pending"
+            )
+        ]))
+
+        assert res[0]["event"] == "DUPLICATE", f"Expected DUPLICATE for different parameter, but got {res[0]['event']}"
+
+    finally:
+        memory._MEMORY_CLIENT = None
+        memory._MEMORY_CONFIG = None
+
+
+@pytest.mark.ollama
+def test_create_tasks_parameterized_url_paths(tmp_path, monkeypatch):
+    """Verify that tasks with different parameters in URL paths are considered duplicates."""
+    from modules.tools import memory
+
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-urls")
+
+    try:
+        plan = {
+            "objective": "Test parameterized URL paths",
+            "current_phase": 1,
+            "total_phases": 1,
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "assessment_complete": False,
+        }
+        memory.store_plan(plan)
+
+        # 1. Create a task with a URL
+        url1 = "http://example.com/api/v1/user/1"
+        memory.create_tasks([
+            memory.TaskCreate(
+                title=f"Check endpoint {url1}",
+                objective=f"Verify access to {url1}",
+                phase=1,
+                status="pending"
+            )
+        ])
+
+        # 2. Try to create a task with a different path value
+        url2 = "http://example.com/api/v1/user/2"
+        res = json.loads(memory.create_tasks([
+            memory.TaskCreate(
+                title=f"Check endpoint {url2}",
+                objective=f"Verify access to {url2}",
+                phase=1,
+                status="pending"
+            )
+        ]))
+
+        assert res[0]["event"] == "DUPLICATE", f"Expected DUPLICATE for different parameterized path, but got {res[0]['event']}"
+
+    finally:
+        memory._MEMORY_CLIENT = None
+        memory._MEMORY_CONFIG = None
+
+
+@pytest.mark.ollama
+def test_create_tasks_parameterized_urls_batched(tmp_path, monkeypatch):
+    """Verify that tasks with different parameters are considered duplicates submitted in the same tool call."""
+    from modules.tools import memory
+
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-urls")
+
+    try:
+        plan = {
+            "objective": "Test parameterized URLs",
+            "current_phase": 1,
+            "total_phases": 1,
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "assessment_complete": False,
+        }
+        memory.store_plan(plan)
+
+        url1 = "https://example.com/api/v1/user?userId=1"
+        url2 = "https://example.com/api/v1/user?userId=2"
+        res = json.loads(memory.create_tasks([
+            memory.TaskCreate(
+                title=f"Check endpoint {url1}",
+                objective=f"Test endpoint {url1} for web vulnerabilities",
+                phase=1,
+                status="pending"
+            ),
+            memory.TaskCreate(
+                title=f"Check endpoint {url2}",
+                objective=f"Test endpoint {url2} for web vulnerabilities",
+                phase=1,
+                status="pending"
+            )
+        ]))
+
+        assert res[0]["event"] == "ADD", f"Expected ADD for first task, but got {res[0]['event']}"
+        assert res[1]["event"] == "DUPLICATE", f"Expected DUPLICATE for different parameter, but got {res[0]['event']}"
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -570,7 +700,6 @@ def test_create_tasks_sensitive_paths(tmp_path, monkeypatch):
             )
         ]))
 
-        # EXPECTATION: This should be ADD, not DUPLICATE
         assert res[0]["event"] == "ADD", f"Expected ADD for different path, but got {res[0]['event']}"
 
     finally:

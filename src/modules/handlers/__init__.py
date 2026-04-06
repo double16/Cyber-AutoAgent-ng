@@ -7,7 +7,6 @@ tool execution, display formatting, and report generation.
 
 from modules.handlers.utils import (
     Colors,
-    analyze_objective_completion,
     create_output_directory,
     get_output_path,
     print_banner,
@@ -16,6 +15,7 @@ from modules.handlers.utils import (
     sanitize_target_name,
     validate_output_path,
     b64,
+    filter_none_values,
 )
 
 __all__ = [
@@ -27,6 +27,6 @@ __all__ = [
     "print_banner",
     "print_section",
     "print_status",
-    "analyze_objective_completion",
     "b64",
+    "filter_none_values",
 ]

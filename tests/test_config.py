@@ -341,23 +341,23 @@ class TestConfigManager:
             assert vector_store_config["provider"] == "faiss"
             assert vector_store_config["config"]["embedding_model_dims"] == 1024
 
-        # Test remote config
-        remote_config = self.config_manager.get_mem0_service_config("bedrock")
-        assert isinstance(remote_config, dict)
+            # Test remote config
+            remote_config = self.config_manager.get_mem0_service_config("bedrock")
+            assert isinstance(remote_config, dict)
 
-        # Test embedder config
-        embedder_config = remote_config["embedder"]
-        assert embedder_config["provider"] == "aws_bedrock"
-        assert "titan-embed" in embedder_config["config"]["model"]
-        assert embedder_config["config"]["aws_region"] == "us-east-1"
+            # Test embedder config
+            embedder_config = remote_config["embedder"]
+            assert embedder_config["provider"] == "aws_bedrock"
+            assert "titan-embed" in embedder_config["config"]["model"]
+            assert embedder_config["config"]["aws_region"] == "us-east-1"
 
-        # Test LLM config
-        llm_config = remote_config["llm"]
-        assert llm_config["provider"] == "aws_bedrock"
-        assert "claude" in llm_config["config"]["model"]
-        assert llm_config["config"]["temperature"] == 0.1
-        assert llm_config["config"]["max_tokens"] == 2000
-        # aws_region is no longer passed to LLM config; Mem0 infers region from environment
+            # Test LLM config
+            llm_config = remote_config["llm"]
+            assert llm_config["provider"] == "aws_bedrock"
+            assert "claude" in llm_config["config"]["model"]
+            assert llm_config["config"]["temperature"] == 0.1
+            assert llm_config["config"]["max_tokens"] == 2000
+            # aws_region is no longer passed to LLM config; Mem0 infers region from environment
 
     @patch.dict(os.environ, {"OPENSEARCH_HOST": "test-opensearch.com"})
     def test_get_mem0_service_config_with_opensearch(self):

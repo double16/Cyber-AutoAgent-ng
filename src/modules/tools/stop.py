@@ -105,6 +105,7 @@ def stop(tool: ToolUse, **kwargs: Any) -> ToolResult:
                 ],
             }
         if active_task is None:
+            # TODO: if the next phase has no tasks, instruct the agent to use current memories to create discovery tasks **FOR THE CURRENT PHASE**
             return {
                 "toolUseId": tool_use_id,
                 "status": "error",

@@ -128,18 +128,18 @@ Trigger after: loading memories, any tool output, phase change, hypothesis chang
 
 Algorithm (fixed-point):
 1) Enumerate candidate threads from: memory_context, plan, existing tasks, findings/observations, fresh tool output.
-2) Create 1 task per thread (do not merge unrelated threads). Prefer full capture of all implied candidates. If there are many, batch creation across multiple `create_tasks(...)` calls (e.g., 25–50 tasks per call) until coverage is complete.
+2) Create 1 task per thread (do not merge unrelated threads). Prefer full capture of all implied candidates.
 3) Repeat until a **no-new-tasks pass**.
 
 No-new-tasks pass definition: you reviewed the *new* evidence and either created all implied tasks or determined none can be created from it.
 
 Fan-out rules (MUST create multiple tasks when lists exist):
-- Endpoints/paths → ≥1 task per path.
+- Endpoints/paths → ≥1 task per set of parameterized paths.
 - Params/injection points → ≥1 task per parameter/point.
 - Host → ≥1 task per host.
 - Tech/Version → ≥1 task per tech/version.
-- Multiple vuln classes → 1 task per class.
-- Multiple auth flows/roles/resources → 1 task per flow/role/resource.
+- Multiple vuln classes → ≥1 task per class per endpoint/path/param/host.
+- Multiple auth flows/roles/resources → ≥1 task per flow/role/resource.
 
 ## Pruning Prohibition (STRICT)
 - You MUST NOT reduce task creation counts due to likelihood, convenience, or "most common" issues.

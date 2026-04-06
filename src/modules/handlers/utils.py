@@ -142,13 +142,13 @@ def validate_output_path(path: str, base_dir: str) -> bool:
 
 
 def create_output_directory(path: str) -> bool:
-    """Create output directory if it doesn't exist.
+    """Create an output directory if it doesn't exist.
 
     Args:
         path: Directory path to create
 
     Returns:
-        True if directory was created or already exists, False on error
+        True if a directory was created or already exists, False on error
     """
     try:
         os.makedirs(path, exist_ok=True)
@@ -306,96 +306,6 @@ def print_status(message, status="INFO"):
     )
 
 
-def analyze_objective_completion(messages: List[Dict]) -> Tuple[bool, str, Dict]:
-    """Check if agent has declared objective completion through self-assessment.
-
-    Returns:
-        (is_complete, summary, metadata)
-    """
-    if not messages:
-        return False, "", {}
-
-    # Look for explicit completion declaration - trust the agent's judgment
-    for msg in reversed(messages[-5:]):  # Check last 5 messages
-        if msg.get("role") == "assistant":
-            content_raw = msg.get("content", "")
-            if isinstance(content_raw, list) and len(content_raw) > 0:
-                content = ""
-                for block in content_raw:
-                    if isinstance(block, dict) and "text" in block:
-                        content += block["text"] + " "
-                content = content.strip()
-            else:
-                content = str(content_raw)
-
-            # Check for explicit objective declaration
-            if "objective achieved:" in content.lower():
-                match = re.search(
-                    r"objective achieved:(.+?)(?:\n|$)",
-                    content,
-                    re.IGNORECASE | re.DOTALL,
-                )
-                if match:
-                    summary = match.group(1).strip()
-
-                    # Extract any confidence or completion percentage mentioned
-                    confidence_match = re.search(r"(\d+)%", content)
-                    confidence = (
-                        int(confidence_match.group(1)) if confidence_match else 100
-                    )
-
-                    return (
-                        True,
-                        summary,
-                        {"confidence": confidence, "agent_determined": True},
-                    )
-                return (
-                    True,
-                    "Agent declared objective complete",
-                    {"confidence": 100, "agent_determined": True},
-                )
-
-            # Check for flag pattern (CTF-style flags)
-            flag_match = re.search(r"FLAG\{[^}]+\}", content)
-            if flag_match:
-                flag = flag_match.group(0)
-                # Also check for success indicators near the flag
-                if any(
-                    indicator in content.lower()
-                    for indicator in [
-                        "congratulations",
-                        "success",
-                        "correct",
-                        "flag obtained",
-                        "flag found",
-                    ]
-                ):
-                    return (
-                        True,
-                        f"Flag obtained: {flag}",
-                        {"confidence": 100, "flag_detected": True},
-                    )
-
-            # Check for other success indicators that might indicate completion
-            success_indicators = [
-                "successfully obtained flag",
-                "flag obtained",
-                "challenge complete",
-                "challenge solved",
-                "objective complete",
-            ]
-
-            for indicator in success_indicators:
-                if indicator in content.lower():
-                    return (
-                        True,
-                        f"Success indicator detected: {indicator}",
-                        {"confidence": 95, "success_indicator": True},
-                    )
-
-    return False, "", {}
-
-
 @dataclass
 class CyberEvent:
     """Structured event for terminal output."""
@@ -503,3 +413,14 @@ def duration_max(*values):
 
     width = max((len(nums) for _, nums in parsed), default=0)
     return max(parsed, key=lambda x: [0.0] * (width - len(x[1])) + x[1])[0] if parsed else None
+
+
+def filter_none_values(d: dict) -> dict:
+    """
+    Returns a new dict with None values removed.
+    """
+    return {
+        key: value
+        for key, value in d.items()
+        if value is not None
+    }

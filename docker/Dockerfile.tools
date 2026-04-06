@@ -245,9 +245,6 @@ RUN set -eux; \
 # Install Python packages for our new tools (use --break-system-packages for Kali)
 RUN pip3 install --break-system-packages pycryptodomex
 
-COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
-COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
-
 # Install uv for fast dependency management
 COPY --from=ghcr.io/astral-sh/uv:0.9.25 /uv /usr/local/bin/uv
 
@@ -263,7 +260,7 @@ RUN git clone --depth=1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool &&
       pip install -r requirements.txt; \
     fi && \
     chmod +x /opt/jwt_tool/jwt_tool.py && \
-    echo '#!/bin/bash\ncd /opt/jwt_tool && source venv/bin/activate && python3 /opt/jwt_tool/jwt_tool.py "$@"' > /usr/local/bin/jwt-tool && \
+    echo '#!/bin/bash\ncd /opt/jwt_tool && source venv/bin/activate && exec python3 /opt/jwt_tool/jwt_tool.py "$@"' > /usr/local/bin/jwt-tool && \
     chmod +x /usr/local/bin/jwt-tool
 
 # SSTImap - Server-Side Template Injection scanner
@@ -275,7 +272,7 @@ RUN git clone --depth=1 https://github.com/vladko312/SSTImap.git /opt/sstimap &&
       pip install -r requirements.txt; \
     fi && \
     chmod +x /opt/sstimap/sstimap.py && \
-    echo '#!/bin/bash\ncd /opt/sstimap && source venv/bin/activate && python3 /opt/sstimap/sstimap.py "$@"' > /usr/local/bin/sstimap && \
+    echo '#!/bin/bash\ncd /opt/sstimap && source venv/bin/activate && exec python3 /opt/sstimap/sstimap.py "$@"' > /usr/local/bin/sstimap && \
     chmod +x /usr/local/bin/sstimap
 
 # IDOR-Forge - IDOR scanner
@@ -288,13 +285,13 @@ RUN git clone --depth=1 https://github.com/errorfiathck/IDOR-Forge.git /opt/idor
       pip install -r reqs.txt; \
     fi && \
     chmod +x /opt/idor_forge/IDOR-Forge.py && \
-    echo '#!/bin/bash\ncd /opt/idor_forge && source venv/bin/activate && python3 /opt/idor_forge/IDOR-Forge.py "$@"' > /usr/local/bin/idor-forge && \
+    echo '#!/bin/bash\ncd /opt/idor_forge && source venv/bin/activate && exec python3 /opt/idor_forge/IDOR-Forge.py "$@"' > /usr/local/bin/idor-forge && \
     chmod +x /usr/local/bin/idor-forge
 
 # Gopherus - SSRF payload generator
 RUN git clone --depth=1 https://github.com/tarunkant/Gopherus.git /opt/gopherus && \
     if [ -f /opt/gopherus/gopherus.py ]; then chmod +x /opt/gopherus/gopherus.py; fi && \
-    echo '#!/bin/bash\npython2 /opt/gopherus/gopherus.py "$@"' > /usr/local/bin/gopherus && \
+    echo '#!/bin/bash\nexec python2 /opt/gopherus/gopherus.py "$@"' > /usr/local/bin/gopherus && \
     chmod +x /usr/local/bin/gopherus
 
 # PHPGGC - PHP Generic Gadget Chains
@@ -305,7 +302,7 @@ RUN git clone --depth=1 https://github.com/ambionics/phpggc.git /opt/phpggc && \
 # Ysoserial - Java Deserialization (download jar)
 RUN mkdir -p /opt/ysoserial && \
     wget -qO /opt/ysoserial/ysoserial.jar https://github.com/frohoff/ysoserial/releases/latest/download/ysoserial-all.jar && \
-    echo '#!/bin/bash\njava -jar /opt/ysoserial/ysoserial.jar "$@"' > /usr/local/bin/ysoserial && \
+    echo '#!/bin/bash\nexec java -jar /opt/ysoserial/ysoserial.jar "$@"' > /usr/local/bin/ysoserial && \
     chmod +x /usr/local/bin/ysoserial
 
 # Install Evil-WinRM via gem
@@ -366,8 +363,11 @@ RUN git clone --depth=1 --depth=1 https://github.com/s0md3v/Corsy.git /opt/corsy
       pip install -r requirements.txt; \
     fi && \
     chmod +x /opt/corsy/corsy.py && \
-    echo '#!/bin/bash\ncd /opt/corsy && source venv/bin/activate && python3 /opt/corsy/corsy.py "$@"' > /usr/local/bin/corsy && \
+    echo '#!/bin/bash\ncd /opt/corsy && source venv/bin/activate && exec python3 /opt/corsy/corsy.py "$@"' > /usr/local/bin/corsy && \
     chmod +x /usr/local/bin/corsy
+
+COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
+COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
 
 RUN useradd --create-home --shell /bin/bash cyberagent && \
     usermod -aG sudo cyberagent && \

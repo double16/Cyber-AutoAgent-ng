@@ -201,7 +201,10 @@ const runAutoAssessment = async () => {
 
       // Apply CLI flag overrides
       if (cli.flags.provider) configOverrides.modelProvider = cli.flags.provider as 'bedrock' | 'ollama' | 'litellm' | 'gemini';
-      if (cli.flags.model) configOverrides.modelId = cli.flags.model;
+      if (cli.flags.model) {
+        configOverrides.modelId = cli.flags.model;
+        configOverrides.swarmModel = cli.flags.model;
+      }
       if (cli.flags.region) configOverrides.awsRegion = cli.flags.region;
       if (cli.flags.iterations) configOverrides.iterations = cli.flags.iterations;
       if (cli.flags.observability !== undefined) configOverrides.observability = cli.flags.observability;
