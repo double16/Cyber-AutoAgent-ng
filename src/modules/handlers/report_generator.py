@@ -1,10 +1,8 @@
-#!/usr/bin/env python3
+    #!/usr/bin/env python3
 """
 Report Generation Handler Utility for Cyber-AutoAgent
 
-This module provides report generation functionality that is called
-directly by handlers (ReactBridgeHandler) at the
-end of operations to guarantee report generation.
+This module provides report generation functionality.
 
 This is NOT a Strands tool - it's a handler utility function.
 """
@@ -32,7 +30,7 @@ from modules.prompts.factory import (
     get_report_observation_system_prompt,
     get_report_appendix_system_prompt,
 )
-from modules.tools.memory import memory_create_time
+from modules.tools.memory import memory_create_time, OperationPlan, Task
 from modules.tools.memory import get_memory_client, memory_is_cross_operation
 from strands.types.content import Message, ContentBlock
 
@@ -40,15 +38,16 @@ logger = get_logger("Handlers.ReportGenerator")
 
 MAX_REPORT_FINDINGS = int(os.getenv("CYBER_REPORT_MAX_FINDINGS", "200"))
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-
+_PAGE_BREAK = """\n<div class="page-break" style="page-break-before: always;"></div>\n\n"""
 
 def generate_security_report(
     target: str,
     objective: str,
     operation_id: str,
-    config_data: Optional[str] = None,
+    config_params: Optional[Dict[str, Any]] = None,
     callback_handler = None,
-) -> str:
+    filename: Optional[str] = None,
+) -> None:
     """
     Generate a comprehensive security assessment report based on the operation results.
 
@@ -61,33 +60,27 @@ def generate_security_report(
         target: The target system that was assessed
         objective: The security assessment objective
         operation_id: The operation identifier
-        config_data: JSON string containing additional config (steps_executed, tools_used,
-                    evidence, provider, model_id, module)
+        config_params: additional config (steps_executed, tools_used, evidence, provider, model_id, module)
+        callback_handler: Optional callback handler for agent events
+        filename: Optional path to save the generated report. If not provided,
+                  a default filename in the output directory will be used.
 
     Returns:
-        The generated security assessment report as a string
+        None
 
     Example:
         generate_security_report(
             target="example.com",
             objective="Identify web application vulnerabilities",
             operation_id="OP_20240115_143022",
-            config_data='{"steps_executed": 15, "tools_used": ["nmap", "nikto"], "provider": "bedrock"}'
+            config_data='{"steps_executed": 15, "tools_used": ["nmap", "nikto"], "provider": "bedrock"}',
+            filename="/path/to/report.md"
         )
     """
     try:
         # Log the report generation request
         logger.info("Generating security report for operation: %s", operation_id)
         config_manager = get_config_manager()
-
-        # Parse config data
-        config_params = {}
-        if config_data:
-            try:
-                config_params = json.loads(config_data)
-            except json.JSONDecodeError:
-                logger.error("Invalid JSON in config_data parameter")
-                return "Report generation failed: Invalid configuration format"
 
         # Extract parameters with defaults
         steps_executed = config_params.get("steps_executed", 0)
@@ -105,13 +98,16 @@ def generate_security_report(
             tools_used=tools_used,
         )
 
+        # these values may have been updated when building the report section
+        steps_executed = max(steps_executed, sections.get("steps_executed", 0))
+
         # Validate evidence collection - skip report only if truly no memories
         if not sections or int(sections.get("evidence_count", 0)) == 0:
             logger.info(
                 "No evidence/memories collected for operation %s - skipping report generation",
                 operation_id,
             )
-            return ""
+            return
 
         # Get module report prompt if available for domain guidance
         module_report_prompt = _get_module_report_prompt(module)
@@ -141,7 +137,7 @@ def generate_security_report(
             else "Apply general security assessment best practices focusing on common vulnerability patterns."
         )
 
-        report_parts = []
+        report_parts_files = []
 
         # Part 1: Executive Summary
         logger.info("Generating Executive Summary...")
@@ -154,7 +150,7 @@ def generate_security_report(
         )
         
         exec_prompt = f"""
-Generate the Executive Summary and Risk Assessment sections.
+Generate all the requested sections.
 Target: {target}
 Objective: {objective}
 Module: {module_str}
@@ -168,17 +164,23 @@ Use the following data:
         if exec_content:
             # Add anchor for Table of Contents
             exec_content = "<a name=\"executive-summary\"></a>\n" + exec_content
-            with open(os.path.join(output_path, "report_executive_summary.md"), "w") as f:
+            exec_summary_file = os.path.join(output_path, "report_executive_summary.md")
+            with open(exec_summary_file, "w") as f:
                 f.write(exec_content)
-            report_parts.append(exec_content)
+            report_parts_files.append(exec_summary_file)
 
         # Part 2: Detailed Findings
         logger.info("Generating Detailed Findings...")
-        findings_content = "<a name=\"detailed-vulnerability-analysis\"></a>\n## DETAILED VULNERABILITY ANALYSIS\n\n"
+        findings_header = _PAGE_BREAK + "<a name=\"detailed-vulnerability-analysis\"></a>\n## DETAILED VULNERABILITY ANALYSIS\n\n"
 
         # Add summary table for remaining findings
         if sections.get("summary_table"):
-            findings_content += "\n### Findings Summary\n\n" + sections.get("summary_table") + "\n\n"
+            findings_header += "\n### Findings Summary\n\n" + sections.get("summary_table") + "\n\n"
+
+        findings_header_file = os.path.join(output_path, "report_findings_header.md")
+        with open(findings_header_file, "w") as f:
+            f.write(findings_header)
+        report_parts_files.append(findings_header_file)
 
         raw_findings = sections.get("raw_evidence", [])
 
@@ -206,17 +208,19 @@ Finding Data:
             finding_text = _extract_text_from_result(finding_result)
             
             if finding_text:
-                findings_content += finding_text + "\n\n"
                 finding_filename = f"finding_{i+1}_{sanitize_target_name(finding.get('title', 'finding')[:50])}.md"
-                with open(os.path.join(output_path, finding_filename), "w") as f:
-                    f.write(finding_text)
+                finding_path = os.path.join(output_path, finding_filename)
+                with open(finding_path, "w") as f:
+                    f.write(_PAGE_BREAK + finding_text + "\n\n")
+                report_parts_files.append(finding_path)
 
-        report_parts.append(findings_content)
-        
         # Part 3: Observations and Discoveries
         logger.info("Generating Observations and Discoveries...")
-        observations_content = "<a name=\"observations-and-discoveries\"></a>\n## OBSERVATIONS AND DISCOVERIES\n\n"
+        observations_header = _PAGE_BREAK + "<a name=\"observations-and-discoveries\"></a>\n## OBSERVATIONS AND DISCOVERIES\n\n"
         has_observations = False
+
+        # Pre-create observation parts list to only add header if there are observations
+        observation_parts_files = []
 
         for i, finding in enumerate(raw_findings):
             if finding.get("category") in ["signal", "observation", "discovery"]:
@@ -240,13 +244,18 @@ Observation Data:
                 obs_text = _extract_text_from_result(obs_result)
                 
                 if obs_text:
-                    observations_content += obs_text + "\n\n"
                     obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
-                    with open(os.path.join(output_path, obs_filename), "w") as f:
-                        f.write(obs_text)
+                    obs_path = os.path.join(output_path, obs_filename)
+                    with open(obs_path, "w") as f:
+                        f.write(_PAGE_BREAK + obs_text + "\n\n")
+                    observation_parts_files.append(obs_path)
 
         if has_observations:
-            report_parts.append(observations_content)
+            observations_header_file = os.path.join(output_path, "report_observations_header.md")
+            with open(observations_header_file, "w") as f:
+                f.write(observations_header)
+            report_parts_files.append(observations_header_file)
+            report_parts_files.extend(observation_parts_files)
 
         # Part 4: Assessment Methodology
         logger.info("Generating Assessment Methodology...")
@@ -259,11 +268,10 @@ Observation Data:
         )
 
         appendix_prompt = f"""
-Generate the Assessment Methodology section.
+Generate all requested sections.
 Target: {target}
 Operation ID: {operation_id}
 Steps Executed: {steps_executed}
-Tools Used: {json.dumps(tools_used)}
 
 Use the following data:
 {json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'tools_summary']})}
@@ -273,35 +281,57 @@ Use the following data:
         
         if appendix_content:
             # Add anchor for Table of Contents
-            appendix_content = "<a name=\"assessment-methodology\"></a>\n" + appendix_content
-            with open(os.path.join(output_path, "report_methodology.md"), "w") as f:
+            appendix_content = _PAGE_BREAK + "<a name=\"assessment-methodology\"></a>\n" + appendix_content
+            methodology_file = os.path.join(output_path, "report_methodology.md")
+            with open(methodology_file, "w") as f:
                 f.write(appendix_content)
-            report_parts.append(appendix_content)
+            report_parts_files.append(methodology_file)
 
         # --- Combine everything ---
-        final_report = "# SECURITY ASSESSMENT REPORT\n\n"
-        final_report += "## TABLE OF CONTENTS\n"
-        final_report += "- [Executive Summary](#executive-summary)\n"
-        final_report += "- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n"
-        if has_observations:
-            final_report += "- [Observations and Discoveries](#observations-and-discoveries)\n"
-        final_report += "- [Assessment Methodology](#assessment-methodology)\n\n"
-        
-        final_report += "\n\n".join(report_parts)
-        
-        # Add footer
-        final_report += f"\n\n----\nReport Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nOperation ID: {operation_id}\n"
+        if not filename:
+            filename = os.path.join(output_path, "security_assessment_report.md")
 
-        with open(os.path.join(output_path, "security_assessment_report.md"), "w") as f:
-            f.write(final_report)
+        with open(filename, "w") as final_f:
+            final_f.write("# SECURITY ASSESSMENT REPORT\n\n")
+            final_f.write("## TABLE OF CONTENTS\n")
+            final_f.write("- [Executive Summary](#executive-summary)\n")
+            final_f.write("- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n")
+            if has_observations:
+                final_f.write("- [Observations and Discoveries](#observations-and-discoveries)\n")
+            final_f.write("- [Assessment Methodology](#assessment-methodology)\n\n")
 
-        logger.info("Final combined report generated: %d characters", len(final_report))
-        return final_report
+            for part_file in report_parts_files:
+                with open(part_file, "r") as part_f:
+                    final_f.write(part_f.read())
+                    final_f.write("\n\n")
+
+            # Add footer
+            main_provider = config_manager.get_provider()
+            main_models = set([
+                config_manager.get_llm_config(main_provider).model_id,
+                config_manager.get_swarm_config(main_provider).llm.model_id
+            ])
+
+            footer = f"""
+----
+
+- Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+- Operation ID: {operation_id}
+- Provider: {main_provider}
+- Model(s): {", ".join(main_models)}
+"""
+            final_f.write(footer)
+
+        logger.info("Final combined report generated: %s", filename)
+        return
 
     except Exception as e:
         logger.error("Error generating security report: %s", e, exc_info=True)
         # Don't expose internal error details to user
-        return "Report generation failed. Please check logs for details."
+        return
+
+
+_RE_MARKDOWN_INDENTED_HEADER = re.compile(r"^[ \t]+(#+ )", re.MULTILINE)
 
 
 def _extract_text_from_result(result: Any) -> str:
@@ -315,9 +345,166 @@ def _extract_text_from_result(result: Any) -> str:
     if not text:
         return text
 
+    # Post-process mermaid diagrams to ensure node names/labels are quoted and sanitize special characters
+    text = _sanitize_mermaid_diagrams(text)
+
     # Remove leading whitespace before markdown heading markers (#, ##, ...)
-    text = re.sub(r"^[ \t]+(#+ )", r"\1", text, flags=re.MULTILINE)
+    text = _RE_MARKDOWN_INDENTED_HEADER.sub(r"\1", text)
     return text
+
+
+_RE_MERMAID_DOUBLE_ROUNDED = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\(\((?!")(.*?)(?<!")\)\)(?:\s|$|[-=])')
+_RE_MERAID_SINGLE_ROUNDED = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\((?!")(.*?)(?<!")\)(?:\s|$|[-=])')
+_RE_MERMAID_SQUARE = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\[(?!")(.*?)(?<!")\](?:\s|$|[-=])')
+_RE_MERMAID_BRACES = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\{(?!")(.*?)(?<!")\}(?:\s|$|[-=])')
+_RE_MERMAID_ANGLE = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)>(?!")(.*?)(?<!")\](?:\s|$|[-=])')
+_RE_MERAID_EDGE = re.compile(r'(--\s+)(?!")(.*?)(?<!")(\s*-->)')
+_RE_MERMAID_SEQUENCE_LABELS = re.compile(r'(->>[^:]+:\s*)(.*)')
+_RE_MERMAID_PIPE_LABELS = re.compile(r'(\|)(?!")(.*?)(?<!")(\|)')
+_RE_MERMAID_SUBGRAPH_LABEL = re.compile(r'(subgraph\s+)(.*)')
+_RE_MERMAID_BLOCK = re.compile(r'```mermaid\s*([\s\S]*?)\s*```')
+
+
+def _sanitize_mermaid_diagrams(text: str) -> str:
+    """
+    Post-process mermaid diagrams to ensure node names/labels are quoted
+    and replace special characters [](){}<>| with unicode equivalents.
+    """
+    if "```mermaid" not in text:
+        return text
+
+    replacements = {
+        # disable replacing, it's noisy and not necessary
+        # '[': '&#91;',
+        # ']': '&#93;',
+        # '(': '&#40;',
+        # ')': '&#41;',
+        # '{': '&#123;',
+        # '}': '&#125;',
+        # '<': '&#60;',
+        # '>': '&#62;',
+        # '|': '&#124;',
+        '"': '&#34;'
+    }
+
+    def replace_special_chars(label: str) -> str:
+        for char, unicode_val in replacements.items():
+            label = label.replace(char, unicode_val)
+        return label
+
+    # Function to replace special characters in a label and ensure it's quoted
+    def quote_and_sanitize(label):
+        # Extract content if already quoted, then re-quote after sanitizing
+        label = label.strip()
+        while label.startswith('"') and label.endswith('"') and len(label) >= 2:
+            label = label[1:-1]
+        return f'"{replace_special_chars(label)}"'
+
+    def process_mermaid_block(match):
+        block_content = match.group(1)
+
+        lines = block_content.splitlines()
+        processed_lines = []
+
+        for line in lines:
+            # Skip common diagram markers
+            if line.strip().lower() in ['graph td', 'graph lr', 'sequencediagram', 'flowchart td', 'flowchart lr']:
+                processed_lines.append(line)
+                continue
+
+            # 1. Double Rounded: ID((label))
+            if '((' in line and '))' in line:
+                match_node = _RE_MERMAID_DOUBLE_ROUNDED.search(line)
+                if match_node:
+                    node_id = match_node.group(1)
+                    label_content = match_node.group(2)
+                    line = line.replace(f'{node_id}(({label_content}))',
+                                      f'{node_id}(({quote_and_sanitize(label_content)}))')
+
+            # 2. Rounded: ID(label) - only if not already matched as double rounded
+            elif '(' in line and ')' in line:
+                match_node = _RE_MERAID_SINGLE_ROUNDED.search(line)
+                if match_node:
+                    node_id = match_node.group(1)
+                    label_content = match_node.group(2)
+                    line = line.replace(f'{node_id}({label_content})',
+                                      f'{node_id}({quote_and_sanitize(label_content)})')
+
+            # 3. Square: ID[label]
+            if '[' in line and ']' in line:
+                # Find the ID and the content between the FIRST [ and LAST ] on this line
+                for match_node in _RE_MERMAID_SQUARE.finditer(line):
+                    if match_node:
+                        node_id = match_node.group(1)
+                        label_content = match_node.group(2)
+                        line = line.replace(f'{node_id}[{label_content}]',
+                                          f'{node_id}[{quote_and_sanitize(label_content)}]')
+
+            # 4. Braces: ID{label}
+            if '{' in line and '}' in line:
+                for match_node in _RE_MERMAID_BRACES.finditer(line):
+                    if match_node:
+                        node_id = match_node.group(1)
+                        label_content = match_node.group(2)
+                        line = line.replace(f'{node_id}{{{label_content}}}',
+                                          f'{node_id}{{{quote_and_sanitize(label_content)}}}')
+
+            # 5. Angle: ID>label]
+            if '>' in line and ']' in line:
+                for match_node in _RE_MERMAID_ANGLE.finditer(line):
+                    if match_node:
+                        node_id = match_node.group(1)
+                        label_content = match_node.group(2)
+                        line = line.replace(f'{node_id}>{label_content}]',
+                                          f'{node_id}>{quote_and_sanitize(label_content)}]')
+
+            # 6. Edge labels: -- label -->
+            if '-- ' in line and '-->' in line:
+                match_edge = _RE_MERAID_EDGE.search(line)
+                if match_edge:
+                    prefix = match_edge.group(1)
+                    label_content = match_edge.group(2)
+                    suffix = match_edge.group(3)
+                    line = line.replace(f'{prefix}{label_content}{suffix}',
+                                      f'{prefix}{quote_and_sanitize(label_content)}{suffix}')
+
+            # 7. Sequence diagram labels: ID->>ID: label
+            if '->>' in line and ':' in line:
+                match_seq = _RE_MERMAID_SEQUENCE_LABELS.search(line)
+                if match_seq:
+                    prefix = match_seq.group(1)
+                    label_content = match_seq.group(2)
+                    line = line.replace(f'{prefix}{label_content}',
+                                      f'{prefix}{quote_and_sanitize(label_content)}')
+
+            # 8. Pipe labels: |label|
+            if '|' in line:
+                # Flowcharts can have |label| after edge
+                # We need to find the label content between pipes. 
+                # Mermaid flowcharts use |label| syntax.
+                def sub_pipe(m):
+                    content = m.group(2)
+                    if '&#124;' in content: # Already processed or contains sanitized pipe
+                        return m.group(0)
+                    return f'|{quote_and_sanitize(content)}|'
+
+                line = _RE_MERMAID_PIPE_LABELS.sub(sub_pipe, line)
+
+            # 9. subgraph label
+            if 'subgraph' in line:
+                match_seq = _RE_MERMAID_SUBGRAPH_LABEL.search(line)
+                if match_seq:
+                    prefix = match_seq.group(1)
+                    label_content = match_seq.group(2)
+                    line = line.replace(f'{prefix}{label_content}',
+                                        f'{prefix}{quote_and_sanitize(label_content)}')
+
+            processed_lines.append(line)
+
+        return f"```mermaid\n" + "\n".join(processed_lines) + "\n```"
+
+    # Match ```mermaid ... ``` blocks
+    return _RE_MERMAID_BLOCK.sub(process_mermaid_block, text)
 
 
 def _get_module_report_prompt(module_name: Optional[str]) -> Optional[str]:
@@ -441,196 +628,120 @@ def build_report_sections(
         # Initialize memory client and retrieve evidence and plans
         evidence = []
         operation_plan = None
-        operation_task_toon_format = None
         operation_tasks = []
-        operation_date = datetime.now().strftime("%Y-%m-%d")
+        if operation_id and len(operation_id) >= 11 and operation_id.startswith("OP_"):
+            operation_date = f"{operation_id[3:7]}-{operation_id[7:9]}-{operation_id[9:11]}"
+        else:
+            operation_date = datetime.now().strftime("%Y-%m-%d")
         cross_operation = memory_is_cross_operation()
         manager = get_config_manager()
 
-        raw_memories: List[Dict[str, Any]] = []
+        memory_client = get_memory_client(silent=True)
 
+        raw_memories: List[Dict[str, Any]] = memory_client.list_memories(
+            run_id=operation_id if not cross_operation else None,
+            limit=MAX_REPORT_FINDINGS * 10,
+        )
+        logger.info(f"Total memories loaded: {len(raw_memories)}")
+
+        # Count by operation_id and category for debugging
         try:
-            memory_client = get_memory_client(silent=True)
-        except Exception:
-            memory_client = None
+            op_ids = Counter()
+            categories = Counter()
+            for m in raw_memories:
+                meta = m.get("metadata", {}) or {}
+                op_ids[meta.get("operation_id", "unknown")] += 1
+                categories[meta.get("category", "unknown")] += 1
+            logger.info(f"Memories by operation_id: {dict(op_ids)}")
+            logger.info(f"Memories by category: {dict(categories)}")
+        except Exception as debug_err:
+            logger.debug(f"Debug counter failed: {debug_err}")
 
-        if memory_client:
-            try:
-                # Use run_id scoping to get operation-specific memories
-                raw_memories = memory_client.list_memories(
-                    run_id=operation_id if not cross_operation else None,
-                    limit=MAX_REPORT_FINDINGS * 10,
-                )
-            except Exception as mem_err:
-                logger.warning(
-                    "Failed to load memories from existing client: %s", mem_err
-                )
-                raw_memories = []
-        else:
-            error_msg = "Critical: Memory service unavailable - cannot generate comprehensive report with stored evidence"
-            logger.error(error_msg)
-            # Still proceed but with clear indication of missing data
-            evidence.append(
-                {
-                    "category": "system_warning",
-                    "content": "⚠️ WARNING: Memory service unavailable - report generated without stored evidence from previous assessment steps",
-                    "severity": "HIGH",
-                    "confidence": "SYSTEM",
-                }
-            )
+        if not cross_operation:
+            logger.info(f"Filtering evidence for current operation_id: {operation_id}")
 
-        if raw_memories:
-            # Debug logging: show what we loaded from memory
-            logger.info(f"Total memories loaded from shared storage: {len(raw_memories)}")
+        operation_plan = memory_client.get_active_plan()
+        operation_tasks = [task.to_toon(include_format=False) for task in memory_client.list_tasks()]
 
-            # Count by operation_id and category for debugging
-            try:
-                op_ids = Counter()
-                categories = Counter()
-                for m in raw_memories:
-                    meta = m.get("metadata", {}) or {}
-                    op_ids[meta.get("operation_id", "unknown")] += 1
-                    categories[meta.get("category", "unknown")] += 1
-                logger.info(f"Memories by operation_id: {dict(op_ids)}")
-                logger.info(f"Memories by category: {dict(categories)}")
-            except Exception as debug_err:
-                logger.debug(f"Debug counter failed: {debug_err}")
+        # Process evidence entries - FILTER BY OPERATION_ID
+        evidence_skipped = 0
+        evidence_included = 0
+
+        logger.info(f"Processing {len(raw_memories)} memories for evidence")
+
+        for memory_item in raw_memories:
+            memory_content = memory_item.get("memory", "")
+            metadata = memory_item.get("metadata", {}) or {}
+            logger.info(
+                f"Checking memory item: id={memory_item.get('id')}, category={metadata.get('category')}, op_id={metadata.get('operation_id')}")
+            if not metadata:
+                continue
 
             if not cross_operation:
-                logger.info(f"Filtering evidence for current operation_id: {operation_id}")
-
-            # Select the newest active plan for this operation and collect tasks
-            try:
-                plan_candidates = []
-                task_memories = []
-                for m in raw_memories:
-                    meta = m.get("metadata", {}) or {}
-                    if str(meta.get("category", "")) == "plan":
-                        # Only include plans from current operation (no cross-op fallback)
-                        if str(meta.get("operation_id", "")) == str(operation_id):
-                            plan_candidates.append(m)
-                    elif str(meta.get("category", "")) == "task":
-                        task_memories.append(m)
-
-                # Sort tasks by created_at ascending
-                task_memories.sort(key=memory_create_time)
-
-                # Only keep the latest by task_uid. This should be handled by the metadata.active value, but it's not perfect
-                task_uid_map = {}
-                for m in task_memories:
-                    metadata = m.get("metadata", {}) or {}
-                    task_uid = metadata.get("task_uid")
-                    if task_uid:
-                        task_uid_map[task_uid] = m
-                task_memories = list(task_uid_map.values())
-
-                # Sort tasks by phase ascending, then by created_at
-                task_memories.sort(key=lambda x: (int((x.get("metadata") or {}).get("phase", 999)), memory_create_time(x)))
-
-                for m in task_memories:
-                    task_content = m.get("memory", "")
-                    if task_content:
-                        task_content_split = task_content.split(':', maxsplit=1)
-                        if len(task_content_split) == 2:
-                            task_toon_format = task_content_split[0].strip()
-                            if task_toon_format.startswith("[TASK]") and task_toon_format.endswith("}"):
-                                operation_task_toon_format = task_toon_format
-                                task_content = task_content_split[1].strip()
-                        operation_tasks.append(task_content)
-
-                # Sort by created_at descending
-                plan_candidates.sort(key=memory_create_time, reverse=True)
-                # Pick the first active one; else first candidate
-                for m in plan_candidates:
-                    meta = m.get("metadata", {}) or {}
-                    if meta.get("active", False) is True:
-                        operation_plan = m.get("memory", "")
-                        logger.info("Selected newest active operation plan from memory")
-                        break
-                if not operation_plan and plan_candidates:
-                    operation_plan = plan_candidates[0].get("memory", "")
-                    logger.info("Selected newest available plan from memory")
-            except Exception as _pe:
-                logger.debug(f"Plan selection fallback due to: {_pe}")
-
-            # Process evidence entries - FILTER BY OPERATION_ID
-            evidence_skipped = 0
-            evidence_included = 0
-
-            logger.info(f"Processing {len(raw_memories)} memories for evidence")
-
-            for memory_item in raw_memories:
-                memory_content = memory_item.get("memory", "")
-                metadata = memory_item.get("metadata", {}) or {}
-                logger.info(f"Checking memory item: id={memory_item.get('id')}, category={metadata.get('category')}, op_id={metadata.get('operation_id')}")
-                if not metadata:
+                item_op_id = str(metadata.get("operation_id", ""))
+                if item_op_id and item_op_id != str(operation_id):
+                    # Skip evidence from other operations
+                    logger.debug(
+                        f"Skipping evidence from different operation: {item_op_id} (current: {operation_id})")
+                    evidence_skipped += 1
                     continue
 
-                if not cross_operation:
-                    item_op_id = str(metadata.get("operation_id", ""))
-                    if item_op_id and item_op_id != str(operation_id):
-                        # Skip evidence from other operations
-                        logger.debug(
-                            f"Skipping evidence from different operation: {item_op_id} (current: {operation_id})")
-                        evidence_skipped += 1
-                        continue
+            # Build base evidence structure
+            base_evidence = {
+                "content": memory_content,
+                "id": memory_item.get("id", ""),
+                "anchor_id": ("finding-" + str(memory_item.get("id", "")))
+                if memory_item.get("id")
+                else "",
+                "anchor": ("#finding-" + str(memory_item.get("id", "")))
+                if memory_item.get("id")
+                else "",
+                "metadata": metadata,  # Include metadata for traceability
+            }
 
-                # Build base evidence structure
-                base_evidence = {
-                    "content": memory_content,
-                    "id": memory_item.get("id", ""),
-                    "anchor_id": ("finding-" + str(memory_item.get("id", "")))
-                    if memory_item.get("id")
-                    else "",
-                    "anchor": ("#finding-" + str(memory_item.get("id", "")))
-                    if memory_item.get("id")
-                    else "",
-                    "metadata": metadata,  # Include metadata for traceability
-                }
+            # Findings via metadata
+            category = metadata.get("category")
+            if category in ["finding", "signal", "observation", "discovery"]:
+                # Downgrade findings that aren't verified (not sure I'm ready for this downgrade rule yet)
+                # if category == "finding":
+                #     is_verified = str(metadata.get("validation_status", "")).strip().lower() == "verified"
+                #     if not is_verified:
+                #         logger.info(
+                #             "Downgrading finding '%s' (id: %s) to observation: verified=%s",
+                #             metadata.get("vulnerability") or memory_content[:30],
+                #             memory_item.get("id"),
+                #             is_verified,
+                #         )
+                #         category = "observation"
 
-                # Findings via metadata
-                category = metadata.get("category")
-                if category in ["finding", "signal", "observation", "discovery"]:
-                    # Downgrade findings that aren't verified (not sure I'm ready for this downgrade rule yet)
-                    # if category == "finding":
-                    #     is_verified = str(metadata.get("validation_status", "")).strip().lower() == "verified"
-                    #     if not is_verified:
-                    #         logger.info(
-                    #             "Downgrading finding '%s' (id: %s) to observation: verified=%s",
-                    #             metadata.get("vulnerability") or memory_content[:30],
-                    #             memory_item.get("id"),
-                    #             is_verified,
-                    #         )
-                    #         category = "observation"
+                evidence_included += 1
+                item = base_evidence.copy()
+                sev = metadata.get("severity", "MEDIUM" if category == "finding" else "INFO")
+                conf = str(metadata.get("confidence", ""))
+                item.update(
+                    {
+                        "category": category,
+                        "severity": sev,
+                        "confidence": conf,
+                        "validation_status": str(
+                            metadata.get("validation_status", "")
+                        ).strip()
+                                             or None,
+                    }
+                )
 
-                    evidence_included += 1
-                    item = base_evidence.copy()
-                    sev = metadata.get("severity", "MEDIUM" if category == "finding" else "INFO")
-                    conf = str(metadata.get("confidence", ""))
-                    item.update(
-                        {
-                            "category": category,
-                            "severity": sev,
-                            "confidence": conf,
-                            "validation_status": str(
-                                metadata.get("validation_status", "")
-                            ).strip()
-                                                 or None,
-                        }
-                    )
+                # Parse structured markers from the content so downstream sections have clean fields
+                parsed_evidence = _parse_structured_evidence(memory_content)
+                if parsed_evidence and isinstance(parsed_evidence, dict):
+                    item["parsed"] = parsed_evidence
 
-                    # Parse structured markers from the content so downstream sections have clean fields
-                    parsed_evidence = _parse_structured_evidence(memory_content)
-                    if parsed_evidence and isinstance(parsed_evidence, dict):
-                        item["parsed"] = parsed_evidence
+                evidence.append(item)
 
-                    evidence.append(item)
-
-            logger.info(
-                "Retrieved %d pieces of evidence from memory (skipped %d from other ops)",
-                len(evidence),
-                evidence_skipped
-            )
+        logger.info(
+            "Retrieved %d pieces of evidence from memory (skipped %d from other ops)",
+            len(evidence),
+            evidence_skipped
+        )
 
         # If no evidence, let LLM handle empty evidence
         if not evidence:
@@ -683,9 +794,6 @@ def build_report_sections(
         summary_table = (
             _format_summary_table(evidence) if evidence else ""
         )
-
-        # Format the operation plan
-        operation_plan_formatted = _format_operation_plan(operation_plan)
 
         # Extract token/duration/cost metrics from the operation log (best-effort)
         metrics_input = 0
@@ -747,8 +855,12 @@ def build_report_sections(
                                         if tool_name:
                                             if tool_name == "shell" and "tool_input" in payload:
                                                 tool_input = payload.get("tool_input")
-                                                if "command" in tool_input:
-                                                    tools_used_from_log.append(tool_input.get("command").split()[0])
+                                                tool_command = tool_input.get("command", "")
+                                                if tool_command:
+                                                    if isinstance(tool_command, list):
+                                                        tools_used_from_log.append(tool_command[0])
+                                                    else:
+                                                        tools_used_from_log.append(str(tool_command).split()[0])
                                             else:
                                                 tools_used_from_log.append(tool_name)
 
@@ -808,9 +920,9 @@ def build_report_sections(
             "low_count": severity_counts["low"],
             "info_count": severity_counts["info"],
             "overview": report_content.get("overview", ""),
-            "operation_plan": operation_plan_formatted,
+            "operation_plan": operation_plan.to_dict() if operation_plan else "",
             "operation_tasks": {
-                "toon_format": operation_task_toon_format,
+                "columns": Task.csv_format(),
                 "items": operation_tasks,
             },
             "evidence_text": evidence_text,
@@ -1062,22 +1174,3 @@ def _format_summary_table(findings: List[Dict[str, Any]]) -> str:
         table.append(f"\n*Total findings: {len(findings)}*")
 
     return "\n".join(table)
-
-
-def _format_operation_plan(plan_content: str) -> str:
-    """Format the operation plan for inclusion in the report."""
-    if not plan_content:
-        return ""
-
-    # Try to parse JSON plan
-    if plan_content.startswith("[PLAN]"):
-        plan_content = plan_content.replace("[PLAN]", "").strip()
-
-    try:
-        plan_data = json.loads(plan_content)
-
-        # Return raw plan data as JSON for LLM to format
-        return json.dumps(plan_data, indent=2)
-    except (json.JSONDecodeError, TypeError):
-        # Return raw plan if not JSON
-        return plan_content

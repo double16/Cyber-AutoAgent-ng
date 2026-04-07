@@ -28,7 +28,7 @@ from modules.config import get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.tools import Mem0ServiceClient
-from modules.tools.memory import memory_create_time, memory_is_cross_operation
+from modules.tools.memory import memory_create_time, memory_is_cross_operation, OperationPlan
 
 logger = get_logger("Handlers.PromptRebuildHook")
 
@@ -81,7 +81,7 @@ class PromptRebuildHook(HookProvider):
 
         Args:
             callback_handler: Callback handler with current_step tracking
-            memory_instance: Memory client for querying findings and plan
+            memory_instance: Memory client for querying findings
             config: Configuration object
             target: Target being assessed
             objective: Assessment objective
@@ -181,7 +181,7 @@ class PromptRebuildHook(HookProvider):
             # Query fresh memory and plan
             memory_overview = self._query_memory_overview()
             plan_snapshot = self._query_plan_snapshot()
-            plan_current_phase = self._extract_current_phase(plan_snapshot)
+            plan_current_phase = plan_snapshot.current_phase if plan_snapshot else None
 
             # Build new prompt
             new_prompt = get_system_prompt(
@@ -272,10 +272,10 @@ class PromptRebuildHook(HookProvider):
             # Continue operation with existing prompt on rebuild failure
 
     def _phase_changed(self) -> bool:
-        """Check if assessment plan phase changed.
+        """Check if the plan phase changed.
 
         Returns:
-            True if phase transition detected, False otherwise
+            True if phase transition is detected, False otherwise
         """
         if not self.memory:
             return False
@@ -285,8 +285,7 @@ class PromptRebuildHook(HookProvider):
             if not plan_snapshot:
                 return False
 
-            # Extract current phase using unified extraction method (handles TOON + text)
-            current_phase = self._extract_current_phase(plan_snapshot)
+            current_phase = plan_snapshot.current_phase
             if current_phase is not None:
                 if self.last_phase is not None and current_phase != self.last_phase:
                     logger.info(
@@ -460,68 +459,18 @@ Without category='finding', your work will NOT appear in the final report.
             logger.debug("Memory query failed: %s", e)
             return None
 
-    def _query_plan_snapshot(self) -> Optional[str]:
-        """Query current assessment plan from memory.
-
+    def _query_plan_snapshot(self) -> Optional[OperationPlan]:
+        """Query active plan.
         Retrieves the most recent plan entry for context.
         """
         if not self.memory:
             return None
 
         try:
-            # Use get_active_plan if available (more direct)
-            active_plan = self.memory.get_active_plan(operation_id=self.operation_id)
-            if active_plan:
-                # Return raw memory content for LLM interpretation
-                return str(active_plan.get("memory", ""))
-
-            # Otherwise, search for any plan-like memory
-            # TODO: is this necessary??
-            results = self.memory.search_memories(
-                query="plan objective phase"
-            )[:1]
-
-            if results:
-                # Return first plan-like memory content
-                return str(results[0].get("memory", ""))
+            return self.memory.get_active_plan(operation_id=self.operation_id)
 
         except Exception as e:
             logger.debug("Plan query failed: %s", e)
-
-        return None
-
-    def _extract_current_phase(self, plan_snapshot: Optional[str]) -> Optional[int]:
-        """Extract phase number from plan snapshot string.
-
-        Handles both TOON format and text format:
-        - TOON: "plan_overview[1]{objective,current_phase,total_phases}:\n  ...,2,3"
-        - Text: "Phase 2: Exploitation..."
-
-        Args:
-            plan_snapshot: Plan snapshot string
-
-        Returns:
-            Phase number or None
-        """
-        if not plan_snapshot:
-            return None
-
-        try:
-            # Try TOON format first: extract current_phase from CSV row
-            # Pattern: "objective,current_phase,total_phases" → "...,2,3"
-            toon_match = re.search(
-                r'plan_overview\[1\]\{[^}]*current_phase[^}]*\}:\s*\n\s*[^,]+,(\d+),',
-                plan_snapshot
-            )
-            if toon_match:
-                return int(toon_match.group(1))
-
-            # Fallback: Try text format "Phase N"
-            text_match = re.search(r"Phase (\d+)", plan_snapshot)
-            if text_match:
-                return int(text_match.group(1))
-        except Exception as e:
-            logger.debug("Phase extraction failed: %s", e)
 
         return None
 
@@ -583,14 +532,6 @@ Without category='finding', your work will NOT appear in the final report.
 
             # Limit to 30 most recent
             recent_memories.sort(key=memory_create_time, reverse=True)
-            # limit to the latest plan
-            plan_ids = list(map(lambda m: m["id"], filter(lambda m: m.get("metadata", {}).get("category", "") == "plan", recent_memories)))
-            plan_id = plan_ids[0] if plan_ids else None
-            recent_memories = [
-                memory
-                for memory in recent_memories
-                if memory.get("metadata", {}).get("category", "") != "plan" or memory.get("id", "") == plan_id
-            ]
             recent_memories = recent_memories[:30]
 
             logger.info("Found %d recent memories", len(recent_memories))

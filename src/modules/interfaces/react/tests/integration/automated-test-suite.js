@@ -69,19 +69,20 @@ class AutomatedTestRunner {
    * Start terminal session with application
    */
   async start(envOverrides = {}) {
+    // Set up test configuration if needed
+    if (this.config.setupConfig) {
+      await this.setupTestConfig(this.config.setupConfig);
+    }
+
     const env = {
       ...process.env,
       NO_COLOR: '1',
       CI: 'true',
       NODE_ENV: 'test',
       CYBER_TEST_MODE: 'true',
+      CYBER_CONFIG_DIR: this.testConfigDir || join(__dirname, 'test-config'),
       ...envOverrides
     };
-
-    // Set up test configuration if needed
-    if (this.config.setupConfig) {
-      await this.setupTestConfig(this.config.setupConfig);
-    }
 
     return new Promise((resolve, reject) => {
       try {
@@ -126,7 +127,7 @@ class AutomatedTestRunner {
    * Setup test configuration
    */
   async setupTestConfig(config) {
-    const configDir = join(os.homedir(), '.cyber-autoagent');
+    const configDir = join(__dirname, 'test-config');
     const configPath = join(configDir, 'config.json');
     
     if (!fs.existsSync(configDir)) {
@@ -134,6 +135,7 @@ class AutomatedTestRunner {
     }
     
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    this.testConfigDir = configDir;
   }
 
   /**

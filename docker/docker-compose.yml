@@ -207,7 +207,6 @@ services:
 
       # Memory configuration
       - MEM0_API_KEY=${MEM0_API_KEY}
-      - MEM0_EMBEDDING_MODEL=${MEM0_EMBEDDING_MODEL}
       - MEM0_LLM_MODEL=${MEM0_LLM_MODEL}
       - OPENSEARCH_HOST=${OPENSEARCH_HOST}
       - MEM0_TELEMETRY=false
@@ -254,11 +253,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
-          cpus: '1.0'
+          memory: 1.5G
+          cpus: '3.0'
         reservations:
-          memory: 512M
-          cpus: '0.5'
+          memory: 1G
+          cpus: '1.5'
     
     # For interactive debugging
     stdin_open: true
@@ -381,6 +380,15 @@ services:
       # Disable signup for security
       NEXT_PUBLIC_SIGN_UP_DISABLED: "true"
 
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 384M
+          cpus: '0.1'
+
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3
     container_name: cyber-langfuse-worker
@@ -449,6 +457,15 @@ services:
       # Media configuration
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "evidence/"
 
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: '0.3'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+
   postgres:
     image: postgres:15-alpine
     container_name: cyber-langfuse-postgres
@@ -465,6 +482,15 @@ services:
       timeout: 3s
       retries: 10
 
+    deploy:
+      resources:
+        limits:
+          memory: 100M
+          cpus: '0.2'
+        reservations:
+          memory: 64M
+          cpus: '0.1'
+
   clickhouse:
     image: docker.io/clickhouse/clickhouse-server
     container_name: cyber-langfuse-clickhouse
@@ -474,6 +500,13 @@ services:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: clickhouse
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     volumes:
       - langfuse_clickhouse_data:/var/lib/clickhouse
       - langfuse_clickhouse_logs:/var/log/clickhouse-server
@@ -483,6 +516,15 @@ services:
       timeout: 5s
       retries: 10
       start_period: 1s
+
+    deploy:
+      resources:
+        limits:
+          memory: 1.8G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.2'
 
   redis:
     image: docker.io/redis:7
@@ -495,6 +537,15 @@ services:
       timeout: 5s
       retries: 10
       start_period: 5s
+
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.3'
+        reservations:
+          memory: 20M
+          cpus: '0.1'
 
   minio:
     image: docker.io/minio/minio
@@ -510,6 +561,15 @@ services:
       - "9091:9001"
     volumes:
       - langfuse_minio_data:/data
+
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: '0.2'
+        reservations:
+          memory: 256M
+          cpus: '0.1'
 
 # Named volumes for better control
 volumes:

@@ -8,7 +8,7 @@ import { Box, Text } from 'ink';
 import { ThinkingIndicator } from './ThinkingIndicator.js';
 import { StreamEvent } from '../types/events.js';
 import { SwarmDisplay, SwarmState, SwarmAgent } from './SwarmDisplay.js';
-import { formatToolInput, getToonPlanPreview } from '../utils/toolFormatters.js';
+import { formatToolInput } from '../utils/toolFormatters.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
 // Removed toolCategories import - using clean tool display without emojis
 import * as fs from 'fs/promises';
@@ -793,9 +793,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         latestInput = hasEventInput ? eventInput : (hasMapInput ? mapInput : {});
       }
       
-      // Always show tool header even if args are not yet available.
+      // Always show a tool header even if args are not yet available.
       // Individual tool renderers will gracefully handle missing fields.
-      // Otherwise handle specific tool formatting
+      // Otherwise, handle specific tool formatting
       switch (event.tool_name) {
         case 'swarm':
           // Simplified swarm tool header to avoid duplication
@@ -814,13 +814,10 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
               </Box>
             </Box>
           );
-        case 'mem0_store_plan':
         case 'mem0_store':
         case 'mem0_get':
         case 'mem0_retrieve':
-        case 'mem0_list':
-        case 'mem0_get_plan':
-        case 'mem0_delete': {
+        case 'mem0_list': {
           const action = event.tool_name.substring(5);
           const rawContent = latestInput?.plan || latestInput?.content || latestInput?.query || '';
           // Ensure content is always a string (handle plan objects, etc.)
@@ -836,12 +833,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
           } else {
             content = String(rawContent);
           }
-          const planPreview = getToonPlanPreview(content);
-          const preview = planPreview ?? (content.length > 60 ? content.substring(0, 60) + '...' : content);
+          const preview = (content.length > 60 ? content.substring(0, 60) + '...' : content);
           const labelKey =
-            planPreview || action === 'store_plan'
-              ? 'plan'
-              : action === 'store'
+              action === 'store'
                 ? 'content'
                 : 'query';
 
@@ -849,7 +843,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
             <Box flexDirection="column" marginTop={1}>
               <Text color="green" bold>tool: {event.tool_name}</Text>
               <Box marginLeft={2}>
-                <Text dimColor>├─ action: {action === 'store_plan' ? 'store_plan' : action === 'store' ? 'storing' : action === 'retrieve' ? 'retrieving' : action}</Text>
+                <Text dimColor>├─ action: {action === 'store' ? 'storing' : action === 'retrieve' ? 'retrieving' : action}</Text>
               </Box>
               {preview && (
                 <Box marginLeft={2}>

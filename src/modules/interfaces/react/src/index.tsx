@@ -60,7 +60,7 @@ const cli = meow(`
     --target, -t        Target system/network to assess
     --objective, -o     Security assessment objective
     --module, -m        Security module to use (default: web)
-    --iterations, -i    Maximum tool executions (default: 50)
+    --iterations, -i    Maximum tool executions (default: 100)
     --auto-run          Start assessment immediately without UI
     --auto-approve      Auto-approve tool executions (no confirmations)
     --memory-mode       Memory mode: auto (default) or fresh
@@ -158,7 +158,7 @@ const cli = meow(`
 // Emit an immediate welcome line in headless test mode to aid terminal capture timing
 try {
   if (process.env.CYBER_TEST_MODE === 'true' && cli.flags.headless && !cli.flags.autoRun) {
-    const configDir = path.join(os.homedir(), '.cyber-autoagent');
+    const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
     const configPath = path.join(configDir, 'config.json');
     const firstLaunch = !fs.existsSync(configPath);
     if (firstLaunch) {
@@ -185,7 +185,7 @@ const runAutoAssessment = async () => {
       const configOverrides: Partial<Config> = {};
 
       // Load saved configuration first to detect provider changes
-      const configDir = path.join(os.homedir(), '.cyber-autoagent');
+      const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
       const configPath = path.join(configDir, 'config.json');
       let savedConfig: Partial<Config> | undefined;
 
@@ -201,7 +201,10 @@ const runAutoAssessment = async () => {
 
       // Apply CLI flag overrides
       if (cli.flags.provider) configOverrides.modelProvider = cli.flags.provider as 'bedrock' | 'ollama' | 'litellm' | 'gemini';
-      if (cli.flags.model) configOverrides.modelId = cli.flags.model;
+      if (cli.flags.model) {
+        configOverrides.modelId = cli.flags.model;
+        configOverrides.swarmModel = cli.flags.model;
+      }
       if (cli.flags.region) configOverrides.awsRegion = cli.flags.region;
       if (cli.flags.iterations) configOverrides.iterations = cli.flags.iterations;
       if (cli.flags.observability !== undefined) configOverrides.observability = cli.flags.observability;
@@ -327,6 +330,9 @@ const runAutoAssessment = async () => {
         if (event.type === 'output' && event.content) {
           loggingService.info(event.content);
         }
+        else if (event.type === 'reasoning' && event.content) {
+          loggingService.info('🧠 '+event.content);
+        }
         else if (event.type === 'rate_limit' && event.sleep_time) {
           loggingService.info(`⌛ Rate limit: waiting for ${Math.ceil(event.sleep_time)} seconds`);
         }
@@ -336,6 +342,11 @@ const runAutoAssessment = async () => {
                 lastMetricsUpdate = metricsUpdateKey;
                 loggingService.info(`💰 Cost: ${event.metrics.tokens.toLocaleString()} (${event.metrics.inputTokens.toLocaleString()} input + ${event.metrics.outputTokens.toLocaleString()} output) | $ ${event.metrics.cost.toFixed(6)}`);
             }
+        }
+        else if (event.type === 'step_header') {
+          if (Number.isInteger(event.step) && Number.isInteger(event.maxSteps)) {
+            loggingService.info(`➡️ Step ${event.step}/${event.maxSteps}`);
+          }
         }
         else if (event.type === 'task_started') {
             lastTaskTitle = event.title;
@@ -408,7 +419,7 @@ function renderReactApp() {
     loggingService.info('🔧 Running in headless mode');
     // Emit a fast welcome banner for first-launch so integration tests can capture it
     try {
-      const configDir = path.join(os.homedir(), '.cyber-autoagent');
+      const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
       const configPath = path.join(configDir, 'config.json');
       const firstLaunch = !fs.existsSync(configPath);
       if (firstLaunch) {

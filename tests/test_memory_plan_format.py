@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Tests for memory tool plan formatting."""
-
-from modules.tools.memory import _format_plan_as_toon
+from modules.tools.memory import OperationPlan
 
 
 def test_format_plan_as_toon_generates_compact_rows():
@@ -26,7 +25,7 @@ def test_format_plan_as_toon_generates_compact_rows():
         ],
     }
 
-    toon = _format_plan_as_toon(plan)
+    toon = OperationPlan.from_obj(plan).to_toon()
 
     assert "plan_overview" in toon
     assert "plan_phases[3]" in toon

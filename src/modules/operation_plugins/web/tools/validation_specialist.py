@@ -6,7 +6,8 @@ import os
 from typing import Optional
 
 from strands import Agent, tool
-from strands_tools import editor, shell
+from strands_tools import editor
+from modules.tools import shell
 
 logger = logging.getLogger(__name__)
 

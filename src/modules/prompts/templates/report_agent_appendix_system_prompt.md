@@ -20,8 +20,8 @@ You are a specialized report generation agent responsible for creating the metho
     - Execution Metrics: Include step count and other performance data.
     - Operation Plan: List all steps from the plan.
     - Operation Tasks: List all tasks.
-      - operation_tasks.toon_format describes the format of tasks.
-      - operation_tasks.items has the actual task details.
+      - operation_tasks.items has the task details in CSV format.
+      - operation_tasks.columns describes the task columns.
    - Include additional details or context that might be helpful.
    - Evidence can be viewed by the editor tool to provide context.
 </sections_to_generate>

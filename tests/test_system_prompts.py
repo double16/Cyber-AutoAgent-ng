@@ -313,7 +313,7 @@ class TestReflectionSnapshot:
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
         assert f"Budget Used: 20%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert "\n**CHECKPOINT 20% REACHED**" in snapshot
-        assert "\nACTION: Call `mem0_get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?" in snapshot
+        assert "\nACTION: Call `get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?" in snapshot
         if plan_phase is None:
             assert "\nCurrent Phase:" not in snapshot
         else:
@@ -329,7 +329,7 @@ class TestReflectionSnapshot:
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
         assert f"Budget Used: 40%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert "\n**CHECKPOINT 40% REACHED**" in snapshot
-        assert "\nACTION: Call `mem0_get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW." in snapshot
+        assert "\nACTION: Call `get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW." in snapshot
         if plan_phase is None:
             assert "\nCurrent Phase:" not in snapshot
         else:
@@ -345,7 +345,7 @@ class TestReflectionSnapshot:
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
         assert f"Budget Used: 60%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert "\n**CHECKPOINT 60% REACHED**" in snapshot
-        assert "\nACTION: Call `mem0_get_plan`. If stuck (no findings), deploy swarm with different approach classes." in snapshot
+        assert "\nACTION: Call `get_plan`. If stuck (no findings), deploy swarm with different approach classes." in snapshot
         assert "\nWARNING: Budget >60%. If no findings yet, deploy specialists/swarm NOW." in snapshot
         if plan_phase is None:
             assert "\nCurrent Phase:" not in snapshot
@@ -362,7 +362,7 @@ class TestReflectionSnapshot:
         snapshot = get_reflection_snapshot(current_step, max_steps, None)
         assert f"Budget Used: 80%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
         assert "\n**CHECKPOINT 80% REACHED**" in snapshot
-        assert "\nACTION: Call `mem0_get_plan`. Focus ONLY on highest-confidence path. No new exploration." in snapshot
+        assert "\nACTION: Call `get_plan`. Focus ONLY on highest-confidence path. No new exploration." in snapshot
         assert "\nCRITICAL: Budget >80%. Focus on single highest-confidence path only." in snapshot
         if plan_phase is None:
             assert "\nCurrent Phase:" not in snapshot

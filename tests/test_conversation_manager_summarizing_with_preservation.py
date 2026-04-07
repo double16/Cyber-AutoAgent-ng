@@ -26,7 +26,7 @@ def test_reduce_context_summarizing_restores_first_and_protected_messages(monkey
             "content": [
                 {
                     "toolResult": {
-                        "toolUseId": "mem0_get_plan",
+                        "toolUseId": "get_plan",
                         "status": "success",
                         "content": [{"text": '{"phase":"recon"}'}],
                     }
@@ -118,7 +118,7 @@ def test_reduce_context_summarizing_restores_first_and_protected_messages(monkey
         any(
             isinstance(block, dict)
             and "toolResult" in block
-            and block["toolResult"].get("toolUseId") == "mem0_get_plan"
+            and block["toolResult"].get("toolUseId") == "get_plan"
             for block in msg.get("content", [])
         )
         for msg in agent.messages

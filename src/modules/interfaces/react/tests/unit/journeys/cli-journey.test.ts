@@ -44,6 +44,7 @@ function startCli(extraEnv: Record<string,string> = {}): PtySession {
     CI: 'true',
     NODE_ENV: 'test',
     CYBER_TEST_MODE: 'true',
+    CYBER_CONFIG_DIR: testConfigDir,
     ...extraEnv,
   } as any;
 
@@ -76,8 +77,10 @@ const Keys = {
   CTRL_S: '\x13',
 };
 
+const testConfigDir = path.join(__dirname, '..', '..', 'test-config');
+
 function setTestConfig(config: Record<string, any> | null) {
-  const configDir = path.join(os.homedir(), '.cyber-autoagent');
+  const configDir = testConfigDir;
   ensureDir(configDir);
   const configPath = path.join(configDir, 'config.json');
   if (config === null) {

@@ -108,7 +108,7 @@ function writeSwarmEventsFile() {
 }
 
 function ensureTestConfig() {
-  const configDir = path.join(os.homedir(), '.cyber-autoagent');
+  const configDir = join(__dirname, 'test-config');
   try { fs.mkdirSync(configDir, { recursive: true }); } catch {}
   const configPath = path.join(configDir, 'config.json');
   const config = {
@@ -122,13 +122,14 @@ function ensureTestConfig() {
     deploymentMode: 'local-cli'
   };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  return configDir;
 }
 
 async function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 (async () => {
   const { runner, appPath, cwd } = resolveAppTarget();
-  ensureTestConfig();
+  const testConfigDir = ensureTestConfig();
   const eventsPath = writeSwarmEventsFile();
 
   const env = {
@@ -139,6 +140,7 @@ async function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
     CYBER_TEST_MODE: 'true',
     CYBER_TEST_EXECUTION: 'mock',
     CYBER_TEST_EVENTS_PATH: eventsPath,
+    CYBER_CONFIG_DIR: testConfigDir
   };
 
   const args = runner === 'node'

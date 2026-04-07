@@ -41,12 +41,14 @@ from botocore.exceptions import (
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ReadTimeout as RequestsReadTimeout
+from strands import Agent
 from strands.telemetry.config import StrandsTelemetry
 from strands.types.content import Message
 from strands.types.exceptions import MaxTokensReachedException
 
 import litellm
 
+from modules.agents.agent_conversation_builder import rebuild_agent_conversation
 from modules.agents.cyber_autoagent import (
     AgentConfig,
     create_agent,
@@ -55,7 +57,7 @@ from modules.agents.cyber_autoagent import (
 from modules.config.models.factory import get_model_timeout, configure_model_rate_limits
 from modules.config.system.environment import auto_setup, clean_operation_memory, setup_logging
 from modules.config.manager import get_config_manager
-from modules.config.types import get_default_base_dir
+from modules.config.types import get_default_base_dir, DEFAULT_ITERATIONS
 from modules.handlers.base import StepLimitReached, is_docker
 from modules.handlers.conversation_budget import strip_reflection_snapshot_messages, _dedupe_state_markers
 from modules.handlers.utils import (
@@ -69,7 +71,8 @@ from modules.handlers.utils import (
     dumpstacks,
 )
 from modules.prompts.factory import get_reflection_snapshot
-from modules.tools import browser, channel_close_all, mem0_get_active_task, mem0_get_plan, mem0_list
+from modules.tools import browser, channel_close_all, get_active_task, get_plan, mem0_list, get_memory_client
+from modules.tools.memory import OperationPlan
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
 
@@ -306,8 +309,8 @@ def main():
     parser.add_argument(
         "--iterations",
         type=int,
-        default=100,
-        help="Maximum tool executions before stopping (default: 100)",
+        default=DEFAULT_ITERATIONS,
+        help=f"Maximum tool executions before stopping (default: {DEFAULT_ITERATIONS})",
     )
     parser.add_argument(
         "--verbose",
@@ -390,8 +393,16 @@ def main():
         type=str,
         help="Configure MCP servers, requires --mcp-enabled to be applied",
     )
+    parser.add_argument(
+        "--heap-monitor",
+        action="store_true",
+        help="Monitor the heap for usage and trigger dumps when threshold exceeded",
+    )
 
     args = parser.parse_args()
+
+    if args.heap_monitor or os.getenv("CYBER_HEAP_MONITOR", "").lower() == "true":
+        from src.modules.utils import heap_monitor
 
     if args.cont or args.report:
         args.memory_mode = "auto"
@@ -700,14 +711,14 @@ def main():
         current_message = initial_prompt
 
         if args.cont:
-            active_plan = mem0_get_plan() or ""
-            active_task = mem0_get_active_task() or ""
+            active_plan = (get_plan() or {}).get("plan", "")
+            active_task = get_active_task() or ""
             memories = mem0_list()
             if memories.startswith("Error:"):
                 memories = ""
-            if active_plan and not active_plan.get("assessment_complete"):
+            if active_plan:
                 current_message = ""
-                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `mem0_get_plan()`)\n{active_plan}"}])]
+                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `get_plan()`)\n{active_plan}"}])]
                 if memories:
                     agent.messages.append(Message(role="user",
                                                   content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
@@ -867,37 +878,26 @@ def main():
 
                         current_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
                     else:
-                        active_plan = mem0_get_plan() or ""
-                        if active_plan and active_plan.get("assessment_complete"):
+                        active_plan = get_memory_client(silent=True).get_active_plan()
+                        if active_plan and active_plan.assessment_complete:
                             # plan is complete, legit exit
                             break
 
-                        active_task = mem0_get_active_task() or ""
+                        active_task = get_active_task() or ""
                         memories = mem0_list()
                         if memories.startswith("Error:"):
                             memories = ""
-                        # TODO: consider summarizing the memories to reduce content size and increase understanding
 
                         logger.warning(
                             "Attempting to rebuild context because no tool calls were detected in last execution loop.")
 
-                        if not active_plan:
-                            agent.messages[:] = [Message(role="user", content=[{"text": initial_prompt}])]
-                            if memories:
-                                agent.messages.append(Message(role="user",
-                                                              content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
-                            current_message += f"**MANDITORY ACTION**: You have missed an important step, create a strategic plan via mem0_store_plan()."
-                        else:
-                            agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT\n{active_plan}"}])]
-                            if memories:
-                                agent.messages.append(Message(role="user",
-                                                              content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress)\n{memories}"}]))
-
-                            if 'status="active"' in active_task:
-                                agent.messages.append(Message(role="user", content=[{"text": active_task}]))
-                                current_message += f"**MANDITORY ACTION**: The operation is not complete. There are tasks pending. Continue by executing the active task."
-                            elif active_plan:
-                                current_message += f"**MANDITORY ACTION**: Move to next plan phase if current phase criteria met."
+                        current_message = rebuild_agent_conversation(
+                            agent=agent,
+                            active_plan=active_plan,
+                            active_task=active_task,
+                            initial_prompt=initial_prompt,
+                            memories=memories,
+                        )
 
             except StepLimitReached:
                 # Handle step limit reached gracefully without context errors
@@ -1028,6 +1028,8 @@ def main():
                     status_text = f"{Colors.RED}Network Timeout / Rate Limit Reached{Colors.RESET}"
                 elif callback_handler.termination_reason == "error":
                     status_text = f"{Colors.RED}Agent Error Occurred{Colors.RESET}"
+                elif args.report:
+                    status_text = f"{Colors.BLUE}Regenerate Report{Colors.RESET}"
                 else:
                     status_text = f"{Colors.GREEN}Operation Completed{Colors.RESET}"
 

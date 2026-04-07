@@ -88,7 +88,7 @@ sequenceDiagram
     participant Memory
     
     User->>Agent: Start Assessment
-    Agent->>Memory: Initialize (mem0_get_plan|mem0_store_plan)
+    Agent->>Memory: Initialize (get_plan|store_plan)
     Agent->>Strands: Begin Reasoning Loop
     
     loop Assessment Cycle
@@ -233,9 +233,11 @@ graph TB
 ```
 
 **Memory Backend Selection**:
-1. **Mem0 Platform** - If `MEM0_API_KEY` environment variable is set
-2. **OpenSearch** - If `OPENSEARCH_HOST` environment variable is set
-3. **FAISS** - Default local vector storage if neither is configured
+1. **Plans and Tasks**: Stored in a local SQLite database (`plan_store.db`).
+2. **Semantic Memories**:
+   - **Mem0 Platform** - If `MEM0_API_KEY` environment variable is set
+   - **OpenSearch** - If `OPENSEARCH_HOST` environment variable is set
+   - **FAISS** - Default local vector storage if neither is configured
 
 **Evidence Storage Format**:
 ```

@@ -743,36 +743,36 @@ class TestToolPairBoundaryConditions:
 
     MESSAGE_WITH_STATE_FOR_DEDUPE = [
         create_user_message("Initial"),  # preserve first
-        create_tool_use_message("mem0_store_plan", {
+        create_tool_use_message("store_plan", {
             "plan": "{\"objective\":\"Find and validate as many vulnerabilities as possible\",\"current_phase\":1,\"total_phases\":1,\"phases\":[{\"id\":1,\"title\":\"Discovery\",\"status\":\"active\",\"criteria\":\"Identify all accessible endpoints, technologies, and authentication mechanisms.\"}]}"},
-                                "mem0_store_plan_1"),
-        create_tool_result_message("mem0_store_plan_1",
-                                   "{\n  \"results\": [\n    {\n      \"id\": \"b0d17ad5-c0b3-4b8f-ac0c-9149dbc127ef\",\n      \"memory\": \"[PLAN] plan_overview[1]{objective,current_phase,total_phases}:\\n  Find and validate as many vulnerabilities as possible\\nplan_phases[4]{id,title,status,criteria}:\\n  1,Discovery,active,Identify all accessible endpoints; technologies; and authentication mechanisms.\",\n      \"event\": \"ADD\",\n      \"actor_id\": null,\n      \"role\": \"user\"\n    }\n  ]\n}"),
+                                "store_plan_1"),
+        create_tool_result_message("store_plan_1",
+                                   "{\n  \"status\": \"success\": \"plan\": \"plan_overview[1]{objective,current_phase,total_phases}:\\n  Find and validate as many vulnerabilities as possible\\nplan_phases[4]{id,title,status,criteria}:\\n  1,Discovery,active,Identify all accessible endpoints; technologies; and authentication mechanisms.\" }"),
         create_user_message("x"),
-        create_tool_use_message("mem0_get_active_task", {}, "mem0_get_active_task_1"),
-        create_tool_result_message("mem0_get_active_task_1",
+        create_tool_use_message("get_active_task", {}, "get_active_task_1"),
+        create_tool_result_message("get_active_task_1",
                                    "<active_task version=\"1\">{\"task\":{\"task_uid\":\"OLD\"}}</active_task>"),
         create_user_message("y"),
-        create_tool_use_message("mem0_get_active_task", {}, "mem0_get_active_task_2"),
-        create_tool_result_message("mem0_get_active_task_2",
+        create_tool_use_message("get_active_task", {}, "get_active_task_2"),
+        create_tool_result_message("get_active_task_2",
                                    "<active_task version=\"1\">{\"task\":{\"task_uid\":\"OLD\"}}</active_task>"),
         create_user_message("y"),
-        create_tool_use_message("mem0_task_done", {}, "mem0_task_done_1"),
-        create_tool_result_message("mem0_task_done_1",
+        create_tool_use_message("task_done", {}, "task_done_1"),
+        create_tool_result_message("task_done_1",
                                    "<active_task version=\"1\">{\"task\":{\"task_uid\":\"OLD\"}}</active_task>"),
         create_user_message("y"),
         create_user_message("y"),
         create_user_message("y"),
-        create_tool_use_message("mem0_store_plan", {
+        create_tool_use_message("store_plan", {
             "plan": "{\"objective\":\"Find and validate as many vulnerabilities as possible\",\"current_phase\":1,\"total_phases\":4,\"phases\":[{\"id\":1,\"title\":\"Discovery\",\"status\":\"active\",\"criteria\":\"Identify all accessible endpoints, technologies, and authentication mechanisms.\"},{\"id\":2,\"title\":\"Hypothesis\",\"status\":\"pending\",\"criteria\":\"Formulate testable hypotheses for potential vulnerabilities based on discovered assets.\"},{\"id\":3,\"title\":\"Validation\",\"status\":\"pending\",\"criteria\":\"Validate hypotheses using targeted tools and confirm exploitability.\"},{\"id\":4,\"title\":\"Chaining\",\"status\":\"pending\",\"criteria\":\"Chain confirmed vulnerabilities to maximize impact and extract sensitive data.\"}]}"},
-                                "mem0_store_plan_2"),
-        create_tool_result_message("mem0_store_plan_2",
-                                   "{\n  \"results\": [\n    {\n      \"id\": \"b0d17ad5-c0b3-4b8f-ac0c-9149dbc127ef\",\n      \"memory\": \"[PLAN] plan_overview[1]{objective,current_phase,total_phases}:\\n  Find and validate as many vulnerabilities as possible\\nplan_phases[4]{id,title,status,criteria}:\\n  1,Discovery,active,Identify all accessible endpoints; technologies; and authentication mechanisms.\\n  2,Hypothesis,pending,Formulate testable hypotheses for potential vulnerabilities based on discovered assets.\\n  3,Validation,pending,Validate hypotheses using targeted tools and confirm exploitability.\\n  4,Chaining,pending,Chain confirmed vulnerabilities to maximize impact and extract sensitive data.\",\n      \"event\": \"ADD\",\n      \"actor_id\": null,\n      \"role\": \"user\"\n    }\n  ]\n}"),
+                                "store_plan_2"),
+        create_tool_result_message("store_plan_2",
+                                   "{\n  \"status\": \"success\", \"plan\": \"plan_overview[1]{objective,current_phase,total_phases}:\\n  Find and validate as many vulnerabilities as possible\\nplan_phases[4]{id,title,status,criteria}:\\n  1,Discovery,active,Identify all accessible endpoints; technologies; and authentication mechanisms.\\n  2,Hypothesis,pending,Formulate testable hypotheses for potential vulnerabilities based on discovered assets.\\n  3,Validation,pending,Validate hypotheses using targeted tools and confirm exploitability.\\n  4,Chaining,pending,Chain confirmed vulnerabilities to maximize impact and extract sensitive data.\" }"),
         create_user_message("z"),
         create_assistant_message("prune_me_1"),
         create_assistant_message("prune_me_2"),
-        create_tool_use_message("mem0_get_active_task", {}, "mem0_get_active_task_3"),
-        create_tool_result_message("mem0_get_active_task_3",
+        create_tool_use_message("get_active_task", {}, "get_active_task_3"),
+        create_tool_result_message("get_active_task_3",
                                    "<active_task version=\"1\">{\"task\":{\"task_uid\":\"NEW\"}}</active_task>"),
         create_assistant_message("prune_me_3"),
         create_assistant_message("prune_me_4"),
@@ -793,10 +793,10 @@ class TestToolPairBoundaryConditions:
         # We should have pruned everything but active state
         assert len(agent.messages) == 7
         assert agent.messages[0]["content"][0]["text"] == "Initial"
-        assert agent.messages[1]["content"][0]["toolUse"]["name"] == "mem0_store_plan"
+        assert agent.messages[1]["content"][0]["toolUse"]["name"] == "store_plan"
         assert "\\\"total_phases\\\":4" in json.dumps(agent.messages[1]["content"][0]["toolUse"]["input"])
         assert "4,Chaining" in agent.messages[2]["content"][0]["toolResult"]["content"][0]["text"]
-        assert agent.messages[3]["content"][0]["toolUse"]["name"] == "mem0_get_active_task"
+        assert agent.messages[3]["content"][0]["toolUse"]["name"] == "get_active_task"
         assert "\"task_uid\":\"NEW\"" in agent.messages[4]["content"][0]["toolResult"]["content"][0]["text"]
 
     def test_active_state_preserved_with_dedupe(self):
@@ -805,10 +805,10 @@ class TestToolPairBoundaryConditions:
         _dedupe_state_markers(agent)
         assert len(agent.messages) == 16
         assert agent.messages[0]["content"][0]["text"] == "Initial"
-        assert agent.messages[7]["content"][0]["toolUse"]["name"] == "mem0_store_plan"
+        assert agent.messages[7]["content"][0]["toolUse"]["name"] == "store_plan"
         assert "\\\"total_phases\\\":4" in json.dumps(agent.messages[7]["content"][0]["toolUse"]["input"])
         assert "4,Chaining" in agent.messages[8]["content"][0]["toolResult"]["content"][0]["text"]
-        assert agent.messages[12]["content"][0]["toolUse"]["name"] == "mem0_get_active_task"
+        assert agent.messages[12]["content"][0]["toolUse"]["name"] == "get_active_task"
         assert "\"task_uid\":\"NEW\"" in agent.messages[13]["content"][0]["toolResult"]["content"][0]["text"]
 
     def test_active_state_preserved_with_dedupe_task_in_text(self):
@@ -819,7 +819,7 @@ class TestToolPairBoundaryConditions:
         _dedupe_state_markers(agent)
         assert len(agent.messages) == 15
         assert agent.messages[0]["content"][0]["text"] == "Initial"
-        assert agent.messages[7]["content"][0]["toolUse"]["name"] == "mem0_store_plan"
+        assert agent.messages[7]["content"][0]["toolUse"]["name"] == "store_plan"
         assert "\\\"total_phases\\\":4" in json.dumps(agent.messages[7]["content"][0]["toolUse"]["input"])
         assert "4,Chaining" in agent.messages[8]["content"][0]["toolResult"]["content"][0]["text"]
         assert "\"task_uid\":\"NEW_IN_TEXT\"" in agent.messages[14]["content"][0]["text"]

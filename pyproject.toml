@@ -64,6 +64,7 @@ dependencies = [
     "guppy3~=3.1.5",
     "validators~=0.35.0",
     "ddgs~=9.10.0",
+    "rapidfuzz~=3.14.3",
 ]
 
 [project.optional-dependencies]

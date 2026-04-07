@@ -17,6 +17,8 @@ DEFAULT_TEMPERATURE_EXECUTION = 0.5
 DEFAULT_TEMPERATURE_SWARM = 0.4
 DEFAULT_TEMPERATURE_EXPLOITATION = 0.6
 
+DEFAULT_ITERATIONS = 100
+
 LITELLM_EMBEDDING_DEFAULTS: Dict[str, Tuple[str, int]] = {
     "openai": ("openai/text-embedding-3-small", 1536),
     "azure": ("azure/text-embedding-3-small", 1536),
@@ -47,6 +49,7 @@ EMBEDDING_DIMENSIONS: Dict[str, int] = {
     "cohere.embed-english-v3": 1024,
     "cohere.embed-multilingual-v3": 1024,
     "multi-qa-MiniLM-L6-cos-v1": 384,
+    "mxbai-embed-large:latest": 1024,
     "ollama/mxbai-embed-large:latest": 1024,
 }
 MEM0_PROVIDER_MAP: Dict[str, str] = {
@@ -274,7 +277,7 @@ class AgentConfig:
 
     target: str
     objective: str
-    max_steps: int = 100
+    max_steps: int = DEFAULT_ITERATIONS
     available_tools: Optional[List[str]] = None
     op_id: Optional[str] = None
     model_id: Optional[str] = None

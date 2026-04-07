@@ -1,18 +1,23 @@
 # Task Tracking System
 
-The Task Tracking System implements **phase-aware external task state** that enables long-running operations to maintain coverage, avoid context loss, and reliably progress through complex work.
+The Task Tracking System implements **phase-aware persistent state** using a local SQLite database. This enables long-running operations to maintain coverage, avoid context loss, and reliably progress through complex work by decoupling task state from ephemeral LLM context.
 
 ## Design Philosophy: Work Queues for Continuous Progress
 
 The core philosophy centers on **externalizing intent into durable tasks**, transforming ephemeral model attention into an explicit queue that survives context pruning, long tool output, and multi-phase execution.
-
-### Why Task Tracking?
 
 Long operations degrade without a durable work queue:
 - **Context Loss**: discovered threads fall out of the window as tools run and outputs accumulate
 - **Thread Collapse**: multiple distinct leads get merged into one “next step”
 - **Premature Phase Progression**: agents move phases after a single success while work remains
 - **Stop-Too-Early**: recon objectives stop after first validated vuln even when mapping tasks remain
+
+### Task Tracking Persistence
+
+Tasks and plans are stored in a dedicated SQLite database (`plan_store.db`) co-located with the operation's vector memory. This ensures:
+- **ACID Compliance**: Reliable task state transitions even during system crashes.
+- **Relational Queries**: Efficient filtering and sorting of tasks by phase, status, and creation time.
+- **Fuzzy Matching**: Duplicate detection uses fuzzy string comparison (`rapidfuzz`) to prevent redundant work when the model generates slightly different task descriptions for the same objective.
 
 ### The Task-First Approach
 
@@ -28,23 +33,23 @@ The system enforces a loop of:
 
 ```mermaid
 graph TB
-    A[Operation Start] --> B[mem0_store_plan]
+    A[Operation Start] --> B[store_plan]
     B --> C[Seed DISCOVERY tasks]
     C --> D[Task Capture Pass]
-    D --> E[mem0_get_active_task]
+    D --> E[get_active_task]
     E -->|task|null? F[Create 1-3 tasks from observations]
     F --> E
 
     E -->|task active| G[Execute task.objective]
     G --> H[Store artifacts + mem0_store observations/findings]
     H --> I[Task Capture Pass if new evidence]
-    I --> J[mem0_task_done status + status_reason]
+    I --> J[task_done status + status_reason]
     J --> E
 
     E --> K{Checkpoint 20/40/60/80%?}
-    K -->|Yes| L[mem0_get_plan]
+    K -->|Yes| L[get_plan]
     L --> M[Evaluate criteria vs evidence]
-    M -->|Advance| N[mem0_store_plan current_phase++]
+    M -->|Advance| N[store_plan current_phase++]
     M -->|Continue| E
 
     style D fill:#f3e5f5,stroke:#333,stroke-width:2px
@@ -104,12 +109,12 @@ A task has:
 
 The task system uses memory-backed tools:
 
-| Tool                                                | Purpose                                   | Notes                           |
-|-----------------------------------------------------|-------------------------------------------|---------------------------------|
-| `mem0_create_tasks(tasks=[...])`                    | Batch create tasks                        | preferred during capture pass   |
-| `mem0_get_active_task()`                            | Return active task for current phase      | canonical task selection        |
-| `mem0_task_done(status, task_uid?, status_reason?)` | Close a task + activate next (same phase) | tool enforces phase gating      |
-| `mem0_list()`                                       | Retrieve observations/findings/tasks      | used when no active task exists |
+| Tool                                           | Purpose                                   | Notes                           |
+|------------------------------------------------|-------------------------------------------|---------------------------------|
+| `create_tasks(tasks=[...])`                    | Batch create tasks                        | preferred during capture pass   |
+| `get_active_task()`                            | Return active task for current phase      | canonical task selection        |
+| `task_done(status, task_uid?, status_reason?)` | Close a task + activate next (same phase) | tool enforces phase gating      |
+| `mem0_list()`                                  | Retrieve observations/findings/tasks      | used when no active task exists |
 
 **Phase gating**:
 - selection and advancement tools operate only on `current_phase`
@@ -146,19 +151,19 @@ A capture pass runs after:
 ### Current Phase Work Loop
 
 1) Task Capture Pass → no-new-tasks  
-2) `mem0_get_active_task()`  
+2) `get_active_task()`  
 3) If task: execute `task.objective` (minimal steps; one variable per test)  
 4) Store artifacts + mem0_store observation/finding  
 5) If new info: Task Capture Pass again  
-6) Close via `mem0_task_done(status=done|partial_failure|blocked, status_reason, task_uid?)`  
-7) Repeat until `mem0_get_active_task()` returns null for current_phase or checkpoint triggers
+6) Close via `task_done(status=done|partial_failure|blocked, status_reason, task_uid?)`  
+7) Repeat until `get_active_task()` returns null for current_phase or checkpoint triggers
 
 ### No Active Task Recovery
 
-If `mem0_get_active_task()` returns null:
+If `get_active_task()` returns null:
 - call `mem0_list()` (focus on `category="observation"`)
 - derive 1–3 DISCOVERY tasks from the highest-signal observations (include evidence paths)
-- call `mem0_get_active_task()` again
+- call `get_active_task()` again
 
 ---
 
@@ -169,10 +174,10 @@ Long runs require aggressive pruning; the task system remains reliable by preser
 ### State Markers
 
 - `<active_task ...>...</active_task>`: canonical current task state, emitted by:
-  - `mem0_get_active_task` results
-  - `mem0_task_done` results
+  - `get_active_task` results
+  - `task_done` results
 - Plan state is preserved by keeping the most recent toolResult of:
-  - `mem0_get_plan` or `mem0_store_plan`
+  - `get_plan` or `store_plan`
 
 ### Preservation Rules
 
@@ -187,11 +192,11 @@ The conversation manager ensures:
 
 To keep the UI synchronized with task state:
 
-- **task_activated**: emitted when either `mem0_get_active_task` or `mem0_task_done` result is received and the active `task_uid` changes.
+- **task_activated**: emitted when either `get_active_task` or `task_done` result is received and the active `task_uid` changes.
   - includes `task_uid`, `title`, `status`
 
-- **task_done**: emitted when `mem0_task_done` is called.
-  - best when mem0_task_done output includes closure provenance (e.g., `closed.task_uid/status` or tool input contains `task_uid/status`)
+- **task_done**: emitted when `task_done` is called.
+  - best when `task_done` output includes closure provenance (e.g., `closed.task_uid/status` or tool input contains `task_uid/status`)
 
 This provides a reliable timeline for operators without requiring the model to infer state.
 

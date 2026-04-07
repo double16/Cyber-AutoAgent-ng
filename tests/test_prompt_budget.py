@@ -108,25 +108,33 @@ def test_strip_reasoning_content_removes_when_forced():
     agent = AgentStub([message])
     setattr(agent, "_allow_reasoning_content", True)
     _strip_reasoning_content(agent, force=True)
-    assert len(agent.messages) == 0
+    assert len(agent.messages) == 1
 
 
-def test_strip_reasoning_content_removes_when_forced_shared_message_content():
+def test_strip_reasoning_content_allowed_preserves_one_when_forced_shared_message_content():
     message = _make_reasoning_message()
     message["content"].append({"type": "text", "text": "keep me"})
     agent = AgentStub([message])
     setattr(agent, "_allow_reasoning_content", True)
     _strip_reasoning_content(agent, force=True)
     assert len(agent.messages) == 1
-    assert len(agent.messages[0]["content"]) == 1
-    assert "reasoningContent" not in agent.messages[0]["content"][0]
-    assert agent.messages[0]["content"][0]["text"] == "keep me"
+    assert len(agent.messages[0]["content"]) == 2
+    assert "reasoningContent" in agent.messages[0]["content"][0]
+    assert agent.messages[0]["content"][1]["text"] == "keep me"
 
 
 @pytest.mark.parametrize("message_count", [1, 2, 5])
-def test_strip_reasoning_content_removes_preserving_recent_messages(message_count):
+def test_strip_reasoning_content_not_allowed_ignores_preserving_recent_messages(message_count):
     agent = AgentStub([ _make_reasoning_message() for _ in range(message_count)])
     setattr(agent, "_allow_reasoning_content", False)
+    _strip_reasoning_content(agent, preserve_recent_messages=1)
+    assert len(agent.messages) == 0
+
+
+@pytest.mark.parametrize("message_count", [1, 2, 5])
+def test_strip_reasoning_content_allowed_preserving_recent_messages(message_count):
+    agent = AgentStub([_make_reasoning_message() for _ in range(message_count)])
+    setattr(agent, "_allow_reasoning_content", True)
     _strip_reasoning_content(agent, preserve_recent_messages=1)
     assert len(agent.messages) == 1
     assert len(agent.messages[0]["content"]) > 0
@@ -165,7 +173,7 @@ def test_dedupe_state_markers_strips_reflection_and_retains_active_task():
         _make_message("a"),
         _make_message("<reflection_snapshot>\nBudget Used: 10%\n</reflection_snapshot>"),
         _make_message("<active_task version=\"1\">{\"task\":{\"task_uid\":\"X\"}}</active_task>"),
-        _make_message("**ACTION**: Call `mem0_get_active_task()`.\n<reflection_snapshot>\nBudget Used: 20%\n</reflection_snapshot>"),
+        _make_message("**ACTION**: Call `get_active_task()`.\n<reflection_snapshot>\nBudget Used: 20%\n</reflection_snapshot>"),
         _make_message("b"),
     ]
     agent = AgentStub(messages)
