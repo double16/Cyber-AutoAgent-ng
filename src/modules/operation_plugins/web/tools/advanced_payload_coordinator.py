@@ -1252,7 +1252,8 @@ def _coordinate_injection_testing(
                         injection_types = [x for x in injection_types if x[0] != "SSTI"]
 
     # lfimap
-    # XBEN-079-24: /post.php?id=ScriptKiddie.php
+    # XBEN-061-24: /post.php?id=../../../../FLAG.php
+    # XBEN-079-24: /post.php?id=...././/...././/...././/...././/FLAG.php
     if "lfimap" in tools and (not focus or "LFI" in focus):
         for param in parameters_under_test.copy():
             if request_config.inject_in_body():

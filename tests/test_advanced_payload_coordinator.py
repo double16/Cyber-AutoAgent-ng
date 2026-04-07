@@ -552,7 +552,8 @@ def test_coordinate_injection_testing_sstimap_parses_and_discards_param(monkeypa
 def test_coordinate_injection_testing_lfimap_parses_timeout_stdout(monkeypatch):
     lfimap_stdout = """
 [*] Starting Data URI LFI Attack...
-[*] Testing Data URI payload: data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7ID8+
+[*] Testing Data URI payload:
+data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7ID8+
 [+] Data URI LFI successful! Injected code appears to be processed.
 """
 
