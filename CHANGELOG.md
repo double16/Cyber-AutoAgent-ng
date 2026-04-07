@@ -3,9 +3,9 @@
 ## v0.8.0
 
 Features:
-- Task system (#26, #89)
+- Task system (#26)
 - System prompt optimization
-- Rejection of early phase transition or termination  
+- Rejection of early phase transition or termination (#89)
 - Ollama context length set via `OLLAMA_CONTEXT_LENGTH` env var (models do not need to be extended)
 - Option for continuing an operation
 - Option for re-generate a report (#21)
@@ -18,6 +18,7 @@ Bug fixes:
 - React UI memory leak fixes
 - Workaround agent sending incorrect arguments for shell tool
 - Reduce the default temperature of agents
+- Limit reasoning content to three messages, prune to one when budget is tight
 
 
 **NOTE:** Requires rebuilding the cyber-autoagent-tools image
