@@ -60,10 +60,17 @@ def test_store_plan_with_json_string():
 
 
 def test_store_plan_invalid_input():
-    with pytest.raises(ValueError, match="store_plan content must be object/dict or JSON string"):
-        store_plan(123)
-    with pytest.raises(ValueError, match="Got string that is not valid JSON"):
-        store_plan("not a json")
+    with patch("modules.tools.memory._ensure_memory_client") as mc, patch("modules.tools.memory._user_id") as mui:
+        mock_client = MagicMock()
+        mc.return_value = mock_client
+        mui.return_value = "user"
+        mock_client.get_active_plan.return_value = None
+        mock_client.store_plan.return_value = {"status": "success"}
+
+        with pytest.raises(ValueError, match="store_plan content must be object/dict or JSON string"):
+            store_plan(123)
+        with pytest.raises(ValueError, match="Got string that is not valid JSON"):
+            store_plan("not a json")
 
 
 def test_store_plan_phase_change_validation_refusal():
