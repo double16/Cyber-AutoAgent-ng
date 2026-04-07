@@ -11,13 +11,16 @@ from modules.config.system.logger import get_logger
 from modules.prompts.factory import get_reflection_snapshot
 from modules.utils.text_reducer import reduce_lines_lossy, collapse_first_repeated_sequence
 
+from modules.agents.patches import _JSON_FENCE_RE, _JSON_BARE_RE, patch_ollama_model_json_toolcalls
+
+
 logger = get_logger("Handlers.AgentRepairHook")
 
 _XML_TOOLCALL_RE = re.compile(r"<(?:function|parameter)=[^>]+>.*?</function>", re.DOTALL)
 
 _TOOL_CALLS_RETRY_STATE_KEY = "force_openai_toolcalls_retry"
 _REASONING_LOOP_RETRY_STATE_KEY = "reasoning_loop_retry"
-
+_JSON_TOOL_CALL_PATCH_ATTEMPT = False
 
 class AgentRepairHook(HookProvider):
     """
@@ -27,6 +30,10 @@ class AgentRepairHook(HookProvider):
 
     Case two:
     Reasoning loop exceeds max tokens.
+
+    Case three:
+    Ollama fails to parse tool_calls due to malformed JSON emitted by the model.
+    Example: ollama._types.ResponseError: error parsing tool call: ... invalid character '}' after object key
     """
 
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
@@ -40,12 +47,33 @@ class AgentRepairHook(HookProvider):
         - If we detect XML-ish tool call markup, request a retry.
         - If we detect reasoning loop exceeds max tokens, request a retry.
         """
+        global _JSON_TOOL_CALL_PATCH_ATTEMPT
         if event is None:
             return
 
         try:
             agent = event.agent
             callback_handler = getattr(agent, "callback_handler", None)
+
+            # Ollama fails to parse tool_calls due to malformed JSON emitted by the model.
+            if event.exception is not None:
+                error_str = str(event.exception)
+                error_str_l = error_str.lower()
+                if (
+                    "error parsing tool call" in error_str_l
+                    or "invalid character" in error_str_l
+                    or "parse tool call" in error_str_l
+                ):
+                    state = self._state_bag(event)
+                    if not state.get(_TOOL_CALLS_RETRY_STATE_KEY):
+                        state[_TOOL_CALLS_RETRY_STATE_KEY] = True
+                        event.retry = True
+                        logger.warning(
+                            "Detected tool-call JSON parse error in step %s; retrying once with stricter tool_call JSON instruction (%s)",
+                            str(callback_handler.current_step) if callback_handler else "?",
+                            error_str[:200].replace("\n", " "),
+                        )
+                    return
 
             max_tokens_reached = False
             if event.stop_response is not None and event.stop_response.stop_reason == "max_tokens":
@@ -122,6 +150,22 @@ class AgentRepairHook(HookProvider):
                 if not assistant_text:
                     continue
 
+                # Look for tool call using json "name" and "arguments"/"parameters"
+                if not _JSON_TOOL_CALL_PATCH_ATTEMPT:
+                    json_tool_call_candidate = None
+                    if json_m := _JSON_FENCE_RE.search(assistant_text):
+                        json_tool_call_candidate = json_m.group(1)
+                    elif json_m := _JSON_BARE_RE.search(assistant_text):
+                        json_tool_call_candidate = json_m.group(1)
+                    if json_tool_call_candidate is not None \
+                            and '"name"' in json_tool_call_candidate \
+                            and ('"arguments"' in json_tool_call_candidate or '"parameters"' in json_tool_call_candidate):
+                        _JSON_TOOL_CALL_PATCH_ATTEMPT = True
+                        if patch_ollama_model_json_toolcalls():
+                            logger.info("Detected JSON style tool calls, patched model and retry")
+                            event.retry = True
+                            return
+
                 if _XML_TOOLCALL_RE.search(assistant_text):
                     # Mark for one retry and ask Strands to redo the model call
                     state = self._state_bag(event)
@@ -158,9 +202,13 @@ class AgentRepairHook(HookProvider):
                 messages.append({
                     "role": "system",
                     "content": [{"type": "text", "text": (
-                        "IMPORTANT: Tool calls must be emitted using OpenAI-style tool calling only "
+                        "IMPORTANT: Your previous output contained a malformed tool call that could not be parsed. "
+                        "Tool calls must be emitted using OpenAI-style tool calling only "
                         "(tool_calls with JSON arguments). Do NOT output tool calls in XML/HTML/text "
-                        "such as <function=...> or <parameter=...>. If you need a tool, emit a proper tool call."
+                        "such as <function=...> or <parameter=...>, markdown code fences, or additional text. "
+                        "For each tool call, the arguments MUST be strictly valid JSON (no trailing commas, no comments, "
+                        "no extra braces, no partial objects, no stray characters). "
+                        "Retry and emit ONLY valid OpenAI-style tool_calls. "
                     )}]
                 })
                 logger.warning("Injected tool-call format correction into retry model call")
@@ -186,16 +234,16 @@ class AgentRepairHook(HookProvider):
                 messages.append({
                     "role": "system",
                     "content": [{"type": "text", "text": (
-                        f"""<continue_instructions>
-You are continuing from a prior run that entered a repetitive reasoning loop.
+                        f"""You are continuing from a prior run that entered a repetitive reasoning loop.
 
 ## CONSTRAINTS
 - Do NOT restate repeated points from the reduced notes.
 - Output must be structured, actionable, and short.
 - Avoid meta commentary about "looping" beyond what's required to recover.
 
+<reflection_snapshot>
 {reflection_snapshot}
-<continue_instructions>"""
+</reflection_snapshot>"""
                     )}]
                 })
                 try:

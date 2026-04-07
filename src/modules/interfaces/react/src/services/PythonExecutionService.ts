@@ -641,7 +641,19 @@ export class PythonExecutionService extends EventEmitter {
         '--iterations', String(config.iterations || 100),
         '--provider', config.modelProvider || 'bedrock',
       ];
-      
+
+      if (params.continueOperation === true || params.continueOperation === "") {
+        args.push('--continue');
+      } else if (params.continueOperation) {
+        args.push('--continue', params.continueOperation);
+      }
+
+      if (params.reportOnly === true || params.reportOnly === "") {
+        args.push('--report');
+      } else if (params.reportOnly) {
+        args.push('--report', params.reportOnly);
+      }
+
       if (config.modelId) {
         args.push('--model', config.modelId);
       }
@@ -690,6 +702,7 @@ export class PythonExecutionService extends EventEmitter {
         ...(config.sagemakerBaseUrl ? { SAGEMAKER_BASE_URL: config.sagemakerBaseUrl } : {}),
         // Ollama Configuration
         ...(config.ollamaHost ? { OLLAMA_HOST: config.ollamaHost } : {}),
+        ...(config.ollamaContextLength ? { OLLAMA_CONTEXT_LENGTH: String(config.ollamaContextLength) } : {}),
         ...(config.ollamaTimeout ? { OLLAMA_TIMEOUT: String(config.ollamaTimeout) } : {}),
         // LiteLLM Configuration (only set if provided)
         ...(config.openaiApiKey ? { OPENAI_API_KEY: config.openaiApiKey } : {}),
@@ -720,6 +733,7 @@ export class PythonExecutionService extends EventEmitter {
         // Model Configuration - pass separate models from config
         ...(config.swarmModel ? { CYBER_AGENT_SWARM_MODEL: config.swarmModel } : {}),
         ...(config.evaluationModel ? { CYBER_AGENT_EVALUATION_MODEL: config.evaluationModel } : {}),
+        ...(config.memoryModel ? { MEM0_LLM_MODEL: config.memoryModel } : {}),
         // Model rate limits
         ...(config.rateLimitTokensPerMinute ? { CYBER_RATE_LIMIT_TOKENS_PER_MIN: String(config.rateLimitTokensPerMinute) } : {}),
         ...(config.rateLimitRequestsPerMinute ? { CYBER_RATE_LIMIT_REQ_PER_MIN: String(config.rateLimitRequestsPerMinute) } : {}),

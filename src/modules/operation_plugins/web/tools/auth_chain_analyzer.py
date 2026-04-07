@@ -54,7 +54,7 @@ def auth_chain_analyzer(target_url: str, auth_type: str = "auto") -> str:
     - summary: mechanism/token types, confirmed_exploits count
     - evidence: endpoints/mechanisms/tokens/flow mapping
     - findings[]: observed/confirmed auth bypass or controls + evidence
-    - next_steps[]: prioritized, capability-tagged tasks
+    - next_steps[]: prioritized, capability-tagged next steps
     - decision: routing hints (best_attack_surface, next_phase)
 
     HOW TO USE
@@ -1506,7 +1506,7 @@ def _test_advanced_auth_bypasses(target_url: str, results: Dict) -> List[Dict[st
 
 
 def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
-    """Generate agent next-steps (structured tasks) to drive discovery, verification, and exploitation.
+    """Generate agent next-steps to drive discovery, verification, and exploitation.
 
     Output is designed for machine consumption:
       - priority: integer (1 = highest)
@@ -1546,7 +1546,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
             ep = v.get("endpoint") or v.get("path") or ""
             _add(
                 {
-                    "id": f"TASK_EXPLOIT_CONFIRMED_{i}",
+                    "id": f"EXPLOIT_CONFIRMED_{i}",
                     "priority": 1,
                     "capabilities": ["http_client", "web_recon", "priv_esc"],
                     "goal": f"Exploit confirmed bypass '{tech}'{(' on ' + ep) if ep else ''} and expand access.",
@@ -1565,7 +1565,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
 
         _add(
             {
-                "id": "TASK_POST_BYPASS_IDOR_PIVOT",
+                "id": "POST_BYPASS_IDOR_PIVOT",
                 "priority": 2,
                 "capabilities": ["web_recon", "http_client", "priv_esc"],
                 "goal": "After bypass, attempt IDOR-style pivots and privilege proof.",
@@ -1594,7 +1594,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
 
         _add(
             {
-                "id": "TASK_MAP_AUTH_ENTRYPOINTS",
+                "id": "MAP_AUTH_ENTRYPOINTS",
                 "priority": 3,
                 "capabilities": ["web_recon", "http_client", "proxying"],
                 "goal": "Map primary auth entrypoints and redirect chains (no auto-follow).",
@@ -1616,7 +1616,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
     if admin_eps:
         _add(
             {
-                "id": "TASK_ADMIN_ENDPOINT_AUTHZ_MATRIX",
+                "id": "ADMIN_ENDPOINT_AUTHZ_MATRIX",
                 "priority": 4,
                 "capabilities": ["http_client", "web_recon", "web_fuzzing"],
                 "goal": "Build an authz matrix for admin endpoints (unauth vs low-priv vs header/method variations).",
@@ -1640,7 +1640,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
     if cookie_tokens or (session_info.get("session_cookies", 0) > 0 and sess_analysis):
         _add(
             {
-                "id": "TASK_SESSION_REPLAY_AND_FIXATION",
+                "id": "SESSION_REPLAY_AND_FIXATION",
                 "priority": 5,
                 "capabilities": ["http_client", "proxying", "traffic_capture"],
                 "goal": "Attempt session replay and session fixation verification.",
@@ -1662,7 +1662,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
     if jwt_tokens or jwt_mechs:
         _add(
             {
-                "id": "TASK_JWT_CLAIM_TAMPER_VERIFY",
+                "id": "JWT_CLAIM_TAMPER_VERIFY",
                 "priority": 6,
                 "capabilities": ["jwt", "crypto", "http_client"],
                 "goal": "Decode JWTs, tamper privilege claims, and verify acceptance.",
@@ -1684,7 +1684,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
     if oauth_mechs:
         _add(
             {
-                "id": "TASK_OAUTH_REDIRECT_AND_STATE_TESTS",
+                "id": "OAUTH_REDIRECT_AND_STATE_TESTS",
                 "priority": 7,
                 "capabilities": ["web_recon", "http_client", "web_fuzzing"],
                 "goal": "Test OAuth/OIDC redirect_uri and state/nonce enforcement; verify token/code binding failures.",
@@ -1705,7 +1705,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
     if saml_mechs:
         _add(
             {
-                "id": "TASK_SAML_ASSERTION_VALIDATION_TESTS",
+                "id": "SAML_ASSERTION_VALIDATION_TESTS",
                 "priority": 8,
                 "capabilities": ["http_client", "web_recon"],
                 "goal": "Collect SAML messages and test assertion validation weaknesses.",
@@ -1726,7 +1726,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
         for i, opp in enumerate([o for o in bypass_opps if isinstance(o, dict)][:5], 1):
             _add(
                 {
-                    "id": f"TASK_VERIFY_BYPASS_HYPOTHESIS_{i}",
+                    "id": f"VERIFY_BYPASS_HYPOTHESIS_{i}",
                     "priority": 9,
                     "capabilities": ["http_client", "web_recon"],
                     "goal": f"Verify bypass hypothesis: {opp.get('type', 'Bypass')}",
@@ -1748,7 +1748,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
         if eps:
             _add(
                 {
-                    "id": "TASK_PRIV_ESC_TARGETED_VALIDATION",
+                    "id": "PRIV_ESC_TARGETED_VALIDATION",
                     "priority": 10,
                     "capabilities": ["priv_esc", "http_client", "web_recon"],
                     "goal": "Targeted privilege escalation validation against identified endpoints.",
@@ -1768,7 +1768,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
     if not steps:
         _add(
             {
-                "id": "TASK_BROADEN_DISCOVERY",
+                "id": "BROADEN_DISCOVERY",
                 "priority": 1,
                 "capabilities": ["web_crawling", "web_recon", "web_fuzzing", "http_client"],
                 "goal": "Broaden discovery for auth surfaces and protected resources.",

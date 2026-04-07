@@ -49,6 +49,8 @@ export interface Config {
   modelProvider: 'bedrock' | 'ollama' | 'litellm' | 'gemini';
   /** Main assessment model identifier (e.g., 'claude-sonnet-4', 'llama3.1:8b') */
   modelId: string;
+  /** LLM model used for memory operations */
+  memoryModel?: string;
   /** Vector embedding model for memory operations */
   embeddingModel?: string;
   /** Quality evaluation model for assessment validation */
@@ -81,6 +83,8 @@ export interface Config {
   sagemakerBaseUrl?: string;
   /** Ollama server host URL for local model serving */
   ollamaHost?: string;
+  /** Ollama server context length */
+  ollamaContextLength?: number;
   /** Ollama server timeout */
   ollamaTimeout?: number;
 
@@ -337,11 +341,12 @@ const deploymentDefaults = getDeploymentDefaults();
 export const defaultConfig: Config = {
   // Model Provider Settings
   modelProvider: 'bedrock',
-  modelId: 'global.anthropic.claude-opus-4-5-20251101-v1:0', // Latest Opus 4.5 with effort parameter support (cross-region)
+  modelId: 'global.anthropic.claude-opus-4-5-20251101-v1:0',
   embeddingModel: 'amazon.titan-embed-text-v2:0',
   evaluationModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+  memoryModel: process.env.MEM0_LLM_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   swarmModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
-  temperature: 0.95,
+  temperature: 0.5,
   awsRegion: process.env.AWS_REGION || 'us-east-1',
   awsBearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK,
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -355,6 +360,7 @@ export const defaultConfig: Config = {
   awsExternalId: process.env.AWS_EXTERNAL_ID,
   sagemakerBaseUrl: process.env.SAGEMAKER_BASE_URL,
   ollamaHost: process.env.OLLAMA_HOST || 'http://localhost:11434',
+  ollamaContextLength: parseInt(process.env.OLLAMA_CONTEXT_LENGTH) || null,
   ollamaTimeout: parseFloat(process.env.OLLAMA_TIMEOUT) || 120,
 
   // Model Pricing (per 1K tokens)
@@ -510,8 +516,8 @@ export const defaultConfig: Config = {
   conversationWindow: 100, // Default conversation window size (sliding window)
   conversationPreserveFirst: 1, // Preserve system messages
   conversationPreserveLast: 5, // Preserve recent context (reduced from 12 to prevent pruning deadlock)
-  toolMaxResultChars: 30000, // Max tool output before truncation
-  toolArtifactThreshold: 10000, // Externalize outputs larger than this
+  toolMaxResultChars: undefined, // Max tool output before truncation, auto based on context size
+  toolArtifactThreshold: undefined, // Externalize outputs larger than this, auto based on context size
 
   // Execution Configuration
   executionMode: undefined, // Auto-select based on availability
@@ -604,7 +610,10 @@ export const ConfigContext = createContext<ConfigContextType | undefined>(undefi
 export const ConfigProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [config, setConfig] = useState<Config>(defaultConfig);
   const [isConfigLoading, setIsConfigLoading] = useState(true);
-  const configFilePath = useMemo(() => path.join(os.homedir(), '.cyber-autoagent', 'config.json'), []);
+  const configFilePath = useMemo(() => {
+    const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
+    return path.join(configDir, 'config.json');
+  }, []);
 
   // Use a ref to get the latest config in callbacks without adding a dependency
   const configRef = useRef(config);

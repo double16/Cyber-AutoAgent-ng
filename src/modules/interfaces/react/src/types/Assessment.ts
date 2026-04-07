@@ -7,6 +7,8 @@ export interface AssessmentParams {
   target: string;
   objective?: string;
   availableTools?: string[];
+  continueOperation?: string | boolean;
+  reportOnly?: string | boolean;
 }
 
 export interface AssessmentState {

@@ -13,12 +13,12 @@ from strands import Agent
 from strands.handlers import PrintingCallbackHandler
 from strands.models import BedrockModel
 from strands.models.litellm import LiteLLMModel
-from strands.models.ollama import OllamaModel
+from strands_tools.editor import editor
+from modules.config.models.ollama import OllamaModel
 
 from modules.config.manager import get_config_manager
 from modules.config.models.factory import create_gemini_model
 from modules.config.system.logger import get_logger
-from modules.prompts.factory import get_report_agent_system_prompt
 from modules.agents.patches import ToolUseIdHook
 from modules import __version__
 
@@ -36,15 +36,16 @@ class ReportGenerator:
     """Factory for a report-generation Agent with a single builder tool.
 
     The agent is configured with a concise system prompt and the
-    build_report_sections tool. Output is returned to the caller.
+    output of the build_report_sections function. Output is returned to the caller.
     """
 
-    @staticmethod
     def create_report_agent(
-        provider: str = "bedrock",
+        provider: str,
+        system_prompt: str,
         model_id: Optional[str] = None,
         operation_id: Optional[str] = None,
         target: Optional[str] = None,
+        callback_handler = None,
     ) -> Agent:
         """
         Create a clean agent instance for report generation.
@@ -58,11 +59,13 @@ class ReportGenerator:
             model_id: Specific model to use (optional)
             operation_id: Operation ID for trace continuity
             target: Target system for trace metadata
+            system_prompt: Optional custom system prompt
 
         Returns:
             Configured Agent instance for report generation
         """
         # Select model via central configuration, with sensible defaults
+        # do not specify max tokens, let the model use up the context
         cfg = get_config_manager()
         prov = (provider or "bedrock").lower()
         if prov == "bedrock":
@@ -82,19 +85,14 @@ class ReportGenerator:
                 max_pool_connections=100,
             )
 
-            # Use the same max_tokens budget as the primary Bedrock model
-            max_tokens = llm_cfg.max_tokens
-
             # Ensure explicit region to avoid environment inconsistencies
             region = cfg.get_server_config("bedrock").region
             model = BedrockModel(
                 model_id=mid,
                 region_name=region,
-                max_tokens=max_tokens,
                 temperature=0.3,
                 boto_client_config=boto_config,
             )
-            setattr(model, "_output_tokens", max_tokens)
         elif prov == "gemini":
             # Always use the primary model from config
             llm_cfg = cfg.get_llm_config("gemini")
@@ -116,32 +114,24 @@ class ReportGenerator:
                 host=host,
                 model_id=mid,
                 temperature=0.3,
-                max_tokens=llm_cfg.max_tokens,
                 ollama_client_args={
                     "timeout": cfg.get_ollama_timeout(),
                 },
+                options=cfg.get_ollama_options(),
             )
-            setattr(model, "_output_tokens", llm_cfg.max_tokens)
         else:  # litellm
             llm_cfg = cfg.get_llm_config("litellm")
             # Only override if explicitly provided, otherwise use config
             mid = model_id if model_id else llm_cfg.model_id
             # Pass both token params - LiteLLM drop_params removes unsupported one
-            llm_max = llm_cfg.max_tokens
             params = {
                 "temperature": 0.3,
-                "max_tokens": llm_max,
-                "max_completion_tokens": llm_max,
             }
             client_args = {
                 "num_retries": 5,
                 "timeout": 1200,
             }
             model = LiteLLMModel(model_id=mid, params=params, client_args=client_args)
-            setattr(model, "_output_tokens", llm_max)
-
-        # Import the report builder tool
-        from modules.tools.report_builder import build_report_sections
 
         # Create agent with report-specific configuration
         trace_attrs = {
@@ -153,6 +143,7 @@ class ReportGenerator:
             # Tags for filtering and categorization
             "langfuse.tags": [
                 "Cyber-AutoAgent",
+                prov,
                 operation_id,
             ],
             "langfuse.environment": cfg.getenv(
@@ -186,13 +177,9 @@ class ReportGenerator:
         return Agent(
             model=model,
             name=f"Cyber-ReportGenerator {operation_id}",
-            system_prompt=get_report_agent_system_prompt(),
-            tools=[build_report_sections],
+            system_prompt=system_prompt,
+            tools=[editor],
             trace_attributes=trace_attrs if operation_id else None,
-            callback_handler=NoOpCallbackHandler(),
+            callback_handler=callback_handler or NoOpCallbackHandler(),
             hooks=[ToolUseIdHook()],
         )
-
-
-# For backward compatibility - in case anything is importing ReportAgent
-ReportAgent = ReportGenerator

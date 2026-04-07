@@ -222,62 +222,84 @@ export function getToonPlanPreview(content: unknown): string | null {
   return `${preview.objective}${descriptor}`;
 }
 
-export const toolFormatters: Record<string, ToolFormatter> = {
-  mem0_memory: (input) => {
-    const action = input.action || 'unknown';
-    if (action === 'unknown') return '';
+function mem0_formatter(tool_name) {
+    return (input) => {
+       const action = tool_name.substring(5) || 'unknown';
+       if (action === 'unknown') return '';
 
-    // Handle list/retrieve - show count instead of truncated JSON
-    if (action === 'list' || action === 'retrieve') {
-      // If we have results in the output, count them
-      // This will be populated after tool completes, but input preview won't have it
-      return `${action} memories`;
-    }
-
-    let content = input.content || input.query || '';
-
-    // Extract memory content from nested JSON responses
-    // Memory tool results often come as: {results: [{memory: "...", ...}]}
-    if (typeof content === 'string' && content.trim().startsWith('{')) {
-      try {
-        const parsed = JSON.parse(content);
-
-        // Handle mem0 result format: {results: [{memory: "..."}]}
-        if (parsed.results && Array.isArray(parsed.results) && parsed.results.length > 0) {
-          const firstResult = parsed.results[0];
-          if (firstResult.memory) {
-            content = firstResult.memory;
-          }
+        // Handle list/retrieve - show count instead of truncated JSON
+        if (action === 'list' || action === 'retrieve') {
+          // If we have results in the output, count them
+          // This will be populated after tool completes, but input preview won't have it
+          return `${action} memories`;
         }
-        // Handle direct memory object: {memory: "..."}
-        else if (parsed.memory) {
-          content = parsed.memory;
-        }
-      } catch {
-        // If parsing fails, keep original content
-      }
-    }
 
-    // Normalize content for display
-    const normalizedContent = typeof content === 'string'
+       let content = input.content || input.query || '';
+
+       // Extract memory content from nested JSON responses
+       // Memory tool results often come as: {results: [{memory: "...", ...}]}
+       if (typeof content === 'string' && content.trim().startsWith('{')) {
+         try {
+           const parsed = JSON.parse(content);
+
+           // Handle mem0 result format: {results: [{memory: "..."}]}
+           if (parsed.results && Array.isArray(parsed.results) && parsed.results.length > 0) {
+             const firstResult = parsed.results[0];
+             if (firstResult.memory) {
+               content = firstResult.memory;
+             }
+           }
+           // Handle direct memory object: {memory: "..."}
+           else if (parsed.memory) {
+             content = parsed.memory;
+           }
+         } catch {
+           // If parsing fails, keep original content
+         }
+       }
+
+       // Normalize content for display
+       const normalizedContent = typeof content === 'string'
+         ? content
+         : isObject(content)
+           ? (() => { try { return JSON.stringify(content); } catch { return toSafeString(content); } })()
+           : toSafeString(content);
+
+       const preview = truncate(normalizedContent, 60);
+
+       const actionDisplay = action === 'store' ? 'storing memory'
+         : action === 'retrieve' ? 'retrieving memory'
+         : action;
+       const labelDisplay = action === 'store' ? 'content' : 'query';
+
+       return preview ? `${actionDisplay} | ${labelDisplay}: ${preview}` : actionDisplay;
+     }
+}
+
+function plan_formatter(input) {
+  let content = input.plan || '';
+
+  // Normalize content for display
+  const normalizedContent = typeof content === 'string'
       ? content
       : isObject(content)
-        ? (() => { try { return JSON.stringify(content); } catch { return toSafeString(content); } })()
-        : toSafeString(content);
+          ? (() => { try { return JSON.stringify(content); } catch { return toSafeString(content); } })()
+          : toSafeString(content);
 
-    // Try to extract TOON plan preview
-    const planPreview = getToonPlanPreview(normalizedContent);
-    const preview = planPreview ?? truncate(normalizedContent, 60);
+  // Try to extract TOON plan preview
+  const planPreview = getToonPlanPreview(normalizedContent);
+  const preview = planPreview ?? truncate(normalizedContent, 60);
 
-    const actionDisplay = action === 'store' ? 'storing memory'
-      : action === 'retrieve' ? 'retrieving memory'
-      : action;
-    const labelDisplay = planPreview || action === 'store_plan' ? 'plan'
-      : action === 'store' ? 'content'
-      : 'query';
+  return `plan: ${preview}`;
+}
 
-    return preview ? `${actionDisplay} | ${labelDisplay}: ${preview}` : actionDisplay;
-  },
+export const toolFormatters: Record<string, ToolFormatter> = {
+  mem0_store: mem0_formatter("mem0_store"),
+  mem0_get: mem0_formatter("mem0_get"),
+  mem0_retrieve: mem0_formatter("mem0_retrieve"),
+  mem0_list: mem0_formatter("mem0_list"),
+  store_plan: plan_formatter,
+  get_plan: plan_formatter,
 
   validation_specialist: (input) => {
     if (!input || typeof input !== 'object') {
@@ -454,7 +476,18 @@ export const toolFormatters: Record<string, ToolFormatter> = {
     const descInfo = toolDescription ? ` | ${toolDescription}` : '';
     return `loading: ${toolName}${pathInfo}${descInfo}`;
   },
-  
+
+  create_tasks: (input) => {
+    if (!Array.isArray(input.tasks)) {
+      return 'invalid tasks input: expected an array';
+    }
+    if (input.tasks.length === 0) {
+      return 'no tasks to create';
+    }
+    const titles = input.tasks.slice(0, 10).map((task) => `• ${truncate(task.title, 50)}`).join('\n');
+    return `create ${input.tasks.length} tasks:\n${titles}`;
+  },
+
   stop: (input) => {
     return input.reason || 'Manual stop requested';
   }

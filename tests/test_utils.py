@@ -3,11 +3,10 @@
 
 import os
 import tempfile
-from pathlib import Path
 
 from modules.handlers.utils import (
-    analyze_objective_completion,
     create_output_directory,
+    filter_none_values,
     get_output_path,
     sanitize_target_name,
     validate_output_path,
@@ -185,85 +184,29 @@ class TestCreateOutputDirectory:
         assert result is False
 
 
-class TestAnalyzeObjectiveCompletion:
-    """Test analyze_objective_completion function (existing tests)."""
+class TestFilterNoneValues:
+    """Test filter_none_values function."""
 
-    def test_empty_messages(self):
-        """Test with empty messages."""
-        result = analyze_objective_completion([])
-        assert result == (False, "", {})
+    def test_filter_none_values_mixed(self):
+        """Test with mixed None and non-None values."""
+        input_dict = {"a": 1, "b": None, "c": "hello", "d": None, "e": []}
+        expected = {"a": 1, "c": "hello", "e": []}
+        assert filter_none_values(input_dict) == expected
 
-    def test_objective_achieved_simple(self):
-        """Test simple objective achieved message."""
-        messages = [
-            {
-                "role": "assistant",
-                "content": [
-                    {"text": "objective achieved: SQL injection vulnerability found"}
-                ],
-            }
-        ]
-        is_complete, summary, metadata = analyze_objective_completion(messages)
-        assert is_complete is True
-        assert summary == "SQL injection vulnerability found"
-        assert metadata["agent_determined"] is True
+    def test_filter_none_values_all_none(self):
+        """Test with all None values."""
+        input_dict = {"a": None, "b": None}
+        expected = {}
+        assert filter_none_values(input_dict) == expected
 
-    def test_objective_achieved_with_confidence(self):
-        """Test objective achieved with confidence percentage."""
-        messages = [
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "text": "objective achieved: Target compromised with 95% confidence"
-                    }
-                ],
-            }
-        ]
-        is_complete, summary, metadata = analyze_objective_completion(messages)
-        assert is_complete is True
-        assert summary == "Target compromised with 95% confidence"
-        assert metadata["confidence"] == 95
+    def test_filter_none_values_no_none(self):
+        """Test with no None values."""
+        input_dict = {"a": 1, "b": 2}
+        expected = {"a": 1, "b": 2}
+        assert filter_none_values(input_dict) == expected
 
-    def test_flag_detected(self):
-        """Test flag detection."""
-        messages = [
-            {
-                "role": "assistant",
-                "content": [{"text": "Success! Found the flag: FLAG{test_flag_123}"}],
-            }
-        ]
-        is_complete, summary, metadata = analyze_objective_completion(messages)
-        assert is_complete is True
-        assert "FLAG{test_flag_123}" in summary
-        assert metadata["flag_detected"] is True
-
-    def test_success_indicator(self):
-        """Test success indicator detection."""
-        messages = [
-            {
-                "role": "assistant",
-                "content": [{"text": "Challenge complete - all objectives met"}],
-            }
-        ]
-        is_complete, summary, metadata = analyze_objective_completion(messages)
-        assert is_complete is True
-        assert "challenge complete" in summary
-        assert metadata["success_indicator"] is True
-
-    def test_no_completion_indicators(self):
-        """Test messages without completion indicators."""
-        messages = [
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "text": "Still working on the target, found some interesting ports"
-                    }
-                ],
-            }
-        ]
-        is_complete, summary, metadata = analyze_objective_completion(messages)
-        assert is_complete is False
-        assert summary == ""
-        assert metadata == {}
+    def test_filter_none_values_empty(self):
+        """Test with empty dictionary."""
+        input_dict = {}
+        expected = {}
+        assert filter_none_values(input_dict) == expected

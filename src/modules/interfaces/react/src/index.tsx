@@ -57,19 +57,21 @@ const cli = meow(`
     $ cyber-react [options]
 
   Options
-    --target, -t         Target system/network to assess
-    --objective, -o      Security assessment objective
-    --module, -m         Security module to use (default: web)
-    --iterations, -i     Maximum tool executions (default: 50)
+    --target, -t        Target system/network to assess
+    --objective, -o     Security assessment objective
+    --module, -m        Security module to use (default: web)
+    --iterations, -i    Maximum tool executions (default: 100)
     --auto-run          Start assessment immediately without UI
     --auto-approve      Auto-approve tool executions (no confirmations)
     --memory-mode       Memory mode: auto (default) or fresh
     --provider          Model provider: bedrock (default), ollama, or litellm
     --model             Specific model ID to use
     --region            AWS region (default: us-east-1)
-    --observability     Enable observability tracing (default: true)
+    --observability     Enable observability tracing (default: false)
     --debug, -d         Enable debug mode
     --headless          Run in headless mode for scripting
+    --continue          Continue a previous operation, optionally by operation ID, defaults to last operation
+    --report            Re-generate a report, optionally by operation ID, defaults to last operation
     --deployment-mode   Deployment mode: local-cli, single-container, full-stack
     --mcp-enabled       Enable MCP servers
     --mcp-conns         Define MCP servers using JSON
@@ -81,6 +83,7 @@ const cli = meow(`
     $ cyber-react -t 192.168.1.100 -o "port scan and service enumeration" -i 25 --auto-approve
 `, {
   importMeta: import.meta,
+  booleanDefault: undefined,
   flags: {
     target: {
       type: 'string',
@@ -130,6 +133,16 @@ const cli = meow(`
       type: 'boolean',
       default: false
     },
+    continue: {
+      type: 'string',
+      isMultiple: false,
+      isRequired: false,
+    },
+    report: {
+      type: 'string',
+      isMultiple: false,
+      isRequired: false,
+    },
     deploymentMode: {
       type: 'string',
     },
@@ -145,7 +158,7 @@ const cli = meow(`
 // Emit an immediate welcome line in headless test mode to aid terminal capture timing
 try {
   if (process.env.CYBER_TEST_MODE === 'true' && cli.flags.headless && !cli.flags.autoRun) {
-    const configDir = path.join(os.homedir(), '.cyber-autoagent');
+    const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
     const configPath = path.join(configDir, 'config.json');
     const firstLaunch = !fs.existsSync(configPath);
     if (firstLaunch) {
@@ -172,7 +185,7 @@ const runAutoAssessment = async () => {
       const configOverrides: Partial<Config> = {};
 
       // Load saved configuration first to detect provider changes
-      const configDir = path.join(os.homedir(), '.cyber-autoagent');
+      const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
       const configPath = path.join(configDir, 'config.json');
       let savedConfig: Partial<Config> | undefined;
 
@@ -188,7 +201,10 @@ const runAutoAssessment = async () => {
 
       // Apply CLI flag overrides
       if (cli.flags.provider) configOverrides.modelProvider = cli.flags.provider as 'bedrock' | 'ollama' | 'litellm' | 'gemini';
-      if (cli.flags.model) configOverrides.modelId = cli.flags.model;
+      if (cli.flags.model) {
+        configOverrides.modelId = cli.flags.model;
+        configOverrides.swarmModel = cli.flags.model;
+      }
       if (cli.flags.region) configOverrides.awsRegion = cli.flags.region;
       if (cli.flags.iterations) configOverrides.iterations = cli.flags.iterations;
       if (cli.flags.observability !== undefined) configOverrides.observability = cli.flags.observability;
@@ -297,11 +313,16 @@ const runAutoAssessment = async () => {
       const assessmentParams = {
         module: cli.flags.module,
         target: cli.flags.target,
-        objective: cli.flags.objective || `Comprehensive ${cli.flags.module} security assessment`
+        objective: cli.flags.objective || `Comprehensive ${cli.flags.module} security assessment`,
+        continueOperation: cli.flags.continue,
+        reportOnly: cli.flags.report,
       };
 
       // Execute assessment and wait for completion
       const handle = await executionService.execute(assessmentParams, finalConfig);
+
+      let lastMetricsUpdate = "";
+      let lastTaskTitle = "";
 
       // In auto-run mode, listen to events and display them to console
       // This provides real-time progress visibility during assessment
@@ -309,8 +330,42 @@ const runAutoAssessment = async () => {
         if (event.type === 'output' && event.content) {
           loggingService.info(event.content);
         }
-        if (event.type === 'rate_limit' && event.sleep_time) {
-          loggingService.info(` Rate limit: waiting for ${Math.ceil(event.sleep_time)} seconds`);
+        else if (event.type === 'reasoning' && event.content) {
+          loggingService.info('🧠 '+event.content);
+        }
+        else if (event.type === 'rate_limit' && event.sleep_time) {
+          loggingService.info(`⌛ Rate limit: waiting for ${Math.ceil(event.sleep_time)} seconds`);
+        }
+        else if (event.type === 'metrics_update') {
+            const metricsUpdateKey = event.metrics.tokens+"|"+event.metrics.inputTokens+"|"+event.metrics.outputToken+"|"+event.metrics.cost;
+            if (lastMetricsUpdate != metricsUpdateKey) {
+                lastMetricsUpdate = metricsUpdateKey;
+                loggingService.info(`💰 Cost: ${event.metrics.tokens.toLocaleString()} (${event.metrics.inputTokens.toLocaleString()} input + ${event.metrics.outputTokens.toLocaleString()} output) | $ ${event.metrics.cost.toFixed(6)}`);
+            }
+        }
+        else if (event.type === 'step_header') {
+          if (Number.isInteger(event.step) && Number.isInteger(event.maxSteps)) {
+            loggingService.info(`➡️ Step ${event.step}/${event.maxSteps}`);
+          }
+        }
+        else if (event.type === 'task_started') {
+            lastTaskTitle = event.title;
+            loggingService.info(`🚀 Starting task ${event.title ? `"${event.title}"` : ''}`);
+        }
+        else if (event.type === 'task_done') {
+            const eventTitle = event.title || lastTaskTitle;
+            lastTaskTitle = "";
+            switch (event.status) {
+                case 'partial_failure':
+                    loggingService.info(`⚠️ Task ${eventTitle ? `"${eventTitle}" ` : ''}failed`);
+                    break;
+                case 'blocked':
+                    loggingService.info(`🧱 Task ${eventTitle ? `"${eventTitle}" ` : ''}blocked`);
+                    break;
+                default:
+                    loggingService.info(`✓ Task ${eventTitle ? `"${eventTitle}" ` : ''}done`);
+                    break;
+            }
         }
       });
 
@@ -364,7 +419,7 @@ function renderReactApp() {
     loggingService.info('🔧 Running in headless mode');
     // Emit a fast welcome banner for first-launch so integration tests can capture it
     try {
-      const configDir = path.join(os.homedir(), '.cyber-autoagent');
+      const configDir = process.env.CYBER_CONFIG_DIR || path.join(os.homedir(), '.cyber-autoagent');
       const configPath = path.join(configDir, 'config.json');
       const firstLaunch = !fs.existsSync(configPath);
       if (firstLaunch) {

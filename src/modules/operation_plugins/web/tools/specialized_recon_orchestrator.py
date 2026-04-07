@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 import urllib3
+import ipaddress
 from urllib.parse import urlparse, parse_qs, urljoin, urlunparse
 import requests
 from typing import Any, Dict, List, Callable, Optional
@@ -22,6 +23,40 @@ HIDDEN_SERVICES_LIMIT = 50
 HIGH_VALUE_TARGET_LIMIT = 25
 ENDPOINTS_LIMIT = 100
 PARAMETER_LIMIT = 300
+
+
+# Helper: should subdomain enumeration run for this target?
+def _should_run_subdomain_enum(target: str) -> bool:
+    """Return True only when target looks like a real DNS domain worth enumerating."""
+    t = (target or "").strip().lower().rstrip(".")
+    if not t:
+        return False
+
+    # Skip IP addresses
+    try:
+        ipaddress.ip_address(t)
+        return False
+    except Exception:
+        pass
+
+    # Skip localhost-ish and .local (mDNS)
+    if t.endswith(".local"):
+        return False
+
+    # Must contain a dot and have a non-empty TLD
+    if "." not in t:
+        return False
+    tld = t.rsplit(".", 1)[-1]
+    if not tld or tld == t:
+        return False
+
+    # Reject obvious invalid labels
+    if t.startswith("-") or t.endswith("-"):
+        return False
+    if any(ch.isspace() for ch in t):
+        return False
+
+    return True
 
 
 def _coerce_str(arg: bytes | str | None) -> str:
@@ -40,7 +75,7 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
     Run focused recon for a target and return agent-ready JSON.
 
     Input:
-    - Accepts domain or URL; normalizes to domain.
+    - Accepts URL or domain; normalizes to domain or IP address.
 
     Reuse vs run:
     - Reuse existing `recon_result_v1` for same target if sufficient.
@@ -59,17 +94,17 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
     - key phase errors indicate partial results
 
     Modes (`recon_type`):
-    - subdomain: subdomain enumeration only
-    - web: live host probing + basic tech fingerprint
-    - comprehensive: subdomain + live hosts + endpoint/js/parameter discovery + prioritization
+    - subdomain: subdomain enumeration only (skipped if target is an IP address)
+    - fingerprint: live host probing + basic tech fingerprint
+    - comprehensive: subdomain + live hosts + basic tech fingerprint + endpoint/js/parameter discovery + prioritization (includes modes subdomain + fingerprint)
 
     Return:
     JSON string with keys:
     - subdomains, live_hosts, technologies, endpoints, js_files, parameters
     - intelligence (ranked targets/hidden services)
-    - tasks (capability-tagged next steps)
-    - recommendations (machine directives)
-    - meta (limits + coverage), errors (per-phase)
+    - next_steps
+    - recommendations
+    - metadata (limits + coverage), errors (per-phase)
     """
     if not target:
         raise ValueError("target is required")
@@ -85,7 +120,7 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
     if not target:
         raise ValueError("target is required")
 
-    if recon_type not in ["subdomain", "web", "comprehensive"]:
+    if recon_type not in ["subdomain", "fingerprint", "comprehensive"]:
         recon_type = "comprehensive"
     recon_type = recon_type.lower()
 
@@ -106,7 +141,7 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
             "ranked_hidden_services": [],
         },
         "errors": [],
-        "tasks": [],
+        "next_steps": [],
         "meta": {
             "format": "recon_result_v1",
             "generated_by": "specialized_recon_orchestrator",
@@ -155,20 +190,27 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
 
         # Phase 2: Subdomain enumeration using multiple specialized tools
         if recon_type in ["subdomain", "comprehensive"]:
-            try:
-                subdomains = _advanced_subdomain_enum(target, errors=results["errors"])
-                results["subdomains"] = subdomains
-            except Exception as e:
-                _err("subdomain_enum", str(e))
+            if _should_run_subdomain_enum(target):
+                try:
+                    subdomains = _advanced_subdomain_enum(target, errors=results["errors"])
+                    results["subdomains"] = subdomains
+                except Exception as e:
+                    _err("subdomain_enum", str(e))
+            else:
+                _err(
+                    "subdomain_enum",
+                    "skipped: target is not a routable domain (ip/no-tld/.local)",
+                    tool="subdomain_enum",
+                )
 
         # Phase 3: Live host detection and technology fingerprinting
-        if recon_type in ["web", "comprehensive"]:
+        if recon_type in ["fingerprint", "comprehensive"]:
             try:
                 live_analysis = _analyze_live_hosts(results["subdomains"] or [target], errors=results["errors"])
                 results["live_hosts"] = live_analysis["hosts"]
                 results["technologies"] = live_analysis["technologies"]
                 # Update meta coverage after Phase 3 if only web recon runs
-                if recon_type == "web":
+                if recon_type == "fingerprint":
                     results["meta"]["coverage"].update(
                         {
                             "subdomains_discovered": len(results.get("subdomains", []) or []),
@@ -210,9 +252,9 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
 
         # Task plan
         try:
-            results["tasks"] = _generate_recon_tasks(results)
+            results["next_steps"] = _generate_recon_tasks(results)
         except Exception as e:
-            _err("tasks", str(e))
+            _err("next_steps", str(e))
 
         # Recommendations
         try:
@@ -1293,7 +1335,7 @@ def main() -> int:
         "--recon-type",
         dest="recon_type",
         default="comprehensive",
-        choices=["subdomain", "web", "comprehensive"],
+        choices=["subdomain", "fingerprint", "comprehensive"],
         help="Type of recon to run (default: comprehensive)",
     )
 

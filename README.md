@@ -1,14 +1,14 @@
 <div align="center">
 
-![GitHub License](https://img.shields.io/github/license/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/bvcyber/Cyber-AutoAgent-ng/ci.yml?branch=main&style=flat-square)
-![GitHub issues](https://img.shields.io/github/issues/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub pull requests](https://img.shields.io/github/issues-pr/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub contributors](https://img.shields.io/github/contributors/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub stars](https://img.shields.io/github/stars/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
-![GitHub forks](https://img.shields.io/github/forks/bvcyber/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub License](https://img.shields.io/github/license/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/double16/Cyber-AutoAgent-ng/ci.yml?branch=main&style=flat-square)
+![GitHub issues](https://img.shields.io/github/issues/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/m/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub contributors](https://img.shields.io/github/contributors/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub stars](https://img.shields.io/github/stars/double16/Cyber-AutoAgent-ng?style=flat-square)
+![GitHub forks](https://img.shields.io/github/forks/double16/Cyber-AutoAgent-ng?style=flat-square)
 
 **[!] EXPERIMENTAL SOFTWARE - USE ONLY IN AUTHORIZED, SAFE, SANDBOXED ENVIRONMENTS [!]**
 
@@ -61,7 +61,7 @@ The React-based terminal interface is now the **default UI**, providing interact
 
 ```bash
 # Clone and setup
-git clone https://github.com/bvcyber/Cyber-AutoAgent-ng.git
+git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd Cyber-AutoAgent
 
 # Install in editable mode
@@ -232,6 +232,7 @@ sequenceDiagram
     participant E as Evidence
     participant L as Observability
     participant R as Evaluator
+    participant S as Tasks
 
     U->>A: Start Assessment
     A->>L: Initialize Trace
@@ -246,14 +247,16 @@ sequenceDiagram
         A->>L: Log Tool Execution
         A->>E: Store Findings
         A->>L: Log Evidence Storage
+        A->>S: Create Durable Tasks
 
         alt Critical Discovery
-            A->>T: Exploit Immediately
+            A->>S: Create Task
             T-->>A: Access Gained
             A->>E: Store Evidence
             A->>L: Log Exploitation
         end
 
+        A->>A: Check Tasks
         A->>A: Check Progress
 
         alt Success
@@ -276,7 +279,7 @@ sequenceDiagram
 - **Intelligent Analysis**: Agent continuously analyzes situation using metacognitive reasoning
 - **Dynamic Tool Selection**: Chooses appropriate tools based on confidence and findings
 - **Evidence Collection**: All discoveries stored in persistent memory with categorization
-- **Immediate Exploitation**: Critical vulnerabilities trigger immediate exploitation attempts
+- **Durable Tasks**: Durable tasks in long-term memory, enabling sustained multi-phase operations without losing threads.
 - **Automated Evaluation**: System scores tool selection, evidence quality, and methodology
 - **Report Generation**: Final analysis combines findings with performance metrics
 
@@ -377,13 +380,14 @@ Cyber-AutoAgent supports multiple model providers for maximum flexibility:
 
 ### Comparison
 
-| Feature         | Bedrock      | Ollama             | LiteLLM            |
-|-----------------|--------------|--------------------|--------------------|
-| Cost            | Pay per call | Free               | Varies by provider |
-| Performance     | High         | Hardware dependent | Provider dependent |
-| Offline Use     | No           | Yes                | No                 |
-| Setup           | Easy         | Higher             | Medium             |
-| Model Selection | 100+ models  | Limited            | 100+ models        |
+| Feature         | Bedrock               | Ollama             | LiteLLM              |
+|-----------------|-----------------------|--------------------|----------------------|
+| Cost            | Pay per call          | Free               | Varies by provider   |
+| Performance     | High                  | Hardware dependent | Provider dependent   |
+| Privacy         | Shared Responsibility | Yes                | Varies by provider   |
+| Offline Use     | No                    | Yes                | No                   |
+| Setup           | Easy                  | Higher             | Medium               |
+| Model Selection | 100+ models           | Limited            | 100+ models          |
 
 ## Observability & Evaluation
 
@@ -534,11 +538,18 @@ curl -fsSL https://ollama.ai/install.sh | sh
 # Start service and pull models
 ollama serve
 ollama pull qwen3-coder:30b-a3b-q4_K_M
+ollama pull llama3.2:3b
 ollama pull mxbai-embed-large:latest
 ```
 
-Most models ship with a context window size of 4096, some with 8192. Neither are large enough for quality results. The model
-may advertise a higher context window, but it needs to be set using a derived model.
+Ollama defaults to a context window size based on VRAM. This can be set at runtime using the OLLAMA_CONTEXT_LENGTH env
+var or the the docker compose `.env` file.
+
+```bash
+export OLLAMA_CONTEXT_LENGTH=32768
+```
+
+The context window can be specified for a specific model by creating a derived model and setting the `num_ctx` parameter.
 
 ```bash
 cat > Modelfile <<EOF
@@ -551,11 +562,22 @@ ollama create qwen3-coder-30b:32k -f Modelfile
 
 Configure the system to use model `qwen3-coder-30b:32k`. Other models can have the context window extended in this way.
 
+The recommended context window is 48KB (49152), 32KB can work. If memory constraints require lower, set the `MAX_TOKENS`
+environment variable to 4096 or slightly lower to allow more input tokens.
+
+As of Feb 2026, these models are known to work with varying degrees of success:
+- qwen3-coder:30b or higher
+- qwen3:4b-instruct or higher
+- qwen2.5-coder:7b-instruct
+- llama3.2:3b
+- glm-4.7-flash (runs slow)
+- gpt-oss:20b or higher
+
 ### Docker Deployment (Recommended)
 
 ```bash
 # Clone repository
-git clone https://github.com/bvcyber/Cyber-AutoAgent-ng.git
+git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd cyber-autoagent
 
 # Build image
@@ -580,7 +602,7 @@ docker run --rm \
 
 ```bash
 # Clone repository
-git clone https://github.com/bvcyber/Cyber-AutoAgent-ng.git
+git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd cyber-autoagent
 
 # Create virtual environment
@@ -723,7 +745,7 @@ cp .env.example .env
 The `.env.example` file contains detailed configuration options with inline comments for all supported features including model providers, memory systems, and observability settings. Key environment variables include:
 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION` for remote mode (AWS Bedrock)
-- `OLLAMA_HOST`,`OLLAMA_API_BASE` for local mode (Ollama)
+- `OLLAMA_HOST` for local mode (Ollama)
 - `CYBER_AGENT_OUTPUT_DIR`, `CYBER_AGENT_ENABLE_UNIFIED_OUTPUT` for output management
 - `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` for observability
 - `MEM0_API_KEY` or `OPENSEARCH_HOST` for memory backends
@@ -794,13 +816,15 @@ cyber-autoagent/
 ├── outputs/                  # Unified output directory (auto-created)
 │   └── <target>/             # Target-specific organization
 │       ├── OP_<id>/          # Operation-specific files
-│       │   ├── security_assessment_report.md  # Security findings (when generated)
-│       │   ├── cyber_operations.log           # Operation log
+│       │   ├── security_assessment_report.md   # Final assessment report (when generated)
+│       │   ├── security_assessment_report.json # Final assessment report data (when generated, can be used in other tools)
+│       │   ├── cyber_operations.log            # Operation log
 │       │   ├── artifacts/  # Ad-hoc files
 │       │   └── tools/      # Custom tools created by agent
 │       └── memory/         # Cross-operation memory
 │           ├── mem0.faiss
-│           └── mem0.pkl
+│           ├── mem0.pkl
+│           └── plan_store.db
 └── README.md                 # This file
 ```
 

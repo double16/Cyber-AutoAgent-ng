@@ -8,7 +8,7 @@ import { Box, Text } from 'ink';
 import { ThinkingIndicator } from './ThinkingIndicator.js';
 import { StreamEvent } from '../types/events.js';
 import { SwarmDisplay, SwarmState, SwarmAgent } from './SwarmDisplay.js';
-import { formatToolInput, getToonPlanPreview } from '../utils/toolFormatters.js';
+import { formatToolInput } from '../utils/toolFormatters.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
 // Removed toolCategories import - using clean tool display without emojis
 import * as fs from 'fs/promises';
@@ -20,6 +20,9 @@ import type { Config } from '../contexts/ConfigContext.js';
 
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
 let cachedProjectRoot: string | null | undefined;
+
+// Tracks the most recently-started task title so it can be shown in the ThinkingIndicator.
+let activeTaskTitle: string | null = null;
 
 const resolveProjectRoot = (): string | null => {
   if (cachedProjectRoot !== undefined) {
@@ -84,6 +87,8 @@ export type AdditionalStreamEvent =
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
+  | { type: 'task_started'; task_uid?: string; title?: string; status?: string; [key: string]: any }
+  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; [key: string]: any }
   | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; [key: string]: any };
 
 // Combined event type supporting both SDK-aligned and additional events
@@ -613,6 +618,19 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         </Box>
       );
       
+    case 'task_started': {
+      const title = event.title;
+      if (typeof title === 'string' && title.trim().length > 0) {
+        activeTaskTitle = title.trim();
+      }
+      return null;
+    }
+
+    case 'task_done': {
+      activeTaskTitle = null;
+      return null;
+    }
+
     case 'thinking':
       return (
         <ThinkingIndicator
@@ -620,9 +638,10 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
           startTime={event.startTime}
           enabled={animationsEnabled}
           message={event.message ?? null}
+          taskTitle={activeTaskTitle ?? null}
         />
       );
-      
+
     case 'thinking_end':
       // Don't render anything - this just signals to stop showing thinking indicator
       return null;
@@ -774,9 +793,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         latestInput = hasEventInput ? eventInput : (hasMapInput ? mapInput : {});
       }
       
-      // Always show tool header even if args are not yet available.
+      // Always show a tool header even if args are not yet available.
       // Individual tool renderers will gracefully handle missing fields.
-      // Otherwise handle specific tool formatting
+      // Otherwise, handle specific tool formatting
       switch (event.tool_name) {
         case 'swarm':
           // Simplified swarm tool header to avoid duplication
@@ -795,9 +814,12 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
               </Box>
             </Box>
           );
-        case 'mem0_memory': {
-          const action = latestInput?.action || 'list';
-          const rawContent = latestInput?.content || latestInput?.query || '';
+        case 'mem0_store':
+        case 'mem0_get':
+        case 'mem0_retrieve':
+        case 'mem0_list': {
+          const action = event.tool_name.substring(5);
+          const rawContent = latestInput?.plan || latestInput?.content || latestInput?.query || '';
           // Ensure content is always a string (handle plan objects, etc.)
           let content: string;
           if (typeof rawContent === 'string') {
@@ -811,20 +833,17 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
           } else {
             content = String(rawContent);
           }
-          const planPreview = getToonPlanPreview(content);
-          const preview = planPreview ?? (content.length > 60 ? content.substring(0, 60) + '...' : content);
+          const preview = (content.length > 60 ? content.substring(0, 60) + '...' : content);
           const labelKey =
-            planPreview || action === 'store_plan'
-              ? 'plan'
-              : action === 'store'
+              action === 'store'
                 ? 'content'
                 : 'query';
 
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: mem0_memory</Text>
+              <Text color="green" bold>tool: {event.tool_name}</Text>
               <Box marginLeft={2}>
-                <Text dimColor>├─ action: {action === 'store_plan' ? 'store_plan' : action === 'store' ? 'storing' : action === 'retrieve' ? 'retrieving' : action}</Text>
+                <Text dimColor>├─ action: {action === 'store' ? 'storing' : action === 'retrieve' ? 'retrieving' : action}</Text>
               </Box>
               {preview && (
                 <Box marginLeft={2}>

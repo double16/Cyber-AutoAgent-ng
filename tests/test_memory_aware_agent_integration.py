@@ -78,9 +78,9 @@ class TestMemoryAwareAgentIntegration:
 
         # Verify memory system was initialized
         mock_initialize_memory.assert_called_once()
-        mock_check_memories.assert_called_once_with("test.com", "bedrock")
+        mock_check_memories.assert_called_once_with("test.com", "bedrock", "OP_20240101_120000")
         assert mock_get_client.call_count == 2  # Called for overview and active plan
-        mock_memory_client.get_memory_overview.assert_called_once_with(user_id="cyber_agent")
+        mock_memory_client.get_memory_overview.assert_called_once_with()
 
         # Verify agent was created with memory-aware system prompt
         assert agent is not None
@@ -88,10 +88,8 @@ class TestMemoryAwareAgentIntegration:
 
         # Check that the system prompt contains memory context
         system_prompt = agent.system_prompt
-        assert "## MEMORY CONTEXT" in system_prompt
         assert "Continuing assessment with 5 existing memories" in system_prompt
-        assert "Load all memories with mem0_memory" in system_prompt
-        assert "**CRITICAL FIRST ACTION**" in system_prompt
+        assert "**CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`" in system_prompt
 
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
     @patch("modules.agents.cyber_autoagent.get_memory_client")
@@ -143,7 +141,7 @@ class TestMemoryAwareAgentIntegration:
 
         # Verify memory system was initialized
         mock_initialize_memory.assert_called_once()
-        mock_check_memories.assert_called_once_with("test.com", "bedrock")
+        mock_check_memories.assert_called_once_with("test.com", "bedrock", "OP_20240101_120000")
 
         # Verify agent was created with fresh start system prompt
         assert agent is not None
@@ -151,10 +149,7 @@ class TestMemoryAwareAgentIntegration:
 
         # Check that the system prompt contains fresh start context
         system_prompt = agent.system_prompt
-        assert "## MEMORY CONTEXT" in system_prompt
-        assert "Starting fresh assessment" in system_prompt
-        assert "reconnaissance and target information gathering" in system_prompt
-        assert "Store all findings immediately" in system_prompt
+        assert "Create a strategic plan" in system_prompt
 
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
     @patch("modules.agents.cyber_autoagent.get_memory_client")
@@ -228,9 +223,8 @@ class TestMemoryAwareAgentIntegration:
 
         # Check that the system prompt contains memory path context
         system_prompt = agent.system_prompt
-        assert "## MEMORY CONTEXT" in system_prompt
         assert "Continuing assessment with 2 existing memories" in system_prompt
-        assert "Load all memories with mem0_memory" in system_prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`" in system_prompt
 
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
     @patch("modules.agents.cyber_autoagent.get_memory_client")
@@ -288,7 +282,6 @@ class TestMemoryAwareAgentIntegration:
 
         # Check that the system prompt contains fallback memory context
         system_prompt = agent.system_prompt
-        assert "## MEMORY CONTEXT" in system_prompt
         assert "Continuing assessment with 0 existing memories" in system_prompt
 
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
@@ -354,11 +347,8 @@ class TestMemoryAwareAgentIntegration:
 
         # Check that the system prompt contains both memory context and local server config
         system_prompt = agent.system_prompt
-        assert "## MEMORY CONTEXT" in system_prompt
         assert "Continuing assessment with 1 existing memories" in system_prompt
-        assert "Load all memories with mem0_memory" in system_prompt
-        assert "Retrieve the active plan with mem0_memory" in system_prompt
-        assert "create one via mem0_memory" in system_prompt
+        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories: `mem0_list()`" in system_prompt
 
 
 if __name__ == "__main__":

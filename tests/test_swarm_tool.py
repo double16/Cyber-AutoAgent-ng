@@ -87,9 +87,7 @@ class SwarmToolTests(unittest.TestCase):
         self.assertEqual("error", out["status"])
         self.assertIn("At least one agent specification is required", out["content"][0]["text"])
 
-    @patch.object(swarm_mod, "create_rich_status_panel", autospec=True)
-    @patch.object(swarm_mod.console_util, "create", autospec=True)
-    def test_swarm_enforces_minimums_and_adjusts_timeouts_no_rate_limit(self, _console_create, _rich_panel):
+    def test_swarm_enforces_minimums_and_adjusts_timeouts_no_rate_limit(self):
         """
         Covers:
           - minimum enforcement
@@ -143,9 +141,7 @@ class SwarmToolTests(unittest.TestCase):
         self.assertIn("A2 final answer.", txt)
         self.assertIn(" Team Resource Usage:", txt)
 
-    @patch.object(swarm_mod, "create_rich_status_panel", autospec=True)
-    @patch.object(swarm_mod.console_util, "create", autospec=True)
-    def test_swarm_scales_timeouts_with_rate_limit_rpm_low_model_timeout_gt_300(self, _console_create, _rich_panel):
+    def test_swarm_scales_timeouts_with_rate_limit_rpm_low_model_timeout_gt_300(self):
         """
         Covers:
           - rate_limit_scale > 1.0 (rpm < 20)
@@ -181,9 +177,7 @@ class SwarmToolTests(unittest.TestCase):
         self.assertEqual(1800.0, init["execution_timeout"])
         self.assertEqual(600.0, init["node_timeout"])
 
-    @patch.object(swarm_mod, "create_rich_status_panel", autospec=True)
-    @patch.object(swarm_mod.console_util, "create", autospec=True)
-    def test_swarm_scales_timeouts_with_rate_limit_rpm_low_model_timeout_le_300(self, _console_create, _rich_panel):
+    def test_swarm_scales_timeouts_with_rate_limit_rpm_low_model_timeout_le_300(self):
         """
         Covers:
           - rate_limit_scale > 1.0 (rpm < 20)
@@ -217,9 +211,7 @@ class SwarmToolTests(unittest.TestCase):
         self.assertEqual(1800.0, init["execution_timeout"])
         self.assertEqual(600.0, init["node_timeout"])
 
-    @patch.object(swarm_mod, "create_rich_status_panel", autospec=True)
-    @patch.object(swarm_mod.console_util, "create", autospec=True)
-    def test_swarm_returns_error_on_exception(self, _console_create, _rich_panel):
+    def test_swarm_returns_error_on_exception(self):
         # Force sdk swarm execution to raise
         class BoomSwarm:
             def __init__(self, **_kwargs):

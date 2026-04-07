@@ -33,6 +33,8 @@ from modules.config.manager import get_config_manager
 from modules.config.system.logger import get_logger
 
 from .trace_parser import TraceParser
+from ..config.providers.ollama_config import get_ollama_timeout
+from ..config.system import EnvironmentReader
 from ..handlers.events import EventEmitter
 
 logger = get_logger("Evaluation.Evaluation")
@@ -89,20 +91,25 @@ class CyberAgentEvaluator:
         server_config = config_manager.get_server_config(server_type)
 
         if server_type == "ollama":
+            env_reader = EnvironmentReader()
+            client_kwargs={
+                "timeout": get_ollama_timeout(env_reader)
+            }
             # Local mode using Ollama
             ollama_host = config_manager.getenv("OLLAMA_HOST", "http://localhost:11434")
-            # Should we configure timeout from OLLAMA_TIMEOUT ?
             langchain_chat = ChatOllama(
                 model=config_manager.getenv(
                     "RAGAS_EVALUATOR_MODEL", server_config.evaluation.llm.model_id
                 ),
                 base_url=ollama_host,
+                client_kwargs=client_kwargs,
             )
             langchain_embeddings = OllamaEmbeddings(
                 model=config_manager.getenv(
                     "MEM0_EMBEDDING_MODEL", server_config.embedding.model_id
                 ),
                 base_url=ollama_host,
+                client_kwargs=client_kwargs,
             )
 
             self.llm = LangchainLLMWrapper(langchain_chat)
@@ -760,7 +767,7 @@ class CyberAgentEvaluator:
                         agent_name = attrs.get("agent.name")
                         if (
                             agent_role == "report_generation"
-                            or agent_name == "Cyber-ReportGenerator"
+                            or "ReportGenerator" in agent_name
                         ):
                             is_report_trace = True
                 except Exception:

@@ -15,8 +15,10 @@ src/modules/prompts/
 ├── templates/
 │   ├── system_prompt.md
 │   ├── tools_guide.md
-│   ├── report_template.md
-│   └── report_agent_system_prompt.md
+│   ├── report_agent_executive_system_prompt.md
+│   ├── report_agent_finding_system_prompt.md
+│   ├── report_agent_observation_system_prompt.md
+│   └── report_agent_appendix_system_prompt.md
 ├── __init__.py
 ├── factory.py
 └── README.md
@@ -30,7 +32,7 @@ src/modules/prompts/
 This is the heart of the module. It contains the primary logic for prompt construction and the loading of external modules.
 
 - **`get_system_prompt(...)`**: Assembles the main system prompt for the agent by combining the base persona, workflow, tool guides, and any module-specific execution guidance.
-- **`get_report_generation_prompt(...)`**: Constructs the detailed prompt used by a specialized AI agent to write the final security report. It populates the `report_template.md` with all collected evidence and analysis.
+- **`get_report_generation_prompt(...)`**: Constructs the detailed prompt used by a specialized AI agent to write the final security report.
 - **`ModulePromptLoader` (Class)**: The engine for our plugin architecture. This class handles the discovery, validation, and loading of "Operation Modules" (our term for plugins).
 
 ### `templates/` Directory

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 def _minimal_server_config():
     return SimpleNamespace(
-        llm=SimpleNamespace(model_id="claude-3-sonnet", max_tokens=256000, temperature=0.95),
+        llm=SimpleNamespace(model_id="claude-3-sonnet", max_tokens=256000, temperature=0.55),
         output=SimpleNamespace(base_dir="./outputs"),
         swarm=SimpleNamespace(llm=SimpleNamespace(model_id="claude-3-sonnet")),
         sdk=SimpleNamespace(conversation_window_size=64),

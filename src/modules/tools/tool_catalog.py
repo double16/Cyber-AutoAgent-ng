@@ -1,5 +1,6 @@
 import json
 import subprocess
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Any, Dict, Optional
@@ -87,15 +88,26 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
     @tool(name="tool_catalog")
     def tool_catalog(keywords: Optional[str] = None) -> str:
         """
-        List the catalog of available tools with descriptions and calling guidance. Invoke this tool when a
-        capability is needed. Use the results to understand the purpose of each tool, how it is invoked and
-        understand the available options you should use.
+        List available tools to pick the best next tool.
+
+        Call when:
+        - Unsure which tool fits (confidence <80%).
+        - About to use `shell`, `http_request`, or `python_repl` for recon/fuzz/scan/validate/crack/crawl/parse.
+        - Need a tool’s args/schema.
+        - User asks “what tool can do X?”.
+
+        How:
+        - Search by keywords; prefer tools marked `preferred`; pick one best match and use it.
 
         Args:
-            keywords: space separated keywords for filtering the tools returned (Optional)
+            keywords:
+                - None/empty: return full catalog.
+                - 2–6 terms: capability + task (e.g., `idor validate`, `jwt decode`, `web_crawling`, `xss_testing`).
+                - 1 term: tool/command name.
         """
         separator = "=" * 80
-        keywords = list(filter(bool, [w.strip().lower() for w in (keywords or "").split()]))
+        parts = re.split(r"[\s,;]+", (keywords or ""))
+        keywords = [w.strip().lower() for w in parts if w.strip()]
         found_tools = []
         catalog = ""
         all_tools = agent.tool_registry.get_all_tools_config()
@@ -108,21 +120,14 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
                     continue
             found_tools.append(tool_name)
 
+            tool_desc = tool_spec.get("description", "")
+            if len(tool_desc) > 200:
+                tool_desc = tool_desc[:200] + " ..."
             catalog += f"""
 {separator}
 name: {tool_name}
 
-{tool_spec.get("description")}
-
-input schema:
-{json.dumps(tool_spec.get("inputSchema"), indent=2, sort_keys=True, ensure_ascii=False)}
-"""
-            output_schema = tool_spec.get("outputSchema", None)
-            if output_schema:
-                catalog += f"""
-
-output schema:
-{json.dumps(output_schema, indent=2, sort_keys=True, ensure_ascii=False)}
+{tool_desc}
 
 {separator}
 """
@@ -133,13 +138,6 @@ output schema:
 # COMMAND LINE PROGRAMS
 
 Use the **shell** tool to invoke the following command line programs in a bash shell.
-
-**Example**:
-{{"tool":"shell","args":{{"command":"nmap -sV ...","timeout":600}}}}
-{{"tool":"shell","args":{{"command":"nuclei ...","timeout":300}}}}
-
-Always use options that reduce progress but not supress meaningful output. If possible, use options that save output to
-a file in the ARTIFACTS DIRECTORY and silence program output.
 """
             cyber_tools = _get_cyber_tools()
             for shell_command in shell_commands:
@@ -152,10 +150,10 @@ a file in the ARTIFACTS DIRECTORY and silence program output.
                 caps = tool_cfg.get("caps") or []
                 if isinstance(caps, str):
                     caps = [caps]
-                if keywords:
+                if keywords and not specific_tool:
                     desc_l = str(description).lower()
                     if not any(
-                            [w in shell_command.lower() or w in real_command.lower() or w in desc_l for w in keywords]):
+                            [w in shell_command.lower() or w in real_command.lower() or w in desc_l or w in caps for w in keywords]):
                         continue
                 found_cyber_tools.append(real_command)
 

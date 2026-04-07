@@ -41,11 +41,14 @@ from botocore.exceptions import (
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ReadTimeout as RequestsReadTimeout
+from strands import Agent
 from strands.telemetry.config import StrandsTelemetry
+from strands.types.content import Message
 from strands.types.exceptions import MaxTokensReachedException
 
 import litellm
 
+from modules.agents.agent_conversation_builder import rebuild_agent_conversation
 from modules.agents.cyber_autoagent import (
     AgentConfig,
     create_agent,
@@ -54,9 +57,9 @@ from modules.agents.cyber_autoagent import (
 from modules.config.models.factory import get_model_timeout, configure_model_rate_limits
 from modules.config.system.environment import auto_setup, clean_operation_memory, setup_logging
 from modules.config.manager import get_config_manager
-from modules.config.types import get_default_base_dir
-from modules.handlers.base import StepLimitReached
-from modules.handlers.conversation_budget import _strip_continue_messages
+from modules.config.types import get_default_base_dir, DEFAULT_ITERATIONS
+from modules.handlers.base import StepLimitReached, is_docker
+from modules.handlers.conversation_budget import strip_reflection_snapshot_messages, _dedupe_state_markers
 from modules.handlers.utils import (
     Colors,
     get_output_path,
@@ -68,7 +71,8 @@ from modules.handlers.utils import (
     dumpstacks,
 )
 from modules.prompts.factory import get_reflection_snapshot
-from modules.tools import browser, channel_close_all
+from modules.tools import browser, channel_close_all, get_active_task, get_plan, mem0_list, get_memory_client
+from modules.tools.memory import OperationPlan
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
 
@@ -91,10 +95,6 @@ def detect_deployment_mode():
     Returns:
         str: 'cli' (Python CLI), 'container' (single container), or 'compose' (full stack)
     """
-
-    def is_docker():
-        """Check if running inside a Docker container."""
-        return os.path.exists("/.dockerenv") or os.path.exists("/app")
 
     def is_langfuse_available():
         """Check if Langfuse service is available."""
@@ -193,10 +193,6 @@ def setup_telemetry(logger):
 def setup_langfuse_connection(logger, deployment_mode):
     """Setup Langfuse connection parameters for remote observability."""
 
-    def is_docker():
-        """Check if running inside a Docker container."""
-        return os.path.exists("/.dockerenv") or os.path.exists("/app")
-
     # Use langfuse-web:3000 when in Docker, localhost:3000 otherwise
     default_host = (
         "http://langfuse-web:3000" if is_docker() else "http://localhost:3000"
@@ -285,7 +281,7 @@ def main():
     # Parse command line arguments first to get the confirmations flag
     parser = argparse.ArgumentParser(
         description="Cyber-AutoAgent - Autonomous Cybersecurity Assessment Tool",
-        epilog="⚠️  Use only on authorized targets in safe environments ⚠️",
+        epilog="⚠️ Use only on authorized targets in safe environments ⚠️",
     )
     parser.add_argument(
         "--module",
@@ -313,8 +309,8 @@ def main():
     parser.add_argument(
         "--iterations",
         type=int,
-        default=100,
-        help="Maximum tool executions before stopping (default: 100)",
+        default=DEFAULT_ITERATIONS,
+        help=f"Maximum tool executions before stopping (default: {DEFAULT_ITERATIONS})",
     )
     parser.add_argument(
         "--verbose",
@@ -353,8 +349,8 @@ def main():
         "--memory-mode",
         type=str,
         choices=["auto", "fresh"],
-        default="auto",
-        help="Memory initialization mode: 'auto' loads existing memory if found (default), 'fresh' starts with new memory",
+        default="fresh" if os.getenv("MEMORY_ISOLATION") == "operation" else "auto",
+        help="Memory initialization mode: 'auto' loads existing memory if found, 'fresh' starts with new memory",
     )
     parser.add_argument(
         "--keep-memory",
@@ -366,6 +362,21 @@ def main():
         "--output-dir",
         type=str,
         help="Base directory for output artifacts (default: ./outputs)",
+    )
+    parser.add_argument(
+        "--continue",
+        dest="cont",
+        nargs="?",
+        type=str,
+        const=True,
+        help="Continue last operation or the passed operation",
+    )
+    parser.add_argument(
+        "--report",
+        nargs="?",
+        type=str,
+        const=True,
+        help="Generate report (without execution) of the last operation or the passed operation",
     )
     parser.add_argument(
         "--eval-rubric",
@@ -382,8 +393,19 @@ def main():
         type=str,
         help="Configure MCP servers, requires --mcp-enabled to be applied",
     )
+    parser.add_argument(
+        "--heap-monitor",
+        action="store_true",
+        help="Monitor the heap for usage and trigger dumps when threshold exceeded",
+    )
 
     args = parser.parse_args()
+
+    if args.heap_monitor or os.getenv("CYBER_HEAP_MONITOR", "").lower() == "true":
+        from src.modules.utils import heap_monitor
+
+    if args.cont or args.report:
+        args.memory_mode = "auto"
 
     ensure_workspace_marker_files()
 
@@ -473,19 +495,42 @@ def main():
     if args.eval_rubric:
         os.environ["EVAL_RUBRIC_ENABLED"] = "true"
 
+    # Operation ID
+    target_sanitized = sanitize_target_name(args.target)
+    operation_id = None
+    if isinstance(args.cont, str) and args.cont:
+        operation_id = args.cont
+    elif isinstance(args.report, str) and args.report:
+        operation_id = args.report
+    elif (isinstance(args.cont, bool) and args.cont) or (isinstance(args.report, bool) and args.report):
+        # get the last operation
+        base_dir = os.path.abspath(
+            args.output_dir
+            or os.getenv("CYBER_AGENT_OUTPUT_DIR")
+            or get_default_base_dir()
+        )
+        previous_operations = list(filter(
+            lambda d: d.is_dir() and d.name.startswith("OP_"),
+            os.scandir(os.path.join(base_dir, target_sanitized))))
+        previous_operations.sort(key=lambda e: e.name, reverse=True)
+        if previous_operations:
+            operation_id = previous_operations[0].name
+
+    if operation_id is None:
+        operation_id = f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    config_overrides["operation_id"] = operation_id
+    config_overrides["target_name"] = args.target
+
+    # Expose operation ID to tools via environment for consistent evidence tagging
+    os.environ["CYBER_OPERATION_ID"] = operation_id
+
     server_config = config_manager.get_server_config(args.provider, **config_overrides)
 
     # Set mem0 environment variables based on configuration
     os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
     os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
     os.environ["MEM0_EMBEDDING_MODEL"] = server_config.embedding.model_id
-
-    # Log operation start
-    operation_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    local_operation_id = f"OP_{operation_timestamp}"
-
-    # Expose operation ID to tools via environment for consistent evidence tagging
-    os.environ["CYBER_OPERATION_ID"] = local_operation_id
 
     mcp_config = config_manager.get_mcp_config(args.provider, **config_overrides)
     if mcp_config.enabled:
@@ -496,7 +541,7 @@ def main():
     # Initialize logger using unified output system
     log_path = get_output_path(
         sanitize_target_name(args.target),
-        local_operation_id,
+        operation_id,
         "",
         server_config.output.base_dir,
     )
@@ -581,13 +626,14 @@ def main():
     # Pass memory_path to auto_setup to skip cleanup if using existing memory
     available_tools = auto_setup(skip_mem0_cleanup=bool(args.memory_path))
 
-    logger.info("Operation %s initiated", local_operation_id)
+    logger.info("Operation %s initiated", operation_id)
     logger.info("Objective: %s", args.objective)
     logger.info("Target: %s", args.target)
     logger.info("Max steps: %d", args.iterations)
     logger.info("Provider: %s", args.provider)
     logger.info("Model: %s", server_config.llm.model_id)
     logger.info("Temperature: %s", server_config.llm.temperature)
+    # FIXME: set server_config.llm.max_tokens earlier, this isn't the real max tokens
     logger.info("Max tokens: %d", server_config.llm.max_tokens)
     if server_config.llm.top_p is not None:
         logger.info("Top P: %s", server_config.llm.top_p)
@@ -605,16 +651,12 @@ def main():
         logger.info("Max completion tokens: %s", max_completion)
 
     # Display operation details with unified output information
-    target_sanitized = sanitize_target_name(args.target)
     output_base_path = get_output_path(
-        target_sanitized, operation_timestamp, "", server_config.output.base_dir
+        target_sanitized, operation_id, "", server_config.output.base_dir
     )
 
-    # Detect if running in Docker for path display
-    is_docker = os.path.exists("/.dockerenv") or os.environ.get("CONTAINER") == "docker"
-
     # Prepare path display based on environment
-    if is_docker:
+    if is_docker():
         output_path_display = f"{output_base_path}\n{Colors.BOLD}Host Path:{Colors.RESET}     {output_base_path.replace('/app/outputs', './outputs')}"
     else:
         output_path_display = output_base_path
@@ -623,7 +665,7 @@ def main():
         print_section(
             "MISSION PARAMETERS",
             f"""
-{Colors.BOLD}Operation ID:{Colors.RESET} {Colors.CYAN}{local_operation_id}{Colors.RESET}
+{Colors.BOLD}Operation ID:{Colors.RESET} {Colors.CYAN}{operation_id}{Colors.RESET}
 {Colors.BOLD}Objective:{Colors.RESET}    {Colors.YELLOW}{args.objective}{Colors.RESET}
 {Colors.BOLD}Target:{Colors.RESET}       {Colors.RED}{args.target}{Colors.RESET} (sanitized: {target_sanitized})
 {Colors.BOLD}Max Iterations:{Colors.RESET} {args.iterations} steps
@@ -647,7 +689,7 @@ def main():
             objective=args.objective,
             max_steps=args.iterations,
             available_tools=available_tools,
-            op_id=local_operation_id,
+            op_id=operation_id,
             model_id=args.model,
             region_name=args.region,
             provider=args.provider,
@@ -665,9 +707,23 @@ def main():
         print_status("Cyber-AutoAgent online and starting", "SUCCESS")
 
         # Initial user message to start the agent
-        initial_prompt = (
-            f"Conduct security assessment of {args.target} for: {args.objective}"
-        )
+        initial_prompt = f"Conduct security assessment of {args.target} for: {args.objective}"
+        current_message = initial_prompt
+
+        if args.cont:
+            active_plan = (get_plan() or {}).get("plan", "")
+            active_task = get_active_task() or ""
+            memories = mem0_list()
+            if memories.startswith("Error:"):
+                memories = ""
+            if active_plan:
+                current_message = ""
+                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `get_plan()`)\n{active_plan}"}])]
+                if memories:
+                    agent.messages.append(Message(role="user",
+                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
+                if 'status="active"' in active_task:
+                    agent.messages.append(Message(role="user", content=[{"text": active_task}]))
 
         # Backward-compat helper for tests expecting get_initial_prompt to exist
         def _initial_prompt_accessor():
@@ -680,25 +736,35 @@ def main():
 
         # Execute autonomous operation
         operation_start = time.time()
-        current_message = initial_prompt
         step0_retry = 2
         # the number of consecutive action-less results
         actionless_step_count = 0
 
         # SDK-aligned execution loop with continuation support
-        while not interrupted:
+        while not interrupted and not args.report:
             last_step = callback_handler.current_step
             last_tool_call_count = sum(callback_handler.tool_counts.values(), start=0)
             try:
+                # add reflection snapshot
+                if "<reflection_snapshot>" not in current_message and not current_message.startswith(initial_prompt):
+                    reflection_snapshot = get_reflection_snapshot(
+                        current_step=callback_handler.current_step,
+                        max_steps=callback_handler.max_steps,
+                        plan_current_phase=None,
+                    )
+                    current_message = current_message + "\n\n" + f"<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
+
                 print_status(
                     f"Agent processing: {current_message[:100]}{' ...' if len(current_message) > 100 else ''}",
                     "THINKING",
                 )
                 logger.debug(f"Agent processing: {current_message}")
 
-                _strip_continue_messages(agent)
+                # trim context
+                strip_reflection_snapshot_messages(agent)
                 _ensure_prompt_within_budget(agent)
-                # Execute agent with current message
+
+                # Execute agent with current message. This is a long, blocking call.
                 result = agent(current_message)
 
                 logger.debug(f"Agent result: {repr(result)}")
@@ -787,19 +853,51 @@ def main():
                     callback_handler.current_step if callback_handler else 0,
                     remaining_steps,
                 )
-                if remaining_steps > 0:
-                    reflection_snapshot = get_reflection_snapshot(
-                        current_step=callback_handler.current_step,
-                        max_steps=callback_handler.max_steps,
-                        plan_current_phase=None,
-                    )
-                    extra_message = ""
-                    if actionless_step_count > 0:
-                        logger.warning("Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
-                        extra_message += f"Re-emit your last response as valid tool calls. No prose. No XML. At least one tool call is required to progress.\n"
-                    current_message = f"<continue_instructions>\n{extra_message}{reflection_snapshot}\n<continue_instructions>"
-                else:
+                if remaining_steps <= 0:
                     break
+
+                current_message = ""
+
+                if actionless_step_count > 0:
+                    if actionless_step_count == 1:
+                        logger.warning(
+                            "Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
+
+                        # remove trailing assistant messages, they may encourage the agent to consider the operation complete
+                        while len(agent.messages) > 3:
+                            tool_block_count = 0
+                            for block in agent.messages[-1].get("content", []):
+                                if not isinstance(block, dict):
+                                    continue
+                                if "toolUse" in block or "toolResult" in block:
+                                    tool_block_count += 1
+                            if tool_block_count == 0:
+                                agent.messages.pop()
+                            else:
+                                break
+
+                        current_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
+                    else:
+                        active_plan = get_memory_client(silent=True).get_active_plan()
+                        if active_plan and active_plan.assessment_complete:
+                            # plan is complete, legit exit
+                            break
+
+                        active_task = get_active_task() or ""
+                        memories = mem0_list()
+                        if memories.startswith("Error:"):
+                            memories = ""
+
+                        logger.warning(
+                            "Attempting to rebuild context because no tool calls were detected in last execution loop.")
+
+                        current_message = rebuild_agent_conversation(
+                            agent=agent,
+                            active_plan=active_plan,
+                            active_task=active_task,
+                            initial_prompt=initial_prompt,
+                            memories=memories,
+                        )
 
             except StepLimitReached:
                 # Handle step limit reached gracefully without context errors
@@ -912,7 +1010,7 @@ def main():
             # Display summary in terminal mode only
             if os.environ.get("CYBER_UI_MODE", "cli").lower() != "react":
                 print(
-                    f"{Colors.BOLD}Operation ID:{Colors.RESET}      {local_operation_id}"
+                    f"{Colors.BOLD}Operation ID:{Colors.RESET}      {operation_id}"
                 )
 
                 # Determine status based on completion
@@ -930,6 +1028,8 @@ def main():
                     status_text = f"{Colors.RED}Network Timeout / Rate Limit Reached{Colors.RESET}"
                 elif callback_handler.termination_reason == "error":
                     status_text = f"{Colors.RED}Agent Error Occurred{Colors.RESET}"
+                elif args.report:
+                    status_text = f"{Colors.BLUE}Regenerate Report{Colors.RESET}"
                 else:
                     status_text = f"{Colors.GREEN}Operation Completed{Colors.RESET}"
 
@@ -967,6 +1067,7 @@ def main():
 
             # Show where evidence and memories are stored
             # Determine memory location based on backend and unified output structure
+            # FIXME: memory_location should be returned by the initialized memory system, not duplicated here
             target_name = sanitize_target_name(args.target)
             if os.getenv("MEM0_API_KEY"):
                 memory_location = "Mem0 Platform (cloud)"
@@ -978,19 +1079,14 @@ def main():
             # Use unified output paths for evidence storage
             evidence_location = get_output_path(
                 sanitize_target_name(args.target),
-                local_operation_id,
+                operation_id,
                 "",  # No subdirectory - show the operation root
                 server_config.output.base_dir,
             )
 
             # Display output paths in terminal mode
             if os.environ.get("CYBER_UI_MODE", "cli").lower() != "react":
-                is_docker = (
-                    os.path.exists("/.dockerenv")
-                    or os.environ.get("CONTAINER") == "docker"
-                )
-
-                if is_docker:
+                if is_docker():
                     # Docker environment: show both container and host paths
                     host_evidence_location = evidence_location.replace(
                         "/app/outputs", "./outputs"
@@ -1056,6 +1152,7 @@ def main():
         loop.close()
 
         # Ensure log files are properly closed before exit
+        # FIXME: this looks duplicative of the above cleanup_logging()
         def close_log_outputs():
             if hasattr(sys.stdout, "close") and hasattr(sys.stdout, "log"):
                 try:
@@ -1120,8 +1217,8 @@ def main():
                 logger.debug(
                     "Calling clean_operation_memory with target_name=%s", target_name
                 )
-                clean_operation_memory(local_operation_id, target_name)
-                logger.info("Memory cleaned up for operation %s", local_operation_id)
+                clean_operation_memory(operation_id, target_name)
+                logger.info("Memory cleaned up for operation %s", operation_id)
             except Exception as cleanup_error:
                 logger.warning("Error cleaning up memory: %s", cleanup_error)
         else:
@@ -1130,7 +1227,7 @@ def main():
         # Log operation end
         end_time = time.time()
         total_time = end_time - start_time
-        logger.info("Operation %s ended after %.2fs", local_operation_id, total_time)
+        logger.info("Operation %s ended after %.2fs", operation_id, total_time)
 
         flush_traces(telemetry=telemetry)
 

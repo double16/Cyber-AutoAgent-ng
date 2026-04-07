@@ -359,7 +359,7 @@ class ComponentTestRunner {
     console.log(chalk.blue('\n📋 Testing State Persistence...'));
     
     // Create test config
-    const configDir = join(process.env.HOME || process.env.USERPROFILE, '.cyber-autoagent');
+    const configDir = join(__dirname, 'test-config');
     const configPath = join(configDir, 'test-config.json');
     
     const testConfig = {
@@ -385,7 +385,8 @@ class ComponentTestRunner {
       cwd: __dirname,
       env: {
         ...process.env,
-        CYBER_CONFIG_PATH: configPath
+        CYBER_CONFIG_PATH: configPath,
+        CYBER_CONFIG_DIR: configDir
       }
     });
     

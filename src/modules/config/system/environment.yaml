@@ -57,6 +57,11 @@ cyber_tools:
     preference: preferred
     caps: [graphql]
     canary: "graphql-inspector --help"
+  graphql-path-enum:
+    description: "Lists the different ways of reaching a given type in a GraphQL schema."
+    preference: fallback
+    caps: [graphql]
+    canary: "graphql-path-enum --help"
 
   # JWT manipulation tools
   jwt-tool:
@@ -76,6 +81,16 @@ cyber_tools:
     preference: preferred
     caps: [injection_testing, exploitation_framework]
     canary: "commix --help"
+  lfimap:
+    description: "Local File Inclusion Exploitation Framework."
+    preference: preferred
+    caps: [file_inclusion]
+    canary: "lfimap --help"
+  idor-forge:
+    description: "Detection and exploitation of Insecure Direct Object Reference (IDOR) vulnerabilities."
+    preference: preferred
+    caps: [idor]
+    canary: "idor-forge --help"
 
   # ProjectDiscovery ecosystem
   nuclei:
@@ -202,11 +217,11 @@ cyber_tools:
     preference: preferred
     caps: [web_crawling, web_recon]
     canary: "katana -h"
-  semgrep:
+  opengrep:
     description: "Static source code analysis"
     preference: preferred
     caps: [sast]
-    canary: "semgrep -h"
+    canary: "opengrep scan --help"
 
   # DNS/Recon
   dnsrecon:

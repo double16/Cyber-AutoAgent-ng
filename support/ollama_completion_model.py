@@ -51,6 +51,13 @@ def is_cloud_name(name: str) -> bool:
     return "cloud" in name.lower()
 
 
+def parse_num_ctx(num_ctx_val: Any) -> int:
+    try:
+        return int(num_ctx_val)
+    except (TypeError, ValueError):
+        return 0
+
+
 def pick_best_model(host: str, timeout: int = 10, verbose: bool = False) -> Tuple[str, str, float]:
     tags = http_json(f"{host}/api/tags", timeout=timeout)
     models: List[Dict[str, Any]] = tags.get("models", [])
@@ -58,6 +65,7 @@ def pick_best_model(host: str, timeout: int = 10, verbose: bool = False) -> Tupl
     best_name = ""
     best_param_str = ""
     best_param_b = 0.0
+    best_num_ctx = 0
 
     for m in models:
         name = (m.get("name") or "").strip()
@@ -84,13 +92,32 @@ def pick_best_model(host: str, timeout: int = 10, verbose: bool = False) -> Tupl
         param_str = ((show.get("details") or {}).get("parameter_size")) or ""
         param_b = param_to_billions(param_str)
 
-        if verbose:
-            print(f"candidate: {name} param_size={param_str or 'unknown'} (~{param_b}B)", file=sys.stderr)
+        num_ctx = 0
+        parameters = show.get("parameters")
+        if isinstance(parameters, dict):
+            num_ctx = parse_num_ctx(parameters.get("num_ctx"))
+        elif isinstance(parameters, str):
+            for line in parameters.splitlines():
+                line = line.strip()
+                if not line or not line.startswith("num_ctx"):
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    num_ctx = parse_num_ctx(parts[1])
+                    if num_ctx > 0:
+                        break
 
-        if param_b > best_param_b:
+        if num_ctx == 0:
+            num_ctx = parse_num_ctx((show.get("details") or {}).get("num_ctx", 4096))
+
+        if verbose:
+            print(f"candidate: {name} param_size={param_str or 'unknown'} (~{param_b}B) num_ctx={num_ctx}", file=sys.stderr)
+
+        if (num_ctx, param_b) > (best_num_ctx, best_param_b):
             best_name = name
             best_param_str = param_str
             best_param_b = param_b
+            best_num_ctx = num_ctx
 
     if not best_name:
         # Fallback: ensure a known completion-capable local model is present.

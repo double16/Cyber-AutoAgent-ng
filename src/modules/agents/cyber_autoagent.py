@@ -19,7 +19,7 @@ from strands.tools.executors import ConcurrentToolExecutor
 # These tools have the @tool decorator, the function is to be imported
 from strands_tools.editor import editor
 from strands_tools.load_tool import load_tool
-from strands_tools.shell import shell
+from modules.tools.shell import shell
 from strands_tools.sleep import sleep
 from strands_tools.tavily import tavily_search
 
@@ -27,8 +27,9 @@ from strands_tools.tavily import tavily_search
 from strands_tools import (
     http_request,
     python_repl,
-    stop,
+    environment,
 )
+from modules.tools import stop
 
 from modules import prompts, __version__
 from modules.agents.factory import AgentFactoryConfig, init_agent_factory
@@ -66,7 +67,15 @@ from modules.tools.mcp import (
 from modules.tools.memory import (
     get_memory_client,
     initialize_memory_system,
-    mem0_memory,
+    mem0_store,
+    mem0_retrieve,
+    mem0_list,
+    store_plan,
+    get_plan,
+    create_tasks,
+    list_uncompleted_tasks,
+    task_done,
+    get_active_task,
 )
 from modules.tools.browser import (
     initialize_browser,
@@ -183,7 +192,7 @@ def create_agent(
             "Using fresh memory mode - ignoring any existing memories", "WARNING"
         )
     else:
-        has_existing_memories = check_existing_memories(config.target, config.provider)
+        has_existing_memories = check_existing_memories(config.target, config.provider, operation_id)
         # Log the result for debugging container vs local issues
         if has_existing_memories:
             print_status(
@@ -287,9 +296,7 @@ def create_agent(
         try:
             memory_client = get_memory_client()
             if memory_client:
-                memory_overview = memory_client.get_memory_overview(
-                    user_id="cyber_agent"
-                )
+                memory_overview = memory_client.get_memory_overview()
         except Exception as e:
             agent_logger.debug(
                 "Could not get memory overview for system prompt: %s", str(e)
@@ -367,7 +374,7 @@ def create_agent(
                 # Tools are pre-loaded
                 for tool_name in tool_names:
                     tool_examples.append(
-                        f"{tool_name}()  # Pre-loaded and ready to use"
+                        f"{tool_name}(...)"
                     )
             else:
                 # Fallback to load_tool instructions using discovered absolute paths
@@ -389,12 +396,10 @@ def create_agent(
             tool_count += len(tool_names)
             module_tools_context = f"""
 ### MODULE-SPECIFIC TOOLS
+Preferred over command line.
 
-Available {config.module} module tools:
-{", ".join(tool_names)}
-
-{"Ready to use:" if loaded_module_tools else "Load these tools when needed:"}
-{chr(10).join(f"- {example}" for example in tool_examples)}
+{"Ready to use:" if loaded_module_tools else "Load when needed:"}
+{chr(10).join(f"  - {example}" for example in tool_examples)}
 """
         else:
             print_status(
@@ -410,14 +415,9 @@ Available {config.module} module tools:
         tools_context = f"""
 ### COMMAND LINE PROGRAMS
 
-Use the **shell** tool for bash commands.
-
-**Command line tool selection rules**
-- Use a purpose-built tool when scanning/enumerating many targets or endpoints.
-- Use `curl` only for single requests, reproductions, or crafted edge-cases.
-- Use `grep/sed/awk/jq` only for small transformations after purpose-built tools produce raw output.
-
-### Capabilities → Preferred tools → Fallbacks
+- Use the **shell** tool for command line programs.
+- Capabilities → Preferred tools → Fallbacks
+- These programs are known to be installed.
 """
         for cap, cap_prefs in tools_by_caps.items():
             tools_context += f"\n- **{cap}**\n"
@@ -454,7 +454,7 @@ Prefer MCP tools over command line tools that offer similar capabilities.
         full_tools_context = f"""
 ## TOOLS
 
-Guidance and tool names in prompts are illustrative, not prescriptive. Always check availability and prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
+Prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
 
 """ + full_tools_context
 
@@ -495,10 +495,19 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
         shell,
         editor,
         load_tool,
-        mem0_memory,
+        mem0_store,
+        mem0_retrieve,
+        mem0_list,
+        store_plan,
+        get_plan,
+        create_tasks,
+        list_uncompleted_tasks,
+        task_done,
+        get_active_task,
         stop,
         sleep,
         python_repl,
+        environment,  # environment is referenced by other strands tools
     ]
 
     if enable_prompt_optimization:
@@ -576,123 +585,12 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
             "Error loading module execution prompt for '%s': %s", config.module, e
         )
 
-    # Optionally build a concise plan snapshot from memory (best-effort, no hard dependency)
     plan_snapshot = None
     plan_current_phase = None
     try:
         memory_client = get_memory_client(silent=True)
-        if memory_client:
-            active_plan = memory_client.get_active_plan(user_id="cyber_agent", operation_id=operation_id)
-            if active_plan:
-                # First try to get JSON from metadata
-                plan_json = active_plan.get("metadata", {}).get("plan_json")
-
-                # If we have JSON, create a rich snapshot
-                if plan_json and isinstance(plan_json, dict):
-                    try:
-                        plan_current_phase = plan_json.get("current_phase", 1)
-                        objective = plan_json.get("objective", "Unknown objective")
-                        phases = plan_json.get("phases", [])
-
-                        # Find current phase details
-                        current_phase_info = None
-                        for phase in phases:
-                            if (
-                                phase.get("id") == plan_current_phase
-                                or phase.get("status") == "active"
-                            ):
-                                current_phase_info = phase
-                                break
-
-                        # Build comprehensive snapshot
-                        snap_lines = []
-                        snap_lines.append(f"Objective: {objective}")
-                        if current_phase_info:
-                            snap_lines.append(
-                                f"CurrentPhase: {current_phase_info.get('title', 'Unknown')} (Phase {plan_current_phase}/{len(phases)})"
-                            )
-                            snap_lines.append(
-                                f"Criteria: {current_phase_info.get('criteria', 'No criteria defined')}"
-                            )
-
-                        plan_snapshot = "\n".join(snap_lines)
-                    except Exception as e:
-                        logger.debug("Error creating plan snapshot from JSON: %s", e)
-
-                # Fallback to text extraction if no JSON
-                if not plan_snapshot:
-                    phase_line = None
-                    criteria_line = None
-                    raw = active_plan.get("memory") or active_plan.get("content", "")
-                    if isinstance(raw, str) and raw:
-                        # Best-effort extraction: find first active/pending phase and any criteria line
-                        for line in raw.split("\n"):
-                            ls = line.strip()
-                            # Look for phase lines in format: "Phase X [STATUS]: title - criteria"
-                            if not phase_line and ls.lower().startswith("phase"):
-                                # Check if it's an active phase
-                                if "[ACTIVE]" in ls or "[active]" in ls.upper():
-                                    phase_line = ls
-                                    # Extract criteria from the same line (after the dash)
-                                    if " - " in ls and not criteria_line:
-                                        criteria_line = ls.split(" - ", 1)[1]
-                            if phase_line and criteria_line:
-                                break
-                    # Try JSON extraction first (plan stored as JSON or within [PLAN] {json})
-                    plan_json = None
-                    try:
-                        brace = raw.find("{")
-                        if brace != -1:
-                            plan_json = json.loads(raw[brace:])
-                    except Exception:
-                        plan_json = None
-                    if isinstance(plan_json, dict):
-                        try:
-                            cph = plan_json.get("current_phase")
-                            if isinstance(cph, int):
-                                plan_current_phase = cph
-                            else:
-                                phases = plan_json.get("phases") or []
-                                if isinstance(phases, list):
-                                    for ph in phases:
-                                        if (
-                                            isinstance(ph, dict)
-                                            and ph.get("status") == "active"
-                                        ):
-                                            pid = ph.get("id")
-                                            if isinstance(pid, int):
-                                                plan_current_phase = pid
-                                                break
-                        except Exception:
-                            pass
-                    # Compose snapshot with up to three lines
-                    snap_lines = []
-                    if phase_line:
-                        # Clean up the phase line for display
-                        clean_phase = (
-                            phase_line.replace("[ACTIVE]", "")
-                            .replace("[PENDING]", "")
-                            .replace("[COMPLETED]", "")
-                            .strip()
-                        )
-                        snap_lines.append(f"CurrentPhase: {clean_phase}")
-                    # Derive sub-objective from phase goal portion if present
-                    sub_obj = None
-                    try:
-                        # Extract title from format: "Phase X [STATUS]: title - criteria"
-                        if phase_line and ":" in phase_line:
-                            after_colon = phase_line.split(":", 1)[1].strip()
-                            if " - " in after_colon:
-                                sub_obj = after_colon.split(" - ", 1)[0].strip()
-                            else:
-                                sub_obj = after_colon
-                    except Exception:
-                        sub_obj = None
-                    if sub_obj:
-                        snap_lines.append(f"Objective: {sub_obj}")
-                    if criteria_line:
-                        snap_lines.append(f"Criteria: {criteria_line}")
-                    plan_snapshot = "\n".join(snap_lines[:3]).strip() or None
+        plan_snapshot = memory_client.get_active_plan(operation_id=operation_id)
+        plan_current_phase = plan_snapshot.current_phase if plan_snapshot else None
     except Exception as e:
         logger.debug("Plan snapshot not available: %s", e)
 
@@ -777,6 +675,7 @@ Guidance and tool names in prompts are illustrative, not prescriptive. Always ch
     callback_handler = ReactBridgeHandler(
         max_steps=config.max_steps,
         operation_id=operation_id,
+        provider_id=config.provider,
         model_id=config.model_id,
         swarm_model_id=server_config.swarm.llm.model_id,
         init_context={

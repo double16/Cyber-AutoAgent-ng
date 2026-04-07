@@ -14,7 +14,7 @@ from modules.config.manager import (
     get_config_manager,
     get_default_model_configs,
     get_model_config,
-    get_ollama_host, MAX_TOKENS_LIMIT,
+    get_ollama_host, MAX_TOKENS_LIMIT, MAX_TOKENS_REASONING_LIMIT,
 )
 from modules.config.types import (
     EmbeddingConfig,
@@ -30,6 +30,7 @@ from modules.config.types import (
     ServerConfig,
     SwarmConfig,
     get_default_base_dir,
+    DEFAULT_TEMPERATURE_EXECUTION, DEFAULT_TEMPERATURE_SWARM,
 )
 from modules.tools.mcp import resolve_env_vars_in_dict, resolve_env_vars_in_list
 
@@ -75,10 +76,10 @@ class TestLLMConfig:
     def test_default_parameters(self):
         """Test LLM config with default parameters."""
         config = LLMConfig(provider=ModelProvider.OLLAMA, model_id="llama3.2:3b")
-        assert config.temperature == 0.95
+        assert config.temperature == DEFAULT_TEMPERATURE_EXECUTION
         assert config.max_tokens == 4096
         assert config.top_p is None  # Default is None (optional parameter)
-        assert config.parameters["temperature"] == 0.95
+        assert config.parameters["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
         assert config.parameters["max_tokens"] == 4096
         assert "top_p" not in config.parameters  # Only included when explicitly set
 
@@ -219,7 +220,7 @@ class TestConfigManager:
 
             assert config.server_type == "ollama"
             assert config.llm.provider == ModelProvider.OLLAMA
-            assert config.llm.model_id == "llama3.2:3b"
+            assert config.llm.model_id == "qwen3-coder:30b-a3b-q4_K_M"
             assert config.embedding.provider == ModelProvider.OLLAMA
             assert config.embedding.model_id == "mxbai-embed-large:latest"
             assert config.region == "ollama"
@@ -261,7 +262,7 @@ class TestConfigManager:
 
         assert isinstance(config, LLMConfig)
         assert config.provider == ModelProvider.OLLAMA
-        assert config.model_id == "llama3.2:3b"
+        assert config.model_id == "qwen3-coder:30b-a3b-q4_K_M"
 
     def test_get_embedding_config(self):
         """Test getting embedding configuration."""
@@ -299,18 +300,17 @@ class TestConfigManager:
         local_config = self.config_manager.get_swarm_config("ollama")
         assert isinstance(local_config, SwarmConfig)
         assert local_config.llm.provider == ModelProvider.OLLAMA
-        assert local_config.llm.model_id == "llama3.2:3b"
-        assert local_config.llm.temperature == 0.7
-        # Swarm max_tokens now uses models.dev safe defaults (50% of limit, fallback 4096)
-        assert local_config.llm.max_tokens == 4096
+        assert local_config.llm.model_id == "qwen3-coder:30b-a3b-q4_K_M"
+        assert local_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
+        assert local_config.llm.max_tokens == 3072
 
         # Test remote swarm config
         remote_config = self.config_manager.get_swarm_config("bedrock")
         assert isinstance(remote_config, SwarmConfig)
         assert remote_config.llm.provider == ModelProvider.AWS_BEDROCK
         assert "claude" in remote_config.llm.model_id
-        assert remote_config.llm.temperature == 0.7
-        assert remote_config.llm.max_tokens == 6000
+        assert remote_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
+        assert remote_config.llm.max_tokens == 5000
 
     def test_get_mem0_service_config(self):
         """Test getting Mem0 service configuration."""
@@ -341,23 +341,23 @@ class TestConfigManager:
             assert vector_store_config["provider"] == "faiss"
             assert vector_store_config["config"]["embedding_model_dims"] == 1024
 
-        # Test remote config
-        remote_config = self.config_manager.get_mem0_service_config("bedrock")
-        assert isinstance(remote_config, dict)
+            # Test remote config
+            remote_config = self.config_manager.get_mem0_service_config("bedrock")
+            assert isinstance(remote_config, dict)
 
-        # Test embedder config
-        embedder_config = remote_config["embedder"]
-        assert embedder_config["provider"] == "aws_bedrock"
-        assert "titan-embed" in embedder_config["config"]["model"]
-        assert embedder_config["config"]["aws_region"] == "us-east-1"
+            # Test embedder config
+            embedder_config = remote_config["embedder"]
+            assert embedder_config["provider"] == "aws_bedrock"
+            assert "titan-embed" in embedder_config["config"]["model"]
+            assert embedder_config["config"]["aws_region"] == "us-east-1"
 
-        # Test LLM config
-        llm_config = remote_config["llm"]
-        assert llm_config["provider"] == "aws_bedrock"
-        assert "claude" in llm_config["config"]["model"]
-        assert llm_config["config"]["temperature"] == 0.1
-        assert llm_config["config"]["max_tokens"] == 2000
-        # aws_region is no longer passed to LLM config; Mem0 infers region from environment
+            # Test LLM config
+            llm_config = remote_config["llm"]
+            assert llm_config["provider"] == "aws_bedrock"
+            assert "claude" in llm_config["config"]["model"]
+            assert llm_config["config"]["temperature"] == 0.1
+            assert llm_config["config"]["max_tokens"] == 2000
+            # aws_region is no longer passed to LLM config; Mem0 infers region from environment
 
     @patch.dict(os.environ, {"OPENSEARCH_HOST": "test-opensearch.com"})
     def test_get_mem0_service_config_with_opensearch(self):
@@ -976,7 +976,7 @@ class TestGlobalFunctions:
         assert "llm_model" in config
         assert "embedding_model" in config
         assert "embedding_dims" in config
-        assert config["llm_model"] == "llama3.2:3b"
+        assert config["llm_model"] == "qwen3-coder:30b-a3b-q4_K_M"
         assert config["embedding_model"] == "mxbai-embed-large:latest"
         assert config["embedding_dims"] == 1024
 
@@ -1070,6 +1070,7 @@ class TestEnvironmentIntegration:
         assert not config_manager.is_thinking_model("us.anthropic.claude-3-5-sonnet-20241022-v2:0")
         assert not config_manager.is_thinking_model("llama3.2:3b")
 
+    @patch.dict(os.environ, {"OLLAMA_CONTEXT_LENGTH": "32768"}, clear=True)
     def test_centralized_model_configuration_methods(self):
         """Test the new centralized model configuration methods."""
         config_manager = ConfigManager()
@@ -1079,7 +1080,7 @@ class TestEnvironmentIntegration:
             "us.anthropic.claude-opus-4-20250514-v1:0", "us-east-1"
         )
         assert thinking_config["temperature"] == 1.0
-        assert thinking_config["max_tokens"] == 32000
+        assert thinking_config["max_tokens"] == 10_000
         assert "additional_request_fields" in thinking_config
         assert "anthropic_beta" in thinking_config["additional_request_fields"]
         assert "thinking" in thinking_config["additional_request_fields"]
@@ -1088,14 +1089,14 @@ class TestEnvironmentIntegration:
         standard_config = config_manager.get_standard_model_config(
             "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "us-east-1", "bedrock"
         )
-        assert standard_config["temperature"] == 0.95
-        assert standard_config["max_tokens"] == MAX_TOKENS_LIMIT  # clamped
+        assert standard_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
+        assert standard_config["max_tokens"] == MAX_TOKENS_REASONING_LIMIT  # clamped
         # top_p is now optional (not included for Anthropic models to avoid conflicts)
 
         # Test local model configuration
         local_config = config_manager.get_local_model_config("llama3.2:3b", "ollama")
-        assert local_config["temperature"] == 0.95
-        assert local_config["max_tokens"] == 8192
+        assert local_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
+        assert local_config["max_tokens"] == 4096
         assert "host" in local_config
         assert local_config["host"].startswith("http://")
 

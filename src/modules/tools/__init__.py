@@ -4,7 +4,15 @@ from modules.tools.memory import (
     Mem0ServiceClient,
     get_memory_client,
     initialize_memory_system,
-    mem0_memory,
+    mem0_store,
+    mem0_retrieve,
+    mem0_list,
+    store_plan,
+    get_plan,
+    create_tasks,
+    list_uncompleted_tasks,
+    task_done,
+    get_active_task,
 )
 from modules.tools.browser import (
     initialize_browser,
@@ -37,9 +45,19 @@ from modules.tools.oast import (
     oast_clear_http_responses,
     close_oast_providers,
 )
+from modules.tools import stop
 
 __all__ = [
-    "mem0_memory",
+    "stop",
+    "mem0_store",
+    "mem0_retrieve",
+    "mem0_list",
+    "store_plan",
+    "get_plan",
+    "create_tasks",
+    "list_uncompleted_tasks",
+    "task_done",
+    "get_active_task",
     "initialize_memory_system",
     "get_memory_client",
     "Mem0ServiceClient",

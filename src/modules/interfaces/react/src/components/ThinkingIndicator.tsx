@@ -16,6 +16,7 @@ interface ThinkingIndicatorProps {
   toolName?: string;
   toolCategory?: string;
   enabled?: boolean;
+  taskTitle?: string;
 }
 
 // Fun thinking phrases that cycle through
@@ -38,15 +39,11 @@ const THINKING_PHRASES = [
   'Mapping vectors',
   'Testing theories',
   'Building game plan',
-  'Evaluating angles',
-  'Synthesizing intel',
   'Formulating tactics',
   'Calibrating approach',
   'Piecing together',
-  'Calculating odds',
   'Assembling strategy',
   'Decoding patterns',
-  'Triangulating path',
   'Optimizing route',
   'Spinning up ideas',
   'Cooking up plan'
@@ -73,6 +70,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
   context,
   startTime,
   message,
+  taskTitle,
   enabled = true
 }) => {
   const theme = themeManager.getCurrentTheme();
@@ -81,7 +79,10 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
 
   // Elapsed time tracking (single interval)
   useEffect(() => {
-    if (!startTime || !enabled) return;
+    if (!startTime || !enabled) {
+      setElapsedSeconds(0);
+      return;
+    }
 
     const updateElapsed = () => {
       setElapsedSeconds(Math.floor((Date.now() - startTime) / 1000));
@@ -114,7 +115,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
     return `${minutes}m ${secs}s`;
   };
 
-  const displayMessage = message || getContextMessage(context, phraseIndex);
+  const displayMessage = (taskTitle ? (taskTitle + ' - ') : '') + (message || getContextMessage(context, phraseIndex));
 
   return (
     <Box flexDirection="column">

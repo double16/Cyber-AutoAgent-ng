@@ -17,6 +17,7 @@ import tomllib
 import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 
@@ -67,6 +68,7 @@ def get_output_path(
     return os.path.join(operation_dir, subdir) if subdir else operation_dir
 
 
+@lru_cache
 def sanitize_target_name(target: str) -> str:
     """Sanitize target string for safe filesystem usage.
 
@@ -140,13 +142,13 @@ def validate_output_path(path: str, base_dir: str) -> bool:
 
 
 def create_output_directory(path: str) -> bool:
-    """Create output directory if it doesn't exist.
+    """Create an output directory if it doesn't exist.
 
     Args:
         path: Directory path to create
 
     Returns:
-        True if directory was created or already exists, False on error
+        True if a directory was created or already exists, False on error
     """
     try:
         os.makedirs(path, exist_ok=True)
@@ -180,8 +182,6 @@ class Colors:
 
 def print_banner():
     """Display operation banner with neon cyberpunk gradient colors."""
-    import os
-
     if (
             os.getenv("CYBERAGENT_NO_BANNER", "").lower() in ("1", "true", "yes")
             or os.getenv("CYBER_UI_MODE", "cli").lower() == "react"
@@ -259,8 +259,6 @@ def print_banner():
 
 def print_section(title, content, color=Colors.BLUE, emoji=""):
     """Print formatted section with optional emoji."""
-    import os
-
     if (
             os.getenv("CYBERAGENT_NO_BANNER", "").lower() in ("1", "true", "yes")
             or os.getenv("CYBER_UI_MODE", "cli").lower() == "react"
@@ -276,8 +274,6 @@ def print_section(title, content, color=Colors.BLUE, emoji=""):
 
 def print_status(message, status="INFO"):
     """Print status message with color coding and emojis."""
-    import os
-
     if (
             os.getenv("CYBERAGENT_NO_BANNER", "").lower() in ("1", "true", "yes")
             or os.getenv("CYBER_UI_MODE", "cli").lower() == "react"
@@ -308,96 +304,6 @@ def print_status(message, status="INFO"):
             message,
         )
     )
-
-
-def analyze_objective_completion(messages: List[Dict]) -> Tuple[bool, str, Dict]:
-    """Check if agent has declared objective completion through self-assessment.
-
-    Returns:
-        (is_complete, summary, metadata)
-    """
-    if not messages:
-        return False, "", {}
-
-    # Look for explicit completion declaration - trust the agent's judgment
-    for msg in reversed(messages[-5:]):  # Check last 5 messages
-        if msg.get("role") == "assistant":
-            content_raw = msg.get("content", "")
-            if isinstance(content_raw, list) and len(content_raw) > 0:
-                content = ""
-                for block in content_raw:
-                    if isinstance(block, dict) and "text" in block:
-                        content += block["text"] + " "
-                content = content.strip()
-            else:
-                content = str(content_raw)
-
-            # Check for explicit objective declaration
-            if "objective achieved:" in content.lower():
-                match = re.search(
-                    r"objective achieved:(.+?)(?:\n|$)",
-                    content,
-                    re.IGNORECASE | re.DOTALL,
-                )
-                if match:
-                    summary = match.group(1).strip()
-
-                    # Extract any confidence or completion percentage mentioned
-                    confidence_match = re.search(r"(\d+)%", content)
-                    confidence = (
-                        int(confidence_match.group(1)) if confidence_match else 100
-                    )
-
-                    return (
-                        True,
-                        summary,
-                        {"confidence": confidence, "agent_determined": True},
-                    )
-                return (
-                    True,
-                    "Agent declared objective complete",
-                    {"confidence": 100, "agent_determined": True},
-                )
-
-            # Check for flag pattern (CTF-style flags)
-            flag_match = re.search(r"FLAG\{[^}]+\}", content)
-            if flag_match:
-                flag = flag_match.group(0)
-                # Also check for success indicators near the flag
-                if any(
-                    indicator in content.lower()
-                    for indicator in [
-                        "congratulations",
-                        "success",
-                        "correct",
-                        "flag obtained",
-                        "flag found",
-                    ]
-                ):
-                    return (
-                        True,
-                        f"Flag obtained: {flag}",
-                        {"confidence": 100, "flag_detected": True},
-                    )
-
-            # Check for other success indicators that might indicate completion
-            success_indicators = [
-                "successfully obtained flag",
-                "flag obtained",
-                "challenge complete",
-                "challenge solved",
-                "objective complete",
-            ]
-
-            for indicator in success_indicators:
-                if indicator in content.lower():
-                    return (
-                        True,
-                        f"Success indicator detected: {indicator}",
-                        {"confidence": 95, "success_indicator": True},
-                    )
-
-    return False, "", {}
 
 
 @dataclass
@@ -489,3 +395,32 @@ def get_tool_name(tool) -> str:
     except AttributeError:
         tool_name = getattr(tool, "__name__", tool.__class__.__name__).split(".")[-1]
     return tool_name
+
+
+def duration_max(*values):
+    parsed = []
+    for value in values:
+        if not value:
+            continue
+        nums = [
+            float(m.group(0))
+            for token in re.split(r"[\s:]+", value.strip())
+            if token
+            for m in [re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", token)]
+            if m
+        ]
+        parsed.append((value, nums))
+
+    width = max((len(nums) for _, nums in parsed), default=0)
+    return max(parsed, key=lambda x: [0.0] * (width - len(x[1])) + x[1])[0] if parsed else None
+
+
+def filter_none_values(d: dict) -> dict:
+    """
+    Returns a new dict with None values removed.
+    """
+    return {
+        key: value
+        for key, value in d.items()
+        if value is not None
+    }

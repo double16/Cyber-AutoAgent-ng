@@ -201,6 +201,18 @@ export class DirectDockerService extends EventEmitter {
         '--provider', config.modelProvider || 'bedrock',
       ];
 
+      if (params.continueOperation === true || params.continueOperation === "") {
+        args.push('--continue');
+      } else if (params.continueOperation) {
+        args.push('--continue', params.continueOperation);
+      }
+
+      if (params.reportOnly === true || params.reportOnly === "") {
+        args.push('--report');
+      } else if (params.reportOnly) {
+        args.push('--report', params.reportOnly);
+      }
+
       if (config.modelId) {
         args.push('--model', config.modelId);
       }
@@ -326,7 +338,9 @@ export class DirectDockerService extends EventEmitter {
       // Ollama configuration
       if (config.ollamaHost) {
         env.push(`OLLAMA_HOST=${config.ollamaHost}`);
-        env.push(`OLLAMA_API_BASE=${config.ollamaHost}`);
+      }
+      if (config.ollamaContextLength) {
+        env.push(`OLLAMA_CONTEXT_LENGTH=${config.ollamaContextLength}`);
       }
       if (config.ollamaTimeout) {
         env.push(`OLLAMA_TIMEOUT=${config.ollamaTimeout}`);
@@ -392,6 +406,9 @@ export class DirectDockerService extends EventEmitter {
       if (config.evaluationModel) {
         env.push(`CYBER_AGENT_EVALUATION_MODEL=${config.evaluationModel}`);
       }
+      if (config.memoryModel) {
+        env.push(`MEM0_LLM_MODEL=${config.memoryModel}`);
+      }
 
       // MCP Servers
       if (config.mcp.enabled && config.mcp.connections) {
@@ -435,13 +452,6 @@ export class DirectDockerService extends EventEmitter {
         }
         return out;
       };
-      logger.info('Docker exec plan', {
-        args,
-        env: maskEnv(env),
-        target: params.target,
-        module: params.module,
-        mode: await ContainerManager.getInstance().getCurrentMode()
-      });
 
       // Get deployment mode for configuration and messaging decisions
       const deploymentManager = ContainerManager.getInstance();
@@ -537,6 +547,14 @@ export class DirectDockerService extends EventEmitter {
         }
       }
       env = Array.from(envMap.entries()).map(([key, value]) => `${key}=${value}`);
+
+      logger.info('Docker exec plan', {
+        args,
+        env: maskEnv(env),
+        target: params.target,
+        module: params.module,
+        mode: await ContainerManager.getInstance().getCurrentMode()
+      });
 
       // Prefer re-using the long-lived service container when available.
       // CYBER_DOCKER_REUSE defaults to true; set to `false` to force ad-hoc containers.

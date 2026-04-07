@@ -222,7 +222,7 @@ def test_before_model_call_inject_replaces_last_assistant_with_reduced_text_and_
     # A system message with continue instructions should be appended.
     assert agent.messages[-1]["role"] == "system"
     sys_text = agent.messages[-1]["content"][0]["text"]
-    assert "<continue_instructions>" in sys_text
+    assert "<reflection_snapshot>" in sys_text
     assert "REFLECTION_SNAPSHOT" in sys_text
 
 

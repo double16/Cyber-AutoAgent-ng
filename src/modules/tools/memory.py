@@ -15,13 +15,14 @@ Key Features:
    • get: Retrieve specific memories by memory ID
    • retrieve: Perform semantic search across all memories
 
-2. Safety Features:
-   • User confirmation for mutative operations
+2. Task Management:
+   • Work is broken into small tasks per phase with activation managed by these tools.
+
+3. Safety Features:
    • Content previews before storage
    • Warning messages before deletion
-   • BYPASS_TOOL_CONSENT mode for bypassing confirmations in tests
 
-3. Advanced Capabilities:
+4. Advanced Capabilities:
    • Automatic memory ID generation
    • Structured memory storage with metadata
    • Semantic search with relevance filtering
@@ -29,134 +30,494 @@ Key Features:
    • Support for both user and agent memories
    • Multiple vector database backends (OpenSearch, Mem0 Platform, FAISS)
 
-4. Error Handling:
+5. Error Handling:
    • Memory ID validation
    • Parameter validation
    • Graceful API error handling
    • Clear error messages
 
-5. Configurable Components:
+6. Configurable Components:
    • Embedder (AWS Bedrock, Ollama, OpenAI)
    • LLM (AWS Bedrock, Ollama, OpenAI)
    • Vector Store (FAISS, OpenSearch, Mem0 Platform)
-
-Plan & Reflection:
-- Plan lifecycle: store_plan (create), get_plan (retrieve), update via store_plan (new version)
-- Evaluation cadence: Every ~20 steps → get_plan, assess criteria, update phases if satisfied
-- Phase transitions: Criteria met → status="done", advance current_phase, next status="active", store_plan
-- Post-reflection: Evaluate plan, update if phase complete or pivot needed
-- Stuck detection: Phase >40% budget → force advance with context note
-
-Adaptation Tracking:
-- After failed attempts: store("[OBSERVATION] Approach X blocked at endpoint Y", metadata={"category": "observation", "blocker": "WAF", "retry_count": n})
-- Include what was blocked (script tags, specific chars, etc.) and next strategy
-- After 3 retries with same approach, mandatory pivot to different technique
-
-Plan Storage - CRITICAL: Pass as dict/object, NOT string! (serializes to TOON internally)
-
-**━━━ EXACT FORMAT (copy this structure) ━━━**
-
-```python
-mem0_memory(
-  action="store_plan",
-  content={
-    "objective": "Comprehensive security assessment",
-    "current_phase": 1,
-    "total_phases": 3,
-    "phases": [
-      {"id": 1, "title": "Reconnaissance", "status": "active", "criteria": "tech stack identified"},
-      {"id": 2, "title": "Testing", "status": "pending", "criteria": "vulns validated with PoC"},
-      {"id": 3, "title": "Exploitation", "status": "pending", "criteria": "flag extracted"}
-    ]
-  }
-)
-```
-
-**Phase fields (REQUIRED - use EXACT names):**
-- id: int (NOT "phase")
-- title: str (NOT "name")
-- status: str (active/pending/done)
-- criteria: str (NOT "completion_criteria" or "tasks")
-
-**Common mistakes to AVOID:**
-✗ Passing content="string..." (must be dict!)
-✗ Using {"phase": 1, "name": "X"} (use id/title)
-✗ Adding extra fields like tasks, budget_percent (invalid)
-
-**Internal TOON storage** (30-60% more token-efficient than JSON):
-```
-plan_overview[1]{objective,current_phase,total_phases}:
-  Comprehensive security assessment,1,3
-plan_phases[3]{id,title,status,criteria}:
-  1,Reconnaissance,active,tech stack identified
-  2,Testing,pending,vulns validated with PoC
-  3,Exploitation,pending,flag extracted
-```
-
-Required: objective, current_phase, total_phases, phases (each with: id, title, status, criteria)
-
-Proof Pack policy:
-- For any HIGH/CRITICAL finding stored via mem0_memory, include Proof Pack in metadata:
-  • proof_pack: {"artifacts": ["path1", "path2"], "rationale": "one-line explanation"}
-  • All artifact paths MUST exist and be >200 bytes (authentic tool outputs)
-  • Rationale links artifacts to the claim with technical explanation
-- If no valid proof_pack exists:
-  • Set validation_status="hypothesis" (NOT "verified" or "unverified")
-  • Set status="hypothesis" (NOT "verified" or "solved")
-  • Confidence capped at 60% automatically
-  • Include next steps to obtain proof in content
-- For FLAGS specifically:
-  • MUST include artifact_hash (sha256 of artifact containing flag)
-  • MUST include extraction_line (line number where flag found)
-  • status="verified" ONLY after submission API returns success
-- Recommended metadata keys: severity, confidence, validation_status, status, proof_pack, artifact_hash
-
-Capability gaps (Ask-Enable-Retry):
-- If a missing capability blocks progress (e.g., web3), the LLM should:
-  1) Ask: state why it is required and the minimal package(s)
-  2) Enable: propose a minimal, temporary, non-interactive enablement (e.g., ephemeral venv under outputs/<target>/<op>/venv)
-  3) Retry: re-run once and store resulting artifacts
-- If enablement is not permitted, store the next steps instead of escalating severity.
-
-Usage:
-- Keep entries concise. For large artifacts (HTML/JS/logs), save files to outputs/<target>/OP_<id>/artifacts and store only the file path in memory.
-- See tool schema below.
 """
 
 import json
 import logging
 import os
 import re
+import sqlite3
 import threading
+import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Literal, Union, Iterable
 
 import boto3
 from mem0 import Memory as Mem0Memory
 from mem0 import MemoryClient
 from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
-from strands import tool
+from strands import tool, ToolContext
+from rapidfuzz import fuzz
 
 from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
+from modules.handlers.utils import filter_none_values
 
 # Set up logging
 logger = get_logger("Tools.Memory")
 
-# Initialize Rich console
-console = Console()
-
 # Global configuration and client
-_MEMORY_CONFIG = None
-_MEMORY_CLIENT = None
+_MEMORY_CONFIG: Optional[Dict[str, str]] = None
+_MEMORY_CLIENT: Optional["Mem0ServiceClient"] = None
+_PLAN_STORE: Optional["PlanStore"] = None
 
 # Thread lock for FAISS write safety (prevents corruption during concurrent writes)
 _FAISS_WRITE_LOCK = threading.Lock()
+
+
+PlanStatus = Literal["active", "pending", "done"]
+TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
+
+
+@dataclass(frozen=True)
+class Task:
+    """A single unit of work tied to an execution-prompt phase.
+
+    Stored as a memory item with metadata.category == "task".
+    Updates are written as new memories sharing the same task_uid.
+    """
+
+    task_uid: str
+    title: str
+    objective: str
+    phase: int
+    status: TaskStatus
+    status_reason: Optional[str] = None
+    evidence: List[str] = field(default_factory=list)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_uid, str) or not self.task_uid.strip():
+            raise ValueError("task_uid must be a non-empty string")
+        if not isinstance(self.title, str) or not self.title.strip():
+            raise ValueError("title must be a non-empty string")
+        if not isinstance(self.objective, str) or not self.objective.strip():
+            raise ValueError("objective must be a non-empty string")
+        if not isinstance(self.phase, int) or self.phase <= 0:
+            raise ValueError("phase must be a positive int")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
+            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked")
+
+    @staticmethod
+    def from_obj(obj: Any) -> "Task":
+        if not isinstance(obj, dict):
+            raise ValueError("task must be an object/dict")
+        return Task(
+            task_uid=str(obj.get("task_uid", "")),
+            title=str(obj.get("title", "")),
+            objective=str(obj.get("objective", "")),
+            evidence=_normalize_evidence(obj.get("evidence", None)),
+            phase=int(obj.get("phase")),
+            status=str(obj.get("status", "pending")),
+            status_reason=str(obj.get("status_reason", "")),
+            created_at=obj.get("created_at"),
+            updated_at=obj.get("updated_at"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return filter_none_values({
+            "task_uid": self.task_uid,
+            "title": self.title,
+            "objective": self.objective,
+            "evidence": self.evidence,
+            "phase": self.phase,
+            "status": self.status,
+            "status_reason": self.status_reason,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        })
+
+    @staticmethod
+    def toon_format() -> str:
+        return f"task[1]{Task.csv_format()}"
+
+    @staticmethod
+    def csv_format() -> str:
+        return "title,objective,evidence,phase,status,status_reason"
+
+    def to_toon(self, include_format=True) -> str:
+        title = _sanitize_toon_value(self.title)
+        objective = _sanitize_toon_value(self.objective)
+        evidence = "|".join(_sanitize_toon_value(e) for e in self.evidence)
+        status = _sanitize_toon_value(self.status)
+        status_reason = _sanitize_toon_value(self.status_reason)
+        lines = []
+        if include_format:
+            lines.append(f"{self.toon_format()}:")
+        lines.append(f"  {title},{objective},{evidence},{self.phase},{status},{status_reason}")
+        return "\n".join(lines).strip()
+
+
+@dataclass(frozen=True)
+class PlanPhase:
+    id: int
+    title: str
+    status: PlanStatus
+    criteria: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, int) or self.id < 0:
+            raise ValueError("phase.id must be a positive int")
+        if not isinstance(self.title, str) or not self.title.strip():
+            raise ValueError("phase.title must be a non-empty string")
+        if self.status not in ("active", "pending", "done"):
+            raise ValueError("phase.status must be one of: active|pending|done")
+        if self.criteria is None:
+            object.__setattr__(self, "criteria", "")  # type: ignore[misc]
+        if not isinstance(self.criteria, str):
+            raise ValueError("phase.criteria must be a string")
+
+    @staticmethod
+    def from_obj(obj: Any) -> "PlanPhase":
+        if not isinstance(obj, dict):
+            raise ValueError("phase must be an object/dict")
+        return PlanPhase(
+            id=int(obj.get("id")),
+            title=str(obj.get("title", "")),
+            status=str(obj.get("status", "pending")),  # validated in __post_init__
+            criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return filter_none_values({
+            "id": self.id,
+            "title": self.title,
+            "status": self.status,
+            "criteria": self.criteria,
+        })
+
+
+@dataclass
+class OperationPlan:
+    objective: str
+    current_phase: int
+    total_phases: int
+    phases: List[PlanPhase] = field(default_factory=list)
+    assessment_complete: bool = False
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.objective, str) or not self.objective.strip():
+            raise ValueError("objective must be a non-empty string")
+        if not isinstance(self.current_phase, int) or self.current_phase <= 0:
+            raise ValueError("current_phase must be a positive int")
+        if not isinstance(self.total_phases, int) or self.total_phases <= 0:
+            raise ValueError("total_phases must be a positive int")
+        if not isinstance(self.phases, list) or not self.phases:
+            raise ValueError("phases must be a non-empty list")
+        for p in self.phases:
+            if not isinstance(p, PlanPhase):
+                raise ValueError("phases must contain PlanPhase objects")
+
+        # enforce consistency
+        if self.total_phases != len(self.phases):
+            raise ValueError("total_phases must equal len(phases)")
+
+        # current_phase must match an existing phase id
+        phase_ids = {p.id for p in self.phases}
+        if self.current_phase not in phase_ids:
+            raise ValueError("current_phase must match one of the phase ids")
+
+        # at most one active phase
+        active_count = sum(1 for p in self.phases if p.status == "active")
+        if active_count > 1:
+            raise ValueError("only one phase may have status='active'")
+
+    @staticmethod
+    def from_obj(obj: Any) -> "OperationPlan":
+        if isinstance(obj, OperationPlan):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("plan content must be an object/dict")
+
+        phases_raw = obj.get("phases")
+        if not isinstance(phases_raw, list):
+            raise ValueError("phases must be a list")
+
+        phases = [PlanPhase.from_obj(p) for p in phases_raw]
+        phases.sort(key=lambda p: p.id)
+
+        return OperationPlan(
+            objective=str(obj.get("objective", "")),
+            current_phase=int(obj.get("current_phase")),
+            total_phases=len(phases),
+            phases=phases,
+            assessment_complete=bool(obj.get("assessment_complete", False)),
+            created_at=obj.get("created_at"),
+            updated_at=obj.get("updated_at"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return filter_none_values({
+            "objective": self.objective,
+            "current_phase": self.current_phase,
+            "total_phases": self.total_phases,
+            "phases": [p.to_dict() for p in self.phases],
+            "assessment_complete": self.assessment_complete,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        })
+
+    @staticmethod
+    def toon_format() -> str:
+        return "plan_overview[1]{objective,current_phase,total_phases}"
+
+    def to_toon(self, include_format=True) -> str:
+        objective = _sanitize_toon_value(self.objective)
+        overview_lines = []
+        if include_format:
+            overview_lines.append(f"{self.toon_format()}:")
+        overview_lines.append(f" {objective},{self.current_phase},{self.total_phases}")
+        phase_lines = [f"plan_phases[{len(self.phases)}]{{id,title,status,criteria}}:"]
+        for phase in self.phases:
+            phase_lines.append(
+                "  "
+                + ",".join(
+                    [
+                        _sanitize_toon_value(phase.id),
+                        _sanitize_toon_value(phase.title),
+                        _sanitize_toon_value(phase.status),
+                        _sanitize_toon_value(phase.criteria),
+                    ]
+                )
+            )
+        return "\n".join([*overview_lines, *phase_lines]).strip()
+
+
+def _get_memory_base_path(config: Optional[Dict] = None) -> str:
+    """Determine the base path for memory storage (FAISS, SQLite)."""
+    # Use provided path or create unified output structure path
+    if config and config.get("vector_store", {}).get("config", {}).get("path"):
+        return config["vector_store"]["config"]["path"]
+
+    # Create memory path using unified output structure
+    target_name = (config or {}).get("target_name", "default_target")
+    operation_id = (config or {}).get("operation_id", "default_operation")
+
+    # Get output directory from environment or config
+    output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or (config or {}).get(
+        "output_dir", get_default_base_dir()
+    )
+
+    # Memory isolation strategy (controlled via MEMORY_ISOLATION env var)
+    # Options: "operation" (per-operation, safe for parallel) | "shared" (per-target, cross-learning)
+    isolation_mode = os.environ.get("MEMORY_ISOLATION", "operation")
+
+    if isolation_mode == "shared":
+        # Shared per-target store (enables automatic cross-learning but parallel-unsafe)
+        memory_base_path = os.path.join(output_dir, target_name, "memory")
+        logger.debug("Memory mode: SHARED per-target at %s", memory_base_path)
+    else:
+        # Per-operation isolation (parallel-safe, explicit cross-learning needed)
+        memory_base_path = os.path.join(output_dir, target_name, "memory", operation_id)
+        logger.debug("Memory mode: ISOLATED per-operation at %s", memory_base_path)
+
+    return memory_base_path
+
+
+class PlanStore:
+    """Persistence for OperationPlan and Task using SQLite.
+
+    This replaces the use of Mem0 for storing plans and tasks, providing
+    a simpler and more reliable local storage.
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._bootstrap()
+
+    def _bootstrap(self):
+        """Initialize the database schema if it doesn't exist."""
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS plans (
+                        operation_id TEXT PRIMARY KEY,
+                        objective TEXT,
+                        current_phase INTEGER,
+                        total_phases INTEGER,
+                        assessment_complete BOOLEAN,
+                        plan_data TEXT,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        task_uid TEXT PRIMARY KEY,
+                        operation_id TEXT,
+                        title TEXT,
+                        objective TEXT,
+                        phase INTEGER,
+                        status TEXT,
+                        status_reason TEXT,
+                        evidence TEXT,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_operation_id ON tasks(operation_id)")
+
+    def store_plan(self, operation_id: str, plan: OperationPlan):
+        """Store or update a plan."""
+        plan_dict = plan.to_dict()
+        now = datetime.now().isoformat()
+        if not plan.created_at:
+            plan_dict["created_at"] = now
+        plan_dict["updated_at"] = now
+
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO plans (operation_id, objective, current_phase, total_phases, assessment_complete, plan_data, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(operation_id) DO UPDATE SET
+                        objective=excluded.objective,
+                        current_phase=excluded.current_phase,
+                        total_phases=excluded.total_phases,
+                        assessment_complete=excluded.assessment_complete,
+                        plan_data=excluded.plan_data,
+                        updated_at=excluded.updated_at
+                """, (
+                    operation_id,
+                    plan.objective,
+                    plan.current_phase,
+                    plan.total_phases,
+                    plan.assessment_complete,
+                    json.dumps(plan_dict),
+                    plan_dict["created_at"],
+                    plan_dict["updated_at"]
+                ))
+
+    def get_plan(self, operation_id: str) -> Optional[OperationPlan]:
+        """Retrieve a plan by operation_id."""
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT plan_data FROM plans WHERE operation_id = ?", (operation_id,))
+                row = cursor.fetchone()
+                if row:
+                    return OperationPlan.from_obj(json.loads(row[0]))
+        return None
+
+    def store_task(self, operation_id: str, task: Task):
+        """Store or update a task."""
+        task_dict = task.to_dict()
+        now = datetime.now().isoformat()
+        if not task.created_at:
+            task_dict["created_at"] = now
+        task_dict["updated_at"] = now
+
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO tasks (task_uid, operation_id, title, objective, phase, status, status_reason, evidence, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(task_uid) DO UPDATE SET
+                        title=excluded.title,
+                        objective=excluded.objective,
+                        phase=excluded.phase,
+                        status=excluded.status,
+                        status_reason=excluded.status_reason,
+                        evidence=excluded.evidence,
+                        updated_at=excluded.updated_at
+                """, (
+                    task.task_uid,
+                    operation_id,
+                    task.title,
+                    task.objective,
+                    task.phase,
+                    task.status,
+                    task.status_reason,
+                    json.dumps(task.evidence),
+                    task_dict["created_at"],
+                    task_dict["updated_at"]
+                ))
+
+    def get_tasks(self, operation_id: str) -> List[Task]:
+        """Retrieve all tasks for an operation."""
+        tasks = []
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT title, objective, phase, status, status_reason, evidence, task_uid, created_at, updated_at FROM tasks WHERE operation_id = ?", (operation_id,))
+                for row in cursor:
+                    tasks.append(Task(
+                        title=row[0],
+                        objective=row[1],
+                        phase=row[2],
+                        status=row[3],
+                        status_reason=row[4],
+                        evidence=json.loads(row[5]),
+                        task_uid=row[6],
+                        created_at=row[7],
+                        updated_at=row[8]
+                    ))
+        return tasks
+
+
+def _get_plan_store() -> PlanStore:
+    """Get or initialize the global plan store."""
+    global _PLAN_STORE
+    if _PLAN_STORE is None:
+        base_path = _get_memory_base_path(_MEMORY_CONFIG)
+        db_path = os.path.join(base_path, "plan_storage.db")
+        print(f"[+] Plan Storage: {db_path}")
+        _PLAN_STORE = PlanStore(db_path)
+    return _PLAN_STORE
+
+
+def _normalize_evidence(val: Any) -> List[str]:
+    if val is None:
+        return []
+
+    def _to_s(x: Any) -> str:
+        if x is None:
+            return ""
+        if isinstance(x, str):
+            return x.strip()
+        # Prefer stable JSON for dict-like evidence
+        if isinstance(x, dict):
+            try:
+                return json.dumps(x, sort_keys=True)
+            except Exception:
+                return str(x).strip()
+        return str(x).strip()
+
+    if isinstance(val, list):
+        out: List[str] = []
+        for x in val:
+            s = _to_s(x)
+            if s:
+                out.append(s)
+        return out
+
+    s = _to_s(val)
+    return [s] if s else []
+
+
+def _user_id(user_id: Optional[str] = None) -> str:
+    if user_id:
+        return user_id
+    return (_MEMORY_CONFIG or {}).get("user_id", "cyber-agent")
+
+
+def _operation_id(operation_id: Optional[str] = None) -> str:
+    return operation_id or (_MEMORY_CONFIG or {}).get("operation_id", os.getenv("CYBER_OPERATION_ID", "default_operation"))
 
 
 def _sanitize_toon_value(value: Any) -> str:
@@ -165,140 +526,840 @@ def _sanitize_toon_value(value: Any) -> str:
     return text.replace(",", ";")
 
 
-def _format_plan_as_toon(plan_content: Dict[str, Any]) -> str:
-    objective = _sanitize_toon_value(plan_content.get("objective", "Unknown objective"))
-    current_phase = plan_content.get("current_phase", 1)
-    phases = plan_content.get("phases", [])
-    total_phases = plan_content.get("total_phases", len(phases))
+def active_task_message(
+        active_task: Optional[Task] = None,
+        activated: bool = True,
+        closed_task: Optional[Task] = None,
+        current_phase: Optional[int] = None,
+) -> str:
+    if closed_task:
+        closed_info = {"closed": {"task_uid": closed_task.task_uid, "status": closed_task.status}}
+    else:
+        closed_info = {}
 
-    overview_lines = [
-        "plan_overview[1]{objective,current_phase,total_phases}:",
-        f"  {objective},{current_phase},{total_phases}",
-    ]
-    phase_lines = [f"plan_phases[{len(phases)}]{{id,title,status,criteria}}:"]
-    for phase in phases:
-        phase_lines.append(
-            "  "
-            + ",".join(
-                [
-                    _sanitize_toon_value(phase.get("id", "")),
-                    _sanitize_toon_value(phase.get("title", "")),
-                    _sanitize_toon_value(phase.get("status", "")),
-                    _sanitize_toon_value(phase.get("criteria", "")),
-                ]
-            )
-        )
-    return "\n".join([*overview_lines, *phase_lines]).strip()
+    if active_task is None:
+        return f"""<active_task phase="{current_phase}" status="none">
+{json.dumps({"task": None, "activated": False} | closed_info)}
+</active_task>
+"""
+    return f"""<active_task phase="{active_task.phase}" status="{active_task.status}">
+{json.dumps({"task": active_task.to_dict()} | closed_info | {"activated": activated}, indent=2, sort_keys=True)}
+</active_task>
+"""
 
 
-def memory_sort_by_create_time(m: Dict[str, Any]) -> str:
-    return str(m.get("created_at", ""))
+def memory_create_time(m: Dict[str, Any]) -> str:
+    """Best-effort created_at extraction (metadata preferred, then top-level)."""
+    meta = m.get("metadata", {})
+    return str(m.get("created_at", meta.get("created_at", "")))
 
 
 def memory_is_cross_operation() -> bool:
     return os.getenv("MEMORY_ISOLATION", "operation").lower() == "shared"
 
 
-TOOL_SPEC = {
-    "name": "mem0_memory",
-    "description": (
-        "Memory management for storing plans, findings, and observations.\n\n"
-        "━━━ CRITICAL: store_plan FORMAT ━━━\n"
-        "For action='store_plan', content MUST be a dict/object (NOT a string!).\n\n"
-        "EXACT FORMAT (copy this structure):\n"
-        '  mem0_memory(action="store_plan", content={\n'
-        '    "objective": "Assess web application for vulnerabilities",\n'
-        '    "current_phase": 1,\n'
-        '    "total_phases": 3,\n'
-        '    "phases": [\n'
-        '      {"id": 1, "title": "Discovery", "status": "active", "criteria": "Identify services running and understand attack surface"},\n'
-        '      {"id": 2, "title": "Exploit", "status": "pending", "criteria": "extract data"},\n'
-        '      {"id": 3, "title": "Validation", "status": "pending", "criteria": "confirm data is sensitive"}\n'
-        "    ]\n"
-        "  })\n\n"
-        "Phase fields (REQUIRED, do NOT use other field names):\n"
-        "  - id: int (NOT 'phase')\n"
-        "  - title: str (NOT 'name')\n"
-        "  - status: str (active/pending/done)\n"
-        "  - criteria: str (NOT 'completion_criteria')\n\n"
-        "WRONG (common mistakes):\n"
-        '  ✗ content="string..." (must be dict!)\n'
-        '  ✗ {"phase": 1} (use "id")\n'
-        '  ✗ {"name": "X"} (use "title")\n'
-        '  ✗ {"tasks": [...]} (not a valid field)\n'
-        '  ✗ {"budget_percent": 10} (not a valid field)\n\n'
-        "Actions: store, store_plan, get_plan, list, retrieve, delete.\n"
-        "Checkpoints: At 20%/40%/60%/80% budget → get_plan, assess, update if met.\n"
-        "Default user_id='cyber_agent'.\n"
-    ),
-    "inputSchema": {
-        "json": {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "description": (
-                        "Action to perform (store, store_plan, get_plan, get, list, retrieve, delete)"
-                    ),
-                    "enum": [
-                        "store",
-                        "store_plan",
-                        "get_plan",
-                        "get",
-                        "list",
-                        "retrieve",
-                        "delete",
-                    ],
-                },
-                "content": {
-                    "type": ["string", "object"],
-                    "description": (
-                        "Content to store. For action='store': string. "
-                        "For action='store_plan': MUST be object/dict (NOT string) with structure:\n"
-                        '{"objective": "...", "current_phase": 1, "total_phases": 3, '
-                        '"phases": [{"id": 1, "title": "Phase Name", "status": "active", "criteria": "..."}]}.\n'
-                        "Required phase fields: id (int), title (string), status (active/pending/done), criteria (string, optional)."
-                    ),
-                },
-                "memory_id": {
-                    "type": "string",
-                    "description": "Memory ID (required for get, delete actions)",
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Search query (required for retrieve action)",
-                },
-                "user_id": {
-                    "type": "string",
-                    "description": "User ID for the memory operations (required for store, list, retrieve actions)",
-                },
-                "agent_id": {
-                    "type": "string",
-                    "description": "Agent ID for the memory operations (required for store, list, retrieve actions)",
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": (
-                        "For store: metadata dict with category (REQUIRED: finding/signal/observation/discovery), "
-                        "severity (CRITICAL/HIGH/MEDIUM/LOW), status (verified/hypothesis), validation_status, technique, etc. "
-                        "For retrieve: metadata dict used as filters (e.g., {category: 'finding', status: 'verified'}). "
-                        "NOTE: category is REQUIRED for store action - missing category will raise an error."
-                    ),
-                },
-                "cross_operation": {
-                    "type": "boolean",
-                    "description": (
-                        "If True, search/list across ALL operations for cross-learning. "
-                        "Default False = scoped to current operation only. "
-                        "Use True to learn from past operations (e.g., retrieve(query='SQLi techniques', cross_operation=True))."
-                    ),
-                    "default": False,
-                },
-            },
-            "required": ["action"],
-        }
-    },
-}
+def _ensure_memory_client() -> "Mem0ServiceClient":
+    """Ensure the global memory client is initialized and return it."""
+    global _MEMORY_CLIENT
+    if _MEMORY_CLIENT is None:
+        # Always use silent mode for auto-init to prevent unwanted console output
+        initialize_memory_system(silent=True)
+    if _MEMORY_CLIENT is None:
+        raise RuntimeError("Memory client could not be initialized")
+    return _MEMORY_CLIENT
+
+
+def normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
+    """Normalize confidence to a percentage string, optionally capping at cap_to."""
+    try:
+        if isinstance(conf_val, str) and conf_val.strip().endswith("%"):
+            num = float(conf_val.strip().rstrip("%"))
+        else:
+            num = float(conf_val)
+    except Exception:
+        num = 0.0
+    if cap_to is not None:
+        num = min(num, cap_to)
+    num = max(0.0, min(100.0, num))
+    return f"{num:.1f}%"
+
+
+_RE_PROOF_PACK_FILE_PATTERN = re.compile(r"artifact(?:\s+paths?)?:\s*(\S+)", re.IGNORECASE)
+
+def _has_valid_proof_pack(finding: Any) -> bool:
+    """Validate proof_pack structure and artifact existence (fail-closed).
+
+    Expectations:
+    - proof_pack is a dict with key 'artifacts': List[str] of file paths (absolute or relative)
+    - Optional 'rationale': short string tying artifacts to impact
+    - Every listed artifact path MUST exist at validation time
+
+    Notes:
+    - No content parsing or domain heuristics are used here; presence of files only
+    - Any exception or malformed input results in False (fail-closed)
+    """
+    stack = [ finding ]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, list):
+            stack.extend(e)
+        elif isinstance(e, dict):
+            stack.extend(e.values())
+        else:
+            e_str = str(e)
+            if os.path.exists(e_str):
+                return True
+            matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
+            file_paths = [path.strip() for paths in matches for path in paths.split(',')]
+            for path in file_paths:
+                if os.path.exists(path):
+                    return True
+
+    return False
+
+@tool
+def mem0_store(
+    content: str,
+    metadata: Dict[str, Any],
+    agent_id: Optional[str] = None,
+) -> str:
+    """Store a single memory entry.
+    Use this for atomic entries (ONE finding/observation per call). Prefer storing immediately after you confirm something.
+
+    REQUIRED:
+    - `metadata.category` MUST be set.
+      Valid values: finding | signal | observation | discovery | plan | decision
+        finding     Exploits, flags, vulnerabilities - APPEARS IN REPORTS
+        signal      Strong indicators, access evidence - APPEARS IN REPORTS
+        observation Reconnaissance, artifacts, failed attempts - APPEARS IN REPORTS
+        discovery   New techniques, bypasses - APPEARS IN REPORTS
+        plan        Strategic planning - internal only, NOT in reports
+        decision    Filtering choices - internal only, NOT in reports
+
+    CATEGORY DECISION TREE (CRITICAL - wrong category = empty report):
+        Q: Did you EXPLOIT something or extract sensitive data?
+           YES → category="finding" (SQLi data dump, auth bypass, flag, RCE, credentials)
+           NO  → Q: Did you CONFIRM a vulnerability exists?
+                    YES → category="finding" (XSS fires, IDOR returns other user data)
+                    NO  → category="observation" (recon, tech stack, failed attempts)
+
+        COMMON MISTAKE: Using category="observation" for successful exploits
+        RESULT: Report generator finds 0 findings → NO REPORT GENERATED
+        FIX: ANY successful exploit or confirmed vuln = category="finding"
+
+    RECOMMENDED for findings:
+    - metadata.severity: CRITICAL/HIGH/MEDIUM/LOW
+    - metadata.status: hypothesis/unverified/verified (only use verified after external validation)
+    - metadata.validation_status: hypothesis/unverified/verified
+    - metadata.technique: short snake_case identifier
+    - metadata.proof_pack: artifact path for HIGH/CRITICAL when available
+
+    QUICK START:
+        # Store finding ONLY after verification succeeds
+        mem0_store(content="[FINDING] XSS Vulnerability confirmed on /contactus endpoint with name parameter. - Technique: stored_xss",
+            metadata={"category": "finding", "severity": "HIGH",
+                      "status": "verified", "validation_status": "verified",
+                      "technique": "stored_xss", "artifact_hash": "sha256_of_artifact"})
+
+        # Store observation during reconnaissance
+        mem0_store(content="[OBSERVATION] Discovered 15 endpoints, JWT auth, admin panel at /admin returns 403",
+            metadata={"category": "observation"})
+
+    STORAGE RULES:
+        1. ONE finding = ONE memory (atomic, not summaries)
+        2. Store IMMEDIATELY after success (not batched at end)
+        3. Use category="finding" for exploits/flags (required for reports)
+        4. Include severity="HIGH" minimum (CRITICAL for auth bypass, RCE, data exfil)
+        5. Add technique metadata for pattern-based cross-learning queries
+
+    STATUS VERIFICATION (prevent hallucination):
+        - status="hypothesis" → Flag extracted but NOT verified (requires testing/submission)
+        - status="unverified" → Flag in artifact, grep verified, but NOT submitted
+        - status="verified" → Flag submission accepted (ONLY use after external validation success)
+        - FORBIDDEN: status="solved" (ambiguous - use "verified" or "hypothesis")
+        - Memory contamination: status="solved" + validation_status="hypothesis" = contradiction/hallucination
+
+    Args:
+        content: Content string with [FINDING] or [OBSERVATION] markers (store artifact paths, no large blobs)
+        agent_id: Agent ID
+        metadata: Dict with category (required), severity, technique, status, etc.
+
+    Returns:
+        JSON/text with operation result.
+    """
+    if not content:
+        raise ValueError("content is required")
+
+    user_id = _user_id()
+
+    # Clean content to prevent JSON issues
+    cleaned_content = (
+        str(content)
+        .replace("\x00", "")
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .replace("\t", " ")
+        .strip()
+    )
+    # Also clean multiple spaces
+    cleaned_content = re.sub(r"\s+", " ", cleaned_content)
+    if not cleaned_content:
+        raise ValueError("Content is empty after cleaning")
+
+    # Clean metadata values too
+    if metadata:
+        cleaned_metadata = {}
+        for key, value in metadata.items():
+            if isinstance(value, str):
+                cleaned_value = (
+                    str(value)
+                    .replace("\x00", "")
+                    .replace("\n", " ")
+                    .replace("\r", " ")
+                    .replace("\t", " ")
+                    .strip()
+                )
+                cleaned_value = re.sub(r"\s+", " ", cleaned_value)
+                cleaned_metadata[key] = cleaned_value
+            else:
+                cleaned_metadata[key] = value
+        metadata = cleaned_metadata
+    else:
+        metadata = {}
+
+    # Tag with current operation ID when available
+    # Keep operation_id in metadata for backward compatibility and debugging
+    # Primary scoping now uses session_id parameter in mem0.add()
+    op_id = _operation_id()
+    if op_id:
+        metadata["operation_id"] = op_id
+        logger.debug("Tagged memory with operation_id=%s (metadata backup)", op_id)
+
+    # Validate category field exists (CRITICAL for report generation)
+    # Category is REQUIRED - agents must explicitly specify finding vs observation
+    VALID_CATEGORIES = {"finding", "signal", "observation", "discovery", "decision"}
+    if "category" not in metadata:
+        raise ValueError(
+            "MISSING CATEGORY: metadata must include 'category' field.\n"
+            "  - category='finding' for exploits, vulns, flags (APPEARS IN REPORTS)\n"
+            "  - category='observation' for recon, failed attempts (background context)\n"
+            f"VALID CATEGORIES: {', '.join(VALID_CATEGORIES)}\n"
+            "Example: metadata={'category': 'finding', 'severity': 'HIGH'}"
+        )
+
+    # Validate category is a known value
+    category_val = str(metadata.get("category", "")).lower()
+    if category_val and category_val not in VALID_CATEGORIES:
+        logger.warning(
+            "Invalid category '%s'. Valid categories: %s. Defaulting to 'observation'.",
+            category_val, VALID_CATEGORIES
+        )
+        metadata["category"] = "observation"
+
+    # Debug: Log category before any processing
+    logger.debug("Category validation: category=%s", metadata.get("category"))
+
+    # Consolidated validation for findings (single pass)
+    if metadata.get("category") in ["observation", "discovery"] and metadata.get("severity", "INFO") != "INFO":
+        logger.warning("category '%s' != 'finding' with severity != 'INFO', changing category to 'finding'", metadata.get("category"))
+        metadata["category"] = "finding"
+        if isinstance(cleaned_content, str):
+            cleaned_content = (cleaned_content
+                               .replace("[OBSERVATION]", "[FINDING]")
+                               .replace("[DISCOVERY]", "[FINDING]"))
+
+    if metadata.get("category") == "finding":
+        # 0. Warn on forbidden status="solved" (ambiguous - use verified/hypothesis)
+        status_val = str(metadata.get("status", "")).lower()
+        if status_val == "solved":
+            logger.warning(
+                "FORBIDDEN status='solved' detected - this is ambiguous. "
+                "Use status='verified' (after verification/submission success) or status='hypothesis' (unconfirmed). "
+                "Changing to 'hypothesis' to prevent memory contamination."
+            )
+            metadata["status"] = "hypothesis"
+
+        # 1. Normalize severity
+        valid_severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        sev = str(metadata.get("severity", "MEDIUM")).upper()
+        if sev not in valid_severities:
+            logger.warning(f"Invalid severity '{sev}', defaulting to MEDIUM")
+            sev = "MEDIUM"
+        metadata["severity"] = sev
+
+        # 2. Validate proof_pack for HIGH/CRITICAL findings
+        vstat = str(metadata.get("validation_status", "")).lower()
+        if sev in {"HIGH", "CRITICAL"}:
+            if _has_valid_proof_pack(metadata):
+                # Valid proof_pack exists - respect or default to unverified
+                if vstat not in {"verified", "unverified", "hypothesis"}:
+                    metadata["validation_status"] = "unverified"
+            else:
+                # Missing/invalid proof_pack - downgrade to hypothesis and cap confidence
+                metadata["validation_status"] = "hypothesis"
+                metadata["confidence"] = normalize_confidence(
+                    metadata.get("confidence", "60%"), cap_to=60.0
+                )
+        else:
+            # Non-critical findings - default validation_status if not set
+            if vstat not in {"verified", "unverified", "hypothesis"}:
+                metadata["validation_status"] = "unverified"
+
+        # 3. Determine evidence_type based on confidence (if not already set)
+        if "evidence_type" not in metadata:
+            confidence_str = metadata.get("confidence", "0%")
+            try:
+                confidence_val = float(str(confidence_str).rstrip("%"))
+            except Exception:
+                confidence_val = 0
+
+            if confidence_val >= 70:
+                metadata["evidence_type"] = "exploited"
+            elif confidence_val >= 50:
+                metadata["evidence_type"] = "behavioral"
+            else:
+                metadata["evidence_type"] = "pattern_match"
+
+        # 4. Cap confidence for pattern matches
+        if metadata.get("evidence_type") == "pattern_match":
+            metadata["confidence"] = normalize_confidence(
+                metadata.get("confidence", "35%"), cap_to=40.0
+            )
+
+    # Cross-field validation: Ensure status and validation_status are consistent
+    status_val = str(metadata.get("status", "")).lower()
+    validation_status = str(metadata.get("validation_status", "")).lower()
+
+    # If status="verified" but validation_status contradicts, fix it
+    if status_val == "verified" and validation_status and validation_status != "verified":
+        logger.warning(
+            "Inconsistent status fields: status='verified' but validation_status='%s'. "
+            "Setting validation_status='verified' to prevent contradiction.",
+            validation_status
+        )
+        metadata["validation_status"] = "verified"
+        validation_status = "verified"
+
+    # If validation_status="verified" but status isn't "verified", fix it
+    if validation_status == "verified" and status_val != "verified":
+        logger.warning(
+            "Inconsistent status fields: validation_status='verified' but status='%s'. "
+            "Setting status='verified'.",
+            status_val
+        )
+        metadata["status"] = "verified"
+        status_val = "verified"
+
+    # Suppress mem0's internal error logging during operation
+    mem0_logger = logging.getLogger("root")
+    original_level = mem0_logger.level
+    mem0_logger.setLevel(logging.CRITICAL)
+
+    client = _ensure_memory_client()
+
+    existing_search = client.mem0.search(query=cleaned_content, user_id=user_id, run_id=op_id, limit=1,
+                                         filters={"category": metadata.get("category")})
+    if existing_search.get("results"):
+        existing_best_match = existing_search["results"][0]
+        existing_best_score = existing_best_match.get("score", 1.0)
+        if existing_best_score < 0.1:
+            # Sensitive data comparison: URLs and paths must match exactly if present
+            new_patterns = set(_extract_sensitive_patterns(cleaned_content))
+            existing_content = existing_best_match.get("memory", "")
+            existing_patterns = set(_extract_sensitive_patterns(existing_content))
+
+            if new_patterns == existing_patterns:
+                logger.debug(
+                    f"Found memory duplicate with score {existing_best_score}: {cleaned_content} ~= {existing_best_match.get('memory')}")
+                result = [{"role": "user", "event": "DUPLICATE", "id": existing_best_match.get("id")}]
+                return json.dumps(result, indent=2, sort_keys=True)
+            else:
+                logger.debug(
+                    f"Memory similarity is high ({existing_best_score}) but sensitive patterns differ. "
+                    f"New: {new_patterns}, Existing: {existing_patterns}. Not treating as duplicate.")
+
+    try:
+        results = client.store_memory(
+            cleaned_content, user_id, agent_id, metadata
+        )
+    except Exception as store_error:
+        # Handle mem0 library errors - attempt recovery before failing
+        error_str = str(store_error)
+        if "Extra data" in error_str or "Expecting value" in error_str:
+            # JSON parsing error - try with more aggressive cleaning
+            logger.warning("JSON parsing error in mem0, attempting recovery: %s", error_str)
+            try:
+                # Escape problematic characters and retry
+                escaped_content = json.dumps(cleaned_content)[1:-1]  # Remove outer quotes
+                results = client.store_memory(
+                    escaped_content, user_id, agent_id, metadata
+                )
+                logger.info("Memory stored after content escaping")
+            except Exception as retry_error:
+                # Recovery failed - log and return error (don't fake success!)
+                logger.error(
+                    "Memory storage failed after retry: %s (original: %s)",
+                    retry_error, store_error
+                )
+                raise RuntimeError(f"Storage failed: {store_error}, content_preview: {cleaned_content[:50]}...")
+        else:
+            raise store_error
+    finally:
+        # Restore original logging level
+        mem0_logger.setLevel(original_level)
+
+    # Normalize to list with better error handling
+    if results is None:
+        results_list = []
+    elif isinstance(results, list):
+        results_list = results
+    elif isinstance(results, dict):
+        results_list = results.get("results", [])
+    else:
+        results_list = []
+    return json.dumps(results_list, indent=2, sort_keys=True)
+
+
+@tool(context=True)
+def store_plan(
+    plan: Union[OperationPlan, str, Dict],
+    tool_context: ToolContext = None,
+) -> Optional[Dict]:
+    """Store the current operation plan.
+
+    Args:
+        plan: {"objective":"...", "current_phase":X, "total_phases":N, "phases":[{"id":1, "title":"...", "status":"...", "criteria":"..."}, ...]}
+
+    Returns:
+        JSON/text response with operation result
+    """
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    if isinstance(plan, str):
+        plan = plan.strip()
+        try:
+            try:
+                plan_obj = OperationPlan.from_obj(json.loads(plan))
+            except ValueError as e1:
+                # commonly there is an extra }
+                if plan.endswith("}}"):
+                    plan_obj = OperationPlan.from_obj(json.loads(plan[0:-1]))
+                else:
+                    raise e1
+        except ValueError as e:
+            raise ValueError(
+                f"store_plan requires JSON object/dict with fields: objective, current_phase, total_phases, phases. "
+                f"Got string that is not valid JSON: {str(e)}"
+            )
+    elif isinstance(plan, dict):
+        plan_obj = OperationPlan.from_obj(plan)
+    elif isinstance(plan, OperationPlan):
+        plan_obj = plan
+    else:
+        plan_obj = None
+    if not plan_obj:
+        raise ValueError(
+            f"store_plan content must be object/dict or JSON string, got {type(plan).__name__}"
+        )
+
+    # detect phase change and refuse if there are remaining tasks, AND there is budget left
+    prev_plan = client.get_active_plan(user_id=user_id)
+
+    if not plan_obj.assessment_complete and prev_plan and \
+            plan_obj.current_phase != prev_plan.current_phase and \
+            tool_context and tool_context.agent and tool_context.agent.callback_handler and \
+            hasattr(tool_context.agent.callback_handler, 'current_step') and \
+            hasattr(tool_context.agent.callback_handler, 'max_steps'):
+        current_step = tool_context.agent.callback_handler.current_step
+        max_steps = tool_context.agent.callback_handler.max_steps
+        active_task, _ = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=prev_plan.current_phase)
+
+        phase_step_start = max_steps * (plan_obj.current_phase - 1) // plan_obj.total_phases
+        if active_task and current_step < phase_step_start * 0.9:
+            raise ValueError(
+                "Cannot advance phase due to activate tasks remaining.\n"
+                "**MANDATORY ACTION**: Continue by executing this active task:\n" + active_task_message(active_task)
+            )
+
+    results = client.store_plan(plan=plan_obj, user_id=user_id)
+    return results
+
+
+@tool
+def get_plan() -> Optional[Dict]:
+    """Get the most recent active plan.
+    Returns the plan or null if none found.
+    """
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    op_id = None if memory_is_cross_operation() else _operation_id()
+    plan = client.get_active_plan(user_id=user_id, operation_id=op_id)
+    if not plan:
+        return None
+
+    return {"status": "success", "plan": plan.to_toon(), "operation_id": op_id}
+
+
+@dataclass
+class TaskCreate:
+    title: str
+    objective: str
+    phase: Optional[int]
+    status: TaskStatus
+    evidence: Any = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError("title required")
+        if not self.objective.strip():
+            raise ValueError("objective required")
+        if self.status not in ("active", "pending"):
+            self.status = "pending"
+            # raise ValueError("status must be one of: active|pending")
+        # Coerce evidence to List[str] to tolerate dict/list-of-dict inputs from models
+        self.evidence = _normalize_evidence(self.evidence)
+
+    @staticmethod
+    def from_obj(obj: Any) -> "TaskCreate":
+        if obj.__class__.__name__ == "TaskCreate":
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("task must be an object/dict")
+        return TaskCreate(
+            title=str(obj.get("title", "")),
+            objective=str(obj.get("objective", "")),
+            evidence=obj.get("evidence", None),
+            phase=obj.get("phase"),
+            status=str(obj.get("status", "pending")),
+        )
+
+
+def _get_plan_current_phase() -> int:
+    client = _ensure_memory_client()
+    user_id = _user_id()
+
+    plan = client.get_active_plan(user_id=user_id, operation_id=_operation_id())
+    if not plan:
+        raise ValueError("no_active_plan")
+
+    return int(plan.current_phase)
+
+
+_RE_URL_PATTERN = re.compile(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*')
+_RE_PATH_PATTERN = re.compile(r'(?:(?<=^)|(?<=\s))(?:/|\./|\.\./)[a-zA-Z0-9._\-/]+')
+
+# Regex for UUID: 8-4-4-4-12 hex chars
+_RE_UUID = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+# Regex for numeric IDs: one or more digits, possibly preceded by = or /
+_RE_NUMERIC_ID = re.compile(r'(?<=/|=)\d+(?=$|/|&|\s)')
+
+
+def _normalize_id(text: str) -> str:
+    """Replace UUIDs and numeric IDs with a placeholder."""
+    # Replace UUIDs first
+    text = _RE_UUID.sub(':id', text)
+    # Replace numeric IDs
+    text = _RE_NUMERIC_ID.sub(':id', text)
+    return text
+
+
+def _extract_sensitive_patterns(text: str) -> List[str]:
+    """Extract URLs and potential file paths from text for strict matching."""
+    # URL regex
+    urls = _RE_URL_PATTERN.findall(text)
+
+    # Simple file path heuristic: looks for strings starting with / or ./ or ../
+    # and containing characters common in paths.
+    paths = _RE_PATH_PATTERN.findall(text)
+
+    # Normalize IDs in all extracted patterns
+    all_patterns = [_normalize_id(p) for p in urls + paths]
+
+    return sorted(list(set(all_patterns)))
+
+
+@tool
+def create_tasks(tasks: List[TaskCreate]) -> str:
+    """Create one or more tasks.
+
+    Rules:
+    - If phase is omitted, uses the active plan's current_phase.
+    - If status="active", any other active task in the same operation is demoted to pending.
+    - If you identified N candidates, create N tasks (do not merge).
+
+    Args:
+        A JSON array of task dict.
+
+    Returns:
+        store result.
+    """
+
+    # validate input, TaskCreate has post init validation
+    if not tasks:
+        raise ValueError("must have at least one task")
+    tasks = [TaskCreate.from_obj(task) for task in tasks]
+
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    op_id = _operation_id()
+
+    try:
+        current_phase = _get_plan_current_phase()
+    except Exception:
+        current_phase = 1
+
+    existing_tasks = _get_plan_store().get_tasks(op_id)
+
+    all_results = []
+    for new_task in tasks:
+        # Default phase to active plan's current phase when available
+        try:
+            eff_phase = max(current_phase, int(new_task.phase or current_phase))
+        except ValueError:
+            eff_phase = current_phase
+
+        title = str(new_task.title).strip()
+        objective = str(new_task.objective).strip()
+
+        # look for duplicate
+        duplicate_task = None
+        new_patterns = set(_extract_sensitive_patterns(title) + _extract_sensitive_patterns(objective))
+
+        for et in existing_tasks:
+            # If sensitive patterns (URLs/paths) are present, they must match exactly
+            et_patterns = set(_extract_sensitive_patterns(et.title) + _extract_sensitive_patterns(et.objective))
+            if new_patterns != et_patterns:
+                continue
+
+            title_score = fuzz.ratio(et.title.lower(), title.lower())
+            objective_score = fuzz.ratio(et.objective.lower(), objective.lower())
+            if title_score >= 90 and objective_score >= 90:
+                duplicate_task = et
+                break
+
+        if duplicate_task:
+            all_results.append({
+                "task_uid": duplicate_task.task_uid,
+                "event": "DUPLICATE",
+                # "title": duplicate_task.title,  # do not include title, the agent may be redirected
+            })
+            continue
+
+        task_uid = str(uuid.uuid4())
+        task = Task(
+            task_uid=task_uid,
+            title=title,
+            objective=objective,
+            evidence=new_task.evidence,
+            phase=eff_phase,
+            status=new_task.status,
+        )
+
+        client.store_task(task=task, user_id=user_id)
+        all_results.append({
+            "task_uid": task_uid,
+            "event": "ADD",
+            # "title": title,  # do not include title, the agent may be redirected
+        })
+        existing_tasks.append(task)
+
+    return json.dumps(all_results, indent=2, sort_keys=True)
+
+
+@tool
+def task_done(
+        status: Literal["done", "partial_failure", "blocked"],
+        task_uid: Optional[str] = None,
+        reason: Optional[str] = None,
+) -> str:
+    """Mark a task as done/partial_failure/blocked and activate the next pending task in the current plan phase.
+
+    Behavior:
+    - Phase is taken from the active plan's current_phase.
+    - If task_uid is omitted, the current active task for that phase is selected.
+    - After updating the task, the next pending task in the SAME phase becomes active.
+
+    Returns:
+        Returns the next active task. The closed task id is included under closed.task_uid.
+    """
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    try:
+        current_phase = _get_plan_current_phase()
+    except ValueError:
+        return active_task_message()
+
+    if status not in ["done", "partial_failure", "blocked"]:
+        status = "done"
+
+    updated, next_active = client.advance_task_in_phase(
+        user_id=user_id,
+        phase=current_phase,
+        new_status=status,
+        new_status_reason=reason,
+        task_uid=task_uid,
+    )
+
+    return active_task_message(next_active, next_active is not None, updated, current_phase=current_phase)
+
+
+@tool
+def get_active_task() -> str:
+    """Get the task to execute for the active plan's current_phase. Call task_done when:
+    - task objective is achieved, status=done
+    - objective is not able to be achieved within budget, status=partial_failure
+    - objective can not be achieved, status=blocked
+
+    Returns:
+        The active task.
+    """
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    try:
+        current_phase = _get_plan_current_phase()
+
+        task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
+        return active_task_message(task, activated, current_phase=current_phase)
+    except ValueError:
+        # no active plan
+        return active_task_message(None, False)
+
+
+@tool
+def list_uncompleted_tasks() -> List[Task]:
+    """List all uncompleted tasks for the current plan phase."""
+    client = _ensure_memory_client()
+    user_id = _user_id()
+    try:
+        current_phase = _get_plan_current_phase()
+        return client.list_tasks(user_id=user_id, phase=current_phase, status=["pending", "active"])
+    except ValueError:
+        # no active plan
+        return []
+
+
+def _memory_list_for_agent(memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    pruned = []
+    memories.sort(key=memory_create_time, reverse=True)
+    for result in memories:
+        memory = result.get("memory", "")
+        if not memory:
+            continue
+        pruned.append({"id": result.get("id", ""), "memory": memory})
+    return pruned
+
+
+@tool
+def mem0_list(
+    agent_id: Optional[str] = None,
+) -> str:
+    """List memories. Returns a list of memory dicts.
+    """
+    try:
+        client = _ensure_memory_client()
+
+        # Respect MEM0_LIST_LIMIT if set, default to 100 (matches retrieve/report limits)
+        try:
+            list_limit = int(os.getenv("MEM0_LIST_LIMIT", "100"))
+        except Exception:
+            list_limit = 100
+
+        user_id = _user_id()
+
+        # Scope to current operation unless cross_operation=True
+        cross_operation = memory_is_cross_operation()
+        op_id = None if cross_operation else _operation_id()
+        memories = client.list_memories(
+            user_id, agent_id, limit=list_limit, run_id=op_id
+        )
+
+        # Debug logging to understand the response structure
+        logger.debug("Memory list raw response type: %s, response: %s", type(memories), memories)
+
+        results_list = memories or []
+        logger.debug("memories is list with %d items", len(memories))
+
+        if not results_list:
+            return ""
+        return json.dumps(_memory_list_for_agent(results_list), indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@tool
+def mem0_retrieve(
+    query: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    agent_id: Optional[str] = None,
+) -> str:
+    """Semantic search across memories.
+
+    REQUIRED:
+    - query: natural language query
+
+    OPTIONAL:
+    - metadata: filter dict applied to metadata (e.g., {"category": "finding", "status": "verified"}).
+
+    CROSS-SESSION LEARNING:
+        - mem0_retrieve: Scoped to current operation by default
+        - mem0_retrieve(cross_operation=True): Search ALL operations for cross-learning
+
+        Cross-Learning Query Examples:
+        - Learn from past: mem0_retrieve(query="SQLi techniques", cross_operation=True)
+        - Skip verified: metadata={"status": "verified"} to find verified findings
+        - Learn techniques: metadata={"category": "discovery"}
+        - Avoid failures: query for failed_technique or blocker in metadata
+
+    Returns a list of memory dicts.
+    """
+    try:
+        if not query:
+            raise ValueError("query is required")
+
+        op_id = None if memory_is_cross_operation() else _operation_id()
+
+        user_id = _user_id()
+
+        # Debug: Log retrieval parameters
+        logger.debug(
+            "RETRIEVE query='%s', metadata_filters=%s, user_id=%s, run_id=%s, cross_operation=%s",
+            query,
+            metadata,
+            user_id,
+            op_id,
+            cross_operation
+        )
+
+        # Use search() directly to support metadata filters (e.g., category, status)
+        # Include run_id to scope to current operation (unless cross_operation=True)
+        client = _ensure_memory_client()
+        memories = client.search(
+            query=query,
+            filters=metadata,  # Pass metadata as filters for category/status filtering
+            limit=100,
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=op_id,  # None if cross_operation=True for cross-learning
+        )
+
+        results_list = memories or []
+
+        # Debug: Verify categories in retrieved memories
+        if results_list:
+            categories = {}
+            for m in results_list:
+                cat = m.get("metadata", {}).get("category", "MISSING")
+                categories[cat] = categories.get(cat, 0) + 1
+            logger.info(
+                "RETRIEVE complete: %d memories, categories=%s",
+                len(results_list),
+                categories
+            )
+        else:
+            logger.warning("RETRIEVE returned 0 results for query='%s'", query)
+        return json.dumps(_memory_list_for_agent(results_list), indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 
 class Mem0ServiceClient:
@@ -407,6 +1468,8 @@ class Mem0ServiceClient:
             An initialized Mem0 client (MemoryClient or Mem0Memory instance).
         """
         if os.environ.get("MEM0_API_KEY"):
+            # Ensure base path exists for SQLite
+            _get_memory_base_path(config)
             if not self.silent:
                 print("[+] Memory Backend: Mem0 Platform (cloud)")
                 print(
@@ -488,17 +1551,11 @@ class Mem0ServiceClient:
     def _initialize_opensearch_client(
         self, config: Optional[Dict] = None, server: str = "bedrock"
     ) -> Mem0Memory:
-        """Initialize a Mem0 client with OpenSearch backend.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-            server: Server type for configuration.
-
-        Returns:
-            An initialized Mem0Memory instance configured for OpenSearch.
-        """
-        # Set up AWS region - prioritize passed config, then environment, then default
+        """Initialize a Mem0 client with OpenSearch backend."""
         merged_config = self._merge_config(config, server)
+        
+        # Ensure base path exists for SQLite
+        _get_memory_base_path(merged_config)
         self._realign_provider_configs(merged_config)
         config_manager = get_config_manager()
         config_region = (
@@ -549,49 +1606,11 @@ class Mem0ServiceClient:
         # Initialize store existence flag
         store_existed_before = False
 
-        # Use provided path or create unified output structure path
-        if merged_config.get("vector_store", {}).get("config", {}).get("path"):
-            # Path already set in config (from args.memory_path)
-            faiss_path = merged_config["vector_store"]["config"]["path"]
-            # For custom paths, assume it's an existing store (like --memory-path flag)
-            store_existed_before = os.path.exists(faiss_path)
-        else:
-            # Create memory path using unified output structure
-            target_name = merged_config.get("target_name", "default_target")
-            operation_id = merged_config.get("operation_id", "default_operation")
+        faiss_path = _get_memory_base_path(merged_config)
+        store_existed_before = os.path.exists(faiss_path)
 
-            # Get output directory from environment or config
-            output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or merged_config.get(
-                "output_dir", get_default_base_dir()
-            )
-
-            # Memory isolation strategy (controlled via MEMORY_ISOLATION env var)
-            # Options: "operation" (per-operation, safe for parallel) | "shared" (per-target, cross-learning)
-            isolation_mode = os.environ.get("MEMORY_ISOLATION", "operation")
-
-            if isolation_mode == "shared":
-                # Shared per-target store (enables automatic cross-learning but parallel-unsafe)
-                memory_base_path = os.path.join(output_dir, target_name, "memory")
-                faiss_path = memory_base_path
-                logger.info(
-                    "Memory mode: SHARED per-target at %s (cross-learning enabled, NOT parallel-safe)",
-                    memory_base_path
-                )
-            else:
-                # Per-operation isolation (parallel-safe, explicit cross-learning needed)
-                # Pattern: ./outputs/<target>/memory/<operation_id>/mem0_faiss
-                memory_base_path = os.path.join(output_dir, target_name, "memory", operation_id)
-                faiss_path = memory_base_path
-                logger.info(
-                    "Memory mode: ISOLATED per-operation at %s (parallel-safe)",
-                    memory_base_path
-                )
-
-            # Check if store existed before we create directories
-            store_existed_before = os.path.exists(memory_base_path)
-
-            # Ensure the memory directory exists
-            os.makedirs(memory_base_path, exist_ok=True)
+        # Ensure the memory directory exists
+        os.makedirs(faiss_path, exist_ok=True)
 
         merged_config["vector_store"]["config"]["path"] = faiss_path
 
@@ -849,6 +1868,7 @@ class Mem0ServiceClient:
         Uses run_id for mem0's native operation isolation instead of manual metadata filtering.
         This provides O(log n) indexed lookups vs O(n) local filtering.
         """
+        user_id = _user_id(user_id)
         if not user_id and not agent_id:
             raise ValueError("Either user_id or agent_id must be provided")
 
@@ -859,7 +1879,7 @@ class Mem0ServiceClient:
         metadata = metadata or {}
 
         # Get operation ID for native session scoping
-        op_id = os.getenv("CYBER_OPERATION_ID")
+        op_id = _operation_id()
 
         messages = [{"role": "user", "content": content}]
         try:
@@ -906,10 +1926,6 @@ class Mem0ServiceClient:
             logger.error("Exception args: %s", e.args)
             raise RuntimeError(f"Memory storage failed: {str(e)}") from e
 
-    def get_memory(self, memory_id: str):
-        """Get a memory by ID."""
-        return self.mem0.get(memory_id)
-
     def list_memories(
         self,
         user_id: Optional[str] = None,
@@ -930,6 +1946,7 @@ class Mem0ServiceClient:
 
         Falls back gracefully if backend doesn't support limit/page/run_id.
         """
+        user_id = _user_id(user_id)
         if not user_id and not agent_id:
             raise ValueError("Either user_id or agent_id must be provided")
 
@@ -994,6 +2011,7 @@ class Mem0ServiceClient:
             run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Search memories using semantic search."""
+        user_id = _user_id(user_id)
         if not user_id and not agent_id:
             raise ValueError("Either user_id or agent_id must be provided")
 
@@ -1002,7 +2020,7 @@ class Mem0ServiceClient:
             query=query,
             filters=None,
             limit=20,
-            user_id=user_id or "cyber_agent",
+            user_id=user_id,
             agent_id=agent_id,
             run_id=run_id,
         )
@@ -1013,7 +2031,7 @@ class Mem0ServiceClient:
         filters: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         *,
-        user_id: str = "cyber_agent",
+            user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
@@ -1031,6 +2049,7 @@ class Mem0ServiceClient:
             List of memory dictionaries with 'memory' and 'metadata' fields
         """
 
+        user_id = _user_id(user_id)
         filters = filters or {}
         top_k = max(int(limit or 100), 1)
 
@@ -1123,17 +2142,12 @@ class Mem0ServiceClient:
 
         return results
 
-    def delete_memory(self, memory_id: str):
-        """Delete a memory by ID."""
-        return self.mem0.delete(memory_id)
-
-    def get_memory_history(self, memory_id: str):
-        """Get the history of a memory by ID."""
-        return self.mem0.history(memory_id)
-
     def _display_startup_overview(self) -> None:
         """Display memory overview at startup if memories exist."""
         try:
+            # Ensure _PLAN_STORE is initialized
+            _get_plan_store()
+            
             # For Mem0 Platform & OpenSearch - always display (remote backends)
             # For FAISS - only if memories existed before init
             should_display = (
@@ -1146,7 +2160,7 @@ class Mem0ServiceClient:
                 return
 
             # Get and display overview
-            overview = self.get_memory_overview(user_id="cyber_agent")
+            overview = self.get_memory_overview(user_id=_user_id())
 
             if overview.get("error"):
                 print(
@@ -1189,139 +2203,48 @@ class Mem0ServiceClient:
 
     def store_plan(
         self,
-        plan_content: Union[str, Dict],
-        user_id: str = "cyber_agent",
-        metadata: Optional[Dict] = None,
+        plan: OperationPlan,
+        user_id: Optional[str] = None,
+        operation_id: Optional[str] = None
     ) -> Dict:
-        """Store a strategic plan in memory with category='plan'.
-
-        REQUIRES dict format (JSON string is parsed before this method)
+        """Store a strategic plan.
 
         Args:
-            plan_content: The strategic plan dict with required fields
-            user_id: User ID for memory storage
-            metadata: Optional metadata (will be enhanced with category='plan')
+            plan: The strategic plan with required fields
 
         Returns:
-            Memory storage result
+            Status result
         """
-        # This should always be a dict (mem0_memory parses JSON strings)
-        if isinstance(plan_content, str):
-            logger.error("Unexpected string in store_plan - should be dict")
-            raise ValueError(
-                "Internal error: plan_content should be dict at this point. "
-                "The mem0_memory function should have parsed any JSON string."
-            )
+        # Check if all phases complete and add reminder
+        all_done = all(p.status == "done" for p in plan.phases)
+        add_stop_reminder = False
+        if all_done and not plan.assessment_complete:
+            plan.assessment_complete = True
+            add_stop_reminder = True
+            logger.info("All phases complete - set assessment_complete=true")
 
-        # Validate required fields
-        required_fields = ["objective", "current_phase", "total_phases", "phases"]
-        missing = [f for f in required_fields if f not in plan_content]
-        if missing:
-            logger.error(f"Plan missing required fields: {missing}")
-            raise ValueError(
-                f"Plan missing required fields: {missing}. See tool docstring for format."
-            )
+        op_id = _operation_id(operation_id)
 
-        # Validate phases structure
-        if (
-            not isinstance(plan_content.get("phases"), list)
-            or not plan_content["phases"]
-        ):
-            raise ValueError("Plan must have 'phases' as non-empty list")
-
-        for idx, phase in enumerate(plan_content["phases"]):
-            # Validate each phase is a dict
-            if not isinstance(phase, dict):
-                raise ValueError(
-                    f"Phase at index {idx} must be a dict/object, got {type(phase).__name__}"
-                )
-            # Make criteria optional with default empty string
-            phase_required = ["id", "title", "status"]
-            phase_missing = [f for f in phase_required if f not in phase]
-            if phase_missing:
-                raise ValueError(
-                    f"Phase {phase.get('id', '?')} missing fields: {phase_missing}"
-                )
-            # Set default empty criteria if not provided
-            phase.setdefault("criteria", "")
-
-        # Format dict as structured text for storage
-        plan_content_str = _format_plan_as_toon(plan_content)
-        plan_structured = True
-
-        plan_metadata = metadata or {}
-        plan_metadata.update(
-            {
-                "category": "plan",
-                "created_at": datetime.now().isoformat(),
-                "type": "strategic_plan",
-                "structured": plan_structured,
-                "plan_format": "toon",
-                "active": True,
-                "plan_json": plan_content,  # Store original JSON in metadata
-            }
-        )
-        # Tag with current operation ID (prefer client config, then env)
-        op_id = (self.config or {}).get("operation_id") or os.getenv(
-            "CYBER_OPERATION_ID"
-        )
-        if op_id:
-            plan_metadata["operation_id"] = op_id
+        result = {}
 
         # Warn if extending plan after marking complete
         try:
-            prev = self.get_active_plan(user_id, operation_id=op_id)
-            if prev:
-                prev_json = prev.get("metadata", {}).get("plan_json", {})
-                new_total = int(
-                    plan_content.get(
-                        "total_phases", len(plan_content.get("phases", []))
-                    )
-                )
-                if prev_json.get("assessment_complete") and new_total > int(
-                    prev_json.get("total_phases", 0)
-                ):
-                    logger.warning(
-                        f"Adding phases ({prev_json.get('total_phases')} → {new_total}) after assessment_complete=true. "
+            prev_plan = _get_plan_store().get_plan(op_id)
+            if prev_plan:
+                new_total = int(plan.total_phases)
+                if prev_plan.assessment_complete and new_total > int(prev_plan.total_phases):
+                    result["_reminder"] = (
+                        f"Adding phases ({prev_plan.total_phases} → {new_total}) after assessment_complete=true. "
                         "Consider stopping and generating report instead."
                     )
         except Exception as e:
             logger.debug(f"Could not check previous plan for extension: {e}")
 
-        # Deactivate previous plans
-        try:
-            # TODO: change query to filters
-            previous_plans = self.search_memories(
-                "category:plan active:true", user_id=user_id, run_id=op_id
-            )
-            if isinstance(previous_plans, list):
-                for plan in previous_plans:
-                    if plan.get("id"):
-                        logger.debug(f"Deactivating plan {plan.get('id')}")
-                        # Mark as inactive
-                        self.store_memory(
-                            content=plan.get("memory", ""),
-                            user_id=user_id,
-                            metadata={**plan.get("metadata", {}), "active": False},
-                        )
-        except Exception as e:
-            logger.debug(f"Could not deactivate previous plans: {e}")
+        _get_plan_store().store_plan(op_id, plan)
 
-        # Check if all phases complete and add reminder
-        all_done = all(
-            p.get("status") == "done" for p in plan_content.get("phases", [])
-        )
-        add_stop_reminder = False
-        if all_done and not plan_content.get("assessment_complete"):
-            plan_content["assessment_complete"] = True
-            add_stop_reminder = True
-            logger.info("All phases complete - set assessment_complete=true")
-
-        result = self.store_memory(
-            content=f"[PLAN] {plan_content_str}",
-            user_id=user_id,
-            metadata=plan_metadata,
-        )
+        result["status"] = "success"
+        result["plan"] = plan.to_toon()
+        result["operation_id"] = op_id
 
         if add_stop_reminder:
             result["_reminder"] = (
@@ -1330,202 +2253,229 @@ class Mem0ServiceClient:
 
         return result
 
-    def store_reflection(
-        self,
-        reflection_content: str,
-        plan_id: Optional[str] = None,
-        user_id: str = "cyber_agent",
-        metadata: Optional[Dict] = None,
-    ) -> Dict:
-        """Store a reflection on findings and plan progress.
-
-        Args:
-            reflection_content: The reflection content
-            plan_id: Optional ID of the plan being reflected upon
-            user_id: User ID for memory storage
-            metadata: Optional metadata (will be enhanced with category='reflection')
-
-        Returns:
-            Memory storage result with plan evaluation reminder
-        """
-        reflection_metadata = metadata or {}
-        reflection_metadata.update(
-            {
-                "category": "reflection",
-                "created_at": datetime.now().isoformat(),
-                "type": "plan_reflection",
-            }
-        )
-        # Tag with current operation ID when available
-        op_id = os.getenv("CYBER_OPERATION_ID")
-        if op_id and "operation_id" not in reflection_metadata:
-            reflection_metadata["operation_id"] = op_id
-
-        if plan_id:
-            reflection_metadata["related_plan_id"] = plan_id
-
-        result = self.store_memory(
-            content=f"[REFLECTION] {reflection_content}",
-            user_id=user_id,
-            metadata=reflection_metadata,
-        )
-
-        # Add plan evaluation reminder
-        result["_reminder"] = (
-            "Reflection stored. Now: get_plan → check if phase criteria met or pivot needed → update if yes"
-        )
-
-        return result
-
     def get_active_plan(
-        self, user_id: str = "cyber_agent", operation_id: Optional[str] = None
-    ) -> Optional[Dict]:
-        """Get the most recent active plan, preferring the current operation.
-
-        This avoids semantic-search drift by listing all memories and selecting the
-        newest plan entry (by created_at) with metadata.active == True. If an
-        operation_id is provided, only consider plans tagged with that ID.
+            self,
+            user_id: Optional[str] = None,
+            operation_id: Optional[str] = None
+    ) -> Optional[OperationPlan]:
+        """Get the most recent plan.
 
         Args:
-            user_id: User ID to search plans for
+            user_id: User ID (ignored)
             operation_id: Optional operation ID to scope plan selection
 
         Returns:
             Most recent active plan or None if no plans found
         """
+        op_id = _operation_id(operation_id)
+
         try:
-            # Use run_id scoping to get operation-specific plans
-            all_memories = self.list_memories(user_id=user_id, run_id=operation_id, limit=100)
-
-            if isinstance(all_memories, dict):
-                raw = (
-                    all_memories.get("results", [])
-                    or all_memories.get("memories", [])
-                    or []
-                )
-            elif isinstance(all_memories, list):
-                raw = all_memories
-            else:
-                raw = []
-
-            # Filter to plan items from current operation
-            plan_items: List[Dict[str, Any]] = []
-            for m in raw:
-                meta = m.get("metadata", {}) or {}
-                if str(meta.get("category", "")) != "plan":
-                    continue
-                plan_items.append(m)
-
-            if not plan_items:
-                return None
-
-            # Sort by created_at (desc). If missing, keep original order.
-            plan_items.sort(key=memory_sort_by_create_time, reverse=True)
-
-            # Prefer the first active plan; if none, return most recent plan
-            for m in plan_items:
-                meta = m.get("metadata", {}) or {}
-                if meta.get("active", False) is True:
-                    return m
-
-            return plan_items[0]
+            return _get_plan_store().get_plan(op_id)
         except Exception as e:
             logger.error(f"Error retrieving active plan: {e}")
             return None
 
-    def reflect_on_findings(
-        self,
-        recent_findings: List[Dict],
-        current_plan: Optional[Dict] = None,
-        user_id: str = "cyber_agent",
-    ) -> str:
-        """Generate reflection prompt based on recent findings and current plan.
+    def _select_latest_by_uid(
+            self, entries: List[Dict[str, Any]], uid_key: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """Group entries by uid_key and keep the newest by created_at."""
+        latest: Dict[str, Dict[str, Any]] = {}
+        for e in entries or []:
+            meta = e.get("metadata", {}) or {}
+            uid = str(meta.get(uid_key, "") or "")
+            if not uid:
+                continue
+            prev = latest.get(uid)
+            if not prev:
+                latest[uid] = e
+                continue
+            if memory_create_time(e) >= memory_create_time(prev):
+                latest[uid] = e
+        return latest
 
-        Args:
-            recent_findings: List of recent findings to reflect on
-            current_plan: Current active plan (optional)
-            user_id: User ID for memory operations
+    def _list_tasks_latest(
+            self,
+            *,
+            user_id: str,
+            run_id: Optional[str],
+    ) -> List[Task]:
+        """Return latest-version task objects for a run_id (operation)"""
+        op_id = _operation_id(run_id)
+        tasks = _get_plan_store().get_tasks(op_id)
+        # Sort by created_at desc
+        tasks.sort(key=lambda x: x.created_at or "", reverse=True)
+        return tasks
 
-        Returns:
-            Reflection prompt for the agent
-        """
-        if not recent_findings:
-            return "No recent findings to reflect on."
-
-        # Summarize recent findings
-        findings_summary = []
-        for finding in recent_findings[:5]:  # Last 5 findings
-            content = finding.get("memory", finding.get("content", ""))[:100]
-            metadata = finding.get("metadata", {})
-            severity = str(metadata.get("severity", "unknown"))
-            findings_summary.append(f"- [{severity.upper()}] {content}")
-
-        reflection_prompt = f"""
-## REFLECTION REQUIRED
-
-**Recent Findings ({len(findings_summary)}):**
-{chr(10).join(findings_summary)}
-
-**Current Plan Status:**
-"""
-
-        if current_plan:
-            plan_content = current_plan.get("memory", current_plan.get("content", ""))[
-                :200
-            ]
-            reflection_prompt += f"""
-Active plan: {plan_content}
-
-**Required Actions:**
-1. Is current phase criteria satisfied? If YES → mark status="done", advance current_phase, store_plan
-2. Should we pivot strategy? If YES → update phases with new approach, store_plan
-3. Phase stuck >40% budget? If YES → force advance to next phase
-4. Deploy swarms if multiple vectors or <70% budget with no progress
-
-After analysis: get_plan → evaluate → update phases if needed → store_plan → continue
-"""
-        else:
-            reflection_prompt += """
-No active plan found.
-
-**Required Action:**
-Create strategic plan NOW with store_plan before continuing.
-Include: objective, current_phase=1, phases with clear criteria for each.
-"""
-
-        return reflection_prompt
-
-    def get_memory_overview(self, user_id: str = "cyber_agent") -> Dict:
-        """Get overview of memories for startup display.
-
-        Args:
-            user_id: User ID to retrieve memories for
-
-        Returns:
-            Dictionary containing memory overview data
-        """
+    def _task_from_memory(self, mem: Dict[str, Any]) -> Optional[Task]:
+        meta = (mem.get("metadata", {}) or {})
         try:
-            # Get all memories for the user
-            logger.debug("Getting memory overview for user_id: %s", user_id)
+            return Task.from_obj(meta)
+        except Exception:
+            return None
 
-            memories_response = self.list_memories(user_id=user_id)
-            logger.debug(
-                "Memory overview raw response type: %s", type(memories_response)
+    def store_task(
+            self,
+            *,
+            task: Task,
+            user_id: Optional[str] = None,
+    ):
+        """Store (or update) a task."""
+        op_id = _operation_id()
+
+        # Enforce only one active task per operation by demoting any existing active task
+        if task.status == 'active':
+            try:
+                all_tasks = _get_plan_store().get_tasks(op_id)
+                for t in all_tasks:
+                    if t.task_uid != task.task_uid and t.status == "active":
+                        # Demote current active task
+                        demoted = Task(
+                            task_uid=t.task_uid,
+                            title=t.title,
+                            objective=t.objective,
+                            evidence=t.evidence,
+                            phase=t.phase,
+                            status="pending",
+                            status_reason="demoted",
+                            created_at=t.created_at
+                        )
+                        _get_plan_store().store_task(op_id, demoted)
+            except Exception as e:
+                logger.debug("Could not enforce single active task: %s", e)
+
+        _get_plan_store().store_task(op_id, task)
+
+    def advance_task_in_phase(
+            self,
+            *,
+            user_id: str,
+            phase: int,
+            new_status: Literal["done", "partial_failure", "blocked"],
+            new_status_reason: Optional[str] = None,
+            task_uid: Optional[str] = None,
+    ) -> Tuple[Optional[Task], Optional[Task]]:
+        """Update a task in a given phase and activate the next pending task in that phase."""
+        op_id = _operation_id()
+        phase_tasks = _get_plan_store().get_tasks(op_id)
+        phase_tasks = [t for t in phase_tasks if int(t.phase) == int(phase)]
+
+        # Pick target task: explicit uid, else current active
+        target: Optional[Task] = None
+        if task_uid:
+            for t in phase_tasks:
+                if t.task_uid == task_uid:
+                    target = t
+                    break
+
+        if target is None:
+            for t in phase_tasks:
+                if t.status == "active":
+                    target = t
+                    break
+
+        updated: Optional[Task] = None
+        if target:
+            updated = Task(
+                task_uid=target.task_uid,
+                title=target.title,
+                objective=target.objective,
+                evidence=target.evidence,
+                phase=target.phase,
+                status=new_status,
+                status_reason=new_status_reason,
+                created_at=target.created_at
             )
-            logger.debug("Memory overview raw response: %s", memories_response)
+            self.store_task(task=updated, user_id=user_id)
 
-            # Parse response format
-            if isinstance(memories_response, dict):
-                raw_memories = memories_response.get(
-                    "memories", memories_response.get("results", [])
-                )
-                logger.debug("Dict response: found %d memories", len(raw_memories))
-            elif isinstance(memories_response, list):
-                raw_memories = memories_response
-                logger.debug("List response: found %d memories", len(raw_memories))
-            else:
-                raw_memories = []
-                logger.debug("Unexpected response type, using empty list")
+        # After updating, find next pending
+        next_active: Optional[Task] = None
+        if new_status in ("done", "partial_failure", "blocked"):
+            # Check for another active (shouldn't be any)
+            still_active = [t for t in phase_tasks if t.status == "active" and t.task_uid != (target.task_uid if target else None)]
+            if not still_active:
+                pendings = [t for t in phase_tasks if t.status == "pending" and t.task_uid != (target.task_uid if target else None)]
+                if pendings:
+                    # Sort pendings by created_at (asc) to pick the oldest pending as next
+                    pendings.sort(key=lambda x: x.created_at or "")
+                    p = pendings[0]
+                    next_active = Task(
+                        task_uid=p.task_uid,
+                        title=p.title,
+                        objective=p.objective,
+                        evidence=p.evidence,
+                        phase=p.phase,
+                        status="active",
+                        status_reason="activated",
+                        created_at=p.created_at
+                    )
+                    self.store_task(task=next_active, user_id=user_id)
+
+        return updated, next_active
+
+    def get_or_activate_next_task_in_phase(
+            self,
+            *,
+            user_id: Optional[str] = None,
+            phase: int,
+    ) -> Tuple[Optional[Task], bool]:
+        """Return the active task for a phase, or promote the next pending task to active."""
+        user_id = _user_id(user_id)
+        op_id = _operation_id()
+        phase_tasks = _get_plan_store().get_tasks(op_id)
+        phase_tasks = [t for t in phase_tasks if int(t.phase) == int(phase)]
+
+        # Prefer existing active
+        for t in phase_tasks:
+            if t.status == "active":
+                return t, False
+
+        # Otherwise promote earliest-created pending
+        pendings = [t for t in phase_tasks if t.status == "pending"]
+        if not pendings:
+            return None, False
+
+        pendings.sort(key=lambda x: x.created_at or "")
+        p = pendings[0]
+
+        next_active = Task(
+            task_uid=p.task_uid,
+            title=p.title,
+            objective=p.objective,
+            evidence=p.evidence,
+            phase=p.phase,
+            status="active",
+            status_reason="activated",
+            created_at=p.created_at
+        )
+
+        self.store_task(task=next_active, user_id=user_id)
+        return next_active, True
+
+    def list_tasks(
+            self,
+            *,
+            user_id: Optional[str] = None,
+            phase: Optional[int] = None,
+            status: Optional[List[str]] = None,
+    ) -> List[Task]:
+        """List tasks for a phase."""
+        tasks = _get_plan_store().get_tasks(_operation_id())
+        result = []
+        for t in tasks:
+            if phase is not None and int(t.phase) != int(phase):
+                continue
+            if not status or t.status in status:
+                result.append(t)
+        return result
+
+    def get_memory_overview(self, user_id: Optional[str] = None) -> Dict:
+        """Get an overview of stored memories."""
+        user_id = _user_id(user_id)
+        op_id = _operation_id()
+
+        try:
+            # Get all memories for the user from Mem0
+            raw_memories = self.list_memories(user_id=user_id)
 
             # Analyze memories
             total_count = len(raw_memories)
@@ -1533,34 +2483,38 @@ Include: objective, current_phase=1, phases with clear criteria for each.
             recent_findings = []
 
             for memory in raw_memories:
-                # Extract metadata
                 metadata = memory.get("metadata", {})
                 category = metadata.get("category", "general")
-
-                # Count by category
                 categories[category] = categories.get(category, 0) + 1
 
-                # Collect recent findings
                 if category == "finding":
-                    recent_findings.append(
-                        {
-                            "content": (
-                                memory.get("memory", "")[:100] + "..."
-                                if len(memory.get("memory", "")) > 100
-                                else memory.get("memory", "")
-                            ),
-                            "created_at": memory.get("created_at",
-                                                     memory.get("metadata", {}).get("created_at", "Unknown")),
-                        }
-                    )
+                    recent_findings.append({
+                        "content": (
+                            memory.get("memory", "")[:100] + "..."
+                            if len(memory.get("memory", "")) > 100
+                            else memory.get("memory", "")
+                        ),
+                        "created_at": memory_create_time(memory),
+                    })
 
-            # Sort recent findings by creation date (most recent first)
-            recent_findings.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            # Add Plan and Task counts from SQLite
+            plan = _get_plan_store().get_plan(op_id)
+            if plan:
+                categories["plan"] = categories.get("plan", 0) + 1
+                total_count += 1
+            
+            tasks = _get_plan_store().get_tasks(op_id)
+            if tasks:
+                categories["task"] = categories.get("task", 0) + len(tasks)
+                total_count += len(tasks)
+
+            # Sort recent findings
+            recent_findings.sort(key=memory_create_time, reverse=True)
 
             return {
                 "total_count": total_count,
                 "categories": categories,
-                "recent_findings": recent_findings[:3],  # Top 3 most recent
+                "recent_findings": recent_findings[:10],
                 "has_memories": total_count > 0,
             }
 
@@ -1573,203 +2527,6 @@ Include: objective, current_phase=1, phases with clear criteria for each.
                 "has_memories": False,
                 "error": str(e),
             }
-
-
-def format_get_response(memory: Dict) -> Panel:
-    """Format get memory response."""
-    memory_id = memory.get("id", "unknown")
-    content = memory.get("memory", "No content available")
-    metadata = memory.get("metadata", {})
-    created_at = memory.get("created_at", metadata.get("created_at", "Unknown"))
-    user_id = memory.get("user_id", "Unknown")
-
-    result = [
-        "✅ Memory retrieved successfully:",
-        f"🔑 Memory ID: {memory_id}",
-        f"👤 User ID: {user_id}",
-        f"🕒 Created: {created_at}",
-    ]
-
-    if metadata:
-        result.append(f"📋 Metadata: {json.dumps(metadata, indent=2)}")
-
-    result.append(f"\n📄 Memory: {content}")
-
-    return Panel(
-        "\n".join(result), title="[bold green]Memory Retrieved", border_style="green"
-    )
-
-
-def format_list_response(memories: List[Dict]) -> Panel:
-    """Format list memories response."""
-    if not memories:
-        return Panel(
-            "No memories found.",
-            title="[bold yellow]No Memories",
-            border_style="yellow",
-        )
-
-    table = Table(title="Memories", show_header=True, header_style="bold magenta")
-    table.add_column("ID", style="cyan")
-    table.add_column("Memory", style="yellow", width=50)
-    table.add_column("Created At", style="blue")
-    table.add_column("User ID", style="green")
-    table.add_column("Metadata", style="magenta")
-
-    for memory in memories:
-        metadata = memory.get("metadata", {})
-        memory_id = memory.get("id", "unknown")
-        content = memory.get("memory", "No content available")
-        created_at = memory.get("created_at", metadata.get("created_at", "Unknown"))
-        user_id = memory.get("user_id", "Unknown")
-
-        # Truncate content if too long
-        content_preview = (
-            content[:100] + "..." if content and len(content) > 100 else content
-        )
-
-        # Format metadata for display
-        metadata_str = json.dumps(metadata, indent=2) if metadata else "None"
-
-        table.add_row(memory_id, content_preview, created_at, user_id, metadata_str)
-
-    return Panel(table, title="[bold green]Memories List", border_style="green")
-
-
-def format_delete_response(memory_id: str) -> Panel:
-    """Format delete memory response."""
-    content = [
-        "✅ Memory deleted successfully:",
-        f"🔑 Memory ID: {memory_id}",
-    ]
-    return Panel(
-        "\n".join(content), title="[bold green]Memory Deleted", border_style="green"
-    )
-
-
-def format_retrieve_response(memories: List[Dict]) -> Panel:
-    """Format retrieve response."""
-    if not memories:
-        return Panel(
-            "No memories found matching the query.",
-            title="[bold yellow]No Matches",
-            border_style="yellow",
-        )
-
-    table = Table(title="Search Results", show_header=True, header_style="bold magenta")
-    table.add_column("ID", style="cyan")
-    table.add_column("Memory", style="yellow", width=50)
-    table.add_column("Relevance", style="green")
-    table.add_column("Created At", style="blue")
-    table.add_column("User ID", style="magenta")
-    table.add_column("Metadata", style="white")
-
-    for memory in memories:
-        metadata = memory.get("metadata", {})
-        memory_id = memory.get("id", "unknown")
-        content = memory.get("memory", "No content available")
-        score = memory.get("score", 0)
-        created_at = memory.get("created_at", metadata.get("created_at", "Unknown"))
-        user_id = memory.get("user_id", "Unknown")
-
-        # Truncate content if too long
-        content_preview = (
-            content[:100] + "..." if content and len(content) > 100 else content
-        )
-
-        # Format metadata for display
-        metadata_str = json.dumps(metadata, indent=2) if metadata else "None"
-
-        # Color code the relevance score
-        if score > 0.8:
-            score_color = "green"
-        elif score > 0.5:
-            score_color = "yellow"
-        else:
-            score_color = "red"
-
-        table.add_row(
-            memory_id,
-            content_preview,
-            f"[{score_color}]{score}[/{score_color}]",
-            created_at,
-            user_id,
-            metadata_str,
-        )
-
-    return Panel(table, title="[bold green]Search Results", border_style="green")
-
-
-def format_history_response(history: List[Dict]) -> Panel:
-    """Format memory history response."""
-    if not history:
-        return Panel(
-            "No history found for this memory.",
-            title="[bold yellow]No History",
-            border_style="yellow",
-        )
-
-    table = Table(title="Memory History", show_header=True, header_style="bold magenta")
-    table.add_column("ID", style="cyan")
-    table.add_column("Memory ID", style="green")
-    table.add_column("Event", style="yellow")
-    table.add_column("Old Memory", style="blue", width=30)
-    table.add_column("New Memory", style="blue", width=30)
-    table.add_column("Created At", style="magenta")
-
-    for entry in history:
-        entry_id = entry.get("id", "unknown")
-        memory_id = entry.get("memory_id", "unknown")
-        event = entry.get("event", "UNKNOWN")
-        old_memory = entry.get("old_memory", "None")
-        new_memory = entry.get("new_memory", "None")
-        created_at = entry.get("created_at", "Unknown")
-
-        # Truncate memory content if too long
-        old_memory_preview = (
-            old_memory[:100] + "..."
-            if old_memory and len(old_memory) > 100
-            else old_memory
-        )
-        new_memory_preview = (
-            new_memory[:100] + "..."
-            if new_memory and len(new_memory) > 100
-            else new_memory
-        )
-
-        table.add_row(
-            entry_id,
-            memory_id,
-            event,
-            old_memory_preview,
-            new_memory_preview,
-            created_at,
-        )
-
-    return Panel(table, title="[bold green]Memory History", border_style="green")
-
-
-def format_store_response(results: List[Dict]) -> Panel:
-    """Format store memory response."""
-    if not results:
-        return Panel(
-            "No memories stored.",
-            title="[bold yellow]No Memories Stored",
-            border_style="yellow",
-        )
-
-    table = Table(title="Memory Stored", show_header=True, header_style="bold magenta")
-    table.add_column("Operation", style="green")
-    table.add_column("Content", style="yellow", width=50)
-
-    for memory in results:
-        event = memory.get("event")
-        text = memory.get("memory")
-        # Truncate content if too long
-        content_preview = text[:100] + "..." if text and len(text) > 100 else text
-        table.add_row(event, content_preview)
-
-    return Panel(table, title="[bold green]Memory Stored", border_style="green")
 
 
 def initialize_memory_system(
@@ -1793,26 +2550,25 @@ def initialize_memory_system(
     # Create enhanced config with operation context
     enhanced_config = config.copy() if config else {}
     enhanced_config["operation_id"] = (
-        operation_id or f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            operation_id or os.environ.get("CYBER_OPERATION_ID", f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     )
-    enhanced_config["target_name"] = target_name or "default_target"
-
-    # Expose operation context for downstream components that rely on env
-    try:
-        os.environ["CYBER_OPERATION_ID"] = enhanced_config["operation_id"]
-    except Exception:
-        pass
+    enhanced_config["target_name"] = target_name or os.environ.get("CYBER_TARGET_NAME", "default_target")
+    if enhanced_config["target_name"] == "default_target":
+        enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["operation_id"]}"'
+    else:
+        enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["target_name"]}"'
 
     _MEMORY_CONFIG = enhanced_config
     _MEMORY_CLIENT = Mem0ServiceClient(enhanced_config, has_existing_memories, silent)
     logger.info(
-        "Memory system initialized for operation %s, target: %s",
+        "Memory system initialized for operation %s, target: %s, user: %s",
         enhanced_config["operation_id"],
         enhanced_config["target_name"],
+        enhanced_config["user_id"],
     )
 
 
-def get_memory_client(silent: bool = False) -> Optional[Mem0ServiceClient]:
+def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
     """Get the current memory client, initializing if needed.
 
     Args:
@@ -1823,588 +2579,10 @@ def get_memory_client(silent: bool = False) -> Optional[Mem0ServiceClient]:
     """
     global _MEMORY_CLIENT
     if _MEMORY_CLIENT is None:
-        # Try to initialize with default config
-        try:
-            initialize_memory_system(silent=silent)
-        except Exception as e:
-            logger.error("Failed to auto-initialize memory client: %s", e)
-            return None
+        initialize_memory_system(silent=silent)
     return _MEMORY_CLIENT
 
 
 def clear_memory_client() -> None:
     global _MEMORY_CLIENT
     _MEMORY_CLIENT = None
-
-
-@tool
-def mem0_memory(
-    action: str,
-    content: Union[str, Dict[str, Any], None] = None,
-    memory_id: Optional[str] = None,
-    query: Optional[str] = None,
-    user_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    metadata: Optional[Dict] = None,
-    cross_operation: bool = False,
-) -> str:
-    """
-    Memory management with automatic operation scoping and cross-session learning.
-
-    QUICK START:
-        # Store finding ONLY after verification succeeds
-        mem0_memory(action="store",
-            content="[FINDING] XSS Vulnerability confirmed on [URL] endpoint with name parameter. - Technique: stored_xss",
-            metadata={"category": "finding", "severity": "HIGH",
-                      "status": "verified", "validation_status": "verified",
-                      "technique": "stored_xss", "artifact_hash": "sha256_of_artifact"})
-
-        # Store observation during reconnaissance
-        mem0_memory(action="store",
-            content="[OBSERVATION] Discovered 15 endpoints, JWT auth, admin panel at /admin returns 403",
-            metadata={"category": "observation"})
-
-        # Query verified findings before attempting (avoid duplicate work)
-        mem0_memory(action="retrieve", query="verified findings",
-            metadata={"category": "finding", "status": "verified", "validation_status": "verified"})
-
-    ACTIONS:
-        store       Store finding/observation with content and metadata
-        retrieve    Semantic search with optional metadata filters
-        list        Get all memories for user/agent
-        get         Get specific memory by ID
-        delete      Remove memory by ID
-        store_plan  Store operation plan with phases
-        get_plan    Get current operation plan
-
-    CATEGORIES (report generation):
-        finding     Exploits, flags, vulnerabilities - APPEARS IN REPORTS
-        signal      Strong indicators, access evidence - APPEARS IN REPORTS
-        observation Reconnaissance, artifacts, failed attempts - APPEARS IN REPORTS
-        discovery   New techniques, bypasses - APPEARS IN REPORTS
-        plan        Strategic planning - internal only, NOT in reports
-        decision    Filtering choices - internal only, NOT in reports
-
-    CATEGORY DECISION TREE (CRITICAL - wrong category = empty report):
-        Q: Did you EXPLOIT something or extract sensitive data?
-           YES → category="finding" (SQLi data dump, auth bypass, flag, RCE, credentials)
-           NO  → Q: Did you CONFIRM a vulnerability exists?
-                    YES → category="finding" (XSS fires, IDOR returns other user data)
-                    NO  → category="observation" (recon, tech stack, failed attempts)
-
-        COMMON MISTAKE: Using category="observation" for successful exploits
-        RESULT: Report generator finds 0 findings → NO REPORT GENERATED
-        FIX: ANY successful exploit or confirmed vuln = category="finding"
-
-    CROSS-SESSION LEARNING:
-        Memory Store: Per-operation FAISS store with logical run_id scoping
-        - Default path: ./outputs/<target>/memory/<operation_id>/ (MEMORY_ISOLATION=operation)
-        - Shared mode: ./outputs/<target>/memory/ (MEMORY_ISOLATION=shared)
-        - Thread-safe: Multiple swarm agents can write concurrently (uses lock)
-
-        Operation Scoping: Memories auto-scoped via run_id (CYBER_OPERATION_ID)
-        - store: Auto-tagged with current operation's run_id
-        - retrieve: Scoped to current operation by default
-        - retrieve(cross_operation=True): Search ALL operations for cross-learning
-        - list: Scoped to current operation by default
-        - list(cross_operation=True): List ALL operations
-
-        Cross-Learning Query Examples:
-        - Learn from past: retrieve(query="SQLi techniques", cross_operation=True)
-        - Skip verified: metadata={"status": "verified"} to find verified findings
-        - Learn techniques: metadata={"category": "discovery"}
-        - Avoid failures: query for failed_technique or blocker in metadata
-
-    STORAGE RULES:
-        1. ONE finding = ONE memory (atomic, not summaries)
-        2. Store IMMEDIATELY after success (not batched at end)
-        3. Use category="finding" for exploits/flags (required for reports)
-        4. Include severity="HIGH" minimum (CRITICAL for auth bypass, RCE, data exfil)
-        5. Add technique metadata for pattern-based cross-learning queries
-        6. Store observations every 5-10 steps (category="observation")
-
-    STATUS VERIFICATION (prevent hallucination):
-        - status="hypothesis" → Flag extracted but NOT verified (requires testing/submission)
-        - status="unverified" → Flag in artifact, grep verified, but NOT submitted
-        - status="verified" → Flag submission accepted (ONLY use after external validation success)
-        - FORBIDDEN: status="solved" (ambiguous - use "verified" or "hypothesis")
-        - CRITICAL: Never store status="verified" until submission API returns success
-        - Memory contamination: status="solved" + validation_status="hypothesis" = contradiction/hallucination
-
-    Args:
-        action: Action to perform (see ACTIONS above)
-        content: Content string with [FINDING] or [OBSERVATION] markers
-        memory_id: Memory ID for get/delete
-        query: Semantic search query for retrieve
-        user_id: User ID (defaults to 'cyber_agent')
-        agent_id: Agent ID
-        metadata: Dict with category (required), severity, technique, status, etc.
-        cross_operation: If True, search/list across ALL operations (for cross-learning).
-                        Default False = scoped to current operation only.
-
-    Returns:
-        JSON/text response with operation result
-    """
-    global _MEMORY_CLIENT
-
-    if _MEMORY_CLIENT is None:
-        # Initialize with default config if not already initialized
-        # Always use silent mode for auto-initialization to prevent unwanted output
-        initialize_memory_system(silent=True)
-
-    if _MEMORY_CLIENT is None:
-        return "Error: Memory client could not be initialized"
-
-    try:
-        # Use simple user_id if not provided
-        if not user_id and not agent_id:
-            user_id = "cyber_agent"
-
-        def _normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
-            """Normalize confidence to a percentage string, optionally capping at cap_to."""
-            try:
-                if isinstance(conf_val, str) and conf_val.strip().endswith("%"):
-                    num = float(conf_val.strip().rstrip("%"))
-                else:
-                    num = float(conf_val)
-            except Exception:
-                num = 0.0
-            if cap_to is not None:
-                num = min(num, cap_to)
-            num = max(0.0, min(100.0, num))
-            return f"{num:.1f}%"
-
-        def _is_valid_proof_pack(proof: Any) -> bool:
-            """Validate proof_pack structure and artifact existence (fail-closed).
-
-            Expectations:
-            - proof_pack is a dict with key 'artifacts': List[str] of file paths (absolute or relative)
-            - Optional 'rationale': short string tying artifacts to impact
-            - Every listed artifact path MUST exist at validation time
-
-            Notes:
-            - No content parsing or domain heuristics are used here; presence of files only
-            - Any exception or malformed input results in False (fail-closed)
-            """
-            if not isinstance(proof, dict):
-                return False
-            arts = proof.get("artifacts")
-            if not isinstance(arts, list) or len(arts) == 0:
-                return False
-            # All listed artifacts must exist; relative or absolute paths supported
-            for p in arts:
-                try:
-                    if not isinstance(p, str) or not p.strip():
-                        return False
-                    if not os.path.exists(p):
-                        return False
-                except Exception:
-                    return False
-            # Rationale is encouraged but not strictly required for validity here
-            return True
-
-        # Check if we're in development mode
-        strands_dev = os.environ.get("BYPASS_TOOL_CONSENT", "").lower() == "true"
-
-        # Handle different actions
-        if action == "store_plan":
-            if not content:
-                raise ValueError("content is required for store_plan action")
-
-            # Validate content type
-            if isinstance(content, str):
-                # Must be valid JSON string
-                try:
-                    plan_dict = json.loads(content)
-                    if not isinstance(plan_dict, dict):
-                        raise ValueError("JSON is not an object")
-                except ValueError as e:
-                    raise ValueError(
-                        f"store_plan requires JSON object/dict with fields: objective, current_phase, total_phases, phases. "
-                        f"Got string that is not valid JSON: {str(e)}"
-                    )
-            elif isinstance(content, dict):
-                plan_dict = content
-            else:
-                raise ValueError(
-                    f"store_plan content must be object/dict or JSON string, got {type(content).__name__}"
-                )
-
-            if isinstance(plan_dict.get("phases", None), list) and not "total_phases" in plan_dict:
-                plan_dict["total_phases"] = len(plan_dict.get("phases"))
-
-            results = _MEMORY_CLIENT.store_plan(plan_dict, user_id or "cyber_agent")
-            if not strands_dev:
-                console.print("[green]Strategic plan stored successfully[/green]")
-            return json.dumps(results, indent=2)
-
-        elif action == "get_plan":
-            # Scope retrieval to current operation when available to avoid stale plans
-            op_id = os.getenv("CYBER_OPERATION_ID")
-            plan = _MEMORY_CLIENT.get_active_plan(
-                user_id or "cyber_agent", operation_id=op_id
-            )
-            if plan:
-                if not strands_dev:
-                    console.print("[green]Active plan retrieved[/green]")
-                return json.dumps(plan, indent=2)
-            else:
-                if not strands_dev:
-                    console.print("[yellow]No active plan found[/yellow]")
-                return "No active plan found"
-
-        elif action == "store":
-            if not content:
-                raise ValueError("content is required for store action")
-
-            # Clean content to prevent JSON issues
-            cleaned_content = (
-                str(content)
-                .replace("\x00", "")
-                .replace("\n", " ")
-                .replace("\r", " ")
-                .replace("\t", " ")
-                .strip()
-            )
-            # Also clean multiple spaces
-            cleaned_content = re.sub(r"\s+", " ", cleaned_content)
-            if not cleaned_content:
-                raise ValueError("Content is empty after cleaning")
-
-            # Clean metadata values too
-            if metadata:
-                cleaned_metadata = {}
-                for key, value in metadata.items():
-                    if isinstance(value, str):
-                        cleaned_value = (
-                            str(value)
-                            .replace("\x00", "")
-                            .replace("\n", " ")
-                            .replace("\r", " ")
-                            .replace("\t", " ")
-                            .strip()
-                        )
-                        cleaned_value = re.sub(r"\s+", " ", cleaned_value)
-                        cleaned_metadata[key] = cleaned_value
-                    else:
-                        cleaned_metadata[key] = value
-                metadata = cleaned_metadata
-            else:
-                metadata = {}
-
-            # Tag with current operation ID when available
-            # Keep operation_id in metadata for backward compatibility and debugging
-            # Primary scoping now uses session_id parameter in mem0.add()
-            op_id = os.getenv("CYBER_OPERATION_ID")
-            if op_id and "operation_id" not in metadata:
-                metadata["operation_id"] = op_id
-                logger.debug("Tagged memory with operation_id=%s (metadata backup)", op_id)
-
-            # Validate category field exists (CRITICAL for report generation)
-            # Category is REQUIRED - agents must explicitly specify finding vs observation
-            VALID_CATEGORIES = {"finding", "signal", "observation", "discovery", "plan", "decision"}
-            if "category" not in metadata:
-                raise ValueError(
-                    "MISSING CATEGORY: metadata must include 'category' field.\n"
-                    "  - category='finding' for exploits, vulns, flags (APPEARS IN REPORTS)\n"
-                    "  - category='observation' for recon, failed attempts (background context)\n"
-                    f"VALID CATEGORIES: {', '.join(VALID_CATEGORIES)}\n"
-                    "Example: metadata={'category': 'finding', 'severity': 'HIGH'}"
-                )
-
-            # Validate category is a known value
-            category_val = str(metadata.get("category", "")).lower()
-            if category_val and category_val not in VALID_CATEGORIES:
-                logger.warning(
-                    "Invalid category '%s'. Valid categories: %s. Defaulting to 'observation'.",
-                    category_val, VALID_CATEGORIES
-                )
-                metadata["category"] = "observation"
-
-            # Debug: Log category before any processing
-            logger.debug("Category validation: category=%s", metadata.get("category"))
-
-            # Consolidated validation for findings (single pass)
-            if metadata.get("category") in ["observation", "discovery"] and metadata.get("severity", "INFO") != "INFO":
-                logger.warning("category '%s' != 'finding' with severity != 'INFO', changing category to 'finding'", metadata.get("category"))
-                metadata["category"] = "finding"
-                if isinstance(cleaned_content, str):
-                    cleaned_content = (cleaned_content
-                                       .replace("[OBSERVATION]", "[FINDING]")
-                                       .replace("[DISCOVERY]", "[FINDING]"))
-
-            if metadata.get("category") == "finding":
-                # 0. Warn on forbidden status="solved" (ambiguous - use verified/hypothesis)
-                status_val = str(metadata.get("status", "")).lower()
-                if status_val == "solved":
-                    logger.warning(
-                        "FORBIDDEN status='solved' detected - this is ambiguous. "
-                        "Use status='verified' (after verification/submission success) or status='hypothesis' (unconfirmed). "
-                        "Changing to 'hypothesis' to prevent memory contamination."
-                    )
-                    metadata["status"] = "hypothesis"
-
-                # 1. Normalize severity
-                valid_severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-                sev = str(metadata.get("severity", "MEDIUM")).upper()
-                if sev not in valid_severities:
-                    logger.warning(f"Invalid severity '{sev}', defaulting to MEDIUM")
-                    sev = "MEDIUM"
-                metadata["severity"] = sev
-
-                # 2. Validate proof_pack for HIGH/CRITICAL findings
-                vstat = str(metadata.get("validation_status", "")).lower()
-                if sev in {"HIGH", "CRITICAL"}:
-                    proof = metadata.get("proof_pack")
-                    if _is_valid_proof_pack(proof):
-                        # Valid proof_pack exists - respect or default to unverified
-                        if vstat not in {"verified", "unverified", "hypothesis"}:
-                            metadata["validation_status"] = "unverified"
-                    else:
-                        # Missing/invalid proof_pack - downgrade to hypothesis and cap confidence
-                        metadata["validation_status"] = "hypothesis"
-                        metadata["confidence"] = _normalize_confidence(
-                            metadata.get("confidence", "60%"), cap_to=60.0
-                        )
-                else:
-                    # Non-critical findings - default validation_status if not set
-                    if vstat not in {"verified", "unverified", "hypothesis"}:
-                        metadata["validation_status"] = "unverified"
-
-                # 3. Determine evidence_type based on confidence (if not already set)
-                if "evidence_type" not in metadata:
-                    confidence_str = metadata.get("confidence", "0%")
-                    try:
-                        confidence_val = float(str(confidence_str).rstrip("%"))
-                    except Exception:
-                        confidence_val = 0
-
-                    if confidence_val >= 70:
-                        metadata["evidence_type"] = "exploited"
-                    elif confidence_val >= 50:
-                        metadata["evidence_type"] = "behavioral"
-                    else:
-                        metadata["evidence_type"] = "pattern_match"
-
-                # 4. Cap confidence for pattern matches
-                if metadata.get("evidence_type") == "pattern_match":
-                    metadata["confidence"] = _normalize_confidence(
-                        metadata.get("confidence", "35%"), cap_to=40.0
-                    )
-
-            # Cross-field validation: Ensure status and validation_status are consistent
-            status_val = str(metadata.get("status", "")).lower()
-            validation_status = str(metadata.get("validation_status", "")).lower()
-
-            # If status="verified" but validation_status contradicts, fix it
-            if status_val == "verified" and validation_status and validation_status not in ("verified", "submission_accepted"):
-                logger.warning(
-                    "Inconsistent status fields: status='verified' but validation_status='%s'. "
-                    "Setting validation_status='verified' to prevent contradiction.",
-                    validation_status
-                )
-                metadata["validation_status"] = "verified"
-
-            # If validation_status="submission_accepted" but status isn't "verified", fix it
-            if validation_status == "submission_accepted" and status_val != "verified":
-                logger.warning(
-                    "Inconsistent status fields: validation_status='submission_accepted' but status='%s'. "
-                    "Setting status='verified'.",
-                    status_val
-                )
-                metadata["status"] = "verified"
-
-            # Suppress mem0's internal error logging during operation
-            mem0_logger = logging.getLogger("root")
-            original_level = mem0_logger.level
-            mem0_logger.setLevel(logging.CRITICAL)
-
-            try:
-                results = _MEMORY_CLIENT.store_memory(
-                    cleaned_content, user_id, agent_id, metadata
-                )
-            except Exception as store_error:
-                # Handle mem0 library errors - attempt recovery before failing
-                error_str = str(store_error)
-                if "Extra data" in error_str or "Expecting value" in error_str:
-                    # JSON parsing error - try with more aggressive cleaning
-                    logger.warning("JSON parsing error in mem0, attempting recovery: %s", error_str)
-                    try:
-                        # Escape problematic characters and retry
-                        escaped_content = json.dumps(cleaned_content)[1:-1]  # Remove outer quotes
-                        results = _MEMORY_CLIENT.store_memory(
-                            escaped_content, user_id, agent_id, metadata
-                        )
-                        logger.info("Memory stored after content escaping")
-                    except Exception as retry_error:
-                        # Recovery failed - log and return error (don't fake success!)
-                        logger.error(
-                            "Memory storage failed after retry: %s (original: %s)",
-                            retry_error, store_error
-                        )
-                        return json.dumps({
-                            "status": "error",
-                            "error": f"Storage failed: {store_error}",
-                            "content_preview": cleaned_content[:50] + "..."
-                        }, indent=2)
-                else:
-                    raise store_error
-            finally:
-                # Restore original logging level
-                mem0_logger.setLevel(original_level)
-
-            # Normalize to list with better error handling
-            if results is None:
-                results_list = []
-            elif isinstance(results, list):
-                results_list = results
-            elif isinstance(results, dict):
-                results_list = results.get("results", [])
-            else:
-                results_list = []
-            if results_list and not strands_dev:
-                panel = format_store_response(results_list)
-                console.print(panel)
-            return json.dumps(results_list, indent=2)
-
-        elif action == "get":
-            if not memory_id:
-                raise ValueError("memory_id is required for get action")
-
-            memory = _MEMORY_CLIENT.get_memory(memory_id)
-            if not strands_dev:
-                panel = format_get_response(memory)
-                console.print(panel)
-            return json.dumps(memory, indent=2)
-
-        elif action == "list":
-            # Respect MEM0_LIST_LIMIT if set, default to 100 (matches retrieve/report limits)
-            try:
-                list_limit = int(os.getenv("MEM0_LIST_LIMIT", "100"))
-            except Exception:
-                list_limit = 100
-
-            # Scope to current operation unless cross_operation=True
-            op_id = None if cross_operation else os.getenv("CYBER_OPERATION_ID")
-            memories = _MEMORY_CLIENT.list_memories(
-                user_id, agent_id, limit=list_limit, run_id=op_id
-            )
-
-            # Debug logging to understand the response structure
-            logger.debug("Memory list raw response type: %s", type(memories))
-            logger.debug("Memory list raw response: %s", memories)
-
-            # Normalize to list with better error handling
-            if memories is None:
-                results_list = []
-                logger.debug("memories is None, returning empty list")
-            elif isinstance(memories, list):
-                results_list = memories
-                logger.debug("memories is list with %d items", len(memories))
-            elif isinstance(memories, dict):
-                # Check for different possible dict structures
-                if "results" in memories:
-                    results_list = memories.get("results", [])
-                    logger.debug("Found 'results' key with %d items", len(results_list))
-                elif "memories" in memories:
-                    results_list = memories.get("memories", [])
-                    logger.debug(
-                        "Found 'memories' key with %d items", len(results_list)
-                    )
-                else:
-                    # If dict doesn't have expected keys, treat as single memory
-                    results_list = [memories] if memories else []
-                    logger.debug(
-                        "Dict without expected keys, treating as single memory: %d items",
-                        len(results_list),
-                    )
-            else:
-                results_list = []
-                logger.debug("Unexpected response type: %s", type(memories))
-
-            if not strands_dev:
-                panel = format_list_response(results_list)
-                console.print(panel)
-            return json.dumps(results_list, indent=2)
-
-        elif action == "retrieve":
-            if not query:
-                raise ValueError("query is required for retrieve action")
-
-            # Get operation ID for scoped retrieval (matches how store_memory scopes data)
-            # If cross_operation=True, don't scope to current operation (enables cross-learning)
-            op_id = None if cross_operation else os.getenv("CYBER_OPERATION_ID")
-
-            # Debug: Log retrieval parameters
-            logger.debug(
-                "RETRIEVE query='%s', metadata_filters=%s, user_id=%s, run_id=%s, cross_operation=%s",
-                query,
-                metadata,
-                user_id,
-                op_id,
-                cross_operation
-            )
-
-            # Use search() directly to support metadata filters (e.g., category, status)
-            # Include run_id to scope to current operation (unless cross_operation=True)
-            memories = _MEMORY_CLIENT.search(
-                query=query,
-                filters=metadata,  # Pass metadata as filters for category/status filtering
-                limit=100,
-                user_id=user_id or "cyber_agent",
-                agent_id=agent_id,
-                run_id=op_id,  # None if cross_operation=True for cross-learning
-            )
-
-            # Normalize to list with better error handling
-            if memories is None:
-                results_list = []
-            elif isinstance(memories, list):
-                results_list = memories
-            elif isinstance(memories, dict):
-                results_list = memories.get("results", [])
-            else:
-                results_list = []
-
-            # Debug: Verify categories in retrieved memories
-            if results_list:
-                categories = {}
-                for m in results_list:
-                    cat = m.get("metadata", {}).get("category", "MISSING")
-                    categories[cat] = categories.get(cat, 0) + 1
-                logger.info(
-                    "RETRIEVE complete: %d memories, categories=%s",
-                    len(results_list),
-                    categories
-                )
-            else:
-                logger.warning("RETRIEVE returned 0 results for query='%s'", query)
-
-            if not strands_dev:
-                panel = format_retrieve_response(results_list)
-                console.print(panel)
-            return json.dumps(results_list, indent=2)
-
-        elif action == "delete":
-            if not memory_id:
-                raise ValueError("memory_id is required for delete action")
-
-            _MEMORY_CLIENT.delete_memory(memory_id)
-            if not strands_dev:
-                panel = format_delete_response(memory_id)
-                console.print(panel)
-            return f"Memory {memory_id} deleted successfully"
-
-        else:
-            raise ValueError(f"Invalid action: {action}")
-
-    except Exception as e:
-        error_msg = f"Error: {str(e)}"
-        if os.environ.get("BYPASS_TOOL_CONSENT", "").lower() != "true":
-            error_panel = Panel(
-                Text(str(e), style="red"),
-                title="❌ Memory Operation Error",
-                border_style="red",
-            )
-            console.print(error_panel)
-        return error_msg

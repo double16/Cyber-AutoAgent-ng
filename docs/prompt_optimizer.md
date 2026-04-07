@@ -132,7 +132,6 @@ def check_if_rebuild_needed(self, event: BeforeModelInvocationEvent):
 def _auto_optimize_execution_prompt(self):
     # Phase 1: Retrieve recent memories without preprocessing
     recent_memories = memory.list_memories(
-        user_id="cyber_agent",
         limit=30
     )
 
@@ -310,7 +309,6 @@ def _query_memory_overview(self) -> Optional[Dict[str, Any]]:
 
     # Retrieve recent memories for contextual analysis
     results = self.memory.list_memories(
-        user_id="cyber_agent",
         limit=30
     )
 
@@ -401,13 +399,15 @@ outputs/<target>/OP_<id>/
 ├── execution_prompt_optimized.txt  # Copied from module template, then evolves
 ├── adaptive_prompt.json            # Optional overlay directives
 ├── security_assessment_report.md   # Final assessment report
+├── security_assessment_report.json # Final assessment report data (can be used in other tools)
 ├── cyber_operations.log            # Operation log with all events
 ├── artifacts/                      # Ad-hoc files created during operation
 └── tools/                          # Custom tools created by agent
 
 outputs/<target>/memory/
 ├── mem0.faiss                      # FAISS vector index
-└── mem0.pkl                        # FAISS metadata
+├── mem0.pkl                        # FAISS metadata
+└── plan_store.db                   # SQLite plan/task database
 
 src/modules/operation_plugins/<module>/
 ├── execution_prompt.md             # Master template (never modified)

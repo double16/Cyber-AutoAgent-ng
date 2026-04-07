@@ -149,10 +149,11 @@ def test_tool_catalog_wrapper_lists_agent_tools_and_schemas(monkeypatch, tmp_pat
     text = tool_catalog()
     assert "# TOOL CATALOG" in text
     assert "name: validation_specialist" in text
-    assert "input schema:" in text
+    # simplified, schemas are included in tool descriptions
+    assert "input schema:" not in text
     # Pretty JSON should be present (indent=2 => newline + two spaces)
-    assert "\n  \"type\": \"object\"" in text
-    assert "output schema:" in text
+    assert "\n  \"type\": \"object\"" not in text
+    assert "output schema:" not in text
 
 
 def test_tool_catalog_wrapper_filters_by_keywords_for_agent_tool(monkeypatch, tmp_path):
@@ -173,11 +174,12 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_agent_tool(monkeypatch, tm
     assert "**Tools found**:" not in text
     assert "**Command line tools found**:" not in text
 
-    text = tool_catalog("t1 t2")
-    assert "name: t2" in text
-    assert "name: t1" in text
-    assert "**Tools found**: t1,t2" in text
-    assert "**Command line tools found**:" not in text
+    for multiple_keywords in ["t1 t2", "t1,t2", "t1, t2"]:
+        text = tool_catalog(multiple_keywords)
+        assert "name: t2" in text
+        assert "name: t1" in text
+        assert "**Tools found**: t1,t2" in text
+        assert "**Command line tools found**:" not in text
 
     text = tool_catalog("nothing_to_see_here")
     assert "name: t2" not in text
@@ -238,11 +240,12 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch,
     assert "**Tools found**:" not in text
     assert "**Command line tools found**:" not in text
 
-    text = tool_catalog("httpx nmap")
-    assert "command: httpx" in text
-    assert "command: nmap" in text
-    assert "**Tools found**:" not in text
-    assert "**Command line tools found**: httpx,nmap" in text
+    for multiple_keywords in ["httpx nmap", "httpx nmap", "httpx, nmap"]:
+        text = tool_catalog(multiple_keywords)
+        assert "command: httpx" in text
+        assert "command: nmap" in text
+        assert "**Tools found**:" not in text
+        assert "**Command line tools found**: httpx,nmap" in text
 
     text = tool_catalog("nothing_to_see_here")
     assert "command: httpx" not in text
@@ -250,3 +253,9 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch,
     assert "**Tools found**:" not in text
     assert "**Command line tools found**:" not in text
     assert "**NO RESULTS**\nkeywords: nothing_to_see_here" in text
+
+    text = tool_catalog("web_recon")
+    assert "command: httpx" in text
+    assert "command: nmap" not in text
+    assert "**Tools found**:" not in text
+    assert "**Command line tools found**:" not in text

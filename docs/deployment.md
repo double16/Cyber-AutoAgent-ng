@@ -146,7 +146,7 @@ Cyber-AutoAgent supports **300+ LLM providers** via LiteLLM. Examples:
 
 ```bash
 # Clone the repository
-git clone https://github.com/bvcyber/Cyber-AutoAgent-ng.git
+git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd cyber-autoagent
 
 # Build and run with Docker Compose (includes observability)
@@ -190,7 +190,7 @@ docker run --rm \
 # Run with Ollama (local)
 docker run --rm \
   -e OLLAMA_HOST=http://host.docker.internal:11434 \
-  -e OLLAMA_API_BASE=http://host.docker.internal:11434 \
+  -e OLLAMA_CONTEXT_LENGTH=32768 \
   -v $(pwd)/outputs:/app/outputs \
   cyber-autoagent \
   --target "testsite.local" \
@@ -253,7 +253,7 @@ Settings are applied in this priority order:
 
 **Example:**
 ```bash
-# Default: temperature=0.95 (from provider defaults)
+# Default: temperature=0.5 (from provider defaults)
 # Override via environment: CYBER_LLM_TEMPERATURE=0.8
 # Override via CLI: create_agent(..., temperature=0.7)
 # Result: Uses 0.7 (CLI has highest priority)
@@ -288,11 +288,11 @@ safe_max = model_output_limit * 0.5
 
 Token limits use **five-tier precedence**:
 
-1. **Explicit override** - `CYBER_CONTEXT_LIMIT` environment variable
-2. **Models.dev API** - Authoritative registry (preferred)
-3. **Fallback mappings** - `CYBER_CONTEXT_WINDOW_FALLBACKS` (JSON)
-4. **Provider defaults** - Safe defaults per provider
-5. **Universal fallback** - 128,000 tokens
+1. **Explicit override** - `CYBER_PROMPT_LIMIT_FORCE` environment variable
+2. **Context window maximum** - `CYBER_CONTEXT_LIMIT`, if defined, limits the following
+3. **Models.dev API** - Authoritative registry (preferred)
+4. **Fallback mappings** - `CYBER_CONTEXT_WINDOW_FALLBACKS` (JSON)
+5. **Provider defaults** - Safe defaults per provider
 
 **Example fallback configuration:**
 ```bash
@@ -304,36 +304,42 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 
 ### Environment Variables
 
-| Variable                          | Description                                       | Required                      |
-|-----------------------------------|---------------------------------------------------|-------------------------------|
-| `CYBER_AGENT_PROVIDER`            | Provider choice (bedrock/ollama/litellm)          | No (auto-detected)            |
-| `CYBER_AGENT_LLM_MODEL`           | Main LLM model ID                                 | Yes                           |
-| `CYBER_AGENT_EMBEDDING_MODEL`     | Embedding model ID                                | No (provider default)         |
-| `REASONING_EFFORT`                | Reasoning effort (low/medium/high)                | No (default: medium)          |
-| `MAX_TOKENS`                      | Override LLM max (output) tokens                  | No (models.dev default)       |
-| `CYBER_AGENT_SWARM_MODEL`         | Swarm LLM model ID                                | No                            |
-| `CYBER_AGENT_SWARM_MAX_TOKENS`    | Override specialist max tokens                    | No (models.dev default)       |
-| `MAX_TOKENS_LIMIT`                | Override LLM output token upper bound             | No (12,000 default)           |
-| `MAX_TOKENS_REASONING_LIMIT`      | Override LLM output token upper bound (reasoning) | No (32,000 default)           |
-| `CYBER_CONTEXT_LIMIT`             | Override prompt token limit                       | No (auto-detected)            |
-| `AWS_ACCESS_KEY_ID`               | AWS credentials for Bedrock                       | For Bedrock provider          |
-| `AWS_SECRET_ACCESS_KEY`           | AWS credentials for Bedrock                       | For Bedrock provider          |
-| `AWS_REGION`                      | AWS region (default: us-east-1)                   | For Bedrock provider          |
-| `OLLAMA_HOST`,`OLLAMA_API_BASE`   | Ollama API endpoint                               | For Ollama provider           |
-| `OLLAMA_TIMEOUT`                  | Ollama API timeout in seconds                     | No (default: 120)             |
-| `AZURE_API_KEY`                   | Azure OpenAI API key                              | For Azure/LiteLLM             |
-| `AZURE_API_BASE`                  | Azure endpoint URL                                | For Azure/LiteLLM             |
-| `AZURE_API_VERSION`               | Azure API version                                 | For Azure/LiteLLM             |
-| `MEM0_API_KEY`                    | Mem0 Platform API key                             | For cloud memory backend      |
-| `MEM0_LLM_MODEL`                  | Memory system LLM                                 | No (auto-aligned)             |
-| `OPENSEARCH_HOST`                 | OpenSearch endpoint                               | For OpenSearch memory backend |
-| `LANGFUSE_HOST`                   | Langfuse observability endpoint                   | For observability             |
-| `LANGFUSE_PUBLIC_KEY`             | Langfuse API public key                           | For observability             |
-| `LANGFUSE_SECRET_KEY`             | Langfuse API secret key                           | For observability             |
-| `ENABLE_AUTO_EVALUATION`          | Enable automatic Ragas evaluation                 | For evaluation                |
-| `CYBER_RATE_LIMIT_REQ_PER_MIN`    | Limit model requests per minute                   | No (no limit)                 |
-| `CYBER_RATE_LIMIT_TOKENS_PER_MIN` | Limit model tokens per minute                     | No (no limit)                 |
-| `CYBER_RATE_LIMIT_MAX_CONCURRENT` | Limit model concurrent requests                   | No (Ollama defaults to 1)     |
+| Variable                            | Description                                       | Required                      |
+|-------------------------------------|---------------------------------------------------|-------------------------------|
+| `CYBER_AGENT_PROVIDER`              | Provider choice (bedrock/ollama/litellm)          | No (auto-detected)            |
+| `CYBER_AGENT_LLM_MODEL`             | Main LLM model ID                                 | Yes                           |
+| `CYBER_AGENT_EMBEDDING_MODEL`       | Embedding model ID                                | No (provider default)         |
+| `REASONING_EFFORT`                  | Reasoning effort (low/medium/high)                | No (default: medium)          |
+| `MAX_TOKENS`                        | Override LLM max (output) tokens                  | No (models.dev default)       |
+| `CYBER_AGENT_SWARM_MODEL`           | Swarm LLM model ID                                | No                            |
+| `CYBER_AGENT_SWARM_MAX_TOKENS`      | Override specialist max tokens                    | No (models.dev default)       |
+| `MAX_TOKENS_LIMIT`                  | Override LLM output token upper bound             | No (12,000 default)           |
+| `MAX_TOKENS_REASONING_LIMIT`        | Override LLM output token upper bound (reasoning) | No (32,000 default)           |
+| `CYBER_CONTEXT_LIMIT`               | Limit detected prompt tokens                      | No (auto-detected)            |
+| `CYBER_PROMPT_LIMIT_FORCE`          | Force prompt token limit                          | No (auto-detected)            |
+| `AWS_ACCESS_KEY_ID`                 | AWS credentials for Bedrock                       | For Bedrock provider          |
+| `AWS_SECRET_ACCESS_KEY`             | AWS credentials for Bedrock                       | For Bedrock provider          |
+| `AWS_REGION`                        | AWS region (default: us-east-1)                   | For Bedrock provider          |
+| `OLLAMA_HOST`                       | Ollama API endpoint                               | For Ollama provider           |
+| `OLLAMA_CONTEXT_LENGTH`             | Ollama model context length                       | No, Ollama default            |
+| `OLLAMA_TIMEOUT`                    | Ollama API timeout in seconds                     | No (default: 120)             |
+| `AZURE_API_KEY`                     | Azure OpenAI API key                              | For Azure/LiteLLM             |
+| `AZURE_API_BASE`                    | Azure endpoint URL                                | For Azure/LiteLLM             |
+| `AZURE_API_VERSION`                 | Azure API version                                 | For Azure/LiteLLM             |
+| `MEM0_API_KEY`                      | Mem0 Platform API key                             | For cloud memory backend      |
+| `MEM0_LLM_MODEL`                    | Memory system LLM                                 | No (auto-aligned)             |
+| `OPENSEARCH_HOST`                   | OpenSearch endpoint                               | For OpenSearch memory backend |
+| `LANGFUSE_HOST`                     | Langfuse observability endpoint                   | For observability             |
+| `LANGFUSE_PUBLIC_KEY`               | Langfuse API public key                           | For observability             |
+| `LANGFUSE_SECRET_KEY`               | Langfuse API secret key                           | For observability             |
+| `ENABLE_AUTO_EVALUATION`            | Enable automatic Ragas evaluation                 | For evaluation                |
+| `CYBER_RATE_LIMIT_REQ_PER_MIN`      | Limit model requests per minute                   | No (no limit)                 |
+| `CYBER_RATE_LIMIT_TOKENS_PER_MIN`   | Limit model tokens per minute                     | No (no limit)                 |
+| `CYBER_RATE_LIMIT_MAX_CONCURRENT`   | Limit model concurrent requests                   | No (Ollama defaults to 1)     |
+| `CYBER_AGENT_PRICING_INPUT`         | Model price per 1M input tokens                   | No (defaults to models.dev)   |
+| `CYBER_AGENT_PRICING_OUTPUT`        | Model price per 1M output tokens                  | No (defaults to models.dev)   |
+| `CYBER_AGENT_PRICING_CACHE_READ`    | Model price per 1M cache read tokens              | No (defaults to models.dev)   |
+| `CYBER_AGENT_PRICING_CACHE_WRITE`   | Model price per 1M cache write tokens             | No (defaults to models.dev)   |
 
 ### Kubernetes Deployment
 
@@ -455,6 +461,7 @@ export OPENAI_API_KEY=your_moonshot_key  # Mem0 compatibility
 ### Ollama with Context Window Fallbacks
 ```bash
 export OLLAMA_HOST=http://localhost:11434
+export OLLAMA_CONTEXT_LENGTH=32768
 export CYBER_AGENT_LLM_MODEL=qwen3-coder:30b-a3b-q4_K_M
 export CYBER_AGENT_EMBEDDING_MODEL=nomic-embed-text:latest
 export CYBER_CONTEXT_WINDOW_FALLBACKS='[

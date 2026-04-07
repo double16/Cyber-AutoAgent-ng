@@ -30,7 +30,7 @@ function resolveAppPath() {
 async function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function ensureTestConfig() {
-  const configDir = path.join(os.homedir(), '.cyber-autoagent');
+  const configDir = join(__dirname, 'test-config');
   try { fs.mkdirSync(configDir, { recursive: true }); } catch {}
   const configPath = path.join(configDir, 'config.json');
   const config = {
@@ -61,11 +61,12 @@ function ensureTestConfig() {
     deploymentMode: 'local-cli'
   };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  return configDir;
 }
 
 (async () => {
   const appPath = resolveAppPath();
-  ensureTestConfig();
+  const testConfigDir = ensureTestConfig();
   const env = {
     ...process.env,
     NO_COLOR: '1',
@@ -73,6 +74,7 @@ function ensureTestConfig() {
     NODE_ENV: 'test',
     CYBER_TEST_MODE: 'true',
     CYBER_TEST_EXECUTION: 'mock',
+    CYBER_CONFIG_DIR: testConfigDir
   };
 
   const term = spawn('node', [appPath, '--headless', '--deployment-mode', 'local-cli'], {

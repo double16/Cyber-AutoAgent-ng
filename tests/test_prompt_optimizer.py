@@ -71,7 +71,7 @@ def _install_llm_rewrite_stubs(monkeypatch: pytest.MonkeyPatch, *, response_text
 
     # Patch strands Agent + Ollama model class
     import strands
-    import strands.models.ollama as ollama_mod
+    import modules.config.models.ollama as ollama_mod
 
     monkeypatch.setattr(strands, "Agent", _FakeAgent)
     monkeypatch.setattr(ollama_mod, "OllamaModel", _DummyModel)

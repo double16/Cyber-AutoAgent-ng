@@ -61,7 +61,7 @@ sequenceDiagram
         Tools-->>Agent: Scan results
         Strands->>Langfuse: Tool execution trace
         
-        Agent->>Tools: mem0_memory(store, finding)
+        Agent->>Tools: mem0_store(finding)
         Tools-->>Agent: Memory stored
         Strands->>Langfuse: Memory operation
     end
@@ -148,7 +148,7 @@ export LANGFUSE_ADMIN_PASSWORD=$(openssl rand -base64 32)
 
 **Model Support:**
 - AWS Bedrock: `-e SERVER=remote` (default)
-- Ollama: `-e SERVER=local -e OLLAMA_HOST=http://localhost:11434 -e OLLAMA_API_BASE=http://localhost:11434`
+- Ollama: `-e SERVER=local -e OLLAMA_HOST=http://localhost:11434`
 
 ## Troubleshooting
 

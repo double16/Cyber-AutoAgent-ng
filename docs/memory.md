@@ -1,32 +1,40 @@
 # Memory System
 
-Cyber-AutoAgent implements persistent memory using Mem0 with automatic reflection, strategic planning, and evidence categorization. The system supports multiple backend configurations for different deployment scenarios.
+Cyber-AutoAgent implements persistent memory using Mem0 with automatic reflection, strategic planning, and evidence categorization. The system uses a hybrid storage approach: a local SQLite database for structured plans and tasks, and a vector backend (Mem0 Platform, OpenSearch, or FAISS) for semantic memories.
 
 ## Key Features
 
-- **Operation Scoping**: Memories are automatically scoped to the current operation via `run_id`
-- **Cross-Operation Learning**: Query across all operations using `cross_operation=True`
-- **Thread-Safe Writes**: FAISS backend uses locking for safe concurrent writes (swarm mode)
+- **Operation Scoping**: Memories and task state are automatically scoped to the current operation via `run_id`
+- **Cross-Operation Learning**: Query semantic memories across all operations using `cross_operation=True`
+- **Hybrid Storage**: Relational data (plans, tasks) uses SQLite; semantic data uses vector stores
+- **Thread-Safe Writes**: SQLite and FAISS backends use locking for safe concurrent writes
 - **Category Validation**: Invalid categories are auto-corrected to prevent empty reports
 - **Status Validation**: Contradictory status fields are automatically reconciled
 
 ## Architecture
 
+The memory system employs a hybrid architecture to balance structured task tracking with unstructured semantic search.
+
 ```mermaid
-graph LR
-    A[Agent] --> B[mem0_memory Tool]
-    B --> C{Backend Selection}
+graph TD
+    A[Agent] --> B[mem0_* Tools]
+    B --> C{Data Type}
 
-    C -->|MEM0_API_KEY set| D[Mem0 Platform]
-    C -->|OPENSEARCH_HOST set| E[OpenSearch + AWS]
-    C -->|Default| F[FAISS Local]
+    C -->|Plans & Tasks| D[SQLite Plan Store]
+    C -->|Semantic Memories| E{Vector Backend Selection}
 
-    D --> G[Cloud Vector Store]
-    E --> H[OpenSearch + Bedrock]
-    F --> I[Local FAISS Store]
+    E -->|MEM0_API_KEY set| F[Mem0 Platform]
+    E -->|OPENSEARCH_HOST set| G[OpenSearch + AWS]
+    E -->|Default| H[FAISS Local]
+
+    D --> I[plan_store.db]
+    F --> J[Cloud Vector Store]
+    G --> K[OpenSearch + Bedrock]
+    H --> L[mem0.faiss]
 
     style B fill:#e3f2fd,stroke:#333,stroke-width:2px
-    style F fill:#e8f5e8,stroke:#333,stroke-width:2px
+    style D fill:#fff9c4,stroke:#333,stroke-width:2px
+    style H fill:#e8f5e8,stroke:#333,stroke-width:2px
 ```
 
 ## Backend Selection
@@ -91,10 +99,8 @@ Evidence storage employs structured metadata for efficient retrieval and analysi
 
 ```python
 # Finding storage with metadata
-mem0_memory(
-    action="store",
+mem0_store(
     content="[WHAT] SQL injection [WHERE] /login [IMPACT] Auth bypass [EVIDENCE] payload",
-    user_id="cyber_agent",
     metadata={
         "category": "finding",
         "severity": "CRITICAL",
@@ -144,7 +150,7 @@ Plan evaluation triggers at budget checkpoints:
 
 ```python
 # Budget checkpoint workflow
-plan = mem0_memory(action="get_plan")
+plan = get_plan()
 # Evaluate: Is current phase criteria met?
 # If yes: Update phase status to "done", advance current_phase
 # Store updated plan
@@ -156,9 +162,8 @@ Hierarchical planning with phase tracking:
 
 ```python
 # Plan storage (required format)
-mem0_memory(
-    action="store_plan",
-    content={
+store_plan(
+    plan={
         "objective": "Compromise web application",
         "current_phase": 1,
         "total_phases": 3,
@@ -171,7 +176,7 @@ mem0_memory(
 )
 
 # Plan retrieval
-current_plan = mem0_memory(action="get_plan")
+current_plan = get_plan()
 ```
 
 **Required Plan Fields:**
@@ -186,9 +191,8 @@ Tactical pivots are managed through plan updates:
 
 ```python
 # Update plan with new strategy after reflection
-mem0_memory(
-    action="store_plan",
-    content={
+store_plan(
+    plan={
         "objective": "Compromise web application",
         "current_phase": 2,
         "total_phases": 3,
@@ -206,57 +210,50 @@ mem0_memory(
 ```
 ./outputs/<target>/memory/<operation_id>/
 ├── mem0.faiss           # Vector embeddings (FAISS index)
-└── mem0.pkl             # Metadata storage (pickle: docstore + ID mapping)
+├── mem0.pkl             # Metadata storage (pickle: docstore + ID mapping)
+└── plan_store.db        # SQLite database (Plans and Tasks)
 ```
 
 ### FAISS Backend Layout (Shared Mode)
 ```
 ./outputs/<target>/memory/
 ├── mem0.faiss           # Vector embeddings (FAISS index)
-└── mem0.pkl             # Metadata storage (pickle: docstore + ID mapping)
+├── mem0.pkl             # Metadata storage (pickle: docstore + ID mapping)
+└── plan_store.db        # SQLite database (Plans and Tasks)
 ```
 
 ### Operation Output Structure
 ```
 ./outputs/<target>/<operation_id>/
-├── artifacts/                     # Operation artifacts
-├── security_assessment_report.md  # Final assessment report
-└── logs/                          # Operation logs
+├── artifacts/                      # Operation artifacts
+├── security_assessment_report.md   # Final assessment report
+├── security_assessment_report.json # Final assessment report data (can be used in other tools)
+└── logs/                           # Operation logs
     └── cyber_operations.log
 ```
 
 ## Memory Tool Usage
 
-The unified `mem0_memory` tool handles all operations:
-
 ### Basic Operations
 ```python
 # Store finding with metadata
-mem0_memory(
-    action="store",
+mem0_store(
     content="[WHAT] RCE [WHERE] /upload [IMPACT] Shell access [EVIDENCE] shell.php",
     metadata={"category": "finding", "severity": "critical", "confidence": "98%"}
 )
 
 # Search memories  
-mem0_memory(action="retrieve", query="SQL injection")
+mem0_retrieve(query="SQL injection")
 
 # List all memories
-mem0_memory(action="list", user_id="cyber_agent")
-
-# Get specific memory
-mem0_memory(action="get", memory_id="mem_123")
-
-# Delete memory
-mem0_memory(action="delete", memory_id="mem_123")
+mem0_list()
 ```
 
 ### Advanced Operations
 ```python
 # Store strategic plan (dict format required)
-mem0_memory(
-    action="store_plan",
-    content={
+store_plan(
+    plan={
         "objective": "Compromise web application",
         "current_phase": 1,
         "total_phases": 3,
@@ -269,12 +266,11 @@ mem0_memory(
 )
 
 # Get current plan
-current_plan = mem0_memory(action="get_plan")
+current_plan = get_plan()
 
 # Update plan after tactical pivot
-mem0_memory(
-    action="store_plan",
-    content={
+store_plan(
+    plan={
         "objective": "Compromise web application",
         "current_phase": 2,
         "total_phases": 3,
@@ -290,42 +286,38 @@ mem0_memory(
 ### Memory Query Patterns
 ```python
 # Semantic search (current operation only - default)
-mem0_memory(action="retrieve", query="SQL injection vulnerabilities")
+mem0_retrieve(query="SQL injection vulnerabilities")
 
 # Search with metadata filter
-mem0_memory(
-    action="retrieve",
+mem0_retrieve(
     query="authentication bypass",
     metadata={"category": "finding", "severity": "CRITICAL"}
 )
 
 # Cross-operation learning (search ALL operations)
-mem0_memory(
-    action="retrieve",
+mem0_retrieve(
     query="SQL injection techniques",
     cross_operation=True  # Enables cross-learning
 )
 
 # List memories from current operation
-mem0_memory(action="list", user_id="cyber_agent")
+mem0_list()
 
 # List all memories across operations
-mem0_memory(action="list", user_id="cyber_agent", cross_operation=True)
+mem0_list(cross_operation=True)
 ```
 
 ### Cross-Operation Learning
 ```python
 # Learn from past successful exploits
-mem0_memory(
-    action="retrieve",
+mem0_retrieve(
     query="successful exploitation techniques",
     metadata={"status": "verified"},
     cross_operation=True
 )
 
 # Find what blocked previous attempts
-mem0_memory(
-    action="retrieve",
+mem0_retrieve(
     query="blocked or filtered",
     metadata={"category": "observation"},
     cross_operation=True
@@ -374,7 +366,7 @@ Structured finding format ensures consistent evidence collection:
 
 **Optional Fields:**
 - **status**: Verification state (hypothesis, unverified, verified)
-- **validation_status**: Submission state (hypothesis, submission_accepted)
+- **validation_status**: Submission state (hypothesis, unverified, verified)
 - **technique**: Exploitation technique used
 - **challenge_id**: CTF challenge identifier
 
@@ -385,7 +377,7 @@ The memory system automatically validates and corrects inconsistent status field
 ```python
 # These contradictions are auto-corrected:
 # status="verified" + validation_status="hypothesis" → validation_status="verified"
-# validation_status="submission_accepted" + status="hypothesis" → status="verified"
+# validation_status="verified" + status="hypothesis" → status="verified"
 
 # FORBIDDEN: status="solved" is ambiguous and auto-converts to "hypothesis"
 # Use status="verified" for confirmed findings

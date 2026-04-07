@@ -87,9 +87,9 @@ Every tool execution begins with a `tool_start` event that shows the tool name a
 
 These tools have dedicated display formatters in `StreamDisplay.tsx`:
 
-#### `mem0_memory` - Memory Operations
+#### `mem0_*` - Memory Operations
 ```
-tool: mem0_memory
+tool: mem0_store
 ├─ action: storing
 └─ content: Evidence from vulnerability scan...
 ```
@@ -333,7 +333,7 @@ The ThinkingIndicator component shows different contexts:
 ## Tool Categories
 
 ### Core Tools (Hardcoded Formatters)
-- `mem0_memory`, `shell`, `http_request`, `swarm`, `python_repl`
+- `mem0_*`, `shell`, `http_request`, `swarm`, `python_repl`
 - `report_generator`, `file_write`, `editor`
 - `think`, `load_tool`, `stop`, `handoff_to_agent`
 
@@ -473,7 +473,7 @@ pylint src/ && black src/ && mypy src/
 AWS_REGION=us-east-1
 AWS_BEARER_TOKEN_BEDROCK=<token>
 OLLAMA_HOST=http://localhost:11434
-OLLAMA_API_BASE=http://localhost:11434
+OLLAMA_CONTEXT_LENGTH=32768
 LANGFUSE_HOST=http://localhost:3000
 CYBER_THEME=retro
 ```

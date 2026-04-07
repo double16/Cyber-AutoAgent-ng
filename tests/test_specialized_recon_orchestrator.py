@@ -101,13 +101,13 @@ def test_target_normalization_domain_and_url_inputs(fake_subprocess, fake_reques
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    out1 = _as_json(sro.specialized_recon_orchestrator("Example.com", recon_type="web"))
+    out1 = _as_json(sro.specialized_recon_orchestrator("Example.com", recon_type="fingerprint"))
     assert out1["target"] == "example.com"
 
-    out2 = _as_json(sro.specialized_recon_orchestrator("https://Example.com/some/path", recon_type="web"))
+    out2 = _as_json(sro.specialized_recon_orchestrator("https://Example.com/some/path", recon_type="fingerprint"))
     assert out2["target"] == "example.com"
 
-    out3 = _as_json(sro.specialized_recon_orchestrator("Example.com/another/path", recon_type="web"))
+    out3 = _as_json(sro.specialized_recon_orchestrator("Example.com/another/path", recon_type="fingerprint"))
     assert out3["target"] == "example.com"
 
 
@@ -331,7 +331,7 @@ def test_orchestrator_end_to_end_happy_path_with_mocked_tools(fake_subprocess, f
     assert "ranked_hidden_services" in intel
 
     # Tasks have selector-based inputs (not big embedded lists)
-    tasks = out["tasks"]
+    tasks = out["next_steps"]
     assert isinstance(tasks, list)
     assert any(t["id"] == "asset_inventory" for t in tasks)
     for t in tasks:
@@ -675,7 +675,7 @@ def test_meta_coverage_updates_for_web_recon(monkeypatch):
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    out = _as_json(sro.specialized_recon_orchestrator("example.com", recon_type="web"))
+    out = _as_json(sro.specialized_recon_orchestrator("example.com", recon_type="fingerprint"))
     cov = out["meta"]["coverage"]
     assert cov["live_hosts_discovered"] == 1
     assert cov["subdomains_discovered"] == 0

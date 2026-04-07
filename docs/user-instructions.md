@@ -16,6 +16,9 @@ Cyber-AutoAgent is an autonomous security assessment tool with a React-based ter
 ## Installation
 
 ```bash
+# optional to get runtime dependencies and security tools
+brew bundle
+
 cd src/modules/interfaces/react
 npm install
 npm run build
@@ -52,8 +55,8 @@ npm start
 2. Select **Provider**: `litellm` (supports 300+ models)
 3. Configure **LLM Settings**:
    - Model ID: `azure/gpt-5`, `moonshot/kimi-k2-thinking`, `openrouter/openrouter/polaris-alpha`
-   - Temperature: `1.0` (for reasoning models) or `0.95` (default)
-   - Max Tokens: `32000`
+   - Temperature: `0.7` (for reasoning models) or `0.5` (default)
+   - Max Tokens: `12000`
    - Reasoning Effort: `medium` (for GPT-5/o1 models)
 4. Configure **Embedding Model**: `azure/text-embedding-3-large`
 5. Add **Provider Credentials**:
@@ -96,6 +99,8 @@ export OPENROUTER_API_KEY=your_key
 export CYBER_AGENT_LLM_MODEL=openrouter/openrouter/polaris-alpha
 export CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
 ```
+
+Finding free compatible models: https://github.com/EvanThomasLuke/Cyber-AutoAgent-OpenRouter-CompatCheck
 
 **Moonshot AI:**
 ```bash
@@ -250,6 +255,7 @@ outputs/
 └── <target>/
     ├── OP_<timestamp>/
     │   ├── security_assessment_report.md    # Assessment report
+    │   ├── security_assessment_report.json  # Assessment report data (can be used in other tools)
     │   ├── logs/
     │   │   └── cyber_operations.log
     │   └── utils/
@@ -501,6 +507,46 @@ cyber-react \
   --auto-run \
   --auto-approve \
   --headless
+```
+
+### Continue Assessment
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --continue
+```
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --continue OP_20260320_101501
+```
+
+### Re-generate Report
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --report
+```
+
+```bash
+cyber-react \
+  -t "192.168.1.100" \
+  -o "Network security assessment" \
+  --auto-run \
+  --auto-approve \
+  --report OP_20260320_101501
 ```
 
 ## Best Practices

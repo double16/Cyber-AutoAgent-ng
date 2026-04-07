@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cyber-autoagent"
-version = "0.7.0"
+version = "0.8.0"
 description = "Cyber-AutoAgent: Autonomous AI agent for ethical security assessments"
 readme = "README.md"
 authors = [
@@ -29,41 +29,42 @@ classifiers = [
 ]
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "strands-agents[ollama,otel,litellm]>=1.19.0",
-    "strands-agents-tools>=0.2.17",
-    "mem0ai>=1.0.1",
-    "google-genai>=1.49.0",
-    "litellm>=1.80.0",
-    "azure-identity>=1.15.0",
-    "boto3>=1.42.4",
-    "botocore>=1.42.4",
-    "faiss-cpu",
-    "ollama>=0.6.1",
-    "requests>=2.25.0",
-    "opensearch-py",
-    "opentelemetry-api",
-    "opentelemetry-sdk",
-    "opentelemetry-exporter-otlp-proto-http>=1.30.0",
+    "strands-agents[ollama,otel,litellm]~=1.27.0",
+    "strands-agents-tools~=0.2.17",
+    "mem0ai~=1.0.1",
+    "google-genai~=1.64.0",
+    "litellm~=1.80.0",
+    "azure-identity~=1.25.0",
+    "boto3~=1.42.4",
+    "botocore~=1.42.4",
+    "faiss-cpu~=1.13.2",
+    "ollama~=0.6.1",
+    "requests~=2.32.5",
+    "opensearch-py~=3.1.0",
+    "opentelemetry-api~=1.39.1",
+    "opentelemetry-sdk~=1.39.1",
+    "opentelemetry-exporter-otlp-proto-http~=1.39.1",
     "pyarrow>=14.0.0,<20.0.0",
-    "ragas>=0.3.0",
-    "langfuse>=2.0.0",
-    "langchain-aws>=0.2.0",
-    "langchain-ollama>=0.2.0",
-    "langchain-litellm>=0.3.5",
-    "langchain-google-genai>=4.1.1",
+    "ragas~=0.3.2",
+    "langfuse~=3.14.4",
+    "langchain-aws~=1.2.5",
+    "langchain-ollama~=1.0.1",
+    "langchain-litellm~=0.5.1",
+    "langchain-google-genai~=4.2.1",
     "stagehand~=0.5.7",
-    "pymitter>=1.1.3",
-    "tldextract>=5.3.0",
-    "pwntools>=4.13.0",
-    "volatility3>=2.7.0",
-    "sympy>=1.13.0",
-    "angr>=9.2.0",
-    "r2pipe>=1.9.0",
-    "sentence-transformers>=5.1.2",
-    "standard-distutils>=3.11.9",
+    "pymitter~=1.1.3",
+    "tldextract~=5.3.0",
+    "pwntools~=4.15.0",
+    "volatility3~=2.27.0",
+    "sympy~=1.14.0",
+    "angr~=9.2.0",
+    "r2pipe~=1.9.8",
+    "sentence-transformers~=5.2.3",
+    "standard-distutils~=3.11.9",
     "guppy3~=3.1.5",
-    "validators>=0.35.0",
+    "validators~=0.35.0",
     "ddgs~=9.10.0",
+    "rapidfuzz~=3.14.3",
 ]
 
 [project.optional-dependencies]
@@ -78,10 +79,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/bvcyber/Cyber-AutoAgent-ng"
-Repository = "https://github.com/bvcyber/Cyber-AutoAgent-ng"
-Documentation = "https://github.com/bvcyber/Cyber-AutoAgent-ng#readme"
-"Bug Tracker" = "https://github.com/bvcyber/Cyber-AutoAgent-ng/issues"
+Homepage = "https://github.com/double16/Cyber-AutoAgent-ng"
+Repository = "https://github.com/double16/Cyber-AutoAgent-ng"
+Documentation = "https://github.com/double16/Cyber-AutoAgent-ng#readme"
+"Bug Tracker" = "https://github.com/double16/Cyber-AutoAgent-ng/issues"
 
 [project.scripts]
 caa = "cyberautoagent:main"
@@ -122,7 +123,7 @@ use_parentheses = true
 ensure_newline_before_comments = true
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -163,10 +164,10 @@ max-attributes = 15
 
 [dependency-groups]
 dev = [
-    "pylint>=3.3.7",
-    "pyright>=1.1.402",
-    "pytest>=8.4.1",
-    "pytest-mock>=3.14.1",
-    "ruff>=0.12.1",
-    "pytest-asyncio>=1.3.0",
+    "pylint~=4.0.5",
+    "pyright~=1.1.408",
+    "pytest~=9.0.2",
+    "pytest-mock~=3.15.1",
+    "ruff~=0.15.2",
+    "pytest-asyncio~=1.3.0",
 ]

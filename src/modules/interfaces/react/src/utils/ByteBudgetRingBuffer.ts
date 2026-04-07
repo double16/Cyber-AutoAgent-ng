@@ -88,13 +88,19 @@ export class ByteBudgetRingBuffer<T> {
 
   private enforceBudget() {
     // Remove from the front until under budget
-    if (this.currentBytes <= this.byteLimit) return;
+    if (this.currentBytes <= this.byteLimit) {
+      if (this.currentBytes < 0) this.currentBytes = 0;
+      return;
+    }
     // Remove 10% headroom in one go to reduce churn
     const target = Math.floor(this.byteLimit * 0.9);
     while (this.items.length > 0 && this.currentBytes > target) {
-      const removed = this.items.shift()!;
-      this.currentBytes -= this.estimator(removed);
+      const removed = this.items.shift();
+      if (removed !== undefined) {
+        this.currentBytes -= this.estimator(removed);
+      }
     }
+    if (this.currentBytes < 0) this.currentBytes = 0;
   }
 
   toArray(): T[] {

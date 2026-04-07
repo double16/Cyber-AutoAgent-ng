@@ -37,7 +37,7 @@ graph TB
     D --> I[swarm]
     D --> J[load_tool]
     D --> K[http_request]
-    D --> L[mem0_memory]
+    D --> L[mem0_store]
     D --> M[stop]
     
     G --> N[Security Tools]
@@ -58,7 +58,7 @@ The agent operates through these core tools:
 - **editor**: Create/modify files and custom tools
 - **swarm**: Deploy parallel agents for complex tasks
 - **http_request**: Make HTTP requests for web testing
-- **mem0_memory**: Store/retrieve findings and knowledge
+- **mem0_...**: Store/retrieve findings and knowledge
 - **load_tool**: Dynamically load created tools
 - **stop**: Terminate execution
 
@@ -88,7 +88,7 @@ sequenceDiagram
     participant Memory
     
     User->>Agent: Start Assessment
-    Agent->>Memory: Initialize (mem0_memory)
+    Agent->>Memory: Initialize (get_plan|store_plan)
     Agent->>Strands: Begin Reasoning Loop
     
     loop Assessment Cycle
@@ -96,10 +96,11 @@ sequenceDiagram
         Agent->>Tools: Execute Tool (shell/http_request/etc)
         Tools-->>Agent: Results
         Agent->>Memory: Store Findings
-        
+        Agent->>Memory: Create Tasks (current + future phases)
+
         alt Critical Finding
-            Agent->>Tools: Immediate Exploitation (shell)
             Agent->>Memory: Store Evidence
+            Agent->>Memory: Create Exploitation Tasks
         end
         
         alt Complex Task
@@ -129,7 +130,7 @@ flowchart TD
     D --> G[swarm: Create Specialized Sub-Agents]
     E --> H[http_request: Reconnaissance]
     
-    F --> I[mem0_memory: Centralized Knowledge]
+    F --> I[mem0_store: Centralized Knowledge]
     G --> I
     H --> I
     
@@ -208,7 +209,7 @@ MCP Tools pre-configured:
 ```mermaid
 graph TB
     A[Agent Actions] --> B[Finding Discovered]
-    B --> C[mem0_memory store]
+    B --> C[mem0_store]
     C --> D[Backend Selection]
 
     D --> E[Mem0 Platform<br/>MEM0_API_KEY]
@@ -223,7 +224,7 @@ graph TB
     H --> J[category: plan]
     H --> K[category: reflection]
 
-    L[Future Decisions] --> M[mem0_memory retrieve]
+    L[Future Decisions] --> M[mem0_retrieve]
     M --> N[Historical Context]
     N --> A
 
@@ -232,9 +233,11 @@ graph TB
 ```
 
 **Memory Backend Selection**:
-1. **Mem0 Platform** - If `MEM0_API_KEY` environment variable is set
-2. **OpenSearch** - If `OPENSEARCH_HOST` environment variable is set
-3. **FAISS** - Default local vector storage if neither is configured
+1. **Plans and Tasks**: Stored in a local SQLite database (`plan_store.db`).
+2. **Semantic Memories**:
+   - **Mem0 Platform** - If `MEM0_API_KEY` environment variable is set
+   - **OpenSearch** - If `OPENSEARCH_HOST` environment variable is set
+   - **FAISS** - Default local vector storage if neither is configured
 
 **Evidence Storage Format**:
 ```

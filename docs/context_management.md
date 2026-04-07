@@ -321,6 +321,7 @@ outputs/<target>/<operation>/
 ├── logs/
 │   └── cyber_operations.log
 └── security_assessment_report.md
+└── security_assessment_report.json
 ```
 
 ### Artifact Lifecycle
@@ -352,11 +353,11 @@ Artifact references include immediate context for LLM comprehension:
 
 #### Token Budget Controls
 
-| Variable                            | Default | Description                                                                                |
-|-------------------------------------|---------|--------------------------------------------------------------------------------------------|
-| `CYBER_CONTEXT_LIMIT`               | 200,000 | Maximum context window size in tokens. Used when provider-specific limits are unavailable. |
-| `CYBER_PROMPT_TELEMETRY_THRESHOLD`  | 0.85    | Reduction trigger threshold (85%)                                                          |
-| `CYBER_PROMPT_CACHE_RELAX`          | 0.1     | Threshold relaxation when prompt caching active                                            |
+| Variable                            | Default | Description                                                                                                           |
+|-------------------------------------|---------|-----------------------------------------------------------------------------------------------------------------------|
+| `CYBER_CONTEXT_LIMIT`               | No      | Maximum context window size in tokens. Used to clamp context window or when provider-specific limits are unavailable. |
+| `CYBER_PROMPT_TELEMETRY_THRESHOLD`  | 0.85    | Reduction trigger threshold (85%)                                                                                     |
+| `CYBER_PROMPT_CACHE_RELAX`          | 0.1     | Threshold relaxation when prompt caching active                                                                       |
 
 #### Tool Result Handling
 
@@ -450,13 +451,13 @@ When token estimation fails, the system degrades gracefully:
 
 ### Symptoms and Resolutions
 
-| Symptom                  | Likely Cause               | Resolution                                                                                    |
-|--------------------------|----------------------------|-----------------------------------------------------------------------------------------------|
-| Tokens grow unbounded    | Estimation failure         | Check for `TOKEN ESTIMATION FAILED` logs; verify `CYBER_CONTEXT_LIMIT`                        |
-| Reductions ineffective   | Preservation overlap       | Reduce `CYBER_CONVERSATION_PRESERVE_LAST`; verify prunable range exists                       |
-| Budget checks not firing | Hook registration failure  | Verify `HOOK REGISTRATION: PromptBudgetHook` in logs                                          |
-| Layer 2 never triggers   | Artifact threshold too low | Verify `CYBER_TOOL_RESULT_ARTIFACT_THRESHOLD` (default: 10,000); compression is 4x this value |
-| Excessive log volume     | LiteLLM DEBUG logging      | Verify `logger.py` silences LiteLLM at WARNING level                                          |
+| Symptom                  | Likely Cause               | Resolution                                                                                      |
+|--------------------------|----------------------------|-------------------------------------------------------------------------------------------------|
+| Tokens grow unbounded    | Estimation failure         | Check for `TOKEN ESTIMATION FAILED` logs; verify context window size; set `CYBER_CONTEXT_LIMIT` |
+| Reductions ineffective   | Preservation overlap       | Reduce `CYBER_CONVERSATION_PRESERVE_LAST`; verify prunable range exists                         |
+| Budget checks not firing | Hook registration failure  | Verify `HOOK REGISTRATION: PromptBudgetHook` in logs                                            |
+| Layer 2 never triggers   | Artifact threshold too low | Verify `CYBER_TOOL_RESULT_ARTIFACT_THRESHOLD` (default: 10,000); compression is 4x this value   |
+| Excessive log volume     | LiteLLM DEBUG logging      | Verify `logger.py` silences LiteLLM at WARNING level                                            |
 
 ### Validation Commands
 
