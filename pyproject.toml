@@ -29,7 +29,7 @@ classifiers = [
 ]
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "strands-agents[ollama,otel,litellm]~=1.27.0",
+    "strands-agents[ollama,otel,litellm]~=1.35.0",
     "strands-agents-tools~=0.4.0",
     "mem0ai~=1.0.1",
     "google-genai~=1.71.0",
