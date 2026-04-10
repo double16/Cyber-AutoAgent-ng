@@ -332,10 +332,11 @@ Use the following data:
 
 
 _RE_MARKDOWN_INDENTED_HEADER = re.compile(r"^[ \t]+(#+ )", re.MULTILINE)
+_RE_MARKDOWN_TABLE_START = re.compile(r"([^\n])\n([ \t]*\|.*\|[ \t]*\n[ \t]*\|[ \t]*:?---)", re.MULTILINE)
 
 
 def _extract_text_from_result(result: Any) -> str:
-    """Extract text content from an agent result object and fix leading whitespace on headings."""
+    """Extract text content from an agent result object and fix leading whitespace on headings and tables."""
     text = ""
     if result and hasattr(result, "message"):
         for block in result.message.get("content", []):
@@ -350,6 +351,10 @@ def _extract_text_from_result(result: Any) -> str:
 
     # Remove leading whitespace before markdown heading markers (#, ##, ...)
     text = _RE_MARKDOWN_INDENTED_HEADER.sub(r"\1", text)
+
+    # Ensure markdown tables have an empty line before them
+    text = _RE_MARKDOWN_TABLE_START.sub(r"\1\n\n\2", text)
+    
     return text
 
 

@@ -10,6 +10,7 @@ import dataclasses
 import logging
 import os
 import sys
+from math import floor
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -475,7 +476,7 @@ def create_bedrock_model(
         additional_fields.setdefault("output_config", {})
         additional_fields["output_config"]["effort"] = effort
 
-    if config_manager.is_thinking_model(model_id):
+    if role in ["primary", "swarm"] and config_manager.is_thinking_model(provider, model_id):
         # Use thinking model configuration
         config = config_manager.get_thinking_model_config(model_id, region_name)
 
@@ -486,6 +487,18 @@ def create_bedrock_model(
                     additional_fields[k] = list(set(additional_fields[k] + v))
                 elif k not in additional_fields:
                     additional_fields[k] = v
+
+        try:
+            logger.info(
+                "Model build: thinking, role=%s provider=%s model=%s max_tokens=%s effort=%s",
+                role,
+                provider,
+                config.get("model_id"),
+                llm_max,
+                effort or "none",
+            )
+        except Exception:
+            pass
 
         model = BedrockModel(
             model_id=config["model_id"],
@@ -515,7 +528,6 @@ def create_bedrock_model(
     llm_max = create_parameters.llm_max
     role = create_parameters.role
 
-    # Observability: one-liner
     try:
         logger.info(
             "Model build: role=%s provider=%s model=%s max_tokens=%s effort=%s",
@@ -643,7 +655,7 @@ def create_litellm_model(
     # Get centralized configuration
     config_manager = _get_config_manager()
 
-    # Get standard configuration (LiteLLM doesn't have special thinking mode handling)
+    # Get standard configuration (current get_thinking_model_config has bedrock specifics)
     config = config_manager.get_standard_model_config(model_id, region_name, provider)
 
     # Prepare client args based on model prefix
@@ -731,21 +743,25 @@ def create_litellm_model(
         client_args["num_retries"] = num_retries
         client_args["max_retries"] = num_retries
 
-    # Reasoning parameters for reasoning-capable models (o1, o3, o4, gpt-5)
-    reasoning_effort = config_manager.getenv("REASONING_EFFORT")
+    # Reasoning parameters for reasoning-capable models
+    # https://docs.litellm.ai/docs/reasoning_content
     try:
         from modules.config.models.capabilities import get_capabilities
 
-        caps = get_capabilities(provider, config.get("model_id", ""))
-        if reasoning_effort and caps.pass_reasoning_effort:
-            params["reasoning_effort"] = reasoning_effort
+        if role in ["primary", "swarm"]:
+            caps = get_capabilities(provider, config.get("model_id", ""))
+            reasoning_effort = config_manager.getenv("REASONING_EFFORT", "medium")
+            if reasoning_effort and caps.pass_reasoning_effort:
+                client_args["reasoning_effort"] = reasoning_effort
+            if caps.supports_reasoning:
+                client_args["thinking"] = {"type": "enabled", "budget_tokens": floor(llm_max * 0.80)}
     except Exception:
         # If capability resolution fails, do not attach the param
         pass
 
     # Reasoning text verbosity for Azure Responses API models (default: medium)
     reasoning_verbosity = config_manager.getenv("REASONING_VERBOSITY", "medium")
-    if reasoning_verbosity and "azure/responses/" in config["model_id"]:
+    if role in ["primary", "swarm"] and reasoning_verbosity and "azure/responses/" in config["model_id"]:
         params["text"] = {
             "format": {"type": "text"},
             "verbosity": reasoning_verbosity,

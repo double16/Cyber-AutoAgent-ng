@@ -101,7 +101,8 @@ def test_create_tasks_filesystem(tmp_path, monkeypatch):
         tasks = memory.list_uncompleted_tasks()
         assert len(tasks) == 2
         assert all(task.phase == 1 for task in tasks)
-        assert all(task.status == "pending" for task in tasks)
+        assert len([task for task in tasks if task.status == "pending"]) == 1
+        assert len([task for task in tasks if task.status == "active"]) == 1
         assert {task.title for task in tasks} == {task_1_title, task_2_title}
 
         active_raw = memory.get_active_task()
@@ -119,6 +120,68 @@ def test_create_tasks_filesystem(tmp_path, monkeypatch):
         assert active_task["phase"] == 1
         assert active_task["status"] == "active"
         assert active_task["title"] in {task_1_title, task_2_title}
+
+    finally:
+        memory._MEMORY_CLIENT = None
+        memory._MEMORY_CONFIG = None
+
+
+@pytest.mark.ollama
+def test_create_tasks_filesystem_future_phase(tmp_path, monkeypatch):
+    from modules.tools import memory
+
+    _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-fs")
+
+    try:
+        plan = {
+            "objective": "Test task creation",
+            "current_phase": 1,
+            "total_phases": 1,
+            "phases": [
+                {
+                    "id": 1,
+                    "title": "Phase 1",
+                    "status": "active",
+                    "criteria": "Create tasks",
+                }
+            ],
+            "assessment_complete": False,
+        }
+        memory.store_plan(plan)
+
+        task_1_title = "Enumerate login endpoints"
+        task_2_title = "Check GraphQL schema exposure"
+
+        raw = memory.create_tasks(
+            [
+                memory.TaskCreate(
+                    title=task_1_title,
+                    objective="Find authentication entry points",
+                    phase=2,
+                    status="pending",
+                ),
+                memory.TaskCreate(
+                    title=task_2_title,
+                    objective="Inspect GraphQL attack surface",
+                    phase=2,
+                    status="pending",
+                ),
+            ]
+        )
+
+        assert isinstance(raw, str)
+        assert not raw.startswith("Error:")
+
+        payload = json.loads(raw)
+        assert isinstance(payload, list)
+
+        tasks = memory.list_uncompleted_tasks()
+        assert len(tasks) == 0
+
+        active_raw = memory.get_active_task()
+        assert "<active_task" in active_raw
+        assert 'phase="1"' in active_raw
+        assert 'status="none"' in active_raw
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -174,9 +237,10 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
             ]
         ))
 
-        assert len(create_raw) == 2
+        assert len(create_raw) == 3
         assert create_raw[0]["event"] == "ADD"
         assert create_raw[1]["event"] == "ADD"
+        assert create_raw[2]["event"] == "ACTIVATE"
 
         create_dup1 = json.loads(memory.create_tasks(
             [
@@ -216,7 +280,7 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
         assert len(create_dup2) == 2
         assert create_dup2[0]["event"] == "DUPLICATE"
         assert create_dup2[0]["task_uid"] == create_raw[1]["task_uid"]
-        assert create_dup2[1]["event"] == "ADD"  # Title is same, objective is different
+        assert create_dup2[1]["event"] == "ADD"  # Title is same, the objective is different
 
         create_new2 = json.loads(memory.create_tasks(
             [

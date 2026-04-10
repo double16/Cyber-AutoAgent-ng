@@ -917,6 +917,9 @@ def mem0_store(
         results_list = results.get("results", [])
     else:
         results_list = []
+
+    results_list = [ filter_none_values(d) if isinstance(d, dict) else d for d in results_list ]
+
     return json.dumps(results_list, indent=2, sort_keys=True)
 
 
@@ -1091,7 +1094,7 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
         A JSON array of task dict.
 
     Returns:
-        store result.
+        store result and active task (if any)
     """
 
     # validate input, TaskCreate has post init validation
@@ -1162,6 +1165,14 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
             # "title": title,  # do not include title, the agent may be redirected
         })
         existing_tasks.append(task)
+
+    if all_results:
+        active_task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
+        if active_task and activated:
+            all_results.append({
+                "event": "ACTIVATE",
+                "task": active_task.to_dict(),
+            })
 
     return json.dumps(all_results, indent=2, sort_keys=True)
 

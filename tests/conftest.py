@@ -19,6 +19,9 @@ from modules.config.models.capabilities import (
 # Disable dotenv loading in tests
 os.environ["PYTHON_DOTENV_DISABLED"] = "true"
 
+# Disable download from models.dev, use cache or snapshot
+os.environ["DEV_CLIENT_OFFLINE"] = "true"
+
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
