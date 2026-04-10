@@ -264,11 +264,7 @@ class ModelCapabilitiesResolver:
             supports_tools = "tools" in lowered
             supports_tool_choice = "tool_choice" in lowered
 
-        # Priority 4: strands OpenAI and LiteLLM model classes do not support reasoning content, 1.23.0
-        if provider == "litellm":
-            supports_reason = False
-
-        # Priority 5: Environment overrides (highest precedence)
+        # Priority 4: Environment overrides (highest precedence)
         model_l = model.lower()
         allow = os.getenv("CYBER_REASONING_ALLOW", "").lower().split(",")
         deny = os.getenv("CYBER_REASONING_DENY", "").lower().split(",")

@@ -1,5 +1,10 @@
 # Cyber-AutoAgent-ng Changelog
 
+- Support thinking/reasoning for LiteLLM (#24)
+- Activate a new task and return in `create_tasks` tool
+- Report generation ensures a blank line before Markdown tables
+- advanced_payload_coordinator.py: only do param discovery if no params are provided, limit scans to 5 params
+
 ## v0.8.0
 
 Features:

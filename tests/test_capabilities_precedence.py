@@ -20,14 +20,12 @@ class TestCapabilitiesPrecedence:
     def test_moonshot_kimi_k2_reasoning_via_models_dev(self):
         """Verify moonshot/kimi-k2-thinking uses models.dev data."""
         caps = get_capabilities("litellm", "moonshot/kimi-k2-thinking")
-        # LiteLLMModel 1.23.0 does not support reasoning in chat completions
-        assert caps.supports_reasoning is False, "Should detect reasoning via models.dev"
+        assert caps.supports_reasoning is True, "Should detect reasoning via models.dev"
 
     def test_azure_gpt5_reasoning_via_models_dev(self):
         """Verify azure/gpt-5 uses models.dev data."""
         caps = get_capabilities("litellm", "azure/gpt-5")
-        # LiteLLMModel 1.23.0 does not support reasoning in chat completions
-        assert caps.supports_reasoning is False
+        assert caps.supports_reasoning is True
 
     def test_claude_sonnet_45_reasoning(self):
         """Verify Claude Sonnet 4.5 detected correctly."""
@@ -154,8 +152,7 @@ class TestPrecedenceOrder:
         # - LiteLLM says: reasoning=False
         # - Should use models.dev
         caps = get_capabilities("litellm", "moonshot/kimi-k2-thinking")
-        # LiteLLMModel 1.23.0 does not support reasoning in chat completions
-        assert caps.supports_reasoning is False, "models.dev should win"
+        assert caps.supports_reasoning is True, "models.dev should win"
 
     def test_static_patterns_fallback(self):
         """Verify static patterns work when models.dev unavailable."""
@@ -178,11 +175,10 @@ class TestPrecedenceOrder:
 
     def test_multiple_models_consistent(self):
         """Verify precedence works consistently across multiple models."""
-        # LiteLLMModel 1.23.0 does not support reasoning in chat completions
         test_cases = [
             ("bedrock", "claude-sonnet-4-5", True),
-            ("litellm", "azure/gpt-5", False),  # True),
-            ("litellm", "moonshot/kimi-k2-thinking", False),  # True),
+            ("litellm", "azure/gpt-5", True),
+            ("litellm", "moonshot/kimi-k2-thinking", True),
         ]
 
         for provider, model, expected_reasoning in test_cases:

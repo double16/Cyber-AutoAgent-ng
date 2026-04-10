@@ -18,6 +18,7 @@ export AZURE_API_VERSION="2024-12-01-preview"
 export CYBER_AGENT_LLM_MODEL="azure/gpt-5"
 export CYBER_AGENT_EMBEDDING_MODEL="azure/text-embedding-3-large"
 export REASONING_EFFORT="medium"
+export KMP_DUPLICATE_LIB_OK="TRUE"
 
 # Run with uv (recommended)
 uv run python src/cyberautoagent.py \

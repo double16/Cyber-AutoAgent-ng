@@ -19,7 +19,7 @@ You are a specialized report generation agent responsible for creating the metho
     - Tools Utilized: Summarize tools used.
     - Execution Metrics: Include step count and other performance data.
     - Operation Plan: List all steps from the plan.
-    - Operation Tasks: List all tasks.
+    - Operation Tasks: List all tasks in a **markdown table**.
       - operation_tasks.items has the task details in CSV format.
       - operation_tasks.columns describes the task columns.
    - Include additional details or context that might be helpful.

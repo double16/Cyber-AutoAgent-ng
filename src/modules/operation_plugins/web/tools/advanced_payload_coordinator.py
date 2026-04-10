@@ -20,6 +20,8 @@ from strands import tool
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# We need to bound the tool or it can take a very long time.
+_PARAMETER_COUNT_LIMIT = 5
 
 _ARJUN_RESPONSE_PARAMS = re.compile(r"\b(\w+)(?=,|$)\b")
 
@@ -182,7 +184,7 @@ def advanced_payload_coordinator(
         results["tools"] = tools_setup
 
         # Parameter discovery and expansion
-        if test_type in ["xss", "lfi", "ssti", "command_injection", "ldap_injection", "param_discovery", "comprehensive"]:
+        if not parameters or test_type in ["param_discovery"]:
             discovered_params = _advanced_parameter_discovery(request_config, parameters, tools=tools_setup["tools"])
             if not discovered_params and request_config.http_method == "GET":
                 # try again with POST
@@ -194,8 +196,10 @@ def advanced_payload_coordinator(
                     discovered_params = discovered_params_post
                 else:
                     request_config.http_method = "GET"
-            results["http_method"] = request_config.http_method
-            results["parameters_discovered"] = discovered_params
+        else:
+            discovered_params = [p.strip() for p in parameters.split(",") if p.strip()]
+        results["http_method"] = request_config.http_method
+        results["parameters_discovered"] = discovered_params
 
         # XSS payload coordination and testing
         if test_type in ["xss", "comprehensive"]:
@@ -301,9 +305,9 @@ def _setup_payload_tools() -> Dict[str, Any]:
         ("arjun", None),  # Python tool
         ("corsy", None),  # Python tool
         ("paramspider", None),  # Python tool
-        ("lfimap", None),  # Python tool
-        ("sstimap", None),  # Python tool
-        ("commix", None),  # Python tool
+        ("lfimap", None),  # Python tool, pipx install --global lfimap-ng
+        ("sstimap", None),  # Python tool, https://github.com/vladko312/SSTImap.git
+        ("commix", None),  # Python tool, https://github.com/commixproject/commix.git
     ]
 
     for tool_name, install_path in specialized_tools:
@@ -845,7 +849,7 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
     if "dalfox" in tools:
         dalfox_out = ""
         dalfox_timeout = False
-        dalfox_params = set(parameters[:10])  # Test first 10 parameters
+        dalfox_params = set(parameters[:_PARAMETER_COUNT_LIMIT])
         try:
             cmd = [
                 "dalfox",
@@ -944,6 +948,12 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
                         {"parameter": param, "vulnerable": False, "payload_type": "XSS tested", "tool": "dalfox"}
                     )
 
+    # Test parameters not covered by dalfox
+    tested_params = {r["parameter"] for r in xss_results}
+    remaining_params = [p for p in parameters if p not in tested_params]
+    if not remaining_params:
+        return xss_results
+
     # Method 2: Modern XSS payloads with realistic exploitation context
     advanced_xss_payload_files = [ "/usr/share/seclists/Fuzzing/XSS/robot-friendly/XSS-Cheat-Sheet-PortSwigger.txt" ]
     advanced_xss_payloads = None
@@ -979,10 +989,6 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
             # Polyglot attempts
             "'\\\"><svg/onload=alert(1)>",
         ]
-
-    # Test parameters not covered by dalfox
-    tested_params = {r["parameter"] for r in xss_results}
-    remaining_params = [p for p in parameters if p not in tested_params]
 
     for param in remaining_params:
         encoded_found_count = 0  # limit how many encoded params we report
@@ -1192,7 +1198,7 @@ def _coordinate_injection_testing(
         injection_types = [(t, payloads) for (t, payloads) in injection_types if t in focus]
 
     # Test each parameter with different injection types
-    parameters_under_test = set(parameters.copy())  # parameters[:5]   # Limit to first 5 parameters
+    parameters_under_test = set(parameters[:_PARAMETER_COUNT_LIMIT])
 
     # SSTImap
     # XBEN-044-24 is a good test case. Target the '/' endpoint, 'name' parameter, POST method.
@@ -1209,7 +1215,7 @@ def _coordinate_injection_testing(
                 cmd = [
                     "sstimap",
                     "--no-color",
-                    "--level", "3",
+                    "--level", "2",  # TODO: we should accept a notional level in the tool call and apply ("light", "aggressive", ...)
                     "--random-user-agent",
                     "--url", test_url,
                     "--method", request_config.http_method,

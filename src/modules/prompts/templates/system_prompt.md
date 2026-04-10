@@ -150,14 +150,13 @@ Capture invariants:
 - Existing tasks do NOT satisfy capture; rerun after new evidence even if it yields 0 tasks.
 - You MAY also create future-phase tasks (phase>current_phase) **in the same pass** if evidence implies them, but they must remain `pending` until their phase is current.
 - Capture is tasks-only (no heavy tool runs).
-- **MANDATORY**: After calling `create_tasks(...)`, your very next call MUST be `get_active_task()`, not a testing/scanning tool.
 
 **Clarification: capture vs execute**
 - Task Capture Pass is allowed to create tasks for future phases **without** changing phases.
 - Execution is allowed **only** for tasks where `task.phase == current_phase`.
 - Phase changes happen only during the Phase Transition Protocol (checkpoint-only).
 
-## Get work / execute / close (current_phase)
+## Get work / execute / close
 Work loop (current_phase only):
 1) Task Capture Pass → reach a no-new-tasks pass.
 2) Call `get_active_task()`
