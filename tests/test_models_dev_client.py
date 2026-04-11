@@ -12,6 +12,7 @@ Tests cover:
 """
 
 import json
+import os
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
@@ -108,6 +109,38 @@ def mock_models_data():
                     "modalities": {
                         "input": ["text", "image"],
                         "output": ["text"]
+                    }
+                },
+                "claude-3.5-haiku": {
+                    "name": "Claude Haiku 3.5 (latest)",
+                    "family": "claude-haiku",
+                    "attachment": True,
+                    "reasoning": False,
+                    "tool_call": True,
+                    "temperature": True,
+                    "knowledge": "2024-07-31",
+                    "release_date": "2024-10-22",
+                    "last_updated": "2024-10-22",
+                    "modalities": {
+                        "input": [
+                            "text",
+                            "image",
+                            "pdf"
+                        ],
+                        "output": [
+                            "text"
+                        ]
+                    },
+                    "open_weights": False,
+                    "cost": {
+                        "input": 0.8,
+                        "output": 4,
+                        "cache_read": 0.08,
+                        "cache_write": 1
+                    },
+                    "limit": {
+                        "context": 200000,
+                        "output": 8192
                     }
                 }
             }
@@ -215,7 +248,11 @@ def temp_client(tmp_path, mock_models_data):
     return client
 
 
-# Test model lookup
+@pytest.fixture
+def real_client():
+    """Create a real client that will load from the snapshot."""
+    client = ModelsDevClient()
+    return client
 
 
 def test_get_model_info_with_provider_prefix(temp_client):
@@ -413,9 +450,9 @@ def test_fuzzy_matching_dots_to_dashes(temp_client):
 # Test list operations
 
 
-def test_list_providers(temp_client):
+def test_list_providers(real_client):
     """Test listing all providers."""
-    providers = temp_client.list_providers()
+    providers = real_client.list_providers()
 
     # Real snapshot has 58 providers
     assert len(providers) >= 50, f"Expected at least 50 providers, got {len(providers)}"
@@ -427,9 +464,9 @@ def test_list_providers(temp_client):
     assert providers == sorted(providers)  # Should be sorted
 
 
-def test_list_models_all(temp_client):
+def test_list_models_all(real_client):
     """Test listing all models across all providers."""
-    models = temp_client.list_models()
+    models = real_client.list_models()
 
     # Real snapshot has 500+ models
     assert len(models) >= 500, f"Expected at least 500 models, got {len(models)}"
@@ -440,9 +477,9 @@ def test_list_models_all(temp_client):
     assert any("kimi" in m for m in models)
 
 
-def test_list_models_by_provider(temp_client):
+def test_list_models_by_provider(real_client):
     """Test listing models for specific provider."""
-    models = temp_client.list_models(provider="azure")
+    models = real_client.list_models(provider="azure")
 
     # Real snapshot has many Azure models (GPT-3.5, GPT-4, GPT-5 variants, O-series)
     assert len(models) >= 20, f"Expected at least 20 Azure models, got {len(models)}"
@@ -459,6 +496,7 @@ def test_list_models_empty_provider(temp_client):
 # Test cache behavior
 
 
+@patch.dict(os.environ, {"DEV_CLIENT_OFFLINE": "false"}, clear=False)
 def test_cache_saves_on_api_fetch(tmp_path, mock_models_data):
     """Test that API data is saved to cache."""
     client = ModelsDevClient(cache_dir=tmp_path)
@@ -503,6 +541,7 @@ def test_cache_used_when_valid(tmp_path, mock_models_data):
         assert client.get_data_source() == "cache"
 
 
+@patch.dict(os.environ, {"DEV_CLIENT_OFFLINE": "false"}, clear=False)
 def test_cache_expired_fetches_api(tmp_path, mock_models_data):
     """Test that expired cache triggers API fetch."""
     client = ModelsDevClient(cache_dir=tmp_path)

@@ -1046,29 +1046,14 @@ class TestEnvironmentIntegration:
         """Test centralized thinking models configuration."""
         config_manager = ConfigManager()
 
-        # Test get_thinking_models method
-        thinking_models = config_manager.get_thinking_models()
-        assert isinstance(thinking_models, list)
-        assert len(thinking_models) > 0
-
-        # Test specific thinking models
-        expected_models = [
-            "global.anthropic.claude-opus-4-5-20251101-v1:0",
-            "us.anthropic.claude-opus-4-5-20251101-v1:0",
-            "us.anthropic.claude-opus-4-20250514-v1:0",
-            "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-            "us.anthropic.claude-sonnet-4-20250514-v1:0",
-        ]
-        for model in expected_models:
-            assert model in thinking_models
-
-        # Test is_thinking_model method
-        assert config_manager.is_thinking_model("global.anthropic.claude-opus-4-5-20251101-v1:0")
-        assert config_manager.is_thinking_model("us.anthropic.claude-opus-4-5-20251101-v1:0")
-        assert config_manager.is_thinking_model("us.anthropic.claude-opus-4-20250514-v1:0")
-        assert config_manager.is_thinking_model("us.anthropic.claude-sonnet-4-20250514-v1:0")
-        assert not config_manager.is_thinking_model("us.anthropic.claude-3-5-sonnet-20241022-v2:0")
-        assert not config_manager.is_thinking_model("llama3.2:3b")
+        assert config_manager.is_thinking_model("bedrock", "global.anthropic.claude-opus-4-5-20251101-v1:0")
+        assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-5-20251101-v1:0")
+        assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-20250514-v1:0")
+        assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-sonnet-4-20250514-v1:0")
+        assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+        assert config_manager.is_thinking_model("litellm", "nvidia_nim/moonshotai/kimi-k2.5")
+        assert not config_manager.is_thinking_model("venice", "llama-3.2-3b")
+        assert not config_manager.is_thinking_model("not_a_provider", "llama-3.2-3b")
 
     @patch.dict(os.environ, {"OLLAMA_CONTEXT_LENGTH": "32768"}, clear=True)
     def test_centralized_model_configuration_methods(self):

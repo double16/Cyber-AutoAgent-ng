@@ -1,8 +1,6 @@
 import pytest
 import os
-import json
-from unittest.mock import patch, MagicMock, mock_open
-from datetime import datetime
+from unittest.mock import patch, MagicMock
 from modules.handlers.report_generator import generate_security_report, _extract_text_from_result, build_report_sections
 from modules.tools.memory import clear_memory_client
 
@@ -31,6 +29,36 @@ def test_extract_text_from_result():
     assert lines[1] == "## Heading 2"
     assert lines[2] == "Some normal text"
     assert lines[3] == "### Heading 3 with spaces"
+
+
+def test_extract_text_from_result_markdown_table():
+    # Test that a table without a preceding empty line gets one
+    mock_result = MagicMock()
+    mock_result.message = {
+        "content": [
+            {"text": "Text\n| T |\n| --- |\n| C |"}
+        ]
+    }
+    extracted = _extract_text_from_result(mock_result)
+    assert extracted == "Text\n\n| T |\n| --- |\n| C |"
+
+    # Test that a table WITH a preceding empty line is NOT modified further
+    mock_result.message = {
+        "content": [
+            {"text": "Text\n\n| T |\n| --- |\n| C |"}
+        ]
+    }
+    extracted = _extract_text_from_result(mock_result)
+    assert extracted == "Text\n\n| T |\n| --- |\n| C |"
+
+    # Test multiple tables
+    mock_result.message = {
+        "content": [
+            {"text": "T1\n| T1 |\n| --- |\nT2\n| T2 |\n| --- |"}
+        ]
+    }
+    extracted = _extract_text_from_result(mock_result)
+    assert extracted == "T1\n\n| T1 |\n| --- |\nT2\n\n| T2 |\n| --- |"
 
 def test_extract_text_from_result_empty():
     assert _extract_text_from_result(None) == ""

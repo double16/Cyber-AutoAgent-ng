@@ -133,21 +133,12 @@ class ConfigManager:
         """Get the default AWS region with environment override support."""
         return get_default_region(self.env)
 
-    def get_thinking_models(self) -> List[str]:
-        """Get list of models that support thinking capabilities."""
-        return [
-            "global.anthropic.claude-opus-4-5-20251101-v1:0",
-            "us.anthropic.claude-opus-4-5-20251101-v1:0",
-            "us.anthropic.claude-opus-4-20250514-v1:0",
-            "us.anthropic.claude-opus-4-1-20250805-v1:0",
-            "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-            "us.anthropic.claude-sonnet-4-20250514-v1:0",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        ]
-
-    def is_thinking_model(self, model_id: str) -> bool:
+    def is_thinking_model(self, provider: str, model_id: str) -> bool:
         """Check if a model supports thinking capabilities."""
-        return model_id in self.get_thinking_models()
+        from modules.config import get_capabilities
+        if not provider:
+            return False
+        return get_capabilities(provider, model_id).supports_reasoning
 
     def get_max_tokens(
             self,

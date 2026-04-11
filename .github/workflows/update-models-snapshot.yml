@@ -1,0 +1,107 @@
+name: Update models.dev snapshot
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Run twice a month (approx. every two weeks) at 05:00 UTC on the 1st and 15th
+    - cron: '0 5 1,15 * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-models-snapshot:
+    name: Update snapshot and open PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Ensure jq is installed
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+
+      - name: Update models.dev snapshot
+        id: update_snapshot
+        run: |
+          set -euo pipefail
+          
+          SNAPSHOT_FILE="src/modules/config/models/models_snapshot.json"
+          TEMP_FILE="models_snapshot.json.tmp"
+          
+          # 1. Fetch new data
+          curl -sS https://models.dev/api.json | jq --indent 2 . > "$TEMP_FILE"
+          
+          # 2. Validation: Ensure it's valid JSON (jq already failed if it wasn't, but let's be explicit)
+          if ! jq . "$TEMP_FILE" > /dev/null 2>&1; then
+            echo "Error: Fetched content is not valid JSON."
+            exit 1
+          fi
+          
+          # 3. Validation: Size check
+          # Compare with existing snapshot if it exists
+          if [ -f "$SNAPSHOT_FILE" ]; then
+            OLD_SIZE=$(stat -c%s "$SNAPSHOT_FILE" 2>/dev/null || stat -f%z "$SNAPSHOT_FILE")
+            NEW_SIZE=$(stat -c%s "$TEMP_FILE" 2>/dev/null || stat -f%z "$TEMP_FILE")
+            
+            # Allow for some reduction, but not "significantly smaller" (e.g., > 30% drop)
+            # THRESHOLD = 0.7 * OLD_SIZE
+            THRESHOLD=$((OLD_SIZE * 70 / 100))
+            
+            echo "Old size: $OLD_SIZE bytes"
+            echo "New size: $NEW_SIZE bytes"
+            echo "Threshold: $THRESHOLD bytes"
+            
+            if [ "$NEW_SIZE" -lt "$THRESHOLD" ]; then
+              echo "Error: New snapshot size ($NEW_SIZE) is significantly smaller than original ($OLD_SIZE)."
+              echo "This might indicate a truncated or invalid API response."
+              exit 1
+            fi
+          fi
+          
+          # 4. Replace original file only if changed
+          if [ -f "$SNAPSHOT_FILE" ] && cmp -s "$TEMP_FILE" "$SNAPSHOT_FILE"; then
+            echo "No changes detected in models snapshot. Skipping PR creation."
+            rm "$TEMP_FILE"
+            # Setting an output to skip subsequent steps
+            echo "changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected in models snapshot."
+            mv "$TEMP_FILE" "$SNAPSHOT_FILE"
+            echo "changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set branch metadata
+        if: steps.update_snapshot.outputs.changes == 'true'
+        id: meta
+        run: |
+          DATE=$(date +'%Y%m%d')
+          echo "DATE=$DATE" >> "$GITHUB_ENV"
+          echo "branch=chore/models-snapshot-${DATE}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        if: steps.update_snapshot.outputs.changes == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: develop
+          branch: ${{ steps.meta.outputs.branch }}
+          title: "chore: update models.dev snapshot"
+          body: |
+            Automated update of `src/modules/config/models/models_snapshot.json`.
+
+            - Source: `https://models.dev/api.json`
+            - Trigger: ${{ github.event_name }}
+          labels: |
+            automated
+            chore
+          commit-message: "chore: update models.dev snapshot"
+          author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+          signoff: false

@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -312,7 +314,7 @@ class ModelsDevClient:
         Priority:
         1. Memory cache (already loaded)
         2. Disk cache (if valid and not expired)
-        3. Live API (https://models.dev/api.json)
+        3. Live API (https://models.dev/api.json) unless os.getenv("DEV_CLIENT_OFFLINE") is "true"
         4. Embedded snapshot (bundled with application)
 
         Returns:
@@ -336,25 +338,20 @@ class ModelsDevClient:
 
         # Try live API
         try:
-            logger.info(f"Fetching models from API: {self.API_URL}")
+            if os.getenv("DEV_CLIENT_OFFLINE", "").lower() != "true":
+                logger.info(f"Fetching models from API: {self.API_URL}")
 
-            # Use httpx if available, fall back to urllib
-            try:
+                # import here for unit test mocks
                 import httpx
                 response = httpx.get(self.API_URL, timeout=10.0, follow_redirects=True)
                 response.raise_for_status()
                 self._data = response.json()
-            except ImportError:
-                import urllib.request
-                with urllib.request.urlopen(self.API_URL, timeout=10) as response:
-                    self._data = json.loads(response.read().decode())
+                self._data_source = "api"
+                logger.info(f"Fetched models from API ({len(self._data)} providers)")
 
-            self._data_source = "api"
-            logger.info(f"Fetched models from API ({len(self._data)} providers)")
-
-            # Save to cache
-            self._save_cache(self._data)
-            return self._data
+                # Save to cache
+                self._save_cache(self._data)
+                return self._data
 
         except Exception as e:
             logger.warning(f"Failed to fetch from API: {e}")
@@ -460,6 +457,7 @@ class ModelsDevClient:
         provider_aliases = {
             'moonshot': 'moonshotai',
             'anthropic': 'amazon-bedrock',  # When used with ARN format
+            'bedrock': 'amazon-bedrock',  # When used with ARN format
             'gemini': 'google',  # Gemini models are under google provider
             'nvidia_nim': 'nvidia',
         }

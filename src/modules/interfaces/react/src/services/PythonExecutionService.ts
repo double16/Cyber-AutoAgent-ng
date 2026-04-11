@@ -673,6 +673,8 @@ export class PythonExecutionService extends EventEmitter {
         ...process.env,
         PYTHONPATH: this.srcPath,
         PYTHONUNBUFFERED: '1',
+        // Dependencies bring in multiple libs, but they are compatible
+        KMP_DUPLICATE_LIB_OK: 'TRUE',
         FORCE_COLOR: '1',
         // Always pass objective via environment to avoid escaping issues
         CYBER_OBJECTIVE: objective,
