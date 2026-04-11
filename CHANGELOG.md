@@ -1,5 +1,7 @@
 # Cyber-AutoAgent-ng Changelog
 
+## v0.8.1
+
 - Support thinking/reasoning for LiteLLM (#24)
 - Activate a new task and return in `create_tasks` tool
 - Report generation ensures a blank line before Markdown tables
