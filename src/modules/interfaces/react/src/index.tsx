@@ -334,7 +334,7 @@ const runAutoAssessment = async () => {
           loggingService.info('🧠 '+event.content);
         }
         else if (event.type === 'rate_limit' && event.sleep_time) {
-          loggingService.info(`⌛ Rate limit: waiting for ${Math.ceil(event.sleep_time)} seconds${event.message ? `: ${event.message}` : ''}`);
+          loggingService.info(`⌛ Rate limit: waiting for ${Math.ceil(event.sleep_time)} seconds${event.message ? `, ${event.message}` : ''}`);
         }
         else if (event.type === 'metrics_update') {
             const metricsUpdateKey = event.metrics.tokens+"|"+event.metrics.inputTokens+"|"+event.metrics.outputToken+"|"+event.metrics.cost;
