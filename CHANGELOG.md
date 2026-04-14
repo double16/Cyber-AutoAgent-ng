@@ -1,5 +1,7 @@
 # Cyber-AutoAgent-ng Changelog
 
+- Improve rate limiting with back-off when HTTP responses 429 (rate limit) and 503 (service unavailable) occur. This feature is enabled always.
+
 ## v0.8.1
 
 - Support thinking/reasoning for LiteLLM (#24)

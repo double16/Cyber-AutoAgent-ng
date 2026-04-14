@@ -1455,7 +1455,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           const thinkingEvent: DisplayStreamEvent = {
             type: 'thinking',
             context: 'rate_limit',
-            message: `Rate Limit for ${Math.ceil(event.wait_total)}s`,
+            message: `Rate Limit for ${Math.ceil(event.wait_total)}s${event.message ? `: ${event.message}` : ''}`,
             startTime: Date.now(),
             urgent: true
           } as DisplayStreamEvent;

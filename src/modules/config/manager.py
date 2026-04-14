@@ -1010,8 +1010,8 @@ class ConfigManager:
         safe_max = self.get_safe_max_tokens(swarm_cfg.model_id)
 
         # Allow explicit override via dedicated env var (don't inherit from main LLM)
-        explicit_max = self.getenv_int("CYBER_AGENT_SWARM_MAX_TOKENS", None)
-        if explicit_max is not None:
+        explicit_max = self.getenv_int("CYBER_AGENT_SWARM_MAX_TOKENS", 0)
+        if explicit_max:
             swarm_cfg.max_tokens = explicit_max
             logger.info(
                 "Swarm config: model=%s, max_tokens=%d (source=env override)",
@@ -1154,15 +1154,13 @@ class ConfigManager:
                 "Ollama default concurrency limited to 1, set CYBER_RATE_LIMIT_MAX_CONCURRENT to make it higher")
             max_concurrent = 1
 
-        if request_per_minute or tokens_per_minute or max_concurrent:
-            return RateLimitConfig(
-                rpm=request_per_minute,
-                tpm=tokens_per_minute,
-                max_concurrent=max_concurrent,
-                assume_output_tokens=assume_output_tokens
-            )
-
-        return None
+        # Always return a value to enable rate limit cool down
+        return RateLimitConfig(
+            rpm=request_per_minute,
+            tpm=tokens_per_minute,
+            max_concurrent=max_concurrent,
+            assume_output_tokens=assume_output_tokens
+        )
 
 
 # Memory utility functions

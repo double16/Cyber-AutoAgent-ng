@@ -381,3 +381,10 @@ class RateLimitConfig:
 
     # Token estimation knobs
     assume_output_tokens: int = 0  # add a constant to estimated input tokens
+
+    # Retry and cooldown settings
+    retry_codes: List[int] = field(default_factory=lambda: [429, 503])
+    max_retries: int = 10
+    retry_base_delay: float = 4.0  # seconds
+    retry_max_delay: float = 120.0  # seconds
+    cooldown_period: float = 90.0  # seconds to stay in cooldown after last error

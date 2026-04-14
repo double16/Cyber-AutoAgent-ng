@@ -24,6 +24,13 @@ T = TypeVar("T")
 logger = logging.getLogger("RateLimit")
 
 
+class _RetryableError(Exception):
+    """Internal exception to trigger retry logic in patches."""
+
+    def __init__(self, code: int) -> None:
+        self.code = code
+
+
 # ----------------------------
 # Thread-safe token buckets
 # ----------------------------
@@ -97,7 +104,14 @@ class ThreadSafeRateLimiter:
         # capacity = rpm, refill rate = rpm / 60 tokens per second
         self._req_bucket = _TokenBucket(cfg.rpm, cfg.rpm / 60.0) if cfg.rpm else None
         self._tok_bucket = _TokenBucket(cfg.tpm, cfg.tpm / 60.0) if cfg.tpm else None
+        self._max_concurrent = cfg.max_concurrent
         self._sem = threading.BoundedSemaphore(cfg.max_concurrent) if cfg.max_concurrent else None
+
+        # Cooldown state
+        self._cooldown_active = False
+        self._last_error_time = 0.0
+        self._cooldown_sem = threading.Semaphore(1)
+        self._lock = threading.Lock()
 
     def acquire_blocking(self, token_cost: int) -> Callable[[], None]:
         """
@@ -107,9 +121,25 @@ class ThreadSafeRateLimiter:
         - token budget allows token_cost
         Returns a release() callable.
         """
+        # 1. Check cooldown
+        in_cooldown = False
+        with self._lock:
+            if self._cooldown_active:
+                now = time.monotonic()
+                if now - self._last_error_time > self.cfg.cooldown_period:
+                    logger.info("Rate limit: Cooldown period expired, resuming normal operation")
+                    self._cooldown_active = False
+                else:
+                    in_cooldown = True
+
+        # 2. Acquire concurrency slots
+        if in_cooldown:
+            self._cooldown_sem.acquire()
+
         if self._sem:
             self._sem.acquire()
 
+        # 3. Consume buckets
         try:
             if self._req_bucket:
                 self._req_bucket.consume_blocking(1.0)
@@ -118,13 +148,86 @@ class ThreadSafeRateLimiter:
         except Exception:
             if self._sem:
                 self._sem.release()
+            if in_cooldown:
+                self._cooldown_sem.release()
             raise
 
         def release() -> None:
             if self._sem:
                 self._sem.release()
+            if in_cooldown:
+                self._cooldown_sem.release()
 
         return release
+
+    def report_error(self, code) -> bool:
+        """
+        Reports an HTTP error code. If it's a retryable code,
+        triggers cooldown mode and returns True.
+        """
+        if not code:
+            return False
+        try:
+            code = int(code)
+        except ValueError:
+            return False
+        if code in self.cfg.retry_codes:
+            with self._lock:
+                if not self._cooldown_active:
+                    logger.warning("Rate limit: Received %d, entering cooldown mode (concurrency=1)", code)
+                self._cooldown_active = True
+                self._last_error_time = time.monotonic()
+            return True
+        return False
+
+    async def ahandle_exception(self, e: Exception, attempt: int):
+        await asyncio.sleep(self._handle_exception(e, attempt))
+
+    def handle_exception(self, e: Exception, attempt: int):
+        time.sleep(self._handle_exception(e, attempt))
+
+    def _handle_exception(self, e: Exception, attempt: int) -> float:
+        """
+        Handle exceptions from the event loop. Raises an exception unless retry is acceptable.
+        :param e: the exception
+        :param attempt: attempt number, 0 based
+        :return: Delay time in seconds
+        """
+        assert e is not None
+
+        is_retryable = False
+        if isinstance(e, _RetryableError):
+            is_retryable = True
+            code = e.code
+            # Don't call self.report_error a second time
+        else:
+            code = getattr(e, "status_code", None)
+            if not code and hasattr(e, "response") and hasattr(e.response, "status_code"):  # type: ignore
+                code = e.response.status_code  # type: ignore
+            if code and self.report_error(code):
+                is_retryable = True
+
+        if attempt >= self.cfg.max_retries:
+            logger.error("Rate limit: Max retries reached for code %d", code)
+            is_retryable = False
+
+        if not is_retryable:
+            if isinstance(e, _RetryableError):
+                raise RuntimeError(f"Response error {code}")
+            raise e
+
+        delay = min(self.cfg.retry_max_delay, self.cfg.retry_base_delay * (2 ** attempt))
+        # TODO: use an EventEmitter object
+        rate_limit_event = {
+            "type": "rate_limit",
+            "timestamp": datetime.now().isoformat(),
+            "needed": delay,
+            "wait_total": delay,
+            "sleep_time": delay,
+            "message": f"Cool down for {delay:.1f} seconds ({code} {attempt + 1}/{self.cfg.max_retries})",
+        }
+        print(f"__CYBER_EVENT__{json.dumps(rate_limit_event)}__CYBER_EVENT_END__")
+        return delay
 
 
 def _batch_messages_to_strands_messages(
@@ -206,20 +309,32 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
         )
         token_cost += limiter.cfg.assume_output_tokens
 
-        release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
-        try:
-            async for event in orig_stream(
-                    self,
-                    messages,
-                    tool_specs,
-                    system_prompt,
-                    tool_choice=tool_choice,
-                    system_prompt_content=system_prompt_content,
-                    **kwargs,
-            ):
-                yield event
-        finally:
-            release()
+        for attempt in range(limiter.cfg.max_retries + 1):
+            release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
+            try:
+                async for event in orig_stream(
+                        self,
+                        messages,
+                        tool_specs,
+                        system_prompt,
+                        tool_choice=tool_choice,
+                        system_prompt_content=system_prompt_content,
+                        **kwargs,
+                ):
+                    # Check for 429/503 error event
+                    # Strands models typically yield events as dicts or objects
+                    # We need to detect if any of them represent an HTTP error
+                    if isinstance(event, dict) and event.get("type") == "error":
+                        code = event.get("code")
+                        if code and limiter.report_error(code):
+                            # It's a retryable error
+                            raise _RetryableError(code)
+                    yield event
+                return  # Success
+            except Exception as e:
+                await limiter.ahandle_exception(e, attempt)
+            finally:
+                release()
 
     model_cls.stream = stream  # type: ignore[assignment]
 
@@ -244,12 +359,20 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
             )
             token_cost += limiter.cfg.assume_output_tokens
 
-            release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
-            try:
-                async for event in orig_struct(self, output_model, prompt, system_prompt=system_prompt, **kwargs):
-                    yield event
-            finally:
-                release()
+            for attempt in range(limiter.cfg.max_retries + 1):
+                release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
+                try:
+                    async for event in orig_struct(self, output_model, prompt, system_prompt=system_prompt, **kwargs):
+                        if isinstance(event, dict) and event.get("type") == "error":
+                            code = event.get("code")
+                            if code and limiter.report_error(code):
+                                raise _RetryableError(code)
+                        yield event
+                    return
+                except Exception as e:
+                    await limiter.ahandle_exception(e, attempt)
+                finally:
+                    release()
 
         model_cls.structured_output = structured_output  # type: ignore[assignment]
 
@@ -296,11 +419,15 @@ def patch_langchain_chat_class_generate(model_cls: Type[Any], limiter: ThreadSaf
                 messages=_batch_messages_to_strands_messages(messages),
             )
             token_cost += limiter.cfg.assume_output_tokens
-            release = limiter.acquire_blocking(token_cost)
-            try:
-                return orig_generate(self, messages, *args, **kwargs)
-            finally:
-                release()
+
+            for attempt in range(limiter.cfg.max_retries + 1):
+                release = limiter.acquire_blocking(token_cost)
+                try:
+                    return orig_generate(self, messages, *args, **kwargs)
+                except Exception as e:
+                    limiter.handle_exception(e, attempt)
+                finally:
+                    release()
 
         model_cls.generate = generate  # type: ignore[assignment]
     else:
@@ -324,14 +451,18 @@ def patch_langchain_chat_class_generate(model_cls: Type[Any], limiter: ThreadSaf
                 messages=_batch_messages_to_strands_messages(messages),
             )
             token_cost += limiter.cfg.assume_output_tokens
-            release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
-            try:
-                result = orig_agenerate(self, messages, *args, **kwargs)
-                if asyncio.iscoroutine(result):
-                    return await result
-                return result
-            finally:
-                release()
+
+            for attempt in range(limiter.cfg.max_retries + 1):
+                release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
+                try:
+                    result = orig_agenerate(self, messages, *args, **kwargs)
+                    if asyncio.iscoroutine(result):
+                        return await result
+                    return result
+                except Exception as e:
+                    await limiter.ahandle_exception(e, attempt)
+                finally:
+                    release()
 
         model_cls.agenerate = agenerate  # type: ignore[assignment]
     else:

@@ -89,7 +89,7 @@ export type AdditionalStreamEvent =
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
   | { type: 'task_started'; task_uid?: string; title?: string; status?: string; [key: string]: any }
   | { type: 'task_done'; task_uid?: string; title?: string; status?: string; [key: string]: any }
-  | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; [key: string]: any };
+  | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; message?: string; [key: string]: any };
 
 // Combined event type supporting both SDK-aligned and additional events
 export type DisplayStreamEvent = StreamEvent | AdditionalStreamEvent;
