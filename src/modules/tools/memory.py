@@ -1312,11 +1312,10 @@ def mem0_retrieve(
     - metadata: filter dict applied to metadata (e.g., {"category": "finding", "status": "verified"}).
 
     CROSS-SESSION LEARNING:
-        - mem0_retrieve: Scoped to current operation by default
-        - mem0_retrieve(cross_operation=True): Search ALL operations for cross-learning
+        - mem0_retrieve: Scoped to the current operation by default
 
         Cross-Learning Query Examples:
-        - Learn from past: mem0_retrieve(query="SQLi techniques", cross_operation=True)
+        - Learn from past: mem0_retrieve(query="SQLi techniques")
         - Skip verified: metadata={"status": "verified"} to find verified findings
         - Learn techniques: metadata={"category": "discovery"}
         - Avoid failures: query for failed_technique or blocker in metadata
@@ -1327,7 +1326,8 @@ def mem0_retrieve(
         if not query:
             raise ValueError("query is required")
 
-        op_id = None if memory_is_cross_operation() else _operation_id()
+        cross_operation = memory_is_cross_operation()
+        op_id = None if cross_operation else _operation_id()
 
         user_id = _user_id()
 
@@ -1342,7 +1342,6 @@ def mem0_retrieve(
         )
 
         # Use search() directly to support metadata filters (e.g., category, status)
-        # Include run_id to scope to current operation (unless cross_operation=True)
         client = _ensure_memory_client()
         memories = client.search(
             query=query,
@@ -1350,7 +1349,7 @@ def mem0_retrieve(
             limit=100,
             user_id=user_id,
             agent_id=agent_id,
-            run_id=op_id,  # None if cross_operation=True for cross-learning
+            run_id=op_id,
         )
 
         results_list = memories or []

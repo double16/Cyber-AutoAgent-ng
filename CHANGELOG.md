@@ -1,6 +1,7 @@
 # Cyber-AutoAgent-ng Changelog
 
 - Improve rate limiting with back-off when HTTP responses 429 (rate limit) and 503 (service unavailable) occur. This feature is enabled always.
+- Fix mem0_retrieve bug, missing 'cross_operation' reference.
 
 ## v0.8.1
 
