@@ -65,6 +65,6 @@
     "react-test-renderer": "^19.2.4",
     "ts-jest": "^29.4.6",
     "tsx": "^4.6.2",
-    "typescript": "^5.9.2"
+    "typescript": "^6.0.2"
   }
 }
