@@ -15,6 +15,8 @@ def rebuild_agent_conversation(
 ) -> str:
     current_message = ""
     # TODO: consider summarizing the memories to reduce content size and increase understanding
+    if memories and memories.startswith("Error:"):
+        memories = ""
     if not active_plan:
         if initial_prompt:
             agent.messages[:] = [Message(role="user", content=[ContentBlock(text=initial_prompt)])]

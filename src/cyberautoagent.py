@@ -885,8 +885,6 @@ def main():
 
                         active_task = get_active_task() or ""
                         memories = mem0_list()
-                        if memories.startswith("Error:"):
-                            memories = ""
 
                         logger.warning(
                             "Attempting to rebuild context because no tool calls were detected in last execution loop.")
@@ -922,6 +920,7 @@ def main():
             except Exception as error:
                 # Handle other termination scenarios
                 error_str = str(error).lower()
+                # TODO: when MaxTokensReachedException, do one attempt at rebuilding conversation
                 if isinstance(error, MaxTokensReachedException) or "maxtokensreached" in error_str or "max_tokens" in error_str:
                     print_status(
                         "Token limit reached - generating final report", "WARNING"
