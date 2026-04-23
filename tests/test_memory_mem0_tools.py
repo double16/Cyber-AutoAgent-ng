@@ -31,15 +31,11 @@ class TestMem0List:
         ]
         
         result = mem0_list()
-        
-        # Verify result is a JSON string of pruned memories
-        data = json.loads(result)
-        assert len(data) == 2
-        assert data[0]["id"] == "2" # Sorted by create time reverse
-        assert data[0]["memory"] == "test memory 2"
-        assert data[1]["id"] == "1"
-        assert data[1]["memory"] == "test memory 1"
-        
+
+        assert len(result.splitlines()) == 2
+        assert "- test memory 1\n" in result
+        assert "- test memory 2\n" in result
+
         mock_client.list_memories.assert_called_once_with(
             "test_user", None, limit=100, run_id="test_op"
         )
@@ -114,11 +110,10 @@ class TestMem0Retrieve:
         ]
         
         result = mem0_retrieve(query="test query")
-        
-        data = json.loads(result)
-        assert len(data) == 1
-        assert data[0]["memory"] == "relevant memory"
-        
+
+        assert len(result.splitlines()) == 1
+        assert "- relevant memory" in result
+
         mock_client.search.assert_called_once_with(
             query="test query",
             filters=None,
@@ -158,7 +153,7 @@ class TestMem0Retrieve:
         mock_client.search.return_value = []
         
         result = mem0_retrieve(query="test query")
-        assert result == "[]"
+        assert result == ""
 
     def test_mem0_retrieve_exception(self, mock_op_id, mock_user_id, mock_ensure_client):
         mock_ensure_client.side_effect = Exception("Search failed")

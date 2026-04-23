@@ -711,7 +711,9 @@ def main():
         current_message = initial_prompt
 
         if args.cont:
-            active_plan = (get_plan() or {}).get("plan", "")
+            active_plan = get_plan() or ""
+            if "plan_overview[1]" not in active_plan:
+                active_plan = None
             active_task = get_active_task() or ""
             memories = mem0_list()
             if memories.startswith("Error:"):

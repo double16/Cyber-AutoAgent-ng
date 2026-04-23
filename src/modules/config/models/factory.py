@@ -476,6 +476,7 @@ def create_bedrock_model(
         additional_fields.setdefault("output_config", {})
         additional_fields["output_config"]["effort"] = effort
 
+    # FIXME: for bedrock, "is_thinking" means something more (?)
     if role in ["primary", "swarm"] and config_manager.is_thinking_model(provider, model_id):
         # Use thinking model configuration
         config = config_manager.get_thinking_model_config(model_id, region_name)
@@ -488,17 +489,14 @@ def create_bedrock_model(
                 elif k not in additional_fields:
                     additional_fields[k] = v
 
-        try:
-            logger.info(
-                "Model build: thinking, role=%s provider=%s model=%s max_tokens=%s effort=%s",
-                role,
-                provider,
-                config.get("model_id"),
-                llm_max,
-                effort or "none",
-            )
-        except Exception:
-            pass
+        logger.info(
+            "Model build: thinking, role=%s provider=%s model=%s max_tokens=%s effort=%s",
+            role,
+            provider,
+            config.get("model_id"),
+            config.get("max_tokens"),
+            effort or "none",
+        )
 
         model = BedrockModel(
             model_id=config["model_id"],
@@ -528,17 +526,14 @@ def create_bedrock_model(
     llm_max = create_parameters.llm_max
     role = create_parameters.role
 
-    try:
-        logger.info(
-            "Model build: role=%s provider=%s model=%s max_tokens=%s effort=%s",
-            role,
-            provider,
-            config.get("model_id"),
-            llm_max,
-            effort or "none",
-        )
-    except Exception:
-        pass
+    logger.info(
+        "Model build: role=%s provider=%s model=%s max_tokens=%s effort=%s",
+        role,
+        provider,
+        config.get("model_id"),
+        llm_max,
+        effort or "none",
+    )
 
     # If top_p is in config, add it to additional_fields
     if config.get("top_p") is not None:

@@ -14,10 +14,10 @@ def test_store_plan_with_operation_plan_object():
         mc.return_value = mock_client
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = None
-        mock_client.store_plan.return_value = {"status": "success"}
+        mock_client.store_plan.return_value = {"status": "success", "plan": plan_obj.to_toon()}
         result = store_plan(plan_obj)
-        assert result == {"status": "success"}
         mock_client.store_plan.assert_called_once_with(plan=plan_obj, user_id="user")
+        assert "plan_overview[1]" in result
 
 
 def test_store_plan_with_dict():
@@ -28,11 +28,11 @@ def test_store_plan_with_dict():
         mc.return_value = mock_client
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = None
-        mock_client.store_plan.return_value = {"status": "success"}
+        mock_client.store_plan.return_value = {"status": "success", "plan": OperationPlan.from_obj(plan_dict).to_toon()}
         result = store_plan(plan_dict)
-        assert result == {"status": "success"}
         args, kwargs = mock_client.store_plan.call_args
         assert isinstance(kwargs["plan"], OperationPlan)
+        assert "plan_overview[1]" in result
 
 
 def test_store_plan_with_json_string():
@@ -130,9 +130,10 @@ def test_store_plan_phase_change_allowed_no_tasks():
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = prev_plan
         mock_client.get_or_activate_next_task_in_phase.return_value = (None, False)
-        mock_client.store_plan.return_value = {"status": "success"}
+        mock_client.store_plan.return_value = {"status": "success", "plan": new_plan.to_toon()}
         result = store_plan(new_plan, tool_context=mock_tool_context)
-        assert result["status"] == "success"
+        assert "plan_overview[1]" in result
+        assert "Test,2,2" in result
 
 
 def test_store_plan_phase_change_allowed_budget_exhausted():
@@ -163,9 +164,10 @@ def test_store_plan_phase_change_allowed_budget_exhausted():
         # phase_step_start = 100 * (2-1) // 2 = 50. 46 > 50 * 0.9 = 45.
         active_task = Task(task_uid="uuid", title="T1", objective="O1", phase=1, status="active")
         mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
-        mock_client.store_plan.return_value = {"status": "success"}
+        mock_client.store_plan.return_value = {"status": "success", "plan": new_plan.to_toon()}
         result = store_plan(new_plan, tool_context=mock_tool_context)
-        assert result["status"] == "success"
+        assert "plan_overview[1]" in result
+        assert "Test,2,2" in result
 
 
 def test_store_plan_assessment_complete_reminder():
@@ -200,8 +202,7 @@ def test_store_plan_assessment_complete_reminder():
 
         result = store_plan(plan_obj)
 
-        assert result["status"] == "success"
-        assert "_reminder" in result
-        assert "All phases complete" in result["_reminder"]
+        assert "plan_overview[1]" in result
+        assert "All phases complete" in result
         args, kwargs = mock_client.store_plan.call_args
         assert kwargs["plan"].assessment_complete is True
