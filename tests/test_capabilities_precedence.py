@@ -1,6 +1,7 @@
 """Test unified precedence order for model capabilities."""
 
 import os
+from unittest.mock import patch, MagicMock
 
 from modules.config.models.capabilities import (
     get_capabilities,
@@ -186,3 +187,43 @@ class TestPrecedenceOrder:
             assert (
                 caps.supports_reasoning == expected_reasoning
             ), f"{model} reasoning should be {expected_reasoning}"
+
+
+class TestTemperature:
+    """Validate temperature capability."""
+
+    def test_supports_temperature_default(self):
+        """Verify temperature support defaults to True."""
+        caps = get_capabilities("litellm", "unknown-model")
+        assert caps.supports_temperature is True
+
+    def test_supports_temperature_models_dev(self):
+        """Verify temperature support from models.dev (if we had a model that doesn't support it)."""
+        # We don't have a specific model in mind that has temperature=False in snapshot,
+        # but we can verify it's present in the Capabilities object.
+        caps = get_capabilities("litellm", "azure/gpt-5")
+        assert hasattr(caps, "supports_temperature")
+        assert isinstance(caps.supports_temperature, bool)
+
+    def test_supports_temperature_false_via_models_dev_mock(self):
+        """Verify supports_temperature is False when models.dev returns False."""
+        with patch("modules.config.models.capabilities.get_models_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_get_client.return_value = mock_client
+            
+            # Create a mock ModelInfo object
+            mock_info = MagicMock()
+            mock_info.capabilities.temperature = False
+            mock_info.capabilities.reasoning = True
+            mock_info.capabilities.tool_call = True
+            
+            mock_client.get_model_info.return_value = mock_info
+            
+            # Clear cache to ensure our mock is used
+            ModelCapabilitiesResolver.capabilities.cache_clear()
+            
+            caps = get_capabilities("litellm", "mock-model-no-temp")
+            
+            assert caps.supports_temperature is False, "Should be False when models.dev says so"
+            assert caps.supports_reasoning is True
+            assert caps.supports_tools is True

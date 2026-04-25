@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import ollama
+from google.genai.types import HttpRetryOptions, HttpOptions
 
 from strands.models import Model
 
@@ -30,10 +31,9 @@ from modules.config.types import (
 from modules.config.models.capabilities import (
     get_model_input_limit,
     get_provider_default_limit,
+    get_capabilities,
 )
 from modules.handlers.utils import print_status
-
-from google.genai import types
 
 logger = get_logger("Config.ModelFactory")
 
@@ -42,6 +42,7 @@ try:
     PROMPT_TOKEN_FALLBACK_LIMIT = int(os.getenv("CYBER_CONTEXT_LIMIT", "0"))
 except ValueError:
     pass
+
 
 def _get_config_manager():
     """Lazy import to avoid circular dependency."""
@@ -413,7 +414,7 @@ def _get_parameters_by_role(provider: str, model_id: str, role: Optional[LLMRole
                 )
                 llm_max = 4096
     except Exception:
-        llm_temp = config.get("temperature", DEFAULT_TEMPERATURE_EXECUTION)
+        llm_temp = config.get("temperature", DEFAULT_TEMPERATURE_SWARM if role == "swarm" else DEFAULT_TEMPERATURE_EXECUTION)
         llm_max = config.get("max_tokens", 4096)
         role = "unknown"
 
@@ -476,6 +477,8 @@ def create_bedrock_model(
         additional_fields.setdefault("output_config", {})
         additional_fields["output_config"]["effort"] = effort
 
+    capabilities = get_capabilities(provider, model_id)
+
     # FIXME: for bedrock, "is_thinking" means something more (?)
     if role in ["primary", "swarm"] and config_manager.is_thinking_model(provider, model_id):
         # Use thinking model configuration
@@ -501,7 +504,7 @@ def create_bedrock_model(
         model = BedrockModel(
             model_id=config["model_id"],
             region_name=config["region_name"],
-            temperature=config["temperature"],
+            temperature=config["temperature"] if capabilities.supports_temperature else None,
             max_tokens=config["max_tokens"],
             additional_request_fields=additional_fields if additional_fields else None,
             boto_client_config=boto_config,
@@ -509,7 +512,7 @@ def create_bedrock_model(
         setattr(model, "_output_tokens", config["max_tokens"])
 
         return model
-    
+
     # Standard model configuration
     config = config_manager.get_standard_model_config(model_id, region_name, provider)
 
@@ -543,11 +546,10 @@ def create_bedrock_model(
         # Assuming Strands BedrockModel handles it via kwargs or we ignore it for now as per previous code.
         pass
 
-
     model = BedrockModel(
         model_id=config["model_id"],
         region_name=config["region_name"],
-        temperature=llm_temp,
+        temperature=llm_temp if capabilities.supports_temperature else None,
         max_tokens=llm_max,
         additional_request_fields=additional_fields if additional_fields else None,
         boto_client_config=boto_config,
@@ -555,8 +557,6 @@ def create_bedrock_model(
     setattr(model, "_output_tokens", llm_max)
 
     return model
-
-
 
 
 def create_ollama_model(
@@ -613,7 +613,7 @@ def create_ollama_model(
     model = OllamaModel(
         host=config["host"],
         model_id=config["model_id"],
-        temperature=llm_temp,
+        temperature=llm_temp if capabilities.supports_temperature else None,
         max_tokens=llm_max,
         ollama_client_args={
             "timeout": config["timeout"],
@@ -647,11 +647,9 @@ def create_litellm_model(
     """
     from strands.models.litellm import LiteLLMModel
 
-    # Get centralized configuration
     config_manager = _get_config_manager()
-
-    # Get standard configuration (current get_thinking_model_config has bedrock specifics)
     config = config_manager.get_standard_model_config(model_id, region_name, provider)
+    capabilities = get_capabilities(provider, model_id)
 
     # Prepare client args based on model prefix
     client_args: Dict[str, Any] = {}
@@ -721,9 +719,10 @@ def create_litellm_model(
         pass
 
     params: Dict[str, Any] = {
-        "temperature": llm_temp,
         "max_tokens": llm_max,
     }
+    if capabilities.supports_temperature:
+        params["temperature"] = llm_temp
 
     # Only include top_p if present in config (avoid provider conflicts)
     if "top_p" in config:
@@ -741,14 +740,11 @@ def create_litellm_model(
     # Reasoning parameters for reasoning-capable models
     # https://docs.litellm.ai/docs/reasoning_content
     try:
-        from modules.config.models.capabilities import get_capabilities
-
         if role in ["primary", "swarm"]:
-            caps = get_capabilities(provider, config.get("model_id", ""))
             reasoning_effort = config_manager.getenv("REASONING_EFFORT", "medium")
-            if reasoning_effort and caps.pass_reasoning_effort:
+            if reasoning_effort and capabilities.pass_reasoning_effort:
                 client_args["reasoning_effort"] = reasoning_effort
-            if caps.supports_reasoning:
+            if capabilities.supports_reasoning:
                 client_args["thinking"] = {"type": "enabled", "budget_tokens": floor(llm_max * 0.80)}
     except Exception:
         # If capability resolution fails, do not attach the param
@@ -788,7 +784,7 @@ def create_gemini_model(
     provider: str = "gemini",
     role: Optional[LLMRoleType] = None,
 ) -> "GeminiModel":
-    """Create native Gemini model instance using Google's genai SDK.
+    """Create the native Gemini model instance using Google's genai SDK.
 
     This avoids LiteLLM's transformation layer and uses Google's native SDK directly,
     which better handles tool calling and turn ordering for agentic workflows.
@@ -808,9 +804,8 @@ def create_gemini_model(
     from strands.models.gemini import GeminiModel
 
     config_manager = _get_config_manager()
-
-    # Get standard configuration
     config = config_manager.get_standard_model_config(model_id, region_name, provider)
+    capabilities = get_capabilities(provider, model_id)
 
     # Strip gemini/ prefix if present
     clean_model_id = model_id.replace("gemini/", "")
@@ -834,7 +829,8 @@ def create_gemini_model(
     llm_max = create_parameters.llm_max
 
     params: Dict[str, Any] = {}
-    params["temperature"] = llm_temp
+    if capabilities.supports_temperature:
+        params["temperature"] = llm_temp
     params["max_output_tokens"] = llm_max
 
     logger.info(
@@ -844,8 +840,8 @@ def create_gemini_model(
         llm_max,
     )
 
-    client_args["http_options"] = types.HttpOptions(
-        retry_options=types.HttpRetryOptions(
+    client_args["http_options"] = HttpOptions(
+        retry_options=HttpRetryOptions(
             attempts=10,
             exp_base=4.0,
         )

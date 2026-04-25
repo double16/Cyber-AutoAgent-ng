@@ -135,6 +135,9 @@ class ConfigManager:
 
     def is_thinking_model(self, provider: str, model_id: str) -> bool:
         """Check if a model supports thinking capabilities."""
+        if "opus" in model_id:
+            return False
+
         from modules.config import get_capabilities
         if not provider:
             return False
@@ -189,6 +192,8 @@ class ConfigManager:
         max_tokens = self.getenv_int("MAX_TOKENS", min(default_max_tokens, max_tokens_limit))
         thinking_budget = self.getenv_int("THINKING_BUDGET", default_thinking_budget)
 
+        # FIXME: opus 4.[67] doesn't have "type=enabled", it has something like "adaptive"
+        # {"type":"invalid_request_error","message":""thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior."}}
         return {
             "model_id": model_id,
             "region_name": region_name,

@@ -17,13 +17,14 @@ from strands_tools.editor import editor
 from modules.config.models.ollama import OllamaModel
 
 from modules.config.manager import get_config_manager
-from modules.config.models.factory import create_gemini_model
+from modules.config.models.factory import create_gemini_model, get_capabilities
 from modules.config.system.logger import get_logger
 from modules.agents.patches import ToolUseIdHook
 from modules import __version__
 
 logger = get_logger("Agents.ReportAgent")
 
+_REPORT_TEMPERATURE = 0.3
 
 class NoOpCallbackHandler(PrintingCallbackHandler):
     """Minimal callback handler that suppresses SDK output during report generation."""
@@ -72,7 +73,7 @@ class ReportGenerator:
             # Always use the primary bedrock model from config
             llm_cfg = cfg.get_llm_config("bedrock")
             # Only override if explicitly provided, otherwise use config
-            mid = model_id if model_id else llm_cfg.model_id
+            mid = model_id or llm_cfg.model_id
 
             # Harden Bedrock client similar to main agent to avoid timeouts
             from botocore.config import Config as BotocoreConfig
@@ -87,33 +88,39 @@ class ReportGenerator:
 
             # Ensure explicit region to avoid environment inconsistencies
             region = cfg.get_server_config("bedrock").region
+            capabilities = get_capabilities(prov, mid)
             model = BedrockModel(
                 model_id=mid,
                 region_name=region,
-                temperature=0.3,
+                temperature=_REPORT_TEMPERATURE if capabilities.supports_temperature else None,
                 boto_client_config=boto_config,
             )
         elif prov == "gemini":
             # Always use the primary model from config
             llm_cfg = cfg.get_llm_config("gemini")
             # Only override if explicitly provided, otherwise use config
-            mid = model_id if model_id else llm_cfg.model_id
+            mid = model_id or llm_cfg.model_id
 
             model = create_gemini_model(
                 mid,
                 cfg.get_default_region(),
                 prov,
                 "report")
-            model.config.get("params")["temperature"] = 0.3
+            capabilities = get_capabilities(prov, mid)
+            if capabilities.supports_temperature:
+                model.config.get("params")["temperature"] = _REPORT_TEMPERATURE
+            else:
+                model.config.get("params").pop("temperature", None)
         elif prov == "ollama":
             host = cfg.get_ollama_host()
             llm_cfg = cfg.get_llm_config("ollama")
             # Only override if explicitly provided, otherwise use config
-            mid = model_id if model_id else llm_cfg.model_id
+            mid = model_id or llm_cfg.model_id
+            capabilities = get_capabilities(prov, mid)
             model = OllamaModel(
                 host=host,
                 model_id=mid,
-                temperature=0.3,
+                temperature=_REPORT_TEMPERATURE if capabilities.supports_temperature else None,
                 ollama_client_args={
                     "timeout": cfg.get_ollama_timeout(),
                 },
@@ -122,11 +129,12 @@ class ReportGenerator:
         else:  # litellm
             llm_cfg = cfg.get_llm_config("litellm")
             # Only override if explicitly provided, otherwise use config
-            mid = model_id if model_id else llm_cfg.model_id
+            mid = model_id or llm_cfg.model_id
+            capabilities = get_capabilities(prov, mid)
             # Pass both token params - LiteLLM drop_params removes unsupported one
-            params = {
-                "temperature": 0.3,
-            }
+            params = {}
+            if capabilities.supports_temperature:
+                params["temperature"] = _REPORT_TEMPERATURE
             client_args = {
                 "num_retries": 5,
                 "timeout": 1200,
