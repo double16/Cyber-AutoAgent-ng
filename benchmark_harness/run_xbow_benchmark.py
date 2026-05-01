@@ -65,7 +65,7 @@ def ensure_benchmarks_dir(xbow_root: Path) -> None:
     if not (xbow_root / "benchmarks").is_dir():
         _print_err(
             f"[!] benchmarks directory not found at: {xbow_root / 'benchmarks'}\n"
-            "    git clone --depth=1 https://github.com/schniggie/validation-benchmarks.git"
+            "    git clone --depth=1 https://github.com/double16/validation-benchmarks.git"
         )
         raise SystemExit(1)
 
@@ -428,6 +428,7 @@ def run_benchmark(
     react_ui: bool = False,
     dry_run: bool = False,
     hints: bool = True,
+    continue_session: bool = False,
 ) -> int:
     ensure_benchmarks_dir(xbow_root)
 
@@ -476,7 +477,7 @@ def run_benchmark(
 
     memory_isolation: Literal["shared", "operation"] = "operation"
 
-    iterations: int = 100
+    iterations: int = 200
 
     print("\n============================================================")
     print(f"[*] Running benchmark: {bench_id}")
@@ -520,6 +521,8 @@ def run_benchmark(
             "--iterations",
             str(iterations),
         ]
+        if continue_session:
+            cmd.append("--continue")
         if provider_under_test:
             cmd += ["--provider", provider_under_test]
         if model_under_test:
@@ -557,6 +560,8 @@ def run_benchmark(
             str(iterations),
             "--verbose",
         ]
+        if continue_session:
+            cmd.append("--continue")
 
         cp = _run(cmd, capture=False)
         agent_exit = cp.returncode
@@ -838,6 +843,7 @@ def run_all_benchmarks(
     keep_running: bool,
     react_ui: bool = False,
     hints: bool = True,
+    continue_session: bool = False,
 ) -> int:
     ensure_benchmarks_dir(xbow_root)
 
@@ -880,6 +886,7 @@ def run_all_benchmarks(
             keep_running=keep_running,
             react_ui=react_ui,
             hints=hints,
+            continue_session=continue_session,
         )
         if rc != 0:
             print(f"[!] Benchmark {bench_id} failed.")
@@ -904,6 +911,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     g.add_argument("--remaining", action="store_true")
 
     p.add_argument("--no-hints", action="store_true")
+    p.add_argument("--continue", action="store_true", dest="continue_session")
     p.add_argument("--debug", action="store_true")
     p.add_argument("--tag", dest="tag", default=None)
     p.add_argument("--help", "-h", action="store_true")
@@ -922,11 +930,12 @@ def main(argv: Sequence[str]) -> int:
             "  run_xbow_benchmark.py --tags\n"
             "  run_xbow_benchmark.py --check [--tag <TAG>]\n"
             "  run_xbow_benchmark.py --all [--tag <TAG>]\n"
-            "  run_xbow_benchmark.py --remaining [--tag <TAG> --debug]\n"
+            "  run_xbow_benchmark.py --remaining [--tag <TAG> --debug --continue]\n"
             "  run_xbow_benchmark.py --tag <TAG> [--all|--remaining|--check]\n"
-            "  run_xbow_benchmark.py <BENCHMARK_ID>\n\n"
+            "  run_xbow_benchmark.py <BENCHMARK_ID> [--continue]\n\n"
             "Examples:\n"
             "  run_xbow_benchmark.py XBEN-001-24\n"
+            "  run_xbow_benchmark.py XBEN-001-24 --continue\n"
             "  run_xbow_benchmark.py --tag xss --all\n"
             "  run_xbow_benchmark.py --remaining --tag xss\n"
             "  run_xbow_benchmark.py --remaining --no-hints\n\n"
@@ -980,6 +989,7 @@ def main(argv: Sequence[str]) -> int:
             keep_running=keep_running,
             react_ui=not bool(args.debug),
             hints=not bool(args.no_hints),
+            continue_session=bool(args.continue_session),
         )
 
     # Single benchmark mode
@@ -997,6 +1007,7 @@ def main(argv: Sequence[str]) -> int:
         keep_running=keep_running,
         react_ui=not bool(args.debug),
         hints=not bool(args.no_hints),
+        continue_session=bool(args.continue_session),
     )
 
 

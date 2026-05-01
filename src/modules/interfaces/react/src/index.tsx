@@ -376,8 +376,8 @@ const runAutoAssessment = async () => {
         loggingService.info(` Assessment completed successfully in ${result.durationMs}ms`);
         // FIXME: stepsExecuted is reporting max steps because the promises updating stepsExecuted are set to config.iterations
         loggingService.info(` Steps executed: ${result.stepsExecuted || 'unknown'}`);
-        // FIXME: findings count is reporting unknown
-        loggingService.info(` Findings: ${result.findingsCount || 'unknown'}`);
+        // FIXME: findings count is reporting unknown, it is never updated
+        loggingService.info(` Findings: ${result.findingsCount == null ? 'unknown' : result.findingsCount}`);
       } else {
         loggingService.error(` Assessment failed: ${result.error}`);
       }
