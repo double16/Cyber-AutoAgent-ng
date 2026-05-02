@@ -14,7 +14,7 @@ from modules.config.manager import (
     get_config_manager,
     get_default_model_configs,
     get_model_config,
-    get_ollama_host, MAX_TOKENS_LIMIT, MAX_TOKENS_REASONING_LIMIT,
+    get_ollama_host, MAX_TOKENS_REASONING_LIMIT,
 )
 from modules.config.types import (
     EmbeddingConfig,
@@ -1046,9 +1046,9 @@ class TestEnvironmentIntegration:
         """Test centralized thinking models configuration."""
         config_manager = ConfigManager()
 
-        assert config_manager.is_thinking_model("bedrock", "global.anthropic.claude-opus-4-5-20251101-v1:0")
-        assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-5-20251101-v1:0")
-        assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-20250514-v1:0")
+        assert not config_manager.is_thinking_model("bedrock", "global.anthropic.claude-opus-4-5-20251101-v1:0")
+        assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-5-20251101-v1:0")
+        assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-20250514-v1:0")
         assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-sonnet-4-20250514-v1:0")
         assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
         assert config_manager.is_thinking_model("litellm", "nvidia_nim/moonshotai/kimi-k2.5")

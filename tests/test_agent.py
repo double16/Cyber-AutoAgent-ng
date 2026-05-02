@@ -539,7 +539,7 @@ class TestCheckExistingMemories:
 
         result = check_existing_memories("https://test.com/path", "ollama")
         assert result is False
-        mock_exists.assert_called_with(str((outputs_dir / "test.com" / "memory").resolve()))
+        mock_exists.assert_called_with(str((Path.cwd() / "outputs" / "test.com" / "memory").resolve()))
 
     @patch("modules.config.manager.os.environ.get")
     @patch("modules.config.manager.os.path.exists")

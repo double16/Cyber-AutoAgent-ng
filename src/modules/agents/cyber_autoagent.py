@@ -897,6 +897,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     os.environ["STRANDS_MAX_TOKENS"] = str(server_config.llm.max_tokens)
     os.environ["STRANDS_TEMPERATURE"] = str(server_config.llm.temperature)
     os.environ["STRANDS_NON_INTERACTIVE"] = "true"
+    os.environ["STRANDS_HTTP_ALLOW_INSECURE_SSL"] = "true"
 
     # Create agent (telemetry is handled globally by Strands SDK)
     agent = Agent(**agent_kwargs)

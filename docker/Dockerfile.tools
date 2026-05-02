@@ -36,7 +36,7 @@ FROM kalilinux/kali-rolling
 
 LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng Tools"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"
-LABEL org.opencontainers.image.version="0.8.1"
+LABEL org.opencontainers.image.version="0.9.0"
 LABEL org.opencontainers.image.source="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.url="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.licenses="MIT"
@@ -92,6 +92,8 @@ RUN set -eux; \
     python2 \
     virtualenv \
     php \
+    openssh-client \
+    sshpass \
     # Java runtime for ZAP/Burp
     openjdk-21-jre-headless \
     # Binary analysis tools
@@ -345,7 +347,7 @@ RUN ARCH=$(uname -m) && \
 RUN npm install --global @graphql-inspector/cli
 
 # Install TruffleHog (Secret Scanning)
-RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh latest | sh -s -- -b /usr/local/bin
 
 # Install GitTools (Git Dumper/Extractor)
 RUN git clone --depth=1 https://github.com/internetwache/GitTools.git /opt/gittools && \
@@ -377,9 +379,9 @@ RUN useradd --create-home --shell /bin/bash cyberagent && \
     chown -R cyberagent:cyberagent /home/cyberagent/go
 
 RUN mkdir -p -m 0700 "/root/.ssh" && touch "/root/.ssh/config" && chmod 0600 "/root/.ssh/config" && \
-    echo -e "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/root/.ssh/config" && \
+    echo "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/root/.ssh/config" && \
     mkdir -p -m 0700 "/home/cyberagent/.ssh" && touch "/home/cyberagent/.ssh/config" && chmod 0600 "/home/cyberagent/.ssh/config" && \
-    echo -e "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/home/cyberagent/.ssh/config"
+    echo "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/home/cyberagent/.ssh/config"
 
 # Install Sliver (C2 Framework - Client only) - Optional, may fail on ARM64
 RUN mkdir -p /home/cyberagent/sliver && \

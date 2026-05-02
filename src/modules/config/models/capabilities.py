@@ -48,8 +48,9 @@ except Exception:  # pragma: no cover
     LlmProviders = None  # type: ignore
     ModelInfoBase = None  # type: ignore
 
+
     def llm_supports_reasoning(
-        model: str, custom_llm_provider: Optional[str] = None
+            model: str, custom_llm_provider: Optional[str] = None
     ) -> bool:  # type: ignore
         return False
 
@@ -123,10 +124,11 @@ class Capabilities:
     pass_reasoning_effort: bool
     supports_tools: bool
     supports_tool_choice: bool
+    supports_temperature: bool
 
 
 class ModelCapabilitiesResolver:
-    """Model capability detection with authoritative models.dev source.
+    """Model capability detection with the authoritative models.dev source.
 
     Precedence: models.dev → static patterns → LiteLLM → env overrides
     Cached per (provider, model_id).
@@ -153,6 +155,7 @@ class ModelCapabilitiesResolver:
         pass_reasoning_effort = False
         supports_tools = True
         supports_tool_choice = True
+        supports_temp = True
 
         # Priority 1: models.dev (authoritative source for 500+ models)
         if get_models_client is not None:
@@ -164,11 +167,13 @@ class ModelCapabilitiesResolver:
                     supports_reason = bool(caps.reasoning)
                     supports_tools = bool(caps.tool_call)
                     supports_tool_choice = supports_tools
+                    supports_temp = bool(caps.temperature)
                     logger.debug(
-                        "Using models.dev: model=%s reasoning=%s tools=%s",
+                        "Using models.dev: model=%s reasoning=%s tools=%s temperature=%s",
                         model,
                         supports_reason,
                         supports_tools,
+                        supports_temp,
                     )
             except Exception as e:
                 logger.debug("models.dev lookup failed for %s: %s", model, e)
@@ -201,10 +206,10 @@ class ModelCapabilitiesResolver:
         allowed_params: list[str] = []
         try:
             if (
-                ProviderConfigManager is not None
-                and LlmProviders is not None
-                and ModelInfoBase is not None
-                and base_provider
+                    ProviderConfigManager is not None
+                    and LlmProviders is not None
+                    and ModelInfoBase is not None
+                    and base_provider
             ):
                 prov_enum = LlmProviders(base_provider)  # type: ignore[call-arg]
                 cfg = ProviderConfigManager.get_provider_chat_config(
@@ -259,10 +264,16 @@ class ModelCapabilitiesResolver:
             supports_reason = True
         pass_reasoning_effort = "reasoning_effort" in lowered
 
-        # Update tool support from provider params if available
+        # Update tool and temperature support from provider params if available
         if lowered:
             supports_tools = "tools" in lowered
             supports_tool_choice = "tool_choice" in lowered
+            if "temperature" in lowered:
+                supports_temp = True
+            elif base_provider != "ollama":  # Ollama doesn't always report temperature in show
+                # If LiteLLM explicitly knows about params and temperature is NOT there
+                if ProviderConfigManager is not None and "temperature" not in lowered:
+                    supports_temp = False
 
         # Priority 4: Environment overrides (highest precedence)
         model_l = model.lower()
@@ -276,6 +287,7 @@ class ModelCapabilitiesResolver:
             logger.info("ENV override: forcing reasoning=True for %s", model)
         if any(tok in model_l for tok in deny):
             supports_reason = False
+            pass_reasoning_effort = False
             logger.info("ENV override: forcing reasoning=False for %s", model)
 
         return Capabilities(
@@ -283,6 +295,7 @@ class ModelCapabilitiesResolver:
             pass_reasoning_effort=pass_reasoning_effort,
             supports_tools=supports_tools,
             supports_tool_choice=supports_tool_choice,
+            supports_temperature=supports_temp,
         )
 
 
