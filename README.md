@@ -581,7 +581,7 @@ git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd cyber-autoagent
 
 # Build image
-docker build --pull -f docker/Dockerfile.tools -t cyber-autoagent-tools .
+# (optional) docker build --pull -f docker/Dockerfile.tools -t public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest .
 docker build -f docker/Dockerfile -t cyber-autoagent .
 
 # Using environment variables

@@ -1,5 +1,6 @@
 # Cyber-AutoAgent-ng Changelog
 
+- Publish tools image to `public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest`. (Fixes #20)
 - Only pass temperature if the model supports it.
 - Refactor output of the following tools to avoid agent misdirection. Fixes #105.
   - mem0_list, mem0_retrieve, list_uncompleted_tasks, get_plan response, store_plan

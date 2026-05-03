@@ -425,8 +425,8 @@ Requirements: Python 3.11+, dependencies installed
 ### Docker Standalone
 
 ```bash
-docker build --pull -t cyber-autoagent-tools -f Dockerfile.tools ..
-docker build -t cyber-autoagent ..
+# (optional) docker build --pull -f docker/Dockerfile.tools -t public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest ..
+docker build -t cyber-autoagent -f docker/Dockerfile .
 
 docker run --rm \
   -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} \
