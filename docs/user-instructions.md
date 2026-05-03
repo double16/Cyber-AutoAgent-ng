@@ -6,7 +6,7 @@ Cyber-AutoAgent is an autonomous security assessment tool with a React-based ter
 
 | Requirement               | Purpose                            |
 |---------------------------|------------------------------------|
-| Node.js 24+               | React interface runtime            |
+| Node.js 22+               | React interface runtime            |
 | Docker Desktop            | Containerized agent execution      |
 | AWS credentials or Ollama | Model provider access              |
 | Authorization             | Written permission to test targets |
@@ -446,7 +446,7 @@ docker run --rm \
 | React app won't start | `rm -rf node_modules && npm install && npm run build` |
 | Configuration errors  | `rm ~/.cyber-autoagent/config.json && cyber-react`    |
 | Docker connectivity   | `docker info` to verify daemon running                |
-| Node version issues   | Verify Node.js 24+ with `node --version`              |
+| Node version issues   | Verify Node.js 22+ with `node --version`              |
 
 ### Provider Issues
 

@@ -1,6 +1,6 @@
 brew "python@3.12"
 brew "virtualenv"
-brew "node@24"
+brew "node@22"
 brew "docker"
 brew "uv"
 brew "ollama"
