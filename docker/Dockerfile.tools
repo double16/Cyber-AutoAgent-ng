@@ -1,5 +1,4 @@
 # Dockerfile for Cyber-AutoAgent tools base image (Kali Rolling base)
-# docker build --pull -t cyber-autoagent-tools -f Dockerfile.tools
 # syntax=docker/dockerfile:1.7
 
 ARG APT_PROXY
