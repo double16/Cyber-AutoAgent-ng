@@ -47,10 +47,10 @@ class TestMem0List:
         mock_op_id.return_value = "test_op"
         mock_client.list_memories.return_value = []
         
-        mem0_list(agent_id="test_agent")
+        mem0_list()
         
         mock_client.list_memories.assert_called_once_with(
-            "test_user", "test_agent", limit=100, run_id="test_op"
+            "test_user", None, limit=100, run_id="test_op"
         )
 
     def test_mem0_list_empty(self, mock_op_id, mock_user_id, mock_ensure_client):
@@ -131,14 +131,14 @@ class TestMem0Retrieve:
         mock_client.search.return_value = []
         
         filters = {"category": "finding"}
-        mem0_retrieve(query="test query", metadata=filters, agent_id="test_agent")
+        mem0_retrieve(query="test query", metadata=filters)
         
         mock_client.search.assert_called_once_with(
             query="test query",
             filters=filters,
             limit=100,
             user_id="test_user",
-            agent_id="test_agent",
+            agent_id=None,
             run_id="test_op"
         )
 
