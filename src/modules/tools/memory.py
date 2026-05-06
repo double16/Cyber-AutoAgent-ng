@@ -520,6 +520,8 @@ def _user_id(user_id: Optional[str] = None) -> str:
         return user_id
     return (_MEMORY_CONFIG or {}).get("user_id", "cyber-agent")
 
+def _agent_id(agent_id: Optional[str] = None) -> Optional[str]:
+    return agent_id
 
 def _operation_id(operation_id: Optional[str] = None) -> str:
     return operation_id or (_MEMORY_CONFIG or {}).get("operation_id", os.getenv("CYBER_OPERATION_ID", "default_operation"))
@@ -626,7 +628,6 @@ def _has_valid_proof_pack(finding: Any) -> bool:
 def mem0_store(
     content: str,
     metadata: Dict[str, Any],
-    agent_id: Optional[str] = None,
 ) -> str:
     """Store a single memory entry.
     Use this for atomic entries (ONE finding/observation per call). Prefer storing immediately after you confirm something.
@@ -696,6 +697,7 @@ def mem0_store(
         raise ValueError("content is required")
 
     user_id = _user_id()
+    agent_id = _agent_id()
 
     # Clean content to prevent JSON issues
     cleaned_content = (
@@ -1274,9 +1276,7 @@ def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:
 
 
 @tool
-def mem0_list(
-    agent_id: Optional[str] = None,
-) -> str:
+def mem0_list() -> str:
     """List operation findings, observations, and discoveries."""
     try:
         client = _ensure_memory_client()
@@ -1288,6 +1288,7 @@ def mem0_list(
             list_limit = 100
 
         user_id = _user_id()
+        agent_id = _agent_id()
 
         # Scope to current operation unless cross_operation=True
         cross_operation = memory_is_cross_operation()
@@ -1313,7 +1314,6 @@ def mem0_list(
 def mem0_retrieve(
     query: str,
     metadata: Optional[Dict[str, Any]] = None,
-    agent_id: Optional[str] = None,
 ) -> str:
     """Semantic search across memories.
 
@@ -1342,6 +1342,7 @@ def mem0_retrieve(
         op_id = None if cross_operation else _operation_id()
 
         user_id = _user_id()
+        agent_id = _agent_id()
 
         # Debug: Log retrieval parameters
         logger.debug(
