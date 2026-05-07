@@ -367,6 +367,9 @@ RUN git clone --depth=1 --depth=1 https://github.com/s0md3v/Corsy.git /opt/corsy
     echo '#!/bin/bash\ncd /opt/corsy && source venv/bin/activate && exec python3 /opt/corsy/corsy.py "$@"' > /usr/local/bin/corsy && \
     chmod +x /usr/local/bin/corsy
 
+# Patch arjun when URL response is 400-500
+RUN find /usr/lib/python3 -path "*/arjun/__main__.py" -print0 | xargs -r0 sed -i 's/request.status_code/response_1.status_code/g'
+
 COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
 
