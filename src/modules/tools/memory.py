@@ -665,7 +665,7 @@ def mem0_store(
         mem0_store(content="[FINDING] XSS Vulnerability confirmed on /contactus endpoint with name parameter. - Technique: stored_xss",
             metadata={"category": "finding", "severity": "HIGH",
                       "status": "verified", "validation_status": "verified",
-                      "technique": "stored_xss", "artifact_hash": "sha256_of_artifact"})
+                      "technique": "stored_xss"})
 
         # Store observation during reconnaissance
         mem0_store(content="[OBSERVATION] Discovered 15 endpoints, JWT auth, admin panel at /admin returns 403",
