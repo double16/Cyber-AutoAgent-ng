@@ -18,7 +18,7 @@ ADD docker/packages-go.sh /tmp
 RUN --mount=type=cache,target=/usr/local/share/go-build-cache --mount=type=cache,target=/usr/local/share/go \
     /tmp/packages-go.sh
 
-FROM --platform=$BUILDPLATFORM ubuntu:24.04 AS cargobuild
+FROM --platform=$BUILDPLATFORM ubuntu:26.04 AS cargobuild
 ARG TARGETARCH
 ARG BUILDPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
