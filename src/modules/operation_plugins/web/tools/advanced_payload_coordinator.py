@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import DEVNULL
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
@@ -202,20 +202,20 @@ def advanced_payload_coordinator(
         # Setup specialized testing tools
         if verbose:
             print("[*] Setting up specialized testing tools...", file=sys.stderr)
-        tools_setup = _setup_payload_tools()
+        tools_setup = setup_payload_tools()
         results["tools"] = tools_setup
 
         # Parameter discovery and expansion
         if not parameters or test_type in ["param_discovery"]:
             if verbose:
                 print("[*] Running parameter discovery...", file=sys.stderr)
-            discovered_params = _advanced_parameter_discovery(request_config, parameters, tools=tools_setup["tools"])
+            discovered_params = advanced_parameter_discovery(request_config, parameters, tools=tools_setup["tools"])
             if not discovered_params and request_config.http_method == "GET":
                 # try again with POST
                 request_config.http_method = "POST"
                 if verbose:
                     print("[*] No parameters found with GET, trying POST for discovery...", file=sys.stderr)
-                discovered_params_post = _advanced_parameter_discovery(
+                discovered_params_post = advanced_parameter_discovery(
                     request_config, parameters, tools=tools_setup["tools"]
                 )
                 if discovered_params_post:
@@ -345,22 +345,24 @@ def advanced_payload_coordinator(
     return json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def _setup_payload_tools() -> Dict[str, Any]:
-    """Setup specialized payload testing tools"""
+def setup_payload_tools(tools_limit: Set[str] = None) -> Dict[str, Any]:
+    """Set up specialized payload testing tools"""
     tools_status = {"tools": [], "failed": []}
 
-    # Specialized tools from awesome-bugbounty-tools
+    # Specialized tools from awesome-bugbounty-tools: (command, github URL, python package)
     specialized_tools = [
-        ("dalfox", "github.com/hahwul/dalfox/v2@latest"),
-        ("arjun", None),  # Python tool
-        ("corsy", None),  # Python tool
-        ("paramspider", None),  # Python tool
-        ("lfimap", None),  # Python tool, pipx install --global lfimap-ng
-        ("sstimap", None),  # Python tool, https://github.com/vladko312/SSTImap.git
-        ("commix", None),  # Python tool, https://github.com/commixproject/commix.git
+        ("dalfox", "github.com/hahwul/dalfox/v2@latest", None),
+        ("arjun", None, "arjun"),  # Python tool
+        ("corsy", None, "corsy",),  # Python tool
+        ("paramspider", None, "ParamSpider"),  # Python tool
+        ("lfimap", None, "lfimap-ng"),  # Python tool, pipx install --global lfimap-ng
+        ("sstimap", None, "sstimap"),  # Python tool, https://github.com/vladko312/SSTImap.git
+        ("commix", None, "commix"),  # Python tool, https://github.com/commixproject/commix.git
     ]
 
-    for tool_name, install_path in specialized_tools:
+    for tool_name, install_path, pip_name in specialized_tools:
+        if tools_limit and tool_name not in tools_limit:
+            continue
         try:
             # Check if tool exists
             check_cmd = ["which", tool_name]
@@ -377,24 +379,24 @@ def _setup_payload_tools() -> Dict[str, Any]:
                     tools_status["tools"].append(tool_name)
                 else:
                     tools_status["failed"].append(tool_name)
-            else:
-                # Python tool - try pip install
-                pip_names = {"arjun": "arjun", "corsy": "corsy", "sstimap": "sstimap", "paramspider": "ParamSpider", "commix": "commix"}
-                if tool_name in pip_names:
-                    install_cmd = ["pip3", "install", pip_names[tool_name]]
-                    result = subprocess.run(install_cmd, stdin=DEVNULL, capture_output=True, timeout=120)
-                    if result.returncode == 0:
-                        tools_status["tools"].append(tool_name)
-                    else:
-                        tools_status["failed"].append(tool_name)
+            elif pip_name:
+                install_cmd = ["pip3", "install", pip_name]
+                result = subprocess.run(install_cmd, stdin=DEVNULL, capture_output=True, timeout=120)
+                if result.returncode == 0:
+                    tools_status["tools"].append(tool_name)
+                else:
+                    tools_status["failed"].append(tool_name)
         except Exception:
             tools_status["failed"].append(tool_name)
 
     return tools_status
 
 
-def _advanced_parameter_discovery(request_config: RequestConfig, provided_params: str = None,
-                                  tools: List[str] = None) -> List[str]:
+def advanced_parameter_discovery(
+        request_config: RequestConfig,
+        provided_params: str = None,
+        tools: List[str] = None
+) -> List[str]:
     """Advanced parameter discovery using multiple techniques"""
     target_url = request_config.target_url
 
@@ -405,7 +407,16 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
         provided_list = [p.strip() for p in provided_params.split(",") if p.strip()]
         discovered_params.update(provided_list)
 
-    # Method 1: Arjun parameter discovery (if available)
+    # Extract from URL if it has parameters
+    try:
+        parsed_url = urlparse(target_url)
+        if parsed_url.query:
+            url_params = parse_qs(parsed_url.query)
+            discovered_params.update(url_params.keys())
+    except Exception:
+        pass
+
+    # Arjun parameter discovery (if available)
     if "arjun" in tools:
         arjun_out = ""
         arjun_path = None
@@ -458,7 +469,7 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
                     for param in _ARJUN_RESPONSE_PARAMS.findall(line.split("Parameters found:")[1]):
                         discovered_params.add(param)
 
-    # Method 2: ParamSpider (if available)
+    # ParamSpider (if available)
     if "paramspider" in tools:
         try:
             domain = urlparse(target_url).netloc
@@ -492,7 +503,7 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
         except Exception:
             pass
 
-    # Method 3: Common parameter wordlist
+    # Common parameter wordlist
     common_params = [
         "id",
         "user",
@@ -564,15 +575,6 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
                         discovered_params.add(param)
         except Exception:
             pass
-
-    # Method 4: Extract from URL if it has parameters
-    try:
-        parsed_url = urlparse(target_url)
-        if parsed_url.query:
-            url_params = parse_qs(parsed_url.query)
-            discovered_params.update(url_params.keys())
-    except Exception:
-        pass
 
     return sorted(list(discovered_params))
 
@@ -1481,70 +1483,71 @@ def _coordinate_injection_testing(
                         }
                     )
 
-    time_scan_start = time.time()
-    timeout_per_param = max(60, timeout_seconds // len(parameters_under_test))
-    for param in parameters_under_test:
-        found_for_param = False
-        time_param_start = time.time()
-        for injection_type, payloads in injection_types:
-            for payload in payloads:
-                try:
-                    response = _requests_get_text(target_url, {param: payload}, request_config, timeout=10)
-                    if response is not None:
-                        # Check for injection indicators
-                        vulnerable = False
-                        evidence = ""
+    if parameters_under_test:
+        time_scan_start = time.time()
+        timeout_per_param = max(60, timeout_seconds // len(parameters_under_test))
+        for param in parameters_under_test:
+            found_for_param = False
+            time_param_start = time.time()
+            for injection_type, payloads in injection_types:
+                for payload in payloads:
+                    try:
+                        response = _requests_get_text(target_url, {param: payload}, request_config, timeout=10)
+                        if response is not None:
+                            # Check for injection indicators
+                            vulnerable = False
+                            evidence = ""
 
-                        if injection_type == "SSTI":
-                            # Check for template evaluation
-                            if "1764" in response and "42*42" in payload:
-                                vulnerable = True
-                                evidence = "Template evaluation detected (42*42=1764)"
-                            elif payload in response and "config" in payload:
-                                vulnerable = True
-                                evidence = "Configuration disclosure detected"
+                            if injection_type == "SSTI":
+                                # Check for template evaluation
+                                if "1764" in response and "42*42" in payload:
+                                    vulnerable = True
+                                    evidence = "Template evaluation detected (42*42=1764)"
+                                elif payload in response and "config" in payload:
+                                    vulnerable = True
+                                    evidence = "Configuration disclosure detected"
 
-                        elif injection_type == "Command Injection":
-                            # Check for command execution indicators
-                            # Avoid the obvious reflection false-positive: the string "whoami" may simply echo back.
-                            if any(indicator in response.lower() for indicator in ["uid=", "gid=", "root:"]):
-                                vulnerable = True
-                                evidence = "Command execution indicators detected"
+                            elif injection_type == "Command Injection":
+                                # Check for command execution indicators
+                                # Avoid the obvious reflection false-positive: the string "whoami" may simply echo back.
+                                if any(indicator in response.lower() for indicator in ["uid=", "gid=", "root:"]):
+                                    vulnerable = True
+                                    evidence = "Command execution indicators detected"
 
-                        elif injection_type == "LDAP Injection":
-                            # Check for LDAP error patterns or unexpected responses
-                            if any(
-                                indicator in response.lower()
-                                for indicator in ["ldap", "invalid dn", "bad search filter"]
-                            ):
-                                vulnerable = True
-                                evidence = "LDAP error patterns detected"
+                            elif injection_type == "LDAP Injection":
+                                # Check for LDAP error patterns or unexpected responses
+                                if any(
+                                    indicator in response.lower()
+                                    for indicator in ["ldap", "invalid dn", "bad search filter"]
+                                ):
+                                    vulnerable = True
+                                    evidence = "LDAP error patterns detected"
 
-                        if vulnerable:
-                            injection_results.append(
-                                {
-                                    "vulnerable": True,
-                                    "url": target_url,
-                                    "parameter": param,
-                                    "method": request_config.http_method,
-                                    "injection_type": injection_type,
-                                    "payload": payload,
-                                    "evidence": evidence,
-                                    "tool": "custom",
-                                }
-                            )
-                            found_for_param = True
-                            break  # break payload loop
+                            if vulnerable:
+                                injection_results.append(
+                                    {
+                                        "vulnerable": True,
+                                        "url": target_url,
+                                        "parameter": param,
+                                        "method": request_config.http_method,
+                                        "injection_type": injection_type,
+                                        "payload": payload,
+                                        "evidence": evidence,
+                                        "tool": "custom",
+                                    }
+                                )
+                                found_for_param = True
+                                break  # break payload loop
 
-                except Exception:
-                    continue
-            if found_for_param:
-                break  # break injection_type loop
-            if time.time() - time_param_start > timeout_per_param:
+                    except Exception:
+                        continue
+                if found_for_param:
+                    break  # break injection_type loop
+                if time.time() - time_param_start > timeout_per_param:
+                    break
+
+            if time.time() - time_scan_start > timeout_seconds:
                 break
-
-        if time.time() - time_scan_start > timeout_seconds:
-            break
 
     # Add summary for tested parameters without vulnerabilities
     tested_params = {r.get("parameter") for r in injection_results if r.get("vulnerable", False) and r.get("parameter")}
