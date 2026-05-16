@@ -286,6 +286,7 @@ class AgentConfig:
     memory_path: Optional[str] = None
     memory_mode: str = "auto"
     module: str = "web"
+    bug_bounty_headers: Dict[str, str] = field(default_factory=dict)
     mcp_connections: List[MCPConnection] = field(default_factory=list)
 
 
