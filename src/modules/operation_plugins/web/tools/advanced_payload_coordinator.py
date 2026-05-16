@@ -15,12 +15,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import DEVNULL
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Literal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 import urllib3
-from strands import tool
+from strands import tool, ToolContext
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -101,15 +101,15 @@ class RequestConfig:
         return self.http_method.upper() in ["POST", "PUT", "PATCH", "DELETE"]
 
 
-@tool
+@tool(context=True)
 def advanced_payload_coordinator(
         target_url: str,
-        test_type: str = "comprehensive",
+        test_type: Literal["comprehensive", "xss", "lfi", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors"] = "comprehensive",
         parameters: str = None,
         http_method: str = "GET",
         cookies: Optional[Dict[str, str]] = None,
         headers: Optional[Dict[str, str]] = None,
-        **kwargs
+        tool_context: Optional[ToolContext] = None,
 ) -> str:
     """
     Run coordinated payload-based web vuln testing (XSS/CORS/LFI/SSTI/command/LDAP) against a single URL. SQLi is *NOT* supported.
@@ -146,14 +146,18 @@ def advanced_payload_coordinator(
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
 
-    verbose = bool(kwargs.get("verbose", False))
+    verbose = tool_context is None
 
-    if "sql" in test_type.lower():
+    test_type = (test_type or "comprehensive").lower().strip()
+
+    if "sql" in test_type:
         # Some LLMs are bent on using this for SQLi
-        raise ValueError("SQLi is not supported")
+        raise ValueError("SQLi is not supported by this tool, try sqlmap")
+    if "directory_brute_force" in test_type or "file_brute_force" in test_type:
+        # Come on LLM, stop making things up ...
+        raise ValueError("Directory/file brute forcing is not supported by this tool, try feroxbuster or ffuf")
 
     # normalize test types
-    test_type = test_type.lower() if test_type else "comprehensive"
     if test_type in {"local_file", "local_file_inclusion"}:
         test_type = "lfi"
     elif test_type in {"template_injection", "template"}:
@@ -1809,12 +1813,6 @@ def main() -> int:
         default=None,
         help="Cookie to include (repeatable). Format: 'name=value'",
     )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Output progress to stderr",
-    )
 
     args = parser.parse_args()
 
@@ -1865,7 +1863,6 @@ def main() -> int:
             http_method=args.http_method,
             headers=headers,
             cookies=cookies,
-            verbose=args.verbose,
         )
     )
     return 0
