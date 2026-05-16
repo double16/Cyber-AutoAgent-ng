@@ -666,6 +666,22 @@ The unified structure organizes all artifacts under operation-specific directori
 - `--output-dir`: Custom output directory (default: ./outputs)
 - `--mcp-enabled`: Enable MCP tools
 - `--mcp-conns`: Provide JSON of MCP server, the same `mcp.connections` block present in the configuration file 
+- `--bug-bounty-header NAME=VALUE`: Add an HTTP marker header for authorized bug bounty traffic (repeatable)
+- `--bug-bounty-headers-json '{...}'`: Add marker headers from a JSON object
+
+### Bug Bounty Traffic Markers
+
+Some programs require every request to include researcher marker headers such as `X-HackerOne-Research`, `X-Bugcrowd`, or a custom `User-Agent`. Configure them at startup:
+
+```bash
+python src/cyberautoagent.py \
+  --target "https://example.com" \
+  --objective "Authorized bug bounty testing" \
+  --bug-bounty-header X-HackerOne-Research=username \
+  --bug-bounty-header User-Agent=username@wearehackerone.com
+```
+
+The agent pre-applies these headers to browser traffic and adds them to tool guidance so `http_request`, shell tools, and MCP tools include the same markers.
 
 ### Usage Examples
 
