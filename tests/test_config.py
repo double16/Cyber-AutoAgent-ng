@@ -1051,7 +1051,7 @@ class TestEnvironmentIntegration:
         assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-20250514-v1:0")
         assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-sonnet-4-20250514-v1:0")
         assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
-        assert config_manager.is_thinking_model("litellm", "nvidia_nim/moonshotai/kimi-k2.5")
+        assert config_manager.is_thinking_model("litellm", "nvidia_nim/moonshotai/kimi-k2.6")
         assert not config_manager.is_thinking_model("venice", "llama-3.2-3b")
         assert not config_manager.is_thinking_model("not_a_provider", "llama-3.2-3b")
 
