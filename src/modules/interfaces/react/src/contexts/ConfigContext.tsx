@@ -167,6 +167,8 @@ export interface Config {
   outputFormat: 'markdown' | 'json' | 'html';
   /** Enable detailed debug logging and verbose output */
   verbose: boolean;
+  /** HTTP headers to mark authorized bug bounty traffic */
+  bugBountyHeaders?: Record<string, string>;
 
   // Context Management
   /** Conversation window size - max messages in history */
@@ -511,6 +513,7 @@ export const defaultConfig: Config = {
   maxThreads: 10,
   outputFormat: 'markdown',
   verbose: false, // Default to non-verbose mode
+  bugBountyHeaders: {},
 
   // Context Management
   conversationWindow: 100, // Default conversation window size (sliding window)

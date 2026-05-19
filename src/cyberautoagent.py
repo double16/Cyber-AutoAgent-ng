@@ -407,11 +407,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--bug-bounty-headers-json",
-        type=str,
-        help="JSON object of HTTP headers to mark authorized bug bounty traffic",
-    )
-    parser.add_argument(
         "--heap-monitor",
         action="store_true",
         help="Monitor the heap for usage and trigger dumps when threshold exceeded",
@@ -423,16 +418,18 @@ def main():
         from src.modules.utils import heap_monitor
 
     bug_bounty_headers = {}
-    if args.bug_bounty_headers_json:
-        try:
-            parsed_headers = json.loads(args.bug_bounty_headers_json)
-        except json.JSONDecodeError as exc:
-            parser.error(f"--bug-bounty-headers-json must be valid JSON: {exc}")
-        if not isinstance(parsed_headers, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in parsed_headers.items()
-        ):
-            parser.error("--bug-bounty-headers-json must be a JSON object with string keys and values")
-        bug_bounty_headers.update(parsed_headers)
+    if not args.bug_bounty_header:
+        env_headers = os.getenv("CYBER_BUG_BOUNTY_HEADERS")
+        if env_headers:
+            try:
+                parsed_headers = json.loads(env_headers)
+            except json.JSONDecodeError as exc:
+                parser.error(f"CYBER_BUG_BOUNTY_HEADERS must be valid JSON: {exc}")
+            if not isinstance(parsed_headers, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in parsed_headers.items()
+            ):
+                parser.error("CYBER_BUG_BOUNTY_HEADERS must be a JSON object with string keys and values")
+            bug_bounty_headers.update(parsed_headers)
 
     for header in args.bug_bounty_header:
         if "=" not in header:
@@ -442,6 +439,9 @@ def main():
         if not name:
             parser.error("--bug-bounty-header name cannot be empty")
         bug_bounty_headers[name] = value
+
+    if args.bug_bounty_header:
+        os.environ["CYBER_BUG_BOUNTY_HEADERS"] = json.dumps(bug_bounty_headers)
 
     if args.cont or args.report:
         args.memory_mode = "auto"

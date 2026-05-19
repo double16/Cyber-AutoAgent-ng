@@ -460,7 +460,7 @@ Prefer MCP tools over command line tools that offer similar capabilities.
 Authorized bug bounty traffic must include these HTTP headers:
 {marker_headers}
 
-Before using browser traffic, call `browser_set_headers` with these headers. For `http_request`, command-line tools, and MCP tools that make HTTP requests, include the same headers/User-Agent in the tool input, command flags, or prompt.
+Before using browser traffic, call `browser_set_headers` with these headers. For `http_request`, command-line tools, and MCP tools that make HTTP requests, include the same headers in the tool input, command flags, or prompt.
 """
         full_tools_context = f"{full_tools_context}\n\n{marker_context}" if full_tools_context else marker_context
 
