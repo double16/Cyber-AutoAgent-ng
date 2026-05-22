@@ -2,37 +2,47 @@
 """
 IDOR Specialist - Coordinated authorization / IDOR testing for a single endpoint.
 
-Primary engine:
-- IDOR-Forge (https://github.com/errorfiathck/IDOR-Forge)
-
-Fallback engine:
-- Lightweight Python IDOR heuristics:
-  - Mutate candidate object identifiers (query/body/path)
-  - Compare responses via status/length/similarity + sensitive keyword detection
-  - Optional authorization replay using alt (low-priv/unauth) auth context
+- Mutate candidate object identifiers (query/body/path)
+- Compare responses via status/length/similarity
+- JSON structure and content similarity analysis
+- Optional authorization replay using alt (low-priv/unauth) auth context
 
 Returns:
 - JSON only (no prose), intended for agents.
 """
 
 import argparse
-import base64
 import json
-import os
-import re
-import shutil
-import subprocess
-import tempfile
+import sys
 import time
+import random
+import traceback
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from subprocess import DEVNULL
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Literal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 import urllib3
-from strands import tool
+from strands import tool, ToolContext
+
+#
+# import from advanced_payload_coordinator
+#
+import importlib.util
+from pathlib import Path
+
+module_path = Path(__file__).resolve().parent / "advanced_payload_coordinator.py"
+
+spec = importlib.util.spec_from_file_location("advanced_payload_coordinator", str(module_path))
+assert spec is not None and spec.loader is not None, "Failed to load advanced_payload_coordinator.py"
+exporter = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(exporter)
+advanced_parameter_discovery = exporter.advanced_parameter_discovery
+apc_request_config = exporter.RequestConfig
+#
+#
+#
 
 # Test cases:
 # XBEN-001-24
@@ -51,11 +61,6 @@ from strands import tool
 # XBEN-103-24
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-IDOR_FORGE_REPO_DIR = os.environ.get("IDOR_FORGE_DIR", "/opt/idor-forge")
-
-_RE_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
-_RE_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 # Common ID-like parameter names (horizontal + vertical IDOR entry points)
 _COMMON_ID_KEYS = {
@@ -93,46 +98,6 @@ _COMMON_ID_KEYS = {
     "workspace_id",
 }
 
-_DEFAULT_SENSITIVE_KEYWORDS = [
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "authorization",
-    "ssn",
-    "social security",
-    "credit card",
-    "ccv",
-    "pan",
-    "dob",
-    "date of birth",
-    "email",
-    "address",
-    "phone",
-]
-
-
-def _b64(x: Any) -> str:
-    if x is None:
-        return ""
-    if isinstance(x, bytes):
-        raw = x
-    else:
-        raw = str(x).encode("utf-8", errors="ignore")
-    return base64.b64encode(raw).decode("ascii")
-
-
-def _coerce_str(x: Any) -> str:
-    if x is None:
-        return ""
-    if isinstance(x, str):
-        return x
-    if isinstance(x, bytes):
-        return x.decode("utf-8", errors="ignore")
-    return str(x)
-
 
 @dataclass
 class RequestConfig:
@@ -144,78 +109,86 @@ class RequestConfig:
     alt_cookies: Optional[Dict[str, str]] = None
     alt_headers: Optional[Dict[str, str]] = None
     timeout: int = 15
+    request_type: str = "query"
+    auth_type: str = "basic"
 
     def inject_in_body(self) -> bool:
-        return self.http_method.upper() in ["POST", "PUT", "PATCH", "DELETE"]
+        return self.http_method.upper() in ["POST", "PUT", "PATCH", "DELETE"] or self.request_type in ["json",
+                                                                                                       "graphql"]
 
 
-@tool
+@tool(context=True)
 def idor_specialist(
         target_url: str,
-        test_type: str = "comprehensive",
-        parameters: str = None,
-        http_method: str = "GET",
-        cookies: Dict[str, str] = None,
-        headers: Dict[str, str] = None,
-        alt_cookies: Dict[str, str] = None,
-        alt_headers: Dict[str, str] = None,
-        sensitive_keywords: str = None,
-        num_range: str = None,
+        test_type: Literal["comprehensive", "idor", "authz_replay", "param_discovery"] = "comprehensive",
+        parameters: Optional[str] = None,
+        http_method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET",
+        cookies: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        alt_cookies: Optional[Dict[str, str]] = None,
+        alt_headers: Optional[Dict[str, str]] = None,
+        test_values: Optional[str] = None,
+        login_url: Optional[str] = None,
+        credentials: Optional[str] = None,
+        login_method: Optional[Literal["GET", "POST"]] = None,
+        num_range: Optional[str] = None,
+        multi_credentials: Optional[str] = None,
+        evasion: bool = False,
+        request_type: Optional[Literal["query", "json", "graphql"]] = None,
+        auth_type: Optional[Literal["basic", "oauth", "jwt"]] = None,
+        tool_context: Optional[ToolContext] = None,
 ) -> str:
     """
-    Coordinated IDOR / authorization testing against a single URL.
+    Coordinated IDOR (Insecure Direct Object Reference) / authorization testing against a single URL.
 
     When to call:
-    - You have a concrete endpoint and want to detect IDOR / access-control breaks quickly:
-      horizontal (other users’ objects) and vertical (admin-only objects).
-    - Especially useful when you can provide an alternate auth context (alt_cookies/alt_headers)
-      to replay requests as a low-priv or unauth user.
+    - You have a concrete endpoint (URL) and want to detect IDOR / authorization bypasses.
+    - Works with a single auth context (detects IDOR via parameter mutation) or two auth contexts
+      (compares high-priv vs low-priv/unauth responses).
+    - Use when you see numeric IDs, UUIDs, or usernames in query strings, JSON bodies, or URL paths.
 
     How to call:
     - target_url: full URL (include query string if known)
+    - test_type: "idor", "authz_replay", "param_discovery", or "comprehensive" (default)
     - parameters: comma-separated parameter names to focus (optional). If omitted, auto-detect.
     - http_method: GET/POST/PUT/DELETE
     - cookies/headers: privileged (or current) context
     - alt_cookies/alt_headers: alternate low-priv or unauth context for replay comparisons (optional)
-    - sensitive_keywords: JSON list string, e.g. '["password","email"]' (optional)
+    - test_values: JSON list of custom values to test as payloads (optional)
+    - login_url: URL for the login page (optional)
+    - credentials: Login credentials in JSON format (e.g., '{"username": "admin", "password": "password"}') (optional)
+    - login_method: HTTP method to use for login (default: POST) (optional)
     - num_range: "start-end" to seed numeric mutations, e.g. "1-1000" (optional)
+    - multi_credentials: JSON list of multiple credentials for multi-user testing (optional)
+    - evasion: Enable evasion techniques (e.g., jitter, UA rotation) (optional)
+    - request_type: "query", "json", or "graphql" (optional)
+    - auth_type: "basic", "oauth", or "jwt" (optional)
 
     Returns:
-    - JSON (no prose), intended for agents.
+    - JSON. Key fields:
+      - parameters_discovered: list of parameters to focus testing.
+      - findings: per-test records (include tool, parameter, finding_type, signals, evidence).
+      - vulnerabilities: subset of findings where vulnerable=true (primary signal).
+      - intelligence: attack_vectors / bypass_techniques / exploitation_chains (routing hints).
+      - recommendations: next-step action tags (agent routing, not remediation).
+      - counts / errors: quick health + triage.
     """
     if not target_url:
         raise ValueError("target_url is required")
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
 
+    verbose = tool_context is None
+
     test_type = (test_type or "comprehensive").lower().strip()
     if test_type not in ["idor", "authz_replay", "param_discovery", "comprehensive"]:
         test_type = "comprehensive"
 
-    sk = _DEFAULT_SENSITIVE_KEYWORDS
-    if sensitive_keywords:
-        try:
-            parsed = json.loads(sensitive_keywords)
-            if isinstance(parsed, list) and parsed:
-                sk = [str(x) for x in parsed if str(x).strip()]
-        except Exception:
-            pass
-
-    rc = RequestConfig(
-        target_url=target_url,
-        http_method=http_method,
-        cookies=cookies,
-        headers=headers,
-        alt_cookies=alt_cookies,
-        alt_headers=alt_headers,
-    )
-
     results: Dict[str, Any] = {
         "target": target_url,
         "test_type": test_type,
-        "http_method": rc.http_method,
+        "http_method": http_method,
         "parameters_provided": parameters,
-        "tools": {"available": [], "failed": []},
         "parameters_discovered": [],
         "findings": [],
         "vulnerabilities": [],
@@ -229,61 +202,119 @@ def idor_specialist(
         "counts": {},
         "errors": [],
         "evidence": {
-            "idor_forge_stdout_b64": "",
-            "idor_forge_stderr_b64": "",
             "fallback_notes": [],
         },
     }
 
     try:
-        tools_setup = _setup_idor_tools()
-        results["tools"] = tools_setup
+        # Handle login and credentials
+        final_cookies = cookies or {}
+        final_headers = headers or {}
+        final_alt_cookies = alt_cookies or {}
+        final_alt_headers = alt_headers or {}
 
+        multi_creds_list = []
+        if multi_credentials:
+            try:
+                multi_creds_list = json.loads(multi_credentials)
+            except Exception as e:
+                raise ValueError(f"multi_credentials expected to be JSON: {e}")
+
+        if login_url:
+            # Use single credentials for main auth context if provided
+            if credentials:
+                try:
+                    creds_dict = json.loads(credentials)
+                except Exception as e:
+                    raise ValueError(f"credentials expected to be JSON: {e}")
+                try:
+                    if verbose:
+                        print(f"[*] Attempting login at {login_url}", file=sys.stderr)
+                    c, h = _perform_login(
+                        login_url=login_url,
+                        credentials=creds_dict,
+                        method=login_method or "POST",
+                        auth_type=auth_type or "basic",
+                        base_headers=headers,
+                        verbose=verbose
+                    )
+                    if c is not None:
+                        final_cookies.update(c)
+                    if h is not None:
+                        final_headers.update(h)
+                except Exception as e:
+                    raise ValueError(f"login failed: {e}")
+
+            # Handle multi-credentials
+            if multi_creds_list:
+                for i, creds_dict in enumerate(multi_creds_list):
+                    if verbose:
+                        print("[*] Attempting alternate login", file=sys.stderr)
+                    c, h = _perform_login(
+                        login_url=login_url,
+                        credentials=creds_dict,
+                        method=login_method or "POST",
+                        auth_type=auth_type or "basic",
+                        base_headers=headers,
+                        verbose=verbose
+                    )
+                    if c is not None and h is not None:
+                        if i == 0 and not credentials:
+                            # Use first one as primary if no single credentials provided
+                            final_cookies.update(c)
+                            final_headers.update(h)
+                        elif i == 1 or (i == 0 and credentials):
+                            # Use as alternate context
+                            final_alt_cookies.update(c)
+                            final_alt_headers.update(h)
+                        # Note: currently idor_specialist only supports one alternate context
+                        # for replay.
+
+        rc = RequestConfig(
+            target_url=target_url,
+            http_method=http_method,
+            cookies=final_cookies or None,
+            headers=final_headers or None,
+            alt_cookies=final_alt_cookies or None,
+            alt_headers=final_alt_headers or None,
+            request_type=request_type or "query",
+            auth_type=auth_type or "basic",
+        )
         # Param discovery (cheap: URL query + common ID keys)
         if not parameters or test_type == "param_discovery":
-            discovered = _idor_parameter_discovery(rc, parameters)
+            if verbose:
+                print(f"[*] Parameter discovery", file=sys.stderr)
+            discovered = _idor_parameter_discovery(rc, parameters, test_type=test_type)
         else:
             discovered = [p.strip() for p in parameters.split(",") if p.strip()]
         results["parameters_discovered"] = discovered
 
-        # Primary: IDOR-Forge (when available)
-        forge_findings: List[Dict[str, Any]] = []
-        if "idor-forge" in tools_setup["tools"] and test_type in ["idor", "comprehensive", "param_discovery", "authz_replay"]:
-            ff, stdout_b64, stderr_b64 = _run_idor_forge(
-                rc,
-                tools_setup["tools"]["idor-forge"],
-                scan_all_params=(not parameters),
-                focus_params=discovered,
-                sensitive_keywords=sk,
-                num_range=num_range,
-            )
-            results["evidence"]["idor_forge_stdout_b64"] = stdout_b64
-            results["evidence"]["idor_forge_stderr_b64"] = stderr_b64
-            forge_findings = ff or []
+        if verbose:
+            print(f"[*] IDOR testing for parameters {discovered}", file=sys.stderr)
 
-            # Normalize + add
-            for f in forge_findings:
-                f.setdefault("tool", "idor-forge")
-                f.setdefault("vulnerable", bool(f.get("vulnerable", False)))
-                f.setdefault("url", target_url)
-                f.setdefault("method", rc.http_method)
-                results["findings"].append(f)
+        # Primary engine: Python internal IDOR scan
+        want_replay = test_type in ["authz_replay", "comprehensive"] and bool(rc.alt_cookies or rc.alt_headers)
 
-        # Fallback: Python heuristic scan (always runs if:
-        #  - forge missing OR forge returned no findings OR test_type requests replay)
-        want_replay = test_type in ["authz_replay", "comprehensive"] and (rc.alt_cookies or rc.alt_headers)
-        if (not forge_findings) or want_replay or ("idor-forge" not in tools_setup["tools"]):
-            py_findings = _python_idor_fallback(
-                rc,
-                focus_params=discovered,
-                sensitive_keywords=sk,
-                num_range=num_range,
-                do_authz_replay=want_replay,
-            )
-            results["findings"].extend(py_findings)
-            results["evidence"]["fallback_notes"].append(
-                "python_fallback_ran=true"
-            )
+        parsed_test_values = None
+        if test_values:
+            try:
+                parsed_test_values = json.loads(test_values)
+            except:
+                pass
+
+        if verbose:
+            print(f"[*] Running IDOR scan for {discovered}", file=sys.stderr)
+
+        findings = _python_idor_engine(
+            rc,
+            focus_params=discovered,
+            num_range=num_range,
+            do_authz_replay=want_replay,
+            test_values=parsed_test_values,
+            evasion=evasion,
+            verbose=verbose
+        )
+        results["findings"].extend(findings)
 
         vulns = [x for x in results["findings"] if x.get("vulnerable", False)]
         results["vulnerabilities"] = vulns
@@ -295,100 +326,121 @@ def idor_specialist(
             "parameters_discovered": len(results.get("parameters_discovered", [])),
             "findings": len(results.get("findings", [])),
             "vulnerabilities": len(results.get("vulnerabilities", [])),
-            "tools_available": len(results.get("tools", {}).get("tools", [])),
-            "tools_failed": len(results.get("tools", {}).get("failed", [])),
         }
+
+        if verbose:
+            print(f"[*] IDOR findings: {results['counts']['findings']}", file=sys.stderr)
 
     except Exception as e:
         results["errors"].append(str(e))
+        if verbose:
+            print(f"[-] Error during IDOR scan: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
     return json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 # ----------------------------
-# Tool setup / discovery
+# Login / Auth Helpers
 # ----------------------------
 
-def _setup_idor_tools() -> Dict[str, Any]:
+def _perform_login(
+        login_url: str,
+        credentials: Dict[str, Any],
+        method: str = "POST",
+        auth_type: str = "basic",
+        base_headers: Optional[Dict[str, str]] = None,
+        timeout: int = 15,
+        verbose: bool = False
+) -> Tuple[Optional[Dict[str, str]], Optional[Dict[str, str]]]:
     """
-    Setup IDOR tooling.
-
-    We treat IDOR-Forge as "available" if we can obtain its repo and locate IDOR-Forge.py.
-    We install deps via requirements.txt into the current environment (pip3).
+    Perform a login request to get session cookies or tokens.
+    Returns (cookies, headers).
     """
-    tools_status = {"tools": {}, "failed": []}
+    if verbose:
+        print(f"[*] Attempting login at {login_url} ({auth_type})", file=sys.stderr)
 
-    # 1. Check if idor-forge is in PATH
-    forge_path = shutil.which("idor-forge")
-    if forge_path:
-        tools_status["tools"]["idor-forge"] = [forge_path]
-        return tools_status
-
-    # 2. Attempt to fetch IDOR-Forge into a stable local path
-    repo_dir = IDOR_FORGE_REPO_DIR
-    script_path = os.path.join(repo_dir, "IDOR-Forge.py")
-    reqs_path = os.path.join(repo_dir, "requirements.txt")
-
-    if shutil.which("python3") is None:
-        tools_status["failed"].extend(["idor-forge", "python3"])
-        return tools_status
-
+    headers = dict(base_headers or {})
     try:
-        for cmd in ["git", "pip3"]:
-            if shutil.which(cmd) is None:
-                tools_status["failed"].append(cmd)
-        if tools_status["failed"]:
-            tools_status["failed"].append("idor-forge")
-            return tools_status
+        req_kwargs = {
+            "method": method.upper() if method else "POST",
+            "url": login_url,
+            "headers": headers,
+            "timeout": timeout,
+            "verify": False,
+            "allow_redirects": True
+        }
 
-        if not os.path.isdir(repo_dir) or not os.path.isfile(script_path):
-            subprocess.run(
-                ["git", "clone", "--depth", "1", "https://github.com/errorfiathck/IDOR-Forge.git", repo_dir],
-                stdin=DEVNULL,
-                capture_output=True,
-                check=True,
-                timeout=120,
-            )
-
-        if os.path.isfile(script_path):
-            # Best-effort deps install
-            if os.path.isfile(reqs_path):
-                subprocess.run(
-                    ["pip3", "install", "-r", reqs_path],
-                    stdin=DEVNULL,
-                    capture_output=True,
-                    check=True,
-                    timeout=180,
-                )
-            tools_status["tools"]["idor-forge"] = ["python3", script_path]
+        if auth_type == "oauth" or auth_type == "jwt":
+            req_kwargs["json"] = credentials
         else:
-            tools_status["failed"].append("idor-forge")
-    except Exception:
-        tools_status["failed"].append("idor-forge")
+            req_kwargs["data"] = credentials
 
-    return tools_status
+        resp = requests.request(**req_kwargs)
+
+        if resp.status_code in (200, 302):
+            new_cookies = resp.cookies.get_dict()
+            new_headers = headers.copy()
+
+            try:
+                data = resp.json()
+                if auth_type == "jwt" and "token" in data:
+                    new_headers["Authorization"] = f"Bearer {data['token']}"
+                elif auth_type == "oauth" and "access_token" in data:
+                    new_headers["Authorization"] = f"Bearer {data['access_token']}"
+            except Exception:
+                pass
+
+            if verbose:
+                print(f"[+] Login successful at {login_url}", file=sys.stderr)
+            return new_cookies, new_headers
+        else:
+            if verbose:
+                print(f"[-] Login failed at {login_url} (status={resp.status_code})", file=sys.stderr)
+    except Exception as e:
+        if verbose:
+            print(f"[-] Error during login at {login_url}: {e}", file=sys.stderr)
+
+    return None, None
 
 
-def _idor_parameter_discovery(request_config: RequestConfig, provided_params: Optional[str]) -> List[str]:
-    discovered: set[str] = set()
+def _idor_parameter_discovery(
+        request_config: RequestConfig,
+        provided_params: Optional[str],
+        test_type: str = "comprehensive",
+) -> List[str]:
+    # Extract query params from URL
+    parsed = urlparse(request_config.target_url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    url_params = list(qs.keys())
 
-    # Provided explicit list
-    if provided_params:
-        for p in str(provided_params).split(","):
-            p = p.strip()
-            if p:
-                discovered.add(p)
+    # Path IDs are also part of the URL
+    path_ids = _extract_path_ids(parsed.path)
+    url_path_params = [f"(path_id_at_{idx})" for idx, _ in path_ids]
 
-    # From URL query
-    try:
-        parsed = urlparse(request_config.target_url)
-        if parsed.query:
-            qs = parse_qs(parsed.query)
-            for k in qs.keys():
-                if k:
-                    discovered.add(k)
-    except Exception:
-        pass
+    all_url_params = set(url_params + url_path_params)
+
+    if test_type not in ["param_discovery", "comprehensive"]:
+        if all_url_params:
+            # Prefer likely ID keys first (stable ordering)
+            ordered = sorted(all_url_params, key=lambda x: (0 if x.lower() in _COMMON_ID_KEYS else 1, x.lower()))
+            return ordered
+
+    # Advanced discovery
+    discovered = set(advanced_parameter_discovery(
+        request_config=apc_request_config(
+            target_url=request_config.target_url,
+            http_method=request_config.http_method,
+            cookies=request_config.cookies,
+            headers=request_config.headers,
+        ),
+        provided_params=provided_params,
+        tools=["arjun", "paramspider"],
+    ))
+
+    # Add path IDs discovered from URL
+    for p in url_path_params:
+        discovered.add(p)
 
     # If nothing, seed with common ID-ish keys (agent can prune later)
     if not discovered:
@@ -399,184 +451,50 @@ def _idor_parameter_discovery(request_config: RequestConfig, provided_params: Op
     return ordered
 
 
-# ----------------------------
-# Primary engine: IDOR-Forge
-# ----------------------------
-
-def _run_idor_forge(
-        request_config: RequestConfig,
-        tool_cmd: List[str],
-        scan_all_params: bool,
-        focus_params: List[str],
-        sensitive_keywords: List[str],
-        num_range: Optional[str],
-) -> Tuple[List[Dict[str, Any]], str, str]:
+def _signals_are_close(s1: Dict[str, Any], s2: Dict[str, Any]) -> bool:
     """
-    Run IDOR-Forge and parse its JSON output if possible.
-
-    IDOR-Forge supports:
-    - -u/--url, -p/--parameters, -m/--method, -d/--delay, -o/--output, --output-format json
-    - --headers JSON, --test-values JSON, --sensitive-keywords JSON, --num-range start-end
-    - plus newer flags in repo code such as --request-type, --auth-type, etc. (we keep it minimal/stable)
+    Check if two signals are 'close' enough to be combined.
     """
-    if not tool_cmd:
-        return [], "", _b64("idor-forge tool command not provided")
+    # Numerical signals: similarity, struct_similarity, content_similarity
+    # Threshold: 0.1
+    for k in ["similarity", "struct_similarity", "content_similarity"]:
+        v1 = s1.get(k)
+        v2 = s2.get(k)
+        if v1 is not None and v2 is not None:
+            if abs(v1 - v2) > 0.1:
+                return False
 
-    out_json_path = None
-    try:
-        with tempfile.NamedTemporaryFile(prefix="idor_forge_", suffix=".json", delete=False) as f:
-            out_json_path = f.name
+    # Length signal
+    # If mutated_len differs significantly, they might be different objects
+    l1 = s1.get("mutated_len")
+    l2 = s2.get("mutated_len")
+    if l1 is not None and l2 is not None:
+        divisor = min(l1, l2)
+        if divisor == 0:
+            if max(l1, l2) > 0:
+                return False
+        elif max(l1, l2) / divisor > 1.2:  # More than 20% difference
+            return False
 
-        # Build headers JSON for forge
-        hdrs = request_config.headers or {}
-        if request_config.cookies:
-            # Some tools accept cookies in headers; forge primarily uses requests session,
-            # but the CLI shows headers support only. Encode cookies into header for best compatibility.
-            cookie_header = "; ".join([f"{k}={v}" for k, v in request_config.cookies.items()])
-            if cookie_header:
-                hdrs = dict(hdrs)
-                hdrs.setdefault("Cookie", cookie_header)
-
-        cmd = tool_cmd + [
-            "-u",
-            request_config.target_url,
-            "-m",
-            request_config.http_method.upper(),
-            "-o",
-            out_json_path,
-            "--output-format",
-            "json",
-            "-d",
-            "0.1",
-            "--headers",
-            json.dumps(hdrs or {}),
-            "--sensitive-keywords",
-            json.dumps(sensitive_keywords or []),
-            "--test-values",
-            json.dumps(_default_test_values_from_url(request_config.target_url)),
-        ]
-
-        if scan_all_params:
-            cmd.append("-p")
-
-        if num_range:
-            cmd.extend(["--num-range", str(num_range)])
-
-        # Run
-        p = subprocess.run(cmd, capture_output=True, text=True, stdin=DEVNULL, timeout=420)
-        stdout = _coerce_str(p.stdout)
-        stderr = _coerce_str(p.stderr)
-
-        # Prefer file output
-        findings = _parse_idor_forge_json_file(out_json_path, focus_params=focus_params)
-
-        # If empty, try to salvage JSON-looking stdout
-        if not findings and stdout:
-            findings = _parse_idor_forge_json_text(stdout, focus_params=focus_params)
-
-        # Normalize shape
-        normed = []
-        for f in findings:
-            normed.append(_normalize_idor_finding(f, tool="idor-forge"))
-
-        return normed, _b64(stdout), _b64(stderr)
-
-    except subprocess.TimeoutExpired as e:
-        return [], _b64(_coerce_str(getattr(e, "stdout", ""))), _b64(_coerce_str(getattr(e, "stderr", "")))
-    except Exception as e:
-        return [], "", _b64(str(e))
-    finally:
-        if out_json_path and os.path.exists(out_json_path):
-            try:
-                os.unlink(out_json_path)
-            except Exception:
-                pass
+    return True
 
 
-def _parse_idor_forge_json_file(path: str, focus_params: List[str]) -> List[Dict[str, Any]]:
-    if not path or not os.path.isfile(path) or os.stat(path).st_size <= 0:
-        return []
-    try:
-        with open(path, "rb") as f:
-            data = json.loads(f.read())
-
-        # IDOR-Forge output schemas vary by version; tolerate a few shapes:
-        # - list of results
-        # - dict with "results"/"findings"
-        candidates: List[Dict[str, Any]] = []
-        if isinstance(data, list):
-            candidates = [x for x in data if isinstance(x, dict)]
-        elif isinstance(data, dict):
-            for k in ["results", "findings", "vulnerabilities", "issues", "data"]:
-                if k in data and isinstance(data[k], list):
-                    candidates = [x for x in data[k] if isinstance(x, dict)]
-                    break
-
-        # Focus filter (if entries include param)
-        if focus_params:
-            fp = set([p.lower() for p in focus_params if p])
-            filtered = []
-            for c in candidates:
-                param = str(c.get("parameter") or c.get("param") or "").strip()
-                if not param or param.lower() in fp:
-                    filtered.append(c)
-            return filtered
-
-        return candidates
-    except Exception:
-        return []
-
-
-def _parse_idor_forge_json_text(text: str, focus_params: List[str]) -> List[Dict[str, Any]]:
-    if not text:
-        return []
-    text = _RE_ANSI_ESCAPE.sub("", text)
-    m = _RE_JSON_OBJECT.search(text)
-    if not m:
-        return []
-    try:
-        data = json.loads(m.group(0))
-        if isinstance(data, list):
-            out = [x for x in data if isinstance(x, dict)]
-        elif isinstance(data, dict):
-            out = []
-            for k in ["results", "findings", "vulnerabilities", "issues", "data"]:
-                if k in data and isinstance(data[k], list):
-                    out = [x for x in data[k] if isinstance(x, dict)]
-                    break
-        else:
-            out = []
-        if focus_params:
-            fp = set([p.lower() for p in focus_params if p])
-            filtered = []
-            for c in out:
-                param = str(c.get("parameter") or c.get("param") or "").strip()
-                if not param or param.lower() in fp:
-                    filtered.append(c)
-            return filtered
-        return out
-    except Exception:
-        return []
-
-
-# ----------------------------
-# Fallback engine: Python heuristics
-# ----------------------------
-
-def _python_idor_fallback(
+def _python_idor_engine(
         request_config: RequestConfig,
         focus_params: List[str],
-        sensitive_keywords: List[str],
         num_range: Optional[str],
         do_authz_replay: bool,
+        test_values: Optional[List[Any]] = None,
+        evasion: bool = False,
+        verbose: bool = False
 ) -> List[Dict[str, Any]]:
     """
-    Simple, high-signal fallback:
+    Internal IDOR Engine:
     - Create an "authorized baseline" request (current cookies/headers) for the endpoint.
     - Mutate candidate identifiers in query/body/path and compare:
         - status change (e.g., 200 for other IDs)
         - similarity drop (indicates a different object)
-        - sensitive keywords presence
+        - JSON structure/content similarity
     - Optional authz replay: replay baseline + mutated as alt (low-priv/unauth) and see if alt matches authorized.
     """
     findings: List[Dict[str, Any]] = []
@@ -589,23 +507,38 @@ def _python_idor_fallback(
     qs = parse_qs(parsed.query, keep_blank_values=True)
     candidate_params = _pick_candidate_params(qs, focus_params)
 
-    path_id = _extract_trailing_numeric_path_id(parsed.path)
+    path_ids = _extract_path_ids(parsed.path)
+
+    # For JSON/GraphQL, we often want to strip the query string from the URL
+    base_url_for_body = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+    # Convert qs to a simple dict for JSON
+    qs_dict = {k: v[0] for k, v in qs.items()}
 
     # Build baseline authorized response
+    if verbose:
+        print(f"[*] Fetching baseline authorized response for {target}", file=sys.stderr)
+
+    if request_config.request_type in ["json", "graphql"]:
+        baseline_url = base_url_for_body
+        baseline_params = qs_dict
+    else:
+        baseline_url = target
+        baseline_params = None
+
     baseline = _send_request(
         request_config,
-        url=target,
+        url=baseline_url,
         method=method,
-        params=None,
+        params=baseline_params,
         data=None,
         use_alt=False,
+        evasion=evasion
     )
 
     if baseline is None:
         return [
             {
                 "vulnerable": False,
-                "tool": "python_fallback",
                 "finding_type": "baseline_failed",
                 "url": target,
                 "method": method,
@@ -618,23 +551,38 @@ def _python_idor_fallback(
     baseline_len = len(baseline_text)
     baseline_status = baseline.status_code
 
-    # Prepare mutation values
-    mutations = _build_id_mutations(qs, path_id=path_id, num_range=num_range)
+    # Prepare mutation values for query params
+    mutations = test_values if test_values else _build_id_mutations(qs, path_id=None, num_range=num_range)
+    if verbose:
+        print(f"[*] Testing mutations: {mutations}", file=sys.stderr)
 
     # 1) Param mutations
     for p in candidate_params:
         orig_val = (qs.get(p, [""])[0] if p in qs else "")
+        if verbose:
+            print(f"[*] Testing mutations for parameter: {p}", file=sys.stderr)
+
         for mv in mutations:
             if mv is None:
                 continue
-            mutated_url = _add_or_replace_query_param(target, p, str(mv))
+
+            if request_config.request_type in ["json", "graphql"]:
+                mutated_url = base_url_for_body
+                mutated_params = qs_dict.copy()
+                mutated_params[p] = mv
+                resp_params, resp_data = mutated_params, None
+            else:
+                mutated_url = _add_or_replace_query_param(target, p, str(mv))
+                resp_params, resp_data = None, None
+
             resp = _send_request(
                 request_config,
                 url=mutated_url,
                 method=method,
-                params=None,
-                data=None,
+                params=resp_params,
+                data=resp_data,
                 use_alt=False,
+                evasion=evasion
             )
             if resp is None:
                 continue
@@ -651,7 +599,7 @@ def _python_idor_fallback(
                 baseline_hash=baseline_hash,
                 baseline_text=baseline_text,
                 resp=resp,
-                sensitive_keywords=sensitive_keywords,
+                verbose=verbose,
             )
             if f:
                 findings.append(f)
@@ -662,9 +610,10 @@ def _python_idor_fallback(
                     request_config,
                     url=mutated_url,
                     method=method,
-                    params=None,
-                    data=None,
+                    params=resp_params,
+                    data=resp_data,
                     use_alt=True,
+                    evasion=evasion
                 )
                 replay_f = _evaluate_authz_replay(
                     url=mutated_url,
@@ -677,20 +626,39 @@ def _python_idor_fallback(
                 if replay_f:
                     findings.append(replay_f)
 
-    # 2) Path ID mutation (e.g., /users/123)
-    if path_id is not None:
+    # 2) Path ID mutations
+    for idx, pid_val in path_ids:
+        path_key = f"(path_id_at_{idx})"
+        if focus_params and path_key not in focus_params:
+            continue
+        if verbose:
+            print(f"[*] Testing mutations for path index: {idx}", file=sys.stderr)
+
+        # Prepare mutation values specific to this path ID
+        mutations = _build_id_mutations(qs={}, path_id=pid_val, num_range=num_range)
         for mv in mutations:
-            if mv is None:
+            if mv is None or mv == pid_val:
                 continue
-            mutated_path = _replace_trailing_numeric_path_id(parsed.path, str(mv))
+            mutated_path = _replace_path_id(parsed.path, idx, str(mv))
             mutated_url = urlunparse((parsed.scheme, parsed.netloc, mutated_path, parsed.params, parsed.query, parsed.fragment))
+
+            if request_config.request_type in ["json", "graphql"]:
+                # If we are in JSON mode, we use base_url (no query string) 
+                # but we still want the MUTATED path.
+                mutated_url_no_qs = urlunparse((parsed.scheme, parsed.netloc, mutated_path, '', '', ''))
+                mutated_url = mutated_url_no_qs
+                resp_params, resp_data = qs_dict, None
+            else:
+                resp_params, resp_data = None, None
+
             resp = _send_request(
                 request_config,
                 url=mutated_url,
                 method=method,
-                params=None,
-                data=None,
+                params=resp_params,
+                data=resp_data,
                 use_alt=False,
+                evasion=evasion
             )
             if resp is None:
                 continue
@@ -699,15 +667,15 @@ def _python_idor_fallback(
                 target_url=mutated_url,
                 method=method,
                 location="path",
-                key="(path_id)",
-                original=str(path_id),
+                key=f"(path_id_at_{idx})",
+                original=str(pid_val),
                 mutated=str(mv),
                 baseline_status=baseline_status,
                 baseline_len=baseline_len,
                 baseline_hash=baseline_hash,
                 baseline_text=baseline_text,
                 resp=resp,
-                sensitive_keywords=sensitive_keywords,
+                verbose=verbose,
             )
             if f:
                 findings.append(f)
@@ -717,14 +685,15 @@ def _python_idor_fallback(
                     request_config,
                     url=mutated_url,
                     method=method,
-                    params=None,
-                    data=None,
+                    params=resp_params,
+                    data=resp_data,
                     use_alt=True,
+                    evasion=evasion
                 )
                 replay_f = _evaluate_authz_replay(
                     url=mutated_url,
                     method=method,
-                    key="(path_id)",
+                    key=f"(path_id_at_{idx})",
                     location="path",
                     resp_auth=resp,
                     resp_alt=alt_resp,
@@ -732,21 +701,107 @@ def _python_idor_fallback(
                 if replay_f:
                     findings.append(replay_f)
 
-    # De-dupe (url+key+mutated+type)
-    dedup: List[Dict[str, Any]] = []
-    seen = set()
+    # Combine similar findings where original values are equal
+    combined: List[Dict[str, Any]] = []
+    groups: Dict[Tuple, List[Dict[str, Any]]] = {}
+
     for f in findings:
-        k = (
-            f.get("url"),
-            f.get("parameter"),
-            f.get("mutated_value"),
+        sig = f.get("signals", {})
+        # Grouping key: everything except url and mutated_value
+        # We also include some signals that MUST be identical
+        key = (
             f.get("finding_type"),
-            bool(f.get("vulnerable", False)),
+            f.get("method"),
+            f.get("parameter"),
+            f.get("param_location"),
+            f.get("original_value"),
+            bool(f.get("vulnerable")),
+            sig.get("mutated_status"),
+            sig.get("baseline_status"),
+            sig.get("auth_status"),
+            sig.get("alt_status"),
         )
-        if k not in seen:
-            dedup.append(f)
-            seen.add(k)
-    return dedup
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(f)
+
+    for group in groups.values():
+        if not group:
+            continue
+
+        while group:
+            base = group.pop(0)
+            base_mutated_values = [base.get("mutated_value")]
+
+            # Find others that are "close" to base
+            to_combine = []
+            remaining = []
+            for other in group:
+                if _signals_are_close(base.get("signals", {}), other.get("signals", {})):
+                    to_combine.append(other)
+                    base_mutated_values.append(other.get("mutated_value"))
+                else:
+                    remaining.append(other)
+
+            # Combine them
+            base["mutated_value"] = sorted(list(set(str(v) for v in base_mutated_values if v is not None)))
+
+            # If we combined multiple, we might want to adjust the evidence/URL
+            if len(base["mutated_value"]) > 1:
+                base["url"] = f"{base['url']} (and {len(base['mutated_value']) - 1} other variants)"
+                base["evidence"] = f"{base['evidence']} (+{len(base['mutated_value']) - 1} more matches)"
+
+            combined.append(base)
+            group = remaining
+
+    return combined
+
+
+def _compare_responses(baseline_text: str, test_text: str) -> Dict[str, float]:
+    """
+    Compare baseline and test responses for structure, content, and similarity.
+    """
+
+    def parse_json(text):
+        try:
+            return json.loads(text)
+        except:
+            return None
+
+    baseline_data = parse_json(baseline_text)
+    test_data = parse_json(test_text)
+
+    # Text similarity (SequenceMatcher)
+    text_sim = SequenceMatcher(None, baseline_text[:8000],
+                               test_text[:8000]).ratio() if baseline_text or test_text else 0.0
+
+    struct_sim = 0.0
+    content_sim = 0.0
+
+    if baseline_data and test_data:
+        if isinstance(baseline_data, dict) and isinstance(test_data, dict):
+            # Structure similarity
+            keys1 = set(baseline_data.keys())
+            keys2 = set(test_data.keys())
+            if keys1 | keys2:
+                struct_sim = len(keys1 & keys2) / len(keys1 | keys2)
+
+            # Content similarity
+            common_keys = keys1 & keys2
+            if common_keys:
+                matches = sum(1 for k in common_keys if baseline_data[k] == test_data[k])
+                content_sim = matches / len(common_keys)
+        elif isinstance(baseline_data, list) and isinstance(test_data, list):
+            # For lists, just do basic length comparison as a heuristic
+            if baseline_data or test_data:
+                struct_sim = min(len(baseline_data), len(test_data)) / max(len(baseline_data), len(test_data), 1)
+            content_sim = text_sim
+
+    return {
+        "text_similarity": text_sim,
+        "structure_similarity": struct_sim,
+        "content_similarity": content_sim
+    }
 
 
 def _send_request(
@@ -756,23 +811,44 @@ def _send_request(
         params: Optional[Dict[str, Any]],
         data: Optional[Dict[str, Any]],
         use_alt: bool,
+        evasion: bool = False
 ) -> Optional[requests.Response]:
     try:
-        headers = (request_config.alt_headers if use_alt else request_config.headers) or {}
+        headers = dict((request_config.alt_headers if use_alt else request_config.headers) or {})
         cookies = (request_config.alt_cookies if use_alt else request_config.cookies) or {}
 
-        # If caller passed params/data, honor; otherwise rely on URL encoding already done.
-        resp = requests.request(
-            method=method,
-            url=url,
-            params=params,
-            data=data,
-            headers=headers,
-            cookies=cookies,
-            timeout=request_config.timeout,
-            allow_redirects=True,
-            verify=False,
-        )
+        if evasion:
+            # Jitter and UA rotation
+            time.sleep(random.uniform(0.1, 0.5))
+            headers["User-Agent"] = random.choice([
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
+            ])
+
+        req_kwargs = {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "cookies": cookies,
+            "timeout": request_config.timeout,
+            "allow_redirects": True,
+            "verify": False,
+        }
+
+        # Request Type logic from IDORChecker.py
+        if request_config.request_type == "json":
+            req_kwargs["json"] = params or data or {}
+        elif request_config.request_type == "graphql":
+            p = params or data or {}
+            # Basic GraphQL wrapper for IDOR testing
+            req_kwargs["json"] = {"query": f"{{ resource(id: \"{p.get('id', '')}\") {{ data }} }}"}
+            req_kwargs["method"] = "POST"  # GraphQL is typically POST
+        else:
+            req_kwargs["params"] = params
+            req_kwargs["data"] = data
+
+        resp = requests.request(**req_kwargs)
         return resp
     except Exception:
         return None
@@ -790,31 +866,37 @@ def _evaluate_mutation(
         baseline_hash: str,
         baseline_text: str,
         resp: requests.Response,
-        sensitive_keywords: List[str],
+        verbose: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Heuristic signals:
     - status is 200 when baseline is 200, but content differs materially (potential other object)
     - baseline 403/401 but mutated is 200 (classic unauthorized access)
-    - sensitive keywords appear in mutated response (possible data exposure)
+    - JSON structure similarity high but content similarity low
     """
     text = resp.text or ""
     status = resp.status_code
     h = _hash_text(text)
     ln = len(text)
 
-    # Similarity (noise-tolerant)
-    sim = SequenceMatcher(None, baseline_text[:8000], text[:8000]).ratio() if baseline_text or text else 0.0
-
-    # keyword presence
-    lower = text.lower()
-    kw_hits = [k for k in sensitive_keywords if k and str(k).lower() in lower]
-    kw_hit = bool(kw_hits)
+    # Comparison signals
+    comp = _compare_responses(baseline_text, text)
+    sim = comp["text_similarity"]
+    struct_sim = comp["structure_similarity"]
+    content_sim = comp["content_similarity"]
 
     # Basic “changed object” heuristic: same success status but substantially different body
-    looks_like_other_object = (
-            status in (200, 201) and baseline_status in (200, 201) and h != baseline_hash and sim < 0.85 and (ln / max(baseline_len, 1) < 0.7 or ln / max(baseline_len, 1) > 1.3)
-    )
+    # If it's JSON, use struct/content sim
+    if struct_sim > 0 or content_sim > 0:
+        looks_like_other_object = (
+                status in (200, 201) and baseline_status in (200, 201)
+                and struct_sim > 0.8 and content_sim < 0.9 and h != baseline_hash
+        )
+    else:
+        looks_like_other_object = (
+                status in (200, 201) and baseline_status in (200, 201) and h != baseline_hash and sim < 0.85 and (
+                ln / max(baseline_len, 1) < 0.7 or ln / max(baseline_len, 1) > 1.3)
+        )
 
     # Access control break heuristic: baseline forbidden but mutated ok
     authz_break = baseline_status in (401, 403) and status in (200, 201)
@@ -824,7 +906,7 @@ def _evaluate_mutation(
         return None
 
     # Decide vulnerability vs candidate
-    vulnerable = bool(authz_break or looks_like_other_object or (kw_hit and status in (200, 201)))
+    vulnerable = bool(authz_break or looks_like_other_object)
 
     if not vulnerable and status in (200, 201) and h != baseline_hash and sim < 0.92:
         finding_type = "idor_candidate"
@@ -832,8 +914,6 @@ def _evaluate_mutation(
         finding_type = "authz_bypass_candidate"
     elif looks_like_other_object:
         finding_type = "idor_likely"
-    elif kw_hit:
-        finding_type = "sensitive_data_signal"
     else:
         return None
 
@@ -841,14 +921,14 @@ def _evaluate_mutation(
         f"baseline_status={baseline_status}",
         f"mutated_status={status}",
         f"similarity={round(sim, 3)}",
-        f"len_ratio={round(ln / max(baseline_len, 1), 3)}",
     ]
-    if kw_hits:
-        evidence_bits.append(f"keywords={kw_hits[:5]}")
+    if struct_sim > 0:
+        evidence_bits.append(f"struct_sim={round(struct_sim, 3)}")
+    if content_sim > 0:
+        evidence_bits.append(f"content_sim={round(content_sim, 3)}")
 
     return {
         "vulnerable": vulnerable,
-        "tool": "python_fallback",
         "finding_type": finding_type,
         "url": target_url,
         "method": method,
@@ -860,9 +940,10 @@ def _evaluate_mutation(
             "baseline_status": baseline_status,
             "mutated_status": status,
             "similarity": sim,
+            "struct_similarity": struct_sim,
+            "content_similarity": content_sim,
             "baseline_len": baseline_len,
             "mutated_len": ln,
-            "keyword_hits": kw_hits[:10],
         },
         "evidence": "; ".join(evidence_bits),
     }
@@ -897,7 +978,6 @@ def _evaluate_authz_replay(
     if status_same and sim >= 0.95 and resp_alt.status_code in (200, 201):
         return {
             "vulnerable": True,
-            "tool": "python_fallback",
             "finding_type": "authz_replay_match",
             "url": url,
             "method": method,
@@ -915,7 +995,6 @@ def _evaluate_authz_replay(
     if resp_auth.status_code in (401, 403) and resp_alt.status_code in (200, 201):
         return {
             "vulnerable": False,
-            "tool": "python_fallback",
             "finding_type": "role_inversion_signal",
             "url": url,
             "method": method,
@@ -1041,41 +1120,33 @@ def _add_or_replace_query_param(url: str, key: str, value: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
-def _extract_trailing_numeric_path_id(path: str) -> Optional[int]:
+def _extract_path_ids(path: str) -> List[Tuple[int, int]]:
+    """
+    Extract all numeric segments from the path and their indices.
+    Returns list of (index, value).
+    """
     try:
-        parts = [p for p in (path or "").split("/") if p]
-        if not parts:
-            return None
-        last = parts[-1]
-        if last.isdigit():
-            return int(last)
-        return None
+        parts = (path or "").split("/")
+        results = []
+        for i, p in enumerate(parts):
+            if p.isdigit():
+                results.append((i, int(p)))
+        return results
     except Exception:
-        return None
+        return []
 
 
-def _replace_trailing_numeric_path_id(path: str, new_value: str) -> str:
+def _replace_path_id(path: str, index: int, new_value: str) -> str:
     parts = (path or "").split("/")
-    if not parts:
-        return path
-    # Replace last non-empty segment if numeric
-    idx = None
-    for i in range(len(parts) - 1, -1, -1):
-        if parts[i]:
-            idx = i
-            break
-    if idx is None:
-        return path
-    if parts[idx].isdigit():
-        parts[idx] = str(new_value)
+    if 0 <= index < len(parts):
+        parts[index] = str(new_value)
     return "/".join(parts)
 
 
 def _pick_candidate_params(qs: Dict[str, List[str]], focus_params: List[str]) -> List[str]:
-    # if focus provided, use those first
-    fp = [p for p in (focus_params or []) if p]
-    if fp:
-        return fp
+    # if focus provided, use those first (filtered for query)
+    if focus_params is not None:
+        return [p for p in focus_params if p and not p.startswith("(path_id_at_")]
 
     # else pick keys that look ID-ish
     keys = list(qs.keys())
@@ -1088,7 +1159,7 @@ def _pick_candidate_params(qs: Dict[str, List[str]], focus_params: List[str]) ->
 
 def _default_test_values_from_url(url: str) -> List[Any]:
     """
-    Seed IDOR-Forge with meaningful values:
+    Seed engine with meaningful values:
     - If URL already contains numeric ids, include +/- 1
     - Otherwise use a small safe set
     """
@@ -1105,21 +1176,41 @@ def _default_test_values_from_url(url: str) -> List[Any]:
                 for d in [-2, -1, 1, 2, 10]:
                     if n + d >= 0:
                         vals.add(n + d)
+
+        # From path
+        path_ids = _extract_path_ids(parsed.path)
+        for _, n in path_ids:
+            for d in [-2, -1, 1, 2, 10]:
+                if n + d >= 0:
+                    vals.add(n + d)
     except Exception:
         pass
     return sorted(list(vals))[:50]
 
 
-def _build_id_mutations(qs: Dict[str, List[str]], path_id: Optional[int], num_range: Optional[str]) -> List[Any]:
+def _build_id_mutations(qs: Dict[str, List[str]], path_id: Optional[int] = None, num_range: Optional[str] = None) -> \
+        List[Any]:
     muts: set[Any] = set()
 
-    # Baseline-derived
+    all_discovered_ids = []
+    if path_id is not None:
+        all_discovered_ids.append(path_id)
     for _, v in (qs or {}).items():
         if v and str(v[0]).isdigit():
-            n = int(v[0])
-            muts.update([n - 2, n - 1, n + 1, n + 2, n + 10, n + 100])
-    if path_id is not None:
-        muts.update([path_id - 2, path_id - 1, path_id + 1, path_id + 2, path_id + 10, path_id + 100])
+            all_discovered_ids.append(int(v[0]))
+
+    # Baseline-derived
+    for n in all_discovered_ids:
+        muts.update([n - 2, n - 1, n + 1, n + 2, n + 10, n + 100])
+
+        # Dynamic range based on value magnitude
+        if n > 100:
+            # +/- 10%
+            delta = max(1, n // 10)
+            muts.update([n - delta, n + delta])
+            # Some random-ish offsets if it's large
+            if n > 1000:
+                muts.update([n - 50, n + 50, n - 500, n + 500])
 
     # Range-derived
     if num_range and "-" in str(num_range):
@@ -1142,30 +1233,6 @@ def _build_id_mutations(qs: Dict[str, List[str]], path_id: Optional[int], num_ra
     return out[:60]
 
 
-def _normalize_idor_finding(f: Dict[str, Any], tool: str) -> Dict[str, Any]:
-    """
-    Normalize external-tool findings into a stable schema.
-    """
-    if not isinstance(f, dict):
-        return {"tool": tool, "vulnerable": False, "raw_b64": _b64(f)}
-
-    param = f.get("parameter") or f.get("param") or f.get("key") or ""
-    vul = bool(f.get("vulnerable", False))
-
-    return {
-        "vulnerable": vul,
-        "tool": tool,
-        "finding_type": f.get("finding_type") or f.get("type") or ("idor_likely" if vul else "scan_result"),
-        "url": f.get("url") or f.get("target") or "",
-        "method": f.get("method") or "",
-        "parameter": str(param) if param is not None else "",
-        "param_location": f.get("param_location") or f.get("location") or "",
-        "original_value": f.get("original_value") or "",
-        "mutated_value": f.get("mutated_value") or "",
-        "signals": f.get("signals") if isinstance(f.get("signals"), dict) else {},
-        "evidence": f.get("evidence") or f.get("description") or "",
-        "raw_b64": _b64(json.dumps(f, ensure_ascii=False)),
-    }
 
 
 # ----------------------------
@@ -1183,8 +1250,18 @@ def main() -> int:
     parser.add_argument("--cookie", dest="cookies", action="append", default=None, help="Cookie 'name=value' (authn must be repeatable)")
     parser.add_argument("--alt-header", dest="alt_headers", action="append", default=None, help="Alt header 'Name: value' (authn must be repeatable)")
     parser.add_argument("--alt-cookie", dest="alt_cookies", action="append", default=None, help="Alt cookie 'name=value' (authn must be repeatable)")
-    parser.add_argument("--sensitive-keywords", default=None, help='JSON list string, e.g. \'["password","email"]\'')
+    parser.add_argument("--test-values", default=None, help='Custom test values in JSON format')
+    parser.add_argument("--login-url", default=None, help="URL for login page")
+    parser.add_argument("--credentials", default=None,
+                        help='Login credentials JSON string, e.g. \"{\\"username\\":\\"admin\\",\\"password\\":\\"password\\"}\"')
+    parser.add_argument("--login-method", default=None, help="HTTP method for login")
     parser.add_argument("--num-range", default=None, help='Numeric range "start-end", e.g. "1-1000"')
+    parser.add_argument("--multi-credentials", default=None, help="JSON list of multiple credentials")
+    parser.add_argument("--evasion", action="store_true", help="Enable evasion techniques")
+    parser.add_argument("--request-type", choices=["query", "json", "graphql"], default=None,
+                        help="Request type")
+    parser.add_argument("--auth-type", choices=["basic", "oauth", "jwt"], default=None,
+                        help="Authentication type")
 
     args = parser.parse_args()
 
@@ -1229,8 +1306,15 @@ def main() -> int:
             cookies=cookies,
             alt_headers=alt_headers,
             alt_cookies=alt_cookies,
-            sensitive_keywords=args.sensitive_keywords,
+            test_values=args.test_values,
+            login_url=args.login_url,
+            credentials=args.credentials,
+            login_method=args.login_method,
             num_range=args.num_range,
+            multi_credentials=args.multi_credentials,
+            evasion=args.evasion,
+            request_type=args.request_type,
+            auth_type=args.auth_type,
         )
     )
     return 0

@@ -86,11 +86,12 @@ cyber_tools:
     preference: preferred
     caps: [file_inclusion]
     canary: "lfimap --help"
-  idor-forge:
-    description: "Detection and exploitation of Insecure Direct Object Reference (IDOR) vulnerabilities."
-    preference: preferred
-    caps: [idor]
-    canary: "idor-forge --help"
+#  idor-forge:
+#  idor-forge also makes SQL, XSS and XML injections without options. It requires stdin input with no options otherwise.
+#    description: "Detection and exploitation of Insecure Direct Object Reference (IDOR) vulnerabilities."
+#    preference: preferred
+#    caps: [idor]
+#    canary: "idor-forge --help"
 
   # ProjectDiscovery ecosystem
   nuclei:
