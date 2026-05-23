@@ -667,7 +667,6 @@ The unified structure organizes all artifacts under operation-specific directori
 - `--mcp-enabled`: Enable MCP tools
 - `--mcp-conns`: Provide JSON of MCP server, the same `mcp.connections` block present in the configuration file 
 - `--bug-bounty-header NAME=VALUE`: Add an HTTP marker header for authorized bug bounty traffic (repeatable)
-- `--bug-bounty-headers-json '{...}'`: Add marker headers from a JSON object
 
 ### Bug Bounty Traffic Markers
 
