@@ -1,5 +1,7 @@
 # Cyber-AutoAgent-ng Changelog
 
+- Add bug bounty header markers. (Fixes #63)
+- Add idor_specialist tool. (Fixes #22)
 - Publish tools image to `public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest`. (Fixes #20)
 - Only pass temperature if the model supports it.
 - Refactor output of the following tools to avoid agent misdirection. Fixes #105.
