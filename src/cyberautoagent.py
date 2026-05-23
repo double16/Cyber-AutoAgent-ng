@@ -878,7 +878,7 @@ def main():
                             else:
                                 break
 
-                        current_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
+                        current_message += f"**MANDATORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
                     else:
                         active_plan = get_memory_client(silent=True).get_active_plan()
                         if active_plan and active_plan.assessment_complete:
