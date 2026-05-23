@@ -275,6 +275,9 @@ export class DirectDockerService extends EventEmitter {
       if (config.modelId) {
         env.push(`CYBER_AGENT_LLM_MODEL=${config.modelId}`);
       }
+      if (config.bugBountyHeaders && Object.keys(config.bugBountyHeaders).length > 0) {
+        env.push(`CYBER_BUG_BOUNTY_HEADERS=${JSON.stringify(config.bugBountyHeaders)}`);
+      }
       if (config.rateLimitTokensPerMinute) {
         env.push(`CYBER_RATE_LIMIT_TOKENS_PER_MIN=${config.rateLimitTokensPerMinute}`);
       }

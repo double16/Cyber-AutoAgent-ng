@@ -194,6 +194,19 @@ cyber-react \
 | `--deployment-mode`    | Auto      | local-cli, single-container, full-stack |
 | `--mcp-enabled`        | `false`   | Enable MCP Tools                        |
 | `--mcp-conns` '[...]'  | None      | Configure MCP Tools                     |
+| `--bug-bounty-header NAME=VALUE` | None | Add a marker header to authorized bug bounty traffic; repeat for multiple headers |
+
+### Bug Bounty Traffic Markers
+
+Some programs require marker headers on every request. Configure them once so the agent applies them to the shared browser context and includes them in prompts for HTTP/MCP/tool usage:
+
+```bash
+cyber-react \
+  --target "https://example.com" \
+  --objective "Authorized bug bounty testing" \
+  --bug-bounty-header X-HackerOne-Research=username \
+  --bug-bounty-header User-Agent=username@wearehackerone.com
+```
 
 ### Configuration Loading Priority
 

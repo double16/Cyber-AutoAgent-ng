@@ -738,6 +738,9 @@ export class PythonExecutionService extends EventEmitter {
         ...(config.memoryModel ? { MEM0_LLM_MODEL: config.memoryModel } : {}),
         // Model rate limits
         ...(config.rateLimitTokensPerMinute ? { CYBER_RATE_LIMIT_TOKENS_PER_MIN: String(config.rateLimitTokensPerMinute) } : {}),
+        ...(config.bugBountyHeaders && Object.keys(config.bugBountyHeaders).length > 0
+          ? { CYBER_BUG_BOUNTY_HEADERS: JSON.stringify(config.bugBountyHeaders) }
+          : {}),
         ...(config.rateLimitRequestsPerMinute ? { CYBER_RATE_LIMIT_REQ_PER_MIN: String(config.rateLimitRequestsPerMinute) } : {}),
         ...(config.rateLimitConcurrency ? { CYBER_RATE_LIMIT_MAX_CONCURRENT: String(config.rateLimitConcurrency) } : {}),
         // Context Management - conversation budget settings

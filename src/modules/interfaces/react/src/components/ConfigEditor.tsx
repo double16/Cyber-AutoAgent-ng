@@ -177,6 +177,10 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'maxThreads', label: 'Max Threads', type: 'number', section: 'Operations' },
   { key: 'dockerTimeout', label: 'Docker Timeout (s)', type: 'number', section: 'Operations' },
   { key: 'verbose', label: 'Verbose Output', type: 'boolean', section: 'Operations' },
+  {
+    key: 'bugBountyHeaders', label: 'Bug Bounty Headers (JSON)', type: 'text', section: 'Operations',
+    description: 'JSON map of authorized bug bounty marker headers.'
+  },
 
   // Context Management
   {
@@ -1142,6 +1146,22 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
       return;
     }
 
+    if (key === 'bugBountyHeaders') {
+      try {
+        const parsed = typeof value === 'string' && value.trim()
+          ? JSON.parse(value)
+          : {};
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Expected a JSON object');
+        }
+        updateConfig({ bugBountyHeaders: parsed });
+        setUnsavedChanges(true);
+      } catch (e: any) {
+        showMessage(`Invalid bug bounty headers JSON: ${e?.message || String(e)}`, 'error', 5000);
+      }
+      return;
+    }
+
     // Handle nested keys
     if (key.includes('.')) {
       const parts = key.split('.');
@@ -1213,6 +1233,8 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
       }
     } else if (field.type === 'number') {
       setTempValue(String(currentValue || 0));
+    } else if (field.key === 'bugBountyHeaders') {
+      setTempValue(currentValue ? JSON.stringify(currentValue) : '');
     } else {
       setTempValue(String(currentValue || ''));
     }
@@ -1239,6 +1261,12 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         const status = mcpTestStatus[selectedMcpIndex];
         return status ? `Press Enter to test — ${status}` : 'Press Enter to test';
       }
+    }
+
+    if (key === 'bugBountyHeaders') {
+      return config.bugBountyHeaders && Object.keys(config.bugBountyHeaders).length > 0
+        ? JSON.stringify(config.bugBountyHeaders)
+        : '';
     }
 
     // Special handling for model pricing info
