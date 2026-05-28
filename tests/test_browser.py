@@ -1,5 +1,8 @@
 import pytest
 import os
+import http.server
+import threading
+from functools import partial
 from modules.tools.browser import (
     initialize_browser,
     close_browser,
@@ -13,6 +16,31 @@ from modules.tools.browser import (
 
 
 @pytest.fixture(scope="module")
+def server_url():
+    directory = os.path.join(os.path.dirname(__file__), "test_browser_fixtures")
+
+    class CookieHandler(http.server.SimpleHTTPRequestHandler):
+        def end_headers(self):
+            self.send_header("Set-Cookie", "test_cookie=test_value; Path=/")
+            super().end_headers()
+
+    handler = partial(CookieHandler, directory=directory)
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_port
+    url = f"http://127.0.0.1:{port}"
+
+    thread = threading.Thread(target=httpd.serve_forever)
+    thread.daemon = True
+    thread.start()
+
+    yield url
+
+    httpd.shutdown()
+    httpd.server_close()
+    thread.join()
+
+
+@pytest.fixture(scope="module")
 def artifacts_dir(tmp_path_factory):
     return str(tmp_path_factory.mktemp("browser_artifacts"))
 
@@ -20,7 +48,7 @@ def artifacts_dir(tmp_path_factory):
 @pytest.fixture(scope="module", autouse=True)
 def setup_browser(artifacts_dir):
     # Assume local ollama running model llama3.2:3b
-    initialize_browser(provider="ollama", model="qwen3:14b", artifacts_dir=artifacts_dir)
+    initialize_browser(provider="ollama", model="llama3.2:3b", artifacts_dir=artifacts_dir)
     yield
     close_browser()
 
@@ -28,10 +56,10 @@ def setup_browser(artifacts_dir):
 @pytest.mark.asyncio
 @pytest.mark.ollama
 @pytest.mark.browser
-async def test_browser_goto_url():
-    url = "https://ginandjuice.shop"
+async def test_browser_goto_url(server_url):
+    url = f"{server_url}/index.html"
     result = await browser_goto_url(url)
-    assert "https://ginandjuice.shop" in result or "ginandjuice.shop" in result
+    assert url in result
     # Check if some expected text from the site is present in the observation
     assert "shop" in result.lower()
 
@@ -39,8 +67,8 @@ async def test_browser_goto_url():
 @pytest.mark.asyncio
 @pytest.mark.ollama
 @pytest.mark.browser
-async def test_browser_get_page_html():
-    await browser_goto_url("https://ginandjuice.shop")
+async def test_browser_get_page_html(server_url):
+    await browser_goto_url(f"{server_url}/index.html")
     result = await browser_get_page_html()
     assert "HTML content saved to artifact" in result
     artifact_path = result.split(": ")[1]
@@ -55,8 +83,8 @@ async def test_browser_get_page_html():
 @pytest.mark.asyncio
 @pytest.mark.ollama
 @pytest.mark.browser
-async def test_browser_evaluate_js():
-    await browser_goto_url("https://ginandjuice.shop")
+async def test_browser_evaluate_js(server_url):
+    await browser_goto_url(f"{server_url}/index.html")
     title = await browser_evaluate_js("document.title")
     assert "gin" in title.lower() or "juice" in title.lower()
 
@@ -64,8 +92,8 @@ async def test_browser_evaluate_js():
 @pytest.mark.asyncio
 @pytest.mark.ollama
 @pytest.mark.browser
-async def test_browser_get_cookies():
-    await browser_goto_url("https://ginandjuice.shop")
+async def test_browser_get_cookies(server_url):
+    await browser_goto_url(f"{server_url}/index.html")
     cookies = await browser_get_cookies()
     assert isinstance(cookies, str)
     assert "name,value" in cookies.lower()
@@ -74,8 +102,8 @@ async def test_browser_get_cookies():
 @pytest.mark.asyncio
 @pytest.mark.ollama
 @pytest.mark.browser
-async def test_browser_observe_page():
-    await browser_goto_url("https://ginandjuice.shop")
+async def test_browser_observe_page(server_url):
+    await browser_goto_url(f"{server_url}/index.html")
     observation = await browser_observe_page("All links on the page")
     assert len(observation) > 0
     assert isinstance(observation, list)
@@ -85,8 +113,8 @@ async def test_browser_observe_page():
 @pytest.mark.asyncio
 @pytest.mark.ollama
 @pytest.mark.browser
-async def test_browser_perform_action():
-    await browser_goto_url("https://ginandjuice.shop")
+async def test_browser_perform_action(server_url):
+    await browser_goto_url(f"{server_url}/index.html")
     result = await browser_perform_action("scroll down")
     assert result is not None
     assert isinstance(result, str)
