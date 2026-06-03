@@ -33,7 +33,6 @@ RUN --mount=type=cache,target=/root/.cache \
 
 # Install chromium browser for playwright to use
 RUN --mount=type=cache,target=/root/.cache \
-    env PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="debian13-$(dpkg --print-architecture | sed 's/amd/x/')" \
     PLAYWRIGHT_BROWSERS_PATH=/home/cyberagent/.cache/ms-playwright \
     uv run --no-project playwright install chromium --with-deps && \
     chown -R cyberagent:cyberagent /home/cyberagent/.cache && \
@@ -65,6 +64,7 @@ ENV GOCACHE="/home/cyberagent/go/.cache"
 ENV PATH="/app/.venv/bin:/home/cyberagent/go/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH="/home/cyberagent/.cache/ms-playwright"
 ENV PYTHONPATH="/usr/lib/python3/dist-packages:/app/src"
+ENV CHROME_PATH="/usr/lib/chromium/chromium"
 
 # Persist important directories
 VOLUME ["/app/outputs", "/app/tools", "/app/external_plugins", "/app/home_plugins"]

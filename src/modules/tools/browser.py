@@ -18,6 +18,7 @@ from urllib.parse import urlparse, parse_qs
 from modules import __version__
 
 from playwright.async_api import (
+    async_playwright,
     Page,
     BrowserContext,
     Response,
@@ -29,9 +30,7 @@ from playwright.async_api import (
 )
 from pymitter import EventEmitter
 from six import StringIO
-from stagehand import StagehandConfig, Stagehand, StagehandPage
-from stagehand.context import StagehandContext
-from stagehand.llm.client import LLMClient
+from stagehand import AsyncStagehand, AsyncSession
 from strands import tool
 from tldextract import tldextract
 
@@ -107,7 +106,8 @@ class InteractionCollector:
         )
 
 
-class LLMClientJSONResponsePatch(LLMClient):
+# FIXME: Patching the LLM output is still necessary. The output is parsed in a nodejs self-executable archive in TypeScript.
+class LLMClientJSONResponsePatch:  # (LLMClient):
     """
     Response content is expected to be in JSON format when response_format is specified, but the model doesn't always
     do so.
@@ -117,7 +117,7 @@ class LLMClientJSONResponsePatch(LLMClient):
         re.DOTALL,
     )
 
-    def __init__(self, inner_llm: LLMClient):
+    def __init__(self, inner_llm):  # : LLMClient):
         self._inner_llm = inner_llm
 
     def __getattr__(self, name: str) -> Any:
@@ -292,8 +292,12 @@ class LLMClientJSONResponsePatch(LLMClient):
 class BrowserService(EventEmitter):
     _initialized = False
 
-    stagehand_config: StagehandConfig
-    stagehand: Stagehand
+    stagehand: AsyncStagehand
+    _session: Optional[AsyncSession] = None
+    _playwright: Any = None
+    _browser: Any = None
+    _page: Optional[Page] = None
+    _context: Optional[BrowserContext] = None
     default_timeout: float
     artifacts_dir: str
     provider: str
@@ -308,7 +312,6 @@ class BrowserService(EventEmitter):
     ):
         super().__init__()
         api_key = None
-        # Stagehand internally uses litellm. so we ensure the model name is as per what is required by litellm
         if provider == "bedrock":
             model = f"bedrock/{model}"
             if os.getenv("AWS_BEARER_TOKEN_BEDROCK"):
@@ -349,15 +352,6 @@ class BrowserService(EventEmitter):
             )
 
         self.default_timeout = float(os.getenv("BROWSER_DEFAULT_TIMEOUT", "120000"))
-        self.stagehand_config = StagehandConfig(
-            env="LOCAL",
-            modelName=model,
-            modelApiKey=api_key,
-            selfHeal=True,
-            localBrowserLaunchOptions=launch_options,
-            verbose=0,  # errors only. keep output minimal
-            use_rich_logging=False,  # ensure ansi does not pollute outputs
-        )
 
         # Dedicated event loop running in its own thread via ThreadPoolExecutor
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -382,9 +376,15 @@ class BrowserService(EventEmitter):
         self._loop_ready.wait()
 
         # Stagehand instance will be used exclusively from the dedicated event loop
-        self.stagehand = Stagehand(self.stagehand_config)
-        if self.stagehand.llm:
-            self.stagehand.llm = LLMClientJSONResponsePatch(self.stagehand.llm)
+        self.stagehand = AsyncStagehand(
+            server="local",
+            model_api_key=api_key,
+            local_headless=launch_options.get("headless", True),
+            local_chrome_path=launch_options.get("executable_path"),
+        )
+        # FIXME:
+        # if self.stagehand.llm:
+        #     self.stagehand.llm = LLMClientJSONResponsePatch(self.stagehand.llm)
 
     async def run_in_browser_loop(self, coro_factory):
         """Run a coroutine factory on the dedicated browser event loop.
@@ -481,20 +481,22 @@ class BrowserService(EventEmitter):
         return extract_domain(self.page.url)
 
     @property
-    def page(self) -> Union[Page, StagehandPage]:
+    def page(self) -> Page:
         """
         A property that retrieves the current page instance.
 
         This property provides access to the `page` attribute, which represents the
-        current page or stagehand page being managed.
+        current page being managed.
 
         Returns:
-            Union[Page, StagehandPage]: The current page or stagehand page instance.
+            Page: The current page instance.
         """
-        return self.stagehand.page
+        if self._page is not None:
+            return self._page
+        raise RuntimeError("Browser not initialized. Call ensure_init() first.")
 
     @property
-    def context(self) -> Union[BrowserContext, StagehandContext]:
+    def context(self) -> BrowserContext:
         """
         This property retrieves the context associated with the current stagehand instance.
 
@@ -503,10 +505,12 @@ class BrowserService(EventEmitter):
 
         Returns
         -------
-        Union[BrowserContext, StagehandContext]
+        BrowserContext
             The context managed by stagehand.
         """
-        return self.stagehand.context
+        if self._context is not None:
+            return self._context
+        raise RuntimeError("Browser not initialized. Call ensure_init() first.")
 
     async def ensure_init(self):
         """Lazy init stagehand when needed"""
@@ -516,7 +520,21 @@ class BrowserService(EventEmitter):
                 return
 
             logger.info("Initializing browser")
-            await self.stagehand.init()
+            self._session = await self.stagehand.sessions.start(
+                model_name=self.model,
+                self_heal=True,
+                browser={
+                    "type": "local",
+                    "launch_options": {},
+                },
+                timeout=self.default_timeout,
+            )
+            cdp_url = self._session.data.cdp_url
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
+            self._context = self._browser.contexts[0]
+            self._page = self._context.pages[0]
+
             self._initialized = True
 
             self.context.set_default_timeout(self.default_timeout)
@@ -573,7 +591,13 @@ class BrowserService(EventEmitter):
         async def _inner_close():
             if self._initialized:
                 try:
+                    if self._session:
+                        await self._session.end()
                     await self.stagehand.close()
+                    if self._browser:
+                        await self._browser.close()
+                    if self._playwright:
+                        await self._playwright.stop()
                 except Exception as exc:
                     logger.warning("Browser reset encountered error while closing: %s", exc)
                 self._initialized = False
@@ -1127,7 +1151,13 @@ def close_browser():
                             _BROWSER._active_ops_peak,
                             _BROWSER._active_ops_violations,
                         )
+                        if _BROWSER._session:
+                            await _BROWSER._session.end()
                         await _BROWSER.stagehand.close()
+                        if _BROWSER._browser:
+                            await _BROWSER._browser.close()
+                        if _BROWSER._playwright:
+                            await _BROWSER._playwright.stop()
 
                 asyncio.run_coroutine_threadsafe(_close_impl(), _BROWSER._loop).result(10)
             except Exception:
@@ -1395,16 +1425,17 @@ async def browser_goto_url(url: str):
                         only_domains=[browser.page_domain, extract_domain(url)]
                 ) as interaction_context:
                     async with browser.timeout():
-                        await browser.page.goto(url)
+                        await browser._session.navigate(url=url, page=browser.page)
 
                     async with browser.timeout():
                         observations = "\n".join(
                             map(
                                 lambda obs: obs.description,
-                                await browser.page.observe(
-                                    f"{url} was just opened. "
+                                await browser._session.observe(
+                                    instruction=f"{url} was just opened. "
                                     "give all important elements on the page that might be relevant to the next action. "
-                                    "observe the overall state of the page to understand the purpose of the page."
+                                    "observe the overall state of the page to understand the purpose of the page.",
+                                    page=browser.page
                                 ),
                             )
                         )
@@ -1625,7 +1656,7 @@ async def browser_perform_action(action: str):
                     only_domains=[browser.page_domain]
             ) as interaction_context:
                 async with browser.timeout():
-                    await browser.page.act(action)
+                    await browser._session.act(input=action, page=browser.page)
                 with contextlib.suppress(TimeoutError):
                     await browser.page.wait_for_load_state("networkidle", timeout=60000)
 
@@ -1634,10 +1665,11 @@ async def browser_perform_action(action: str):
                     observations = "\n".join(
                         map(
                             lambda obs: obs.description,
-                            await browser.page.observe(
-                                f"`{action}` action was just performed. "
+                            await browser._session.observe(
+                                instruction=f"`{action}` action was just performed. "
                                 "give all important elements on the page that might be relevant to the next action."
-                                "observe the overall state of the page to understand the purpose of the page."
+                                "observe the overall state of the page to understand the purpose of the page.",
+                                page=browser.page
                             ),
                         )
                     )
@@ -1682,7 +1714,7 @@ async def browser_observe_page(instruction: Optional[str] = None) -> list[str]:
     async with get_browser() as browser:
         async def _impl():
             async with browser.timeout():
-                observations = await browser.page.observe(instruction)
+                observations = await browser._session.observe(instruction=instruction, page=browser.page)
             return [observation.description for observation in observations]
 
         retval = await browser.run_in_browser_loop(_impl)

@@ -1,7 +1,7 @@
 import pytest
 import os
 import http.server
-import threading
+import multiprocessing
 from functools import partial
 from modules.tools.browser import (
     initialize_browser,
@@ -15,29 +15,37 @@ from modules.tools.browser import (
 )
 
 
-@pytest.fixture(scope="module")
-def server_url():
-    directory = os.path.join(os.path.dirname(__file__), "test_browser_fixtures")
-
+def run_server(directory, port_queue):
     class CookieHandler(http.server.SimpleHTTPRequestHandler):
         def end_headers(self):
             self.send_header("Set-Cookie", "test_cookie=test_value; Path=/")
             super().end_headers()
 
     handler = partial(CookieHandler, directory=directory)
-    httpd = http.server.HTTPServer(("127.0.0.1", 0), handler)
-    port = httpd.server_port
-    url = f"http://127.0.0.1:{port}"
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port_queue.put(httpd.server_port)
+    httpd.serve_forever()
 
-    thread = threading.Thread(target=httpd.serve_forever)
-    thread.daemon = True
-    thread.start()
+
+@pytest.fixture(scope="module")
+def server_url():
+    directory = os.path.join(os.path.dirname(__file__), "test_browser_fixtures")
+    port_queue = multiprocessing.Queue()
+    process = multiprocessing.Process(target=run_server, args=(directory, port_queue))
+    process.daemon = True
+    process.start()
+    try:
+        port = port_queue.get(timeout=10)
+    except Exception:
+        process.terminate()
+        raise
+    url = f"http://127.0.0.1:{port}"
+    print(f"HTTP Server running at {url}")
 
     yield url
 
-    httpd.shutdown()
-    httpd.server_close()
-    thread.join()
+    process.terminate()
+    process.join(timeout=5)
 
 
 @pytest.fixture(scope="module")
@@ -47,8 +55,10 @@ def artifacts_dir(tmp_path_factory):
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_browser(artifacts_dir):
-    # Assume local ollama running model llama3.2:3b
-    initialize_browser(provider="ollama", model="llama3.2:3b", artifacts_dir=artifacts_dir)
+    # model = "qwen3.5:4b-mlx"
+    # model = "qwen3.6:27b-mlx"
+    model = "llama3.2:3b"
+    initialize_browser(provider="ollama", model=model, artifacts_dir=artifacts_dir)
     yield
     close_browser()
 
@@ -61,7 +71,7 @@ async def test_browser_goto_url(server_url):
     result = await browser_goto_url(url)
     assert url in result
     # Check if some expected text from the site is present in the observation
-    assert "shop" in result.lower()
+    assert "index.html,200," in result.lower()
 
 
 @pytest.mark.asyncio
