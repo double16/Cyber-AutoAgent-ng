@@ -88,7 +88,7 @@ jobs:
 
       - name: Create Pull Request
         if: steps.update_snapshot.outputs.changes == 'true'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           base: develop
@@ -105,3 +105,5 @@ jobs:
           commit-message: "chore: update models.dev snapshot"
           author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
           signoff: false
+          # necessary to run workflows when changed from draft
+          draft: true
