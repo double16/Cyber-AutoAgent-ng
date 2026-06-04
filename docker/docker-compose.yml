@@ -385,10 +385,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 1250M
           cpus: '1.0'
         reservations:
-          memory: 384M
+          memory: 768M
           cpus: '0.1'
 
   langfuse-worker:
