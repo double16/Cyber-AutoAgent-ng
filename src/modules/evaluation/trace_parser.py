@@ -290,7 +290,7 @@ class TraceParser:
         Returns:
             List of observation objects
         """
-        observations = []
+        observations: List[Any] = []
 
         # Check if we have observation IDs to fetch
         if hasattr(trace, "observations") and trace.observations:
@@ -306,9 +306,9 @@ class TraceParser:
                 for obs_id in trace.observations:
                     try:
                         # Fetch observation from Langfuse API
-                        obs = self.langfuse.api.observations.get(obs_id)
-                        if obs:
-                            observations.append(obs)
+                        obs = self.langfuse.api.observations.get_many(trace_id=obs_id, limit=1, fields="core,basic,io,metadata,model,usage,prompt")
+                        if obs and obs.data:
+                            observations.append(obs.data[0])
                     except Exception as e:
                         logger.warning(f"Failed to fetch observation {obs_id}: {e}")
 

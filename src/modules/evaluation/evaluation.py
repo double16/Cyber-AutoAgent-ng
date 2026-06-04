@@ -10,7 +10,9 @@ Evaluates agent performance on cybersecurity assessment tasks.
 import hashlib
 import json
 import os
+import sys
 import time
+import types
 from typing import Any, Dict, List, Optional
 
 from langchain_aws import BedrockEmbeddings, ChatBedrock
@@ -19,6 +21,17 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_litellm import ChatLiteLLM
 from langchain_core.load.dump import dumps
 from langfuse import Langfuse
+
+# HACK BEGIN
+# for ragas/llms/base.by import of missing "langchain_community.chat_models.vertexai"
+dummy_chat = types.ModuleType("langchain_community.chat_models.vertexai")
+dummy_chat.ChatVertexAI = type("ChatVertexAI", (object,), {})
+sys.modules["langchain_community.chat_models.vertexai"] = dummy_chat
+
+import langchain_community.llms
+langchain_community.llms.VertexAI = type("VertexAI", (object,), {})
+# HACK END
+
 from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
@@ -942,8 +955,39 @@ class CyberAgentEvaluator:
                 except Exception:
                     pass
 
-            # Use score method directly on langfuse client
-            if hasattr(self.langfuse, "score"):
+            # Use v4 collection API when available, else fall back to legacy
+            if hasattr(self.langfuse, "scores") and hasattr(getattr(self.langfuse, "scores"), "create"):
+                try:
+                    self.langfuse.scores.create(
+                        trace_id=trace_id,
+                        name=metric_name,
+                        value=float(score_value),
+                        comment=(
+                            "Automated ragas evaluation: %s (%s)"
+                            % (metric_name, metric_category)
+                            if not metric_name.startswith("rubric/")
+                            else "Rubric judge evaluation: %s" % metric_name
+                        ),
+                        metadata=score_metadata,
+                    )
+                except Exception as e:
+                    logger.warning("Langfuse v4 scores.create failed, will try legacy score: %s", e)
+                    if hasattr(self.langfuse, "score"):
+                        self.langfuse.score(
+                            trace_id=trace_id,
+                            name=metric_name,
+                            value=float(score_value),
+                            comment=(
+                                "Automated ragas evaluation: %s (%s)"
+                                % (metric_name, metric_category)
+                                if not metric_name.startswith("rubric/")
+                                else "Rubric judge evaluation: %s" % metric_name
+                            ),
+                            metadata=score_metadata,
+                        )
+                    else:
+                        raise
+            elif hasattr(self.langfuse, "score"):
                 self.langfuse.score(
                     trace_id=trace_id,
                     name=metric_name,
@@ -977,8 +1021,17 @@ class CyberAgentEvaluator:
             "Uploaded %s evaluation scores to Langfuse trace %s", len(scores), trace_id
         )
 
-        # Flush to ensure scores are sent
-        self.langfuse.flush()
+        # Flush/Shutdown to ensure scores are sent
+        try:
+            if hasattr(self.langfuse, "flush"):
+                self.langfuse.flush()
+            elif hasattr(self.langfuse, "shutdown"):
+                # Some SDK versions expose shutdown instead of flush
+                self.langfuse.shutdown()
+            elif hasattr(self.langfuse, "close"):
+                self.langfuse.close()
+        except Exception as e:
+            logger.debug("Langfuse client flush/shutdown failed: %s", e)
 
     def _get_metric_category(self, metric_name: str) -> str:
         """Categorize metrics for better organization in Langfuse."""
