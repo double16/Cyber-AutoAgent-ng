@@ -706,6 +706,7 @@ export class PythonExecutionService extends EventEmitter {
         ...(config.ollamaHost ? { OLLAMA_HOST: config.ollamaHost } : {}),
         ...(config.ollamaContextLength ? { OLLAMA_CONTEXT_LENGTH: String(config.ollamaContextLength) } : {}),
         ...(config.ollamaTimeout ? { OLLAMA_TIMEOUT: String(config.ollamaTimeout) } : {}),
+        ...(config.ollamaKeepAlive ? { OLLAMA_KEEP_ALIVE: config.ollamaKeepAlive } : {}),
         // LiteLLM Configuration (only set if provided)
         ...(config.openaiApiKey ? { OPENAI_API_KEY: config.openaiApiKey } : {}),
         ...(config.anthropicApiKey ? { ANTHROPIC_API_KEY: config.anthropicApiKey } : {}),

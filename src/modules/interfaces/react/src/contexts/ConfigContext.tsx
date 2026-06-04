@@ -87,6 +87,8 @@ export interface Config {
   ollamaContextLength?: number;
   /** Ollama server timeout */
   ollamaTimeout?: number;
+  /** Ollama keep-alive for models */
+  ollamaKeepAlive?: string;
 
   // Model Pricing Configuration (per 1K tokens)
   /** Custom model pricing configuration - overrides defaults */
@@ -364,6 +366,7 @@ export const defaultConfig: Config = {
   ollamaHost: process.env.OLLAMA_HOST || 'http://localhost:11434',
   ollamaContextLength: parseInt(process.env.OLLAMA_CONTEXT_LENGTH) || null,
   ollamaTimeout: parseFloat(process.env.OLLAMA_TIMEOUT) || 120,
+  ollamaKeepAlive: process.env.OLLAMA_KEEP_ALIVE || null,
 
   // Model Pricing (per 1K tokens)
   // AWS Bedrock: Real AWS CLI pricing from us-east-1

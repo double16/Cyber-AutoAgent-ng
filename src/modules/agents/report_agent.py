@@ -124,6 +124,7 @@ class ReportGenerator:
                 ollama_client_args={
                     "timeout": cfg.get_ollama_timeout(),
                 },
+                keep_alive=cfg.get_ollama_keep_alive(),
                 options=cfg.get_ollama_options(),
             )
         else:  # litellm
