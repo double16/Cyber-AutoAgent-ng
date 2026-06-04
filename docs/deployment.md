@@ -174,7 +174,7 @@ For just the agent without observability:
 
 ```bash
 # Build the image
-# (optional) docker build --pull -f docker/Dockerfile.tools -t public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest .
+# (optional) docker build --pull --platform linux/amd64,linux/arm64 -f docker/Dockerfile.tools -t public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest .
 docker build -t cyber-autoagent -f docker/Dockerfile .
 
 # Run with AWS Bedrock
