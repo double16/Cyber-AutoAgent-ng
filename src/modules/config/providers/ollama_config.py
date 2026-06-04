@@ -92,7 +92,7 @@ def get_ollama_keep_alive(env_reader: EnvironmentReader) -> str:
     Returns:
         Ollama keep_alive
     """
-    return env_reader.get("OLLAMA_KEEP_ALIVE", "30m")
+    return env_reader.get("OLLAMA_KEEP_ALIVE") or "30m"
 
 
 def get_ollama_options(env_reader: EnvironmentReader) -> Dict[str, Any]:

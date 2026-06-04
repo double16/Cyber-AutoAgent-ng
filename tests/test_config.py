@@ -473,6 +473,12 @@ class TestConfigManager:
         keep_alive = self.config_manager.get_ollama_keep_alive()
         assert keep_alive == "30m"
 
+    @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434", "OLLAMA_KEEP_ALIVE": ""})
+    def test_get_ollama_keep_alive_enviroment_empty(self):
+        """Test the keep alive default."""
+        keep_alive = self.config_manager.get_ollama_keep_alive()
+        assert keep_alive == "30m"
+
     @patch("modules.config.system.validation.requests.get")
     def test_validate_ollama_requirements_success(self, mock_get):
         """Test successful Ollama requirements validation."""
