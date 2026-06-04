@@ -55,6 +55,7 @@ from modules.config.providers.ollama_config import (
     get_ollama_host as _get_ollama_host_from_env,
     get_ollama_timeout as _get_ollama_timeout_from_env,
     get_ollama_options as _get_ollama_options_from_env,
+    get_ollama_keep_alive as _get_ollama_keep_alive_from_env,
 )
 from modules.config.providers.litellm_config import (
     align_litellm_defaults,
@@ -270,6 +271,7 @@ class ConfigManager:
             "model_id": model_id,
             "host": self.get_ollama_host(),
             "timeout": self.get_ollama_timeout(),
+            "keep_alive": self.get_ollama_keep_alive(),
             "temperature": llm_config.temperature,
             "max_tokens": max_tokens,
             "options": self.get_ollama_options(),
@@ -806,6 +808,10 @@ class ConfigManager:
     def get_ollama_timeout(self) -> float:
         """Get Ollama timeout."""
         return _get_ollama_timeout_from_env(self.env)
+
+    def get_ollama_keep_alive(self) -> str:
+        """Get Ollama keep alive."""
+        return _get_ollama_keep_alive_from_env(self.env)
 
     def get_ollama_options(self) -> Dict[str, Any]:
         """Get Ollama options, such as num_ctx."""

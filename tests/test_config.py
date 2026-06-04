@@ -451,15 +451,27 @@ class TestConfigManager:
 
     @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434"})
     def test_get_ollama_host_environment_override(self):
-        """Test that OLLAMA_HOST environment variable overrides detection."""
+        """Test that the OLLAMA_HOST environment variable overrides detection."""
         host = self.config_manager.get_ollama_host()
         assert host == "http://custom:11434"
 
     @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434", "OLLAMA_TIMEOUT": "3600.2" })
     def test_get_ollama_timeout_environment_override(self):
-        """Test that OLLAMA_TIMEOUT environment variable overrides defaults."""
+        """Test that the OLLAMA_TIMEOUT environment variable overrides defaults."""
         timeout = self.config_manager.get_ollama_timeout()
         assert timeout == 3600.2
+
+    @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434", "OLLAMA_KEEP_ALIVE": "15m" })
+    def test_get_ollama_keep_alive_environment_override(self):
+        """Test that the OLLAMA_KEEP_ALIVE environment variable overrides defaults."""
+        keep_alive = self.config_manager.get_ollama_keep_alive()
+        assert keep_alive == "15m"
+
+    @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434"})
+    def test_get_ollama_keep_alive_default(self):
+        """Test the keep alive default."""
+        keep_alive = self.config_manager.get_ollama_keep_alive()
+        assert keep_alive == "30m"
 
     @patch("modules.config.system.validation.requests.get")
     def test_validate_ollama_requirements_success(self, mock_get):

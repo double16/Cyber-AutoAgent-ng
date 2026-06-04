@@ -324,6 +324,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `OLLAMA_HOST`                       | Ollama API endpoint                               | For Ollama provider           |
 | `OLLAMA_CONTEXT_LENGTH`             | Ollama model context length                       | No, Ollama default            |
 | `OLLAMA_TIMEOUT`                    | Ollama API timeout in seconds                     | No (default: 120)             |
+| `OLLAMA_KEEP_ALIVE`                 | Ollama model keep alive                           | No (default: 30m)             |
 | `AZURE_API_KEY`                     | Azure OpenAI API key                              | For Azure/LiteLLM             |
 | `AZURE_API_BASE`                    | Azure endpoint URL                                | For Azure/LiteLLM             |
 | `AZURE_API_VERSION`                 | Azure API version                                 | For Azure/LiteLLM             |

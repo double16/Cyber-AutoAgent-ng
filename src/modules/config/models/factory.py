@@ -618,6 +618,7 @@ def create_ollama_model(
         ollama_client_args={
             "timeout": config["timeout"],
         },
+        keep_alive=config.get("keep_alive"),
         additional_args=additional_args,
         options=config.get("options", {}),
     )

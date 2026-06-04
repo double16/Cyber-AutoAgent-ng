@@ -114,6 +114,7 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'ollamaHost', label: 'Ollama Host', type: 'text', section: 'Models' },
   { key: 'ollamaContextLength', label: 'Ollama Context Length', type: 'number', section: 'Models' },
   { key: 'ollamaTimeout', label: 'Ollama Timeout', type: 'number', section: 'Models' },
+  { key: 'ollamaKeepAlive', label: 'Ollama Keep-Alive', type: 'text', section: 'Models' },
   { key: 'openaiApiKey', label: 'OpenAI API Key', type: 'password', section: 'Models' },
   { key: 'anthropicApiKey', label: 'Anthropic API Key', type: 'password', section: 'Models' },
   { key: 'geminiApiKey', label: 'Gemini API Key', type: 'password', section: 'Models' },
@@ -750,7 +751,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
           ];
           return bedrockFields.includes(f.key);
         } else if (config.modelProvider === 'ollama') {
-          return ['ollamaHost', 'ollamaContextLength', 'ollamaTimeout', 'temperature', 'maxTokens'].includes(f.key);
+          return ['ollamaHost', 'ollamaContextLength', 'ollamaTimeout', 'ollamaKeepAlive', 'temperature', 'maxTokens'].includes(f.key);
         } else if (config.modelProvider === 'litellm') {
           const litellmFields = [
             'openaiApiKey', 'anthropicApiKey', 'geminiApiKey', 'xaiApiKey', 'cohereApiKey',
