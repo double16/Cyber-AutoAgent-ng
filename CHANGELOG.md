@@ -1,5 +1,6 @@
 # Cyber-AutoAgent-ng Changelog
 
+- Replace React UI model pricing with model.dev. Fixes #55.
 - Configure Ollama keep-alive for models to avoid extra start up time. Defaults to 30m.
 - Add bug bounty header markers. (Fixes #63)
 - Add idor_specialist tool. (Fixes #22)
