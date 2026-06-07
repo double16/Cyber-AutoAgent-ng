@@ -55,7 +55,7 @@
     "@types/dockerode": "^4.0.1",
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.9.2",
     "@types/react": "^19.2.17",
     "@types/react-test-renderer": "^19.1.0",
     "babel-jest": "^30.4.1",
