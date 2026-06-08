@@ -18,7 +18,7 @@ ADD docker/packages-go.sh /tmp
 RUN --mount=type=cache,target=/usr/local/share/go-build-cache --mount=type=cache,target=/usr/local/share/go \
     /tmp/packages-go.sh
 
-FROM --platform=$BUILDPLATFORM ubuntu:26.04 AS cargobuild
+FROM --platform=$BUILDPLATFORM ubuntu:24.04 AS cargobuild
 ARG TARGETARCH
 ARG BUILDPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
@@ -233,6 +233,8 @@ RUN set -eux; \
     ruby-full && \
     apt clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
+COPY docker/pip.conf /etc/pip.conf
+
 # Provide symlinks from Ruby vendor_ruby so WhatWeb runs without error
 RUN set -eux; \
     if command -v whatweb >/dev/null 2>&1; then \
@@ -385,6 +387,6 @@ RUN amass -h || true
 
 # Validate expected tools are present in the PATH
 COPY docker/tools_check.sh src/modules/config/system/environment.yaml /tmp
-RUN bash /tmp/tools_check.sh 2>&1 | tee /var/log/tools_check.log && \
+RUN bash -o pipefail -c 'bash /tmp/tools_check.sh 2>&1 | tee /var/log/tools_check.log' && \
     /tmp/apt_proxy_clean.sh && \
     rm -rf /tmp/* /var/tmp/*
