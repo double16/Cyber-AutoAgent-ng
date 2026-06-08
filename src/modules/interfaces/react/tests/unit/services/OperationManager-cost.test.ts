@@ -3,7 +3,6 @@
  */
 import { describe, it, expect, beforeEach, jest } from '@jest/globals';
 import { OperationManager } from '../../../src/services/OperationManager.js';
-import { modelsCatalog } from '../../../src/services/ModelsCatalog.js';
 import type { Config } from '../../../src/contexts/ConfigContext.js';
 
 describe('OperationManager cost calculation', () => {
@@ -99,18 +98,18 @@ describe('OperationManager + ModelsCatalog integration', () => {
   it('uses override pricing from config when present', () => {
     const localCfg = { ...cfg, modelPricing: { 'x/vendor.model': { inputCostPer1k: 0.01, outputCostPer1k: 0.02 } } } as Config;
     const om = new OperationManager(localCfg);
-    const op = om.startOperation('mod', 'tgt', 'obj', 'x/vendor.model');
-    expect(op.cost.modelPricing.inputCostPer1k).toBeCloseTo(0.01, 6);
-    expect(op.cost.modelPricing.outputCostPer1k).toBeCloseTo(0.02, 6);
-    // cache derived from input when not provided
-    expect(op.cost.modelPricing.cacheReadCostPer1k).toBeCloseTo(0.0025, 6);
-    expect(op.cost.modelPricing.cacheWriteCostPer1k).toBeCloseTo(0.0125, 6);
+    const info = om.getModelInfo('x/vendor.model');
+    expect(info).toBeTruthy();
+    expect(info!.inputCostPer1k).toBeCloseTo(0.01, 6);
+    expect(info!.outputCostPer1k).toBeCloseTo(0.02, 6);
   });
 
   it('returns zero costs for ollama provider', () => {
-    const om = new OperationManager({ ...(cfg as any), modelProvider: 'ollama' });
-    const op = om.startOperation('mod', 'tgt', 'obj', 'llama3.1:8b');
-    expect(op.cost.modelPricing).toEqual({ inputCostPer1k: 0, outputCostPer1k: 0, cacheReadCostPer1k: 0, cacheWriteCostPer1k: 0 });
+    const om = new OperationManager({ ...(cfg as any), modelProvider: 'ollama', modelPricing: { 'llama3.1:8b': { inputCostPer1k: 1, outputCostPer1k: 1 } } });
+    const info = om.getModelInfo('llama3.1:8b');
+    expect(info).toBeTruthy();
+    expect(info!.inputCostPer1k).toBe(0);
+    expect(info!.outputCostPer1k).toBe(0);
   });
 
   it('defaults context limit to 8000 when catalog data is unavailable', () => {

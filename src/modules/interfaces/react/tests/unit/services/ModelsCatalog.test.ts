@@ -54,35 +54,6 @@ describe('ModelsCatalog loader and helpers', () => {
     expect(peek!.some(x => x.model.name === 'GPT-4.1 Mini')).toBe(true);
   });
 
-  it('getPricingPer1k derives defaults when fields are missing', async () => {
-    const { getPricingPer1k, modelsCatalog } = await import('../../../src/services/ModelsCatalog.js');
-    (modelsCatalog as any).catalog = JSON.parse(makeCatalog());
-
-    const pricing = await getPricingPer1k('gpt-mini');
-    expect(pricing).not.toBeNull();
-    expect(pricing!.input).toBeCloseTo(2, 6);
-    // output defaults to input when not provided
-    expect(pricing!.output).toBeCloseTo(2, 6);
-    // cache_* derived from input (25% and 125%)
-    expect(pricing!.cache_read).toBeCloseTo(0.5, 6);
-    expect(pricing!.cache_write).toBeCloseTo(2.5, 6);
-  });
-
-  it('getPricingPer1kSync returns null before load, then returns values after cache is warm', async () => {
-    const { getPricingPer1kSync, modelsCatalog } = await import('../../../src/services/ModelsCatalog.js');
-
-    // Before loading, sync peek should be null
-    const before = getPricingPer1kSync('openai/gpt-4.1-mini');
-    expect(before).toBeNull();
-
-    // Warm cache by preloading catalog
-    (modelsCatalog as any).catalog = JSON.parse(makeCatalog());
-
-    const after = getPricingPer1kSync('openai/gpt-4.1-mini');
-    expect(after).not.toBeNull();
-    expect(after!.input).toBe(3);
-    expect(after!.output).toBe(15);
-  });
 
   it('getContextLimit and getContextLimitSync return context window when available', async () => {
     const { getContextLimit, getContextLimitSync, modelsCatalog } = await import('../../../src/services/ModelsCatalog.js');

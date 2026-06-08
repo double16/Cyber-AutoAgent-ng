@@ -11,8 +11,6 @@ jest.mock('../../../src/services/ModelsCatalog.js', () => {
   const getAllModels = jest.fn();
   const findModel = jest.fn();
   const peekCatalog = jest.fn();
-  const getPricingPer1kSync = jest.fn();
-  const getPricingPer1k = jest.fn();
   const getContextLimitSync = jest.fn();
   const getContextLimit = jest.fn();
   return {
@@ -20,8 +18,6 @@ jest.mock('../../../src/services/ModelsCatalog.js', () => {
     modelsCatalog: { peekAllModels, getAllModels, findModel, peekCatalog },
     peekAllModels,
     loadAllModels,
-    getPricingPer1kSync,
-    getPricingPer1k,
     getContextLimitSync,
     getContextLimit,
   };
@@ -118,18 +114,19 @@ describe('OperationManager + ModelsCatalog/pricing', () => {
     } as Config;
 
     const om = new OperationManager(cfg);
-    const op = om.startOperation('mod', 'tgt', 'obj', 'provider/special-model');
-    expect(op.cost.modelPricing.inputCostPer1k).toBeCloseTo(1.0, 6);
-    expect(op.cost.modelPricing.outputCostPer1k).toBeCloseTo(2.0, 6);
-    expect(op.cost.modelPricing.cacheReadCostPer1k).toBeCloseTo(0.25, 6);
-    expect(op.cost.modelPricing.cacheWriteCostPer1k).toBeCloseTo(1.25, 6);
+    const info = om.getModelInfo('provider/special-model');
+    expect(info).toBeTruthy();
+    expect(info!.inputCostPer1k).toBeCloseTo(1.0, 6);
+    expect(info!.outputCostPer1k).toBeCloseTo(2.0, 6);
   });
 
   it('returns zero costs when provider is ollama (local)', () => {
-    const cfg = { ...baseConfig, modelProvider: 'ollama' } as Config;
+    const cfg = { ...baseConfig, modelProvider: 'ollama', modelPricing: { 'llama3.1:8b': { inputCostPer1k: 0.5, outputCostPer1k: 0.5 } } } as Config;
     const om = new OperationManager(cfg);
-    const op = om.startOperation('mod', 'tgt', 'obj', 'llama3.1:8b');
-    expect(op.cost.modelPricing).toEqual({ inputCostPer1k: 0, outputCostPer1k: 0, cacheReadCostPer1k: 0, cacheWriteCostPer1k: 0 });
+    const info = om.getModelInfo('llama3.1:8b');
+    expect(info).toBeTruthy();
+    expect(info!.inputCostPer1k).toBe(0);
+    expect(info!.outputCostPer1k).toBe(0);
   });
 
   it('defaults context limit to 8000 when not available in any source', () => {

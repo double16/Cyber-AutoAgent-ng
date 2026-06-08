@@ -5,7 +5,6 @@
  * to the embedded snapshot at src/modules/config/models/models_snapshot.json.
  *
  * Notes:
- * - Pricing values in the snapshot are per 1K tokens (USD)
  * - This module caches results in-memory for the process lifetime
  */
 
@@ -155,44 +154,9 @@ export async function loadAllModels(): Promise<Array<{ provider: string; model: 
   return modelsCatalog.getAllModels();
 }
 
-// Helper to extract pricing per 1K tokens for a model id
-export async function getPricingPer1k(modelId: string): Promise<{
-  input: number; output: number; cache_read: number; cache_write: number;
-} | null> {
-  const found = await modelsCatalog.findModel(modelId);
-  if (!found?.model?.cost) return null;
-  const c = found.model.cost;
-  const input = c.input ?? 0;
-  const output = c.output ?? input;
-  const cache_read = c.cache_read ?? input * 0.25;
-  const cache_write = c.cache_write ?? input * 1.25;
-  return { input, output, cache_read, cache_write };
-}
-
 export async function getContextLimit(modelId: string): Promise<number | null> {
   const found = await modelsCatalog.findModel(modelId);
   return found?.model?.limit?.context ?? null;
-}
-
-// Synchronous best-effort pricing lookup using the currently cached catalog
-export function getPricingPer1kSync(modelId: string): {
-  input: number; output: number; cache_read: number; cache_write: number;
-} | null {
-  const cat = modelsCatalog.peekCatalog();
-  if (!cat) return null;
-  for (const [providerId, provider] of Object.entries(cat)) {
-    for (const m of Object.values(provider.models || {})) {
-      if (m.id === modelId) {
-        const c = m.cost || {};
-        const input = c.input ?? 0;
-        const output = c.output ?? input;
-        const cache_read = c.cache_read ?? input * 0.25;
-        const cache_write = c.cache_write ?? input * 1.25;
-        return { input, output, cache_read, cache_write };
-      }
-    }
-  }
-  return null;
 }
 
 export function getContextLimitSync(modelId: string): number | null {
