@@ -6,6 +6,7 @@
 
 import { Config } from '../contexts/ConfigContext.js';
 import { loggingService } from './LoggingService.js';
+import { peekAllModels, loadAllModels, getPricingPer1kSync, getPricingPer1k, getContextLimitSync, getContextLimit } from './ModelsCatalog.js';
 
 export interface Operation {
   id: string;
@@ -109,11 +110,9 @@ export class OperationManager {
 
     // Try to use the models.dev catalog if available (loaded asynchronously)
     try {
-      // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-      const lazy = require('./ModelsCatalog.js') as typeof import('./ModelsCatalog.js');
-      const peek = lazy.modelsCatalog.peekAllModels();
+      const peek = peekAllModels();
       // Fire-and-forget async load for future calls
-      void lazy.modelsCatalog.getAllModels().catch(() => {});
+      void loadAllModels().catch(() => {});
       if (peek && peek.length) {
         return peek.map(entry => ({
           id: entry.model.id,
@@ -136,9 +135,7 @@ export class OperationManager {
   private getModelDisplayName(modelId: string): string {
     // Prefer models.dev catalog name (synchronous cached lookup first)
     try {
-      // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-      const lazy = require('./ModelsCatalog.js') as typeof import('./ModelsCatalog.js');
-      const peek = lazy.modelsCatalog.peekAllModels();
+      const peek = peekAllModels();
       if (peek && peek.length) {
         // Exact ID match
         let found = peek.find(entry => entry.model.id === modelId);
@@ -161,7 +158,7 @@ export class OperationManager {
         }
       }
       // Trigger async population for future calls (non-blocking)
-      void lazy.modelsCatalog.findModel(modelId).then(() => {}).catch(() => {});
+      void loadAllModels().then(() => {}).catch(() => {});
     } catch {
       // ignore catalog errors; fall through to default
     }
@@ -174,8 +171,6 @@ export class OperationManager {
   private getModelContextLimit(modelId: string): number {
     // Try models.dev catalog (synchronous cached lookup first)
     try {
-      // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-      const { getContextLimitSync, getContextLimit } = require('./ModelsCatalog.js') as typeof import('./ModelsCatalog.js');
       const cached = getContextLimitSync(modelId);
       if (typeof cached === 'number' && cached > 0) {
         return cached;
@@ -484,8 +479,6 @@ export class OperationManager {
 
     // Next, try models.dev catalog (best-effort synchronous read of cached data)
     try {
-      // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-      const { getPricingPer1kSync, getPricingPer1k } = require('./ModelsCatalog.js') as typeof import('./ModelsCatalog.js');
       const cached = getPricingPer1kSync(modelId);
       if (cached) {
         return {

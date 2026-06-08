@@ -146,6 +146,15 @@ class ModelsCatalogLoader {
 
 export const modelsCatalog = new ModelsCatalogLoader();
 
+// Top-level helpers to facilitate ESM-friendly testing/mocking
+export function peekAllModels(): Array<{ provider: string; model: CatalogModel }> | null {
+  return modelsCatalog.peekAllModels();
+}
+
+export async function loadAllModels(): Promise<Array<{ provider: string; model: CatalogModel }>> {
+  return modelsCatalog.getAllModels();
+}
+
 // Helper to extract pricing per 1K tokens for a model id
 export async function getPricingPer1k(modelId: string): Promise<{
   input: number; output: number; cache_read: number; cache_write: number;

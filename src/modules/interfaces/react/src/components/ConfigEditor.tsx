@@ -1329,18 +1329,6 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         }
         return 'Auto';
       }
-      if (key === 'maxTokens' && config.modelId?.includes('claude-sonnet-4-5-20250929')) {
-        return '16000';
-      }
-      if (key === 'thinkingBudget' && config.modelId?.includes('claude-sonnet-4-5-20250929')) {
-        return '7000';
-      }
-      if (key === 'maxTokens' && config.modelId?.includes('claude-sonnet-4-20250514')) {
-        return '32000';
-      }
-      if (key === 'thinkingBudget' && config.modelId?.includes('claude-sonnet-4-20250514')) {
-        return '10000';
-      }
 
       // Show provider defaults for common optional fields
       if (key === 'topP') {
