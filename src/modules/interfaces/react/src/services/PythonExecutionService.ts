@@ -775,6 +775,27 @@ export class PythonExecutionService extends EventEmitter {
       })
       };
 
+      // Pricing overrides from config.modelPricing when modelId matches
+      try {
+        const modelId = config.modelId as any;
+        const pricingTable = (config as any)?.modelPricing as Record<string, any> | undefined;
+        const p = modelId && pricingTable ? pricingTable[modelId] : undefined;
+        if (p && typeof p === 'object') {
+          if (p.inputCostPer1k !== undefined && p.inputCostPer1k !== null) {
+            env.CYBER_AGENT_PRICING_INPUT = String(p.inputCostPer1k / 1000.0);
+          }
+          if (p.outputCostPer1k !== undefined && p.outputCostPer1k !== null) {
+            env.CYBER_AGENT_PRICING_OUTPUT = String(p.outputCostPer1k / 1000.0);
+          }
+          if (p.cacheReadCostPer1k !== undefined && p.cacheReadCostPer1k !== null) {
+            env.CYBER_AGENT_PRICING_CACHE_READ = String(p.cacheReadCostPer1k / 1000.0);
+          }
+          if (p.cacheWriteCostPer1k !== undefined && p.cacheWriteCostPer1k !== null) {
+            env.CYBER_AGENT_PRICING_CACHE_WRITE = String(p.cacheWriteCostPer1k / 1000.0);
+          }
+        }
+      } catch {}
+
       const userEnvironment = flattenEnvironment(config.environment as any);
       for (const [key, value] of Object.entries(userEnvironment)) {
         env[key] = value;
