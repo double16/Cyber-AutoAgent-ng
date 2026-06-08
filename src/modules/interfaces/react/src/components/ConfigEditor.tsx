@@ -1329,18 +1329,6 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         }
         return 'Auto';
       }
-      if (key === 'maxTokens' && config.modelId?.includes('claude-sonnet-4-5-20250929')) {
-        return '16000';
-      }
-      if (key === 'thinkingBudget' && config.modelId?.includes('claude-sonnet-4-5-20250929')) {
-        return '7000';
-      }
-      if (key === 'maxTokens' && config.modelId?.includes('claude-sonnet-4-20250514')) {
-        return '32000';
-      }
-      if (key === 'thinkingBudget' && config.modelId?.includes('claude-sonnet-4-20250514')) {
-        return '10000';
-      }
 
       // Show provider defaults for common optional fields
       if (key === 'topP') {
@@ -1489,7 +1477,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
                       const isEditing = editingField?.field === field.key;
 
                       return (
-                        <Box key={field.key} marginY={0.25}>
+                        <Box key={field.key} marginY={0}>
                           {(() => {
                             const cols = (() => { try { return Math.max(40, Math.min(Number((process as any)?.stdout?.columns || 80), 200)); } catch { return 80; } })();
                             const labelWidth = Math.max(20, Math.min(48, Math.floor(cols * 0.38)));
