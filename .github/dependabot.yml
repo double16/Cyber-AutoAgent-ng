@@ -6,7 +6,7 @@ updates:
       interval: "weekly"
     target-branch: "develop"
     groups:
-      minor:
+      python-minor:
         applies-to: version-updates
         update-types:
           - "minor"
@@ -24,7 +24,7 @@ updates:
       interval: "weekly"
     target-branch: "develop"
     groups:
-      minor:
+      npm-minor:
         applies-to: version-updates
         update-types:
           - "minor"
