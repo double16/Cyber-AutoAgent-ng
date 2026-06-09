@@ -60,12 +60,23 @@ def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, Dict[str, Any]]:
 
 
 @lru_cache(maxsize=200)
-def _get_shell_command_help(command: str) -> str:
+def _get_shell_command_help(command: str, help_commands_json: str) -> str:
+    """
+    Get the command help text by attempting `--help` or `-h`.
+    :param command: The name of the command
+    :param help_commands_json: JSON array of full command(s) that provide help. A string to allow lru_cache to be used.
+    :return:
+    """
     try:
-        for option in ["--help", "-h", ""]:
-            cmd = [command]
-            if option:
-                cmd.append(option)
+        help_commands = json.loads(help_commands_json)
+        for cmd in [
+            *help_commands,
+            f"{command} --help",
+            f"{command} -h",
+            command,
+        ]:
+            if not cmd:
+                continue
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if result.stdout is None and result.stderr is None:
                 continue
@@ -145,6 +156,9 @@ Use the **shell** tool to invoke the following command line programs in a bash s
                     continue
                 tool_cfg = (cyber_tools.get(shell_command) or {})
                 real_command = tool_cfg.get("command", shell_command)
+                help_commands = tool_cfg.get("help", [])
+                if not isinstance(help_commands, list):
+                    help_commands = [help_commands]
                 description = tool_cfg.get("description", "")
                 preference = tool_cfg.get("preference", "")
                 caps = tool_cfg.get("caps") or []
@@ -165,7 +179,7 @@ preference: {preference}
 
 {description}
 
-{_get_shell_command_help(real_command)}
+{_get_shell_command_help(real_command, json.dumps(help_commands))}
 
 {separator}
 """

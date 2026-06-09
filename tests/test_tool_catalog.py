@@ -115,20 +115,30 @@ def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeyp
 
     def fake_run(cmd, capture_output, text, timeout):
         calls.append(cmd)
-        # First attempt: --help returns short -> should continue
-        if cmd == ["foo", "--help"]:
+        # First attempt: foo --help returns short -> should continue
+        if cmd == "foo -help":
             return SimpleNamespace(stdout="x", stderr="")
-        # Second attempt: -h returns long -> should return it
-        if cmd == ["foo", "-h"]:
+        # Second attempt: --help returns short -> should continue
+        if cmd == "foo --help":
+            return SimpleNamespace(stdout="x", stderr="")
+        # Third attempt: -h returns long -> should return it
+        if cmd == "foo -h":
             return SimpleNamespace(stdout="A" * 40, stderr="")
         return SimpleNamespace(stdout="", stderr="")
 
     monkeypatch.setattr(tc.subprocess, "run", fake_run)
 
-    out = tc._get_shell_command_help("foo")
+    out = tc._get_shell_command_help("foo", "[]")
     assert len(out) >= 40
-    assert calls[0] == ["foo", "--help"]
-    assert calls[1] == ["foo", "-h"]
+    assert calls[0] == "foo --help"
+    assert calls[1] == "foo -h"
+
+    calls = []
+    out = tc._get_shell_command_help("foo", '["foo -help", ""]')
+    assert len(out) >= 40
+    assert calls[0] == "foo -help"
+    assert calls[1] == "foo --help"
+    assert calls[2] == "foo -h"
 
 
 def test_tool_catalog_wrapper_lists_agent_tools_and_schemas(monkeypatch, tmp_path):
@@ -203,7 +213,7 @@ def test_tool_catalog_wrapper_includes_shell_commands_and_handles_missing_cyber_
     _patch_environment_file(monkeypatch, tmp_path)
 
     # Avoid calling real subprocess help
-    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd: f"HELP({cmd})")
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: f"HELP({cmd})")
 
     tools_config = {}
     agent = _FakeAgent(tools_config)
@@ -229,7 +239,7 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch,
     _write_env(tmp_path, cyber_tools={"httpx": {"description": "HTTP probing", "caps": ["web_recon"], "preference": "preferred"}})
     _patch_environment_file(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd: "")
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: "")
 
     agent = _FakeAgent({})
     tool_catalog = tc.tool_catalog_wrapper(agent, shell_commands=["httpx", "nmap"])
