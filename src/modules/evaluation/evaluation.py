@@ -10,7 +10,9 @@ Evaluates agent performance on cybersecurity assessment tasks.
 import hashlib
 import json
 import os
+import sys
 import time
+import types
 from typing import Any, Dict, List, Optional
 
 from langchain_aws import BedrockEmbeddings, ChatBedrock
@@ -19,6 +21,17 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_litellm import ChatLiteLLM
 from langchain_core.load.dump import dumps
 from langfuse import Langfuse
+
+# HACK BEGIN
+# for ragas/llms/base.by import of missing "langchain_community.chat_models.vertexai"
+dummy_chat = types.ModuleType("langchain_community.chat_models.vertexai")
+dummy_chat.ChatVertexAI = type("ChatVertexAI", (object,), {})
+sys.modules["langchain_community.chat_models.vertexai"] = dummy_chat
+
+import langchain_community.llms
+langchain_community.llms.VertexAI = type("VertexAI", (object,), {})
+# HACK END
+
 from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
@@ -287,11 +300,9 @@ class CyberAgentEvaluator:
         """
         # Find all traces for this operation with bounded retry from config manager
         config_manager = get_config_manager()
-        eval_cfg = config_manager.get_server_config(
-            config_manager.get_provider()
-        ).evaluation
-        max_wait = getattr(eval_cfg, "max_wait_secs", 30)
-        poll_interval = getattr(eval_cfg, "poll_interval_secs", 5)
+        eval_cfg = config_manager.get_server_config(config_manager.get_provider()).evaluation
+        max_wait = eval_cfg.max_wait_secs
+        poll_interval = eval_cfg.poll_interval_secs
         waited = 0
         traces_to_evaluate = await self._find_operation_traces(operation_id)
         while not traces_to_evaluate and waited < max_wait:
@@ -746,11 +757,9 @@ class CyberAgentEvaluator:
         # Optionally short-circuit when insufficient evidence to avoid 0/1 collapse
         try:
             config_manager = get_config_manager()
-            eval_cfg = config_manager.get_server_config(
-                config_manager.get_provider()
-            ).evaluation
-            min_tools = getattr(eval_cfg, "min_tool_calls", 3)
-            min_evidence = getattr(eval_cfg, "min_evidence", 1)
+            eval_cfg = config_manager.get_server_config(config_manager.get_provider()).evaluation
+            min_tools = eval_cfg.min_tool_calls
+            min_evidence = eval_cfg.min_evidence
             if (
                 len(parsed_trace.tool_calls) < min_tools
                 and evidence_count < min_evidence
@@ -942,34 +951,51 @@ class CyberAgentEvaluator:
                 except Exception:
                     pass
 
-            # Use score method directly on langfuse client
-            if hasattr(self.langfuse, "score"):
-                self.langfuse.score(
-                    trace_id=trace_id,
-                    name=metric_name,
-                    value=float(score_value),
-                    comment=(
-                        "Automated ragas evaluation: %s (%s)"
-                        % (metric_name, metric_category)
-                        if not metric_name.startswith("rubric/")
-                        else "Rubric judge evaluation: %s" % metric_name
-                    ),
-                    metadata=score_metadata,
-                )
-            elif hasattr(self.langfuse, "create_score"):
-                self.langfuse.create_score(
-                    trace_id=trace_id,
-                    name=metric_name,
-                    value=float(score_value),
-                    comment=(
-                        "Automated ragas evaluation: %s (%s)"
-                        % (metric_name, metric_category)
-                        if not metric_name.startswith("rubric/")
-                        else "Rubric judge evaluation: %s" % metric_name
-                    ),
-                    metadata=score_metadata,
-                )
-            else:
+            score_comment = (
+                "Automated ragas evaluation: %s (%s)"
+                % (metric_name, metric_category)
+                if not metric_name.startswith("rubric/")
+                else "Rubric judge evaluation: %s" % metric_name
+            )
+            # Use v4 collection API when available, else fall back to legacy
+            score_fallback = True
+            if hasattr(self.langfuse, "scores") and hasattr(getattr(self.langfuse, "scores"), "create"):
+                try:
+                    self.langfuse.scores.create(
+                        trace_id=trace_id,
+                        name=metric_name,
+                        value=float(score_value),
+                        comment=score_comment,
+                        metadata=score_metadata,
+                    )
+                    score_fallback = False
+                except Exception as e:
+                    logger.warning("Langfuse v4 scores.create failed, will try legacy score: %s", e)
+            if score_fallback and hasattr(self.langfuse, "score"):
+                try:
+                    self.langfuse.score(
+                        trace_id=trace_id,
+                        name=metric_name,
+                        value=float(score_value),
+                        comment=score_comment,
+                        metadata=score_metadata,
+                    )
+                    score_fallback = False
+                except Exception as e:
+                    logger.warning("Langfuse v3 scores failed, will try legacy create_score: %s", e)
+            if score_fallback and hasattr(self.langfuse, "create_score"):
+                try:
+                    self.langfuse.create_score(
+                        trace_id=trace_id,
+                        name=metric_name,
+                        value=float(score_value),
+                        comment=score_comment,
+                        metadata=score_metadata,
+                    )
+                    score_fallback = False
+                except Exception as e:
+                    logger.warning("Langfuse v3 create_score failed: %s", e)
+            if score_fallback:
                 logger.error("No score creation method found on Langfuse client")
                 return
 
@@ -977,8 +1003,16 @@ class CyberAgentEvaluator:
             "Uploaded %s evaluation scores to Langfuse trace %s", len(scores), trace_id
         )
 
-        # Flush to ensure scores are sent
-        self.langfuse.flush()
+        # Flush/Shutdown to ensure scores are sent
+        try:
+            if hasattr(self.langfuse, "flush"):
+                self.langfuse.flush()
+            elif hasattr(self.langfuse, "shutdown"):
+                self.langfuse.shutdown()
+            elif hasattr(self.langfuse, "close"):
+                self.langfuse.close()
+        except Exception as e:
+            logger.debug("Langfuse client flush/shutdown failed: %s", e)
 
     def _get_metric_category(self, metric_name: str) -> str:
         """Categorize metrics for better organization in Langfuse."""
@@ -1010,14 +1044,6 @@ class CyberAgentEvaluator:
 
         Returns JSON like: {"caps": {"metric": 0.7, ...}, "disable": ["metric_name", ...]}
         """
-        try:
-            config_manager = get_config_manager()
-            config_manager.get_server_config(
-                config_manager.get_provider()
-            ).evaluation
-        except Exception:
-            return {}
-
         event_base = {
             "tool_name": "evaluation",
             "tool_id": f"evaluation-{time.time_ns()}",
@@ -1040,9 +1066,7 @@ class CyberAgentEvaluator:
             if parsed:
                 # current-session evidence count
                 try:
-                    current_ev = self.trace_parser.count_current_evidence_findings(
-                        parsed
-                    )
+                    current_ev = self.trace_parser.count_current_evidence_findings(parsed)
                 except Exception:
                     current_ev = 0
                 # tool calls + failed count
@@ -1116,23 +1140,18 @@ class CyberAgentEvaluator:
             return {}
 
     async def _rubric_judge_scores(self, eval_data) -> Dict[str, Any]:
-        """Optionally compute rubric-based scores with rationales using the evaluator LLM.
+        """Optionally, compute rubric-based scores with rationales using the evaluator LLM.
 
         Returns a dict of metric_name -> (score_float, metadata_dict) when enabled, else {}.
         """
-        try:
-            config_manager = get_config_manager()
-            eval_cfg = config_manager.get_server_config(
-                config_manager.get_provider()
-            ).evaluation
-        except Exception:
-            return {}
+        config_manager = get_config_manager()
+        eval_cfg = config_manager.get_server_config(config_manager.get_provider()).evaluation
 
-        if not getattr(eval_cfg, "rubric_enabled", False):
+        if not eval_cfg.rubric_enabled:
             return {}
 
         # Guard: ensure we have sufficient evidence/context when configured
-        if getattr(eval_cfg, "skip_if_insufficient_evidence", True):
+        if eval_cfg.skip_if_insufficient_evidence:
             try:
                 parsed = getattr(self, "_last_parsed_trace", None)
                 if not parsed:
@@ -1261,8 +1280,8 @@ class CyberAgentEvaluator:
                     getattr(self._chat_model, "bind")
                 ):
                     bound = self._chat_model.bind(
-                        temperature=getattr(eval_cfg, "judge_temperature", 0.2),
-                        max_tokens=getattr(eval_cfg, "judge_max_tokens", 800),
+                        temperature=eval_cfg.judge_temperature,
+                        max_tokens=eval_cfg.judge_max_tokens
                     )
                     resp = bound.invoke(msgs)
                 else:
@@ -1305,7 +1324,7 @@ class CyberAgentEvaluator:
             return {}
 
         insufficient = bool(parsed.get("insufficient_evidence", False))
-        if insufficient and getattr(eval_cfg, "skip_if_insufficient_evidence", True):
+        if insufficient and eval_cfg.skip_if_insufficient_evidence:
             self._emitter.emit(event_base | {"type": "tool_end", "success": True, })
             return {}
 
@@ -1364,10 +1383,8 @@ class CyberAgentEvaluator:
         """
         try:
             config_manager = get_config_manager()
-            eval_cfg = config_manager.get_server_config(
-                config_manager.get_provider()
-            ).evaluation
-            max_chars = int(getattr(eval_cfg, "summary_max_chars", 8000))
+            eval_cfg = config_manager.get_server_config(config_manager.get_provider()).evaluation
+            max_chars = eval_cfg.summary_max_chars
         except Exception:
             max_chars = 8000
 
