@@ -527,7 +527,8 @@ cyber_tools:
   sliver:
     description: "Command and Control framework"
     command: "sliver-client"
-    preference: preferred
+    # sliver install is unstable
+    preference: fallback
     caps: [exploitation_framework]
     canary: "sliver-client -h"
 
