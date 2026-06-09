@@ -213,7 +213,7 @@ def test_tool_catalog_wrapper_includes_shell_commands_and_handles_missing_cyber_
     _patch_environment_file(monkeypatch, tmp_path)
 
     # Avoid calling real subprocess help
-    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd: f"HELP({cmd})")
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: f"HELP({cmd})")
 
     tools_config = {}
     agent = _FakeAgent(tools_config)
@@ -239,7 +239,7 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch,
     _write_env(tmp_path, cyber_tools={"httpx": {"description": "HTTP probing", "caps": ["web_recon"], "preference": "preferred"}})
     _patch_environment_file(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd: "")
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: "")
 
     agent = _FakeAgent({})
     tool_catalog = tc.tool_catalog_wrapper(agent, shell_commands=["httpx", "nmap"])
