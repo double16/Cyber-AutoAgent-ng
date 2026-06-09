@@ -60,8 +60,15 @@ def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, Dict[str, Any]]:
 
 
 @lru_cache(maxsize=200)
-def _get_shell_command_help(command: str, help_commands: List[str]) -> str:
+def _get_shell_command_help(command: str, help_commands_json: str) -> str:
+    """
+    Get the command help text by attempting `--help` or `-h`.
+    :param command: The name of the command
+    :param help_commands_json: JSON array of full command(s) that provide help. A string to allow lru_cache to be used.
+    :return:
+    """
     try:
+        help_commands = json.loads(help_commands_json)
         for cmd in [
             *help_commands,
             f"{command} --help",
@@ -172,7 +179,7 @@ preference: {preference}
 
 {description}
 
-{_get_shell_command_help(real_command, help_commands)}
+{_get_shell_command_help(real_command, json.dumps(help_commands))}
 
 {separator}
 """

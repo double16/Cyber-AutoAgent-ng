@@ -128,14 +128,14 @@ def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeyp
 
     monkeypatch.setattr(tc.subprocess, "run", fake_run)
 
-    out = tc._get_shell_command_help("foo", [])
+    out = tc._get_shell_command_help("foo", "[]")
     assert len(out) >= 40
     assert calls[0] == "foo -help"
     assert calls[1] == "foo --help"
     assert calls[2] == "foo -h"
 
     calls = []
-    out = tc._get_shell_command_help("foo", ["foo -help", ""])
+    out = tc._get_shell_command_help("foo", '["foo -help", ""]')
     assert len(out) >= 40
     assert calls[0] == "foo --help"
     assert calls[1] == "foo -h"
