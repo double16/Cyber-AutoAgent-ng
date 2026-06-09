@@ -115,20 +115,30 @@ def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeyp
 
     def fake_run(cmd, capture_output, text, timeout):
         calls.append(cmd)
-        # First attempt: --help returns short -> should continue
-        if cmd == ["foo", "--help"]:
+        # First attempt: foo --help returns short -> should continue
+        if cmd == "foo -help":
             return SimpleNamespace(stdout="x", stderr="")
-        # Second attempt: -h returns long -> should return it
-        if cmd == ["foo", "-h"]:
+        # Second attempt: --help returns short -> should continue
+        if cmd == "foo --help":
+            return SimpleNamespace(stdout="x", stderr="")
+        # Third attempt: -h returns long -> should return it
+        if cmd == "foo -h":
             return SimpleNamespace(stdout="A" * 40, stderr="")
         return SimpleNamespace(stdout="", stderr="")
 
     monkeypatch.setattr(tc.subprocess, "run", fake_run)
 
-    out = tc._get_shell_command_help("foo")
+    out = tc._get_shell_command_help("foo", [])
     assert len(out) >= 40
-    assert calls[0] == ["foo", "--help"]
-    assert calls[1] == ["foo", "-h"]
+    assert calls[0] == "foo -help"
+    assert calls[1] == "foo --help"
+    assert calls[2] == "foo -h"
+
+    calls = []
+    out = tc._get_shell_command_help("foo", ["foo -help", ""])
+    assert len(out) >= 40
+    assert calls[0] == "foo --help"
+    assert calls[1] == "foo -h"
 
 
 def test_tool_catalog_wrapper_lists_agent_tools_and_schemas(monkeypatch, tmp_path):

@@ -78,6 +78,7 @@ RUN set -eux; \
     python3 \
     python3-venv \
     python3-pip \
+    python3-yaml \
     python-is-python3 \
     pipx \
     python3-requests \
@@ -329,7 +330,7 @@ RUN pipx install --global bloodhound && \
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "x86_64" ]; then OPENGREP_ARCH="x86"; else OPENGREP_ARCH="${ARCH}"; fi && \
     OPENGREP_VERSION=$(curl -s https://api.github.com/repos/opengrep/opengrep/releases/latest | grep "tag_name" | cut -d ":" -f 2 | tr -d " ,\"") && \
-    curl -L "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" -o /usr/local/bin/opengrep && \
+    curl --silent --fail -L "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" -o /usr/local/bin/opengrep && \
     chmod +x /usr/local/bin/opengrep
 
 RUN npm install --global @graphql-inspector/cli
@@ -386,7 +387,7 @@ RUN mkdir -p /home/cyberagent/sliver && \
 RUN amass -h || true
 
 # Validate expected tools are present in the PATH
-COPY docker/tools_check.sh src/modules/config/system/environment.yaml /tmp
-RUN bash -o pipefail -c 'bash /tmp/tools_check.sh 2>&1 | tee /var/log/tools_check.log' && \
+COPY docker/tools_check.py src/modules/config/system/environment.yaml /tmp
+RUN bash -o pipefail -c 'python3 /tmp/tools_check.py 2>&1 | tee /var/log/tools_check.log' && \
     /tmp/apt_proxy_clean.sh && \
     rm -rf /tmp/* /var/tmp/*
