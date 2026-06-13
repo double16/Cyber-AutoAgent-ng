@@ -114,6 +114,7 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'ollamaHost', label: 'Ollama Host', type: 'text', section: 'Models' },
   { key: 'ollamaContextLength', label: 'Ollama Context Length', type: 'number', section: 'Models' },
   { key: 'ollamaTimeout', label: 'Ollama Timeout', type: 'number', section: 'Models' },
+  { key: 'ollamaKeepAlive', label: 'Ollama Keep-Alive', type: 'text', section: 'Models' },
   { key: 'openaiApiKey', label: 'OpenAI API Key', type: 'password', section: 'Models' },
   { key: 'anthropicApiKey', label: 'Anthropic API Key', type: 'password', section: 'Models' },
   { key: 'geminiApiKey', label: 'Gemini API Key', type: 'password', section: 'Models' },
@@ -177,6 +178,10 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'maxThreads', label: 'Max Threads', type: 'number', section: 'Operations' },
   { key: 'dockerTimeout', label: 'Docker Timeout (s)', type: 'number', section: 'Operations' },
   { key: 'verbose', label: 'Verbose Output', type: 'boolean', section: 'Operations' },
+  {
+    key: 'bugBountyHeaders', label: 'Bug Bounty Headers (JSON)', type: 'text', section: 'Operations',
+    description: 'JSON map of authorized bug bounty marker headers.'
+  },
 
   // Context Management
   {
@@ -746,7 +751,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
           ];
           return bedrockFields.includes(f.key);
         } else if (config.modelProvider === 'ollama') {
-          return ['ollamaHost', 'ollamaContextLength', 'ollamaTimeout', 'temperature', 'maxTokens'].includes(f.key);
+          return ['ollamaHost', 'ollamaContextLength', 'ollamaTimeout', 'ollamaKeepAlive', 'temperature', 'maxTokens'].includes(f.key);
         } else if (config.modelProvider === 'litellm') {
           const litellmFields = [
             'openaiApiKey', 'anthropicApiKey', 'geminiApiKey', 'xaiApiKey', 'cohereApiKey',
@@ -1142,6 +1147,22 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
       return;
     }
 
+    if (key === 'bugBountyHeaders') {
+      try {
+        const parsed = typeof value === 'string' && value.trim()
+          ? JSON.parse(value)
+          : {};
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Expected a JSON object');
+        }
+        updateConfig({ bugBountyHeaders: parsed });
+        setUnsavedChanges(true);
+      } catch (e: any) {
+        showMessage(`Invalid bug bounty headers JSON: ${e?.message || String(e)}`, 'error', 5000);
+      }
+      return;
+    }
+
     // Handle nested keys
     if (key.includes('.')) {
       const parts = key.split('.');
@@ -1213,6 +1234,8 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
       }
     } else if (field.type === 'number') {
       setTempValue(String(currentValue || 0));
+    } else if (field.key === 'bugBountyHeaders') {
+      setTempValue(currentValue ? JSON.stringify(currentValue) : '');
     } else {
       setTempValue(String(currentValue || ''));
     }
@@ -1239,6 +1262,12 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         const status = mcpTestStatus[selectedMcpIndex];
         return status ? `Press Enter to test — ${status}` : 'Press Enter to test';
       }
+    }
+
+    if (key === 'bugBountyHeaders') {
+      return config.bugBountyHeaders && Object.keys(config.bugBountyHeaders).length > 0
+        ? JSON.stringify(config.bugBountyHeaders)
+        : '';
     }
 
     // Special handling for model pricing info
@@ -1299,18 +1328,6 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
           return '1.0 (required)';
         }
         return 'Auto';
-      }
-      if (key === 'maxTokens' && config.modelId?.includes('claude-sonnet-4-5-20250929')) {
-        return '16000';
-      }
-      if (key === 'thinkingBudget' && config.modelId?.includes('claude-sonnet-4-5-20250929')) {
-        return '7000';
-      }
-      if (key === 'maxTokens' && config.modelId?.includes('claude-sonnet-4-20250514')) {
-        return '32000';
-      }
-      if (key === 'thinkingBudget' && config.modelId?.includes('claude-sonnet-4-20250514')) {
-        return '10000';
       }
 
       // Show provider defaults for common optional fields
@@ -1460,7 +1477,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
                       const isEditing = editingField?.field === field.key;
 
                       return (
-                        <Box key={field.key} marginY={0.25}>
+                        <Box key={field.key} marginY={0}>
                           {(() => {
                             const cols = (() => { try { return Math.max(40, Math.min(Number((process as any)?.stdout?.columns || 80), 200)); } catch { return 80; } })();
                             const labelWidth = Math.max(20, Math.min(48, Math.floor(cols * 0.38)));

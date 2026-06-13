@@ -464,15 +464,15 @@ LANGFUSE_ADMIN_PASSWORD=strong-password-here
 ### Prerequisites
 
 **System Requirements**
-- **Node.js**: Version 20+ required for React CLI interface
+- **Node.js**: Version 24+ required for React CLI interface
 - **Python**: Version 3.11+ for local installation
 - **Docker**: For containerized deployments
 - **macOS Users**: Xcode Command Line Tools required
 
 **React CLI Setup (Required for Interactive Mode)**
 ```bash
-# Ensure Node.js 20+ is installed
-node --version  # Should show v20.x.x or higher
+# Ensure Node.js 24+ is installed
+node --version  # Should show v24.x.x or higher
 
 # macOS users: Update Xcode tools if needed
 sudo softwareupdate --install -a
@@ -581,7 +581,7 @@ git clone https://github.com/double16/Cyber-AutoAgent-ng.git
 cd cyber-autoagent
 
 # Build image
-docker build --pull -f docker/Dockerfile.tools -t cyber-autoagent-tools .
+# (optional) docker build --pull -f docker/Dockerfile.tools -t public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest .
 docker build -f docker/Dockerfile -t cyber-autoagent .
 
 # Using environment variables
@@ -666,6 +666,21 @@ The unified structure organizes all artifacts under operation-specific directori
 - `--output-dir`: Custom output directory (default: ./outputs)
 - `--mcp-enabled`: Enable MCP tools
 - `--mcp-conns`: Provide JSON of MCP server, the same `mcp.connections` block present in the configuration file 
+- `--bug-bounty-header NAME=VALUE`: Add an HTTP marker header for authorized bug bounty traffic (repeatable)
+
+### Bug Bounty Traffic Markers
+
+Some programs require every request to include researcher marker headers such as `X-HackerOne-Research`, `X-Bugcrowd`, or a custom `User-Agent`. Configure them at startup:
+
+```bash
+python src/cyberautoagent.py \
+  --target "https://example.com" \
+  --objective "Authorized bug bounty testing" \
+  --bug-bounty-header X-HackerOne-Research=username \
+  --bug-bounty-header User-Agent=username@wearehackerone.com
+```
+
+The agent pre-applies these headers to browser traffic and adds them to tool guidance so `http_request`, shell tools, and MCP tools include the same markers.
 
 ### Usage Examples
 
@@ -853,13 +868,13 @@ cyber-autoagent/
 
 **Node.js Version**
 ```bash
-# Check Node.js version (must be 20+)
+# Check Node.js version (must be 24+)
 node --version
 
-# Install Node.js 20+ via nvm
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
-nvm install 20
-nvm use 20
+# Install Node.js 24+ via nvm
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
+nvm install 24
+nvm use 24
 ```
 
 **macOS Build Errors**

@@ -6,7 +6,7 @@ Cyber-AutoAgent is an autonomous security assessment tool with a React-based ter
 
 | Requirement               | Purpose                            |
 |---------------------------|------------------------------------|
-| Node.js 20+               | React interface runtime            |
+| Node.js 22+               | React interface runtime            |
 | Docker Desktop            | Containerized agent execution      |
 | AWS credentials or Ollama | Model provider access              |
 | Authorization             | Written permission to test targets |
@@ -194,6 +194,19 @@ cyber-react \
 | `--deployment-mode`    | Auto      | local-cli, single-container, full-stack |
 | `--mcp-enabled`        | `false`   | Enable MCP Tools                        |
 | `--mcp-conns` '[...]'  | None      | Configure MCP Tools                     |
+| `--bug-bounty-header NAME=VALUE` | None | Add a marker header to authorized bug bounty traffic; repeat for multiple headers |
+
+### Bug Bounty Traffic Markers
+
+Some programs require marker headers on every request. Configure them once so the agent applies them to the shared browser context and includes them in prompts for HTTP/MCP/tool usage:
+
+```bash
+cyber-react \
+  --target "https://example.com" \
+  --objective "Authorized bug bounty testing" \
+  --bug-bounty-header X-HackerOne-Research=username \
+  --bug-bounty-header User-Agent=username@wearehackerone.com
+```
 
 ### Configuration Loading Priority
 
@@ -425,8 +438,8 @@ Requirements: Python 3.11+, dependencies installed
 ### Docker Standalone
 
 ```bash
-docker build --pull -t cyber-autoagent-tools -f Dockerfile.tools ..
-docker build -t cyber-autoagent ..
+# (optional) docker build --pull -f docker/Dockerfile.tools -t public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest ..
+docker build -t cyber-autoagent -f docker/Dockerfile .
 
 docker run --rm \
   -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} \
@@ -446,7 +459,7 @@ docker run --rm \
 | React app won't start | `rm -rf node_modules && npm install && npm run build` |
 | Configuration errors  | `rm ~/.cyber-autoagent/config.json && cyber-react`    |
 | Docker connectivity   | `docker info` to verify daemon running                |
-| Node version issues   | Verify Node.js 20+ with `node --version`              |
+| Node version issues   | Verify Node.js 22+ with `node --version`              |
 
 ### Provider Issues
 

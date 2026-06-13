@@ -28,12 +28,10 @@ def test_mem0_store_basic_success(mock_memory_client, mock_user_op_ids):
     mock_memory_client.store_memory.return_value = [{"id": "mem_1", "memory": content}]
 
     # Execute
-    result_json = mem0_store(content, metadata)
-    result = json.loads(result_json)
+    result = mem0_store(content, metadata)
 
     # Verify
-    assert len(result) == 1
-    assert result[0]["id"] == "mem_1"
+    assert "memory stored" in result.lower()
     mock_memory_client.store_memory.assert_called_once()
     args, kwargs = mock_memory_client.store_memory.call_args
     assert args[0] == content
@@ -179,12 +177,9 @@ def test_mem0_store_duplicate_detection_standard(mock_memory_client, mock_user_o
         ]
     }
 
-    result_json = mem0_store(content, metadata)
-    result = json.loads(result_json)
+    result = mem0_store(content, metadata)
+    assert "memory stored" in result.lower()
 
-    assert len(result) == 1
-    assert result[0]["event"] == "DUPLICATE"
-    assert result[0]["id"] == "mem_dup"
     mock_memory_client.store_memory.assert_not_called()
 
 
@@ -206,9 +201,8 @@ def test_mem0_store_duplicate_detection_sensitive_patterns(mock_memory_client, m
     mock_memory_client.store_memory.return_value = [{"id": "mem_new"}]
 
     # Should NOT be treated as duplicate
-    result_json = mem0_store(content1, metadata)
-    result = json.loads(result_json)
-    assert result[0]["id"] == "mem_new"
+    result = mem0_store(content1, metadata)
+    assert "memory stored" in result.lower()
     mock_memory_client.store_memory.assert_called_once()
 
     # Now test with SAME URL
@@ -224,9 +218,8 @@ def test_mem0_store_duplicate_detection_sensitive_patterns(mock_memory_client, m
         ]
     }
 
-    result_json = mem0_store(content1, metadata)
-    result = json.loads(result_json)
-    assert result[0]["event"] == "DUPLICATE"
+    result = mem0_store(content1, metadata)
+    assert "memory stored" in result.lower()
     mock_memory_client.store_memory.assert_not_called()
 
 
@@ -241,10 +234,8 @@ def test_mem0_store_error_recovery_json(mock_memory_client, mock_user_op_ids):
         [{"id": "mem_recovered"}]
     ]
 
-    result_json = mem0_store(content, metadata)
-    result = json.loads(result_json)
-
-    assert result[0]["id"] == "mem_recovered"
+    result = mem0_store(content, metadata)
+    assert "memory stored" in result.lower()
     assert mock_memory_client.store_memory.call_count == 2
 
     # Verify second call had escaped content

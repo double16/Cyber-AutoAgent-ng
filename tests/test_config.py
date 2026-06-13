@@ -14,7 +14,7 @@ from modules.config.manager import (
     get_config_manager,
     get_default_model_configs,
     get_model_config,
-    get_ollama_host, MAX_TOKENS_LIMIT, MAX_TOKENS_REASONING_LIMIT,
+    get_ollama_host, MAX_TOKENS_REASONING_LIMIT,
 )
 from modules.config.types import (
     EmbeddingConfig,
@@ -451,15 +451,33 @@ class TestConfigManager:
 
     @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434"})
     def test_get_ollama_host_environment_override(self):
-        """Test that OLLAMA_HOST environment variable overrides detection."""
+        """Test that the OLLAMA_HOST environment variable overrides detection."""
         host = self.config_manager.get_ollama_host()
         assert host == "http://custom:11434"
 
     @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434", "OLLAMA_TIMEOUT": "3600.2" })
     def test_get_ollama_timeout_environment_override(self):
-        """Test that OLLAMA_TIMEOUT environment variable overrides defaults."""
+        """Test that the OLLAMA_TIMEOUT environment variable overrides defaults."""
         timeout = self.config_manager.get_ollama_timeout()
         assert timeout == 3600.2
+
+    @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434", "OLLAMA_KEEP_ALIVE": "15m" })
+    def test_get_ollama_keep_alive_environment_override(self):
+        """Test that the OLLAMA_KEEP_ALIVE environment variable overrides defaults."""
+        keep_alive = self.config_manager.get_ollama_keep_alive()
+        assert keep_alive == "15m"
+
+    @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434"})
+    def test_get_ollama_keep_alive_default(self):
+        """Test the keep alive default."""
+        keep_alive = self.config_manager.get_ollama_keep_alive()
+        assert keep_alive == "30m"
+
+    @patch.dict(os.environ, {"OLLAMA_HOST": "http://custom:11434", "OLLAMA_KEEP_ALIVE": ""})
+    def test_get_ollama_keep_alive_enviroment_empty(self):
+        """Test the keep alive default."""
+        keep_alive = self.config_manager.get_ollama_keep_alive()
+        assert keep_alive == "30m"
 
     @patch("modules.config.system.validation.requests.get")
     def test_validate_ollama_requirements_success(self, mock_get):
@@ -1046,12 +1064,12 @@ class TestEnvironmentIntegration:
         """Test centralized thinking models configuration."""
         config_manager = ConfigManager()
 
-        assert config_manager.is_thinking_model("bedrock", "global.anthropic.claude-opus-4-5-20251101-v1:0")
-        assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-5-20251101-v1:0")
-        assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-20250514-v1:0")
+        assert not config_manager.is_thinking_model("bedrock", "global.anthropic.claude-opus-4-5-20251101-v1:0")
+        assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-5-20251101-v1:0")
+        assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-opus-4-20250514-v1:0")
         assert config_manager.is_thinking_model("bedrock", "us.anthropic.claude-sonnet-4-20250514-v1:0")
         assert not config_manager.is_thinking_model("bedrock", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
-        assert config_manager.is_thinking_model("litellm", "nvidia_nim/moonshotai/kimi-k2.5")
+        assert config_manager.is_thinking_model("litellm", "nvidia_nim/moonshotai/kimi-k2.6")
         assert not config_manager.is_thinking_model("venice", "llama-3.2-3b")
         assert not config_manager.is_thinking_model("not_a_provider", "llama-3.2-3b")
 

@@ -48,8 +48,9 @@ except Exception:  # pragma: no cover
     LlmProviders = None  # type: ignore
     ModelInfoBase = None  # type: ignore
 
+
     def llm_supports_reasoning(
-        model: str, custom_llm_provider: Optional[str] = None
+            model: str, custom_llm_provider: Optional[str] = None
     ) -> bool:  # type: ignore
         return False
 
@@ -123,10 +124,11 @@ class Capabilities:
     pass_reasoning_effort: bool
     supports_tools: bool
     supports_tool_choice: bool
+    supports_temperature: bool
 
 
 class ModelCapabilitiesResolver:
-    """Model capability detection with authoritative models.dev source.
+    """Model capability detection with the authoritative models.dev source.
 
     Precedence: models.dev → static patterns → LiteLLM → env overrides
     Cached per (provider, model_id).
@@ -153,6 +155,7 @@ class ModelCapabilitiesResolver:
         pass_reasoning_effort = False
         supports_tools = True
         supports_tool_choice = True
+        supports_temp = True
 
         # Priority 1: models.dev (authoritative source for 500+ models)
         if get_models_client is not None:
@@ -164,11 +167,13 @@ class ModelCapabilitiesResolver:
                     supports_reason = bool(caps.reasoning)
                     supports_tools = bool(caps.tool_call)
                     supports_tool_choice = supports_tools
+                    supports_temp = bool(caps.temperature)
                     logger.debug(
-                        "Using models.dev: model=%s reasoning=%s tools=%s",
+                        "Using models.dev: model=%s reasoning=%s tools=%s temperature=%s",
                         model,
                         supports_reason,
                         supports_tools,
+                        supports_temp,
                     )
             except Exception as e:
                 logger.debug("models.dev lookup failed for %s: %s", model, e)
@@ -201,10 +206,10 @@ class ModelCapabilitiesResolver:
         allowed_params: list[str] = []
         try:
             if (
-                ProviderConfigManager is not None
-                and LlmProviders is not None
-                and ModelInfoBase is not None
-                and base_provider
+                    ProviderConfigManager is not None
+                    and LlmProviders is not None
+                    and ModelInfoBase is not None
+                    and base_provider
             ):
                 prov_enum = LlmProviders(base_provider)  # type: ignore[call-arg]
                 cfg = ProviderConfigManager.get_provider_chat_config(
@@ -259,10 +264,16 @@ class ModelCapabilitiesResolver:
             supports_reason = True
         pass_reasoning_effort = "reasoning_effort" in lowered
 
-        # Update tool support from provider params if available
+        # Update tool and temperature support from provider params if available
         if lowered:
             supports_tools = "tools" in lowered
             supports_tool_choice = "tool_choice" in lowered
+            if "temperature" in lowered:
+                supports_temp = True
+            elif base_provider != "ollama":  # Ollama doesn't always report temperature in show
+                # If LiteLLM explicitly knows about params and temperature is NOT there
+                if ProviderConfigManager is not None and "temperature" not in lowered:
+                    supports_temp = False
 
         # Priority 4: Environment overrides (highest precedence)
         model_l = model.lower()
@@ -276,6 +287,7 @@ class ModelCapabilitiesResolver:
             logger.info("ENV override: forcing reasoning=True for %s", model)
         if any(tok in model_l for tok in deny):
             supports_reason = False
+            pass_reasoning_effort = False
             logger.info("ENV override: forcing reasoning=False for %s", model)
 
         return Capabilities(
@@ -283,6 +295,7 @@ class ModelCapabilitiesResolver:
             pass_reasoning_effort=pass_reasoning_effort,
             supports_tools=supports_tools,
             supports_tool_choice=supports_tool_choice,
+            supports_temperature=supports_temp,
         )
 
 
@@ -297,86 +310,6 @@ def get_capabilities(provider: str, model_id: str) -> Capabilities:
 # --- Input limits (static registry) --------------------------------------------
 # Accurate INPUT token limits (context window capacity) for known models
 # These are NOT output limits.
-
-MODEL_INPUT_LIMITS = {
-    # Azure OpenAI GPT-5 Family (400K total, 272K input, 128K output)
-    "azure/gpt-5": 272000,
-    "azure/gpt-5-mini": 272000,
-    "azure/gpt-5-nano": 272000,
-    "azure/gpt-5-pro": 272000,
-    "azure/gpt-5-codex": 272000,
-    "azure/responses/gpt-5-pro": 272000,
-    # Azure OpenAI GPT-5-Chat (128K total)
-    "azure/gpt-5-chat": 128000,
-    # Azure OpenAI GPT-OSS Family (131K context)
-    "azure/gpt-oss-120b": 131072,
-    "azure/gpt-oss-20b": 131072,
-    # Azure OpenAI GPT-4 Family
-    "azure/gpt-4o": 128000,
-    "azure/gpt-4o-mini": 128000,
-    "azure/gpt-4": 128000,
-    "azure/gpt-4-turbo": 128000,
-    # OpenAI Direct (same as Azure variants)
-    "gpt-5": 272000,
-    "gpt-5-mini": 272000,
-    "gpt-5-nano": 272000,
-    "gpt-5-pro": 272000,
-    "gpt-5-codex": 272000,
-    "gpt-5-chat": 128000,
-    "gpt-oss-120b": 131072,
-    "gpt-oss-20b": 131072,
-    "gpt-4o": 128000,
-    "gpt-4o-mini": 128000,
-    "gpt-4-turbo": 128000,
-    "gpt-4": 128000,
-    # AWS Bedrock - Claude 3.5 Family (200K input)
-    "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0": 200000,
-    "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0": 200000,
-    "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0": 200000,
-    # AWS Bedrock - Claude Sonnet 4.5 (1M input)
-    "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0": 1000000,
-    "bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0": 1000000,
-    # AWS Bedrock - Claude Opus 4.5 (200K input)
-    "bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0": 200000,
-    "bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0": 200000,
-    "bedrock/anthropic.claude-opus-4-5-20251101-v1:0": 200000,
-    "global.anthropic.claude-opus-4-5-20251101-v1:0": 200000,
-    "us.anthropic.claude-opus-4-5-20251101-v1:0": 200000,
-    "anthropic.claude-opus-4-5-20251101-v1:0": 200000,
-    # AWS Bedrock - Claude 3 Opus/Sonnet (200K)
-    "bedrock/anthropic.claude-3-opus-20240229-v1:0": 200000,
-    "bedrock/anthropic.claude-3-sonnet-20240229-v1:0": 200000,
-    # Anthropic Direct API (same as Bedrock)
-    "claude-3-5-sonnet-20241022": 200000,
-    "claude-3-5-haiku-20241022": 200000,
-    "claude-sonnet-4-5-20250929": 1000000,
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 1000000,
-    # OpenRouter - Various providers
-    "openrouter/openrouter/polaris-alpha": 256000,
-    "openrouter/openrouter/sherlock-think-alpha": 1840000,  # 1.84M context, 64K output, reasoning model
-    "openrouter/anthropic/claude-3.5-sonnet": 200000,
-    "openrouter/anthropic/claude-3.5-haiku": 200000,
-    "openrouter/google/gemini-2.5-flash": 1000000,
-    "openrouter/google/gemini-2.0-flash-exp": 1000000,
-    "openrouter/google/gemini-3-pro-preview": 1048576,  # 1M input, 65.5K output, reasoning model
-    # Moonshot Kimi
-    "moonshot/kimi-k2-thinking": 256000,
-    # Google Gemini (1M input for flash models)
-    "gemini/gemini-2.5-flash": 1000000,
-    "gemini/gemini-2.0-flash-exp": 1000000,
-    "gemini/gemini-1.5-pro": 1000000,
-    "gemini/gemini-1.5-flash": 1000000,
-    "vertex_ai/gemini-2.5-flash": 1000000,
-    "vertex_ai/gemini-2.0-flash-exp": 1000000,
-    # Deepseek
-    "deepseek/deepseek-chat": 64000,
-    "deepseek/deepseek-reasoner": 64000,
-    # Common Ollama models (approximate)
-    "ollama/llama3.1:70b": 128000,
-    "ollama/llama3.1:8b": 128000,
-    "ollama/mistral:latest": 32000,
-    "ollama/codellama:latest": 16000,
-}
 
 MODEL_FAMILY_PATTERNS = [
     # Azure/OpenAI GPT-5-Chat variants (128K)
@@ -434,11 +367,7 @@ def get_model_input_limit(model_id: str) -> Optional[int]:
         except Exception:
             pass
 
-    # Priority 2: Static registry (exact match)
-    if model_id in MODEL_INPUT_LIMITS:
-        return MODEL_INPUT_LIMITS[model_id]
-
-    # Priority 3: Pattern matching (family match)
+    # Priority 2: Pattern matching (family match)
     for pattern, limit in MODEL_FAMILY_PATTERNS:
         if re.search(pattern, model_id, re.IGNORECASE):
             return limit
@@ -530,7 +459,6 @@ __all__ = [
     "get_model_input_limit",
     "get_model_output_limit",
     "get_provider_default_limit",
-    "MODEL_INPUT_LIMITS",
     "MODEL_FAMILY_PATTERNS",
     # Pricing
     "get_model_pricing",

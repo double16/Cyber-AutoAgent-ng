@@ -1,6 +1,6 @@
 {
   "name": "cyber-autoagent-cli",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Cyber-AutoAgent CLI with React + Ink",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,12 +24,15 @@
     "test:all": "npm run build && npm run test:coverage",
     "validate": "npm run build && npm run test:all"
   },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "dependencies": {
     "ansi-escapes": "^7.0.0",
     "chokidar": "^5.0.0",
     "commander": "^14.0.2",
     "dockerode": "^4.0.9",
-    "ink": "^6.8.0",
+    "ink": "^7.0.0",
     "ink-big-text": "^2.0.0",
     "ink-gradient": "^4.0.0",
     "ink-link": "^5.0.0",
@@ -52,19 +55,19 @@
     "@types/dockerode": "^4.0.1",
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^20.19.9",
-    "@types/react": "^19.1.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.17",
     "@types/react-test-renderer": "^19.1.0",
-    "babel-jest": "^30.2.0",
+    "babel-jest": "^30.4.1",
     "chalk": "^5.4.1",
     "ink-testing-library": "^4.0.0",
     "jest": "^30.2.0",
     "jest-environment-jsdom": "^30.2.0",
-    "jsdom": "^28.1.0",
+    "jsdom": "^29.0.2",
     "react-dom": "^19.1.1",
     "react-test-renderer": "^19.2.4",
     "ts-jest": "^29.4.6",
     "tsx": "^4.6.2",
-    "typescript": "^5.9.2"
+    "typescript": "^6.0.2"
   }
 }

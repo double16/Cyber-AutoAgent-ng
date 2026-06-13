@@ -1,7 +1,16 @@
 brew "python@3.12"
 brew "virtualenv"
-brew "node@24"
+brew "node@22"
+
 brew "docker"
+brew "docker-buildx"
+brew "docker-compose"
+brew "buildkit"
+# ~/.docker/config.json:
+# "cliPluginsExtraDirs": [ "/opt/homebrew/lib/docker/cli-plugins" ]
+
+brew "uv"
+brew "ollama"
 
 brew "nmap"
 brew "nikto"
@@ -41,4 +50,5 @@ brew "hashcat"
 brew "dalfox"
 brew "trufflehog"
 brew "sqlite3"
-brew "wpscanteam/tap/wpscan"
+brew "openvpn"
+#brew "wpscanteam/tap/wpscan"

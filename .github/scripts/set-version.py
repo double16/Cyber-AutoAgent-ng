@@ -290,7 +290,8 @@ def main() -> int:
             file_path = pathlib.Path(root, file)
             update_tsx_header_version(file_path, args.version)
         if root.endswith("/docker"):
-            for file in filter(lambda f: f.startswith("Dockerfile"), files):
+            # Dockerfile.tools is versioned separately
+            for file in filter(lambda f: f == "Dockerfile", files):
                 file_path = pathlib.Path(root, file)
                 replace_dockerfile_version(args.version, [file_path])
 

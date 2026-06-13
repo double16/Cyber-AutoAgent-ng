@@ -450,6 +450,20 @@ Prefer MCP tools over command line tools that offer similar capabilities.
             if full_tools_context:
                 full_tools_context += "\n\n"
             full_tools_context += str(tools_ctx)
+    if config.bug_bounty_headers:
+        marker_headers = "\n".join(
+            f"- {name}: {value}" for name, value in sorted(config.bug_bounty_headers.items())
+        )
+        marker_context = f"""
+## BUG BOUNTY TRAFFIC MARKERS
+
+Authorized bug bounty traffic must include these HTTP headers:
+{marker_headers}
+
+Before using browser traffic, call `browser_set_headers` with these headers. For `http_request`, command-line tools, and MCP tools that make HTTP requests, include the same headers in the tool input, command flags, or prompt.
+"""
+        full_tools_context = f"{full_tools_context}\n\n{marker_context}" if full_tools_context else marker_context
+
     if full_tools_context:
         full_tools_context = f"""
 ## TOOLS
@@ -457,6 +471,18 @@ Prefer MCP tools over command line tools that offer similar capabilities.
 Prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
 
 """ + full_tools_context
+
+    if config.bug_bounty_headers:
+        try:
+            import asyncio
+
+            asyncio.run(browser_set_headers(config.bug_bounty_headers))
+            agent_logger.info(
+                "Applied %d bug bounty marker header(s) to the browser context",
+                len(config.bug_bounty_headers),
+            )
+        except Exception as e:
+            agent_logger.warning("Unable to pre-apply bug bounty browser headers: %s", e)
 
     # Always use original tools - event emission is handled by callback
     # The following are builtin_tools that can be selected by the module
@@ -897,6 +923,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     os.environ["STRANDS_MAX_TOKENS"] = str(server_config.llm.max_tokens)
     os.environ["STRANDS_TEMPERATURE"] = str(server_config.llm.temperature)
     os.environ["STRANDS_NON_INTERACTIVE"] = "true"
+    os.environ["STRANDS_HTTP_ALLOW_INSECURE_SSL"] = "true"
 
     # Create agent (telemetry is handled globally by Strands SDK)
     agent = Agent(**agent_kwargs)

@@ -18,7 +18,7 @@ logger = get_logger("Config.OllamaProvider")
 
 
 def get_ollama_host(env_reader: EnvironmentReader) -> str:
-    """Determine appropriate Ollama host based on environment.
+    """Determine the appropriate Ollama host based on environment.
 
     Tries the following in order:
     1. OLLAMA_HOST environment variable
@@ -56,7 +56,7 @@ def get_ollama_host(env_reader: EnvironmentReader) -> str:
 
 
 def get_ollama_timeout(env_reader: EnvironmentReader) -> float:
-    """Determine appropriate Ollama timeout based on environment.
+    """Determine the appropriate Ollama timeout based on environment.
 
     Tries the following in order:
     1. OLLAMA_TIMEOUT environment variable
@@ -77,6 +77,22 @@ def get_ollama_timeout(env_reader: EnvironmentReader) -> float:
                 "Ollama timeout not a float, falling back to 120"
             )
     return 120
+
+
+def get_ollama_keep_alive(env_reader: EnvironmentReader) -> str:
+    """Determine appropriate Ollama keep alive based on the environment.
+
+    Tries the following in order:
+    1. OLLAMA_KEEP_ALIVE environment variable
+    2. Default to 30m
+
+    Args:
+        env_reader: Environment variable reader
+
+    Returns:
+        Ollama keep_alive
+    """
+    return env_reader.get("OLLAMA_KEEP_ALIVE") or "30m"
 
 
 def get_ollama_options(env_reader: EnvironmentReader) -> Dict[str, Any]:

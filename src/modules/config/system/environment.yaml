@@ -86,11 +86,6 @@ cyber_tools:
     preference: preferred
     caps: [file_inclusion]
     canary: "lfimap --help"
-  idor-forge:
-    description: "Detection and exploitation of Insecure Direct Object Reference (IDOR) vulnerabilities."
-    preference: preferred
-    caps: [idor]
-    canary: "idor-forge --help"
 
   # ProjectDiscovery ecosystem
   nuclei:
@@ -221,7 +216,12 @@ cyber_tools:
     description: "Static source code analysis"
     preference: preferred
     caps: [sast]
-    canary: "opengrep scan --help"
+    canary:
+      - "opengrep scan --version"
+      - "opengrep scan -version"
+    help:
+      - "opengrep scan --help"
+      - "opengrep scan -help"
 
   # DNS/Recon
   dnsrecon:
@@ -527,7 +527,8 @@ cyber_tools:
   sliver:
     description: "Command and Control framework"
     command: "sliver-client"
-    preference: preferred
+    # sliver install is unstable
+    preference: fallback
     caps: [exploitation_framework]
     canary: "sliver-client -h"
 

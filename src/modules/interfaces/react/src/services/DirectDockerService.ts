@@ -275,6 +275,9 @@ export class DirectDockerService extends EventEmitter {
       if (config.modelId) {
         env.push(`CYBER_AGENT_LLM_MODEL=${config.modelId}`);
       }
+      if (config.bugBountyHeaders && Object.keys(config.bugBountyHeaders).length > 0) {
+        env.push(`CYBER_BUG_BOUNTY_HEADERS=${JSON.stringify(config.bugBountyHeaders)}`);
+      }
       if (config.rateLimitTokensPerMinute) {
         env.push(`CYBER_RATE_LIMIT_TOKENS_PER_MIN=${config.rateLimitTokensPerMinute}`);
       }
@@ -344,6 +347,9 @@ export class DirectDockerService extends EventEmitter {
       }
       if (config.ollamaTimeout) {
         env.push(`OLLAMA_TIMEOUT=${config.ollamaTimeout}`);
+      }
+      if (config.ollamaKeepAlive) {
+        env.push(`OLLAMA_KEEP_ALIVE=${config.ollamaKeepAlive}`);
       }
 
       // LiteLLM configuration
@@ -540,6 +546,30 @@ export class DirectDockerService extends EventEmitter {
           envMap.set(key, value);
         }
       }
+
+      // Pricing overrides: allow user to specify model-specific pricing via config.modelPricing
+      try {
+        const modelId = config.modelId;
+        const pricingTable = (config as any)?.modelPricing as Record<string, any> | undefined;
+        const p = modelId && pricingTable ? pricingTable[modelId] : undefined;
+        if (p && typeof p === 'object') {
+          if (p.inputCostPer1k !== undefined && p.inputCostPer1k !== null) {
+            envMap.set('CYBER_AGENT_PRICING_INPUT', String(p.inputCostPer1k / 1000.0));
+          }
+          if (p.outputCostPer1k !== undefined && p.outputCostPer1k !== null) {
+            envMap.set('CYBER_AGENT_PRICING_OUTPUT', String(p.outputCostPer1k / 1000.0));
+          }
+          if (p.cacheReadCostPer1k !== undefined && p.cacheReadCostPer1k !== null) {
+            envMap.set('CYBER_AGENT_PRICING_CACHE_READ', String(p.cacheReadCostPer1k / 1000.0));
+          }
+          if (p.cacheWriteCostPer1k !== undefined && p.cacheWriteCostPer1k !== null) {
+            envMap.set('CYBER_AGENT_PRICING_CACHE_WRITE', String(p.cacheWriteCostPer1k / 1000.0));
+          }
+        }
+      } catch {
+        // Non-fatal: ignore malformed pricing config
+      }
+
       const userEnvironment = flattenEnvironment(config.environment as any);
       for (const [key, value] of Object.entries(userEnvironment)) {
         if (value !== undefined) {

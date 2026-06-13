@@ -160,6 +160,11 @@ class Task:
         lines.append(f"  {title},{objective},{evidence},{self.phase},{status},{status_reason}")
         return "\n".join(lines).strip()
 
+    @staticmethod
+    def list_to_toon(tasks: List["Task"]) -> str:
+        lines = [task.to_toon(include_format=False) for task in tasks]
+        return f"task[{len(tasks)}]{{"+Task.csv_format()+"}:\n"+"\n".join(lines).strip()
+
 
 @dataclass(frozen=True)
 class PlanPhase:
@@ -515,6 +520,8 @@ def _user_id(user_id: Optional[str] = None) -> str:
         return user_id
     return (_MEMORY_CONFIG or {}).get("user_id", "cyber-agent")
 
+def _agent_id(agent_id: Optional[str] = None) -> Optional[str]:
+    return agent_id
 
 def _operation_id(operation_id: Optional[str] = None) -> str:
     return operation_id or (_MEMORY_CONFIG or {}).get("operation_id", os.getenv("CYBER_OPERATION_ID", "default_operation"))
@@ -621,7 +628,6 @@ def _has_valid_proof_pack(finding: Any) -> bool:
 def mem0_store(
     content: str,
     metadata: Dict[str, Any],
-    agent_id: Optional[str] = None,
 ) -> str:
     """Store a single memory entry.
     Use this for atomic entries (ONE finding/observation per call). Prefer storing immediately after you confirm something.
@@ -659,7 +665,7 @@ def mem0_store(
         mem0_store(content="[FINDING] XSS Vulnerability confirmed on /contactus endpoint with name parameter. - Technique: stored_xss",
             metadata={"category": "finding", "severity": "HIGH",
                       "status": "verified", "validation_status": "verified",
-                      "technique": "stored_xss", "artifact_hash": "sha256_of_artifact"})
+                      "technique": "stored_xss"})
 
         # Store observation during reconnaissance
         mem0_store(content="[OBSERVATION] Discovered 15 endpoints, JWT auth, admin panel at /admin returns 403",
@@ -691,6 +697,7 @@ def mem0_store(
         raise ValueError("content is required")
 
     user_id = _user_id()
+    agent_id = _agent_id()
 
     # Clean content to prevent JSON issues
     cleaned_content = (
@@ -871,8 +878,9 @@ def mem0_store(
             if new_patterns == existing_patterns:
                 logger.debug(
                     f"Found memory duplicate with score {existing_best_score}: {cleaned_content} ~= {existing_best_match.get('memory')}")
-                result = [{"role": "user", "event": "DUPLICATE", "id": existing_best_match.get("id")}]
-                return json.dumps(result, indent=2, sort_keys=True)
+                return "Memory stored."
+                # result = [{"role": "user", "event": "DUPLICATE", "id": existing_best_match.get("id")}]
+                # return json.dumps(result, indent=2, sort_keys=True)
             else:
                 logger.debug(
                     f"Memory similarity is high ({existing_best_score}) but sensitive patterns differ. "
@@ -908,26 +916,27 @@ def mem0_store(
         # Restore original logging level
         mem0_logger.setLevel(original_level)
 
+    return "Memory stored."
+
     # Normalize to list with better error handling
-    if results is None:
-        results_list = []
-    elif isinstance(results, list):
-        results_list = results
-    elif isinstance(results, dict):
-        results_list = results.get("results", [])
-    else:
-        results_list = []
-
-    results_list = [ filter_none_values(d) if isinstance(d, dict) else d for d in results_list ]
-
-    return json.dumps(results_list, indent=2, sort_keys=True)
+    # if results is None:
+    #     results_list = []
+    # elif isinstance(results, list):
+    #     results_list = results
+    # elif isinstance(results, dict):
+    #     results_list = results.get("results", [])
+    # else:
+    #     results_list = []
+    #
+    # results_list = [ filter_none_values(d) if isinstance(d, dict) else d for d in results_list ]
+    # return json.dumps(results_list, indent=2, sort_keys=True)
 
 
 @tool(context=True)
 def store_plan(
     plan: Union[OperationPlan, str, Dict],
     tool_context: ToolContext = None,
-) -> Optional[Dict]:
+) -> str:
     """Store the current operation plan.
 
     Args:
@@ -938,6 +947,8 @@ def store_plan(
     """
     client = _ensure_memory_client()
     user_id = _user_id()
+    op_id = None if memory_is_cross_operation() else _operation_id()
+
     if isinstance(plan, str):
         plan = plan.strip()
         try:
@@ -984,23 +995,26 @@ def store_plan(
                 "**MANDATORY ACTION**: Continue by executing this active task:\n" + active_task_message(active_task)
             )
 
-    results = client.store_plan(plan=plan_obj, user_id=user_id)
-    return results
+    results = client.store_plan(plan=plan_obj, user_id=user_id, operation_id=op_id)
+
+    result_str = results.get("plan", "")
+    if "_reminder" in results:
+        result_str += "\n" + results["_reminder"]
+
+    return result_str
 
 
 @tool
-def get_plan() -> Optional[Dict]:
+def get_plan() -> str:
     """Get the most recent active plan.
     Returns the plan or null if none found.
     """
     client = _ensure_memory_client()
     user_id = _user_id()
     op_id = None if memory_is_cross_operation() else _operation_id()
+    logger.debug(f"get_active_plan(user_id={user_id}, operation_id={op_id})")
     plan = client.get_active_plan(user_id=user_id, operation_id=op_id)
-    if not plan:
-        return None
-
-    return {"status": "success", "plan": plan.to_toon(), "operation_id": op_id}
+    return plan.to_toon() if plan is not None else "No active plan."
 
 
 @dataclass
@@ -1166,15 +1180,15 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
         })
         existing_tasks.append(task)
 
+    # Keep the output simple, giving too much info may be interpreted as instructions.
+    results_str = f"Tasks created.\n"
+
     if all_results:
         active_task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
         if active_task and activated:
-            all_results.append({
-                "event": "ACTIVATE",
-                "task": active_task.to_dict(),
-            })
+            results_str += active_task_message(active_task=active_task, activated=True, current_phase=current_phase)
 
-    return json.dumps(all_results, indent=2, sort_keys=True)
+    return results_str
 
 
 @tool
@@ -1237,35 +1251,33 @@ def get_active_task() -> str:
 
 
 @tool
-def list_uncompleted_tasks() -> List[Task]:
+def list_uncompleted_tasks() -> str:
     """List all uncompleted tasks for the current plan phase."""
     client = _ensure_memory_client()
     user_id = _user_id()
     try:
         current_phase = _get_plan_current_phase()
-        return client.list_tasks(user_id=user_id, phase=current_phase, status=["pending", "active"])
+        return Task.list_to_toon(client.list_tasks(user_id=user_id, phase=current_phase, status=["pending", "active"]))
     except ValueError:
-        # no active plan
-        return []
+        return "No active plan."
 
 
-def _memory_list_for_agent(memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    pruned = []
+def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:
+    if not memories:
+        return ""
     memories.sort(key=memory_create_time, reverse=True)
-    for result in memories:
-        memory = result.get("memory", "")
+    result = ""
+    for m in memories:
+        memory = m.get("memory", "")
         if not memory:
             continue
-        pruned.append({"id": result.get("id", ""), "memory": memory})
-    return pruned
+        result += f"- {memory}\n"
+    return result
 
 
 @tool
-def mem0_list(
-    agent_id: Optional[str] = None,
-) -> str:
-    """List memories. Returns a list of memory dicts.
-    """
+def mem0_list() -> str:
+    """List operation findings, observations, and discoveries."""
     try:
         client = _ensure_memory_client()
 
@@ -1276,6 +1288,7 @@ def mem0_list(
             list_limit = 100
 
         user_id = _user_id()
+        agent_id = _agent_id()
 
         # Scope to current operation unless cross_operation=True
         cross_operation = memory_is_cross_operation()
@@ -1292,7 +1305,7 @@ def mem0_list(
 
         if not results_list:
             return ""
-        return json.dumps(_memory_list_for_agent(results_list), indent=2)
+        return _memory_list_markdown(results_list)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -1301,7 +1314,6 @@ def mem0_list(
 def mem0_retrieve(
     query: str,
     metadata: Optional[Dict[str, Any]] = None,
-    agent_id: Optional[str] = None,
 ) -> str:
     """Semantic search across memories.
 
@@ -1312,24 +1324,25 @@ def mem0_retrieve(
     - metadata: filter dict applied to metadata (e.g., {"category": "finding", "status": "verified"}).
 
     CROSS-SESSION LEARNING:
-        - mem0_retrieve: Scoped to current operation by default
-        - mem0_retrieve(cross_operation=True): Search ALL operations for cross-learning
+        - mem0_retrieve: Scoped to the current operation by default
 
         Cross-Learning Query Examples:
-        - Learn from past: mem0_retrieve(query="SQLi techniques", cross_operation=True)
+        - Learn from past: mem0_retrieve(query="SQLi techniques")
         - Skip verified: metadata={"status": "verified"} to find verified findings
         - Learn techniques: metadata={"category": "discovery"}
         - Avoid failures: query for failed_technique or blocker in metadata
 
-    Returns a list of memory dicts.
+    Returns a list of memories.
     """
     try:
         if not query:
             raise ValueError("query is required")
 
-        op_id = None if memory_is_cross_operation() else _operation_id()
+        cross_operation = memory_is_cross_operation()
+        op_id = None if cross_operation else _operation_id()
 
         user_id = _user_id()
+        agent_id = _agent_id()
 
         # Debug: Log retrieval parameters
         logger.debug(
@@ -1342,7 +1355,6 @@ def mem0_retrieve(
         )
 
         # Use search() directly to support metadata filters (e.g., category, status)
-        # Include run_id to scope to current operation (unless cross_operation=True)
         client = _ensure_memory_client()
         memories = client.search(
             query=query,
@@ -1350,7 +1362,7 @@ def mem0_retrieve(
             limit=100,
             user_id=user_id,
             agent_id=agent_id,
-            run_id=op_id,  # None if cross_operation=True for cross-learning
+            run_id=op_id,
         )
 
         results_list = memories or []
@@ -1368,7 +1380,7 @@ def mem0_retrieve(
             )
         else:
             logger.warning("RETRIEVE returned 0 results for query='%s'", query)
-        return json.dumps(_memory_list_for_agent(results_list), indent=2)
+        return _memory_list_markdown(results_list)
     except Exception as e:
         return f"Error: {str(e)}"
 

@@ -9,15 +9,16 @@ def test_store_plan_with_operation_plan_object():
     plan_data = {"objective": "Test", "current_phase": 1, "total_phases": 1,
                  "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "c1"}]}
     plan_obj = OperationPlan.from_obj(plan_data)
-    with patch("modules.tools.memory._ensure_memory_client") as mc, patch("modules.tools.memory._user_id") as mui:
+    with patch("modules.tools.memory._ensure_memory_client") as mc, patch("modules.tools.memory._user_id") as mui, patch("modules.tools.memory._operation_id") as mopid:
         mock_client = MagicMock()
         mc.return_value = mock_client
         mui.return_value = "user"
+        mopid.return_value = "OP_TEST"
         mock_client.get_active_plan.return_value = None
-        mock_client.store_plan.return_value = {"status": "success"}
+        mock_client.store_plan.return_value = {"status": "success", "plan": plan_obj.to_toon()}
         result = store_plan(plan_obj)
-        assert result == {"status": "success"}
-        mock_client.store_plan.assert_called_once_with(plan=plan_obj, user_id="user")
+        mock_client.store_plan.assert_called_once_with(plan=plan_obj, user_id="user", operation_id="OP_TEST")
+        assert "plan_overview[1]" in result
 
 
 def test_store_plan_with_dict():
@@ -28,11 +29,11 @@ def test_store_plan_with_dict():
         mc.return_value = mock_client
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = None
-        mock_client.store_plan.return_value = {"status": "success"}
+        mock_client.store_plan.return_value = {"status": "success", "plan": OperationPlan.from_obj(plan_dict).to_toon()}
         result = store_plan(plan_dict)
-        assert result == {"status": "success"}
         args, kwargs = mock_client.store_plan.call_args
         assert isinstance(kwargs["plan"], OperationPlan)
+        assert "plan_overview[1]" in result
 
 
 def test_store_plan_with_json_string():
@@ -130,9 +131,10 @@ def test_store_plan_phase_change_allowed_no_tasks():
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = prev_plan
         mock_client.get_or_activate_next_task_in_phase.return_value = (None, False)
-        mock_client.store_plan.return_value = {"status": "success"}
+        mock_client.store_plan.return_value = {"status": "success", "plan": new_plan.to_toon()}
         result = store_plan(new_plan, tool_context=mock_tool_context)
-        assert result["status"] == "success"
+        assert "plan_overview[1]" in result
+        assert "Test,2,2" in result
 
 
 def test_store_plan_phase_change_allowed_budget_exhausted():
@@ -163,9 +165,10 @@ def test_store_plan_phase_change_allowed_budget_exhausted():
         # phase_step_start = 100 * (2-1) // 2 = 50. 46 > 50 * 0.9 = 45.
         active_task = Task(task_uid="uuid", title="T1", objective="O1", phase=1, status="active")
         mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
-        mock_client.store_plan.return_value = {"status": "success"}
+        mock_client.store_plan.return_value = {"status": "success", "plan": new_plan.to_toon()}
         result = store_plan(new_plan, tool_context=mock_tool_context)
-        assert result["status"] == "success"
+        assert "plan_overview[1]" in result
+        assert "Test,2,2" in result
 
 
 def test_store_plan_assessment_complete_reminder():
@@ -185,7 +188,7 @@ def test_store_plan_assessment_complete_reminder():
         mock_client.get_active_plan.return_value = None
 
         # We'll simulate what Mem0ServiceClient.store_plan does
-        def side_effect(plan, user_id=None):
+        def side_effect(plan, user_id=None, operation_id=None):
             if all(p.status == "done" for p in plan.phases) and not plan.assessment_complete:
                 # Need to use object.__setattr__ because OperationPlan is frozen=True
                 object.__setattr__(plan, "assessment_complete", True)
@@ -200,8 +203,7 @@ def test_store_plan_assessment_complete_reminder():
 
         result = store_plan(plan_obj)
 
-        assert result["status"] == "success"
-        assert "_reminder" in result
-        assert "All phases complete" in result["_reminder"]
+        assert "plan_overview[1]" in result
+        assert "All phases complete" in result
         args, kwargs = mock_client.store_plan.call_args
         assert kwargs["plan"].assessment_complete is True

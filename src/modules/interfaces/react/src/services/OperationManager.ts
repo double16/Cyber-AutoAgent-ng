@@ -1,11 +1,11 @@
 /**
  * Operation Management Service
  * Handles operation lifecycle, progress tracking, cost monitoring, and model switching
- * Now uses configurable pricing from ConfigContext instead of hardcoded values
  */
 
 import { Config } from '../contexts/ConfigContext.js';
 import { loggingService } from './LoggingService.js';
+import { peekAllModels, loadAllModels, getContextLimitSync, getContextLimit } from './ModelsCatalog.js';
 
 export interface Operation {
   id: string;
@@ -43,14 +43,6 @@ export interface CostInfo {
   cacheReadTokens: number;
   /** Cache write tokens from prompt caching (25% more expensive than input) */
   cacheWriteTokens: number;
-  modelPricing: {
-    inputCostPer1k: number;
-    outputCostPer1k: number;
-    /** Cost per 1k cache read tokens (typically ~25% of input cost) */
-    cacheReadCostPer1k: number;
-    /** Cost per 1k cache write tokens (typically ~125% of input cost) */
-    cacheWriteCostPer1k: number;
-  };
 }
 
 export interface ModelInfo {
@@ -73,8 +65,7 @@ export class OperationManager {
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    modelPricing: { inputCostPer1k: 0, outputCostPer1k: 0, cacheReadCostPer1k: 0, cacheWriteCostPer1k: 0 }
+    cacheWriteTokens: 0
   };
 
   constructor(config: Config) {
@@ -83,105 +74,147 @@ export class OperationManager {
     this.loadSessionData();
   }
 
-  // Get available models with pricing from configuration
+  // Get available models using models.dev (fallback to snapshot), with config.modelPricing as override source
   private getAvailableModelsFromConfig(): ModelInfo[] {
-    const models: ModelInfo[] = [];
-    
-    // Add models from configuration pricing
+    // NOTE: This method is used synchronously by UI code. Since our models.dev
+    // loader is async, we return cached results if already loaded; otherwise, we
+    // provide a minimal list derived from config.modelPricing and schedule an
+    // async refresh so subsequent calls get enriched data.
+    const modelsFromPricing: ModelInfo[] = [];
     if (this.config.modelPricing) {
       Object.entries(this.config.modelPricing).forEach(([modelId, pricing]) => {
-        // Determine provider based on model ID pattern
         let provider = 'bedrock';
-        if (modelId.includes(':') && !modelId.includes('.')) {
-          // Ollama models typically have format "model:version"
-          provider = 'ollama';
-        } else if (modelId.startsWith('bedrock/') || modelId.startsWith('openai/')) {
-          provider = 'litellm';
-        }
-        
-        models.push({
+        if (modelId.includes(':') && !modelId.includes('.')) provider = 'ollama';
+        else if (modelId.startsWith('bedrock/') || modelId.startsWith('openai/')) provider = 'litellm';
+        modelsFromPricing.push({
           id: modelId,
           name: this.getModelDisplayName(modelId),
-          provider: provider,
+          provider,
           inputCostPer1k: this.config.modelProvider === 'ollama' ? 0 : pricing.inputCostPer1k,
           outputCostPer1k: this.config.modelProvider === 'ollama' ? 0 : pricing.outputCostPer1k,
           contextLimit: this.getModelContextLimit(modelId),
-          isAvailable: true
+          isAvailable: true,
         });
       });
     }
-    
-    return models;
+
+    // Try to use the models.dev catalog if available (loaded asynchronously)
+    try {
+      const peek = peekAllModels();
+      // Fire-and-forget async load for future calls
+      void loadAllModels().catch(() => {});
+      if (peek && peek.length) {
+        const pricingOverrides = this.config.modelPricing || {};
+
+        // Build list from catalog first
+        const catalogModels: ModelInfo[] = peek.map(entry => {
+          const baseInput = entry.model.cost?.input ?? 0;
+          const baseOutput = entry.model.cost?.output ?? (entry.model.cost?.input ?? 0);
+          // Apply overrides from config.modelPricing if present
+          const override = pricingOverrides[entry.model.id as keyof typeof pricingOverrides] as any;
+          let input = baseInput;
+          let output = baseOutput;
+          if (override && typeof override === 'object') {
+            input = override.inputCostPer1k ?? input;
+            output = override.outputCostPer1k ?? output;
+          }
+          // Enforce ollama provider = free pricing when global provider is ollama
+          if (this.config.modelProvider === 'ollama') {
+            input = 0;
+            output = 0;
+          }
+          return {
+            id: entry.model.id,
+            name: entry.model.name || entry.model.id,
+            provider: entry.provider,
+            inputCostPer1k: input,
+            outputCostPer1k: output,
+            contextLimit: entry.model.limit?.context ?? 8000,
+            isAvailable: true,
+          } as ModelInfo;
+        });
+
+        // Add any pricing-only models that are not present in catalog
+        const catalogIds = new Set(catalogModels.map(m => m.id));
+        const extras: ModelInfo[] = [];
+        Object.entries(pricingOverrides).forEach(([modelId, pricing]) => {
+          if (!catalogIds.has(modelId)) {
+            let provider = 'bedrock';
+            if (modelId.includes(':') && !modelId.includes('.')) provider = 'ollama';
+            else if (modelId.startsWith('bedrock/') || modelId.startsWith('openai/')) provider = 'litellm';
+            extras.push({
+              id: modelId,
+              name: this.getModelDisplayName(modelId),
+              provider,
+              inputCostPer1k: this.config.modelProvider === 'ollama' ? 0 : (pricing as any).inputCostPer1k,
+              outputCostPer1k: this.config.modelProvider === 'ollama' ? 0 : (pricing as any).outputCostPer1k,
+              contextLimit: this.getModelContextLimit(modelId),
+              isAvailable: true,
+            });
+          }
+        });
+
+        return [...catalogModels, ...extras];
+      }
+    } catch {
+      // ignore catalog errors; use pricing-derived list only
+    }
+
+    return modelsFromPricing;
   }
 
   // Helper to get display names for models
   private getModelDisplayName(modelId: string): string {
-    const nameMap: { [key: string]: string } = {
-      'us.anthropic.claude-sonnet-4-5-20250929-v1:0': 'Claude Sonnet 4.5',
-      'us.anthropic.claude-sonnet-4-20250514-v1:0': 'Claude Sonnet 4',
-      'us.anthropic.claude-opus-4-1-20250805-v1:0': 'Claude Opus 4.1',
-      'claude-3-5-sonnet-20241022-v2:0': 'Claude 3.5 Sonnet v2',
-      'claude-3-5-sonnet-20240620-v1:0': 'Claude 3.5 Sonnet v1',
-      'claude-3-haiku-20240307-v1:0': 'Claude 3 Haiku',
-      'claude-3-sonnet-20240229-v1:0': 'Claude 3 Sonnet',
-      'claude-3-opus-20240229-v1:0': 'Claude 3 Opus',
-      'anthropic.claude-v2': 'Claude 2.0',
-      'anthropic.claude-v2:1': 'Claude 2.1',
-      'anthropic.claude-instant-v1': 'Claude Instant',
-      'meta.llama3-1-405b-instruct-v1:0': 'Llama 3.1 405B',
-      'meta.llama3-1-70b-instruct-v1:0': 'Llama 3.1 70B',
-      'meta.llama3-1-8b-instruct-v1:0': 'Llama 3.1 8B',
-      'amazon.titan-text-premier-v1:0': 'Amazon Titan Premier',
-      'amazon.titan-text-express-v1': 'Amazon Titan Express',
-      'cohere.command-r-plus-v1:0': 'Cohere Command R+',
-      'cohere.command-r-v1:0': 'Cohere Command R',
-      // Ollama Models
-      'qwen3:1.7b': 'Qwen3 1.7B (Ollama)',
-      'llama3.2:3b': 'Llama 3.2 3B (Ollama)',
-      'llama3.2:1b': 'Llama 3.2 1B (Ollama)',
-      'llama3.1:8b': 'Llama 3.1 8B (Ollama)',
-      'mistral:7b': 'Mistral 7B (Ollama)',
-      'mxbai-embed-large:latest': 'MXBAI Embeddings (Ollama)',
-      'nomic-embed-text:latest': 'Nomic Embeddings (Ollama)',
-      'qwen2.5:7b': 'Qwen2.5 7B (Ollama)',
-      'qwen2.5:3b': 'Qwen2.5 3B (Ollama)'
-    };
-    return nameMap[modelId] || modelId;
+    // Prefer models.dev catalog name (synchronous cached lookup first)
+    try {
+      const peek = peekAllModels();
+      if (peek && peek.length) {
+        // Exact ID match
+        let found = peek.find(entry => entry.model.id === modelId);
+        if (!found) {
+          // Try last path segment if ID contains '/'
+          const shortId = modelId.includes('/') ? modelId.split('/').pop()! : modelId;
+          found = peek.find(entry => entry.model.id === shortId || entry.model.name === shortId);
+          if (!found) {
+            // As a last resort, try suffix/dotted matches
+            const dotted = shortId.includes('.') ? shortId.split('.').pop()! : shortId;
+            found = peek.find(entry =>
+              entry.model.id === dotted ||
+              entry.model.id.endsWith(`/${dotted}`) ||
+              (entry.model.name ?? '').toLowerCase() === dotted.toLowerCase()
+            );
+          }
+        }
+        if (found) {
+          return found.model.name || found.model.id;
+        }
+      }
+      // Trigger async population for future calls (non-blocking)
+      void loadAllModels().then(() => {}).catch(() => {});
+    } catch {
+      // ignore catalog errors; fall through to default
+    }
+
+    // Fallback: show the raw model id
+    return modelId;
   }
 
   // Helper to get context limits for models
   private getModelContextLimit(modelId: string): number {
-    const contextLimits: { [key: string]: number } = {
-      'us.anthropic.claude-sonnet-4-5-20250929-v1:0': 1000000, // 1M context with beta flag (context-1m-2025-08-07)
-      'us.anthropic.claude-sonnet-4-20250514-v1:0': 1000000, // 1M context with beta flag
-      'us.anthropic.claude-opus-4-1-20250805-v1:0': 200000,
-      'claude-3-5-sonnet-20241022-v2:0': 200000,
-      'claude-3-5-sonnet-20240620-v1:0': 200000,
-      'claude-3-haiku-20240307-v1:0': 200000,
-      'claude-3-sonnet-20240229-v1:0': 200000,
-      'claude-3-opus-20240229-v1:0': 200000,
-      'anthropic.claude-v2': 100000,
-      'anthropic.claude-v2:1': 200000,
-      'anthropic.claude-instant-v1': 100000,
-      'meta.llama3-1-405b-instruct-v1:0': 128000,
-      'meta.llama3-1-70b-instruct-v1:0': 128000,
-      'meta.llama3-1-8b-instruct-v1:0': 128000,
-      'amazon.titan-text-premier-v1:0': 32000,
-      'amazon.titan-text-express-v1': 8000,
-      'cohere.command-r-plus-v1:0': 128000,
-      'cohere.command-r-v1:0': 128000,
-      // Ollama Models (approximate context limits)
-      'qwen3:1.7b': 32000,
-      'llama3.2:3b': 128000,
-      'llama3.2:1b': 128000,
-      'llama3.1:8b': 128000,
-      'mistral:7b': 32000,
-      'mxbai-embed-large:latest': 512,  // Embedding model
-      'nomic-embed-text:latest': 512,  // Embedding model
-      'qwen2.5:7b': 128000,
-      'qwen2.5:3b': 32000
-    };
-    return contextLimits[modelId] || 8000;
+    // Try models.dev catalog (synchronous cached lookup first)
+    try {
+      const cached = getContextLimitSync(modelId);
+      if (typeof cached === 'number' && cached > 0) {
+        return cached;
+      }
+      // Trigger async population for future calls
+      void getContextLimit(modelId).then(() => {}).catch(() => {});
+    } catch {
+      // ignore
+    }
+
+    // Catalog didn't have it yet (or not loaded); return a conservative default
+    return 8000;
   }
 
   // Start a new operation
@@ -200,8 +233,7 @@ export class OperationManager {
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      modelPricing: this.getModelPricing(model)
+      cacheWriteTokens: 0
     };
 
     const operation: Operation = {
@@ -222,8 +254,7 @@ export class OperationManager {
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        modelPricing: this.getModelPricing(model)
+        cacheWriteTokens: 0
       },
       model,
       continueOperation,
@@ -312,7 +343,6 @@ export class OperationManager {
 
     const oldModel = operation.model;
     operation.model = newModel;
-    operation.cost.modelPricing = this.getModelPricing(newModel);
     
     this.addLog(operationId, 'info', `Model switched from ${oldModel} to ${newModel}`);
     return true;
@@ -419,14 +449,6 @@ export class OperationManager {
     return models.find(m => m.id === modelId) || null;
   }
 
-  // Calculate context usage percentage
-  calculateContextUsage(modelId: string, tokensUsed: number): number {
-    const model = this.getModelInfo(modelId);
-    if (!model) return 0;
-    
-    return Math.max(0, Math.min(100, (tokensUsed / model.contextLimit) * 100));
-  }
-
   // Get operation duration as formatted string
   getOperationDuration(operationId: string): string {
     const operation = this.operations.get(operationId);
@@ -453,55 +475,6 @@ export class OperationManager {
     const timestamp = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15);
     const random = Math.random().toString(36).substring(2, 6);
     return `OP_${timestamp}_${random}`;
-  }
-
-  private getModelPricing(modelId: string): {
-    inputCostPer1k: number;
-    outputCostPer1k: number;
-    cacheReadCostPer1k: number;
-    cacheWriteCostPer1k: number;
-  } {
-    // All Ollama models are free (local execution)
-    if (this.config.modelProvider === 'ollama') {
-      return {
-        inputCostPer1k: 0,
-        outputCostPer1k: 0,
-        cacheReadCostPer1k: 0,
-        cacheWriteCostPer1k: 0
-      };
-    }
-
-    // Try to get pricing from configuration first
-    if (this.config.modelPricing && this.config.modelPricing[modelId]) {
-      const pricing = this.config.modelPricing[modelId];
-      const inputCost = pricing.inputCostPer1k;
-      return {
-        inputCostPer1k: inputCost,
-        outputCostPer1k: pricing.outputCostPer1k,
-        // Cache pricing: read is ~25% of input, write is ~125% of input (if not specified)
-        cacheReadCostPer1k: pricing.cacheReadCostPer1k ?? inputCost * 0.25,
-        cacheWriteCostPer1k: pricing.cacheWriteCostPer1k ?? inputCost * 1.25
-      };
-    }
-
-    // Fallback to model info if not in config pricing
-    const model = this.getModelInfo(modelId);
-    if (model) {
-      return {
-        inputCostPer1k: model.inputCostPer1k,
-        outputCostPer1k: model.outputCostPer1k,
-        // Default cache pricing based on input cost
-        cacheReadCostPer1k: model.inputCostPer1k * 0.25,
-        cacheWriteCostPer1k: model.inputCostPer1k * 1.25
-      };
-    }
-
-    return {
-      inputCostPer1k: 0,
-      outputCostPer1k: 0,
-      cacheReadCostPer1k: 0,
-      cacheWriteCostPer1k: 0
-    };
   }
 
   private loadSessionData(): void {

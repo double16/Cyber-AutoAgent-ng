@@ -1,5 +1,4 @@
 # Dockerfile for Cyber-AutoAgent tools base image (Kali Rolling base)
-# docker build --pull -t cyber-autoagent-tools -f Dockerfile.tools
 # syntax=docker/dockerfile:1.7
 
 ARG APT_PROXY
@@ -36,7 +35,7 @@ FROM kalilinux/kali-rolling
 
 LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng Tools"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"
-LABEL org.opencontainers.image.version="0.8.1"
+LABEL org.opencontainers.image.version="0.9.0"
 LABEL org.opencontainers.image.source="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.url="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.licenses="MIT"
@@ -79,6 +78,7 @@ RUN set -eux; \
     python3 \
     python3-venv \
     python3-pip \
+    python3-yaml \
     python-is-python3 \
     pipx \
     python3-requests \
@@ -92,6 +92,8 @@ RUN set -eux; \
     python2 \
     virtualenv \
     php \
+    openssh-client \
+    sshpass \
     # Java runtime for ZAP/Burp
     openjdk-21-jre-headless \
     # Binary analysis tools
@@ -232,6 +234,8 @@ RUN set -eux; \
     ruby-full && \
     apt clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
+COPY docker/pip.conf /etc/pip.conf
+
 # Provide symlinks from Ruby vendor_ruby so WhatWeb runs without error
 RUN set -eux; \
     if command -v whatweb >/dev/null 2>&1; then \
@@ -246,7 +250,7 @@ RUN set -eux; \
 RUN pip3 install --break-system-packages pycryptodomex
 
 # Install uv for fast dependency management
-COPY --from=ghcr.io/astral-sh/uv:0.9.25 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.18 /uv /usr/local/bin/uv
 
 # Install Ruby gems
 RUN gem install zsteg
@@ -274,19 +278,6 @@ RUN git clone --depth=1 https://github.com/vladko312/SSTImap.git /opt/sstimap &&
     chmod +x /opt/sstimap/sstimap.py && \
     echo '#!/bin/bash\ncd /opt/sstimap && source venv/bin/activate && exec python3 /opt/sstimap/sstimap.py "$@"' > /usr/local/bin/sstimap && \
     chmod +x /usr/local/bin/sstimap
-
-# IDOR-Forge - IDOR scanner
-RUN git clone --depth=1 https://github.com/errorfiathck/IDOR-Forge.git /opt/idor_forge && \
-    if [ -f /opt/idor_forge/requirements.txt ]; then \
-      cd /opt/idor_forge && \
-      python3 -m venv venv && \
-      . venv/bin/activate && \
-      cat requirements.txt | tr -s '[:space:]' '\n' | grep -vi pyqt > reqs.txt && \
-      pip install -r reqs.txt; \
-    fi && \
-    chmod +x /opt/idor_forge/IDOR-Forge.py && \
-    echo '#!/bin/bash\ncd /opt/idor_forge && source venv/bin/activate && exec python3 /opt/idor_forge/IDOR-Forge.py "$@"' > /usr/local/bin/idor-forge && \
-    chmod +x /usr/local/bin/idor-forge
 
 # Gopherus - SSRF payload generator
 RUN git clone --depth=1 https://github.com/tarunkant/Gopherus.git /opt/gopherus && \
@@ -339,13 +330,13 @@ RUN pipx install --global bloodhound && \
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "x86_64" ]; then OPENGREP_ARCH="x86"; else OPENGREP_ARCH="${ARCH}"; fi && \
     OPENGREP_VERSION=$(curl -s https://api.github.com/repos/opengrep/opengrep/releases/latest | grep "tag_name" | cut -d ":" -f 2 | tr -d " ,\"") && \
-    curl -L "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" -o /usr/local/bin/opengrep && \
+    curl --silent --fail -L "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" -o /usr/local/bin/opengrep && \
     chmod +x /usr/local/bin/opengrep
 
 RUN npm install --global @graphql-inspector/cli
 
 # Install TruffleHog (Secret Scanning)
-RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh latest | sh -s -- -b /usr/local/bin
 
 # Install GitTools (Git Dumper/Extractor)
 RUN git clone --depth=1 https://github.com/internetwache/GitTools.git /opt/gittools && \
@@ -366,6 +357,9 @@ RUN git clone --depth=1 --depth=1 https://github.com/s0md3v/Corsy.git /opt/corsy
     echo '#!/bin/bash\ncd /opt/corsy && source venv/bin/activate && exec python3 /opt/corsy/corsy.py "$@"' > /usr/local/bin/corsy && \
     chmod +x /usr/local/bin/corsy
 
+# Patch arjun when URL response is 400-500
+RUN find /usr/lib/python3 -path "*/arjun/__main__.py" -print0 | xargs -r0 sed -i 's/request.status_code/response_1.status_code/g'
+
 COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
 
@@ -377,9 +371,9 @@ RUN useradd --create-home --shell /bin/bash cyberagent && \
     chown -R cyberagent:cyberagent /home/cyberagent/go
 
 RUN mkdir -p -m 0700 "/root/.ssh" && touch "/root/.ssh/config" && chmod 0600 "/root/.ssh/config" && \
-    echo -e "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/root/.ssh/config" && \
+    echo "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/root/.ssh/config" && \
     mkdir -p -m 0700 "/home/cyberagent/.ssh" && touch "/home/cyberagent/.ssh/config" && chmod 0600 "/home/cyberagent/.ssh/config" && \
-    echo -e "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/home/cyberagent/.ssh/config"
+    echo "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/home/cyberagent/.ssh/config"
 
 # Install Sliver (C2 Framework - Client only) - Optional, may fail on ARM64
 RUN mkdir -p /home/cyberagent/sliver && \
@@ -393,7 +387,7 @@ RUN mkdir -p /home/cyberagent/sliver && \
 RUN amass -h || true
 
 # Validate expected tools are present in the PATH
-COPY docker/tools_check.sh src/modules/config/system/environment.yaml /tmp
-RUN bash /tmp/tools_check.sh 2>&1 | tee /var/log/tools_check.log && \
+COPY docker/tools_check.py src/modules/config/system/environment.yaml /tmp
+RUN bash -o pipefail -c 'python3 /tmp/tools_check.py 2>&1 | tee /var/log/tools_check.log' && \
     /tmp/apt_proxy_clean.sh && \
     rm -rf /tmp/* /var/tmp/*

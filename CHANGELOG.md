@@ -1,5 +1,20 @@
 # Cyber-AutoAgent-ng Changelog
 
+## v0.9.0
+
+- Replace React UI model pricing with model.dev. Fixes #55.
+- Configure Ollama keep-alive for models to avoid extra start up time. Defaults to 30m.
+- Add bug bounty header markers. (Fixes #63)
+- Add idor_specialist tool. (Fixes #22)
+- Publish tools image to `public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest`. (Fixes #20)
+- Only pass temperature if the model supports it.
+- Refactor output of the following tools to avoid agent misdirection. Fixes #105.
+  - mem0_list, mem0_retrieve, list_uncompleted_tasks, get_plan response, store_plan
+- Improve rate limiting with back-off when HTTP responses 429 (rate limit) and 503 (service unavailable) occur. This feature is always enabled.
+- Fix mem0_retrieve bug, missing 'cross_operation' reference.
+- React UI requires Node.js 22.x or higher.
+- Python dependency updates.
+
 ## v0.8.1
 
 - Support thinking/reasoning for LiteLLM (#24)

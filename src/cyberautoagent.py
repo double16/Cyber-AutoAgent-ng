@@ -18,6 +18,7 @@ License: MIT
 """
 
 import argparse
+import json
 import asyncio
 import atexit
 import base64
@@ -394,6 +395,18 @@ def main():
         help="Configure MCP servers, requires --mcp-enabled to be applied",
     )
     parser.add_argument(
+        "--bug-bounty-header",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "Add an HTTP header to mark authorized bug bounty traffic. "
+            "May be supplied multiple times, e.g. "
+            "--bug-bounty-header X-HackerOne-Research=username "
+            "--bug-bounty-header User-Agent=username@wearehackerone.com"
+        ),
+    )
+    parser.add_argument(
         "--heap-monitor",
         action="store_true",
         help="Monitor the heap for usage and trigger dumps when threshold exceeded",
@@ -403,6 +416,32 @@ def main():
 
     if args.heap_monitor or os.getenv("CYBER_HEAP_MONITOR", "").lower() == "true":
         from src.modules.utils import heap_monitor
+
+    bug_bounty_headers = {}
+    if not args.bug_bounty_header:
+        env_headers = os.getenv("CYBER_BUG_BOUNTY_HEADERS")
+        if env_headers:
+            try:
+                parsed_headers = json.loads(env_headers)
+            except json.JSONDecodeError as exc:
+                parser.error(f"CYBER_BUG_BOUNTY_HEADERS must be valid JSON: {exc}")
+            if not isinstance(parsed_headers, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in parsed_headers.items()
+            ):
+                parser.error("CYBER_BUG_BOUNTY_HEADERS must be a JSON object with string keys and values")
+            bug_bounty_headers.update(parsed_headers)
+
+    for header in args.bug_bounty_header:
+        if "=" not in header:
+            parser.error("--bug-bounty-header must use NAME=VALUE")
+        name, value = header.split("=", 1)
+        name = name.strip()
+        if not name:
+            parser.error("--bug-bounty-header name cannot be empty")
+        bug_bounty_headers[name] = value
+
+    if args.bug_bounty_header:
+        os.environ["CYBER_BUG_BOUNTY_HEADERS"] = json.dumps(bug_bounty_headers)
 
     if args.cont or args.report:
         args.memory_mode = "auto"
@@ -696,6 +735,7 @@ def main():
             memory_path=args.memory_path,
             memory_mode=args.memory_mode,
             module=args.module,
+            bug_bounty_headers=bug_bounty_headers,
             mcp_connections=mcp_connections,
         )
         agent, callback_handler = create_agent(
@@ -711,7 +751,9 @@ def main():
         current_message = initial_prompt
 
         if args.cont:
-            active_plan = (get_plan() or {}).get("plan", "")
+            active_plan = get_plan() or ""
+            if "plan_overview[1]" not in active_plan:
+                active_plan = None
             active_task = get_active_task() or ""
             memories = mem0_list()
             if memories.startswith("Error:"):
@@ -876,7 +918,7 @@ def main():
                             else:
                                 break
 
-                        current_message += f"**MANDITORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
+                        current_message += f"**MANDATORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
                     else:
                         active_plan = get_memory_client(silent=True).get_active_plan()
                         if active_plan and active_plan.assessment_complete:
@@ -885,8 +927,6 @@ def main():
 
                         active_task = get_active_task() or ""
                         memories = mem0_list()
-                        if memories.startswith("Error:"):
-                            memories = ""
 
                         logger.warning(
                             "Attempting to rebuild context because no tool calls were detected in last execution loop.")
@@ -922,6 +962,7 @@ def main():
             except Exception as error:
                 # Handle other termination scenarios
                 error_str = str(error).lower()
+                # TODO: when MaxTokensReachedException, do one attempt at rebuilding conversation
                 if isinstance(error, MaxTokensReachedException) or "maxtokensreached" in error_str or "max_tokens" in error_str:
                     print_status(
                         "Token limit reached - generating final report", "WARNING"

@@ -30,12 +30,10 @@ jobs:
         export PATH="$HOME/.local/bin:$PATH"
         export PYTHONPATH="${PWD}/src:${PYTHONPATH}"
         # Sync dependencies from lock file
-        uv sync
-        # Add dev dependencies
-        uv add --dev pylint pytest pytest-mock
+        uv sync --all-extras
         # Install package in editable mode with PYTHONPATH set
         uv pip install -e .
-    
+
     - name: Run Pylint
       run: |
         export PATH="$HOME/.local/bin:$PATH"
@@ -59,7 +57,7 @@ jobs:
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
+        node-version: '24'
         cache: 'npm'
         cache-dependency-path: src/modules/interfaces/react/package-lock.json
 

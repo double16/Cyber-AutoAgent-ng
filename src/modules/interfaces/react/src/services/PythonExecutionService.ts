@@ -706,6 +706,7 @@ export class PythonExecutionService extends EventEmitter {
         ...(config.ollamaHost ? { OLLAMA_HOST: config.ollamaHost } : {}),
         ...(config.ollamaContextLength ? { OLLAMA_CONTEXT_LENGTH: String(config.ollamaContextLength) } : {}),
         ...(config.ollamaTimeout ? { OLLAMA_TIMEOUT: String(config.ollamaTimeout) } : {}),
+        ...(config.ollamaKeepAlive ? { OLLAMA_KEEP_ALIVE: config.ollamaKeepAlive } : {}),
         // LiteLLM Configuration (only set if provided)
         ...(config.openaiApiKey ? { OPENAI_API_KEY: config.openaiApiKey } : {}),
         ...(config.anthropicApiKey ? { ANTHROPIC_API_KEY: config.anthropicApiKey } : {}),
@@ -738,6 +739,9 @@ export class PythonExecutionService extends EventEmitter {
         ...(config.memoryModel ? { MEM0_LLM_MODEL: config.memoryModel } : {}),
         // Model rate limits
         ...(config.rateLimitTokensPerMinute ? { CYBER_RATE_LIMIT_TOKENS_PER_MIN: String(config.rateLimitTokensPerMinute) } : {}),
+        ...(config.bugBountyHeaders && Object.keys(config.bugBountyHeaders).length > 0
+          ? { CYBER_BUG_BOUNTY_HEADERS: JSON.stringify(config.bugBountyHeaders) }
+          : {}),
         ...(config.rateLimitRequestsPerMinute ? { CYBER_RATE_LIMIT_REQ_PER_MIN: String(config.rateLimitRequestsPerMinute) } : {}),
         ...(config.rateLimitConcurrency ? { CYBER_RATE_LIMIT_MAX_CONCURRENT: String(config.rateLimitConcurrency) } : {}),
         // Context Management - conversation budget settings
@@ -770,6 +774,27 @@ export class PythonExecutionService extends EventEmitter {
         ...(config.evalSummaryMaxChars !== undefined ? { EVAL_SUMMARY_MAX_CHARS: String(config.evalSummaryMaxChars) } : {}),
       })
       };
+
+      // Pricing overrides from config.modelPricing when modelId matches
+      try {
+        const modelId = config.modelId as any;
+        const pricingTable = (config as any)?.modelPricing as Record<string, any> | undefined;
+        const p = modelId && pricingTable ? pricingTable[modelId] : undefined;
+        if (p && typeof p === 'object') {
+          if (p.inputCostPer1k !== undefined && p.inputCostPer1k !== null) {
+            env.CYBER_AGENT_PRICING_INPUT = String(p.inputCostPer1k / 1000.0);
+          }
+          if (p.outputCostPer1k !== undefined && p.outputCostPer1k !== null) {
+            env.CYBER_AGENT_PRICING_OUTPUT = String(p.outputCostPer1k / 1000.0);
+          }
+          if (p.cacheReadCostPer1k !== undefined && p.cacheReadCostPer1k !== null) {
+            env.CYBER_AGENT_PRICING_CACHE_READ = String(p.cacheReadCostPer1k / 1000.0);
+          }
+          if (p.cacheWriteCostPer1k !== undefined && p.cacheWriteCostPer1k !== null) {
+            env.CYBER_AGENT_PRICING_CACHE_WRITE = String(p.cacheWriteCostPer1k / 1000.0);
+          }
+        }
+      } catch {}
 
       const userEnvironment = flattenEnvironment(config.environment as any);
       for (const [key, value] of Object.entries(userEnvironment)) {
