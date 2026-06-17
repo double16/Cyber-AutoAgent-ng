@@ -3,7 +3,7 @@
  * 
  * Handles direct Python execution for local CLI mode, including:
  * - Virtual environment management
- * - Requirements installation
+ * - Requirement installation
  * - Process execution and monitoring
  * - Output streaming
  */
@@ -13,12 +13,16 @@ import { exec, spawn, ChildProcess, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 import { createLogger } from '../utils/logger.js';
 import { AssessmentParams } from '../types/Assessment.js';
 import { Config } from '../contexts/ConfigContext.js';
-import { StreamEvent, EventType, ToolEvent, AgentEvent } from '../types/events.js';
+import { EventType } from '../types/events.js';
 import { flattenEnvironment } from '../utils/env.js';
+import {
+  CyberEventStreamParserState,
+  emitStatusEvents,
+  processCyberEventStreamChunk,
+} from './events/cyberEventStreamParser.js';
 
 // Define OutputEvent locally since it's part of PythonSystemEvent
 interface OutputEvent {
@@ -41,40 +45,10 @@ export class PythonExecutionService extends EventEmitter {
   // Emit policy: only stream raw stdout during active tool execution
   private inToolExecution = false;
   private toolOutputBuffer = '';
+  private currentToolName: string | undefined = undefined;
   // Track execution start time for duration reporting
   private startTime?: number;
 
-  /** Emit a chunk of buffered tool output */
-  private emitToolOutputChunk(content: string): void {
-    try {
-      this.emit('event', {
-        type: 'output',
-        content,
-        timestamp: Date.now(),
-        metadata: { fromToolBuffer: true, tool: (this as any)._currentToolName, chunked: true }
-      });
-    } catch {}
-  }
-
-  /**
-   * Flush tool output buffer in chunks to keep memory flat and reduce latency.
-   * If force=true, flush remaining buffer even if smaller than chunk size.
-   */
-  private flushToolOutputChunks(force: boolean = false): void {
-    const CHUNK_SIZE = 64 * 1024; // 64 KiB
-    const MIN_SPLIT = 32 * 1024;  // Prefer newline split after 32 KiB
-    while (this.toolOutputBuffer.length > CHUNK_SIZE || (force && this.toolOutputBuffer.length > 0)) {
-      const window = this.toolOutputBuffer.slice(0, CHUNK_SIZE);
-      let n = Math.min(this.toolOutputBuffer.length, CHUNK_SIZE);
-      const nl = window.lastIndexOf('\n');
-      if (nl >= MIN_SPLIT && nl < CHUNK_SIZE) {
-        n = nl + 1; // split on newline
-      }
-      const chunk = this.toolOutputBuffer.slice(0, n);
-      this.emitToolOutputChunk(chunk);
-      this.toolOutputBuffer = this.toolOutputBuffer.slice(n);
-    }
-  }
   // Track whether backend emitted consolidated tool output to avoid duplication
   private sawBackendToolOutput = false;
   // Track whether a user-initiated stop() was requested to treat exits as intentional
@@ -1045,206 +1019,38 @@ export class PythonExecutionService extends EventEmitter {
    * UNIFIED APPROACH: Use the exact same event parsing as DirectDockerService
    */
   private processOutputStream(data: string): void {
-    // Add to buffer
-    this.streamEventBuffer += data;
-
-    // Look for structured event markers (UNIFIED with Docker service)
-    // Use non-global regex with exec() loop to ensure proper cursor management
-    const eventRegex = /__CYBER_EVENT__(.+?)__CYBER_EVENT_END__/s;
-    let match;
-    let processedEvents = false;
-    let lastProcessedIndex = 0;
-
-    while ((match = eventRegex.exec(this.streamEventBuffer)) !== null) {
-      processedEvents = true;
-
-      // Emit any raw text preceding this structured event
-      const preText = this.streamEventBuffer.slice(lastProcessedIndex, match.index);
-        if (preText && this.inToolExecution) {
-          // Buffer raw output; flush on tool end so it appears once per tool
-          this.toolOutputBuffer += preText;
-          // Clamp tool output buffer to prevent unbounded growth
-          const MAX_TOOL_OUTPUT = 1 * 1024 * 1024; // 1 MiB cap
-          if (this.toolOutputBuffer.length > MAX_TOOL_OUTPUT) {
-            this.toolOutputBuffer = this.toolOutputBuffer.slice(-MAX_TOOL_OUTPUT);
-          }
-          // Chunked emission to keep latency low
-          this.flushToolOutputChunks(false);
-        }
-
-      try {
-        const eventData = JSON.parse(match[1]);
-
-        // Track tool execution state for raw output buffering (not for structured events)
-        if (eventData.type === 'tool_start' || eventData.type === 'tool_invocation_start') {
-          this.inToolExecution = true;
-          this.toolOutputBuffer = '';
-          this.sawBackendToolOutput = false; // reset per tool
-          // Remember the current tool name for proper attribution on flush
-          try { (this as any)._currentToolName = eventData.tool_name || eventData.toolName || eventData.tool || undefined; } catch {}
-
-          if (eventData.type === 'tool_start') {
-            this.emit('event', {
-              type: 'output',
-              content: `◆ ${eventData.tool_name} ${JSON.stringify(eventData.tool_input)}`,
-              timestamp: Date.now()
-            });
-          }
-        } else if (
-          eventData.type === 'tool_invocation_end' ||
-          eventData.type === 'tool_result' ||
-          eventData.type === 'step_header' ||
-          eventData.type === 'tool_end'
-        ) {
-          // Flush any remaining raw output when tool ends, but only if backend
-          // did NOT send a consolidated tool output event. This avoids duplicates.
-          if (!this.sawBackendToolOutput) {
-            // Flush remaining buffered output in chunks
-            this.flushToolOutputChunks(true);
-          }
-          this.toolOutputBuffer = '';
-          this.inToolExecution = false;
-          this.sawBackendToolOutput = false;
-          try { (this as any)._currentToolName = undefined; } catch {}
-
-          if (eventData.type === 'tool_end') {
-            var content : string;
-            if (eventData.success) {
-              content = `✓ ${eventData.tool_name}`;
-            } else {
-              content = `○ ${eventData.tool_name}`;
-            }
-            this.emit('event', {
-              type: 'output',
-              content: content,
-              timestamp: Date.now()
-            });
-          }
-        }
-
-        // Emit tool output immediately - backend already handles proper metadata and deduplication
-        if (eventData.type === 'output') {
-          // Track if this is backend-consolidated tool output
-          if (eventData.metadata && eventData.metadata.fromToolBuffer) {
-            this.sawBackendToolOutput = true;
-          }
-          // Always emit output events immediately for real-time display
-          this.emit('event', eventData);
-          lastProcessedIndex = match.index + match[0].length;
-          this.streamEventBuffer = this.streamEventBuffer.slice(lastProcessedIndex);
-          lastProcessedIndex = 0;
-          continue;
-        }
-
-        // Emit system status event exactly like Docker mode
-        if (eventData.type === 'tools_loaded') {
-          this.emit('event', {
-            type: 'output',
-            content: eventData.content,
-            timestamp: Date.now()
-          });
-        } else if (eventData.type === 'tool_discovery_start') {
-          this.emit('event', {
-            type: 'output',
-            content: '◆ Loading cybersecurity assessment tools:',
-            timestamp: Date.now()
-          });
-        } else if (eventData.type === 'tool_available') {
-          this.emit('event', {
-            type: 'output',
-            content: `  ✓ ${eventData.tool_name} (${eventData.description})`,
-            timestamp: Date.now()
-          });
-        } else if (eventData.type === 'tool_unavailable') {
-          this.emit('event', {
-            type: 'output',
-            content: `  ○ ${eventData.tool_name} (${eventData.description}) - unavailable`,
-            timestamp: Date.now()
-          });
-        } else if (eventData.type === 'environment_ready') {
-          this.emit('event', {
-            type: 'output',
-            content: `◆ Environment ready - ${eventData.tool_count} cybersecurity tools loaded`,
-            timestamp: Date.now()
-          });
-
-          setTimeout(() => {
-            this.emit('event', {
-              type: 'output',
-              content: '◆ Configuring assessment parameters and evidence collection',
-              timestamp: Date.now()
-            });
-          }, 500);
-
-          setTimeout(() => {
-            this.emit('event', {
-              type: 'output',
-              content: '◆ Security assessment environment ready - Beginning evaluation',
-              timestamp: Date.now()
-            });
-          }, 1000);
-        }
-        // Forward all other events (step headers, tool calls, reasoning, etc.)
-        else {
-          this.emit('event', eventData);
-        }
-
-        // Update last processed index
-        lastProcessedIndex = match.index + match[0].length;
-        
-        // Move past this match for next iteration
-        this.streamEventBuffer = this.streamEventBuffer.slice(lastProcessedIndex);
-        lastProcessedIndex = 0;
-
-      } catch (error) {
+    processCyberEventStreamChunk(data, this.getEventStreamParserState(), {
+      emitEvent: event => this.emit('event', event),
+      handleEvent: eventData => this.handleParsedPythonEvent(eventData),
+      onParseError: (error, rawEvent) => {
         this.logger.warn('Failed to parse event', {
-          data: match[1].substring(0, 100) + '...',
+          data: rawEvent.substring(0, 100) + '...',
           error: error instanceof Error ? error.message : 'Unknown error'
         });
-        // Move past this match to avoid infinite loop
-        const skipLength = match.index + match[0].length;
-        this.streamEventBuffer = this.streamEventBuffer.slice(skipLength);
-        lastProcessedIndex = 0;
       }
-    }
-
-    if (!processedEvents) {
-      // No structured events found in this chunk; emit raw output immediately
-      if (data) {
-        if (this.inToolExecution) {
-          this.toolOutputBuffer += data;
-          // Clamp tool output buffer to prevent unbounded growth
-          const MAX_TOOL_OUTPUT = 1 * 1024 * 1024; // 1 MiB cap
-          if (this.toolOutputBuffer.length > MAX_TOOL_OUTPUT) {
-            this.toolOutputBuffer = this.toolOutputBuffer.slice(-MAX_TOOL_OUTPUT);
-          }
-          // Chunk out as we accumulate
-          this.flushToolOutputChunks(false);
-        }
-        // Clear buffer regardless to avoid growth
-        this.streamEventBuffer = '';
-      }
-    }
-
-    // Always clamp stream buffer tail to avoid unbounded growth between chunks
-    const MAX_STREAM_BUFFER = 32 * 1024;
-    if (this.streamEventBuffer.length > MAX_STREAM_BUFFER) {
-      this.streamEventBuffer = this.streamEventBuffer.slice(-16 * 1024);
-    }
+    });
   }
-  
-  /**
-   * Get metrics for this execution session
-   */
-  getMetrics(): { 
-    sessionId: string;
-    startTime?: number;
-    isActive: boolean;
-  } {
+
+  private getEventStreamParserState(): CyberEventStreamParserState {
+    const service = this;
     return {
-      sessionId: this.sessionId,
-      startTime: this.startTime,
-      isActive: this.isExecutionActive
+      get streamEventBuffer() { return service.streamEventBuffer; },
+      set streamEventBuffer(value: string) { service.streamEventBuffer = value; },
+      get inToolExecution() { return service.inToolExecution; },
+      set inToolExecution(value: boolean) { service.inToolExecution = value; },
+      get toolOutputBuffer() { return service.toolOutputBuffer; },
+      set toolOutputBuffer(value: string) { service.toolOutputBuffer = value; },
+      get sawBackendToolOutput() { return service.sawBackendToolOutput; },
+      set sawBackendToolOutput(value: boolean) { service.sawBackendToolOutput = value; },
+      get currentToolName() { return service.currentToolName; },
+      set currentToolName(value: string | undefined) { service.currentToolName = value; }
     };
+  }
+
+  private handleParsedPythonEvent(eventData: any): void {
+    emitStatusEvents(eventData, {
+      emitEvent: event => this.emit('event', event),
+      onComplete: () => this.emit('complete')
+    });
   }
 }

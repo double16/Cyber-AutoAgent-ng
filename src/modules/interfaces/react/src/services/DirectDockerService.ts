@@ -25,10 +25,14 @@ import path from 'path';
 import { execSync } from 'child_process';
 import { AssessmentParams } from '../types/Assessment.js';
 import { Config } from '../contexts/ConfigContext.js';
-import { StreamEvent, EventType } from '../types/events.js';
 import { ContainerManager, DeploymentMode } from './ContainerManager.js';
 import { createLogger } from '../utils/logger.js';
 import { flattenEnvironment } from '../utils/env.js';
+import {
+  CyberEventStreamParserState,
+  emitStatusEvents,
+  processCyberEventStreamChunk,
+} from './events/cyberEventStreamParser.js';
 
 /**
  * Sanitize target name for filesystem use (matches Python agent logic)
@@ -110,38 +114,6 @@ export class DirectDockerService extends EventEmitter {
   private toolOutputBuffer = '';
   private sawBackendToolOutput = false;
   private _currentToolName: string | undefined = undefined;
-
-  /** Emit a chunk of buffered tool output */
-  private emitToolOutputChunk(content: string): void {
-    try {
-      this.emit('event', {
-        type: 'output',
-        content,
-        timestamp: Date.now(),
-        metadata: { fromToolBuffer: true, tool: this._currentToolName, chunked: true }
-      } as any);
-    } catch {}
-  }
-
-  /**
-   * Flush tool output buffer in chunks to keep memory flat and reduce latency.
-   * If force=true, flush remaining buffer even if smaller than chunk size.
-   */
-  private flushToolOutputChunks(force: boolean = false): void {
-    const CHUNK_SIZE = 64 * 1024; // 64 KiB
-    const MIN_SPLIT = 32 * 1024;  // Prefer newline split after 32 KiB
-    while (this.toolOutputBuffer.length > CHUNK_SIZE || (force && this.toolOutputBuffer.length > 0)) {
-      const window = this.toolOutputBuffer.slice(0, CHUNK_SIZE);
-      let n = Math.min(this.toolOutputBuffer.length, CHUNK_SIZE);
-      const nl = window.lastIndexOf('\n');
-      if (nl >= MIN_SPLIT && nl < CHUNK_SIZE) {
-        n = nl + 1; // split on newline
-      }
-      const chunk = this.toolOutputBuffer.slice(0, n);
-      this.emitToolOutputChunk(chunk);
-      this.toolOutputBuffer = this.toolOutputBuffer.slice(n);
-    }
-  }
 
   /**
    * Initialize the Docker service with connection to Docker daemon
@@ -872,234 +844,71 @@ export class DirectDockerService extends EventEmitter {
    * Parse structured events from stdout and capture tool discovery
    */
   private parseEvents(data: string) {
-    // Tool discovery is now handled via structured events in parseEvents
-    
-    // Filter out binary/control characters but preserve ANSI escape codes
-    // ANSI codes use ESC (0x1B) followed by [ so we need to preserve those
-    // Only remove: NUL, SOH-BS, VT, FF, SO-SUB (except ESC), FS-US, DEL, and other control chars
-    const cleanedData = data.replace(/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F\x7F-\x9F\uFFFD]/g, '');
-    
-    this.streamEventBuffer += cleanedData;
-
-    const eventRegex = /__CYBER_EVENT__(.+?)__CYBER_EVENT_END__/s;
-    let match;
-    let processedEvents = false;
-
-    while ((match = eventRegex.exec(this.streamEventBuffer))) {
-      processedEvents = true;
-      const start = match.index as number;
-      const end = start + match[0].length;
-      // Capture any raw text preceding this structured event and buffer it if a tool is running
-      const preText = this.streamEventBuffer.slice(0, start);
-      if (preText && this.inToolExecution) {
-        this.toolOutputBuffer += preText;
-        // Clamp tool output buffer to prevent unbounded growth
-        const MAX_TOOL_OUTPUT = 1 * 1024 * 1024; // 1 MiB cap
-        if (this.toolOutputBuffer.length > MAX_TOOL_OUTPUT) {
-          this.toolOutputBuffer = this.toolOutputBuffer.slice(-MAX_TOOL_OUTPUT);
-        }
-        // Chunk out as we accumulate
-        this.flushToolOutputChunks(false);
-      }
-      try {
-        const eventData = JSON.parse(match[1]);
-
-        // For legacy events, pass through all properties
-        const event: any = {
-          type: eventData.type as EventType,
-          content: eventData.content,
-          data: eventData.data || {},
-          metadata: eventData.metadata || {},
-          timestamp: eventData.timestamp || Date.now(),
-          id: eventData.id || `evt-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          sessionId: eventData.sessionId || '',
-          // Include all original properties for legacy events
-          ...eventData
-        };
-
-        // Track tool execution state for raw output buffering
-        if (eventData.type === 'tool_start' || eventData.type === 'tool_invocation_start') {
-          this.inToolExecution = true;
-          this.toolOutputBuffer = '';
-          this.sawBackendToolOutput = false;
-          try { this._currentToolName = eventData.tool_name || eventData.toolName || eventData.tool || undefined; } catch {}
-
-          if (eventData.type === 'tool_start') {
-            this.emit('event', {
-              type: 'output',
-              content: `◆ ${eventData.tool_name} ${JSON.stringify(eventData.tool_input)}`,
-              timestamp: Date.now()
-            });
-          }
-        } else if (
-          eventData.type === 'tool_invocation_end' ||
-          eventData.type === 'tool_result' ||
-          eventData.type === 'step_header' ||
-          eventData.type === 'tool_end'
-        ) {
-          // Flush any remaining raw output when tool ends, but only if backend
-          // did NOT send a consolidated tool output event. This avoids duplicates.
-          if (!this.sawBackendToolOutput) {
-            // Flush remaining buffered output in chunks
-            this.flushToolOutputChunks(true);
-          }
-          this.toolOutputBuffer = '';
-          this.inToolExecution = false;
-          this.sawBackendToolOutput = false;
-          try { this._currentToolName = undefined; } catch {}
-
-          if (eventData.type === 'tool_end') {
-            var content : string;
-            if (eventData.success) {
-              content = `✓ ${eventData.tool_name}`;
-            } else {
-              content = `○ ${eventData.tool_name}`;
-            }
-            this.emit('event', {
-              type: 'output',
-              content: content,
-              timestamp: Date.now()
-            });
-          }
-        }
-
-        // Handle tool discovery events with improved formatting
-        if (event.type === 'tool_discovery_start') {
-          this.emit('event', {
-            type: 'output',
-            content: '◆ Loading cybersecurity assessment tools:',
-            timestamp: Date.now()
-          });
-        } else if (event.type === 'tool_available') {
-          this.emit('event', {
-            type: 'output',
-            content: `  ✓ ${eventData.tool_name} (${eventData.description})`,
-            timestamp: Date.now()
-          });
-        } else if (event.type === 'tool_unavailable') {
-          this.emit('event', {
-            type: 'output',
-            content: `  ○ ${eventData.tool_name} (${eventData.description || ''}) - unavailable`,
-            timestamp: Date.now()
-          });
-        } else if (event.type === 'environment_ready') {
-          this.emit('event', {
-            type: 'output',
-            content: `◆ Environment ready - ${eventData.tool_count} cybersecurity tools loaded`,
-            timestamp: Date.now()
-          });
-
-          setTimeout(() => {
-            this.emit('event', {
-              type: 'output',
-              content: '◆ Configuring assessment parameters and evidence collection',
-              timestamp: Date.now()
-            });
-          }, 300);
-
-          setTimeout(() => {
-            this.emit('event', {
-              type: 'output',
-              content: '◆ Security assessment environment ready - Beginning evaluation',
-              timestamp: Date.now()
-            });
-            // Add improved spacing and start thinking animation
-            setTimeout(() => {
-              this.emit('event', {
-                type: 'output',
-                content: '',
-                timestamp: Date.now()
-              });
-              this.emit('event', {
-                type: 'output',
-                content: '',
-                timestamp: Date.now()
-              });
-              
-              // Note: Removed delayed_thinking_start to avoid duplicate animations during startup
-              // The startup thinking animation is already active and more appropriate
-            }, 100);
-          }, 1000);
-        } else if (event.type === 'output') {
-          // Track if this is backend-consolidated tool output
-          if (event.metadata && (event.metadata as any).fromToolBuffer) {
-            this.sawBackendToolOutput = true;
-          }
-        } else if (event.type === 'operation_complete') {
-              // Backend signaled completion; mark and emit complete once
-          this.seenOperationComplete = true;
-          this.emit('complete');
-        } else if (event.type === 'assessment_complete') {
-              // React backend emits assessment_complete after final report generation
-          this.seenOperationComplete = true;
-          this.emit('complete');
-        } else if (event.type === 'user_handoff') {
-          // Structured user handoff from backend: if autoConfirm is enabled, press Enter automatically
-          if (this.autoConfirm) {
-            logger.info('Auto-confirming user_handoff');
-            setTimeout(() => {
-              if (this.containerStream && this.isExecutionActive) {
-                try {
-                  this.containerStream.write('\r\n');
-                  logger.info('stdin write (auto-confirm)', { data: '\r\\n' });
-                  setTimeout(() => {
-                    try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('\r\n'); } catch {}
-                  }, 200);
-                  setTimeout(() => {
-                    try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('execute\r\n'); } catch {}
-                  }, 1200);
-                } catch (err) {
-                  logger.error('stdin write (auto-confirm) error', err as any);
-                }
-              }
-            }, 200);
-          }
-        }
-        
-        this.emit('event', event);
-
-        // Immediately slice buffer after processing event
-        this.streamEventBuffer = this.streamEventBuffer.slice(end);
-
-        // Immediately check for interactive prompts after processing each event
-        this.handleInteractivePrompts();
-        
-      } catch (error) {
-        // Emit parsing errors as events instead of console.error
+    processCyberEventStreamChunk(data, this.getEventStreamParserState(), {
+      emitEvent: event => this.emit('event', event),
+      handleEvent: eventData => this.handleParsedDockerEvent(eventData),
+      onParseError: error => {
         this.emit('event', {
           type: 'output',
           content: `Error parsing event: ${error}`,
           timestamp: Date.now()
         });
-        
-        // Skip this malformed event to avoid infinite loop
-        const skipLength = match.index + match[0].length;
-        this.streamEventBuffer = this.streamEventBuffer.slice(skipLength);
-      }
-    }
-    
-    // Check for interactive prompts that need automatic responses
-    this.handleInteractivePrompts();
-    
-    // If no structured events were found in this chunk, opportunistically capture raw output
-    if (!processedEvents && cleanedData) {
-      if (this.inToolExecution) {
-        this.toolOutputBuffer += cleanedData;
-        const MAX_TOOL_OUTPUT = 1 * 1024 * 1024; // 1 MiB cap
-        if (this.toolOutputBuffer.length > MAX_TOOL_OUTPUT) {
-          this.toolOutputBuffer = this.toolOutputBuffer.slice(-MAX_TOOL_OUTPUT);
-        }
-        // Chunk out as we accumulate
-        this.flushToolOutputChunks(false);
-      }
-      // Clear buffer to avoid duplicating raw data as preText on the next structured event
-      this.streamEventBuffer = '';
+      },
+      sanitizeInput: input => input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F\x7F-\x9F\uFFFD]/g, ''),
+      onAfterParsedEvent: () => this.handleInteractivePrompts(),
+      onAfterChunk: () => this.handleInteractivePrompts()
+    });
+  }
+
+  private getEventStreamParserState(): CyberEventStreamParserState {
+    const service = this;
+    return {
+      get streamEventBuffer() { return service.streamEventBuffer; },
+      set streamEventBuffer(value: string) { service.streamEventBuffer = value; },
+      get inToolExecution() { return service.inToolExecution; },
+      set inToolExecution(value: boolean) { service.inToolExecution = value; },
+      get toolOutputBuffer() { return service.toolOutputBuffer; },
+      set toolOutputBuffer(value: string) { service.toolOutputBuffer = value; },
+      get sawBackendToolOutput() { return service.sawBackendToolOutput; },
+      set sawBackendToolOutput(value: boolean) { service.sawBackendToolOutput = value; },
+      get currentToolName() { return service._currentToolName; },
+      set currentToolName(value: string | undefined) { service._currentToolName = value; }
+    };
+  }
+
+  private handleParsedDockerEvent(eventData: any): void {
+    emitStatusEvents(eventData, {
+      emitEvent: event => this.emit('event', event),
+      onComplete: () => {
+        this.seenOperationComplete = true;
+        this.emit('complete');
+      },
+      onUserHandoff: () => this.handleUserHandoffAutoConfirm()
+    });
+  }
+
+  private handleUserHandoffAutoConfirm(): void {
+    if (!this.autoConfirm) {
+      return;
     }
 
-    // Keep only last 32KB to prevent memory issues
-    if (this.streamEventBuffer.length > 32768) {
-      this.streamEventBuffer = this.streamEventBuffer.slice(-16384);
-    }
+    logger.info('Auto-confirming user_handoff');
+    setTimeout(() => {
+      if (this.containerStream && this.isExecutionActive) {
+        try {
+          this.containerStream.write('\r\n');
+          logger.info('stdin write (auto-confirm)', { data: '\r\\n' });
+          setTimeout(() => {
+            try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('\r\n'); } catch {}
+          }, 200);
+          setTimeout(() => {
+            try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('execute\r\n'); } catch {}
+          }, 1200);
+        } catch (err) {
+          logger.error('stdin write (auto-confirm) error', err as any);
+        }
+      }
+    }, 200);
   }
 
   /**
