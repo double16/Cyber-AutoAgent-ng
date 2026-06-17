@@ -269,8 +269,6 @@ export class DockerExecutionServiceAdapter extends EventEmitter implements Execu
         resolve({
           success: true,
           durationMs: Date.now() - startTime,
-          stepsExecuted: config.iterations,
-          findingsCount: 0 // Findings are tracked in the output reports
         });
       };
 
