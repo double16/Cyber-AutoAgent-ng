@@ -3,9 +3,9 @@
  * Handles operation lifecycle, progress tracking, cost monitoring, and model switching
  */
 
-import { Config } from '../contexts/ConfigContext.js';
-import { loggingService } from './LoggingService.js';
-import { peekAllModels, loadAllModels, getContextLimitSync, getContextLimit } from './ModelsCatalog.js';
+import {Config} from '../contexts/ConfigContext.js';
+import {loggingService} from './LoggingService.js';
+import {getContextLimit, getContextLimitSync, loadAllModels, peekAllModels} from './ModelsCatalog.js';
 
 export interface Operation {
   id: string;
@@ -84,7 +84,8 @@ export class OperationManager {
     if (this.config.modelPricing) {
       Object.entries(this.config.modelPricing).forEach(([modelId, pricing]) => {
         let provider = 'bedrock';
-        if (modelId.includes(':') && !modelId.includes('.')) provider = 'ollama';
+        if (this.config.modelProvider === 'ollama') provider = 'ollama';
+        else if (modelId.includes(':') && !modelId.includes('.')) provider = 'ollama';
         else if (modelId.startsWith('bedrock/') || modelId.startsWith('openai/')) provider = 'litellm';
         modelsFromPricing.push({
           id: modelId,
@@ -140,7 +141,8 @@ export class OperationManager {
         Object.entries(pricingOverrides).forEach(([modelId, pricing]) => {
           if (!catalogIds.has(modelId)) {
             let provider = 'bedrock';
-            if (modelId.includes(':') && !modelId.includes('.')) provider = 'ollama';
+            if (this.config.modelProvider === 'ollama') provider = 'ollama';
+            else if (modelId.includes(':') && !modelId.includes('.')) provider = 'ollama';
             else if (modelId.startsWith('bedrock/') || modelId.startsWith('openai/')) provider = 'litellm';
             extras.push({
               id: modelId,
