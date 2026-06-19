@@ -139,6 +139,9 @@ Provider requirement validation:
 - `OPENSEARCH_HOST` - OpenSearch endpoint
 - `MEMORY_BACKEND` - Force backend (mem0/opensearch/faiss)
 
+### Runtime Diagnostics
+- `CYBER_HEAP_MONITOR_AUTOSTART` - Auto-start heap monitor thread (`1` by default; set to `0`, `false`, or `no` to disable)
+
 ### Provider Keys
 - `AZURE_API_KEY`, `AZURE_API_BASE`, `AZURE_API_VERSION`
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`

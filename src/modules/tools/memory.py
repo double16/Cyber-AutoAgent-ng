@@ -49,16 +49,16 @@ import re
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Literal, Union, Iterable
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple, Literal, Union
 
 import boto3
 from mem0 import Memory as Mem0Memory
 from mem0 import MemoryClient
 from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
-from strands import tool, ToolContext
 from rapidfuzz import fuzz
+from strands import tool, ToolContext
 
 from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
 from modules.config.system.logger import get_logger
@@ -605,22 +605,25 @@ def _has_valid_proof_pack(finding: Any) -> bool:
     - No content parsing or domain heuristics are used here; presence of files only
     - Any exception or malformed input results in False (fail-closed)
     """
-    stack = [ finding ]
-    while stack:
-        e = stack.pop()
-        if isinstance(e, list):
-            stack.extend(e)
-        elif isinstance(e, dict):
-            stack.extend(e.values())
-        else:
-            e_str = str(e)
-            if os.path.exists(e_str):
-                return True
-            matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
-            file_paths = [path.strip() for paths in matches for path in paths.split(',')]
-            for path in file_paths:
-                if os.path.exists(path):
+    try:
+        stack = [finding]
+        while stack:
+            e = stack.pop()
+            if isinstance(e, list):
+                stack.extend(e)
+            elif isinstance(e, dict):
+                stack.extend(e.values())
+            else:
+                e_str = str(e)
+                if os.path.exists(e_str):
                     return True
+                matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
+                file_paths = [path.strip() for paths in matches for path in paths.split(",")]
+                for path in file_paths:
+                    if os.path.exists(path):
+                        return True
+    except Exception:
+        return False
 
     return False
 

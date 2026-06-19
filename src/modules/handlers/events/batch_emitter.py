@@ -31,7 +31,7 @@ class BatchingEmitter:
         self.batch: List[Dict[str, Any]] = []
         self.batch_ms = batch_ms / 1000.0  # Convert to seconds
         self.timer: Optional[threading.Timer] = None
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.operation_id = operation_id or "batch"
 
     def emit(self, event: Dict[str, Any]) -> None:

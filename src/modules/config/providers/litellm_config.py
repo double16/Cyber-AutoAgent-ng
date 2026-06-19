@@ -138,7 +138,7 @@ def align_litellm_defaults(
         cfg = defaults.get(key)
         if isinstance(cfg, MemoryLLMConfig):
             if not env_reader.get("MEM0_LLM_MODEL"):
-                if embed_override.startswith("ollama/"):
+                if embed_override and embed_override.startswith("ollama/"):
                     cfg.model_id = "ollama/llama3.2:3b"
                     cfg.provider = ModelProvider.LITELLM
                     cfg.parameters["temperature"] = cfg.temperature

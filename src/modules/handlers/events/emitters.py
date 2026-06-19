@@ -174,7 +174,7 @@ class StdoutEventEmitter:
             elif isinstance(value, list):
                 return [clean_value(item) for item in value]
             elif isinstance(value, tuple):
-                return list(value)  # Convert tuples to lists
+                return [clean_value(item) for item in value]
             elif hasattr(value, "__dict__"):
                 # Try to convert objects to dict
                 return clean_value(value.__dict__)
@@ -220,9 +220,13 @@ class StdoutEventEmitter:
         if event_type == "output":
             # Normalize output content for comparison
             content = sig_dict.get("content", "")
-            if isinstance(content, str):
-                # Strip whitespace variations but preserve content
-                content = content.strip()
+            if not isinstance(content, str):
+                try:
+                    content = json.dumps(content, ensure_ascii=False, sort_keys=True)
+                except (TypeError, ValueError):
+                    content = str(content)
+            # Strip whitespace variations but preserve content
+            content = content.strip()
             sig_dict["content"] = content
 
             # Use a hash of the content for more efficient comparison
@@ -231,7 +235,10 @@ class StdoutEventEmitter:
                 return f"output_{content_hash}"
 
         # Create stable signature
-        return json.dumps(sig_dict, sort_keys=True)
+        try:
+            return json.dumps(sig_dict, sort_keys=True)
+        except (TypeError, ValueError):
+            return json.dumps(self._clean_event_for_json(sig_dict), sort_keys=True)
 
 
 def get_emitter(
