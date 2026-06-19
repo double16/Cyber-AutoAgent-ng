@@ -1,5 +1,13 @@
-import threading, time, os, signal
-import psutil, tracemalloc, faulthandler
+import faulthandler
+import os
+import threading
+import time
+import tracemalloc
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 tracemalloc.start()
 
@@ -16,7 +24,12 @@ def take_dumps(prefix='/var/tmp/heap'):
     # optionally trigger core (dangerous)
     # os.kill(os.getpid(), signal.SIGABRT)
 
-def monitor(interval=3.0, threshold_ratio=0.80):
+
+def monitor(interval=3.0, threshold_ratio=0.80, max_iterations=None):
+    if psutil is None:
+        print("WARNING: psutil unavailable, heap monitoring disabled")
+        return
+
     p = psutil.Process()
     # determine limit (cgroup)
     limit = None
@@ -40,7 +53,8 @@ def monitor(interval=3.0, threshold_ratio=0.80):
         print("WARNING: unable to determine memory limit, heap monitoring disabled")
         return
 
-    while True:
+    iterations = 0
+    while max_iterations is None or iterations < max_iterations:
         mem = p.memory_info().rss
         # print(f"Heap usage: {mem} bytes / {limit} bytes {mem / limit:.2%}")
         if mem / limit > threshold_ratio:
@@ -48,9 +62,12 @@ def monitor(interval=3.0, threshold_ratio=0.80):
             # back off and keep sampling less frequently to avoid spamming
             time.sleep(30)
         time.sleep(interval)
+        iterations += 1
 
-t = threading.Thread(target=monitor, daemon=True)
-t.start()
+
+if os.getenv("CYBER_HEAP_MONITOR_AUTOSTART", "1").lower() not in ("0", "false", "no"):
+    t = threading.Thread(target=monitor, daemon=True)
+    t.start()
 
 if __name__ == '__main__':
     take_dumps()

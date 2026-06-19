@@ -206,6 +206,7 @@ services:
       - CYBER_AGENT_OUTPUT_DIR=${CYBER_AGENT_OUTPUT_DIR:-}
       - BYPASS_TOOL_CONSENT=${BYPASS_TOOL_CONSENT:-}
       - CYBER_PLUGIN_PATH=/app/external_plugins:/app/home_plugins
+      - CYBER_HEAP_MONITOR_AUTOSTART=${CYBER_HEAP_MONITOR_AUTOSTART:-}
 
       # Memory configuration
       - MEM0_API_KEY=${MEM0_API_KEY:-}
