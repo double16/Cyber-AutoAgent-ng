@@ -5,9 +5,8 @@
  * Handles the primary interface when not in initialization flow.
  */
 
-import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { Box, Text, useInput, Static, useStdout } from 'ink';
-import ansiEscapes from 'ansi-escapes';
 
 // Components
 import { Header } from './Header.js';

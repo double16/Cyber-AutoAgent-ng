@@ -29,7 +29,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { loggingService } from '../services/LoggingService.js';
-import { detectDeploymentMode, getDeploymentDefaults } from '../config/deployment.js';
+import { getDeploymentDefaults } from '../config/deployment.js';
 import { DeploymentDetector } from '../services/DeploymentDetector.js';
 import { RawEnvironmentMap } from '../utils/env.js';
 

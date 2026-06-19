@@ -3,7 +3,7 @@
  * Supports both guided flow (module→target→objective→execute) and natural language input
  * Provides intelligent autocomplete and suggestions based on current flow state
  */
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import { MultiLineTextInput } from './MultiLineTextInput.js';
 import { ErrorBoundary } from './ErrorBoundary.js';

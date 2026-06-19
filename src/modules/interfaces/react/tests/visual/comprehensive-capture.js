@@ -10,10 +10,8 @@
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import * as pty from 'node-pty';
-import { mockConfiguredState, mockSetupState } from './mock-config.js';
+import { mockConfiguredState } from './mock-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appPath = join(__dirname, '..', 'dist', 'index.js');

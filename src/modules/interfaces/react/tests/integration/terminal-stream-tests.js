@@ -22,7 +22,6 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import fs from 'fs';
 import chalk from 'chalk';
-import stripAnsi from 'strip-ansi';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

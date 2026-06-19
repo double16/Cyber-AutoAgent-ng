@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { promisify } from 'util';
-import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 
 type ExecResult = { stdout?: string; error?: Error };
 

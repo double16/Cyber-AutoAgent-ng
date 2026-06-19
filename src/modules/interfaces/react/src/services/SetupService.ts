@@ -10,10 +10,8 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { ContainerManager } from './ContainerManager.js';
 import { HealthMonitor } from './HealthMonitor.js';
-import { getEnvironmentConfig, getDockerComposePaths } from '../config/environment.js';
+import { getEnvironmentConfig } from '../config/environment.js';
 import { createLogger } from '../utils/logger.js';
-import { RetryConfigs } from '../utils/retry.js';
-import * as fs from 'fs';
 
 const execAsync = promisify(exec);
 

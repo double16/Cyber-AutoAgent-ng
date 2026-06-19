@@ -6,7 +6,6 @@
 import { useCallback } from 'react';
 import { useModule } from '../contexts/ModuleContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { HealthMonitor } from '../services/HealthMonitor.js';
 
 interface SlashCommand {
   command: string;

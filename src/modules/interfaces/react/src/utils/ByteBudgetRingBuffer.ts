@@ -1,6 +1,6 @@
 export class ByteBudgetRingBuffer<T> {
   private items: T[] = [];
-  private byteLimit: number;
+  private readonly byteLimit: number;
   private currentBytes = 0;
   private estimator: (item: T) => number;
   private overflowReducer?: (item: T) => T;

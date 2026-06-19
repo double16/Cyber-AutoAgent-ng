@@ -5,7 +5,6 @@
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
 import * as fs from 'fs/promises';
-import type { Dirent } from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { loggingService } from '../services/LoggingService.js';

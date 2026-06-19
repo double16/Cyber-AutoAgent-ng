@@ -55,7 +55,7 @@ export interface TerminalSize {
  * Hook for managing terminal dimensions with automatic resize handling.
  *
  * Subscribes to terminal resize events and provides both raw and padded dimensions.
- * Handles edge cases like missing stdout properties or extremely small terminals.
+ * Handles edge cases like missing stdout properties or small terminals.
  *
  * @returns TerminalSize object with current dimensions
  */

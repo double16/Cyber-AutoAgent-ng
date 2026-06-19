@@ -14,7 +14,7 @@ import { useModule } from '../contexts/ModuleContext.js';
 import { ApplicationState } from './useApplicationState.js';
 import { useDebouncedState } from './useDebouncedState.js';
 import { ExecutionServiceFactory, ExecutionServiceSelectionError, ServiceSelectionResult } from '../services/ExecutionServiceFactory.js';
-import { ExecutionService, ExecutionHandle, DEFAULT_EXECUTION_CONFIG } from '../services/ExecutionService.js';
+import { ExecutionService, DEFAULT_EXECUTION_CONFIG } from '../services/ExecutionService.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 
 export interface OperationHistoryEntry {

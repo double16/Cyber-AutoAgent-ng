@@ -7,11 +7,9 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import SelectInput from 'ink-select-input';
-import TextInput, { UncontrolledTextInput } from 'ink-text-input';
+import TextInput from 'ink-text-input';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { themeManager } from '../themes/theme-manager.js';
-import { Header } from './Header.js';
-import { loggingService } from '../services/LoggingService.js';
 import { PasswordInput } from './PasswordInput.js';
 import { TokenInput } from './TokenInput.js';
 
@@ -1558,7 +1556,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         const trimmed = raw.trim();
         if (!trimmed) return;
 
-        let next: string[] = [];
+        let next: string[];
         if (trimmed === '*') {
           next = ['*'];
         } else {
@@ -1650,7 +1648,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         const trimmed = raw.trim();
         if (!trimmed) return;
 
-        let next: string[] = [];
+        let next: string[];
         if (trimmed === '*') {
           next = ['*'];
         } else {

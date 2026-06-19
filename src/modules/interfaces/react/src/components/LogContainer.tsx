@@ -5,7 +5,7 @@
  * status indicators, and overflow management.
  */
 
-import React, { useRef, useEffect } from 'react';
+import React from 'react';
 import { Box, Text } from 'ink';
 import stripAnsi from 'strip-ansi';
 import { themeManager } from '../themes/theme-manager.js';

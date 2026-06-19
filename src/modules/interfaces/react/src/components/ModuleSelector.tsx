@@ -8,7 +8,6 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useModule } from '../contexts/ModuleContext.js';
 import { themeManager } from '../themes/theme-manager.js';
-import { Header } from './Header.js';
 
 interface ModuleSelectorProps {
   onClose: () => void;
