@@ -1,5 +1,7 @@
-import {EventEmitter} from 'events';
-import {beforeEach, describe, expect, it, jest} from '@jest/globals';
+import {mkdtempSync, mkdirSync, rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 const createContainer = jest.fn(async () => {
     throw new Error('abort-after-create');
@@ -34,6 +36,8 @@ jest.unstable_mockModule('../../../src/services/ContainerManager.js', () => ({
 }));
 
 const load = async () => import('../../../src/services/DirectDockerService.js');
+const originalHome = process.env.HOME;
+let tempRoot: string | undefined;
 
 const baseConfig = {
     iterations: 9,
@@ -120,14 +124,37 @@ const baseConfig = {
 describe('DirectDockerService broad environment construction', () => {
     beforeEach(() => {
         jest.resetModules();
+        if (tempRoot) {
+            rmSync(tempRoot, {recursive: true, force: true});
+        }
+        tempRoot = mkdtempSync(path.join(tmpdir(), 'caa-direct-docker-'));
         createContainer.mockClear();
         listContainers.mockClear();
         currentMode.mockResolvedValue('full-stack');
+        process.env.HOME = originalHome;
+        delete process.env.CYBER_PROJECT_ROOT;
         delete process.env.CYBER_DOCKER_REUSE;
+    });
+
+    afterEach(() => {
+        if (tempRoot) {
+            rmSync(tempRoot, {recursive: true, force: true});
+            tempRoot = undefined;
+        }
+        process.env.HOME = originalHome;
+        delete process.env.CYBER_PROJECT_ROOT;
     });
 
     it('passes CLI args, mounts, observability, evaluation, provider, AWS, MCP, and user env to Docker', async () => {
         process.env.CYBER_DOCKER_REUSE = 'false';
+        const projectRoot = path.join(tempRoot!, 'project');
+        const homeRoot = path.join(tempRoot!, 'home');
+        const outputDir = path.join(tempRoot!, 'cyber-outputs');
+        process.env.CYBER_PROJECT_ROOT = projectRoot;
+        process.env.HOME = homeRoot;
+        mkdirSync(path.join(projectRoot, 'tools'), {recursive: true});
+        mkdirSync(path.join(projectRoot, 'external_plugins'), {recursive: true});
+        mkdirSync(path.join(homeRoot, '.cyber-autoagent', 'modules'), {recursive: true});
         const {DirectDockerService} = await load();
         const service = new DirectDockerService();
         const events: any[] = [];
@@ -139,7 +166,7 @@ describe('DirectDockerService broad environment construction', () => {
             objective: 'find issues',
             continueOperation: 'op-123',
             reportOnly: true,
-        } as any, baseConfig)).rejects.toThrow('abort-after-create');
+        } as any, {...baseConfig, outputDir})).rejects.toThrow('abort-after-create');
 
         expect(createContainer).toHaveBeenCalledTimes(1);
         const spec = createContainer.mock.calls[0][0] as any;
@@ -153,7 +180,11 @@ describe('DirectDockerService broad environment construction', () => {
             '--region', 'us-east-2',
         ]));
         expect(spec.HostConfig.NetworkMode).toBe('bridge');
-        expect(spec.HostConfig.Binds).toContain('/tmp/cyber-outputs:/app/outputs');
+        expect(spec.HostConfig.Binds).toContain(`${outputDir}:/app/outputs`);
+        expect(spec.HostConfig.Binds).toContain(`${path.join(projectRoot, 'tools')}:/app/tools:delegated`);
+        expect(spec.HostConfig.Binds).toContain(`${path.join(projectRoot, 'external_plugins')}:/app/external_plugins:delegated`);
+        expect(spec.HostConfig.Binds).toContain(`${path.join(homeRoot, '.cyber-autoagent', 'modules')}:/app/home_plugins:delegated`);
+        expect(spec.HostConfig.Binds.join('\n')).not.toContain('root_cache');
 
         const env = Object.fromEntries(spec.Env.map((entry: string) => {
             const idx = entry.indexOf('=');
@@ -192,7 +223,7 @@ describe('DirectDockerService broad environment construction', () => {
 
         await expect(service.executeAssessment(
             {module: 'web', target: 'example.com'} as any,
-            {...baseConfig, observability: false, autoEvaluation: false, environment: {}, mcp: {enabled: false, connections: []}} as any
+            {...baseConfig, outputDir: path.join(tempRoot!, 'cyber-outputs'), observability: false, autoEvaluation: false, environment: {}, mcp: {enabled: false, connections: []}} as any
         )).rejects.toThrow('abort-after-create');
 
         const env = Object.fromEntries((createContainer.mock.calls[0][0] as any).Env.map((entry: string) => {

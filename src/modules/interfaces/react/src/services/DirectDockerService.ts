@@ -20,8 +20,8 @@
 import { EventEmitter } from 'events';
 import Dockerode from 'dockerode';
 import { Transform } from 'stream';
-import fs from 'fs';
-import path from 'path';
+import * as fs from 'fs';
+import * as path from 'path';
 import { execSync } from 'child_process';
 import { AssessmentParams } from '../types/Assessment.js';
 import { Config } from '../contexts/ConfigContext.js';
@@ -45,6 +45,27 @@ function sanitizeTargetName(target: string): string {
     .replace(/\s+/g, '_')  // Replace spaces
     .replace(/_+/g, '_')  // Collapse multiple underscores
     .replace(/^_|_$/g, '');  // Trim underscores
+}
+
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const candidate of paths) {
+    if (!candidate) continue;
+    const resolved = path.resolve(candidate);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    result.push(resolved);
+  }
+  return result;
+}
+
+function isExistingDirectory(candidate: string): boolean {
+  try {
+    return fs.existsSync(candidate) && fs.statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -600,29 +621,7 @@ export class DirectDockerService extends EventEmitter {
         }
       }
 
-      // Resolve optional tools bind robustly
-      const binds: string[] = [];
-      binds.push(`${outputPath}:/app/outputs`);
-
-      try {
-        const candidateRoots: string[] = [];
-        if (process.env.CYBER_PROJECT_ROOT) {
-          candidateRoots.push(process.env.CYBER_PROJECT_ROOT);
-        }
-        // As a fallback, try cwd only if a tools dir actually exists
-        candidateRoots.push(process.cwd());
-
-        for (const root of candidateRoots) {
-          const toolsDir = path.join(root, 'tools');
-          if (fs.existsSync(toolsDir) && fs.statSync(toolsDir).isDirectory()) {
-            binds.push(`${toolsDir}:/app/tools`);
-            break;
-          }
-        }
-      } catch {
-        // If any error occurs during tools resolution, skip binding tools to avoid failure
-      }
-
+      const binds = this.buildAdHocContainerBinds(outputPath);
 
       logger.info('Creating ad-hoc container', { image: dockerImage, network: dockerNetwork, binds, args, env: maskEnv(env) });
       this.activeContainer = await this.dockerClient.createContainer({
@@ -1172,6 +1171,54 @@ export class DirectDockerService extends EventEmitter {
     } catch (error) {
       logger.warn('Failed to force-stop docker exec process', error as any);
     }
+  }
+
+  private getProjectRootCandidates(): string[] {
+    const candidates: string[] = [];
+    if (process.env.CYBER_PROJECT_ROOT) {
+      candidates.push(process.env.CYBER_PROJECT_ROOT);
+    }
+
+    let cursor = process.cwd();
+    for (let depth = 0; depth < 8; depth += 1) {
+      candidates.push(cursor);
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+
+    return uniquePaths(candidates);
+  }
+
+  private buildAdHocContainerBinds(outputPath: string): string[] {
+    const binds: string[] = [];
+
+    if (isExistingDirectory(outputPath)) {
+      binds.push(`${outputPath}:/app/outputs`);
+    }
+
+    const addProjectBind = (hostDirName: string, containerPath: string) => {
+      for (const root of this.getProjectRootCandidates()) {
+        const hostPath = path.join(root, hostDirName);
+        if (isExistingDirectory(hostPath)) {
+          binds.push(`${hostPath}:${containerPath}:delegated`);
+          return;
+        }
+      }
+    };
+
+    addProjectBind('tools', '/app/tools');
+    addProjectBind('external_plugins', '/app/external_plugins');
+
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (home) {
+      const homePlugins = path.join(home, '.cyber-autoagent', 'modules');
+      if (isExistingDirectory(homePlugins)) {
+        binds.push(`${homePlugins}:/app/home_plugins:delegated`);
+      }
+    }
+
+    return binds;
   }
 
   /**
