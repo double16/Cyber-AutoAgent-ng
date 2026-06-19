@@ -122,4 +122,64 @@ describe('DockerProgressAggregator', () => {
             },
         ]);
     });
+
+    it('handles empty chunks, fuzzy service names, generic images, and no-service totals', () => {
+        const updates: Update[] = [];
+        const aggregator = new DockerProgressAggregator(
+            ['api', 'worker'],
+            (message, meta) => updates.push({message, meta}),
+            0
+        );
+
+        aggregator.update('');
+        aggregator.update([
+            'Status: Image is up to date for registry.example.com/team/api',
+            'Pull complete',
+            'Creating project_worker_1 ... done',
+            'Starting stack-api ... done',
+            'Waiting',
+            'Digest: sha256:abc',
+        ].join('\n'));
+
+        expect(updates.map(update => update.message)).toEqual([
+            'Downloading images… 1/2 ready',
+            'Downloading images… 2/2 ready',
+            'Creating containers… 1/2',
+            'Starting containers… 1/2',
+        ]);
+        expect(updates[0].meta).toEqual(expect.objectContaining({
+            phase: 'pull',
+            pullReady: 1,
+            total: 2,
+        }));
+        expect(updates.at(-1)?.meta).toEqual(expect.objectContaining({
+            phase: 'start',
+            started: 1,
+            total: 2,
+        }));
+
+        const fallbackUpdates: Update[] = [];
+        const fallback = new DockerProgressAggregator(
+            [],
+            (message, meta) => fallbackUpdates.push({message, meta}),
+            0
+        );
+
+        fallback.update('Pull complete\nCreating unknown ... done\nStarting unknown ... done');
+
+        expect(fallbackUpdates).toEqual([
+            {
+                message: 'Downloading images… 1/1 ready',
+                meta: expect.objectContaining({phase: 'pull', ratio: 1, total: 1}),
+            },
+            {
+                message: 'Creating containers… 1/1',
+                meta: expect.objectContaining({phase: 'create', ratio: 1, total: 1}),
+            },
+            {
+                message: 'Starting containers… 1/1',
+                meta: expect.objectContaining({phase: 'start', ratio: 1, total: 1}),
+            },
+        ]);
+    });
 });

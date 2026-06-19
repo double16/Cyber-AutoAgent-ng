@@ -277,8 +277,7 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
       if (e.args !== undefined) delete e.args;
       // Ensure a deterministic toolId if upstream omitted it (leave Terminal's fallback as secondary)
       if (!e.toolId && !e.tool_id) {
-        const bucket = Math.floor((e.timestamp ? Date.parse(e.timestamp) : Date.now()) / 1000);
-        e.toolId = `${toolName}-${bucket}`;
+        e.toolId = makeToolId(toolName, e.timestamp);
       }
       return e;
     }
