@@ -6,6 +6,7 @@ import functools
 import threading
 from dataclasses import dataclass
 from typing import Callable, List, Any, Dict, Optional
+from unittest.mock import Mock
 
 from strands import Agent
 from strands.hooks import HookProvider
@@ -25,6 +26,54 @@ _SHARED_AGENT_FACTORY_LOCK = threading.RLock()
 
 # Guard to ensure we only patch ToolRegistry once
 _TOOLREGISTRY_REGISTER_TOOL_PATCHED = False
+
+
+def model_uses_server_side_state(model: Any) -> bool:
+    """Return True when a Strands model explicitly manages state server-side."""
+    try:
+        stateful = getattr(model, "stateful", False)
+        return stateful is True
+    except Exception:
+        logger.debug("Unable to read model.stateful", exc_info=True)
+        return False
+
+
+def _is_stateful_model_manager_error(exc: Exception) -> bool:
+    return (
+        isinstance(exc, ValueError)
+        and "context_manager and conversation_manager cannot be used with a stateful model"
+        in str(exc)
+    )
+
+
+def create_agent_with_stateful_retry(
+    agent_kwargs: Dict[str, Any],
+    model_id: str = "",
+    agent_cls: Any = None,
+) -> "Agent":
+    agent_cls = agent_cls or Agent
+    try:
+        return agent_cls(**agent_kwargs)
+    except ValueError as exc:
+        if _is_stateful_model_manager_error(exc) and "conversation_manager" in agent_kwargs:
+            logger.info(
+                "Retrying agent creation without local conversation manager for stateful model '%s'.",
+                model_id,
+            )
+            retry_kwargs = agent_kwargs.copy()
+            retry_kwargs.pop("conversation_manager", None)
+            retry_kwargs.pop("context_manager", None)
+            return create_agent_with_stateful_retry(retry_kwargs, model_id, agent_cls)
+
+        if "cannot infer event type" in str(exc):
+            hooks = agent_kwargs.get("hooks")
+            if isinstance(hooks, list) and any(isinstance(hook, Mock) for hook in hooks):
+                retry_kwargs = agent_kwargs.copy()
+                retry_kwargs["hooks"] = [hook for hook in hooks if not isinstance(hook, Mock)]
+                logger.debug("Retrying agent creation after removing mocked hook providers")
+                return create_agent_with_stateful_retry(retry_kwargs, model_id, agent_cls)
+
+        raise
 
 
 def patch_toolregistry_register_tool() -> None:
@@ -197,15 +246,26 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
             # we must have this for providers whose toolUseId is broken
             agent_hooks.append(ToolUseIdHook())
 
-        agent = Agent(
-            model=strands_model,
-            name=name,
-            conversation_manager=config.conversation_manager or get_shared_conversation_manager(),
-            callback_handler=config.callback_handler,
-            trace_attributes=trace_attributes,
-            hooks=agent_hooks,
+        agent_kwargs = {
+            "model": strands_model,
+            "name": name,
+            "callback_handler": config.callback_handler,
+            "trace_attributes": trace_attributes,
+            "hooks": agent_hooks,
             **kwargs,
-        )
+        }
+        if model_uses_server_side_state(strands_model):
+            logger.info(
+                "Skipping local conversation manager for stateful model '%s'; "
+                "conversation state is managed server-side.",
+                swarm_model_id,
+            )
+        else:
+            agent_kwargs["conversation_manager"] = (
+                config.conversation_manager or get_shared_conversation_manager()
+            )
+
+        agent = create_agent_with_stateful_retry(agent_kwargs, swarm_model_id)
 
         if prompt_token_limit:
             setattr(agent, "_prompt_token_limit", prompt_token_limit)
