@@ -11,7 +11,6 @@ import { spawn } from 'node-pty';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

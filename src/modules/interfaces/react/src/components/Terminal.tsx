@@ -8,18 +8,16 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Box, Text } from 'ink';
+import { Box } from 'ink';
 import { StreamDisplay, StaticStreamDisplay, DisplayStreamEvent } from './StreamDisplay.js';
 import { ExecutionService } from '../services/ExecutionService.js';
 import { themeManager } from '../themes/theme-manager.js';
 import { loggingService } from '../services/LoggingService.js';
-import { useEventBatcher } from '../utils/useBatchedState.js';
 import { normalizeEvent } from '../services/events/normalize.js';
 import { RingBuffer } from '../utils/RingBuffer.js';
 import { ByteBudgetRingBuffer } from '../utils/ByteBudgetRingBuffer.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
-import { calculateAvailableHeight } from '../utils/layoutConstants.js';
 
 // Exported helper: build a trimmed report preview to avoid storing huge content in memory
 export const buildTrimmedReportContent = (raw: string): string => {
@@ -1792,7 +1790,7 @@ completedBufRef.current.pushMany(newCompletedEvents);
         />
       )}
 
-      {/* Active events with content (reasoning, output, etc) - suppressed once FINAL
+      {/* Active events with content (reasoning, output, etc.) - suppressed once FINAL
           REPORT cluster takes over the dynamic tail. */}
       {!hasFinalReportCluster && activeEvents.length > 0 && !hasOnlyThinkingInActive && (
         <StreamDisplay

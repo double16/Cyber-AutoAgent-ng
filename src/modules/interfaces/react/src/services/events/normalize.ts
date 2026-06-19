@@ -57,12 +57,18 @@ function normalizeToolInput(toolName: string, input: any): any {
         const s = value.trim();
         if ((s.startsWith('[') && s.endsWith(']')) || (s.startsWith('{') && s.endsWith('}'))) {
           try {
-            const normalized = s.replace(/\\n/g, '\n');
-            const parsed = JSON.parse(normalized);
+            const parsed = JSON.parse(s);
             if (Array.isArray(parsed)) return parsed;
             if (parsed && typeof parsed === 'object') return [parsed];
           } catch {
-            /* keep as raw string below */
+            try {
+              const normalized = s.replace(/\\n/g, '\n');
+              const parsed = JSON.parse(normalized);
+              if (Array.isArray(parsed)) return parsed;
+              if (parsed && typeof parsed === 'object') return [parsed];
+            } catch {
+              /* keep as raw string below */
+            }
           }
         }
         return [value];
@@ -206,7 +212,7 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
   const e: AnyEvent = { ...event };
 
   // Standardize common timestamp field to ISO string if present
-  if (e.timestamp && typeof e.timestamp === 'number') {
+  if (e.timestamp !== undefined && e.timestamp !== null && typeof e.timestamp === 'number') {
     try { e.timestamp = new Date(e.timestamp).toISOString(); } catch {}
   }
 
@@ -271,8 +277,7 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
       if (e.args !== undefined) delete e.args;
       // Ensure a deterministic toolId if upstream omitted it (leave Terminal's fallback as secondary)
       if (!e.toolId && !e.tool_id) {
-        const bucket = Math.floor((e.timestamp ? Date.parse(e.timestamp) : Date.now()) / 1000);
-        e.toolId = `${toolName}-${bucket}`;
+        e.toolId = makeToolId(toolName, e.timestamp);
       }
       return e;
     }

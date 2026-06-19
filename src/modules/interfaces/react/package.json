@@ -1,6 +1,6 @@
 {
   "name": "cyber-autoagent-cli",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Cyber-AutoAgent CLI with React + Ink",
   "type": "module",
   "main": "./dist/index.js",

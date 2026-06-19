@@ -5,12 +5,12 @@
  * Handles slash commands, natural language processing, and user input routing.
  */
 
-import { useCallback } from 'react';
-import { InputParser, ParsedCommand } from '../services/InputParser.js';
-import { AssessmentFlow } from '../services/AssessmentFlow.js';
-import { OperationManager } from '../services/OperationManager.js';
-import { ApplicationState } from './useApplicationState.js';
-import { loggingService } from '../services/LoggingService.js';
+import {useCallback} from 'react';
+import {InputParser, ParsedCommand} from '../services/InputParser.js';
+import {AssessmentFlow} from '../services/AssessmentFlow.js';
+import {OperationManager} from '../services/OperationManager.js';
+import {ApplicationState} from './useApplicationState.js';
+import {loggingService} from '../services/LoggingService.js';
 
 interface UseCommandHandlerProps {
   commandParser: InputParser;
@@ -126,18 +126,17 @@ export function useCommandHandler({
       } as const;
 
       const configuredModeKey = applicationConfig?.deploymentMode as keyof typeof deploymentModeNames | undefined;
-      let detectedMode: keyof typeof deploymentModeNames | 'unknown' = 'unknown';
+      let detectedMode: keyof typeof deploymentModeNames | 'unknown';
       try {
-        const rawMode = await containerManager.getCurrentMode();
-        detectedMode = rawMode;
+        detectedMode = await containerManager.getCurrentMode();
       } catch {
         detectedMode = 'unknown';
       }
-      
+
       // Format health report
       let healthReport = `\nSYSTEM HEALTH REPORT\n`;
       healthReport += `====================================\n\n`;
-      
+
       // Deployment information  
       const detectedLabel = detectedMode !== 'unknown'
         ? deploymentModeNames[detectedMode]

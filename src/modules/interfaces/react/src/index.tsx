@@ -10,6 +10,7 @@ import { App } from './App.js';
 import { Config } from './contexts/ConfigContext.js';
 import { loggingService } from './services/LoggingService.js';
 import { enableConsoleSilence } from './utils/consoleSilencer.js';
+import { formatDuration } from './utils/logger.js';
 
 // Check for --debug flag early (before meow parsing) to enable logging
 if (process.argv.includes('--debug') || process.argv.includes('-d')) {
@@ -323,6 +324,7 @@ const runAutoAssessment = async () => {
 
       let lastMetricsUpdate = "";
       let lastTaskTitle = "";
+      let stepsExecuted = 0;
 
       // In auto-run mode, listen to events and display them to console
       // This provides real-time progress visibility during assessment
@@ -346,6 +348,7 @@ const runAutoAssessment = async () => {
         else if (event.type === 'step_header') {
           if (Number.isInteger(event.step) && Number.isInteger(event.maxSteps)) {
             loggingService.info(`➡️ Step ${event.step}/${event.maxSteps}`);
+            stepsExecuted = event.step;
           }
         }
         else if (event.type === 'task_started') {
@@ -372,12 +375,8 @@ const runAutoAssessment = async () => {
       const result = await handle.result;
 
       if (result.success) {
-          // FIXME: report time in seconds or hh:mm:ss
-        loggingService.info(` Assessment completed successfully in ${result.durationMs}ms`);
-        // FIXME: stepsExecuted is reporting max steps because the promises updating stepsExecuted are set to config.iterations
-        loggingService.info(` Steps executed: ${result.stepsExecuted || 'unknown'}`);
-        // FIXME: findings count is reporting unknown, it is never updated
-        loggingService.info(` Findings: ${result.findingsCount == null ? 'unknown' : result.findingsCount}`);
+        loggingService.info(` Assessment completed successfully in ${formatDuration(result.durationMs)}`);
+        loggingService.info(` Steps executed: ${stepsExecuted}`);
       } else {
         loggingService.error(` Assessment failed: ${result.error}`);
       }

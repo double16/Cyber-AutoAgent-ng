@@ -3,7 +3,7 @@
  * Python backend now handles reasoning accumulation and emits complete blocks
  */
 
-import { DisplayStreamEvent } from '../components/StreamDisplay.js';
+import type {DisplayStreamEvent} from '../components/StreamDisplay.js';
 
 export class EventAggregator {
   private outputBuffer: string[] = [];

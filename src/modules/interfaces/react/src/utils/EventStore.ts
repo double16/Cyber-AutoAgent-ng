@@ -6,7 +6,7 @@
  */
 
 import React from 'react';
-import { DisplayStreamEvent } from '../components/StreamDisplay.js';
+import {DisplayStreamEvent} from '../components/StreamDisplay.js';
 
 // Chunk size for internal storage - balance between memory and performance
 const CHUNK_SIZE = 100;
@@ -40,10 +40,11 @@ export class EventStore {
     if (this.currentChunk.length >= CHUNK_SIZE) {
       this.chunks.push(this.currentChunk);
       this.currentChunk = [];
-      
-      // Trim old chunks if over limit
-      this.trimToMaxSize();
     }
+
+    // Trim old events after every append so maxEvents is enforced even
+    // between chunk rollovers.
+    this.trimToMaxSize();
   }
 
   /**
@@ -179,6 +180,13 @@ export class EventStore {
         this.chunks[0] = firstChunk.slice(trimCount);
         removed += trimCount;
       }
+    }
+
+    // If maxEvents is smaller than the active chunk, trim from it too.
+    if (removed < toRemove && this.currentChunk.length > 0) {
+      const trimCount = Math.min(toRemove - removed, this.currentChunk.length);
+      this.currentChunk = this.currentChunk.slice(trimCount);
+      removed += trimCount;
     }
 
     this.totalCount -= removed;

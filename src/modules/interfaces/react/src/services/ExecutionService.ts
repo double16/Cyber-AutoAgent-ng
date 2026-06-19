@@ -83,10 +83,6 @@ export interface ExecutionResult {
   error?: string;
   /** Duration of execution in milliseconds */
   durationMs: number;
-  /** Number of steps executed */
-  stepsExecuted?: number;
-  /** Findings or evidence count */
-  findingsCount?: number;
 }
 
 /**

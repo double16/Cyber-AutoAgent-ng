@@ -11,7 +11,6 @@
  * - Flicker detection
  */
 
-import React from 'react';
 import { spawn } from 'node-pty';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';

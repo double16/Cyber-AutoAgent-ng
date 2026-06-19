@@ -20,15 +20,19 @@
 import { EventEmitter } from 'events';
 import Dockerode from 'dockerode';
 import { Transform } from 'stream';
-import fs from 'fs';
-import path from 'path';
+import * as fs from 'fs';
+import * as path from 'path';
 import { execSync } from 'child_process';
 import { AssessmentParams } from '../types/Assessment.js';
 import { Config } from '../contexts/ConfigContext.js';
-import { StreamEvent, EventType } from '../types/events.js';
 import { ContainerManager, DeploymentMode } from './ContainerManager.js';
 import { createLogger } from '../utils/logger.js';
 import { flattenEnvironment } from '../utils/env.js';
+import {
+  CyberEventStreamParserState,
+  emitStatusEvents,
+  processCyberEventStreamChunk,
+} from './events/cyberEventStreamParser.js';
 
 /**
  * Sanitize target name for filesystem use (matches Python agent logic)
@@ -41,6 +45,27 @@ function sanitizeTargetName(target: string): string {
     .replace(/\s+/g, '_')  // Replace spaces
     .replace(/_+/g, '_')  // Collapse multiple underscores
     .replace(/^_|_$/g, '');  // Trim underscores
+}
+
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const candidate of paths) {
+    if (!candidate) continue;
+    const resolved = path.resolve(candidate);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    result.push(resolved);
+  }
+  return result;
+}
+
+function isExistingDirectory(candidate: string): boolean {
+  try {
+    return fs.existsSync(candidate) && fs.statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -96,11 +121,14 @@ export class DirectDockerService extends EventEmitter {
   private autoExecuteSent: boolean = false;
   private readonly dockerClient: Dockerode;
   private activeContainer?: Dockerode.Container;
+  // If true, we started the container and should manage its lifecycle
+  private activeContainerOwner: boolean = false;
   private containerStream?: any;
   private isExecutionActive = false;
   private streamEventBuffer = '';
   private abortController?: AbortController;
   private activeExec?: Dockerode.Exec;
+  private activeExecRunId?: string;
   // Track when backend signals operation completion to avoid premature "complete"
   private seenOperationComplete = false;
   // Auto-confirm interactive handoffs when configured (maps to BYPASS_TOOL_CONSENT)
@@ -110,38 +138,6 @@ export class DirectDockerService extends EventEmitter {
   private toolOutputBuffer = '';
   private sawBackendToolOutput = false;
   private _currentToolName: string | undefined = undefined;
-
-  /** Emit a chunk of buffered tool output */
-  private emitToolOutputChunk(content: string): void {
-    try {
-      this.emit('event', {
-        type: 'output',
-        content,
-        timestamp: Date.now(),
-        metadata: { fromToolBuffer: true, tool: this._currentToolName, chunked: true }
-      } as any);
-    } catch {}
-  }
-
-  /**
-   * Flush tool output buffer in chunks to keep memory flat and reduce latency.
-   * If force=true, flush remaining buffer even if smaller than chunk size.
-   */
-  private flushToolOutputChunks(force: boolean = false): void {
-    const CHUNK_SIZE = 64 * 1024; // 64 KiB
-    const MIN_SPLIT = 32 * 1024;  // Prefer newline split after 32 KiB
-    while (this.toolOutputBuffer.length > CHUNK_SIZE || (force && this.toolOutputBuffer.length > 0)) {
-      const window = this.toolOutputBuffer.slice(0, CHUNK_SIZE);
-      let n = Math.min(this.toolOutputBuffer.length, CHUNK_SIZE);
-      const nl = window.lastIndexOf('\n');
-      if (nl >= MIN_SPLIT && nl < CHUNK_SIZE) {
-        n = nl + 1; // split on newline
-      }
-      const chunk = this.toolOutputBuffer.slice(0, n);
-      this.emitToolOutputChunk(chunk);
-      this.toolOutputBuffer = this.toolOutputBuffer.slice(n);
-    }
-  }
 
   /**
    * Initialize the Docker service with connection to Docker daemon
@@ -625,29 +621,7 @@ export class DirectDockerService extends EventEmitter {
         }
       }
 
-      // Resolve optional tools bind robustly
-      const binds: string[] = [];
-      binds.push(`${outputPath}:/app/outputs`);
-
-      try {
-        const candidateRoots: string[] = [];
-        if (process.env.CYBER_PROJECT_ROOT) {
-          candidateRoots.push(process.env.CYBER_PROJECT_ROOT);
-        }
-        // As a fallback, try cwd only if a tools dir actually exists
-        candidateRoots.push(process.cwd());
-
-        for (const root of candidateRoots) {
-          const toolsDir = path.join(root, 'tools');
-          if (fs.existsSync(toolsDir) && fs.statSync(toolsDir).isDirectory()) {
-            binds.push(`${toolsDir}:/app/tools`);
-            break;
-          }
-        }
-      } catch {
-        // If any error occurs during tools resolution, skip binding tools to avoid failure
-      }
-
+      const binds = this.buildAdHocContainerBinds(outputPath);
 
       logger.info('Creating ad-hoc container', { image: dockerImage, network: dockerNetwork, binds, args, env: maskEnv(env) });
       this.activeContainer = await this.dockerClient.createContainer({
@@ -671,6 +645,7 @@ export class DirectDockerService extends EventEmitter {
         },
         WorkingDir: '/app',
       });
+      this.activeContainerOwner = true;
 
       // Emit preflight details before attaching streams
       setTimeout(() => {
@@ -872,234 +847,71 @@ export class DirectDockerService extends EventEmitter {
    * Parse structured events from stdout and capture tool discovery
    */
   private parseEvents(data: string) {
-    // Tool discovery is now handled via structured events in parseEvents
-    
-    // Filter out binary/control characters but preserve ANSI escape codes
-    // ANSI codes use ESC (0x1B) followed by [ so we need to preserve those
-    // Only remove: NUL, SOH-BS, VT, FF, SO-SUB (except ESC), FS-US, DEL, and other control chars
-    const cleanedData = data.replace(/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F\x7F-\x9F\uFFFD]/g, '');
-    
-    this.streamEventBuffer += cleanedData;
-
-    const eventRegex = /__CYBER_EVENT__(.+?)__CYBER_EVENT_END__/s;
-    let match;
-    let processedEvents = false;
-
-    while ((match = eventRegex.exec(this.streamEventBuffer))) {
-      processedEvents = true;
-      const start = match.index as number;
-      const end = start + match[0].length;
-      // Capture any raw text preceding this structured event and buffer it if a tool is running
-      const preText = this.streamEventBuffer.slice(0, start);
-      if (preText && this.inToolExecution) {
-        this.toolOutputBuffer += preText;
-        // Clamp tool output buffer to prevent unbounded growth
-        const MAX_TOOL_OUTPUT = 1 * 1024 * 1024; // 1 MiB cap
-        if (this.toolOutputBuffer.length > MAX_TOOL_OUTPUT) {
-          this.toolOutputBuffer = this.toolOutputBuffer.slice(-MAX_TOOL_OUTPUT);
-        }
-        // Chunk out as we accumulate
-        this.flushToolOutputChunks(false);
-      }
-      try {
-        const eventData = JSON.parse(match[1]);
-
-        // For legacy events, pass through all properties
-        const event: any = {
-          type: eventData.type as EventType,
-          content: eventData.content,
-          data: eventData.data || {},
-          metadata: eventData.metadata || {},
-          timestamp: eventData.timestamp || Date.now(),
-          id: eventData.id || `evt-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          sessionId: eventData.sessionId || '',
-          // Include all original properties for legacy events
-          ...eventData
-        };
-
-        // Track tool execution state for raw output buffering
-        if (eventData.type === 'tool_start' || eventData.type === 'tool_invocation_start') {
-          this.inToolExecution = true;
-          this.toolOutputBuffer = '';
-          this.sawBackendToolOutput = false;
-          try { this._currentToolName = eventData.tool_name || eventData.toolName || eventData.tool || undefined; } catch {}
-
-          if (eventData.type === 'tool_start') {
-            this.emit('event', {
-              type: 'output',
-              content: `◆ ${eventData.tool_name} ${JSON.stringify(eventData.tool_input)}`,
-              timestamp: Date.now()
-            });
-          }
-        } else if (
-          eventData.type === 'tool_invocation_end' ||
-          eventData.type === 'tool_result' ||
-          eventData.type === 'step_header' ||
-          eventData.type === 'tool_end'
-        ) {
-          // Flush any remaining raw output when tool ends, but only if backend
-          // did NOT send a consolidated tool output event. This avoids duplicates.
-          if (!this.sawBackendToolOutput) {
-            // Flush remaining buffered output in chunks
-            this.flushToolOutputChunks(true);
-          }
-          this.toolOutputBuffer = '';
-          this.inToolExecution = false;
-          this.sawBackendToolOutput = false;
-          try { this._currentToolName = undefined; } catch {}
-
-          if (eventData.type === 'tool_end') {
-            var content : string;
-            if (eventData.success) {
-              content = `✓ ${eventData.tool_name}`;
-            } else {
-              content = `○ ${eventData.tool_name}`;
-            }
-            this.emit('event', {
-              type: 'output',
-              content: content,
-              timestamp: Date.now()
-            });
-          }
-        }
-
-        // Handle tool discovery events with improved formatting
-        if (event.type === 'tool_discovery_start') {
-          this.emit('event', {
-            type: 'output',
-            content: '◆ Loading cybersecurity assessment tools:',
-            timestamp: Date.now()
-          });
-        } else if (event.type === 'tool_available') {
-          this.emit('event', {
-            type: 'output',
-            content: `  ✓ ${eventData.tool_name} (${eventData.description})`,
-            timestamp: Date.now()
-          });
-        } else if (event.type === 'tool_unavailable') {
-          this.emit('event', {
-            type: 'output',
-            content: `  ○ ${eventData.tool_name} (${eventData.description || ''}) - unavailable`,
-            timestamp: Date.now()
-          });
-        } else if (event.type === 'environment_ready') {
-          this.emit('event', {
-            type: 'output',
-            content: `◆ Environment ready - ${eventData.tool_count} cybersecurity tools loaded`,
-            timestamp: Date.now()
-          });
-
-          setTimeout(() => {
-            this.emit('event', {
-              type: 'output',
-              content: '◆ Configuring assessment parameters and evidence collection',
-              timestamp: Date.now()
-            });
-          }, 300);
-
-          setTimeout(() => {
-            this.emit('event', {
-              type: 'output',
-              content: '◆ Security assessment environment ready - Beginning evaluation',
-              timestamp: Date.now()
-            });
-            // Add improved spacing and start thinking animation
-            setTimeout(() => {
-              this.emit('event', {
-                type: 'output',
-                content: '',
-                timestamp: Date.now()
-              });
-              this.emit('event', {
-                type: 'output',
-                content: '',
-                timestamp: Date.now()
-              });
-              
-              // Note: Removed delayed_thinking_start to avoid duplicate animations during startup
-              // The startup thinking animation is already active and more appropriate
-            }, 100);
-          }, 1000);
-        } else if (event.type === 'output') {
-          // Track if this is backend-consolidated tool output
-          if (event.metadata && (event.metadata as any).fromToolBuffer) {
-            this.sawBackendToolOutput = true;
-          }
-        } else if (event.type === 'operation_complete') {
-              // Backend signaled completion; mark and emit complete once
-          this.seenOperationComplete = true;
-          this.emit('complete');
-        } else if (event.type === 'assessment_complete') {
-              // React backend emits assessment_complete after final report generation
-          this.seenOperationComplete = true;
-          this.emit('complete');
-        } else if (event.type === 'user_handoff') {
-          // Structured user handoff from backend: if autoConfirm is enabled, press Enter automatically
-          if (this.autoConfirm) {
-            logger.info('Auto-confirming user_handoff');
-            setTimeout(() => {
-              if (this.containerStream && this.isExecutionActive) {
-                try {
-                  this.containerStream.write('\r\n');
-                  logger.info('stdin write (auto-confirm)', { data: '\r\\n' });
-                  setTimeout(() => {
-                    try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('\r\n'); } catch {}
-                  }, 200);
-                  setTimeout(() => {
-                    try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('execute\r\n'); } catch {}
-                  }, 1200);
-                } catch (err) {
-                  logger.error('stdin write (auto-confirm) error', err as any);
-                }
-              }
-            }, 200);
-          }
-        }
-        
-        this.emit('event', event);
-
-        // Immediately slice buffer after processing event
-        this.streamEventBuffer = this.streamEventBuffer.slice(end);
-
-        // Immediately check for interactive prompts after processing each event
-        this.handleInteractivePrompts();
-        
-      } catch (error) {
-        // Emit parsing errors as events instead of console.error
+    processCyberEventStreamChunk(data, this.getEventStreamParserState(), {
+      emitEvent: event => this.emit('event', event),
+      handleEvent: eventData => this.handleParsedDockerEvent(eventData),
+      onParseError: error => {
         this.emit('event', {
           type: 'output',
           content: `Error parsing event: ${error}`,
           timestamp: Date.now()
         });
-        
-        // Skip this malformed event to avoid infinite loop
-        const skipLength = match.index + match[0].length;
-        this.streamEventBuffer = this.streamEventBuffer.slice(skipLength);
-      }
-    }
-    
-    // Check for interactive prompts that need automatic responses
-    this.handleInteractivePrompts();
-    
-    // If no structured events were found in this chunk, opportunistically capture raw output
-    if (!processedEvents && cleanedData) {
-      if (this.inToolExecution) {
-        this.toolOutputBuffer += cleanedData;
-        const MAX_TOOL_OUTPUT = 1 * 1024 * 1024; // 1 MiB cap
-        if (this.toolOutputBuffer.length > MAX_TOOL_OUTPUT) {
-          this.toolOutputBuffer = this.toolOutputBuffer.slice(-MAX_TOOL_OUTPUT);
-        }
-        // Chunk out as we accumulate
-        this.flushToolOutputChunks(false);
-      }
-      // Clear buffer to avoid duplicating raw data as preText on the next structured event
-      this.streamEventBuffer = '';
+      },
+      sanitizeInput: input => input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F\x7F-\x9F\uFFFD]/g, ''),
+      onAfterParsedEvent: () => this.handleInteractivePrompts(),
+      onAfterChunk: () => this.handleInteractivePrompts()
+    });
+  }
+
+  private getEventStreamParserState(): CyberEventStreamParserState {
+    const service = this;
+    return {
+      get streamEventBuffer() { return service.streamEventBuffer; },
+      set streamEventBuffer(value: string) { service.streamEventBuffer = value; },
+      get inToolExecution() { return service.inToolExecution; },
+      set inToolExecution(value: boolean) { service.inToolExecution = value; },
+      get toolOutputBuffer() { return service.toolOutputBuffer; },
+      set toolOutputBuffer(value: string) { service.toolOutputBuffer = value; },
+      get sawBackendToolOutput() { return service.sawBackendToolOutput; },
+      set sawBackendToolOutput(value: boolean) { service.sawBackendToolOutput = value; },
+      get currentToolName() { return service._currentToolName; },
+      set currentToolName(value: string | undefined) { service._currentToolName = value; }
+    };
+  }
+
+  private handleParsedDockerEvent(eventData: any): void {
+    emitStatusEvents(eventData, {
+      emitEvent: event => this.emit('event', event),
+      onComplete: () => {
+        this.seenOperationComplete = true;
+        this.emit('complete');
+      },
+      onUserHandoff: () => this.handleUserHandoffAutoConfirm()
+    });
+  }
+
+  private handleUserHandoffAutoConfirm(): void {
+    if (!this.autoConfirm) {
+      return;
     }
 
-    // Keep only last 32KB to prevent memory issues
-    if (this.streamEventBuffer.length > 32768) {
-      this.streamEventBuffer = this.streamEventBuffer.slice(-16384);
-    }
+    logger.info('Auto-confirming user_handoff');
+    setTimeout(() => {
+      if (this.containerStream && this.isExecutionActive) {
+        try {
+          this.containerStream.write('\r\n');
+          logger.info('stdin write (auto-confirm)', { data: '\r\\n' });
+          setTimeout(() => {
+            try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('\r\n'); } catch {}
+          }, 200);
+          setTimeout(() => {
+            try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('execute\r\n'); } catch {}
+          }, 1200);
+        } catch (err) {
+          logger.error('stdin write (auto-confirm) error', err as any);
+        }
+      }
+    }, 200);
   }
 
   /**
@@ -1158,14 +970,15 @@ export class DirectDockerService extends EventEmitter {
     }
 
     try {
-      if (this.activeContainer) {
+      if (this.activeExec) {
+        await this.stopActiveExecProcess();
+        this.activeExec = undefined;
+        this.activeExecRunId = undefined;
+      } else if (this.activeContainer && this.activeContainerOwner) {
         // Force kill the ad-hoc container to ensure immediate termination
         await this.activeContainer.kill('SIGKILL');
-      } else if (this.activeExec && this.containerStream) {
-        // Exec session in persistent service container: try sending Ctrl-C to terminate the process
-        try {
-          this.containerStream.write('\x03'); // SIGINT
-        } catch {}
+        this.activeContainer = undefined;
+        this.activeContainerOwner = false;
       }
 
       // Clean up container/exec stream if exists
@@ -1176,8 +989,6 @@ export class DirectDockerService extends EventEmitter {
         this.containerStream = undefined;
       }
 
-      this.activeExec = undefined;
-      this.activeContainer = undefined;
       this.isExecutionActive = false;
       this.abortController = undefined;
       this.emit('stopped');
@@ -1185,7 +996,9 @@ export class DirectDockerService extends EventEmitter {
     } catch {
       // Force cleanup even if termination fails
       this.activeExec = undefined;
+      this.activeExecRunId = undefined;
       this.activeContainer = undefined;
+      this.activeContainerOwner = false;
       this.isExecutionActive = false;
       this.abortController = undefined;
       this.emit('stopped');
@@ -1236,17 +1049,176 @@ export class DirectDockerService extends EventEmitter {
    * Stop the active container
    */
   async stopContainer(): Promise<void> {
-    if (!this.activeContainer) {
+    if (!this.activeContainer || !this.activeContainerOwner) {
       return;
     }
     
     try {
       await this.activeContainer.stop();
       this.activeContainer = undefined;
+      this.activeContainerOwner = false;
     } catch (error) {
       // Container might already be stopped
       this.activeContainer = undefined;
+      this.activeContainerOwner = false;
     }
+  }
+
+  /**
+   * Stop a docker exec session running inside a persistent service container.
+   *
+   * Dockerode does not expose an Exec.kill API. Writing Ctrl-C to the hijacked
+   * stream is only advisory and can be ignored by the Python process or a child
+   * tool, so follow it with an explicit kill command inside the container.
+   */
+  private async stopActiveExecProcess(): Promise<void> {
+    const exec = this.activeExec as any;
+    const container = this.activeContainer as any;
+
+    try {
+      this.containerStream?.write?.('\x03'); // SIGINT for cooperative shutdown
+    } catch {}
+
+    if (!container || !exec) {
+      return;
+    }
+
+    const execRunId = this.activeExecRunId;
+    if (!execRunId) {
+      logger.warn('Cannot force-stop docker exec process without run id');
+      return;
+    }
+
+    const quotedRunId = `'${execRunId.replace(/'/g, `'\\''`)}'`;
+    const killScript = [
+      `run_id=${quotedRunId}`,
+      'marker="CYBER_EXEC_RUN_ID=$run_id"',
+      'pids=""',
+      'for env_file in /proc/[0-9]*/environ; do',
+      '  pid="${env_file#/proc/}"',
+      '  pid="${pid%/environ}"',
+      '  [ "$pid" = "1" ] && continue',
+      '  if tr "\\000" "\\n" < "$env_file" 2>/dev/null | grep -Fx "$marker" >/dev/null 2>&1; then',
+      '    pids="$pids $pid"',
+      '  fi',
+      'done',
+      '[ -z "$pids" ] && exit 0',
+      'all="$pids"',
+      'parents="$pids"',
+      'while [ -n "$parents" ]; do',
+      '  next=""',
+      '  for parent in $parents; do',
+      '    for stat_file in /proc/[0-9]*/stat; do',
+      '      child="${stat_file#/proc/}"',
+      '      child="${child%/stat}"',
+      '      [ "$child" = "1" ] && continue',
+      '      ppid="$(awk \'{print $4}\' "$stat_file" 2>/dev/null || true)"',
+      '      if [ "$ppid" = "$parent" ]; then',
+      '        case " $all " in',
+      '          *" $child "*) ;;',
+      '          *) next="$next $child"; all="$all $child" ;;',
+      '        esac',
+      '      fi',
+      '    done',
+      '  done',
+      '  parents="$next"',
+      'done',
+      'kill -TERM $all 2>/dev/null || true',
+      'sleep 0.5',
+      'kill -KILL $all 2>/dev/null || true',
+    ].join('\n');
+
+    try {
+      const killer = await container.exec({
+        Cmd: ['/bin/sh', '-lc', killScript],
+        AttachStdout: true,
+        AttachStderr: true,
+        Tty: false,
+        WorkingDir: '/app'
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        killer.start({}, (err: Error | null | undefined, stream: any) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          if (!stream || typeof stream.on !== 'function') {
+            resolve();
+            return;
+          }
+          let settled = false;
+          let timeout: NodeJS.Timeout;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            resolve();
+          };
+          const fail = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            reject(error);
+          };
+          stream.on('end', finish);
+          stream.on('close', finish);
+          stream.on('error', fail);
+          // Some Docker mocks/streams do not emit lifecycle events.
+          timeout = setTimeout(finish, 1000);
+        });
+      });
+    } catch (error) {
+      logger.warn('Failed to force-stop docker exec process', error as any);
+    }
+  }
+
+  private getProjectRootCandidates(): string[] {
+    const candidates: string[] = [];
+    if (process.env.CYBER_PROJECT_ROOT) {
+      candidates.push(process.env.CYBER_PROJECT_ROOT);
+    }
+
+    let cursor = process.cwd();
+    for (let depth = 0; depth < 8; depth += 1) {
+      candidates.push(cursor);
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+
+    return uniquePaths(candidates);
+  }
+
+  private buildAdHocContainerBinds(outputPath: string): string[] {
+    const binds: string[] = [];
+
+    if (isExistingDirectory(outputPath)) {
+      binds.push(`${outputPath}:/app/outputs`);
+    }
+
+    const addProjectBind = (hostDirName: string, containerPath: string) => {
+      for (const root of this.getProjectRootCandidates()) {
+        const hostPath = path.join(root, hostDirName);
+        if (isExistingDirectory(hostPath)) {
+          binds.push(`${hostPath}:${containerPath}:delegated`);
+          return;
+        }
+      }
+    };
+
+    addProjectBind('tools', '/app/tools');
+    addProjectBind('external_plugins', '/app/external_plugins');
+
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (home) {
+      const homePlugins = path.join(home, '.cyber-autoagent', 'modules');
+      if (isExistingDirectory(homePlugins)) {
+        binds.push(`${homePlugins}:/app/home_plugins:delegated`);
+      }
+    }
+
+    return binds;
   }
 
   /**
@@ -1256,6 +1228,7 @@ export class DirectDockerService extends EventEmitter {
     this.autoExecuteSent = false;
     this.seenOperationComplete = false;
     this.streamEventBuffer = '';
+    this.activeExecRunId = undefined;
   }
 
   /**
@@ -1263,7 +1236,7 @@ export class DirectDockerService extends EventEmitter {
    */
   cleanup(): void {
     // Stop any active container
-    if (this.activeContainer) {
+    if (this.activeContainer && this.activeContainerOwner) {
       this.stopContainer().catch(error => {
         // Silently handle cleanup errors - not critical for user experience
       });
@@ -1288,6 +1261,9 @@ export class DirectDockerService extends EventEmitter {
     // Reset state
     this.isExecutionActive = false;
     this.activeContainer = undefined;
+    this.activeContainerOwner = false;
+    this.activeExec = undefined;
+    this.activeExecRunId = undefined;
     this.containerStream = undefined;
     this.abortController = undefined;
     
@@ -1360,6 +1336,10 @@ export class DirectDockerService extends EventEmitter {
     this.abortController = new AbortController();
     // Fallback auto-execute in exec reuse path
     this.isExecutionActive = true;
+    this.activeContainer = container;
+    this.activeContainerOwner = false;
+    const execRunId = `cyber-exec-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    this.activeExecRunId = execRunId;
     
     // Prepare command (python entrypoint + args) to align with container Entrypoint
     const cmd = ['python', '/app/src/cyberautoagent.py', ...args];
@@ -1371,7 +1351,7 @@ export class DirectDockerService extends EventEmitter {
       AttachStderr: true,
       AttachStdin: true,
       Tty: true,
-      Env: env,
+      Env: [...env, `CYBER_EXEC_RUN_ID=${execRunId}`],
       WorkingDir: '/app'
     });
 
@@ -1413,6 +1393,8 @@ export class DirectDockerService extends EventEmitter {
     stream.on('end', () => {
       this.isExecutionActive = false;
       this.abortController = undefined;
+      this.activeExec = undefined;
+      this.activeExecRunId = undefined;
       this.streamEventBuffer = '';
       logger.info('Exec stream ended', { seenOperationComplete: this.seenOperationComplete });
       if (this.seenOperationComplete) this.emit('complete');

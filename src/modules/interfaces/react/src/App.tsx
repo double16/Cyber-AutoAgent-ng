@@ -5,7 +5,7 @@
  * Manages application state, services, and UI rendering.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import { useStdout, useApp, Text, Box, useInput } from 'ink';
 import ansiEscapes from 'ansi-escapes';
 

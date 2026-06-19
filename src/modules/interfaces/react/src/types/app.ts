@@ -3,9 +3,7 @@
  * Replaces 'any' types with proper TypeScript interfaces
  */
 
-import { CyberTheme } from '../themes/types.js';
 import { Operation } from '../services/OperationManager.js';
-import { OperationHistoryEntry } from '../hooks/useOperationManager.js';
 
 /**
  * Application state actions interface

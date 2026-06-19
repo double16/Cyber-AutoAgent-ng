@@ -11,11 +11,9 @@ import Spinner from 'ink-spinner';
 import { HealthMonitor, HealthStatus } from '../services/HealthMonitor.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { themeManager } from '../themes/theme-manager.js';
-import { Header } from './Header.js';
 import { ContainerManager } from '../services/ContainerManager.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import * as path from 'path';
 import * as fs from 'fs';
 import { getEnvironmentConfig, getDockerComposePaths } from '../config/environment.js';
 import { createLogger } from '../utils/logger.js';
@@ -219,6 +217,7 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
     }
   });
 
+  /* istanbul ignore next -- legacy initialization path retained for fallback; the active setup flow uses setup-progress-screen. */
   const checkInitialization = async () => {
     const monitor = HealthMonitor.getInstance();
     
@@ -674,6 +673,7 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
     );
   }
 
+  /* istanbul ignore next -- legacy initialization status UI retained for fallback; no active flow reaches this branch. */
   // Original initialization flow UI
   return (
     <Box flexDirection="column" paddingX={2} paddingY={1}>

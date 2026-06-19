@@ -7,11 +7,7 @@
  */
 
 import { useReducer, useRef, useCallback, useEffect, useMemo } from 'react';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { Operation } from '../services/OperationManager.js';
-import { ModalType } from './useModalManager.js';
 import { useDebouncedState } from './useDebouncedState.js';
 import { ExecutionService } from '../services/ExecutionService.js';
 

@@ -7,11 +7,11 @@
  */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Box, Text, Static, useInput, useApp } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { createLogger } from '../utils/logger.js';
 import { themeManager } from '../themes/theme-manager.js';
 import { LogContainer, LogEntry } from './LogContainer.js';
-import { ProgressIndicator, StatusIcons, Divider } from './icons.js';
+import { ProgressIndicator, StatusIcons } from './icons.js';
 
 interface SetupProgressScreenProps {
   /** Current deployment mode being set up */

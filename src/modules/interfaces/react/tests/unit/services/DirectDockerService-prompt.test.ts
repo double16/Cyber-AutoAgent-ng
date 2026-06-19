@@ -4,8 +4,6 @@
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import { DirectDockerService } from '../../../src/services/DirectDockerService.js';
 
-import { jest } from '@jest/globals';
-
 describe('DirectDockerService prompt detection', () => {
   let svc: DirectDockerService;
   beforeEach(() => {

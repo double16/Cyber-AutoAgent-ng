@@ -15,8 +15,7 @@ import {
   ExecutionMode, 
   ValidationResult, 
   ExecutionHandle, 
-  ExecutionResult, 
-  ExecutionCapabilities 
+  ExecutionCapabilities
 } from './ExecutionService.js';
 import { PythonExecutionService } from './PythonExecutionService.js';
 import { Config } from '../contexts/ConfigContext.js';
@@ -234,8 +233,6 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
       result: executionPromise.then(() => ({
         success: true,
         durationMs: Date.now() - startTime,
-        stepsExecuted: config.iterations,
-        findingsCount: 0 // Findings are tracked in the output reports
       })).catch((error) => ({
         success: false,
         error: error instanceof Error ? error.message : String(error),

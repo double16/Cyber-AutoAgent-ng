@@ -7,7 +7,6 @@
 
 import React, { useState, useEffect } from 'react';
 import { Text, Box, useInput } from 'ink';
-import { loggingService } from '../services/LoggingService.js';
 
 interface TokenInputProps {
   onSubmit: (value: string) => void;

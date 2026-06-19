@@ -2,7 +2,6 @@
  * Verify PythonExecutionService sets pricing override env vars from config.modelPricing
  */
 import { describe, it, expect, jest } from '@jest/globals';
-import { EventEmitter } from 'events';
 
 // Mock fs.existsSync to always return true for venv python presence
 jest.unstable_mockModule('fs', () => ({

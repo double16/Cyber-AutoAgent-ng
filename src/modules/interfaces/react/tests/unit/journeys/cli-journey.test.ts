@@ -3,7 +3,6 @@
  */
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
 import { spawn } from 'node-pty';
 import { jest, describe, test, expect, beforeAll } from '@jest/globals';
 import { fileURLToPath } from 'url';

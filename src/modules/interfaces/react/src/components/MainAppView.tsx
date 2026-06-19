@@ -5,9 +5,8 @@
  * Handles the primary interface when not in initialization flow.
  */
 
-import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { Box, Text, useInput, Static, useStdout } from 'ink';
-import ansiEscapes from 'ansi-escapes';
 
 // Components
 import { Header } from './Header.js';
@@ -195,7 +194,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
               <Box key={item}>
                 <Header
                   key={`app-header-${staticKey}`}
-                  version="0.9.0"
+                  version="0.10.0"
                   terminalWidth={appState.terminalDisplayWidth}
                   nightly={false}
                   exitNotice={Boolean((appState as any).exitNotice)}
@@ -207,7 +206,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
           <Box>
             <Header
               key={`app-header-${staticKey}`}
-              version="0.9.0"
+              version="0.10.0"
               terminalWidth={appState.terminalDisplayWidth}
               nightly={false}
               exitNotice={Boolean((appState as any).exitNotice)}

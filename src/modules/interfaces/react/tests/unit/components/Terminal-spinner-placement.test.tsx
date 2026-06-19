@@ -14,7 +14,7 @@
 
 import { describe, it, expect } from '@jest/globals';
 
-type EventType = 'operation_init' | 'reasoning' | 'step_header' | 'tool_start' | 'output' | 'tool_end' | 'tool_invocation_end' | 'thinking';
+type EventType = 'operation_init' | 'reasoning' | 'step_header' | 'tool_start' | 'output' | 'tool_end' | 'tool_invocation_end' | 'thinking' | 'rate_limit';
 
 interface TestEvent {
   type: EventType;

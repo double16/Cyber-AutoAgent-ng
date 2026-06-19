@@ -19,8 +19,6 @@ import { spawn } from 'node-pty';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import chalk from 'chalk';
 import stripAnsi from 'strip-ansi';
 
