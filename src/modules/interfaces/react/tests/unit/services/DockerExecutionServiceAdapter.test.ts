@@ -1,11 +1,15 @@
-import {jest} from '@jest/globals';
+import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {EventEmitter} from 'events';
 import {ExecutionMode} from '../../../src/services/ExecutionService.js';
 import type {Config} from '../../../src/contexts/ConfigContext.js';
 
 const dockerInstances: MockDirectDockerService[] = [];
-const execMock = jest.fn((_command: string, callback: (error: Error | null, stdout?: string, stderr?: string) => void) => {
-    callback(new Error('image missing'), '', 'missing');
+const execMock = jest.fn((command: string, callback: (error: Error | null, stdout?: string, stderr?: string) => void) => {
+    if (command.startsWith('docker image inspect ')) {
+        callback(new Error('image missing'), '', 'missing');
+        return;
+    }
+    callback(new Error(`unexpected command: ${command}`), '', '');
 });
 
 class MockDirectDockerService extends EventEmitter {
@@ -50,6 +54,10 @@ jest.unstable_mockModule('../../../src/services/ContainerManager.js', () => ({
 }));
 
 jest.unstable_mockModule('node:child_process', () => ({
+    exec: execMock,
+}));
+
+jest.unstable_mockModule('child_process', () => ({
     exec: execMock,
 }));
 
