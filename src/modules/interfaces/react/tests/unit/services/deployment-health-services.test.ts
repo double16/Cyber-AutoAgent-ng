@@ -213,4 +213,36 @@ describe('deployment and health services', () => {
     const detailed = await monitor.getDetailedHealth();
     expect(detailed.recommendations).toContain('Start Docker Desktop to enable Cyber-AutoAgent');
   });
+
+  it('covers health monitor no-service mode, subscriber replay, and uptime formatting branches', async () => {
+    const { HealthMonitor } = await loadHealth();
+    const monitor = HealthMonitor.getInstance() as any;
+    monitor.stopMonitoring();
+    currentMode = 'single-container';
+    execResponses = [{ match: 'docker info', stdout: 'ok' }];
+
+    const status = await monitor.checkHealth();
+    expect(status).toEqual(expect.objectContaining({
+      dockerRunning: true,
+      overall: 'healthy',
+      services: [],
+    }));
+
+    const replay = jest.fn();
+    const unsubscribe = monitor.subscribe(replay);
+    expect(replay).toHaveBeenCalledWith(status);
+    unsubscribe();
+
+    expect(monitor.formatUptime(999)).toBe('0s');
+    expect(monitor.formatUptime(65_000)).toBe('1m 5s');
+    expect(monitor.formatUptime(3_660_000)).toBe('1h 1m');
+    expect(monitor.formatUptime(90_000_000)).toBe('1d 1h');
+
+    execResponses = [{ match: 'docker info', error: new Error('string-like failure') }];
+    currentMode = 'single-container';
+    await expect(monitor.checkHealth()).resolves.toEqual(expect.objectContaining({
+      overall: 'unhealthy',
+      services: [],
+    }));
+  });
 });

@@ -134,4 +134,72 @@ describe('ModalRegistry', () => {
         });
         expect(JSON.stringify(view.toJSON())).toContain('doc:');
     });
+
+    it('handles optional modal context and fallback sizing paths', async () => {
+        const {ModalRegistry} = await load();
+        const onClose = jest.fn();
+        const addOperationHistoryEntry = jest.fn();
+        const setIsFirstRunExperience = jest.fn();
+        const originalColumns = (process as any).stdout?.columns;
+        Object.defineProperty(process.stdout, 'columns', {value: 30, configurable: true});
+
+        let view!: TestRenderer.ReactTestRenderer;
+        act(() => {
+            view = TestRenderer.create(
+                <ModalRegistry
+                    activeModal={ModalType.CONFIG}
+                    modalContext={{}}
+                    onClose={onClose}
+                    terminalWidth={0}
+                    isFirstRunExperience={false}
+                    addOperationHistoryEntry={addOperationHistoryEntry}
+                    setIsFirstRunExperience={setIsFirstRunExperience}
+                />
+            );
+        });
+        act(() => view.root.findByType('button').props.onClick());
+        expect(onClose).toHaveBeenCalled();
+        expect(addOperationHistoryEntry).not.toHaveBeenCalled();
+        expect(setIsFirstRunExperience).not.toHaveBeenCalled();
+
+        act(() => {
+            view = TestRenderer.create(
+                <ModalRegistry
+                    activeModal={ModalType.MODULE_SELECTOR}
+                    modalContext={{}}
+                    onClose={onClose}
+                    terminalWidth={0}
+                />
+            );
+        });
+        expect(() => {
+            act(() => view.root.findAllByType('button')[0].props.onClick());
+        }).not.toThrow();
+
+        act(() => {
+            view = TestRenderer.create(
+                <ModalRegistry
+                    activeModal={ModalType.SAFETY_WARNING}
+                    modalContext={{}}
+                    onClose={onClose}
+                    terminalWidth={0}
+                />
+            );
+        });
+        expect(view.root.findAllByType('button')).toHaveLength(0);
+
+        act(() => {
+            view = TestRenderer.create(
+                <ModalRegistry
+                    activeModal={'unknown' as ModalType}
+                    modalContext={{}}
+                    onClose={onClose}
+                    terminalWidth={0}
+                />
+            );
+        });
+        expect(view.toJSON()).toBeNull();
+
+        Object.defineProperty(process.stdout, 'columns', {value: originalColumns, configurable: true});
+    });
 });

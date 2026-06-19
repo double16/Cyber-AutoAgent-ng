@@ -186,6 +186,14 @@ describe('SetupService', () => {
       ratio: 0,
       missing: ['minio/minio', 'clickhouse/clickhouse-server'],
     });
+
+    execResponses.set('docker images', { stdout: '' });
+    await expect(service.checkImagesAvailability([])).resolves.toEqual({
+      total: 0,
+      presentCount: 0,
+      ratio: 1,
+      missing: [],
+    });
   });
 
   it('returns display metadata for deployment modes', async () => {

@@ -93,6 +93,39 @@ describe('zero-coverage hooks', () => {
         hook.unmount();
     });
 
+    it('useGlobalKeyboard ignores shortcuts when inactive, non-TTY, or callbacks are absent', async () => {
+        const {useGlobalKeyboard} = await import('../../../src/hooks/useGlobalKeyboard.js');
+        const onEscape = jest.fn();
+
+        let hook = renderHook(() => useGlobalKeyboard({onEscape, isActive: false}));
+        expect(inputHandlers.at(-1)!.options).toEqual({isActive: false});
+        act(() => {
+            inputHandlers.at(-1)!.handler('', {escape: true});
+        });
+        expect(onEscape).not.toHaveBeenCalled();
+        hook.unmount();
+
+        Object.defineProperty(process.stdin, 'isTTY', {value: false, configurable: true});
+        hook = renderHook(() => useGlobalKeyboard({onEscape}));
+        expect(inputHandlers.at(-1)!.options).toEqual({isActive: false});
+        act(() => {
+            inputHandlers.at(-1)!.handler('', {escape: true});
+        });
+        expect(onEscape).not.toHaveBeenCalled();
+        hook.unmount();
+
+        Object.defineProperty(process.stdin, 'isTTY', {value: true, configurable: true});
+        hook = renderHook(() => useGlobalKeyboard({}));
+        expect(() => {
+            act(() => {
+                inputHandlers.at(-1)!.handler('', {escape: true});
+                inputHandlers.at(-1)!.handler('c', {ctrl: true});
+                inputHandlers.at(-1)!.handler('l', {ctrl: true});
+            });
+        }).not.toThrow();
+        hook.unmount();
+    });
+
     it('useKeyboardHandlers handles cancel, pause, clear, and fallback exit keys', async () => {
         const {useKeyboardHandlers} = await import('../../../src/hooks/useKeyboardHandlers.js');
         const props = {
@@ -123,6 +156,49 @@ describe('zero-coverage hooks', () => {
             inputHandlers.at(-2)!.handler('c', {ctrl: true});
         });
         expect(exit).toHaveBeenCalledTimes(1);
+        hook.unmount();
+    });
+
+    it('useKeyboardHandlers covers inactive terminal and global escape paths', async () => {
+        const {useKeyboardHandlers} = await import('../../../src/hooks/useKeyboardHandlers.js');
+        const props = {
+            activeOperation: null,
+            isTerminalInteractive: false,
+            onAssessmentPause: jest.fn(),
+            onAssessmentCancel: jest.fn(),
+            onScreenClear: jest.fn(),
+            onEscapeExit: jest.fn(),
+            allowGlobalEscape: true,
+        };
+
+        let hook = renderHook(() => useKeyboardHandlers(props as any));
+        expect(inputHandlers.at(-2)!.options).toEqual({isActive: false});
+        expect(inputHandlers.at(-1)!.options).toEqual({isActive: true});
+        act(() => {
+            inputHandlers.at(-2)!.handler('', {escape: true});
+            inputHandlers.at(-1)!.handler('x', {});
+            inputHandlers.at(-1)!.handler('', {escape: true});
+        });
+        expect(props.onEscapeExit).toHaveBeenCalledTimes(1);
+        expect(props.onAssessmentCancel).not.toHaveBeenCalled();
+        hook.unmount();
+
+        props.activeOperation = {id: 'op-1', status: 'running'} as any;
+        props.onEscapeExit = undefined as any;
+        hook = renderHook(() => useKeyboardHandlers(props as any));
+        act(() => {
+            inputHandlers.at(-1)!.handler('', {escape: true});
+        });
+        expect(props.onAssessmentCancel).toHaveBeenCalledTimes(1);
+        hook.unmount();
+
+        props.activeOperation = null;
+        props.allowGlobalEscape = true;
+        hook = renderHook(() => useKeyboardHandlers(props as any));
+        act(() => {
+            inputHandlers.at(-1)!.handler('', {escape: true});
+        });
+        expect(exit).toHaveBeenCalled();
         hook.unmount();
     });
 
@@ -158,6 +234,50 @@ describe('zero-coverage hooks', () => {
         expect(operationManager.assessmentFlowManager.processUserInput).toHaveBeenCalledWith('target example.com');
         expect(operationManager.assessmentFlowManager.processUserInput).toHaveBeenCalledWith('');
         expect(registerTimeout).toHaveBeenCalledWith(expect.any(Function), 100);
+        expect(operationManager.startAssessmentExecution).toHaveBeenCalled();
+        hook.unmount();
+    });
+
+    it('useAutoRun skips until required flags and config are ready and uses explicit objective', async () => {
+        const {useAutoRun} = await import('../../../src/hooks/useAutoRun.js');
+        const registerTimeout = jest.fn((fn: () => void) => fn());
+        const operationManager = {
+            assessmentFlowManager: {
+                processUserInput: jest.fn(),
+            },
+            startAssessmentExecution: jest.fn(),
+        };
+        const actions = {dismissInit: jest.fn()};
+
+        let hook = renderHook(() => useAutoRun({
+            autoRun: false,
+            target: 'example.com',
+            module: 'web',
+            appState: {isConfigLoaded: true},
+            actions,
+            applicationConfig: {},
+            operationManager,
+            registerTimeout,
+        }));
+        expect(actions.dismissInit).not.toHaveBeenCalled();
+        hook.unmount();
+
+        hook = renderHook(() => useAutoRun({
+            autoRun: true,
+            target: 'example.com',
+            module: 'web',
+            objective: 'find exposed admin panels',
+            iterations: 1,
+            provider: 'ollama',
+            model: 'llama',
+            region: 'us-west-2',
+            appState: {isConfigLoaded: true},
+            actions,
+            applicationConfig: {iterations: 1, modelProvider: 'ollama', modelId: 'llama', awsRegion: 'us-west-2'},
+            operationManager,
+            registerTimeout,
+        }));
+        expect(operationManager.assessmentFlowManager.processUserInput).toHaveBeenCalledWith('objective find exposed admin panels');
         expect(operationManager.startAssessmentExecution).toHaveBeenCalled();
         hook.unmount();
     });
@@ -223,6 +343,70 @@ describe('zero-coverage hooks', () => {
             jest.advanceTimersByTime(1000);
         });
         expect(openConfig).toHaveBeenCalledWith('Please configure your AI model and provider settings to continue.');
+        hook.unmount();
+    });
+
+    it('useDeploymentDetection respects loading, forced setup, existing healthy config, and first-run failures', async () => {
+        const {useDeploymentDetection} = await import('../../../src/hooks/useDeploymentDetection.js');
+        const actions = {setInitializationFlow: jest.fn()};
+        const openConfig = jest.fn();
+
+        let hook = renderHook(() => useDeploymentDetection({
+            isConfigLoading: true,
+            appState: {isInitializationFlowActive: false, hasUserDismissedInit: false, isConfigLoaded: true},
+            actions,
+            applicationConfig: {},
+            activeModal: 'none' as any,
+            openConfig,
+        }));
+        expect(detectDeployments).not.toHaveBeenCalled();
+        hook.unmount();
+
+        process.env.CYBER_SHOW_SETUP = 'true';
+        detectDeployments.mockResolvedValueOnce({availableDeployments: [], needsSetup: false});
+        hook = renderHook(() => useDeploymentDetection({
+            isConfigLoading: false,
+            appState: {isInitializationFlowActive: false, hasUserDismissedInit: true, isConfigLoaded: true},
+            actions,
+            applicationConfig: {isConfigured: true},
+            activeModal: 'none' as any,
+            openConfig,
+        }));
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(actions.setInitializationFlow).toHaveBeenCalledWith(true);
+        hook.unmount();
+        delete process.env.CYBER_SHOW_SETUP;
+
+        detectDeployments.mockResolvedValueOnce({availableDeployments: [{mode: 'docker', isHealthy: true}], needsSetup: false});
+        hook = renderHook(() => useDeploymentDetection({
+            isConfigLoading: false,
+            appState: {isInitializationFlowActive: false, hasUserDismissedInit: true, isConfigLoaded: true},
+            actions,
+            applicationConfig: {isConfigured: true, deploymentMode: 'docker', modelId: 'claude'},
+            activeModal: 'config' as any,
+            openConfig,
+        }));
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(openConfig).not.toHaveBeenCalledWith('Please configure your AI model and provider settings to continue.');
+        hook.unmount();
+
+        detectDeployments.mockRejectedValueOnce(new Error('boom'));
+        hook = renderHook(() => useDeploymentDetection({
+            isConfigLoading: false,
+            appState: {isInitializationFlowActive: false, hasUserDismissedInit: false, isConfigLoaded: true},
+            actions,
+            applicationConfig: {isConfigured: false},
+            activeModal: 'none' as any,
+            openConfig,
+        }));
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(actions.setInitializationFlow).toHaveBeenCalledWith(true);
         hook.unmount();
     });
 });

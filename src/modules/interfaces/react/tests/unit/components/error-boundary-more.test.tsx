@@ -102,4 +102,41 @@ describe('ErrorBoundary additional coverage', () => {
         });
         expect(instance.state.hasError).toBe(false);
     });
+
+    it('renders normal error details, development stack, and restart exits', async () => {
+        const {ErrorBoundary} = await load();
+        const originalEnv = process.env.NODE_ENV;
+        const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+        Object.defineProperty(process.env, 'NODE_ENV', {value: 'development', configurable: true});
+        let view!: TestRenderer.ReactTestRenderer;
+
+        act(() => {
+            view = TestRenderer.create(
+                <ErrorBoundary>
+                    <span>ok</span>
+                </ErrorBoundary>
+            );
+        });
+
+        const instance = view.root.findByType(ErrorBoundary).instance as any;
+        const error = new Error('ordinary failure');
+        error.stack = 'stack line';
+        act(() => {
+            instance.setState({hasError: true, error, errorInfo: null});
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('Application Error');
+        expect(text).toContain('ordinary failure');
+        expect(text).toContain('Stack trace:');
+        expect(text).toContain('Press R to retry');
+
+        act(() => {
+            instance.handleRestart();
+        });
+        expect(exit).toHaveBeenCalledWith(1);
+
+        exit.mockRestore();
+        Object.defineProperty(process.env, 'NODE_ENV', {value: originalEnv, configurable: true});
+    });
 });

@@ -285,4 +285,72 @@ describe('status, log, operation, and wrapper components', () => {
         ).lastFrame();
         expect(main).toContain('main:ready');
     });
+
+    it('routes InitializationWrapper completion branches', async () => {
+        const {InitializationWrapper} = await load();
+        const baseState = {
+            isConfigLoaded: true,
+            isInitializationFlowActive: true,
+            hasUserDismissedInit: false,
+            terminalDisplayWidth: 100,
+            staticKey: 1,
+        } as any;
+
+        const onComplete = jest.fn();
+        const onConfigOpen = jest.fn();
+        let view!: TestRenderer.ReactTestRenderer;
+
+        act(() => {
+            view = TestRenderer.create(
+                <InitializationWrapper
+                    appState={baseState}
+                    applicationConfig={{}}
+                    onInitializationComplete={onComplete}
+                    onConfigOpen={onConfigOpen}
+                    mainAppViewProps={{marker: 'x'}}
+                />
+            );
+        });
+        act(() => {
+            view.root.findAllByType('button')[0].props.onClick();
+            jest.advanceTimersByTime(100);
+        });
+        expect(onComplete).toHaveBeenCalledWith('done');
+        expect(onConfigOpen).toHaveBeenCalledTimes(1);
+
+        act(() => {
+            view.update(
+                <InitializationWrapper
+                    appState={baseState}
+                    applicationConfig={{}}
+                    onInitializationComplete={onComplete}
+                    onConfigOpen={onConfigOpen}
+                    mainAppViewProps={{marker: 'x'}}
+                />
+            );
+        });
+        act(() => {
+            view.root.findAllByType('button')[1].props.onClick();
+            jest.advanceTimersByTime(100);
+        });
+        expect(onComplete).toHaveBeenCalledWith('skip setup');
+        expect(onConfigOpen).toHaveBeenCalledTimes(1);
+
+        act(() => {
+            view.update(
+                <InitializationWrapper
+                    appState={baseState}
+                    applicationConfig={{modelId: 'm', modelProvider: 'p'}}
+                    onInitializationComplete={onComplete}
+                    onConfigOpen={onConfigOpen}
+                    mainAppViewProps={{marker: 'x'}}
+                />
+            );
+        });
+        act(() => {
+            view.root.findAllByType('button')[0].props.onClick();
+            jest.advanceTimersByTime(100);
+        });
+        expect(onConfigOpen).toHaveBeenCalledTimes(1);
+    });
 });

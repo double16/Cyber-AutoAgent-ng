@@ -165,4 +165,82 @@ describe('Terminal event processing', () => {
         });
         expect(textFromTree(view.toJSON())).toBe('');
     });
+
+    it('processes uncommon event transitions without duplicating or crashing', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const onEvent = jest.fn();
+
+        let view!: TestRenderer.ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-branches"
+                    terminalWidth={100}
+                    onEvent={onEvent}
+                    animationsEnabled
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'output', content: 'booting'});
+            jest.advanceTimersByTime(200);
+            service.emit('event', {type: 'operation_init', operation_id: 'op-2', target: 'example.com', max_steps: 3});
+            service.emit('event', {
+                type: 'step_header',
+                step: 1,
+                maxSteps: 3,
+                is_swarm_operation: true,
+                swarm_agent: 'web_tester',
+                swarm_sub_step: 1,
+                swarm_total_iterations: 2,
+            });
+            service.emit('event', {type: 'reasoning', content: ' First thought ', swarm_agent: 'web_tester'});
+            jest.advanceTimersByTime(20);
+            service.emit('event', {type: 'thinking', context: 'waiting', startTime: Date.now(), metadata: {phase: 'x'}});
+            service.emit('event', {type: 'thinking_end'});
+            service.emit('event', {type: 'delayed_thinking_start', context: 'tool_execution'});
+            service.emit('event', {
+                type: 'tool_start',
+                timestamp: new Date().toISOString(),
+                tool_name: 'handoff_to_agent',
+                tool_input: {agent_name: 'auth_agent'},
+                swarm_agent: 'web_tester',
+            });
+            service.emit('event', {type: 'tool_input_update', tool_id: 'tool-1', tool_input: {command: 'whoami'}});
+            service.emit('event', {type: 'tool_input_corrected', toolId: 'tool-1', tool_input: {command: 'id'}});
+            service.emit('event', {type: 'shell_command', command: 'id'});
+            service.emit('event', {type: 'output', content: '', metadata: {fromToolBuffer: true, tool: 'shell'}});
+            service.emit('event', {type: 'output', content: 'uid=1000', metadata: {fromToolBuffer: true, tool: 'shell'}});
+            service.emit('event', {type: 'output', content: 'uid=1000', metadata: {fromToolBuffer: true, tool: 'shell'}});
+            service.emit('event', {type: 'tool_invocation_end'});
+            service.emit('event', {type: 'model_invocation_start'});
+            service.emit('event', {type: 'model_stream_delta', delta: 'ignored'});
+            service.emit('event', {type: 'reasoning_delta', delta: 'ignored'});
+            service.emit('event', {type: 'prompt_change', action: 'compact'});
+            service.emit('event', {type: 'output', content: 'output\nreal content'});
+            service.emit('event', {type: 'output', content: 'output'});
+            service.emit('event', {type: 'output', content: 'Report saved to: /tmp/report.md'});
+            service.emit('event', {type: 'output', content: '# SECURITY ASSESSMENT REPORT\nBody'});
+            service.emit('event', {type: 'step_header', step: 'FINAL REPORT', maxSteps: 3});
+            service.emit('event', {type: 'report_content', content: '# SECURITY ASSESSMENT REPORT\nFinal body'});
+            service.emit('event', {type: 'assessment_complete', success: false});
+            service.emit('event', {type: 'termination_reason', reason: 'user_stopped', message: 'Stopped'});
+            service.emit('event', {type: 'output', content: 'Assessment stopped by user'});
+            service.emit('event', {type: 'output', content: 'meaningful line after stop'});
+            jest.advanceTimersByTime(500);
+            await Promise.resolve();
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({type: 'operation_init'}));
+        expect(text).toContain('SECURITY ASSESSMENT REPORT');
+        expect(text).toContain('TERMINATED: Stopped');
+
+        act(() => {
+            view.unmount();
+        });
+    });
 });

@@ -90,4 +90,37 @@ describe('MultiLineTextInput', () => {
         expect(textFromTree(view.toJSON())).toContain('alpha');
         expect(lastTextInputProps.value).toBe('beta');
     });
+
+    it('handles single-line edits, pending external changes, and submits without a handler', async () => {
+        const {MultiLineTextInput} = await load();
+        const onChange = jest.fn();
+        let view!: TestRenderer.ReactTestRenderer;
+
+        act(() => {
+            view = TestRenderer.create(<MultiLineTextInput value="" onChange={onChange}/>);
+        });
+        expect(lastTextInputProps.value).toBe('');
+
+        act(() => {
+            lastTextInputProps.onChange('typed');
+            view.update(<MultiLineTextInput value="external" onChange={onChange}/>);
+        });
+        expect(lastTextInputProps.value).toBe('typed');
+        expect(onChange).not.toHaveBeenCalled();
+
+        act(() => {
+            jest.advanceTimersByTime(100);
+        });
+        expect(onChange).toHaveBeenCalledWith('typed');
+
+        act(() => {
+            view.update(<MultiLineTextInput value="typed" onChange={onChange}/>);
+        });
+
+        expect(() => {
+            act(() => {
+                lastTextInputProps.onSubmit('ignored');
+            });
+        }).not.toThrow();
+    });
 });

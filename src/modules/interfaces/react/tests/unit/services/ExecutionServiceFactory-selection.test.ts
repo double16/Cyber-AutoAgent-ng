@@ -72,4 +72,45 @@ describe('ExecutionServiceFactory selection in mock mode', () => {
             'streaming',
         ]);
     });
+
+    it('covers mode ordering, unavailable modes, and validation timeout failure formatting', async () => {
+        const factory = ExecutionServiceFactory as any;
+
+        expect(factory.getDefaultModeOrder({deploymentMode: 'local-cli'})).toEqual([
+            ExecutionMode.PYTHON_CLI,
+            ExecutionMode.DOCKER_SINGLE,
+            ExecutionMode.DOCKER_STACK,
+        ]);
+        expect(factory.getDefaultModeOrder({deploymentMode: 'single-container'})).toEqual([
+            ExecutionMode.DOCKER_SINGLE,
+            ExecutionMode.PYTHON_CLI,
+            ExecutionMode.DOCKER_STACK,
+        ]);
+        expect(factory.getDefaultModeOrder({deploymentMode: 'full-stack'})).toEqual([
+            ExecutionMode.DOCKER_STACK,
+            ExecutionMode.DOCKER_SINGLE,
+            ExecutionMode.PYTHON_CLI,
+        ]);
+        expect(factory.getDefaultModeOrder({observability: true})).toEqual([
+            ExecutionMode.DOCKER_STACK,
+            ExecutionMode.DOCKER_SINGLE,
+            ExecutionMode.PYTHON_CLI,
+        ]);
+        expect(factory.getModesToTry({}, {
+            preferredMode: ExecutionMode.DOCKER_SINGLE,
+            fallbackModes: [ExecutionMode.DOCKER_SINGLE, ExecutionMode.PYTHON_CLI],
+        })).toEqual([ExecutionMode.DOCKER_SINGLE, ExecutionMode.PYTHON_CLI]);
+
+        await expect(ExecutionServiceFactory.isModeAvailable('missing-mode' as ExecutionMode)).resolves.toBe(false);
+        await expect(ExecutionServiceFactory.createService('missing-mode' as ExecutionMode))
+            .rejects.toThrow('No service registered');
+
+        const validation = await factory.validateWithTimeout({
+            validate: () => new Promise(() => undefined),
+        }, {}, 1);
+        expect(validation).toEqual(expect.objectContaining({
+            valid: false,
+            error: 'Validation failed: Validation timeout',
+        }));
+    });
 });

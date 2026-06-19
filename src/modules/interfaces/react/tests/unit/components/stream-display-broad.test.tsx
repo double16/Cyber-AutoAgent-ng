@@ -157,4 +157,34 @@ describe('StreamDisplay broad event rendering', () => {
     expect(longOutput).toContain('line 0');
     expect(longOutput).toContain('line 49');
   });
+
+  it('resolves report path candidates across absolute, relative, inferred, and unsafe inputs', async () => {
+    const { mapContainerReportPath, getReportPathCandidates } = await load();
+
+    expect(mapContainerReportPath('/app/outputs/example/op/report.md', '/tmp/out'))
+      .toBe('/tmp/out/example/op/report.md');
+    expect(mapContainerReportPath('/app/outputs/example/op/report.md', null))
+      .toBe('/app/outputs/example/op/report.md');
+
+    const relative = getReportPathCandidates(
+      { operationId: 'op-3', target: 'https://../target.example/a?b=1' },
+      'reports/final.md',
+      '/repo',
+      '/tmp/out'
+    );
+    expect(relative).toContain('/tmp/out/reports/final.md');
+    expect(relative).toContain('/repo/reports/final.md');
+    expect(relative.some(path => path.includes('unknown_target'))).toBe(false);
+    expect(relative.some(path => path.includes('target.example'))).toBe(true);
+
+    const absolute = getReportPathCandidates(
+      { operationId: null, target: null },
+      '/var/reports/final.md',
+      null,
+      undefined
+    );
+    expect(absolute[0]).toBe('/var/reports/final.md');
+
+    expect(getReportPathCandidates({}, null, null, null)).toEqual([]);
+  });
 });
