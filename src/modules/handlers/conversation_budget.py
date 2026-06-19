@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Callable, Sequence, List, Tuple, Set
 from strands import Agent
 from strands.agent.conversation_manager import (
     SlidingWindowConversationManager,
-    SummarizingConversationManager,
+    SummarizingConversationManager, ProactiveCompressionConfig,
 )
 from strands.types.content import Message
 from strands.types.exceptions import ContextWindowOverflowException
@@ -606,7 +606,12 @@ class SlidingWindowConversationManagerWithPreservation(SlidingWindowConversation
             per_turn: bool | int = False,
             preserve_first_messages: int = PRESERVE_FIRST_DEFAULT,
     ):
-        super().__init__(window_size, should_truncate_results, per_turn=per_turn)
+        super().__init__(
+            window_size,
+            should_truncate_results,
+            per_turn=per_turn,
+            pin_first=preserve_first_messages or None,
+        )
         self.preserve_first_messages = preserve_first_messages
 
     def reduce_context(self, agent: "Agent", e: Exception | None = None, **kwargs: Any) -> None:
@@ -674,6 +679,7 @@ class MappingConversationManager(SummarizingConversationManager):
         preserve_recent_messages: Optional[int] = None,
         preserve_first_messages: int = PRESERVE_FIRST_DEFAULT,
         tool_result_mapper: Optional[LargeToolResultMapper] = None,
+        sdk_proactive_compression: bool = True,
     ) -> None:
         if window_size < 1:
             logger.warning("Invalid window_size %d, using minimum 1", window_size)
@@ -704,9 +710,17 @@ class MappingConversationManager(SummarizingConversationManager):
                 old_preserve_last, preserve_recent_messages, window_size
             )
 
+        proactive_compression = None
+        if sdk_proactive_compression:
+            proactive_compression: ProactiveCompressionConfig = {
+                "compression_threshold": PROMPT_TELEMETRY_THRESHOLD,
+            }
+
         super().__init__(
             summary_ratio=summary_ratio,
             preserve_recent_messages=preserve_recent_messages,
+            pin_first=preserve_first_messages or None,
+            proactive_compression=proactive_compression,
         )
         self._sliding = SlidingWindowConversationManagerWithPreservation(
             window_size=window_size,

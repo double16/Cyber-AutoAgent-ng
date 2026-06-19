@@ -6,6 +6,24 @@ from unittest.mock import Mock, patch
 import pytest
 
 
+class FakeReactHooks:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def register_hooks(self, registry, **kwargs):
+        pass
+
+
+def _stateless_model_mock():
+    model = Mock()
+    model.stateful = False
+    return model
+
+
+def _default_getenv(name, default=None):
+    return default
+
+
 def _minimal_server_config():
     # Create a minimal server_config with required nested attributes
     return SimpleNamespace(
@@ -36,6 +54,7 @@ def test_agent_creation_litellm(
     # Mock config manager
     mock_cfg = Mock()
     mock_cfg.validate_requirements.return_value = None
+    mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
     mock_cfg.get_mem0_service_config.return_value = {
@@ -45,7 +64,8 @@ def test_agent_creation_litellm(
     }
     mock_get_cfg.return_value = mock_cfg
 
-    mock_model = Mock()
+    mock_hooks.side_effect = FakeReactHooks
+    mock_model = _stateless_model_mock()
     mock_create_litellm.return_value = mock_model
 
     from modules.agents.cyber_autoagent import create_agent, AgentConfig
@@ -75,6 +95,7 @@ def test_agent_creation_unsupported_provider_raises(
     mock_rbh.return_value = SimpleNamespace(emitter=None)
     mock_cfg = Mock()
     mock_cfg.validate_requirements.return_value = None
+    mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
     mock_cfg.get_mem0_service_config.return_value = {
@@ -83,6 +104,7 @@ def test_agent_creation_unsupported_provider_raises(
         "llm": {"provider": "aws_bedrock", "config": {"model": "test"}},
     }
     mock_get_cfg.return_value = mock_cfg
+    mock_hooks.side_effect = FakeReactHooks
 
     from modules.agents.cyber_autoagent import create_agent, AgentConfig
 

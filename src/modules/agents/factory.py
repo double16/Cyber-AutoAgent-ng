@@ -3,10 +3,10 @@ Provides a factory for creating agents that applies hooks, conversation_manager,
 for managing context, tool calls, observability, etc.
 """
 import functools
+import inspect
 import threading
 from dataclasses import dataclass
 from typing import Callable, List, Any, Dict, Optional
-from unittest.mock import Mock
 
 from strands import Agent
 from strands.hooks import HookProvider
@@ -65,14 +65,6 @@ def create_agent_with_stateful_retry(
             retry_kwargs.pop("context_manager", None)
             return create_agent_with_stateful_retry(retry_kwargs, model_id, agent_cls)
 
-        if "cannot infer event type" in str(exc):
-            hooks = agent_kwargs.get("hooks")
-            if isinstance(hooks, list) and any(isinstance(hook, Mock) for hook in hooks):
-                retry_kwargs = agent_kwargs.copy()
-                retry_kwargs["hooks"] = [hook for hook in hooks if not isinstance(hook, Mock)]
-                logger.debug("Retrying agent creation after removing mocked hook providers")
-                return create_agent_with_stateful_retry(retry_kwargs, model_id, agent_cls)
-
         raise
 
 
@@ -124,6 +116,7 @@ class AgentFactoryConfig:
     hooks: Optional[List[HookProvider]] = None
     callback_handler: Optional[Callable[..., Any]] = None
     conversation_manager: Optional[ConversationManager] = None
+    context_manager: Optional[str] = None
     base_trace_attributes: Optional[Dict[str, Any]] = None
 
 
@@ -264,6 +257,8 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
             agent_kwargs["conversation_manager"] = (
                 config.conversation_manager or get_shared_conversation_manager()
             )
+            if config.context_manager:
+                agent_kwargs.setdefault("context_manager", config.context_manager)
 
         agent = create_agent_with_stateful_retry(agent_kwargs, swarm_model_id)
 
@@ -298,6 +293,15 @@ def agent_factory_wrapper(agent_tool: Callable) -> Callable:
     assert agent_factory is not None
 
     setattr(agent_tool, "agent_factory", agent_factory)
-    setattr(target_func, "agent_factory", agent_factory)
+
+    # Strands 1.44 can expose DecoratedFunctionTool._tool_func as a bound
+    # method. Bound method objects do not allow arbitrary attributes, but the
+    # underlying function does.
+    if inspect.ismethod(target_func):
+        target_func = target_func.__func__
+    try:
+        setattr(target_func, "agent_factory", agent_factory)
+    except AttributeError:
+        logger.debug("Unable to attach agent_factory to %r", target_func, exc_info=True)
 
     return agent_tool

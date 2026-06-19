@@ -4,6 +4,24 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 
+class FakeReactHooks:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def register_hooks(self, registry, **kwargs):
+        pass
+
+
+def _stateless_model_mock():
+    model = Mock()
+    model.stateful = False
+    return model
+
+
+def _default_getenv(name, default=None):
+    return default
+
+
 def _minimal_server_config():
     return SimpleNamespace(
         llm=SimpleNamespace(model_id="claude-3-sonnet", max_tokens=256000, temperature=0.55),
@@ -31,11 +49,13 @@ def test_output_interception_react_only(
     monkeypatch,
 ):
     mock_rbh.return_value = SimpleNamespace(emitter=None)
-    mock_model = Mock()
+    mock_hooks.side_effect = FakeReactHooks
+    mock_model = _stateless_model_mock()
     mock_create_model.return_value = mock_model
 
     mock_cfg = Mock()
     mock_cfg.validate_requirements.return_value = None
+    mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
     mock_cfg.get_mem0_service_config.return_value = {

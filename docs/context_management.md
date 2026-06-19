@@ -147,6 +147,10 @@ Implements the Strands SDK `ConversationManager` interface with multi-layer redu
 | **Pattern**      | Shared singleton across agent hierarchy             |
 | **SDK Contract** | In-place modification via `agent.messages[:] = new` |
 
+Cyber-AutoAgent uses this manager as the authoritative conversation manager for stateless models. It also enables
+the Strands SDK proactive compression hook and first-message pinning so SDK token projection can trigger reductions
+without replacing project-specific behavior.
+
 **Interface Methods**:
 
 ```python
@@ -281,6 +285,9 @@ Cannot remove: toolResult without preceding toolUse
 Cannot remove: toolUse without following toolResult (unless terminal)
 ```
 
+The first-message preservation policy is implemented with the SDK `pin_first` mechanism, with custom restoration
+logic still applied for active task, evidence, and plan markers.
+
 ### Layer 3: LLM Summarization
 
 Condenses historical conversation segments via model-based summarization when sliding window reduction is insufficient.
@@ -307,6 +314,29 @@ Emergency reduction protocol when preceding layers fail to achieve target capaci
 1. Token usage falls below 90% threshold
 2. Maximum passes exhausted
 3. Time budget exceeded
+
+## Strands SDK Context Integration
+
+For stateless models, Cyber-AutoAgent passes both its custom `conversation_manager` and a Strands SDK
+`context_manager` facade to `Agent`. Strands gives precedence to the supplied conversation manager, so
+`MappingConversationManager` continues to enforce Cyber-AutoAgent's preservation, reasoning cleanup, tool-result
+compression, telemetry, and escalation rules.
+
+The SDK facade is still useful because it attaches SDK context plugins, including the context offloader used by
+`context_manager="auto"`. This provides SDK-native offloading of oversized tool results before they enter model
+context, while leaving the Cyber-AutoAgent reduction cascade intact.
+
+Stateful models are different: if a model reports `stateful=True`, Cyber-AutoAgent does not pass either
+`conversation_manager` or `context_manager`. Strands uses `NullConversationManager` because the model provider
+manages conversation state server-side.
+
+`CYBER_SDK_CONTEXT_MANAGER` controls this integration:
+
+| Value                       | Behavior                                                                     |
+|-----------------------------|------------------------------------------------------------------------------|
+| `auto`                      | Default. Enables SDK context offloader/plugins while keeping custom manager. |
+| `agentic`                   | Enables SDK agentic context tools for experimentation.                       |
+| `false`, `none`, `off`, `0` | Disables the SDK context-manager facade; only Cyber-AutoAgent manager runs.  |
 
 ## Artifact Externalization
 
@@ -374,6 +404,7 @@ Artifact references include immediate context for LLM comprehension:
 | `CYBER_CONVERSATION_WINDOW`          | 100     | Sliding window size (messages)                                            |
 | `CYBER_CONVERSATION_PRESERVE_FIRST`  | 1       | Initial messages to preserve                                              |
 | `CYBER_CONVERSATION_PRESERVE_LAST`   | 5       | Recent messages to preserve (reduced from 12 to prevent pruning deadlock) |
+| `CYBER_SDK_CONTEXT_MANAGER`          | `auto`  | Strands SDK context facade for stateless models.                          |
 
 ## Prompt Caching Integration
 

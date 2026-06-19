@@ -14,6 +14,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from modules.agents.cyber_autoagent import create_agent
 
 
+def _stateless_model_mock():
+    model = Mock()
+    model.stateful = False
+    return model
+
+
+def _default_getenv(name, default=None):
+    return default
+
+
 class TestMemoryAwareAgentIntegration:
     """Test memory-aware system prompt integration with agent creation"""
 
@@ -34,6 +44,7 @@ class TestMemoryAwareAgentIntegration:
         # Mock config manager
         mock_config = Mock()
         mock_config.validate_requirements.return_value = None
+        mock_config.getenv.side_effect = _default_getenv
         mock_config.get_server_config.return_value = Mock(
             llm=Mock(model_id="claude-3-sonnet"),
             output=Mock(base_dir="./outputs"),
@@ -62,7 +73,7 @@ class TestMemoryAwareAgentIntegration:
         mock_get_client.return_value = mock_memory_client
 
         # Mock model creation
-        mock_model = Mock()
+        mock_model = _stateless_model_mock()
         mock_create_model.return_value = mock_model
 
         # Create agent
@@ -108,6 +119,7 @@ class TestMemoryAwareAgentIntegration:
         # Mock config manager
         mock_config = Mock()
         mock_config.validate_requirements.return_value = None
+        mock_config.getenv.side_effect = _default_getenv
         mock_config.get_server_config.return_value = Mock(
             llm=Mock(model_id="claude-3-sonnet"),
             output=Mock(base_dir="./outputs"),
@@ -125,7 +137,7 @@ class TestMemoryAwareAgentIntegration:
         mock_get_client.return_value = None  # No client needed for fresh start
 
         # Mock model creation
-        mock_model = Mock()
+        mock_model = _stateless_model_mock()
         mock_create_model.return_value = mock_model
 
         # Create agent
@@ -168,6 +180,7 @@ class TestMemoryAwareAgentIntegration:
         # Mock config manager
         mock_config = Mock()
         mock_config.validate_requirements.return_value = None
+        mock_config.getenv.side_effect = _default_getenv
         mock_config.get_server_config.return_value = Mock(
             llm=Mock(model_id="claude-3-sonnet"),
             output=Mock(base_dir="./outputs"),
@@ -194,7 +207,7 @@ class TestMemoryAwareAgentIntegration:
         mock_get_client.return_value = mock_memory_client
 
         # Mock model creation
-        mock_model = Mock()
+        mock_model = _stateless_model_mock()
         mock_create_model.return_value = mock_model
 
         # Mock path validation
@@ -243,6 +256,7 @@ class TestMemoryAwareAgentIntegration:
         # Mock config manager
         mock_config = Mock()
         mock_config.validate_requirements.return_value = None
+        mock_config.getenv.side_effect = _default_getenv
         mock_config.get_server_config.return_value = Mock(
             llm=Mock(model_id="claude-3-sonnet"),
             output=Mock(base_dir="./outputs"),
@@ -262,7 +276,7 @@ class TestMemoryAwareAgentIntegration:
         mock_get_client.return_value = mock_memory_client
 
         # Mock model creation
-        mock_model = Mock()
+        mock_model = _stateless_model_mock()
         mock_create_model.return_value = mock_model
 
         # Create agent - should handle error gracefully
@@ -301,6 +315,7 @@ class TestMemoryAwareAgentIntegration:
         # Mock config manager for local server
         mock_config = Mock()
         mock_config.validate_requirements.return_value = None
+        mock_config.getenv.side_effect = _default_getenv
         mock_config.get_server_config.return_value = Mock(
             llm=Mock(model_id="llama3.2:3b"),
             output=Mock(base_dir="./outputs"),
@@ -327,7 +342,7 @@ class TestMemoryAwareAgentIntegration:
         mock_get_client.return_value = mock_memory_client
 
         # Mock model creation
-        mock_model = Mock()
+        mock_model = _stateless_model_mock()
         mock_create_model.return_value = mock_model
 
         # Create agent with local server

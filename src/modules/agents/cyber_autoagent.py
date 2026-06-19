@@ -830,11 +830,21 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         ),
     )
     register_conversation_manager(conversation_manager)
+    sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "auto") or "").strip().lower()
+    if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
+        sdk_context_manager = None
+    elif sdk_context_manager not in {"auto", "agentic"}:
+        agent_logger.warning(
+            "Unsupported CYBER_SDK_CONTEXT_MANAGER=%r; using 'auto'",
+            sdk_context_manager,
+        )
+        sdk_context_manager = "auto"
     agent_logger.info(
-        "Conversation manager created: window=%d, preserve_first=%d, preserve_last=%d",
+        "Conversation manager created: window=%d, preserve_first=%d, preserve_last=%d, sdk_context_manager=%s",
         window_size,
         PRESERVE_FIRST_DEFAULT,
         PRESERVE_LAST_DEFAULT,
+        sdk_context_manager or "disabled",
     )
 
     # Initialize concurrent tool executor for parallel execution
@@ -919,12 +929,17 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     else:
         # Use proactive sliding + summarization fallback for stateless models.
         agent_kwargs["conversation_manager"] = conversation_manager
+        if sdk_context_manager:
+            # Let Strands add its context offloader/plugin support while our
+            # project-specific conversation manager remains authoritative.
+            agent_kwargs["context_manager"] = sdk_context_manager
 
     # apply wrapper to provide agent_factory to any tool that has a parameter named such
     agent_factory_config = AgentFactoryConfig(
         hooks = swarm_hooks,
         callback_handler = callback_handler,
         conversation_manager = conversation_manager,
+        context_manager = sdk_context_manager,
         base_trace_attributes = agent_kwargs["trace_attributes"],
     )
     init_agent_factory(agent_factory_config)
