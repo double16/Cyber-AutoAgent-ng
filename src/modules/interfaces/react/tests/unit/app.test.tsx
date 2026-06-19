@@ -68,6 +68,7 @@ const handleUnifiedInput = jest.fn();
 const useKeyboardHandlers = jest.fn();
 const useDeploymentDetection = jest.fn();
 const useAutoRun = jest.fn();
+const cleanupTerminal = jest.fn();
 
 jest.unstable_mockModule('../../src/hooks/useApplicationState.js', () => ({
     useApplicationState: () => ({state: appState, actions}),
@@ -131,6 +132,9 @@ jest.unstable_mockModule('../../src/components/InitializationWrapper.js', () => 
     InitializationWrapper: ({onInitializationComplete, onConfigOpen, mainAppViewProps}: any) => (
         <div>
             <span>wrapper:{mainAppViewProps.staticKey}</span>
+            <button onClick={() => {
+                mainAppViewProps.terminalCleanupRef.current = cleanupTerminal;
+            }}>set-cleanup</button>
             <button onClick={() => onInitializationComplete('done')}>complete-init</button>
             <button onClick={onConfigOpen}>open-config</button>
             <button onClick={() => mainAppViewProps.onModalClose()}>close-modal</button>
@@ -173,9 +177,12 @@ describe('App', () => {
         useDeploymentDetection.mockClear();
         useAutoRun.mockClear();
         setAvailableModules.mockClear();
+        cleanupTerminal.mockClear();
         appState.isConfigLoaded = false;
         appState.activeOperation = null;
         appState.isInitializationFlowActive = false;
+        appState.userHandoffActive = false;
+        delete appState.exitNotice;
         modalManager.activeModal = ModalType.NONE;
     });
 
@@ -222,16 +229,97 @@ describe('App', () => {
             isTerminalInteractive: true,
         }));
 
-        act(() => view.root.findAllByType('button')[0].props.onClick());
+        act(() => view.root.findAllByType('button')[1].props.onClick());
         expect(actions.dismissInit).toHaveBeenCalled();
         expect(actions.clearCompletedOperation).toHaveBeenCalled();
         expect(actions.refreshStatic).toHaveBeenCalled();
         expect(modalManager.refreshStatic).toHaveBeenCalled();
 
-        act(() => view.root.findAllByType('button')[1].props.onClick());
+        act(() => view.root.findAllByType('button')[2].props.onClick());
         expect(modalManager.openConfig).toHaveBeenCalled();
 
-        act(() => view.root.findAllByType('button')[3].props.onClick());
+        act(() => view.root.findAllByType('button')[4].props.onClick());
         expect(handleUnifiedInput).toHaveBeenCalledWith('input');
+    });
+
+    it('runs keyboard callbacks, clear cleanup, modal refresh timeout, and ESC exit notice path', async () => {
+        jest.useFakeTimers();
+        const originalGc = global.gc;
+        const originalExit = (process as any).exit;
+        const originalStdin = (process as any).stdin;
+        const gc = jest.fn();
+        const exitProcess = jest.fn();
+        const stdinHandlers: Record<string, (chunk: Buffer) => void> = {};
+        Object.defineProperty(global, 'gc', {value: gc, configurable: true});
+        Object.defineProperty(process, 'exit', {value: exitProcess, configurable: true});
+        Object.defineProperty(process, 'stdin', {
+            value: {
+                isTTY: true,
+                on: jest.fn((event: string, handler: (chunk: Buffer) => void) => {
+                    stdinHandlers[event] = handler;
+                }),
+                off: jest.fn(),
+                setRawMode: jest.fn(),
+                resume: jest.fn(),
+            },
+            configurable: true,
+        });
+
+        try {
+            const {App} = await load();
+            let view!: TestRenderer.ReactTestRenderer;
+
+            await act(async () => {
+                view = TestRenderer.create(<App/>);
+                await Promise.resolve();
+            });
+
+            act(() => view.root.findAllByType('button')[0].props.onClick());
+            const keyboardArgs = useKeyboardHandlers.mock.calls.at(-1)![0];
+
+            act(() => {
+                keyboardArgs.onScreenClear();
+                jest.runOnlyPendingTimers();
+            });
+            expect(cleanupTerminal).toHaveBeenCalled();
+            expect(gc).toHaveBeenCalled();
+            expect(operationManager.clearOperationHistory).toHaveBeenCalled();
+            expect(actions.resetErrorCount).toHaveBeenCalled();
+            expect(actions.setActiveOperation).toHaveBeenCalledWith(null);
+            expect(modalManager.refreshStatic).toHaveBeenCalled();
+
+            await act(async () => {
+                await keyboardArgs.onAssessmentCancel();
+            });
+            expect(operationManager.handleAssessmentCancel).toHaveBeenCalled();
+
+            act(() => view.root.findAllByType('button')[3].props.onClick());
+            expect(modalManager.closeModal).toHaveBeenCalled();
+            expect(modalManager.refreshStaticOnly).toHaveBeenCalled();
+            act(() => {
+                jest.runOnlyPendingTimers();
+                jest.advanceTimersByTime(1600);
+            });
+
+            act(() => {
+                stdinHandlers.data?.(Buffer.from([0x1b]));
+                jest.advanceTimersByTime(30);
+            });
+            expect(appState.exitNotice).toBe(true);
+            expect(actions.refreshStatic).toHaveBeenCalled();
+            act(() => {
+                jest.advanceTimersByTime(300);
+            });
+            expect(exitProcess).toHaveBeenCalledWith(0);
+        } finally {
+            if (originalGc) {
+                Object.defineProperty(global, 'gc', {value: originalGc, configurable: true});
+            } else {
+                delete (global as any).gc;
+            }
+            Object.defineProperty(process, 'exit', {value: originalExit, configurable: true});
+            Object.defineProperty(process, 'stdin', {value: originalStdin, configurable: true});
+            jest.useRealTimers();
+        }
     });
 });

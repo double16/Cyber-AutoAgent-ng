@@ -21,8 +21,10 @@ const inputHandlers: Array<(input: string, key: any) => void> = [];
 jest.unstable_mockModule('ink', () => ({
     Box: ({children}: any) => <div>{children}</div>,
     Text: ({children}: any) => <span>{children}</span>,
-    useInput: (handler: (input: string, key: any) => void) => {
-        inputHandlers.push(handler);
+    useInput: (handler: (input: string, key: any) => void, options?: {isActive?: boolean}) => {
+        if (options?.isActive !== false) {
+            inputHandlers.push(handler);
+        }
     },
 }));
 
@@ -36,6 +38,7 @@ jest.unstable_mockModule('ink-select-input', () => ({
             <span>select:{items?.map((item: any) => item.label).join('|')}</span>
             <button onClick={() => onSelect(items?.[0])}>select-first</button>
             <button onClick={() => onSelect(items?.[1] || items?.[0])}>select-second</button>
+            <button onClick={() => onSelect(items?.[2] || items?.[0])}>select-third</button>
         </div>
     ),
 }));
@@ -88,9 +91,7 @@ const textFromTree = (node: any): string => {
 
 const sendInput = (input = '', key: Record<string, boolean> = {}) => {
     act(() => {
-        for (const handler of inputHandlers.slice(-2)) {
-            handler(input, key);
-        }
+        inputHandlers.at(-1)?.(input, key);
     });
 };
 
@@ -177,6 +178,12 @@ describe('ConfigEditor', () => {
     });
 
     it('navigates MCP fields and triggers connection actions', async () => {
+        const fetchMock = jest.fn(async () => ({
+            status: 200,
+            ok: true,
+            text: async () => 'ok',
+        }));
+        (globalThis as any).fetch = fetchMock;
         const {ConfigEditor} = await load();
         let view!: TestRenderer.ReactTestRenderer;
 
@@ -208,6 +215,21 @@ describe('ConfigEditor', () => {
         expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
             mcp: expect.objectContaining({connections: expect.any(Array)}),
         }));
+
+        for (let index = 0; index < 10; index += 1) {
+            sendInput('', {downArrow: true});
+        }
+        await act(async () => {
+            sendInput('', {return: true});
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(fetchMock).toHaveBeenCalledWith(
+            'http://localhost:9000',
+            expect.objectContaining({method: 'GET'})
+        );
+        expect(textFromTree(view.toJSON())).toContain('OK (200)');
+        delete (globalThis as any).fetch;
     });
 
     it('renders alternate provider, memory, observability, pricing, and output branches', async () => {
@@ -273,5 +295,170 @@ describe('ConfigEditor', () => {
         output = textFromTree(view.toJSON());
         expect(output).toContain('Output Directory');
         expect(output).toContain('Unified Output Structure');
+    });
+
+    it('renders configuration status and deployment description branches', async () => {
+        const {ConfigEditor} = await load();
+        let view!: TestRenderer.ReactTestRenderer;
+
+        config = {
+            ...config,
+            deploymentMode: 'cli',
+            modelProvider: '',
+            modelId: '',
+            observability: false,
+            autoEvaluation: false,
+        };
+        await act(async () => {
+            view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
+            await Promise.resolve();
+        });
+        expect(textFromTree(view.toJSON())).toContain('No provider selected');
+        expect(textFromTree(view.toJSON())).toContain('Python CLI mode');
+
+        act(() => {
+            config = {
+                ...config,
+                deploymentMode: 'container',
+                modelProvider: 'bedrock',
+                modelId: '',
+                awsBearerToken: 'token',
+            };
+            view.update(<ConfigEditor onClose={jest.fn()}/>);
+        });
+        expect(textFromTree(view.toJSON())).toContain('No model selected');
+        expect(textFromTree(view.toJSON())).toContain('Single container mode');
+
+        act(() => {
+            config = {
+                ...config,
+                deploymentMode: 'compose',
+                modelProvider: 'ollama',
+                modelId: 'qwen',
+                ollamaHost: 'http://localhost:11434',
+            };
+            view.update(<ConfigEditor onClose={jest.fn()}/>);
+        });
+        expect(textFromTree(view.toJSON())).toContain('Ready');
+        expect(textFromTree(view.toJSON())).toContain('Full stack mode');
+    });
+
+    it('initializes missing MCP settings with defaults', async () => {
+        config = {
+            deploymentMode: 'full-stack',
+            modelProvider: 'bedrock',
+            modelId: 'claude',
+            memoryBackend: 'FAISS',
+            observability: false,
+            autoEvaluation: false,
+        };
+        const {ConfigEditor} = await load();
+
+        await act(async () => {
+            TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
+            await Promise.resolve();
+        });
+        expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+            mcp: {enabled: false, connections: []},
+        }));
+    });
+
+    it('tests MCP fallback endpoints and reports failed diagnostics', async () => {
+        config = {
+            ...config,
+            mcp: {
+                enabled: true,
+                connections: [{
+                    id: 'http-1',
+                    transport: 'streamable-http',
+                    server_url: 'http://mcp.local',
+                    headers: {Authorization: 'Bearer token'},
+                    plugins: ['*'],
+                    allowedTools: ['*'],
+                    timeoutSeconds: 5,
+                }],
+            },
+        };
+        const fetchMock = jest
+            .fn()
+            .mockResolvedValueOnce({status: 404, text: async () => 'missing'})
+            .mockResolvedValueOnce({status: 404, text: async () => 'missing stream'})
+            .mockResolvedValueOnce({status: 404, text: async () => 'missing post'})
+            .mockResolvedValueOnce({status: 500, text: async () => 'server exploded'});
+        (globalThis as any).fetch = fetchMock;
+        const {ConfigEditor} = await load();
+        let view!: TestRenderer.ReactTestRenderer;
+
+        await act(async () => {
+            view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
+            await Promise.resolve();
+        });
+
+        for (let index = 0; index < 6; index += 1) {
+            sendInput('', {downArrow: true});
+        }
+        sendInput('', {return: true});
+        for (let index = 0; index < 10; index += 1) {
+            sendInput('', {downArrow: true});
+        }
+        await act(async () => {
+            sendInput('', {return: true});
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(fetchMock).toHaveBeenCalledWith('http://mcp.local/stream', expect.objectContaining({method: 'GET'}));
+        expect(fetchMock).toHaveBeenCalledWith('http://mcp.local/mcp', expect.objectContaining({method: 'POST'}));
+        expect(textFromTree(view.toJSON())).toContain('FAILED (404)');
+
+        delete (globalThis as any).fetch;
+    });
+
+    it('renders MCP plugin and allowed-tool list editors', async () => {
+        config = {
+            ...config,
+            mcp: {
+                enabled: true,
+                connections: [{
+                    id: 'conn-list',
+                    transport: 'sse',
+                    server_url: 'http://localhost:9000',
+                    plugins: ['web'],
+                    allowedTools: ['scan'],
+                    timeoutSeconds: 10,
+                }],
+            },
+        };
+        const {ConfigEditor} = await load();
+        let view!: TestRenderer.ReactTestRenderer;
+
+        await act(async () => {
+            view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
+            await Promise.resolve();
+        });
+
+        for (let index = 0; index < 6; index += 1) {
+            sendInput('', {downArrow: true});
+        }
+        sendInput('', {return: true});
+
+        for (let index = 0; index < 7; index += 1) {
+            sendInput('', {downArrow: true});
+        }
+        sendInput('', {return: true});
+        expect(textFromTree(view.toJSON())).toContain('Plugins:');
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'uncontrolled-submit' || button.props.children === 'text-submit')?.props.onClick();
+        });
+
+        sendInput('', {escape: true});
+        sendInput('', {downArrow: true});
+        sendInput('', {return: true});
+        expect(textFromTree(view.toJSON())).toContain('Allowed Tools:');
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'text-submit')?.props.onClick();
+        });
+        expect(textFromTree(view.toJSON())).toContain('Enter = add');
     });
 });

@@ -215,4 +215,68 @@ describe('InitializationFlow', () => {
     expect(textFromTree(view.toJSON())).toContain('Python environment setup complete!');
     expect(onComplete).not.toHaveBeenCalled();
   });
+
+  it('maps container setup failures to actionable messages', async () => {
+    const { InitializationFlow } = await load();
+    const onComplete = jest.fn();
+    containerManager.switchToMode.mockRejectedValueOnce(new Error('Cannot connect to the Docker daemon'));
+
+    let view!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
+    });
+
+    sendInput('', { return: true });
+    sendInput('', { downArrow: true });
+    sendInput('', { return: true });
+    await wait(120);
+
+    expect(textFromTree(view.toJSON())).toContain('Cannot connect to Docker');
+    expect(textFromTree(view.toJSON())).toContain('Setup failed');
+
+    containerManager.switchToMode.mockRejectedValueOnce(new Error('Timeout waiting for containers'));
+    sendInput('r');
+    await wait(120);
+    expect(textFromTree(view.toJSON())).toContain('Container startup timeout');
+
+    const mappings = [
+      ['Docker compose file not found', 'Missing Docker configuration file'],
+      ['No such image', 'Docker image not found'],
+      ['Docker is not running', 'Docker Desktop is not running'],
+      ['failed to execute template', 'Docker version compatibility issue'],
+    ];
+
+    for (const [rawError, expectedMessage] of mappings) {
+      containerManager.switchToMode.mockRejectedValueOnce(new Error(rawError));
+      sendInput('r');
+      await wait(120);
+      expect(textFromTree(view.toJSON())).toContain(expectedMessage);
+    }
+
+    sendInput('b');
+    expect(textFromTree(view.toJSON())).toContain('Choose Your Deployment Mode');
+  });
+
+  it('maps local Python setup failures to install guidance', async () => {
+    const { InitializationFlow } = await load();
+    const onComplete = jest.fn();
+    pythonService.checkPythonVersion.mockRejectedValueOnce(new Error('Python not found'));
+
+    let view!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
+    });
+
+    sendInput('', { return: true });
+    sendInput('', { return: true });
+    await wait(120);
+
+    expect(textFromTree(view.toJSON())).toContain('Python 3.11+ is not installed');
+
+    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.11.8' } as never);
+    pythonService.setupPythonEnvironment.mockRejectedValueOnce(new Error('No requirements.txt'));
+    sendInput('r');
+    await wait(120);
+    expect(textFromTree(view.toJSON())).toContain('Missing requirements.txt or pyproject.toml');
+  });
 });

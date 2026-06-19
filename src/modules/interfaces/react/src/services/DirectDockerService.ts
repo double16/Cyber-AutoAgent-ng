@@ -100,11 +100,14 @@ export class DirectDockerService extends EventEmitter {
   private autoExecuteSent: boolean = false;
   private readonly dockerClient: Dockerode;
   private activeContainer?: Dockerode.Container;
+  // If true, we started the container and should manage its lifecycle
+  private activeContainerOwner: boolean = false;
   private containerStream?: any;
   private isExecutionActive = false;
   private streamEventBuffer = '';
   private abortController?: AbortController;
   private activeExec?: Dockerode.Exec;
+  private activeExecRunId?: string;
   // Track when backend signals operation completion to avoid premature "complete"
   private seenOperationComplete = false;
   // Auto-confirm interactive handoffs when configured (maps to BYPASS_TOOL_CONSENT)
@@ -643,6 +646,7 @@ export class DirectDockerService extends EventEmitter {
         },
         WorkingDir: '/app',
       });
+      this.activeContainerOwner = true;
 
       // Emit preflight details before attaching streams
       setTimeout(() => {
@@ -967,14 +971,15 @@ export class DirectDockerService extends EventEmitter {
     }
 
     try {
-      if (this.activeContainer) {
+      if (this.activeExec) {
+        await this.stopActiveExecProcess();
+        this.activeExec = undefined;
+        this.activeExecRunId = undefined;
+      } else if (this.activeContainer && this.activeContainerOwner) {
         // Force kill the ad-hoc container to ensure immediate termination
         await this.activeContainer.kill('SIGKILL');
-      } else if (this.activeExec && this.containerStream) {
-        // Exec session in persistent service container: try sending Ctrl-C to terminate the process
-        try {
-          this.containerStream.write('\x03'); // SIGINT
-        } catch {}
+        this.activeContainer = undefined;
+        this.activeContainerOwner = false;
       }
 
       // Clean up container/exec stream if exists
@@ -985,8 +990,6 @@ export class DirectDockerService extends EventEmitter {
         this.containerStream = undefined;
       }
 
-      this.activeExec = undefined;
-      this.activeContainer = undefined;
       this.isExecutionActive = false;
       this.abortController = undefined;
       this.emit('stopped');
@@ -994,7 +997,9 @@ export class DirectDockerService extends EventEmitter {
     } catch {
       // Force cleanup even if termination fails
       this.activeExec = undefined;
+      this.activeExecRunId = undefined;
       this.activeContainer = undefined;
+      this.activeContainerOwner = false;
       this.isExecutionActive = false;
       this.abortController = undefined;
       this.emit('stopped');
@@ -1045,16 +1050,127 @@ export class DirectDockerService extends EventEmitter {
    * Stop the active container
    */
   async stopContainer(): Promise<void> {
-    if (!this.activeContainer) {
+    if (!this.activeContainer || !this.activeContainerOwner) {
       return;
     }
     
     try {
       await this.activeContainer.stop();
       this.activeContainer = undefined;
+      this.activeContainerOwner = false;
     } catch (error) {
       // Container might already be stopped
       this.activeContainer = undefined;
+      this.activeContainerOwner = false;
+    }
+  }
+
+  /**
+   * Stop a docker exec session running inside a persistent service container.
+   *
+   * Dockerode does not expose an Exec.kill API. Writing Ctrl-C to the hijacked
+   * stream is only advisory and can be ignored by the Python process or a child
+   * tool, so follow it with an explicit kill command inside the container.
+   */
+  private async stopActiveExecProcess(): Promise<void> {
+    const exec = this.activeExec as any;
+    const container = this.activeContainer as any;
+
+    try {
+      this.containerStream?.write?.('\x03'); // SIGINT for cooperative shutdown
+    } catch {}
+
+    if (!container || !exec) {
+      return;
+    }
+
+    const execRunId = this.activeExecRunId;
+    if (!execRunId) {
+      logger.warn('Cannot force-stop docker exec process without run id');
+      return;
+    }
+
+    const quotedRunId = `'${execRunId.replace(/'/g, `'\\''`)}'`;
+    const killScript = [
+      `run_id=${quotedRunId}`,
+      'marker="CYBER_EXEC_RUN_ID=$run_id"',
+      'pids=""',
+      'for env_file in /proc/[0-9]*/environ; do',
+      '  pid="${env_file#/proc/}"',
+      '  pid="${pid%/environ}"',
+      '  [ "$pid" = "1" ] && continue',
+      '  if tr "\\000" "\\n" < "$env_file" 2>/dev/null | grep -Fx "$marker" >/dev/null 2>&1; then',
+      '    pids="$pids $pid"',
+      '  fi',
+      'done',
+      '[ -z "$pids" ] && exit 0',
+      'all="$pids"',
+      'parents="$pids"',
+      'while [ -n "$parents" ]; do',
+      '  next=""',
+      '  for parent in $parents; do',
+      '    for stat_file in /proc/[0-9]*/stat; do',
+      '      child="${stat_file#/proc/}"',
+      '      child="${child%/stat}"',
+      '      [ "$child" = "1" ] && continue',
+      '      ppid="$(awk \'{print $4}\' "$stat_file" 2>/dev/null || true)"',
+      '      if [ "$ppid" = "$parent" ]; then',
+      '        case " $all " in',
+      '          *" $child "*) ;;',
+      '          *) next="$next $child"; all="$all $child" ;;',
+      '        esac',
+      '      fi',
+      '    done',
+      '  done',
+      '  parents="$next"',
+      'done',
+      'kill -TERM $all 2>/dev/null || true',
+      'sleep 0.5',
+      'kill -KILL $all 2>/dev/null || true',
+    ].join('\n');
+
+    try {
+      const killer = await container.exec({
+        Cmd: ['/bin/sh', '-lc', killScript],
+        AttachStdout: true,
+        AttachStderr: true,
+        Tty: false,
+        WorkingDir: '/app'
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        killer.start({}, (err: Error | null | undefined, stream: any) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          if (!stream || typeof stream.on !== 'function') {
+            resolve();
+            return;
+          }
+          let settled = false;
+          let timeout: NodeJS.Timeout;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            resolve();
+          };
+          const fail = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            reject(error);
+          };
+          stream.on('end', finish);
+          stream.on('close', finish);
+          stream.on('error', fail);
+          // Some Docker mocks/streams do not emit lifecycle events.
+          timeout = setTimeout(finish, 1000);
+        });
+      });
+    } catch (error) {
+      logger.warn('Failed to force-stop docker exec process', error as any);
     }
   }
 
@@ -1065,6 +1181,7 @@ export class DirectDockerService extends EventEmitter {
     this.autoExecuteSent = false;
     this.seenOperationComplete = false;
     this.streamEventBuffer = '';
+    this.activeExecRunId = undefined;
   }
 
   /**
@@ -1072,7 +1189,7 @@ export class DirectDockerService extends EventEmitter {
    */
   cleanup(): void {
     // Stop any active container
-    if (this.activeContainer) {
+    if (this.activeContainer && this.activeContainerOwner) {
       this.stopContainer().catch(error => {
         // Silently handle cleanup errors - not critical for user experience
       });
@@ -1097,6 +1214,9 @@ export class DirectDockerService extends EventEmitter {
     // Reset state
     this.isExecutionActive = false;
     this.activeContainer = undefined;
+    this.activeContainerOwner = false;
+    this.activeExec = undefined;
+    this.activeExecRunId = undefined;
     this.containerStream = undefined;
     this.abortController = undefined;
     
@@ -1169,6 +1289,10 @@ export class DirectDockerService extends EventEmitter {
     this.abortController = new AbortController();
     // Fallback auto-execute in exec reuse path
     this.isExecutionActive = true;
+    this.activeContainer = container;
+    this.activeContainerOwner = false;
+    const execRunId = `cyber-exec-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    this.activeExecRunId = execRunId;
     
     // Prepare command (python entrypoint + args) to align with container Entrypoint
     const cmd = ['python', '/app/src/cyberautoagent.py', ...args];
@@ -1180,7 +1304,7 @@ export class DirectDockerService extends EventEmitter {
       AttachStderr: true,
       AttachStdin: true,
       Tty: true,
-      Env: env,
+      Env: [...env, `CYBER_EXEC_RUN_ID=${execRunId}`],
       WorkingDir: '/app'
     });
 
@@ -1222,6 +1346,8 @@ export class DirectDockerService extends EventEmitter {
     stream.on('end', () => {
       this.isExecutionActive = false;
       this.abortController = undefined;
+      this.activeExec = undefined;
+      this.activeExecRunId = undefined;
       this.streamEventBuffer = '';
       logger.info('Exec stream ended', { seenOperationComplete: this.seenOperationComplete });
       if (this.seenOperationComplete) this.emit('complete');

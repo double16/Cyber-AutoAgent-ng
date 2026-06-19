@@ -267,6 +267,88 @@ describe('setup and documentation screens', () => {
         expect(onSkip).toHaveBeenCalledTimes(1);
     });
 
+    it('recovers missing local venv, stopped containers, and full-stack deployments', async () => {
+        const {DeploymentRecovery} = await load();
+        const onComplete = jest.fn();
+        const onSkip = jest.fn();
+
+        let view!: TestRenderer.ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <DeploymentRecovery
+                    deployment={{mode: 'local-cli', isHealthy: false, details: {venvExists: false}} as any}
+                    onComplete={onComplete}
+                    onSkip={onSkip}
+                />
+            );
+        });
+
+        await act(async () => {
+            sendInput('y');
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(execMock).toHaveBeenCalledWith('python3 -m venv .venv', expect.any(Function));
+        expect(textFromTree(view.toJSON())).toContain('Recovery complete');
+
+        execMock.mockClear();
+        execMock.mockImplementation((command: string, optionsOrCallback: any, maybeCallback?: any) => {
+            const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+            if (command.includes('docker ps --filter')) {
+                callback(null, '', '');
+                return;
+            }
+            if (command.includes('docker ps -a')) {
+                callback(null, 'Exited (0) 10 seconds ago\n', '');
+                return;
+            }
+            callback(null, '', '');
+        });
+
+        act(() => {
+            view.unmount();
+        });
+        await act(async () => {
+            view = TestRenderer.create(
+                <DeploymentRecovery
+                    deployment={{mode: 'single-container', isHealthy: false, details: {}} as any}
+                    onComplete={onComplete}
+                    onSkip={onSkip}
+                />
+            );
+        });
+        await act(async () => {
+            sendInput('', {return: true});
+            await Promise.resolve();
+            await Promise.resolve();
+            await jest.advanceTimersByTimeAsync(3000);
+        });
+        expect(execMock.mock.calls.map(call => call[0])).toContain('docker ps --filter name=cyber-autoagent --format "{{.Names}}"');
+
+        const fetchMock = jest.fn(async () => ({ok: true}));
+        (globalThis as any).fetch = fetchMock;
+        act(() => {
+            view.unmount();
+        });
+        await act(async () => {
+            view = TestRenderer.create(
+                <DeploymentRecovery
+                    deployment={{mode: 'full-stack', isHealthy: false, details: {}} as any}
+                    onComplete={onComplete}
+                    onSkip={onSkip}
+                />
+            );
+        });
+        await act(async () => {
+            sendInput('Y');
+            await Promise.resolve();
+            await jest.advanceTimersByTimeAsync(5000);
+        });
+        expect(execMock).toHaveBeenCalledWith('docker-compose up -d', {cwd: process.cwd()}, expect.any(Function));
+        expect(fetchMock).toHaveBeenCalledWith('http://localhost:3000/api/public/health');
+        delete (globalThis as any).fetch;
+    });
+
     it('detects active deployments and selects a deployment mode', async () => {
         const {render, DeploymentSelectionScreen} = await load();
         const onSelect = jest.fn();

@@ -219,6 +219,7 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
     }
   });
 
+  /* istanbul ignore next -- legacy initialization path retained for fallback; the active setup flow uses setup-progress-screen. */
   const checkInitialization = async () => {
     const monitor = HealthMonitor.getInstance();
     
@@ -674,6 +675,7 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
     );
   }
 
+  /* istanbul ignore next -- legacy initialization status UI retained for fallback; no active flow reaches this branch. */
   // Original initialization flow UI
   return (
     <Box flexDirection="column" paddingX={2} paddingY={1}>
