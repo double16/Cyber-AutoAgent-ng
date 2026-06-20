@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+import pytest
 
 from modules.tools.web_search import web_search
 

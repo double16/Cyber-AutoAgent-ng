@@ -239,11 +239,20 @@ def pytest_addoption(parser):
         default=False,
         help="Run tests that require the browser."
     )
+    parser.addoption(
+        "--external",
+        action="store_true",
+        default=False,
+        help="Run tests that reach out to the Internet."
+    )
 
 
 def pytest_runtest_setup(item):
     if "browser" in item.keywords and not item.config.getoption("--browser"):
         pytest.skip("Test requires --browser option to run.")
+
+    if "external" in item.keywords and not item.config.getoption("--external"):
+        pytest.skip("Test requires --external option to run.")
 
     if "ollama" in item.keywords:
         # pytest.skip(f"Skipping tests: Ollama", allow_module_level=True)
