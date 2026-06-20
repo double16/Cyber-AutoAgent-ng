@@ -15,10 +15,10 @@ jobs:
         python-version: ['3.11', '3.12', '3.13']
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
     
@@ -55,7 +55,7 @@ jobs:
         PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run pylint src/ --fail-under=9.5
 
     - name: Set up Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: '24'
         cache: 'npm'
