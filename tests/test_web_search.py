@@ -4,6 +4,7 @@ import unittest
 from modules.tools.web_search import web_search
 
 
+@pytest.mark.external
 class WebSearchTest(unittest.TestCase):
     def test_ddg_python3(self):
         result = asyncio.run(web_search("python3 features"))
