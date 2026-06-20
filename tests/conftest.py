@@ -245,6 +245,9 @@ def pytest_runtest_setup(item):
     if "browser" in item.keywords and not item.config.getoption("--browser"):
         pytest.skip("Test requires --browser option to run.")
 
+    if "external" in item.keywords and not item.config.getoption("--external"):
+        pytest.skip("Test requires --external option to run.")
+
     if "ollama" in item.keywords:
         # pytest.skip(f"Skipping tests: Ollama", allow_module_level=True)
         ollama_host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
