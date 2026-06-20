@@ -239,6 +239,12 @@ def pytest_addoption(parser):
         default=False,
         help="Run tests that require the browser."
     )
+    parser.addoption(
+        "--external",
+        action="store_true",
+        default=False,
+        help="Run tests that reach out to the Internet."
+    )
 
 
 def pytest_runtest_setup(item):
