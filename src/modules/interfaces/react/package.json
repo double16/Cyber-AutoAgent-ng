@@ -30,9 +30,9 @@
   "dependencies": {
     "ansi-escapes": "^7.0.0",
     "chokidar": "^5.0.0",
-    "commander": "^14.0.2",
+    "commander": "^15.0.0",
     "dockerode": "^4.0.9",
-    "ink": "^7.0.0",
+    "ink": "^7.1.0",
     "ink-big-text": "^2.0.0",
     "ink-gradient": "^4.0.0",
     "ink-link": "^5.0.0",
