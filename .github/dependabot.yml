@@ -5,6 +5,12 @@ updates:
     schedule:
       interval: "weekly"
     target-branch: "develop"
+    groups:
+      actions-minor:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "uv"
     directory: "/"
