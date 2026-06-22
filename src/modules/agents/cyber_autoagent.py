@@ -32,7 +32,12 @@ from strands_tools import (
 from modules.tools import stop
 
 from modules import prompts, __version__
-from modules.agents.factory import AgentFactoryConfig, init_agent_factory
+from modules.agents.factory import (
+    AgentFactoryConfig,
+    create_agent_with_stateful_retry,
+    init_agent_factory,
+    model_uses_server_side_state,
+)
 from modules.agents.patches import ToolUseIdHook
 from modules.config import (
     AgentConfig,
@@ -825,11 +830,21 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         ),
     )
     register_conversation_manager(conversation_manager)
+    sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "auto") or "auto").strip().lower()
+    if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
+        sdk_context_manager = None
+    elif sdk_context_manager not in {"auto", "agentic"}:
+        agent_logger.warning(
+            "Unsupported CYBER_SDK_CONTEXT_MANAGER=%r; using 'auto'",
+            sdk_context_manager,
+        )
+        sdk_context_manager = "auto"
     agent_logger.info(
-        "Conversation manager created: window=%d, preserve_first=%d, preserve_last=%d",
+        "Conversation manager created: window=%d, preserve_first=%d, preserve_last=%d, sdk_context_manager=%s",
         window_size,
         PRESERVE_FIRST_DEFAULT,
         PRESERVE_LAST_DEFAULT,
+        sdk_context_manager or "disabled",
     )
 
     # Initialize concurrent tool executor for parallel execution
@@ -855,8 +870,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         "system_prompt": system_prompt_payload,
         "callback_handler": callback_handler,
         "hooks": hooks if hooks else None,  # Add hooks if available
-        # Use proactive sliding + summarization fallback
-        "conversation_manager": conversation_manager,
         "load_tools_from_directory": True,
         "trace_attributes": {
             # Core identification - session_id is the key for Langfuse trace naming
@@ -907,12 +920,26 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             "memory.path": config.memory_path if config.memory_path else "ephemeral",
         },
     }
+    if model_uses_server_side_state(model):
+        agent_logger.info(
+            "Skipping local conversation manager for stateful model '%s'; "
+            "conversation state is managed server-side.",
+            config.model_id,
+        )
+    else:
+        # Use proactive sliding + summarization fallback for stateless models.
+        agent_kwargs["conversation_manager"] = conversation_manager
+        if sdk_context_manager:
+            # Let Strands add its context offloader/plugin support while our
+            # project-specific conversation manager remains authoritative.
+            agent_kwargs["context_manager"] = sdk_context_manager
 
     # apply wrapper to provide agent_factory to any tool that has a parameter named such
     agent_factory_config = AgentFactoryConfig(
         hooks = swarm_hooks,
         callback_handler = callback_handler,
         conversation_manager = conversation_manager,
+        context_manager = sdk_context_manager,
         base_trace_attributes = agent_kwargs["trace_attributes"],
     )
     init_agent_factory(agent_factory_config)
@@ -926,7 +953,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     os.environ["STRANDS_HTTP_ALLOW_INSECURE_SSL"] = "true"
 
     # Create agent (telemetry is handled globally by Strands SDK)
-    agent = Agent(**agent_kwargs)
+    agent = create_agent_with_stateful_retry(agent_kwargs, config.model_id, Agent)
     # Allow reasoning deltas only when the provider/model supports them
     try:
         caps = get_capabilities(config.provider, config.model_id or "")

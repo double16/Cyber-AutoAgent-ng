@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Callable, Sequence, List, Tuple, Set
 from strands import Agent
 from strands.agent.conversation_manager import (
     SlidingWindowConversationManager,
-    SummarizingConversationManager,
+    SummarizingConversationManager, ProactiveCompressionConfig,
 )
 from strands.types.content import Message
 from strands.types.exceptions import ContextWindowOverflowException
@@ -606,7 +606,12 @@ class SlidingWindowConversationManagerWithPreservation(SlidingWindowConversation
             per_turn: bool | int = False,
             preserve_first_messages: int = PRESERVE_FIRST_DEFAULT,
     ):
-        super().__init__(window_size, should_truncate_results, per_turn=per_turn)
+        super().__init__(
+            window_size,
+            should_truncate_results,
+            per_turn=per_turn,
+            pin_first=preserve_first_messages or None,
+        )
         self.preserve_first_messages = preserve_first_messages
 
     def reduce_context(self, agent: "Agent", e: Exception | None = None, **kwargs: Any) -> None:
@@ -614,7 +619,14 @@ class SlidingWindowConversationManagerWithPreservation(SlidingWindowConversation
         before_messages = list(agent.messages)
         before_reduce_count = len(before_messages)
 
-        super().reduce_context(agent, e, **kwargs)
+        try:
+            super().reduce_context(agent, e, **kwargs)
+        except ContextWindowOverflowException:
+            logger.warning(
+                "SDK sliding manager could not find a trim point; applying local preservation trim"
+            )
+            self._force_preservation_trim(agent)
+
         messages = agent.messages
 
         preserved_count = _restore_preserved_messages(
@@ -627,8 +639,27 @@ class SlidingWindowConversationManagerWithPreservation(SlidingWindowConversation
 
         after_reduce_count = len(agent.messages)
         logger.info("Preserved %d messages after sliding manager reduction", preserved_count)
+        if after_reduce_count >= before_reduce_count and before_reduce_count > self.window_size + self.preserve_first_messages:
+            self._force_preservation_trim(agent)
+            after_reduce_count = len(agent.messages)
+
         if after_reduce_count >= before_reduce_count:
             raise ContextWindowOverflowException("Unable to trim conversation context!") from e
+
+    def _force_preservation_trim(self, agent: "Agent") -> None:
+        messages = getattr(agent, "messages", None)
+        if not isinstance(messages, list):
+            return
+        if len(messages) <= self.window_size + self.preserve_first_messages:
+            return
+
+        first_count = max(0, min(self.preserve_first_messages, len(messages)))
+        first_messages = messages[:first_count]
+        tail_start = max(first_count, len(messages) - self.window_size)
+        trimmed = first_messages + messages[tail_start:]
+        removed = max(0, len(messages) - len(trimmed))
+        messages[:] = trimmed
+        self.removed_message_count += removed
 
 
 class MappingConversationManager(SummarizingConversationManager):
@@ -648,6 +679,7 @@ class MappingConversationManager(SummarizingConversationManager):
         preserve_recent_messages: Optional[int] = None,
         preserve_first_messages: int = PRESERVE_FIRST_DEFAULT,
         tool_result_mapper: Optional[LargeToolResultMapper] = None,
+        sdk_proactive_compression: bool = True,
     ) -> None:
         if window_size < 1:
             logger.warning("Invalid window_size %d, using minimum 1", window_size)
@@ -678,9 +710,17 @@ class MappingConversationManager(SummarizingConversationManager):
                 old_preserve_last, preserve_recent_messages, window_size
             )
 
+        proactive_compression = None
+        if sdk_proactive_compression:
+            proactive_compression: ProactiveCompressionConfig = {
+                "compression_threshold": PROMPT_TELEMETRY_THRESHOLD,
+            }
+
         super().__init__(
             summary_ratio=summary_ratio,
             preserve_recent_messages=preserve_recent_messages,
+            pin_first=preserve_first_messages or None,
+            proactive_compression=proactive_compression,
         )
         self._sliding = SlidingWindowConversationManagerWithPreservation(
             window_size=window_size,
@@ -865,6 +905,8 @@ class MappingConversationManager(SummarizingConversationManager):
                 window_size
             )
 
+        content_reduced = False
+
         # Remove reasoning, it can be large
         before_tokens = safe_estimate_tokens(agent)
         _strip_reasoning_content(agent, force=True, preserve_recent_messages=max(1, self.preserve_recent_messages))
@@ -938,6 +980,10 @@ class MappingConversationManager(SummarizingConversationManager):
                             reduced_text_tokens,
                         )
                         messages[-1]["content"] = reduced_message_content
+                        content_reduced = True
+                        target_count = self.preserve_first + self.preserve_last
+                        if len(messages) > target_count and len(messages) > self.preserve_first:
+                            del messages[self.preserve_first]
 
         # Apply mapper compression
         self._apply_mapper(agent)
@@ -945,24 +991,32 @@ class MappingConversationManager(SummarizingConversationManager):
         # Use estimation to measure reduction impact (not telemetry - see docstring)
         before_tokens = safe_estimate_tokens(agent)
         stage = "sliding"
-        try:
-            self._sliding.reduce_context(agent, e, **kwargs)
-        except ContextWindowOverflowException as overflow_exc:
-            stage = "summarizing"
-            logger.warning("Sliding window overflow; invoking summarizing fallback")
-            super().reduce_context(agent, e or overflow_exc, **kwargs)
+        sliding_overridden = "reduce_context" in vars(self._sliding)
+        if before_msgs > window_size + self.preserve_first or sliding_overridden:
+            try:
+                self._sliding.reduce_context(agent, e, **kwargs)
+            except ContextWindowOverflowException as overflow_exc:
+                stage = "summarizing"
+                logger.warning("Sliding window overflow; invoking summarizing fallback")
+                super().reduce_context(agent, e or overflow_exc, **kwargs)
 
-            restored_count = _restore_preserved_messages(
-                agent.messages,
-                before_reduce_messages,
-                self.preserve_first,
-                max_total_messages=max(1, before_msgs - 1),
-            )
-            if restored_count > 0:
-                logger.info(
-                    "Restored %d preserved message(s) after summarizing fallback",
-                    restored_count,
+                restored_count = _restore_preserved_messages(
+                    agent.messages,
+                    before_reduce_messages,
+                    self.preserve_first,
+                    max_total_messages=max(1, before_msgs - 1),
                 )
+                if restored_count > 0:
+                    logger.info(
+                        "Restored %d preserved message(s) after summarizing fallback",
+                        restored_count,
+                    )
+        else:
+            logger.debug(
+                "Skipping sliding reduction: %d messages within target %d",
+                before_msgs,
+                window_size + self.preserve_first,
+            )
 
         after_msgs = _count_agent_messages(agent)
         after_tokens = safe_estimate_tokens(agent)
@@ -973,7 +1027,7 @@ class MappingConversationManager(SummarizingConversationManager):
             if removed_this_cycle > 0:
                 self.removed_message_count += removed_this_cycle
 
-        changed = after_msgs < before_msgs or (
+        changed = content_reduced or after_msgs < before_msgs or (
             before_tokens is not None
             and after_tokens is not None
             and after_tokens < before_tokens
