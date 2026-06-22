@@ -830,7 +830,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         ),
     )
     register_conversation_manager(conversation_manager)
-    sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "auto") or "").strip().lower()
+    sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "auto") or "auto").strip().lower()
     if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
         sdk_context_manager = None
     elif sdk_context_manager not in {"auto", "agentic"}:
