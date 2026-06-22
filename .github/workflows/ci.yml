@@ -47,7 +47,44 @@ jobs:
       run: |
         export PATH="$HOME/.local/bin:$PATH"
         export PYTHONPATH="${PWD}/src:${PYTHONPATH}"
-        PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run pytest tests/ -v
+        set +e
+        PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run pytest tests/ -v \
+          --cov=src \
+          --cov-report=term-missing \
+          --cov-report=xml \
+          --cov-report=html \
+          --cov-report=json:coverage.json
+        test_status=$?
+        set -e
+        coverage_status=0
+        if [ -f coverage.json ]; then
+          PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run python .github/scripts/check-python-coverage-floor.py coverage.json --min 50 || coverage_status=$?
+        else
+          echo "coverage.json was not generated."
+          coverage_status=1
+        fi
+        {
+          echo "### Python test coverage (${{ matrix.python-version }})"
+          echo
+          echo '```'
+          PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run coverage report --show-missing || echo "Coverage report unavailable."
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        if [ "$test_status" -ne 0 ]; then
+          exit "$test_status"
+        fi
+        exit "$coverage_status"
+
+    - name: Upload Python coverage report
+      uses: actions/upload-artifact@v6
+      with:
+        name: python-coverage-${{ matrix.python-version }}
+        path: |
+          coverage.xml
+          coverage.json
+          htmlcov/
+        if-no-files-found: warn
+
     - name: Check Pylint minimum score
       run: |
         export PATH="$HOME/.local/bin:$PATH"

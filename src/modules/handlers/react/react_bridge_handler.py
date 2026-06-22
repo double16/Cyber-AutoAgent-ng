@@ -2768,6 +2768,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         signature = json.dumps({"agents": agent_names, "task": task}, sort_keys=True)
         if self._last_swarm_signature == signature:
             return
+        self._last_swarm_signature = signature
 
         # Check if this is a NEW swarm operation or an update to existing
         is_new_swarm = not self.in_swarm_operation
