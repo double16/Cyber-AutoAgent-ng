@@ -3,6 +3,7 @@
 
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -217,6 +218,90 @@ Token payload values:
     assert a["claims"]["aud"] == "audience"
     assert a["claims"]["exp"] == "123456"
     assert a["claims"]["iat"] == "111"
+
+
+def test_auth_mechanism_parsers_and_flow_mapping():
+    jwt = aca._analyze_jwt_mechanism(
+        {"path": "/.well-known/jwks.json"},
+        '{"keys":[{"kid":"1"}]}',
+    )
+    assert jwt["properties"]["jwks_endpoint"] is True
+    assert jwt["properties"]["key_count"] == 1
+    assert jwt["confidence"] == "high"
+
+    oauth = aca._analyze_oauth_mechanism(
+        {"path": "/oauth/authorize"},
+        "client_id redirect_uri response_type scope state github microsoft",
+    )
+    assert oauth["description"] == "OAuth authorization endpoint"
+    assert "github" in oauth["properties"]["providers"]
+
+    saml = aca._analyze_saml_mechanism(
+        {"path": "/saml/metadata"},
+        '<xml xmlns="urn"><saml:Issuer entityID="x"><AssertionConsumerService/></xml>',
+    )
+    assert saml["properties"]["xml_metadata"] is True
+    assert saml["confidence"] == "high"
+
+    session = aca._analyze_session_mechanism(
+        {"path": "/login"},
+        '<form><input type="password" name="p"><input name="csrf"></form>',
+    )
+    assert session["properties"]["password_field"] is True
+    assert session["properties"]["csrf_protection"] is True
+
+    assert len(aca._generate_auth_steps({"type": "Session-based"})) == 4
+    assert len(aca._generate_auth_steps({"type": "JWT"})) == 4
+    assert len(aca._generate_auth_steps({"type": "OAuth"})) == 5
+    assert aca._generate_auth_steps({"type": "unknown"}) == []
+
+    flow = aca._map_authentication_flows(
+        "https://t.example",
+        {
+            "auth_mechanisms": [{"type": "Session-based"}, {"type": "JWT"}],
+            "flow_analysis": {
+                "session_management": {
+                    "security_analysis": [
+                        "Missing Secure flag",
+                        "Missing HttpOnly flag",
+                    ]
+                }
+            },
+            "tokens_discovered": [
+                {"type": "JWT", "analysis": {"algorithm": "none", "vulnerabilities": ["weak algorithm"]}}
+            ],
+            "auth_endpoints": [{"type": "Administrative", "path": "/admin"}],
+        },
+    )
+    assert len(flow["authentication_steps"]) == 8
+    assert any(item["type"] == "JWT None Algorithm" for item in flow["bypass_opportunities"])
+    assert flow["privilege_escalation"][0]["endpoint"] == "/admin"
+
+
+def test_jwt_tool_and_top_level_error_paths(monkeypatch):
+    assert aca._coerce_str(None) == ""
+    assert aca._coerce_str(b"\xffabc").endswith("abc")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "--help" in cmd:
+            return SimpleNamespace(returncode=0, stdout="help")
+        return SimpleNamespace(returncode=0, stdout='[+] alg = "none"\n[+] sub = "u"\nweak algorithm')
+
+    monkeypatch.setattr(aca.subprocess, "run", fake_run)
+    tokens = aca._analyze_jwt_with_tools(
+        "https://t.example",
+        [{"endpoint": "/token", "properties": {"sample_tokens": ["eyJ.a.b"]}}],
+    )
+    assert tokens[0]["analysis"]["algorithm"] == "none"
+    assert tokens[0]["token_preview"].endswith("...")
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", Mock(side_effect=RuntimeError("boom")))
+    error = json.loads(aca.auth_chain_analyzer("https://t.example", auth_type="bad"))
+    assert "boom" in error["error"]
+    assert error["auth_type"] == "auto"
 
 
 def test_discover_auth_endpoints_ignores_wildcard_candidates(monkeypatch):

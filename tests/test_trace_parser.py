@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from modules.evaluation.trace_parser import (
     ParsedMessage,
     ParsedToolCall,
@@ -162,3 +164,44 @@ def test_parse_trace_returns_none_on_error_and_metadata_extraction():
     assert metadata["session_id"] == "S1"
     assert metadata["latency_ms"] == 123
     assert metadata["token_usage"] == {"input": 1, "output": 2, "total": 3}
+
+
+@pytest.mark.asyncio
+async def test_sample_creation_and_topic_generation_fallbacks():
+    parser = TraceParser()
+    trace = ParsedTrace(
+        trace_id="t",
+        trace_name="Trace",
+        objective="",
+        messages=[ParsedMessage("user", "Run assessment")],
+        tool_calls=[ParsedToolCall("shell", {"cmd": "id"}, output="uid=0")],
+    )
+
+    single = parser._create_single_turn_sample(trace)
+    assert single.user_input == "Run assessment"
+    assert "Tool [shell]" in single.response
+
+    topics = await parser._generate_reference_topics_from_trace(
+        ParsedTrace("t", "Trace", "", [], [])
+    )
+    assert topics == ["cybersecurity assessment"]
+
+    parser_no_generate = TraceParser(llm=SimpleNamespace())
+    topics = await parser_no_generate._generate_reference_topics_from_trace(
+        ParsedTrace("t", "Trace", "Assess API", [], [])
+    )
+    assert topics == ["Assess API"]
+
+    multi_trace = ParsedTrace(
+        trace_id="m",
+        trace_name="Multi",
+        objective="Assess auth",
+        messages=[ParsedMessage("user", "Objective: Assess auth", metadata={"source": "objective"})],
+        tool_calls=[
+            ParsedToolCall("shell", {"cmd": "id"}, output="uid=0"),
+            ParsedToolCall("http_request", {"url": "/"}, output="HTTP 200"),
+        ],
+    )
+    multi = await parser._create_multi_turn_sample(multi_trace)
+    assert multi.reference_topics == ["Assess auth"]
+    assert len(multi.user_input) >= 3

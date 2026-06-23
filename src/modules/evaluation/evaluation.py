@@ -1225,12 +1225,12 @@ class CyberAgentEvaluator:
         # Build user prompt template
         default_template = (
             "Evaluate the security operation using the rubric dimensions.\n"
-            "Return STRICT JSON: {\n"
-            '  "scores": {"methodology": float, "tooling": float, "evidence": float, "outcome": float},\n'
+            "Return STRICT JSON: {{\n"
+            '  "scores": {{"methodology": float, "tooling": float, "evidence": float, "outcome": float}},\n'
             '  "overall": float,\n'
             '  "rationale": string,\n'
             '  "insufficient_evidence": boolean\n'
-            "}.\n\n"
+            "}}.\n\n"
             "Context (truncated):\n{context}\n\n"
             "Hints: target={target}, objective={objective}."
         )

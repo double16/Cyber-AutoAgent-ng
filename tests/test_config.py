@@ -4,7 +4,8 @@ Unit tests for the centralized model configuration system.
 """
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, Mock
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,7 @@ from modules.config.types import (
     get_default_base_dir,
     DEFAULT_TEMPERATURE_EXECUTION, DEFAULT_TEMPERATURE_SWARM,
 )
+from modules.config.system import validation
 from modules.tools.mcp import resolve_env_vars_in_dict, resolve_env_vars_in_list
 
 
@@ -1216,3 +1218,62 @@ class TestOutputConfigIntegration:
 
             # Override should take precedence over environment variable
             assert output_config.base_dir == "/override/outputs"
+
+
+def test_validation_provider_and_litellm_paths(monkeypatch):
+    env = SimpleNamespace(
+        get=lambda name, default=None: {
+            "OPENAI_API_KEY": "sk",
+            "ANTHROPIC_API_KEY": None,
+            "AWS_ACCESS_KEY_ID": "id",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "GEMINI_API_KEY": "g",
+        }.get(name, default)
+    )
+    monkeypatch.setattr(validation.requests, "get", Mock(return_value=SimpleNamespace(status_code=200)))
+    monkeypatch.setattr(
+        validation.ollama,
+        "Client",
+        lambda host: SimpleNamespace(list=Mock(return_value={"models": [{"model": "llama"}]})),
+    )
+    validation.validate_provider("bedrock", env, region="us-east-1")
+    validation.validate_provider("ollama", env, ollama_host="http://localhost:11434")
+    validation.validate_provider("litellm", env)
+    validation.validate_provider("gemini", env)
+    with pytest.raises(ValueError):
+        validation.validate_provider("bad", env)
+
+    validation.validate_litellm_requirements(env, "openai/gpt-4o")
+
+    missing = SimpleNamespace(get=lambda _name, default=None: default)
+    with pytest.raises(EnvironmentError):
+        validation.validate_litellm_requirements(missing, "openai/gpt-4o")
+    with pytest.raises(EnvironmentError):
+        validation.validate_gemini_requirements(missing)
+
+
+def test_validation_aws_and_ollama_requirements(monkeypatch):
+    env = SimpleNamespace(
+        get=lambda name, default=None: {
+            "AWS_ACCESS_KEY_ID": "id",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "AWS_SESSION_TOKEN": "token",
+        }.get(name, default)
+    )
+    validation.validate_aws_requirements(env, "us-east-1")
+
+    missing = SimpleNamespace(get=lambda _name, default=None: default)
+    with pytest.raises(EnvironmentError):
+        validation.validate_aws_requirements(missing, "us-east-1")
+
+    monkeypatch.setattr(validation.requests, "get", Mock(return_value=SimpleNamespace(status_code=200)))
+    monkeypatch.setattr(
+        validation.ollama,
+        "Client",
+        lambda host: SimpleNamespace(list=Mock(return_value={"models": [{"model": "llama"}]})),
+    )
+    validation.validate_ollama_requirements(env, "http://localhost:11434")
+    monkeypatch.setattr(validation.requests, "get", Mock(side_effect=RuntimeError("down")))
+    with pytest.raises(ConnectionError):
+        validation.validate_ollama_requirements(env, "http://localhost:11434")
+
