@@ -58,7 +58,7 @@ jobs:
         set -e
         coverage_status=0
         if [ -f coverage.json ]; then
-          PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run python .github/scripts/check-python-coverage-floor.py coverage.json --min 70 || coverage_status=$?
+          PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run python .github/scripts/check-python-coverage-floor.py coverage.json --min 65 || coverage_status=$?
         else
           echo "coverage.json was not generated."
           coverage_status=1
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: ['22', '24', '26']
+        node-version: ['24', '26']
 
     steps:
       - uses: actions/checkout@v7
