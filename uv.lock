@@ -812,7 +812,7 @@ requires-dist = [
     { name = "langchain-google-genai", specifier = "~=4.2.5" },
     { name = "langchain-litellm", specifier = "~=0.6.4" },
     { name = "langchain-ollama", specifier = "~=1.1.0" },
-    { name = "langfuse", specifier = "~=3.14.4" },
+    { name = "langfuse", specifier = "~=4.10.0" },
     { name = "mem0ai", specifier = "~=1.0.1" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "ollama", specifier = "~=0.6.1" },
@@ -1838,12 +1838,11 @@ wheels = [
 
 [[package]]
 name = "langfuse"
-version = "3.14.6"
+version = "4.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "backoff" },
     { name = "httpx" },
-    { name = "openai" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
@@ -1851,9 +1850,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "wrapt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e5/e4/5bb96bc5f95f476c8f7c4e654a6420250938cc21645b914a1309c2dc3d49/langfuse-3.14.6.tar.gz", hash = "sha256:058f7b7caa9284b964feaee81c223542d78e9fb4daabf312269b9f903471b9c4", size = 236530, upload-time = "2026-04-01T17:27:55.057Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ca/d8/442d3f874c1ae396db42332f09efb331edb5b50c59bf372803ef0aa1ecc1/langfuse-4.10.0.tar.gz", hash = "sha256:5e6c8f2aff218b8c75c2dc97e86b3d452cc1e936ac1533df2b7584c69d49ef58", size = 346374, upload-time = "2026-06-23T10:02:41.593Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/9a/f2d82cdb7fb71d89de2e693b317a8f2c3d3da44db8a1533b96cf0fbe362f/langfuse-3.14.6-py3-none-any.whl", hash = "sha256:5eb22a5ea579ac10f050513e3fedccc3c9a981eeefe44f9014273bc229a56f88", size = 421426, upload-time = "2026-04-01T17:27:53.487Z" },
+    { url = "https://files.pythonhosted.org/packages/78/4d/279f93ea5a5fbd9dd4519e5df169237bb8d2f2164fc76d19afae0d5aa95c/langfuse-4.10.0-py3-none-any.whl", hash = "sha256:3bb110df24755245721374ac622e286f2fcfab68f4a9df45d24dde5d6fee1a77", size = 607392, upload-time = "2026-06-23T10:02:40.136Z" },
 ]
 
 [[package]]
