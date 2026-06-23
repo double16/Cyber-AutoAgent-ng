@@ -1,3 +1,4 @@
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -165,3 +166,106 @@ def test_llm_json_patch_helpers_and_response_format_detection():
     assert patch.response_format_has_root_elements_model(ElementsModel) is True
     assert patch.response_format_has_root_elements_model(OtherModel) is False
     assert patch.response_format_has_root_elements_model(None) is False
+
+
+@pytest.mark.asyncio
+async def test_simplify_requests_for_llm_writes_har_and_network_summary(tmp_path):
+    service = mod.BrowserService.__new__(mod.BrowserService)
+    service.artifacts_dir = str(tmp_path)
+    service.stagehand = SimpleNamespace(
+        context=SimpleNamespace(
+            browser=SimpleNamespace(
+                browser_type=SimpleNamespace(name="chromium"),
+                version="1.2.3",
+            )
+        )
+    )
+
+    class FakeResponse:
+        status = 302
+        status_text = "Found"
+
+        async def all_headers(self):
+            return {
+                "content-type": "text/html",
+                "location": "https://example.com/next",
+                "set-cookie": "sid=abc; Path=/",
+                "x-response": "yes",
+            }
+
+        async def body(self):
+            return b"<html>redirect</html>"
+
+    class FakeRequest:
+        method = "POST"
+        url = "https://example.com/login?next=%2Fadmin"
+        headers = {"content-type": "application/json"}
+        post_data_buffer = b'{"user":"a"}'
+        timing = {
+            "startTime": 1_700_000_000_000,
+            "domainLookupStart": 1,
+            "domainLookupEnd": 3,
+            "connectStart": 3,
+            "connectEnd": 5,
+            "requestStart": 5,
+            "responseStart": 11,
+            "responseEnd": 20,
+            "secureConnectionStart": 4,
+        }
+
+        async def all_headers(self):
+            return {
+                "content-type": "application/json",
+                "cookie": "sid=abc",
+                "x-request": "yes",
+            }
+
+        async def response(self):
+            return FakeResponse()
+
+    summary = await service.simplify_requests_for_llm([FakeRequest()])
+
+    assert "network_calls[1]" in summary
+    assert "`POST` `https://example.com/login?next=%2Fadmin`" in summary
+    assert "Status Code: `302`" in summary
+    har_files = list(tmp_path.glob("network_calls_*.har"))
+    assert har_files
+    har = json.loads(har_files[0].read_text())
+    entry = har["log"]["entries"][0]
+    assert entry["request"]["queryString"] == [{"name": "next", "value": "/admin"}]
+    assert entry["request"]["cookies"][0]["name"] == "sid"
+    assert entry["response"]["redirectURL"] == "https://example.com/next"
+
+
+@pytest.mark.asyncio
+async def test_interaction_context_capture_filters_and_unhooks(monkeypatch):
+    service = mod.BrowserService.__new__(mod.BrowserService)
+    service.simplify_metadata_for_llm = AsyncMock(return_value="summary")
+    registered = {}
+    removed = []
+    service.on = lambda name, fn: registered.setdefault(name, fn)
+    service.off = lambda name, fn: removed.append((name, fn))
+
+    async def run_in_loop(fn):
+        return await fn()
+
+    service.run_in_browser_loop = run_in_loop
+
+    async with service.interaction_context_capture(only_domains=["example.com"]) as collector:
+        registered["request"](SimpleNamespace(method="GET", url="https://example.com/a"))
+        registered["request"](SimpleNamespace(method="OPTIONS", url="https://example.com/skip"))
+        registered["request"](SimpleNamespace(method="GET", url="https://other.test/a"))
+        registered["download"]("/tmp/file")
+        registered["dialog"](SimpleNamespace(type="alert", message="hi", default_value=""))
+
+        class FakeArg:
+            async def json_value(self):
+                return {"x": 1}
+
+        await registered["console"](SimpleNamespace(type="log", args=[FakeArg()]))
+        assert len(collector.requests) == 1
+        assert collector.downloads == ["/tmp/file"]
+        assert collector.dialogs[0]["message"] == "hi"
+        assert collector.logs[0]["args"] == [{"x": 1}]
+
+    assert len(removed) == 7

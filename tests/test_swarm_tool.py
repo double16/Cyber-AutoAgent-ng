@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import pytest
 
@@ -229,3 +229,28 @@ class SwarmToolTests(unittest.TestCase):
 
         self.assertEqual("error", out["status"])
         self.assertIn("Custom swarm execution failed: kaboom", out["content"][0]["text"])
+
+
+def test_swarm_creates_custom_agents_and_error_paths(monkeypatch):
+    created = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    agents = swarm_mod._create_custom_agents(
+        FakeAgent,
+        [
+            {"name": "Recon", "system_prompt": "Find hosts", "tools": ["shell"]},
+            {"name": "", "system_prompt": "", "tools": []},
+        ],
+    )
+    assert len(agents) == 2
+    assert created[0]["name"] == "Recon"
+
+    monkeypatch.setattr(swarm_mod, "_create_custom_agents", Mock(side_effect=RuntimeError("boom")))
+    setattr(swarm_mod.swarm, "agent_factory", FakeAgent)
+    result = swarm_mod.swarm(task="do it", agents=[{"name": "a"}])
+    assert result["status"] == "error"
+    assert "boom" in result["content"][0]["text"]
+

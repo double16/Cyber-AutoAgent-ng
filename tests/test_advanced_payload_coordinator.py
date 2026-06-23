@@ -4,6 +4,7 @@ import base64
 import json
 from subprocess import DEVNULL
 from types import SimpleNamespace
+from unittest.mock import Mock
 from urllib.parse import parse_qs, urlparse
 
 import modules.operation_plugins.web.tools.advanced_payload_coordinator as apc
@@ -1374,3 +1375,26 @@ def test_coordinator_phase5_retries_post_when_get_produces_no_injection_vulns(mo
 
     # Counts should reflect at least 1 vuln
     assert data["counts"]["vulnerabilities"] >= 1
+
+
+
+def test_advanced_payload_small_helpers_and_normalization(monkeypatch):
+    assert apc._b64(None) == ""
+    assert apc._b64(b"abc") == "YWJj"
+    assert apc._coerce_str(b"\xffabc").endswith("abc")
+    assert apc.RequestConfig("https://x", http_method="post").inject_in_body() is True
+    assert apc.RequestConfig("https://x", http_method="get").inject_in_body() is False
+
+    monkeypatch.setattr(apc, "setup_payload_tools", Mock(return_value={"tools": [], "failed": []}))
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", Mock(return_value=["q"]))
+    monkeypatch.setattr(apc, "_coordinate_xss_testing", Mock(return_value=[]))
+    monkeypatch.setattr(apc, "_test_cors_configurations", Mock(return_value=[]))
+    monkeypatch.setattr(apc, "_coordinate_injection_testing", Mock(return_value=[]))
+    monkeypatch.setattr(apc, "_analyze_payload_intelligence", Mock(return_value={"attack_vectors": [], "bypass_techniques": [], "exploitation_chains": []}))
+    monkeypatch.setattr(apc, "_generate_payload_recommendations", Mock(return_value=["next"]))
+
+    result = json.loads(apc.advanced_payload_coordinator("example.com", test_type="template", parameters="a,b,c,d,e,f"))
+    assert result["target"] == "https://example.com"
+    assert result["test_type"] == "ssti"
+    assert result["parameters_discovered"] == ["a", "b", "c", "d", "e", "f"]
+

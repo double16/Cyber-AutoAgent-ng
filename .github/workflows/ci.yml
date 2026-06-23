@@ -7,8 +7,8 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  lint-and-test:
-    name: Lint and Test
+  test-python:
+    name: Test Python
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -58,7 +58,7 @@ jobs:
         set -e
         coverage_status=0
         if [ -f coverage.json ]; then
-          PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run python .github/scripts/check-python-coverage-floor.py coverage.json --min 50 || coverage_status=$?
+          PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run python .github/scripts/check-python-coverage-floor.py coverage.json --min 70 || coverage_status=$?
         else
           echo "coverage.json was not generated."
           coverage_status=1
@@ -91,17 +91,27 @@ jobs:
         export PYTHONPATH="${PWD}/src:${PYTHONPATH}"
         PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run pylint src/ --fail-under=9.5
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v6
-      with:
-        node-version: '24'
-        cache: 'npm'
-        cache-dependency-path: src/modules/interfaces/react/package-lock.json
+  test-tui:
+    name: Test Terminal UI
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['22', '24', '26']
 
-    - name: npm install packages
-      working-directory: src/modules/interfaces/react
-      run: npm install
+    steps:
+      - uses: actions/checkout@v7
 
-    - name: Run React tests
-      working-directory: src/modules/interfaces/react
-      run: npm run validate
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: src/modules/interfaces/react/package-lock.json
+
+      - name: npm install packages
+        working-directory: src/modules/interfaces/react
+        run: npm install
+
+      - name: Run React tests
+        working-directory: src/modules/interfaces/react
+        run: npm run validate

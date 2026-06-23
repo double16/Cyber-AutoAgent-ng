@@ -783,7 +783,7 @@ class BrowserService(EventEmitter):
                     parsed_cookie = SimpleCookie(cookie_header)
                     for name, value in parsed_cookie.items():  # type: tuple[str, Morsel]
                         har_entry["request"]["cookies"].append(
-                            {"name": name, "value": value}
+                            {"name": name, "value": value.value}
                         )
 
                 simplified_request = [
