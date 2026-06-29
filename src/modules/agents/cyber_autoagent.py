@@ -255,7 +255,7 @@ def create_agent(
 
     # Tool router to prevent unknown-tool failures by routing to shell before execution
     # Allow configurable truncation of large tool outputs via env var
-    computed_max_results_chars = min(ceil(prompt_token_limit * 0.10), 30000)
+    computed_max_results_chars = min(ceil(prompt_token_limit // 10), 30000) if prompt_token_limit else 30000
     try:
         max_result_chars = int(os.getenv("CYBER_TOOL_MAX_RESULT_CHARS", str(computed_max_results_chars)))
     except Exception:
@@ -695,13 +695,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         from modules.handlers.output_interceptor import setup_output_interception
 
         setup_output_interception()
-
-    # Ensure react package namespace is importable even if some submodules are removed
-    # Tests import modules.handlers.react.react_bridge_handler directly
-    try:
-        from modules.handlers.react import ReactBridgeHandler as _RBH  # noqa: F401
-    except Exception:
-        pass
 
     callback_handler = ReactBridgeHandler(
         max_steps=config.max_steps,

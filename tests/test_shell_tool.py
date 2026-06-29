@@ -43,7 +43,6 @@ def test_shell_single_command(mock_shell_original):
         ignore_errors=False,
         timeout=None,
         work_dir=None,
-        non_interactive=True
     )
 
 
@@ -61,7 +60,6 @@ def test_shell_multiple_independent_commands(mock_shell_original, mock_os_system
         ignore_errors=False,
         timeout=None,
         work_dir=None,
-        non_interactive=True
     )
 
 
@@ -89,7 +87,6 @@ def test_shell_command_joining_heuristic(mock_shell_original, mock_os_system, mo
         ignore_errors=False,
         timeout=None,
         work_dir=None,
-        non_interactive=True
     )
 
 
@@ -102,7 +99,6 @@ def test_shell_timeout_normalization_and_clamping(mock_shell_original):
         ignore_errors=False,
         timeout=30,
         work_dir=None,
-        non_interactive=True
     )
 
     # Test large timeout that takes multiple divisions
@@ -113,7 +109,6 @@ def test_shell_timeout_normalization_and_clamping(mock_shell_original):
         ignore_errors=False,
         timeout=30,
         work_dir=None,
-        non_interactive=True
     )
 
     # Test clamping high
@@ -124,7 +119,6 @@ def test_shell_timeout_normalization_and_clamping(mock_shell_original):
         ignore_errors=False,
         timeout=900,
         work_dir=None,
-        non_interactive=True
     )
 
     # Test clamping low
@@ -135,7 +129,6 @@ def test_shell_timeout_normalization_and_clamping(mock_shell_original):
         ignore_errors=False,
         timeout=30,
         work_dir=None,
-        non_interactive=True
     )
 
     # Test sane timeout
@@ -146,7 +139,6 @@ def test_shell_timeout_normalization_and_clamping(mock_shell_original):
         ignore_errors=False,
         timeout=100,
         work_dir=None,
-        non_interactive=True
     )
 
     # Test list of objects (should not be joined by heuristic as they are not strings)
@@ -158,7 +150,6 @@ def test_shell_timeout_normalization_and_clamping(mock_shell_original):
         ignore_errors=False,
         timeout=None,
         work_dir=None,
-        non_interactive=True
     )
 
 
@@ -184,7 +175,6 @@ def test_shell_command_joining_heuristic_edge_cases(mock_shell_original, mock_os
         ignore_errors=False,
         timeout=None,
         work_dir=None,
-        non_interactive=True
     )
 
     # Test second item is a file but not executable -> SHOULD BE JOINED
@@ -200,7 +190,6 @@ def test_shell_command_joining_heuristic_edge_cases(mock_shell_original, mock_os
         ignore_errors=False,
         timeout=None,
         work_dir=None,
-        non_interactive=True
     )
 
     # Test second item is NEITHER a command NOR a file/dir -> SHOULD BE JOINED
@@ -216,7 +205,6 @@ def test_shell_command_joining_heuristic_edge_cases(mock_shell_original, mock_os
         ignore_errors=False,
         timeout=None,
         work_dir=None,
-        non_interactive=True
     )
 
 
@@ -228,5 +216,4 @@ def test_shell_pass_arguments(mock_shell_original):
         ignore_errors=True,
         timeout=None,
         work_dir="/tmp",
-        non_interactive=True
     )

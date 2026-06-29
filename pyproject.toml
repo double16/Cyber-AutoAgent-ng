@@ -60,6 +60,7 @@ dependencies = [
     "validators~=0.35.0",
     "ddgs~=9.14.1",
     "rapidfuzz~=3.14.3",
+    "psutil~=7.2.2",
 ]
 
 [project.optional-dependencies]

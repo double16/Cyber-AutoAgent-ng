@@ -717,10 +717,29 @@ def main():
         )
 
     # Initialize timing
-    start_time = time.time()
+    operation_start = time.time()
     callback_handler = None
 
+    print(f"\n{Colors.DIM}{'─' * 80}{Colors.RESET}\n")
+
     try:
+        # Initial user message to start the agent
+        initial_prompt = f"Conduct security assessment of {args.target} for: {args.objective}"
+        current_message = initial_prompt
+
+        # Expose at module level for tests patching cyberautoagent.get_initial_prompt
+        globals()["get_initial_prompt"] = lambda: initial_prompt
+
+        active_plan = get_plan() or ""
+        if "plan_overview[1]" not in active_plan:
+            active_plan = None
+        active_task = get_active_task() or ""
+        memories = mem0_list()
+        if memories.startswith("Error:"):
+            memories = ""
+
+        print_status("Cyber-AutoAgent online and starting", "SUCCESS")
+
         # Create agent
         logger.info("Creating agent with iterations=%d", args.iterations)
         config = AgentConfig(
@@ -743,43 +762,19 @@ def main():
             objective=args.objective,
             config=config,
         )
-        setattr(agent, "telemetry", telemetry)
-        print_status("Cyber-AutoAgent online and starting", "SUCCESS")
 
-        # Initial user message to start the agent
-        initial_prompt = f"Conduct security assessment of {args.target} for: {args.objective}"
-        current_message = initial_prompt
-
-        if args.cont:
-            active_plan = get_plan() or ""
-            if "plan_overview[1]" not in active_plan:
-                active_plan = None
-            active_task = get_active_task() or ""
-            memories = mem0_list()
-            if memories.startswith("Error:"):
-                memories = ""
-            if active_plan:
-                current_message = ""
-                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `get_plan()`)\n{active_plan}"}])]
-                if memories:
-                    agent.messages.append(Message(role="user",
-                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
-                if 'status="active"' in active_task:
-                    agent.messages.append(Message(role="user", content=[{"text": active_task}]))
-
-        # Backward-compat helper for tests expecting get_initial_prompt to exist
-        def _initial_prompt_accessor():
-            return initial_prompt
-
-        # Expose at module level for tests patching cyberautoagent.get_initial_prompt
-        globals()["get_initial_prompt"] = _initial_prompt_accessor
-
-        print(f"\n{Colors.DIM}{'─' * 80}{Colors.RESET}\n")
+        if active_plan:
+            current_message = ""
+            agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `get_plan()`)\n{active_plan}"}])]
+            if memories:
+                agent.messages.append(Message(role="user",
+                                              content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
+            if 'status="active"' in active_task:
+                agent.messages.append(Message(role="user", content=[{"text": active_task}]))
 
         # Execute autonomous operation
-        operation_start = time.time()
         step0_retry = 2
-        # the number of consecutive action-less results
+        # the count of consecutive action-less results
         actionless_step_count = 0
 
         # SDK-aligned execution loop with continuation support
@@ -806,7 +801,7 @@ def main():
                 strip_reflection_snapshot_messages(agent)
                 _ensure_prompt_within_budget(agent)
 
-                # Execute agent with current message. This is a long, blocking call.
+                # Execute agent with the current message. This is a long, blocking call.
                 result = agent(current_message)
 
                 logger.debug(f"Agent result: {repr(result)}")
@@ -1044,7 +1039,7 @@ def main():
         # Generate operation summary
         if callback_handler:
             summary = callback_handler.get_summary()
-            elapsed_time = time.time() - start_time
+            elapsed_time = time.time() - operation_start
             minutes = int(elapsed_time // 60)
             seconds = int(elapsed_time % 60)
 
@@ -1267,7 +1262,7 @@ def main():
 
         # Log operation end
         end_time = time.time()
-        total_time = end_time - start_time
+        total_time = end_time - operation_start
         logger.info("Operation %s ended after %.2fs", operation_id, total_time)
 
         flush_traces(telemetry=telemetry)
