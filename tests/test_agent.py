@@ -146,80 +146,86 @@ class TestMemoryConfig:
     """Test memory configuration generation"""
 
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
-    def test_memory_config_local(self, mock_init_memory):
+    @patch("modules.agents.cyber_autoagent.get_memory_client")
+    @patch("modules.config.ConfigManager.validate_requirements")
+    @patch("modules.config.models.factory.create_ollama_model")
+    @patch("modules.agents.cyber_autoagent.Agent")
+    @patch("modules.handlers.react.ReactBridgeHandler")
+    @patch("modules.agents.cyber_autoagent.get_system_prompt")
+    def test_memory_config_local(
+            self,
+            mock_system_prompt,
+            mock_handler,
+            mock_agent_class,
+            mock_create_ollama,
+            mock_validate_requirements,
+            mock_get_memory_client,
+            mock_init_memory,
+    ):
         """Test local memory configuration is created correctly"""
         # The current implementation builds memory config inline in create_agent
         # We'll test that the right config is passed to initialize_memory_system
-        with patch("modules.config.ConfigManager.validate_requirements"):
-            with patch(
-                "modules.config.models.factory.create_ollama_model"
-            ) as mock_create_ollama:
-                mock_create_ollama.return_value = Mock()
-                with patch("modules.agents.cyber_autoagent.Agent") as mock_agent_class:
-                    mock_agent_class.return_value = Mock()
-                    with patch(
-                        "modules.handlers.react.ReactBridgeHandler"
-                    ) as mock_handler:
-                        mock_handler.return_value = Mock()
-                        with patch("modules.agents.cyber_autoagent.get_system_prompt"):
-                            import sys
+        mock_validate_requirements.return_value = Mock()
+        mock_create_ollama.return_value = Mock()
+        mock_agent_class.return_value = Mock()
+        mock_handler.return_value = Mock()
+        sys.path.insert(0, "../../src")
+        from modules.agents.cyber_autoagent import AgentConfig
 
-                            sys.path.insert(0, "../../src")
-                            from modules.agents.cyber_autoagent import AgentConfig
+        # Call create_agent with local server
+        config = AgentConfig(
+            target="test.com", objective="test", provider="ollama"
+        )
+        create_agent(
+            target="test.com", objective="test", config=config
+        )
 
-                            # Call create_agent with local server
-                            config = AgentConfig(
-                                target="test.com", objective="test", provider="ollama"
-                            )
-                            create_agent(
-                                target="test.com", objective="test", config=config
-                            )
+        # Check that initialize_memory_system was called
+        mock_init_memory.assert_called_once()
+        config = mock_init_memory.call_args[0][0]
 
-                            # Check that initialize_memory_system was called
-                            mock_init_memory.assert_called_once()
-                            config = mock_init_memory.call_args[0][0]
-
-                            # Verify local config structure
-                            assert config["embedder"]["provider"] == "ollama"
-                            assert config["llm"]["provider"] == "ollama"
-                            assert "ollama_base_url" in config["embedder"]["config"]
+        # Verify local config structure
+        assert config["embedder"]["provider"] == "ollama"
+        assert config["llm"]["provider"] == "ollama"
+        assert "ollama_base_url" in config["embedder"]["config"]
 
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
-    def test_memory_config_remote(self, mock_init_memory):
+    @patch("modules.agents.cyber_autoagent.get_memory_client")
+    @patch("modules.config.ConfigManager.validate_requirements")
+    @patch("modules.config.models.factory.create_bedrock_model")
+    @patch("modules.agents.cyber_autoagent.Agent")
+    @patch("modules.handlers.react.ReactBridgeHandler")
+    @patch("modules.agents.cyber_autoagent.get_system_prompt")
+    def test_memory_config_remote(
+            self,
+            mock_system_prompt,
+            mock_handler,
+            mock_agent_class,
+            mock_create_bedrock_model,
+            mock_validate_requirements,
+            mock_get_memory_client,
+            mock_init_memory,
+    ):
         """Test remote memory configuration is created correctly"""
-        with patch("modules.config.ConfigManager.validate_requirements"):
-            with patch(
-                "modules.config.models.factory.create_bedrock_model"
-            ) as mock_create_remote:
-                mock_create_remote.return_value = Mock()
-                with patch("modules.agents.cyber_autoagent.Agent") as mock_agent_class:
-                    mock_agent_class.return_value = Mock()
-                    with patch(
-                        "modules.handlers.react.ReactBridgeHandler"
-                    ) as mock_handler:
-                        mock_handler.return_value = Mock()
-                        with patch("modules.agents.cyber_autoagent.get_system_prompt"):
-                            import sys
+        sys.path.insert(0, "../../src")
+        from modules.agents.cyber_autoagent import AgentConfig
 
-                            sys.path.insert(0, "../../src")
-                            from modules.agents.cyber_autoagent import AgentConfig
+        # Call create_agent with remote server
+        config = AgentConfig(
+            target="test.com", objective="test", provider="bedrock"
+        )
+        create_agent(
+            target="test.com", objective="test", config=config
+        )
 
-                            # Call create_agent with remote server
-                            config = AgentConfig(
-                                target="test.com", objective="test", provider="bedrock"
-                            )
-                            create_agent(
-                                target="test.com", objective="test", config=config
-                            )
+        # Check that initialize_memory_system was called
+        mock_init_memory.assert_called_once()
+        config = mock_init_memory.call_args[0][0]
 
-                            # Check that initialize_memory_system was called
-                            mock_init_memory.assert_called_once()
-                            config = mock_init_memory.call_args[0][0]
-
-                            # Verify remote config structure
-                            assert config["embedder"]["provider"] == "aws_bedrock"
-                            assert config["llm"]["provider"] == "aws_bedrock"
-                            assert "aws_region" in config["embedder"]["config"]
+        # Verify remote config structure
+        assert config["embedder"]["provider"] == "aws_bedrock"
+        assert config["llm"]["provider"] == "aws_bedrock"
+        assert "aws_region" in config["embedder"]["config"]
 
 
 class TestServerValidation:
@@ -327,7 +333,7 @@ class TestCreateAgent:
     @patch("modules.agents.cyber_autoagent.Agent")
     @patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
     @patch("modules.agents.cyber_autoagent.get_system_prompt")
-    @patch("modules.agents.cyber_autoagent.initialize_memory_system")
+    @patch("modules.tools.memory.initialize_memory_system")
     def test_create_agent_remote_success(
         self,
         mock_init_memory,
@@ -371,8 +377,10 @@ class TestCreateAgent:
     @patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
     @patch("modules.agents.cyber_autoagent.get_system_prompt")
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
+    @patch("modules.agents.cyber_autoagent.get_memory_client")
     def test_create_agent_local_success(
         self,
+            mock_get_memory_client,
         mock_init_memory,
         mock_get_prompt,
         mock_react_bridge_handler,
@@ -425,8 +433,10 @@ class TestCreateAgent:
     @patch("modules.config.models.factory.create_ollama_model")
     @patch("modules.config.models.factory._handle_model_creation_error")
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
+    @patch("modules.agents.cyber_autoagent.get_memory_client")
     def test_create_agent_model_creation_failure(
         self,
+            mock_get_memory_client,
         mock_init_memory,
         mock_handle_error,
         mock_create_ollama,

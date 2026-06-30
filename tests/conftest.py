@@ -49,6 +49,7 @@ for _var in (
     "MAX_COMPLETION_TOKENS",
     "MAX_TOKENS",
     "ENABLE_OBSERVABILITY",
+    "MEM0_LLM_MODEL",
 ):
     os.environ.pop(_var, None)
 
