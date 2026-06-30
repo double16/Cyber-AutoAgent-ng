@@ -42,7 +42,6 @@ from botocore.exceptions import (
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ReadTimeout as RequestsReadTimeout
-from strands import Agent
 from strands.telemetry.config import StrandsTelemetry
 from strands.types.content import Message
 from strands.types.exceptions import MaxTokensReachedException
@@ -60,7 +59,7 @@ from modules.config.system.environment import auto_setup, clean_operation_memory
 from modules.config.manager import get_config_manager
 from modules.config.types import get_default_base_dir, DEFAULT_ITERATIONS
 from modules.handlers.base import StepLimitReached, is_docker
-from modules.handlers.conversation_budget import strip_reflection_snapshot_messages, _dedupe_state_markers
+from modules.handlers.conversation_budget import strip_reflection_snapshot_messages
 from modules.handlers.utils import (
     Colors,
     get_output_path,
@@ -73,7 +72,6 @@ from modules.handlers.utils import (
 )
 from modules.prompts.factory import get_reflection_snapshot
 from modules.tools import browser, channel_close_all, get_active_task, get_plan, mem0_list, get_memory_client
-from modules.tools.memory import OperationPlan
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
 
@@ -415,6 +413,7 @@ def main():
     args = parser.parse_args()
 
     if args.heap_monitor or os.getenv("CYBER_HEAP_MONITOR", "").lower() == "true":
+        # side effect is the heap monitor starts when imported
         from src.modules.utils import heap_monitor
 
     bug_bounty_headers = {}

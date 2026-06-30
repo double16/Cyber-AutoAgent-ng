@@ -294,14 +294,13 @@ def create_agent(
     )
     print_status(f"Memory system initialized for operation: {operation_id}", "SUCCESS")
 
+    memory_client = get_memory_client(silent=True)
+
     # Get memory overview for system prompt enhancement and UI display
     memory_overview = None
-    memory_client = None
     if has_existing_memories or config.memory_path:
         try:
-            memory_client = get_memory_client()
-            if memory_client:
-                memory_overview = memory_client.get_memory_overview()
+            memory_overview = memory_client.get_memory_overview()
         except Exception as e:
             agent_logger.debug(
                 "Could not get memory overview for system prompt: %s", str(e)
@@ -619,7 +618,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     plan_snapshot = None
     plan_current_phase = None
     try:
-        memory_client = get_memory_client(silent=True)
         plan_snapshot = memory_client.get_active_plan(operation_id=operation_id)
         plan_current_phase = plan_snapshot.current_phase if plan_snapshot else None
     except Exception as e:
