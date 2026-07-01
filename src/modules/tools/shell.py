@@ -100,5 +100,4 @@ def shell(
         ignore_errors=ignore_errors,
         timeout=timeout,
         work_dir=work_dir,
-        non_interactive=True
     )

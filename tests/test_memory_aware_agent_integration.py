@@ -90,7 +90,7 @@ class TestMemoryAwareAgentIntegration:
         # Verify memory system was initialized
         mock_initialize_memory.assert_called_once()
         mock_check_memories.assert_called_once_with("test.com", "bedrock", "OP_20240101_120000")
-        assert mock_get_client.call_count == 2  # Called for overview and active plan
+        assert mock_get_client.call_count == 1
         mock_memory_client.get_memory_overview.assert_called_once_with()
 
         # Verify agent was created with memory-aware system prompt

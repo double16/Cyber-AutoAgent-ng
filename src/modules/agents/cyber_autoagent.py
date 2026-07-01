@@ -255,7 +255,7 @@ def create_agent(
 
     # Tool router to prevent unknown-tool failures by routing to shell before execution
     # Allow configurable truncation of large tool outputs via env var
-    computed_max_results_chars = min(ceil(prompt_token_limit * 0.10), 30000)
+    computed_max_results_chars = min(ceil(prompt_token_limit // 10), 30000) if prompt_token_limit else 30000
     try:
         max_result_chars = int(os.getenv("CYBER_TOOL_MAX_RESULT_CHARS", str(computed_max_results_chars)))
     except Exception:
@@ -294,14 +294,13 @@ def create_agent(
     )
     print_status(f"Memory system initialized for operation: {operation_id}", "SUCCESS")
 
+    memory_client = get_memory_client(silent=True)
+
     # Get memory overview for system prompt enhancement and UI display
     memory_overview = None
-    memory_client = None
     if has_existing_memories or config.memory_path:
         try:
-            memory_client = get_memory_client()
-            if memory_client:
-                memory_overview = memory_client.get_memory_overview()
+            memory_overview = memory_client.get_memory_overview()
         except Exception as e:
             agent_logger.debug(
                 "Could not get memory overview for system prompt: %s", str(e)
@@ -619,7 +618,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     plan_snapshot = None
     plan_current_phase = None
     try:
-        memory_client = get_memory_client(silent=True)
         plan_snapshot = memory_client.get_active_plan(operation_id=operation_id)
         plan_current_phase = plan_snapshot.current_phase if plan_snapshot else None
     except Exception as e:
@@ -695,13 +693,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         from modules.handlers.output_interceptor import setup_output_interception
 
         setup_output_interception()
-
-    # Ensure react package namespace is importable even if some submodules are removed
-    # Tests import modules.handlers.react.react_bridge_handler directly
-    try:
-        from modules.handlers.react import ReactBridgeHandler as _RBH  # noqa: F401
-    except Exception:
-        pass
 
     callback_handler = ReactBridgeHandler(
         max_steps=config.max_steps,

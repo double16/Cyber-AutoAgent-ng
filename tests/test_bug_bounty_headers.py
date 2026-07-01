@@ -14,7 +14,9 @@ from modules.agents.cyber_autoagent import AgentConfig, create_agent
 @patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
 @patch("modules.agents.cyber_autoagent.prompts.get_system_prompt")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
+@patch("modules.agents.cyber_autoagent.get_memory_client")
 def test_bug_bounty_headers_are_applied_and_added_to_prompt(
+        mock_get_memory_client,
     mock_init_memory,
     mock_get_prompt,
     mock_react_bridge_handler,
