@@ -102,7 +102,6 @@ RUN set -eux; \
     nmap \
     sqlmap \
     curl \
-    grpcurl \
     netcat-traditional \
     tcpdump \
     git \
