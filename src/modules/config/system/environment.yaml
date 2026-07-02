@@ -63,6 +63,13 @@ cyber_tools:
     caps: [graphql]
     canary: "graphql-path-enum --help"
 
+  # gRPC tools
+  grpcurl:
+    description: "Client for gRPC"
+    preference: preferred
+    caps: [grp_client]
+    canary: "grpcurl --help"
+
   # JWT manipulation tools
   jwt-tool:
     description: "JWT analysis and manipulation toolkit"

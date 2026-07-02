@@ -3,7 +3,7 @@
 
 ARG APT_PROXY
 
-FROM public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest
+FROM public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:0.9.1
 
 LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"

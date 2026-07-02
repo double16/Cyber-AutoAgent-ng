@@ -404,7 +404,7 @@ Artifact references include immediate context for LLM comprehension:
 | `CYBER_CONVERSATION_WINDOW`          | 100     | Sliding window size (messages)                                            |
 | `CYBER_CONVERSATION_PRESERVE_FIRST`  | 1       | Initial messages to preserve                                              |
 | `CYBER_CONVERSATION_PRESERVE_LAST`   | 5       | Recent messages to preserve (reduced from 12 to prevent pruning deadlock) |
-| `CYBER_SDK_CONTEXT_MANAGER`          | `auto`  | Strands SDK context facade for stateless models.                          |
+| `CYBER_SDK_CONTEXT_MANAGER`          | `false` | Strands SDK context facade for stateless models.                          |
 
 ## Prompt Caching Integration
 
