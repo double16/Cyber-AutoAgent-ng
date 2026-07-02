@@ -318,7 +318,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `MAX_TOKENS_REASONING_LIMIT`        | Override LLM output token upper bound (reasoning)     | No (32,000 default)           |
 | `CYBER_CONTEXT_LIMIT`               | Limit detected prompt tokens                          | No (auto-detected)            |
 | `CYBER_PROMPT_LIMIT_FORCE`          | Force prompt token limit                              | No (auto-detected)            |
-| `CYBER_SDK_CONTEXT_MANAGER`         | Strands context facade (`auto`, `agentic`, `false`)   | No (default: `auto`)          |
+| `CYBER_SDK_CONTEXT_MANAGER`         | Strands context facade (`auto`, `agentic`, `false`)   | No (default: `false`)         |
 | `AWS_ACCESS_KEY_ID`                 | AWS credentials for Bedrock                           | For Bedrock provider          |
 | `AWS_SECRET_ACCESS_KEY`             | AWS credentials for Bedrock                           | For Bedrock provider          |
 | `AWS_REGION`                        | AWS region (default: us-east-1)                       | For Bedrock provider          |
