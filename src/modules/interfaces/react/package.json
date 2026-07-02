@@ -69,5 +69,14 @@
     "ts-jest": "^29.4.11",
     "tsx": "^4.6.2",
     "typescript": "^6.0.2"
+  },
+  "allowScripts": {
+    "cpu-features@0.0.10": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true,
+    "node-pty@1.1.0": true,
+    "protobufjs@7.6.4": true,
+    "ssh2@1.17.0": true,
+    "unrs-resolver@1.12.2": true
   }
 }

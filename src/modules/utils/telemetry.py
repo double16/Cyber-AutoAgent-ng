@@ -1,18 +1,14 @@
 import logging
 import time
-from typing import Optional, Any
 from opentelemetry import trace
 
 logger = logging.getLogger("CyberAutoAgent")
 
 
-def flush_traces(agent: Optional[Any] = None, telemetry: Optional[Any] = None):
+def flush_traces(telemetry):
     """
     Flush OpenTelemetry traces before exiting the thread the agent is running in.
     """
-    if telemetry is None:
-        if agent is not None and hasattr(agent, "telemetry"):
-            telemetry = agent.telemetry
     try:
         # Use the telemetry instance if available, otherwise use global tracer provider
         if telemetry and hasattr(telemetry, "tracer_provider"):

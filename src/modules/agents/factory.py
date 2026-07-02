@@ -239,7 +239,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
             # we must have this for providers whose toolUseId is broken
             agent_hooks.append(ToolUseIdHook())
 
-        agent_kwargs = {
+        agent_kwargs: Dict[str, Any] = {
             "model": strands_model,
             "name": name,
             "callback_handler": config.callback_handler,

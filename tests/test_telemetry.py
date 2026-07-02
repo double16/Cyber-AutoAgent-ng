@@ -11,13 +11,13 @@ class FakeTracerProvider:
         self.calls.append(timeout_millis)
 
 
-def test_flush_traces_uses_agent_telemetry_provider(monkeypatch):
+def test_flush_traces_uses_telemetry_provider(monkeypatch):
     provider = FakeTracerProvider()
-    agent = SimpleNamespace(telemetry=SimpleNamespace(tracer_provider=provider))
+    telemetry=SimpleNamespace(tracer_provider=provider)
     sleeps = []
     monkeypatch.setattr(mod.time, "sleep", sleeps.append)
 
-    mod.flush_traces(agent=agent)
+    mod.flush_traces(telemetry)
 
     assert provider.calls == [10000]
     assert sleeps == [2]
@@ -28,7 +28,7 @@ def test_flush_traces_uses_global_provider_when_no_telemetry(monkeypatch):
     monkeypatch.setattr(mod.trace, "get_tracer_provider", lambda: provider)
     monkeypatch.setattr(mod.time, "sleep", lambda seconds: None)
 
-    mod.flush_traces()
+    mod.flush_traces(None)
 
     assert provider.calls == [10000]
 
@@ -38,7 +38,7 @@ def test_flush_traces_ignores_provider_without_force_flush(monkeypatch):
     sleep = []
     monkeypatch.setattr(mod.time, "sleep", sleep.append)
 
-    mod.flush_traces()
+    mod.flush_traces(None)
 
     assert sleep == []
 
@@ -52,7 +52,7 @@ def test_flush_traces_logs_force_flush_errors(monkeypatch):
     monkeypatch.setattr(mod.trace, "get_tracer_provider", lambda: BrokenProvider())
     monkeypatch.setattr(mod.logger, "warning", lambda *args: warnings.append(args))
 
-    mod.flush_traces()
+    mod.flush_traces(None)
 
     assert warnings
     assert warnings[0][0] == "Error flushing traces: %s"
