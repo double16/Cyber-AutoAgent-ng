@@ -65,7 +65,11 @@ def temp_data_dir():
 @pytest.fixture
 def outputs_dir():
     """Return the path to the expected output directory"""
-    yield Path(__file__).parent / "outputs"
+    cwd = Path.cwd()
+    if (cwd / "tests").exists():
+        yield cwd / "outputs"
+    else:
+        yield Path.cwd() / ".." / "outputs"
 
 
 @pytest.fixture
