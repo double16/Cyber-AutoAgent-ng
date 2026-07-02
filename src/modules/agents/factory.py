@@ -254,7 +254,6 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 swarm_model_id,
             )
         else:
-            # FIXME: use context_manager for tooling context control or conversation_manager, but not both.
             agent_kwargs["conversation_manager"] = (
                 config.conversation_manager or get_shared_conversation_manager()
             )

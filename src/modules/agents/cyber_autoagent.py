@@ -739,6 +739,16 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         },
     )
 
+    sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "auto") or "auto").strip().lower()
+    if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
+        sdk_context_manager = None
+    elif sdk_context_manager not in {"auto", "agentic"}:
+        agent_logger.warning(
+            "Unsupported CYBER_SDK_CONTEXT_MANAGER=%r; using 'auto'",
+            sdk_context_manager,
+        )
+        sdk_context_manager = "auto"
+
     # Create hooks for SDK lifecycle events (tool invocations, etc.)
     # These work alongside the callback handler to capture all events
     from modules.handlers.react.hooks import ReactHooks
@@ -748,18 +758,20 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         emitter=callback_handler.emitter, operation_id=operation_id, agent_config=config
     )
 
+    tool_call_repair_hook = AgentRepairHook()
+
+    prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
+
     tool_router_hook = ToolRouterHook(
         shell,
         max_result_chars=max_result_chars,
         artifacts_dir=paths.get("artifacts"),
         artifact_threshold=artifact_threshold,
-    )
+    ) if sdk_context_manager is None else None
 
-    tool_call_repair_hook = AgentRepairHook()
-
-    prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
-    hooks: List[HookProvider] = [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]
-    swarm_hooks: List[HookProvider] = [tool_call_repair_hook, tool_router_hook, prompt_budget_hook]
+    # hooks to include in agents, order is important
+    hooks: List[HookProvider] = list(filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
+    swarm_hooks: List[HookProvider] = list(filter(bool, [tool_call_repair_hook, tool_router_hook, prompt_budget_hook]))
 
     if enable_prompt_optimization:
         # Create prompt rebuild hook for intelligent prompt updates
@@ -818,18 +830,9 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             # computed previously
             max_tool_chars=TOOL_COMPRESS_THRESHOLD,
             truncate_at=TOOL_COMPRESS_TRUNCATE
-        ),
+        ) if sdk_context_manager is None else None,
     )
     register_conversation_manager(conversation_manager)
-    sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "auto") or "auto").strip().lower()
-    if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
-        sdk_context_manager = None
-    elif sdk_context_manager not in {"auto", "agentic"}:
-        agent_logger.warning(
-            "Unsupported CYBER_SDK_CONTEXT_MANAGER=%r; using 'auto'",
-            sdk_context_manager,
-        )
-        sdk_context_manager = "auto"
     agent_logger.info(
         "Conversation manager created: window=%d, preserve_first=%d, preserve_last=%d, sdk_context_manager=%s",
         window_size,

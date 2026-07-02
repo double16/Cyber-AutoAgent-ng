@@ -727,7 +727,7 @@ class MappingConversationManager(SummarizingConversationManager):
             should_truncate_results=False,  # Use our layers instead of SDK truncation
             preserve_first_messages=preserve_first_messages,
         )
-        self.mapper = tool_result_mapper or LargeToolResultMapper()
+        self.mapper = tool_result_mapper
         self.preserve_first = max(0, preserve_first_messages)
         self.preserve_last = max(0, preserve_recent_messages)
         self.removed_message_count = 0
