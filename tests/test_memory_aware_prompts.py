@@ -121,7 +121,6 @@ class TestMemoryAwareSystemPrompts:
         result = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             operation_id="OP_20240101_120000",
             tools_context="",
             provider="bedrock",
@@ -141,7 +140,6 @@ class TestMemoryAwareSystemPrompts:
         result = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             operation_id="OP_20240101_120000",
             tools_context="",
             provider="bedrock",
@@ -168,7 +166,6 @@ class TestMemoryAwareSystemPrompts:
         result = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             operation_id="OP_20240101_120000",
             tools_context="",
             provider="bedrock",
@@ -204,7 +201,6 @@ class TestMemoryAwareSystemPrompts:
         result = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             operation_id="OP_20240101_120000",
             tools_context="",
             provider="bedrock",
@@ -244,7 +240,6 @@ Leverage these tools directly via shell.
         result = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             operation_id="OP_20240101_120000",
             tools_context=tools_context,
             provider="bedrock",
@@ -268,7 +263,6 @@ Leverage these tools directly via shell.
         result = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             operation_id="OP_20240101_120000",
             tools_context="",
             provider="bedrock",
@@ -288,7 +282,6 @@ Leverage these tools directly via shell.
         result_remote = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             operation_id="OP_20240101_120000",
             provider="bedrock",
         )
@@ -301,7 +294,6 @@ Leverage these tools directly via shell.
         result_local = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             operation_id="OP_20240101_120000",
             provider="ollama",
         )
@@ -317,8 +309,6 @@ Leverage these tools directly via shell.
             target="test.com",
             objective="test objective",
             operation_id="OP_20240101_120000",
-            current_step=0,
-            max_steps=50,
             has_existing_memories=True,
         )
 
@@ -333,8 +323,6 @@ Leverage these tools directly via shell.
             target="test.com",
             objective="test objective",
             operation_id="OP_20240101_120000",
-            current_step=0,
-            max_steps=50,
             has_existing_memories=False,
         )
 
@@ -361,7 +349,6 @@ class TestMemoryAwarePromptIntegration:
         result = get_system_prompt(
             target="vulnerable.com",
             objective="comprehensive penetration test",
-            max_steps=100,
             operation_id="OP_20240101_120000",
             has_existing_memories=True,
             memory_overview=memory_overview,

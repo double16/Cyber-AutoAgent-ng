@@ -16,7 +16,7 @@
  * Configuration Structure:
  * - Model Provider Settings: AI models, regions, authentication
  * - Docker Execution: Container settings, volumes, timeouts
- * - Assessment Parameters: iterations, confirmations, output formats
+ * - Assessment Parameters: duration/token/cost budgets, confirmations, output formats
  * - Memory Management: backends, paths, retention policies
  * - Observability: Langfuse integration, evaluation metrics
  * - UI Preferences: themes, display options, debugging
@@ -157,8 +157,12 @@ export interface Config {
   volumes?: string[];
 
   // Security Assessment Execution Parameters
-  /** Maximum tool executions before automatic termination */
-  iterations: number;
+  /** Required duration budget in minutes before automatic termination */
+  budgetMaxDuration: number;
+  /** Optional total token budget before automatic termination */
+  budgetMaxTokens?: number;
+  /** Optional total cost budget before automatic termination */
+  budgetMaxCost?: number;
   /** Automatically approve tool executions without user confirmation */
   autoApprove: boolean;
   /** Enable interactive tool confirmation prompts (inverse of autoApprove) */
@@ -388,7 +392,9 @@ export const defaultConfig: Config = {
   volumes: [],
 
   // Assessment Settings
-  iterations: 100, // Default from original Python CLI
+  budgetMaxDuration: 60,
+  budgetMaxTokens: undefined,
+  budgetMaxCost: undefined,
   autoApprove: true, // Default to auto-approve (bypass confirmations)
   confirmations: false, // Default to disabled confirmations
   maxThreads: 10,

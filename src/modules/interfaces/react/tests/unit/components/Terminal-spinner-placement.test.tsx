@@ -7,14 +7,14 @@
  * Edge cases covered:
  * 1. Operation startup (after operation_init)
  * 2. Post-reasoning (after reasoning ends, before tool selection)
- * 3. Post-step-header (after step header, before tool announcement)
+ * 3. Post-step-header (after progress update, before tool announcement)
  * 4. Tool execution (during tool invocation, before output)
  * 5. Post-tool-completion (after output, before next reasoning/step)
  */
 
 import { describe, it, expect } from '@jest/globals';
 
-type EventType = 'operation_init' | 'reasoning' | 'step_header' | 'tool_start' | 'output' | 'tool_end' | 'tool_invocation_end' | 'thinking' | 'rate_limit';
+type EventType = 'operation_init' | 'reasoning' | 'progress_update' | 'tool_start' | 'output' | 'tool_end' | 'tool_invocation_end' | 'thinking' | 'rate_limit';
 
 interface TestEvent {
   type: EventType;
@@ -23,6 +23,7 @@ interface TestEvent {
   step?: number;
   context?: string;
   urgent?: boolean;
+  sleep_time?: number;
 }
 
 /**
@@ -49,9 +50,9 @@ function processEventsForSpinners(events: TestEvent[], animationsEnabled = true)
         }
         break;
 
-      case 'step_header':
+      case 'progress_update':
         results.push(event);
-        // Should add thinking spinner after step header
+        // Should add thinking spinner after progress update
         if (animationsEnabled && !activeThinking) {
           activeThinking = true;
           results.push({
@@ -148,21 +149,21 @@ describe('Terminal Spinner Placement', () => {
     expect(processed[1].urgent).toBe(true);
   });
 
-  it('adds tool_preparation spinner after step_header', () => {
+  it('adds tool_preparation spinner after progress_update', () => {
     const events: TestEvent[] = [
       { type: 'operation_init' },
       { type: 'reasoning', content: 'Planning attack...' },
-      { type: 'step_header', step: 1 }
+      { type: 'progress_update', step: 1 }
     ];
 
     const processed = processEventsForSpinners(events);
 
-    // Find the step_header
-    const stepHeaderIndex = processed.findIndex(e => e.type === 'step_header');
-    expect(stepHeaderIndex).toBeGreaterThan(-1);
+    // Find the progress_update
+    const progressUpdateIndex = processed.findIndex(e => e.type === 'progress_update');
+    expect(progressUpdateIndex).toBeGreaterThan(-1);
 
     // Next event should be thinking spinner
-    const nextEvent = processed[stepHeaderIndex + 1];
+    const nextEvent = processed[progressUpdateIndex + 1];
     expect(nextEvent?.type).toBe('thinking');
     expect(nextEvent?.context).toBe('tool_preparation');
     expect(nextEvent?.urgent).toBe(true);
@@ -190,7 +191,7 @@ describe('Terminal Spinner Placement', () => {
 
   it('shows tool_execution spinner during tool invocation', () => {
     const events: TestEvent[] = [
-      { type: 'step_header', step: 1 },
+      { type: 'progress_update', step: 1 },
       { type: 'tool_start', tool_name: 'shell' }
     ];
 
@@ -200,7 +201,7 @@ describe('Terminal Spinner Placement', () => {
     const toolStartIndex = processed.findIndex(e => e.type === 'tool_start');
     expect(toolStartIndex).toBeGreaterThan(-1);
 
-    // Should have thinking spinner before tool_start (after step header)
+    // Should have thinking spinner before tool_start (after progress update)
     const beforeToolStart = processed[toolStartIndex - 1];
     expect(beforeToolStart?.type).toBe('thinking');
     expect(['tool_preparation', 'tool_execution']).toContain(beforeToolStart?.context);
@@ -208,7 +209,7 @@ describe('Terminal Spinner Placement', () => {
 
   it('clears spinner when tool output arrives', () => {
     const events: TestEvent[] = [
-      { type: 'step_header', step: 1 },
+      { type: 'progress_update', step: 1 },
       { type: 'tool_start', tool_name: 'http_request' },
       { type: 'output', content: 'Status: 200 OK' }
     ];
@@ -227,7 +228,7 @@ describe('Terminal Spinner Placement', () => {
 
   it('adds waiting spinner after tool_end', () => {
     const events: TestEvent[] = [
-      { type: 'step_header', step: 1 },
+      { type: 'progress_update', step: 1 },
       { type: 'tool_start', tool_name: 'mem0_store' },
       { type: 'output', content: '{"results": [...]}' },
       { type: 'tool_end', tool_name: 'mem0_store' }
@@ -250,12 +251,12 @@ describe('Terminal Spinner Placement', () => {
     const events: TestEvent[] = [
       { type: 'operation_init' },
       { type: 'reasoning', content: 'Planning...' },
-      { type: 'step_header', step: 1 },
+      { type: 'progress_update', step: 1 },
       { type: 'tool_start', tool_name: 'http_request' },
       { type: 'output', content: 'Response data' },
       { type: 'tool_end', tool_name: 'http_request' },
       { type: 'reasoning', content: 'Analyzing results...' },
-      { type: 'step_header', step: 2 },
+      { type: 'progress_update', step: 2 },
       { type: 'tool_start', tool_name: 'shell' },
       { type: 'output', content: 'Command output' },
       { type: 'tool_invocation_end' }
@@ -275,8 +276,8 @@ describe('Terminal Spinner Placement', () => {
         throw new Error('Missing spinner after operation_init');
       }
 
-      if (lastEventType === 'step_header' && event.type !== 'thinking') {
-        throw new Error('Missing spinner after step_header');
+      if (lastEventType === 'progress_update' && event.type !== 'thinking') {
+        throw new Error('Missing spinner after progress_update');
       }
 
       if (lastEventType === 'tool_end' && event.type !== 'thinking' && event.type !== 'reasoning') {
@@ -296,7 +297,7 @@ describe('Terminal Spinner Placement', () => {
   it('respects animationsEnabled=false', () => {
     const events: TestEvent[] = [
       { type: 'operation_init' },
-      { type: 'step_header', step: 1 },
+      { type: 'progress_update', step: 1 },
       { type: 'tool_end', tool_name: 'shell' }
     ];
 
@@ -311,11 +312,11 @@ describe('Terminal Spinner Placement', () => {
     const events: TestEvent[] = [
       { type: 'operation_init' },
       { type: 'reasoning', content: 'test' },
-      { type: 'step_header', step: 1 },
+      { type: 'progress_update', step: 1 },
       { type: 'tool_start', tool_name: 'test' },
       { type: 'output', content: 'test' },
       { type: 'tool_end', tool_name: 'test' },
-      { type: 'rate_limit', sleep_time: '1' }
+      { type: 'rate_limit', sleep_time: 1 }
     ];
 
     const processed = processEventsForSpinners(events);
@@ -335,11 +336,11 @@ describe('Terminal Spinner Placement', () => {
     const events: TestEvent[] = [
       { type: 'operation_init' },          // → 'startup'
       { type: 'reasoning', content: 'test' },
-      { type: 'step_header', step: 1 },    // → 'tool_preparation' (persists through tool_start)
+      { type: 'progress_update', step: 1 },    // → 'tool_preparation' (persists through tool_start)
       { type: 'tool_start', tool_name: 't' }, // (spinner already active, no new one added)
       { type: 'output', content: 'test' },
       { type: 'tool_end', tool_name: 't' }, // → 'waiting'
-      { type: 'rate_limit', sleep_time: '1' } // → 'rate_limit'
+      { type: 'rate_limit', sleep_time: 1 } // → 'rate_limit'
     ];
 
     const processed = processEventsForSpinners(events);

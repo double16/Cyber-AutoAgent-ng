@@ -175,8 +175,8 @@ describe('status, log, operation, and wrapper components', () => {
                 flowState={{step: 'ready', module: 'web', target: 'example.com', objective: 'audit'}}
                 currentOperation={{
                     id: 'OP_1',
-                    currentStep: 2,
-                    totalSteps: 5,
+                    currentStep: 40,
+                    totalSteps: 100,
                     description: 'Testing target',
                     startTime,
                     status: 'running',
@@ -188,7 +188,7 @@ describe('status, log, operation, and wrapper components', () => {
         expect(running).toContain('Setup');
         expect(running).toContain('Module: web');
         expect(running).toContain('Testing target');
-        expect(running).toContain('Step 2/5');
+        expect(running).toContain('Progress 40%');
         expect(running).toContain('Findings: 1');
         expect(running).toContain('RUNNING');
         expect(running).toContain('ETA');

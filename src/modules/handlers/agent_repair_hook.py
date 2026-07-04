@@ -70,7 +70,7 @@ class AgentRepairHook(HookProvider):
                         event.retry = True
                         logger.warning(
                             "Detected tool-call JSON parse error in step %s; retrying once with stricter tool_call JSON instruction (%s)",
-                            str(callback_handler.current_step) if callback_handler else "?",
+                            str(callback_handler.action_count) if callback_handler else "?",
                             error_str[:200].replace("\n", " "),
                         )
                     return
@@ -128,7 +128,7 @@ class AgentRepairHook(HookProvider):
                         event.retry = True
                         logger.warning(
                             "Model input token limit reached in step %s, retrying with reduced text",
-                            str(callback_handler.current_step) if callback_handler else "?"
+                            str(callback_handler.action_count) if callback_handler else "?"
                         )
                         return
                     else:
@@ -177,7 +177,7 @@ class AgentRepairHook(HookProvider):
                     event.retry = True
                     logger.warning(
                         "Detected XML-ish tool call markup in step %s; forcing model retry with corrective instruction",
-                        str(callback_handler.current_step) if callback_handler else "?"
+                        str(callback_handler.action_count) if callback_handler else "?"
                     )
                     return
         except Exception as e:
@@ -224,9 +224,14 @@ class AgentRepairHook(HookProvider):
                     else:
                         agent.messages.append(reduced_message)
                 if callback_handler:
+                    budget_progress = getattr(callback_handler, "get_budget_progress", lambda: 0)()
+                    if isinstance(budget_progress, dict):
+                        progress_percent = int(budget_progress.get("progress_percent", 0) or 0)
+                    else:
+                        progress_percent = int(budget_progress or 0)
                     reflection_snapshot = get_reflection_snapshot(
-                        current_step=callback_handler.current_step,
-                        max_steps=callback_handler.max_steps,
+                        progress_percent=progress_percent,
+                        budget=None,
                         plan_current_phase=None,
                     )
                 else:

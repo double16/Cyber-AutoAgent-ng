@@ -12,7 +12,9 @@ interface UseAutoRunParams {
   target?: string;
   module?: string;
   objective?: string;
-  iterations?: number;
+  maxDuration?: number;
+  maxTokens?: number;
+  maxCost?: number;
   provider?: string;
   model?: string;
   region?: string;
@@ -28,7 +30,9 @@ export function useAutoRun({
   target,
   module,
   objective,
-  iterations,
+  maxDuration,
+  maxTokens,
+  maxCost,
   provider,
   model,
   region,
@@ -45,8 +49,14 @@ export function useAutoRun({
 
       // Apply CLI parameter overrides to config if provided (note: requires persist function to save)
       const configUpdates: Partial<typeof applicationConfig> = {};
-      if (iterations && iterations !== applicationConfig.iterations) {
-        configUpdates.iterations = iterations;
+      if (maxDuration && maxDuration !== applicationConfig.budgetMaxDuration) {
+        configUpdates.budgetMaxDuration = maxDuration;
+      }
+      if (maxTokens && maxTokens !== applicationConfig.budgetMaxTokens) {
+        configUpdates.budgetMaxTokens = maxTokens;
+      }
+      if (maxCost && maxCost !== applicationConfig.budgetMaxCost) {
+        configUpdates.budgetMaxCost = maxCost;
       }
       if (provider && provider !== applicationConfig.modelProvider) {
         configUpdates.modelProvider = provider as 'bedrock' | 'ollama' | 'litellm' | 'gemini';
@@ -81,7 +91,9 @@ export function useAutoRun({
     target,
     module,
     objective,
-    iterations,
+    maxDuration,
+    maxTokens,
+    maxCost,
     provider,
     model,
     region,

@@ -13,7 +13,7 @@ from modules.handlers.prompt_rebuild_hook import PromptRebuildHook
 def mock_callback_handler():
     """Create a mock callback handler."""
     handler = MagicMock()
-    handler.current_step = 20  # Set to trigger optimization
+    handler.get_budget_progress = MagicMock(return_value=20)
     handler.emitter = MagicMock()
     return handler
 
@@ -78,10 +78,10 @@ def setup_operation_folder(tmp_path, mock_config):
 
 
 @patch.dict(os.environ, {"CYBER_ENABLE_PROMPT_OPTIMIZER": "true"})
-def test_auto_optimization_triggers_at_step_20(
+def test_auto_optimization_triggers_at_20_percent_progress(
     mock_callback_handler, mock_memory, mock_config, setup_operation_folder
 ):
-    """Test that auto-optimization triggers at step 20."""
+    """Test that auto-optimization triggers at 20% budget progress."""
     hook = PromptRebuildHook(
         callback_handler=mock_callback_handler,
         memory_instance=mock_memory,
@@ -89,13 +89,12 @@ def test_auto_optimization_triggers_at_step_20(
         target="test-target",
         objective="test objective",
         operation_id="OP_TEST123",
-        max_steps=100,
         module="web",
         rebuild_interval=20,
     )
 
-    # Set current step to 20
-    mock_callback_handler.current_step = 20
+    # Set current budget progress to 20
+    mock_callback_handler.get_budget_progress.return_value = 20
 
     # Create mock event
     mock_event = MagicMock()
@@ -127,13 +126,12 @@ def test_auto_optimization_forced_disabled(
         target="test-target",
         objective="test objective",
         operation_id="OP_TEST123",
-        max_steps=100,
         module="web",
         rebuild_interval=20,
     )
 
-    # Set current step to 20
-    mock_callback_handler.current_step = 20
+    # Set current budget progress to 20
+    mock_callback_handler.get_budget_progress.return_value = 20
 
     # Create mock event
     mock_event = MagicMock()
@@ -165,7 +163,6 @@ def test_auto_optimization_retrieves_memories(
         target="test-target",
         objective="test objective",
         operation_id="OP_TEST123",
-        max_steps=100,
     )
 
     # Mock memory responses
@@ -180,7 +177,6 @@ def test_auto_optimization_retrieves_memories(
         },
         {
             "memory": "Found SSTI vulnerability allowing code execution",
-            "metadata": {"severity": "critical"},
         },
     ]
 
@@ -203,7 +199,6 @@ def test_auto_optimization_rewrites_prompt(
         target="test-target",
         objective="test objective",
         operation_id="OP_TEST123",
-        max_steps=100,
     )
 
     # Mock the LLM rewrite function to return optimized content
@@ -263,7 +258,6 @@ def test_auto_optimization_handles_no_patterns_gracefully(
         target="test-target",
         objective="test objective",
         operation_id="OP_TEST123",
-        max_steps=100,
     )
 
     # Mock empty memory responses
@@ -281,7 +275,7 @@ def test_auto_optimization_handles_no_patterns_gracefully(
 def test_auto_optimization_at_multiple_intervals(
     mock_callback_handler, mock_memory, mock_config, setup_operation_folder
 ):
-    """Test that auto-optimization triggers at steps 20, 40, 60, etc."""
+    """Test that auto-optimization triggers at budget progress intervals."""
     hook = PromptRebuildHook(
         callback_handler=mock_callback_handler,
         memory_instance=mock_memory,
@@ -290,7 +284,6 @@ def test_auto_optimization_at_multiple_intervals(
         target="test-target",
         objective="test objective",
         operation_id="OP_TEST123",
-        max_steps=100,
         rebuild_interval=20,
         tools_context="dirb,gobuster",
     )
@@ -304,20 +297,20 @@ def test_auto_optimization_at_multiple_intervals(
         with patch("modules.prompts.get_system_prompt") as mock_get_prompt:
             mock_get_prompt.return_value = "rebuilt prompt"
 
-            # Test at step 20
-            mock_callback_handler.current_step = 20
+            # Test at 20% budget progress
+            mock_callback_handler.get_budget_progress.return_value = 20
             hook.check_if_rebuild_needed(mock_event)
             assert mock_optimize.call_count == 1
-            hook.last_rebuild_step = 20
+            hook.last_rebuild_progress = 20
 
-            # Test at step 40
-            mock_callback_handler.current_step = 40
+            # Test at 40% budget progress
+            mock_callback_handler.get_budget_progress.return_value = 40
             hook.check_if_rebuild_needed(mock_event)
             assert mock_optimize.call_count == 2
-            hook.last_rebuild_step = 40
+            hook.last_rebuild_progress = 40
 
-            # Test at step 60
-            mock_callback_handler.current_step = 60
+            # Test at 60% budget progress
+            mock_callback_handler.get_budget_progress.return_value = 60
             hook.check_if_rebuild_needed(mock_event)
             assert mock_optimize.call_count == 3
 
@@ -336,7 +329,6 @@ def test_auto_optimization_error_handling(
         target="test-target",
         objective="test objective",
         operation_id="OP_TEST123",
-        max_steps=100,
         tools_context="dirb,gobuster",
     )
 

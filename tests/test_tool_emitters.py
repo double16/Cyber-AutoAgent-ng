@@ -55,6 +55,7 @@ def test_swarm_operation_emits_rich_agent_details_and_defaults():
     assert event["agent_details"][1]["model_id"] == "default"
     assert event["agent_details"][2]["tools"] == []
     assert event["max_handoffs"] == 20
+    assert event["max_iterations"] == 20
 
 
 def test_swarm_operation_skips_empty_payload():

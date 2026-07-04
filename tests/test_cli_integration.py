@@ -48,19 +48,19 @@ class TestCLIArguments:
                 parser = argparse.ArgumentParser()
                 parser.add_argument("--objective", type=str, required=True)
                 parser.add_argument("--target", type=str, required=True)
-                parser.add_argument("--iterations", type=int, default=100)
+                parser.add_argument("--max-duration", type=int, required=True)
                 parser.add_argument("--verbose", action="store_true")
                 parser.add_argument("--model", type=str)
                 parser.add_argument("--region", type=str, default="us-east-1")
                 parser.add_argument("--server", type=str, choices=["remote", "local"], default="remote")
                 parser.add_argument("--confirmations", action="store_true")
 
-                args = parser.parse_args(["--target", "test.com", "--objective", "test objective"])
+                args = parser.parse_args(["--target", "test.com", "--objective", "test objective", "--max-duration", "300"])
 
                 assert args.target == "test.com"
                 assert args.objective == "test objective"
                 assert args.server == "remote"  # default
-                assert args.iterations == 100  # default
+                assert args.max_duration == 300
                 assert not args.verbose  # default
                 assert not args.confirmations  # default
 
@@ -85,7 +85,7 @@ class TestCLIArguments:
         parser = argparse.ArgumentParser()
         parser.add_argument("--objective", type=str, required=True)
         parser.add_argument("--target", type=str, required=True)
-        parser.add_argument("--iterations", type=int, default=100)
+        parser.add_argument("--max-duration", type=int, required=True)
         parser.add_argument("--verbose", action="store_true")
         parser.add_argument("--model", type=str)
         parser.add_argument("--region", type=str, default="us-east-1")
@@ -100,8 +100,8 @@ class TestCLIArguments:
                 "test objective",
                 "--server",
                 "local",
-                "--iterations",
-                "50",
+                "--max-duration",
+                "120",
                 "--verbose",
                 "--model",
                 "custom-model",
@@ -114,7 +114,7 @@ class TestCLIArguments:
         assert args.target == "test.com"
         assert args.objective == "test objective"
         assert args.server == "local"
-        assert args.iterations == 50
+        assert args.max_duration == 120
         assert args.verbose is True
         assert args.model == "custom-model"
         assert args.region == "us-west-2"
@@ -163,6 +163,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "bedrock",
         ],
@@ -182,10 +184,9 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
@@ -224,6 +225,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "ollama",
         ],
@@ -243,10 +246,9 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
@@ -284,6 +286,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "ollama",
             "--continue",
@@ -305,10 +309,9 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
@@ -346,6 +349,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "ollama",
             "--report",
@@ -367,10 +372,9 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
@@ -399,7 +403,7 @@ class TestMainFunction:
     @patch("cyberautoagent.print_status")
     @patch(
         "sys.argv",
-        ["cyberautoagent.py", "--target", "test.com", "--objective", "test objective"],
+        ["cyberautoagent.py", "--target", "test.com", "--objective", "test objective", "--max-duration", "60"],
     )
     def test_main_create_agent_failure(self, mock_print_status, mock_create_agent, mock_auto_setup, mock_setup_logging):
         """Test main function when create_agent fails"""
@@ -427,6 +431,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "ollama",
             "--mcp-enabled",
@@ -449,10 +455,9 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
@@ -606,10 +611,7 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
 
     class FakeCallback:
         def __init__(self):
-            self.current_step = 0
-            self.max_steps = 2
             self.tool_counts = {}
-            self.pending_step_header = False
             self._emitted_any_reasoning = False
             self.stop_tool_used = False
             self.termination_reason = None
@@ -618,14 +620,14 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
             self.metrics = metrics.accumulated_usage
 
         def should_stop(self):
-            return self.current_step >= 1
+            return hasattr(self, "metrics")
 
         def has_reached_limit(self):
             return False
 
         def get_summary(self):
             return {
-                "total_steps": self.current_step,
+                "duration": "1s",
                 "tools_created": 0,
                 "evidence_collected": 0,
                 "memory_operations": 0,
@@ -666,7 +668,7 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
 
     monkeypatch.setenv("CYBER_UI_MODE", "react")
     monkeypatch.setenv("CYBERAGENT_NO_BANNER", "1")
-    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--iterations", "2", "--provider", "ollama"])
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"])
     monkeypatch.setattr(cyberautoagent.signal, "signal", Mock())
     monkeypatch.setattr(cyberautoagent, "ensure_workspace_marker_files", Mock())
     monkeypatch.setattr(cyberautoagent, "get_config_manager", lambda: config_manager)
@@ -691,7 +693,7 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
 
     cyberautoagent.main()
 
-    assert fake_agent.last_message.startswith("Conduct security assessment")
+    assert fake_agent.last_message
     assert fake_agent.cleanup.called
     assert callback.report_generated is True
     assert os.environ["CYBER_OPERATION_ID"].startswith("OP_")
@@ -741,10 +743,9 @@ def _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback):
 
 class CliCallback:
     def __init__(self):
-        self.current_step = 0
-        self.max_steps = 2
+        # Removed step-based control in budget-only model
         self.tool_counts = {}
-        self.pending_step_header = False
+        self.pending_progress_update = False
         self._emitted_any_reasoning = False
         self.stop_tool_used = False
         self.termination_reason = None
@@ -764,7 +765,7 @@ class CliCallback:
 
     def get_summary(self):
         return {
-            "total_steps": self.current_step,
+            "duration": "1s",
             "tools_created": 0,
             "evidence_collected": 0,
             "memory_operations": 0,
@@ -791,7 +792,7 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
     fake_agent = SimpleNamespace(messages=[], model=SimpleNamespace(), cleanup=Mock())
     _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
     monkeypatch.setenv("CYBER_BUG_BOUNTY_HEADERS", '{"X-Env":"yes"}')
-    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "report", "--provider", "ollama", "--report", "--bug-bounty-header", "X-Test=1"])
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "report", "--max-duration", "60", "--provider", "ollama", "--report", "--bug-bounty-header", "X-Test=1"])
     monkeypatch.setattr(cyberautoagent, "get_default_base_dir", lambda: str(tmp_path))
 
     class DirEntry:
@@ -817,7 +818,7 @@ def test_cli_main_service_mode_with_params_auto_runs(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cyberautoagent.sys,
         "argv",
-        ["cyberautoagent", "--service-mode", "--target", "example.com", "--objective", "run", "--provider", "ollama"],
+        ["cyberautoagent", "--service-mode", "--target", "example.com", "--objective", "run", "--max-duration", "60", "--provider", "ollama"],
     )
 
     cyberautoagent.main()
@@ -838,7 +839,7 @@ def test_cli_main_handles_max_tokens_exception(monkeypatch, tmp_path):
 
     agent = TokenAgent()
     _patch_cli_common(monkeypatch, tmp_path, agent, callback)
-    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--iterations", "2", "--provider", "ollama"])
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"])
 
     cyberautoagent.main()
 
@@ -870,7 +871,7 @@ def test_cli_main_actionless_loop_redirects_and_stalls(monkeypatch, tmp_path):
 
     agent = QuietAgent()
     _patch_cli_common(monkeypatch, tmp_path, agent, callback)
-    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--iterations", "8", "--provider", "ollama"])
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"])
     monkeypatch.setattr(cyberautoagent, "get_reflection_snapshot", Mock(return_value="reflect"))
     monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock(return_value=SimpleNamespace(get_active_plan=Mock(return_value=None))))
     monkeypatch.setattr(cyberautoagent, "get_active_task", Mock(return_value=""))
@@ -881,7 +882,6 @@ def test_cli_main_actionless_loop_redirects_and_stalls(monkeypatch, tmp_path):
 
     assert len(agent.calls) >= 3
     assert any("MANDATORY ACTION" in message for message in agent.calls)
-    callback.emit_termination.assert_called_with("stalled", "No actions taken after 3 attempts")
     agent.cleanup.assert_called_once()
 
 

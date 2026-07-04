@@ -1,6 +1,7 @@
 # Cyber-AutoAgent-ng Changelog
 
 - Cleanup React CLI logging.
+- Replace iteration-based operation limits with duration, token, and cost budgets; progress now reports the highest utilization across configured budgets.
 
 ## v0.9.0
 
@@ -167,4 +168,3 @@ Key Changes:
 ## v0.1
 
 First release of Cyber-AutoAgent
-

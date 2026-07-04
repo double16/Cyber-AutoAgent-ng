@@ -117,7 +117,7 @@ docker run --rm --entrypoint python \
   src/cyberautoagent.py \
   --target "http://testphp.vulnweb.com" \
   --objective "Identify SQL injection vulnerabilities" \
-  --iterations 50 \
+  --max-duration 60 \
   --provider litellm
 ```
 
@@ -595,7 +595,7 @@ docker run --rm \
   cyber-autoagent \
   --target "x.x.x.x" \
   --objective "Identify vulnerabilities" \
-  --iterations 50
+  --max-duration 60
 ```
 
 ### Local Installation
@@ -655,7 +655,9 @@ The unified structure organizes all artifacts under operation-specific directori
 **Optional Arguments**:
 - `--provider`: Model provider - `bedrock` (AWS), `ollama` (local), or `litellm` (universal), default: bedrock
 - `--module`: Security module - `general` (web apps) or `ctf` (challenges), default: general
-- `--iterations`: Maximum tool executions before stopping, default: 100
+- `--max-duration`: Required duration budget in minutes
+- `--max-tokens`: Optional total token budget
+- `--max-cost`: Optional total cost budget
 - `--model`: Model ID to use (default: remote=claude-sonnet-4-5, local=qwen3-coder:30b-a3b-q4_K_M)
 - `--region`: AWS region for Bedrock, default: us-east-1
 - `--verbose`: Enable verbose output with detailed debug logging
@@ -690,7 +692,7 @@ python src/cyberautoagent.py \
   --target "http://testphp.vulnweb.com" \
   --objective "Find SQL injection vulnerabilities" \
   --provider bedrock \
-  --iterations 50
+  --max-duration 60
 
 # Using LiteLLM with OpenAI
 export OPENAI_API_KEY=your_key
@@ -716,14 +718,14 @@ docker run --rm \
   cyber-autoagent:dev \
   --target "http://testphp.vulnweb.com" \
   --objective "Comprehensive SQL injection and XSS assessment" \
-  --iterations 25
+  --max-duration 30
 
 # Using MCP
 python src/cyberautoagent.py \
   --target "http://testphp.vulnweb.com" \
   --objective "Find SQL injection vulnerabilities" \
   --provider bedrock \
-  --iterations 50 \
+  --max-duration 60 \
   --mcp-enabled \
   --map-conns '[{"id":"mcp1","transport":"stdio","command":["python","-m","mymcp.server"]}]'
 ```

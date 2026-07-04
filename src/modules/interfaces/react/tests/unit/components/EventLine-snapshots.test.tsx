@@ -114,20 +114,21 @@ describe('EventLine snapshot-style rendering', () => {
     expect(output).toMatch(/Analyzing target/i);
   });
 
-  it.each(widths)('renders swarm step header with agent (width=%s)', async (width) => {
+  it.each(widths)('renders swarm progress header with agent (width=%s)', async (width) => {
     const output = await renderEventLine(width as number, {
-      type: 'step_header',
-      step: 2,
-      maxSteps: 100,
+      type: 'progress_update',
+      step: 20,
+      progressPercent: 20,
       is_swarm_operation: true,
       swarm_agent: 'recon_specialist',
       swarm_sub_step: 2,
-      swarm_total_iterations: 2,
+      swarm_total_actions: 2,
       swarm_max_iterations: 30,
     });
 
     expect(output).toMatch(/\[SWARM:/i);
     expect(output).toMatch(/RECON[ _]SPECIALIST/i);
-    expect(output).toMatch(/STEP\s+2/i);
+    expect(output).toMatch(/ACTION\s+2/i);
+    expect(output).toMatch(/PROGRESS\s+20%/i);
   });
 });

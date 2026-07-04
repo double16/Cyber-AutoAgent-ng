@@ -87,8 +87,8 @@ def test_prompt_optimizer_apply_and_reset(tmp_path, monkeypatch):
             "trajectory": {"mode": "consolidate"},
         },
         trigger="agent_reflection",
-        current_step=12,
-        expires_after_steps=10,
+        budget_progress=12,
+        expires_after_progress=10,
     )
 
     assert result["status"] == "success"
@@ -99,12 +99,12 @@ def test_prompt_optimizer_apply_and_reset(tmp_path, monkeypatch):
     data = json.loads(overlay_path.read_text(encoding="utf-8"))
     assert data["payload"]["directives"] == ["Focus on consolidation"]
     assert data["origin"] == "agent_reflection"
-    assert data["expires_after_steps"] == 10
+    assert data["expires_after_progress"] == 10
 
     # Cooldown should be persisted and scoped to OP_TEST
     assert data["cooldown"]["operation_id"] == "OP_TEST"
-    assert data["cooldown"]["last_step"] == 12
-    assert data["cooldown"]["cooldown_steps"] == 8
+    assert data["cooldown"]["last_progress"] == 12
+    assert data["cooldown"]["cooldown_progress"] == 8
 
     reset_result = prompt_optimizer(action="reset")
     assert reset_result["status"] == "success"
@@ -116,24 +116,24 @@ def test_prompt_optimizer_cooldown_enforced(tmp_path, monkeypatch):
     _setup_env(tmp_path, monkeypatch)
 
     prompt_optimizer(
-        action="apply", overlay={"directives": ["initial"]}, current_step=5
+        action="apply", overlay={"directives": ["initial"]}, budget_progress=5
     )
 
     # Cooldown state should exist and be scoped to OP_TEST
     overlay_path = Path(__import__("os").environ["CYBER_OPERATION_ROOT"]) / "adaptive_prompt.json"
     data = json.loads(overlay_path.read_text(encoding="utf-8"))
     assert data["cooldown"]["operation_id"] == "OP_TEST"
-    assert data["cooldown"]["last_step"] == 5
+    assert data["cooldown"]["last_progress"] == 5
 
     with pytest.raises(PromptOptimizerError):
         prompt_optimizer(
-            action="apply", overlay={"directives": ["too_soon"]}, current_step=10
+            action="apply", overlay={"directives": ["too_soon"]}, budget_progress=10
         )
 
     # After reset, cooldown clears
     prompt_optimizer(action="reset")
     prompt_optimizer(
-        action="apply", overlay={"directives": ["after_reset"]}, current_step=25
+        action="apply", overlay={"directives": ["after_reset"]}, budget_progress=25
     )
 
 
@@ -148,7 +148,7 @@ def test_prompt_optimizer_view_and_update(tmp_path, monkeypatch):
     update_result = prompt_optimizer(
         action="update",
         prompt="Directive alpha\nDirective beta",
-        current_step=9,
+        budget_progress=9,
         trigger="reflection",
         note="initial rewrite",
     )
@@ -162,11 +162,11 @@ def test_prompt_optimizer_view_and_update(tmp_path, monkeypatch):
 
 def test_prompt_optimizer_add_context(tmp_path, monkeypatch):
     overlay_dir = _setup_env(tmp_path, monkeypatch)
-    prompt_optimizer(action="apply", overlay={"directives": ["seed"]}, current_step=1)
+    prompt_optimizer(action="apply", overlay={"directives": ["seed"]}, budget_progress=1)
     prompt_optimizer(
         action="add_context",
         context="expand attack surface focus",
-        current_step=20,
+        budget_progress=20,
         reviewer="operator",
     )
 
@@ -180,7 +180,7 @@ def test_prompt_optimizer_add_context(tmp_path, monkeypatch):
 def test_prompt_optimizer_update_requires_prompt(tmp_path, monkeypatch):
     _setup_env(tmp_path, monkeypatch)
     with pytest.raises(PromptOptimizerError):
-        prompt_optimizer(action="update", current_step=3)
+        prompt_optimizer(action="update", budget_progress=3)
 
 
 def test_prompt_optimizer_optimize_execution_handles_missing_file(
@@ -306,24 +306,24 @@ def test_prompt_optimizer_quarantines_non_dict_overlay(tmp_path, monkeypatch):
 def test_prompt_optimizer_cooldown_scoped_by_operation_id(tmp_path, monkeypatch):
     _setup_env(tmp_path, monkeypatch)
 
-    prompt_optimizer(action="apply", overlay={"directives": ["initial"]}, current_step=5)
+    prompt_optimizer(action="apply", overlay={"directives": ["initial"]}, budget_progress=5)
 
     # Different operation_id should not be subject to the previous cooldown
     monkeypatch.setenv("CYBER_OPERATION_ID", "OP_OTHER")
     result = prompt_optimizer(
-        action="apply", overlay={"directives": ["new_op"]}, current_step=10
+        action="apply", overlay={"directives": ["new_op"]}, budget_progress=10
     )
     assert result["status"] == "success"
 
 
-def test_prompt_optimizer_cooldown_step_rollback_treated_as_reset(tmp_path, monkeypatch):
+def test_prompt_optimizer_cooldown_progress_rollback_treated_as_reset(tmp_path, monkeypatch):
     _setup_env(tmp_path, monkeypatch)
 
-    prompt_optimizer(action="apply", overlay={"directives": ["initial"]}, current_step=50)
+    prompt_optimizer(action="apply", overlay={"directives": ["initial"]}, budget_progress=50)
 
-    # If steps go backwards, cooldown should be treated as reset/new timeline
+    # If progress goes backwards, cooldown should be treated as reset/new timeline
     result = prompt_optimizer(
-        action="apply", overlay={"directives": ["rollback_ok"]}, current_step=10
+        action="apply", overlay={"directives": ["rollback_ok"]}, budget_progress=10
     )
     assert result["status"] == "success"
 

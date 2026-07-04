@@ -2,91 +2,84 @@
 
 import json
 import os
-import re
 import sys
 from unittest.mock import patch
 
 import pytest
 
-from modules.prompts.factory import get_reflection_snapshot
-
-# Add src to path for imports
-
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from modules.config.types import BudgetConfig
 from modules.prompts import get_system_prompt, load_prompt_template
+from modules.prompts.factory import get_reflection_snapshot
 
 real_load_prompt_template = load_prompt_template
 
-class TestGetSystemPrompt:
-    """Test the get_system_prompt function"""
 
+def _budget() -> BudgetConfig:
+    return BudgetConfig(max_duration_minutes=60, max_tokens=100000, max_cost=10.0)
+
+
+class TestGetSystemPrompt:
     def test_get_system_prompt_basic(self):
-        """Test basic system prompt generation"""
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
         )
 
         assert "test.com" in prompt
         assert "test objective" not in prompt
-        assert "100" in prompt
         assert "OP_20240101_120000" in prompt
         assert "CRITICAL FIRST ACTION" in prompt
 
     def test_get_system_prompt_with_memory_path(self):
-        """Test system prompt with explicit memory path"""
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             has_memory_path=True,
         )
 
         assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
-        assert 'mem0_list(' in prompt
+        assert "mem0_list(" in prompt
         assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_with_existing_memories(self):
-        """Test system prompt with existing memories detected"""
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             has_existing_memories=True,
         )
 
         assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
-        assert 'mem0_list(' in prompt
+        assert "mem0_list(" in prompt
         assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_with_both_memory_flags(self):
-        """Test system prompt with both memory path and existing memories"""
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             has_memory_path=True,
             has_existing_memories=True,
         )
 
         assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
-        assert 'mem0_list(' in prompt
+        assert "mem0_list(" in prompt
         assert "Memory Intake Pass" in prompt
 
     def test_get_system_prompt_no_memory_flags(self):
-        """Test system prompt without memory flags"""
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             has_memory_path=False,
             has_existing_memories=False,
         )
@@ -96,8 +89,6 @@ class TestGetSystemPrompt:
 
     @patch("modules.prompts.factory.load_prompt_template")
     def test_get_system_prompt_with_tools_context(self, mock_load_prompt_template):
-        """Test system prompt with tools context"""
-
         def side_effect(name: str, *args, **kwargs):
             real_template = real_load_prompt_template(name)
             if name == "system_prompt.md":
@@ -105,14 +96,13 @@ class TestGetSystemPrompt:
             return real_template
 
         mock_load_prompt_template.side_effect = side_effect
-
         tools_context = "## ENVIRONMENTAL CONTEXT\n\nTools: nmap, curl"
 
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             tools_context=tools_context,
         )
 
@@ -120,7 +110,6 @@ class TestGetSystemPrompt:
         assert "nmap, curl" in prompt
 
     def test_get_system_prompt_with_output_config(self):
-        """Test system prompt with output configuration"""
         output_config = {
             "artifacts_path": "/custom/artifacts",
             "tools_path": "/custom/tools_path",
@@ -132,8 +121,8 @@ class TestGetSystemPrompt:
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             output_config=output_config,
         )
 
@@ -143,49 +132,41 @@ class TestGetSystemPrompt:
         assert "CRITICAL FIRST ACTION" in prompt
 
     def test_get_system_prompt_with_overlay_block(self, tmp_path):
-        """Overlay file should render adaptive directives block."""
-        output_config = {
-            "base_dir": str(tmp_path),
-            "target_name": "test_target",
-        }
+        output_config = {"base_dir": str(tmp_path), "target_name": "test_target"}
         operation_id = "OP_20250101_000000"
         overlay_dir = tmp_path / "test_target" / operation_id
         overlay_dir.mkdir(parents=True, exist_ok=True)
         overlay_payload = {
             "version": 1,
             "origin": "agent_reflection",
-            "current_step": 12,
+            "budget_progress": 12,
             "payload": {"directives": ["Focus on consolidation"]},
         }
-        (overlay_dir / "adaptive_prompt.json").write_text(
-            json.dumps(overlay_payload), encoding="utf-8"
-        )
+        (overlay_dir / "adaptive_prompt.json").write_text(json.dumps(overlay_payload), encoding="utf-8")
 
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id=operation_id,
+            budget=_budget(),
             output_config=output_config,
-            current_step=20,
+            progress_percent=20,
         )
 
         assert "## ADAPTIVE DIRECTIVES" in prompt
         assert "Focus on consolidation" in prompt
+        assert "applied_progress=12%" in prompt
 
-    def test_overlay_expires_after_steps(self, tmp_path):
-        output_config = {
-            "base_dir": str(tmp_path),
-            "target_name": "test_target",
-        }
+    def test_overlay_expires_after_progress(self, tmp_path):
+        output_config = {"base_dir": str(tmp_path), "target_name": "test_target"}
         operation_id = "OP_20250101_000000"
         overlay_dir = tmp_path / "test_target" / operation_id
         overlay_dir.mkdir(parents=True, exist_ok=True)
         overlay_payload = {
             "version": 1,
             "origin": "agent_reflection",
-            "current_step": 5,
-            "expires_after_steps": 3,
+            "budget_progress": 5,
+            "expires_after_progress": 3,
             "payload": {"directives": ["Temporary directive"]},
         }
         overlay_file = overlay_dir / "adaptive_prompt.json"
@@ -194,36 +175,31 @@ class TestGetSystemPrompt:
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id=operation_id,
+            budget=_budget(),
             output_config=output_config,
-            current_step=10,
+            progress_percent=10,
         )
 
         assert "ADAPTIVE DIRECTIVES" not in prompt
         assert not overlay_file.exists()
 
     def test_get_system_prompt_different_servers(self):
-        """Test system prompt generation for different server types"""
-        # Test local server
         prompt_local = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             provider="ollama",
         )
-
-        # Test remote server
         prompt_remote = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             provider="bedrock",
         )
 
-        # Both should contain the basic elements
         assert "test.com" in prompt_local
         assert "test.com" in prompt_remote
         assert "test objective" not in prompt_local
@@ -231,28 +207,24 @@ class TestGetSystemPrompt:
 
 
 class TestMemoryInstructions:
-    """Test memory instruction logic in system prompts"""
-
     def test_memory_instruction_priority(self):
-        """Test that memory path takes priority over existing memories"""
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             has_memory_path=True,
-            has_existing_memories=False,  # Should be ignored
+            has_existing_memories=False,
         )
 
         assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
 
     def test_memory_instruction_existing_only(self):
-        """Test memory instruction when only existing memories are detected"""
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             has_memory_path=False,
             has_existing_memories=True,
         )
@@ -260,12 +232,11 @@ class TestMemoryInstructions:
         assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
 
     def test_memory_instruction_fresh_operation(self):
-        """Test memory instruction for fresh operations"""
         prompt = get_system_prompt(
             target="test.com",
             objective="test objective",
-            max_steps=100,
             operation_id="OP_20240101_120000",
+            budget=_budget(),
             has_memory_path=False,
             has_existing_memories=False,
         )
@@ -275,115 +246,34 @@ class TestMemoryInstructions:
 
 
 class TestReflectionSnapshot:
-    """Test reflection snapshot logic in system prompts"""
-
-    @pytest.mark.parametrize("max_steps", [
-        100,
-        90,
-    ])
-    def test_first_step(self, max_steps):
-        snapshot = get_reflection_snapshot(0, max_steps, None)
-        assert f"Budget Used: 0%, step 0/{max_steps}, {max_steps-0} remaining steps" in snapshot
-        assert "\nNext Checkpoint: Step" in snapshot
+    @pytest.mark.parametrize("progress", [0, 10])
+    def test_before_first_checkpoint(self, progress):
+        snapshot = get_reflection_snapshot(progress, _budget(), None)
+        assert f"Budget Used: {progress}%" in snapshot
+        assert "duration cap 60m" in snapshot
+        assert "token cap 100000" in snapshot
+        assert "cost cap 10.0" in snapshot
+        assert "Next Checkpoint: 20% budget use" in snapshot
         assert "\nCurrent Phase:" not in snapshot
 
-    @pytest.mark.parametrize("current_step, max_steps, plan_phase", [
-        (19, 100, None),
-        (19, 100, 1),
-        (17, 90, None),
-        (17, 90, 1),
+    @pytest.mark.parametrize("progress, checkpoint, action", [
+        (20, 20, "Evaluate: What capabilities gained? Phase 1 criteria met?"),
+        (40, 40, "Confidence trend rising/flat/falling? Flat = pivot NOW."),
+        (60, 60, "If stuck (no findings), deploy swarm with different approach classes."),
+        (80, 80, "Focus ONLY on highest-confidence path. No new exploration."),
     ])
-    def test_almost_first_checkpoint(self, current_step, max_steps, plan_phase):
-        snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert re.search(rf"Budget Used: \d+%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps", snapshot)
-        assert f"\nNext Checkpoint: Step {current_step + 1} (in 1 steps)" in snapshot
-        assert "\nCheckpoint approaching. Prepare to evaluate plan." in snapshot
-        if plan_phase is None:
-            assert "\nCurrent Phase:" not in snapshot
-        else:
-            assert f"\nCurrent Phase: {plan_phase}" not in snapshot
+    def test_checkpoints(self, progress, checkpoint, action):
+        snapshot = get_reflection_snapshot(progress, _budget(), None)
+        assert f"Budget Used: {progress}%" in snapshot
+        assert f"**CHECKPOINT {checkpoint}% REACHED**" in snapshot
+        assert action in snapshot
 
-    @pytest.mark.parametrize("current_step, max_steps, plan_phase", [
-        (20, 100, None),
-        (20, 100, 1),
-        (18, 90, None),
-        (18, 90, 1),
-    ])
-    def test_first_checkpoint(self, current_step, max_steps, plan_phase):
-        snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 20%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
-        assert "\n**CHECKPOINT 20% REACHED**" in snapshot
-        assert "\nACTION: Call `get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?" in snapshot
-        if plan_phase is None:
-            assert "\nCurrent Phase:" not in snapshot
-        else:
-            assert f"\nCurrent Phase: {plan_phase}" not in snapshot
+    def test_current_phase_and_urgency(self):
+        snapshot = get_reflection_snapshot(95, _budget(), 4)
+        assert "Budget Used: 95%" in snapshot
+        assert "Current Phase: 4" in snapshot
+        assert "FINAL: Budget >90%" in snapshot
 
-    @pytest.mark.parametrize("current_step, max_steps, plan_phase", [
-        (40, 100, None),
-        (40, 100, 2),
-        (36, 90, None),
-        (36, 90, 2),
-    ])
-    def test_second_checkpoint(self, current_step, max_steps, plan_phase):
-        snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 40%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
-        assert "\n**CHECKPOINT 40% REACHED**" in snapshot
-        assert "\nACTION: Call `get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW." in snapshot
-        if plan_phase is None:
-            assert "\nCurrent Phase:" not in snapshot
-        else:
-            assert f"\nCurrent Phase: {plan_phase}" not in snapshot
-
-    @pytest.mark.parametrize("current_step, max_steps, plan_phase", [
-        (60, 100, None),
-        (60, 100, 3),
-        (54, 90, None),
-        (54, 90, 3),
-    ])
-    def test_third_checkpoint(self, current_step, max_steps, plan_phase):
-        snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 60%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
-        assert "\n**CHECKPOINT 60% REACHED**" in snapshot
-        assert "\nACTION: Call `get_plan`. If stuck (no findings), deploy swarm with different approach classes." in snapshot
-        assert "\nWARNING: Budget >60%. If no findings yet, deploy specialists/swarm NOW." in snapshot
-        if plan_phase is None:
-            assert "\nCurrent Phase:" not in snapshot
-        else:
-            assert f"\nCurrent Phase: {plan_phase}" not in snapshot
-
-    @pytest.mark.parametrize("current_step, max_steps, plan_phase", [
-        (80, 100, None),
-        (80, 100, 4),
-        (72, 90, None),
-        (72, 90, 4),
-    ])
-    def test_fourth_checkpoint(self, current_step, max_steps, plan_phase):
-        snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 80%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
-        assert "\n**CHECKPOINT 80% REACHED**" in snapshot
-        assert "\nACTION: Call `get_plan`. Focus ONLY on highest-confidence path. No new exploration." in snapshot
-        assert "\nCRITICAL: Budget >80%. Focus on single highest-confidence path only." in snapshot
-        if plan_phase is None:
-            assert "\nCurrent Phase:" not in snapshot
-        else:
-            assert f"\nCurrent Phase: {plan_phase}" not in snapshot
-
-    @pytest.mark.parametrize("current_step, max_steps, plan_phase", [
-        (95, 100, None),
-        (95, 100, 4),
-        (86, 90, None),
-        (86, 90, 4),
-    ])
-    def test_ninety_five(self, current_step, max_steps, plan_phase):
-        snapshot = get_reflection_snapshot(current_step, max_steps, None)
-        assert f"Budget Used: 95%, step {current_step}/{max_steps}, {max_steps-current_step} remaining steps" in snapshot
-        assert f"\nNext Checkpoint: Step {max_steps}" in snapshot
-        assert "\nFINAL: Budget >90%. Verify objective complete before stop(). Check termination_policy." in snapshot
-        if plan_phase is None:
-            assert "\nCurrent Phase:" not in snapshot
-        else:
-            assert f"\nCurrent Phase: {plan_phase}" not in snapshot
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -61,7 +61,9 @@ const cli = meow(`
     --target, -t        Target system/network to assess
     --objective, -o     Security assessment objective
     --module, -m        Security module to use (default: web)
-    --iterations, -i    Maximum tool executions (default: 100)
+    --max-duration      Required: Maximum duration in minutes for the operation
+    --max-tokens        Optional: Total token budget (input+output+cache)
+    --max-cost          Optional: Total cost budget (e.g., USD)
     --auto-run          Start assessment immediately without UI
     --auto-approve      Auto-approve tool executions (no confirmations)
     --memory-mode       Memory mode: auto (default) or fresh
@@ -99,9 +101,14 @@ const cli = meow(`
       shortFlag: 'm',
       default: 'web'
     },
-    iterations: {
+    maxDuration: {
       type: 'number',
-      shortFlag: 'i',
+    },
+    maxTokens: {
+      type: 'number',
+    },
+    maxCost: {
+      type: 'number',
     },
     autoRun: {
       type: 'boolean',
@@ -207,7 +214,9 @@ const runAutoAssessment = async () => {
         configOverrides.swarmModel = cli.flags.model;
       }
       if (cli.flags.region) configOverrides.awsRegion = cli.flags.region;
-      if (cli.flags.iterations) configOverrides.iterations = cli.flags.iterations;
+      if (cli.flags.maxDuration) configOverrides.budgetMaxDuration = cli.flags.maxDuration;
+      if (cli.flags.maxTokens) configOverrides.budgetMaxTokens = cli.flags.maxTokens;
+      if (cli.flags.maxCost) configOverrides.budgetMaxCost = cli.flags.maxCost;
       if (cli.flags.observability !== undefined) configOverrides.observability = cli.flags.observability;
       if (cli.flags.debug) configOverrides.verbose = cli.flags.debug;
       if (cli.flags.deploymentMode) configOverrides.deploymentMode = cli.flags.deploymentMode as 'local-cli' | 'single-container' | 'full-stack';
@@ -253,7 +262,7 @@ const runAutoAssessment = async () => {
         dockerImage: 'cyber-autoagent:latest',
         dockerTimeout: 300,
         volumes: [],
-        iterations: 100,
+        budgetMaxDuration: 60,
         autoApprove: true,
         confirmations: false,
         maxThreads: 10,
@@ -295,7 +304,11 @@ const runAutoAssessment = async () => {
       // Merge in priority order: defaults → saved config → CLI overrides
       const finalConfig = { ...defaultConfig, ...savedConfig, ...configOverrides } as Config;
 
-      loggingService.info(`⚙️ Config: ${finalConfig.iterations} iterations, ${finalConfig.modelProvider}/${finalConfig.modelId}`);
+      const budgetParts = [] as string[];
+      if (finalConfig.budgetMaxDuration) budgetParts.push(`duration=${finalConfig.budgetMaxDuration}m`);
+      if (finalConfig.budgetMaxTokens) budgetParts.push(`tokens=${finalConfig.budgetMaxTokens}`);
+      if (finalConfig.budgetMaxCost) budgetParts.push(`cost=${finalConfig.budgetMaxCost}`);
+      loggingService.info(`⚙️ Config: budget{${budgetParts.join(', ')}}; model ${finalConfig.modelProvider}/${finalConfig.modelId}`);
       loggingService.info(`🔭 Observability: ${finalConfig.observability ? 'enabled' : 'disabled'}`);
       loggingService.info(`🏗️ Deployment Mode: ${finalConfig.deploymentMode || 'local-cli'}`);
 
@@ -324,7 +337,6 @@ const runAutoAssessment = async () => {
 
       let lastMetricsUpdate = "";
       let lastTaskTitle = "";
-      let stepsExecuted = 0;
 
       // In auto-run mode, listen to events and display them to console
       // This provides real-time progress visibility during assessment
@@ -345,10 +357,9 @@ const runAutoAssessment = async () => {
                 loggingService.info(`💰 Cost: ${event.metrics.tokens.toLocaleString()} (${event.metrics.inputTokens.toLocaleString()} input + ${event.metrics.outputTokens.toLocaleString()} output) | $ ${event.metrics.cost.toFixed(6)}`);
             }
         }
-        else if (event.type === 'step_header') {
-          if (Number.isInteger(event.step) && Number.isInteger(event.maxSteps)) {
-            loggingService.info(`➡️ Step ${event.step}/${event.maxSteps}`);
-            stepsExecuted = event.step;
+        else if (event.type === 'progress_update') {
+          if (Number.isFinite(event.progressPercent)) {
+            loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}`);
           }
         }
         else if (event.type === 'task_started') {
@@ -376,7 +387,6 @@ const runAutoAssessment = async () => {
 
       if (result.success) {
         loggingService.info(` Assessment completed successfully in ${formatDuration(result.durationMs)}`);
-        loggingService.info(` Steps executed: ${stepsExecuted}`);
       } else {
         loggingService.error(` Assessment failed: ${result.error}`);
       }
@@ -477,7 +487,9 @@ function renderReactApp() {
       target={cli.flags.target}
       objective={cli.flags.objective}
       autoRun={cli.flags.autoRun}
-      iterations={cli.flags.iterations}
+      maxDuration={cli.flags.maxDuration}
+      maxTokens={cli.flags.maxTokens}
+      maxCost={cli.flags.maxCost}
       provider={cli.flags.provider}
       model={cli.flags.model}
       region={cli.flags.region}

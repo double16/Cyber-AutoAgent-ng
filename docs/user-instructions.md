@@ -69,7 +69,7 @@ npm start
 **Using Saved Config:**
 ```bash
 # Auto-run uses saved config
-npm start -- --auto-run --target https://example.com --iterations 50
+npm start -- --auto-run --target https://example.com --max-duration 60
 ```
 
 ### Method 2: Environment Variables
@@ -175,26 +175,28 @@ cyber-react \
   --target "https://testphp.vulnweb.com" \
   --objective "Identify OWASP Top 10 vulnerabilities" \
   --module web \
-  --iterations 50 \
+  --max-duration 60 \
   --auto-run
 ```
 
 ### Command Line Flags
 
-| Flag                   | Default   | Description                             |
-|------------------------|-----------|-----------------------------------------|
-| `--target, -t`         | Required  | Target system URL or IP                 |
-| `--objective, -o`      | Required  | Assessment objective                    |
-| `--module, -m`         | `web`     | Security module: web, ctf               |
-| `--iterations, -i`     | `100`     | Maximum tool executions                 |
-| `--provider`           | `bedrock` | Model provider                          |
-| `--auto-run`           | `false`   | Skip interactive prompts                |
-| `--auto-approve`       | `false`   | Auto-approve tool executions            |
-| `--memory-mode`        | `auto`    | Memory: auto or fresh                   |
-| `--deployment-mode`    | Auto      | local-cli, single-container, full-stack |
-| `--mcp-enabled`        | `false`   | Enable MCP Tools                        |
-| `--mcp-conns` '[...]'  | None      | Configure MCP Tools                     |
-| `--bug-bounty-header NAME=VALUE` | None | Add a marker header to authorized bug bounty traffic; repeat for multiple headers |
+| Flag                              | Default   | Description                                                                        |
+|-----------------------------------|-----------|------------------------------------------------------------------------------------|
+| `--target, -t`                    | Required  | Target system URL or IP                                                            |
+| `--objective, -o`                 | Required  | Assessment objective                                                               |
+| `--module, -m`                    | `web`     | Security module: web, ctf                                                          |
+| `--max-duration`                  | `60`      | Duration budget in minutes                                                         |
+| `--max-tokens`                    | None      | Optional total token budget                                                        |
+| `--max-cost`                      | None      | Optional total cost budget                                                         |
+| `--provider`                      | `bedrock` | Model provider                                                                     |
+| `--auto-run`                      | `false`   | Skip interactive prompts                                                           |
+| `--auto-approve`                  | `false`   | Auto-approve tool executions                                                       |
+| `--memory-mode`                   | `auto`    | Memory: auto or fresh                                                              |
+| `--deployment-mode`               | Auto      | local-cli, single-container, full-stack                                            |
+| `--mcp-enabled`                   | `false`   | Enable MCP Tools                                                                   |
+| `--mcp-conns` '[...]'             | None      | Configure MCP Tools                                                                |
+| `--bug-bounty-header NAME=VALUE`  | None      | Add a marker header to authorized bug bounty traffic; repeat for multiple headers  |
 
 ### Bug Bounty Traffic Markers
 
@@ -227,13 +229,13 @@ This means:
 # This command will use:
 # - modelProvider: "bedrock" (from CLI flag, overrides saved config)
 # - observability: true (from saved config)
-# - iterations: 50 (from CLI flag)
+# - duration budget: 60 minutes (from CLI flag)
 # - All other settings from saved config or defaults
 
 cyber-react \
   --target "https://example.com" \
   --provider bedrock \
-  --iterations 50 \
+  --max-duration 60 \
   --auto-run
 ```
 
@@ -430,7 +432,7 @@ python src/cyberautoagent.py \
   --objective "SQL injection assessment" \
   --provider bedrock \
   --module web \
-  --iterations 50
+  --max-duration 60
 ```
 
 Requirements: Python 3.11+, dependencies installed
@@ -471,12 +473,12 @@ docker run --rm \
 
 ### Operation Issues
 
-| Issue                   | Resolution                                                      |
-|-------------------------|-----------------------------------------------------------------|
-| Assessment not starting | Check provider credentials, Docker status, target accessibility |
-| Assessment stuck        | Review step in footer, check tool outputs for errors            |
-| Out of memory           | Reduce iterations, use fresh memory mode, clear old outputs     |
-| Port conflicts          | Change ports in docker-compose.yml or stop conflicting services |
+| Issue                   | Resolution                                                             |
+|-------------------------|------------------------------------------------------------------------|
+| Assessment not starting | Check provider credentials, Docker status, target accessibility        |
+| Assessment stuck        | Review progress in footer, check tool outputs for errors               |
+| Out of memory           | Reduce token-heavy workloads, use fresh memory mode, clear old outputs |
+| Port conflicts          | Change ports in docker-compose.yml or stop conflicting services        |
 
 ## Examples
 
@@ -487,7 +489,7 @@ cyber-react \
   -m web \
   -t "https://testphp.vulnweb.com" \
   -o "OWASP Top 10 assessment" \
-  -i 50
+  --max-duration 30
 ```
 
 ### API Security Testing
@@ -497,7 +499,7 @@ cyber-react \
   -m web \
   -t "https://api.example.com" \
   -o "Authentication testing" \
-  -i 75 \
+  --max-duration 45 \
   --auto-approve
 ```
 
@@ -508,7 +510,7 @@ cyber-react \
   -m ctf \
   -t "http://challenge.ctf:8080" \
   -o "Extract flag" \
-  -i 100
+  --max-duration 60
 ```
 
 ### Automated Scan
@@ -574,13 +576,13 @@ cyber-react \
 
 ### Configuration Guidelines
 
-| Setting       | Recommendation                                                  |
-|---------------|-----------------------------------------------------------------|
-| Iterations    | Start with 25-50, increase to 100-200 for comprehensive testing |
-| Module        | Use web for web apps, ctf for competitions                  |
-| Auto-approve  | Only for trusted environments                                   |
-| Observability | Enable for production assessments                               |
-| Memory mode   | Auto for iterative testing, fresh for baselines                 |
+| Setting         | Recommendation                                               |
+|-----------------|--------------------------------------------------------------|
+| Duration budget | Start with 30-60 minutes; add token or cost caps when needed |
+| Module          | Use web for web apps, ctf for competitions                   |
+| Auto-approve    | Only for trusted environments                                |
+| Observability   | Enable for production assessments                            |
+| Memory mode     | Auto for iterative testing, fresh for baselines              |
 
 ## Legal and Ethical Use
 

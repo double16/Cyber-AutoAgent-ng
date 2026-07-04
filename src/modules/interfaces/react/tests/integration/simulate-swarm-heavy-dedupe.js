@@ -4,7 +4,7 @@
  * Swarm Heavy Deduplication Integration Test
  *
  * Emits many repeated reasoning blocks for the same swarm agent across
- * several step headers. Asserts:
+ * several progress updates. Asserts:
  *  - Only one accepted reasoning marker is emitted ([TEST_ONCE_REASONING])
  *  - Tool header for a normal tool appears in the stream
  */
@@ -35,7 +35,7 @@ function writeHeavyEventsFile() {
 
   // Start swarm and step
   lines.push(JSON.stringify({ type: 'swarm_start', agent_names: ['sqli_specialist'], agent_count: 1, task: 'Heavy dedupe test', max_handoffs: 5, max_iterations: 10 }));
-  lines.push(JSON.stringify({ type: 'step_header', is_swarm_operation: true, swarm_agent: 'sqli_specialist', swarm_sub_step: 1, swarm_total_iterations: 1, swarm_max_iterations: 10 }));
+  lines.push(JSON.stringify({ type: 'progress_update', is_swarm_operation: true, swarm_agent: 'sqli_specialist', swarm_sub_step: 1, swarm_total_iterations: 1, swarm_max_iterations: 10 }));
 
   const r = 'I will deepen SQLi findings by enumerating schema and testing privilege escalation.';
 
@@ -43,11 +43,11 @@ function writeHeavyEventsFile() {
   for (let i = 0; i < 3; i++) {
     lines.push(JSON.stringify({ type: 'reasoning', content: r, is_swarm_operation: true, swarm_agent: 'sqli_specialist' }));
   }
-  lines.push(JSON.stringify({ type: 'step_header', is_swarm_operation: true, swarm_agent: 'sqli_specialist', swarm_sub_step: 2, swarm_total_iterations: 2, swarm_max_iterations: 10 }));
+  lines.push(JSON.stringify({ type: 'progress_update', is_swarm_operation: true, swarm_agent: 'sqli_specialist', swarm_sub_step: 2, swarm_total_iterations: 2, swarm_max_iterations: 10 }));
   for (let i = 0; i < 3; i++) {
     lines.push(JSON.stringify({ type: 'reasoning', content: '  ' + r + '  ', is_swarm_operation: true, swarm_agent: 'sqli_specialist' }));
   }
-  lines.push(JSON.stringify({ type: 'step_header', is_swarm_operation: true, swarm_agent: 'sqli_specialist', swarm_sub_step: 3, swarm_total_iterations: 3, swarm_max_iterations: 10 }));
+  lines.push(JSON.stringify({ type: 'progress_update', is_swarm_operation: true, swarm_agent: 'sqli_specialist', swarm_sub_step: 3, swarm_total_iterations: 3, swarm_max_iterations: 10 }));
   for (let i = 0; i < 3; i++) {
     lines.push(JSON.stringify({ type: 'reasoning', content: r.replace(/\s+/g, ' '), is_swarm_operation: true, swarm_agent: 'sqli_specialist' }));
   }

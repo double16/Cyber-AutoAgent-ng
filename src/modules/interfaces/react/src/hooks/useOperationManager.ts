@@ -85,6 +85,7 @@ export function useOperationManager({
     duration: string;
     memoryOps: number;
     evidence: number;
+    progressPercent?: number;
   }) => {
     const now = Date.now();
     if (now - (lastMetricsUpdateRef.current || 0) < 300) {
@@ -403,8 +404,8 @@ export function useOperationManager({
           if (process.env.CYBER_TEST_MODE === 'true') {
             const t = event?.type || 'unknown';
             // Include some details for key types
-            if (t === 'step_header') {
-              console.log(`[TEST_EVENT] step_header step=${event.step} max=${event.maxSteps || event.total_steps || ''}`);
+            if (t === 'progress_update') {
+              console.log(`[TEST_EVENT] progress_update progress=${event.progressPercent ?? event.step ?? ''}`);
             } else if (t === 'tool_start') {
               console.log(`[TEST_EVENT] tool_start tool=${event.toolName || event.tool_name || ''}`);
             } else if (t === 'metrics_update') {
@@ -432,11 +433,11 @@ export function useOperationManager({
           }
         }
 
-        // Handle progress updates
-        if (event.step && event.total_steps) {
+        // Handle progress updates. progressPercent is budget progress; step is sequencing metadata.
+        if (event.type === 'progress_update' && typeof event.progressPercent === 'number') {
           operationManager.updateOperation(operation.id, {
-            currentStep: event.step,
-            totalSteps: event.total_steps,
+            currentStep: event.progressPercent,
+            totalSteps: 100,
             description: event.content || operation.description
           });
         }
@@ -459,7 +460,8 @@ export function useOperationManager({
                 cost: currentOp.cost.estimatedCost,
                 duration: event.metrics.duration || operationManager.getOperationDuration(operation.id),
                 memoryOps: event.metrics.memoryOps || currentOp.findings,
-                evidence: event.metrics.evidence || currentOp.findings
+                evidence: event.metrics.evidence || currentOp.findings,
+                progressPercent: event.metrics.progressPercent
               });
             }
           }

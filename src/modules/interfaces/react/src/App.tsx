@@ -42,7 +42,9 @@ interface AppProps {
   target?: string;
   objective?: string;
   autoRun?: boolean;
-  iterations?: number;
+  maxDuration?: number;
+  maxTokens?: number;
+  maxCost?: number;
   provider?: string;
   model?: string;
   region?: string;
@@ -56,7 +58,9 @@ const AppContent: React.FC<AppProps> = ({
   target, 
   objective, 
   autoRun, 
-  iterations, 
+  maxDuration,
+  maxTokens,
+  maxCost,
   provider, 
   model, 
   region 
@@ -427,7 +431,9 @@ const AppContent: React.FC<AppProps> = ({
     target,
     module,
     objective,
-    iterations,
+    maxDuration,
+    maxTokens,
+    maxCost,
     provider,
     model,
     region,

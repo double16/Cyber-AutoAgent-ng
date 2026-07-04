@@ -53,7 +53,7 @@ class StreamLogicValidator {
 
     // Test 2: Step header during swarm includes agent context
     const stepEvent = {
-      type: 'step_header',
+      type: 'progress_update',
       step: 3,
       maxSteps: 100,
       is_swarm_operation: true,

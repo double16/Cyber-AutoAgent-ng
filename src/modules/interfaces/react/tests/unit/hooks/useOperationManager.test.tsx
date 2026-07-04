@@ -206,7 +206,7 @@ describe('useOperationManager', () => {
 
     act(() => {
       executionService.emit('event', { type: 'operation_init', operation_id: 'backend-op' });
-      executionService.emit('event', { step: 2, total_steps: 5, content: 'Enumerating' });
+      executionService.emit('event', { type: 'progress_update', step: 1, progressPercent: 40, content: 'Enumerating' });
       executionService.emit('event', {
         type: 'metrics_update',
         metrics: { inputTokens: 10, outputTokens: 5, cost: 0.02, duration: '6s', memoryOps: 2, evidence: 3 },
@@ -217,8 +217,8 @@ describe('useOperationManager', () => {
 
     expect(operationManager.renameOperationId).toHaveBeenCalledWith('op-local', 'backend-op');
     expect(operationManager.updateOperation).toHaveBeenCalledWith('backend-op', expect.objectContaining({
-      currentStep: 2,
-      totalSteps: 5,
+      currentStep: 40,
+      totalSteps: 100,
     }));
     expect(operationManager.updateTokenUsage).toHaveBeenCalledWith('backend-op', 10, 5, 0.02, 0, 0);
     expect(actions.setUserHandoff).toHaveBeenCalledWith(true);

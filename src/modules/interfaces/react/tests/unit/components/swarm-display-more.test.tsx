@@ -33,8 +33,7 @@ const baseState = (): SwarmState => ({
             tools: ['think', 'delegate'],
             model_id: 'provider/model-name:tag',
             temperature: 0.2,
-            currentStep: 1,
-            maxSteps: 4,
+            progressPercent: 25,
             toolCalls: [{tool: 'think', input: {goal: 'map'}}],
             result: 'short result',
         },
@@ -75,7 +74,7 @@ describe('SwarmDisplay additional coverage', () => {
         expect(text).toContain('1 active');
         expect(text).toContain('1 completed');
         expect(text).toContain('Planner - Plans the work');
-        expect(text).toContain('[1/4]');
+        expect(text).toContain('[25%]');
         expect(text).toContain('(think, delegate)');
     });
 

@@ -197,7 +197,7 @@ describe('App', () => {
                     target="example.com"
                     objective="audit"
                     autoRun
-                    iterations={2}
+                    maxDuration={62}
                     provider="bedrock"
                     model="claude"
                     region="us-east-1"
@@ -222,7 +222,7 @@ describe('App', () => {
             target: 'example.com',
             module: 'web',
             objective: 'audit',
-            iterations: 2,
+            maxDuration: 62,
         }));
         expect(useKeyboardHandlers).toHaveBeenCalledWith(expect.objectContaining({
             activeOperation: null,

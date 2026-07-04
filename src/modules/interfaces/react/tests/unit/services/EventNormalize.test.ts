@@ -182,8 +182,8 @@ describe('normalizeEvent source coverage', () => {
             tool_input: {
                 Action: 'refine',
                 note: long(450),
-                current_step: '3',
-                expires_after_steps: '6',
+                budget_progress: 3,
+                expires_after_progress: 6,
                 overlay: JSON.stringify({
                     payload: {
                         directives: ['a', 'b', 'c', 'd', 'e'],
@@ -196,8 +196,8 @@ describe('normalizeEvent source coverage', () => {
 
         expect(event.tool_input).toEqual(expect.objectContaining({
             action: 'refine',
-            current_step: 3,
-            expires_after_steps: 6,
+            budget_progress: 3,
+            expires_after_progress: 6,
             directives: 'a, b, c, d, ... (+1 more)',
             metadata: {source: 'reviewer'},
         }));

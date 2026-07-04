@@ -171,7 +171,9 @@ const CONFIG_FIELDS: ConfigField[] = [
   },
 
   // Operations (renamed from Assessment)
-  { key: 'iterations', label: 'Max Iterations', type: 'number', section: 'Operations' },
+  { key: 'budgetMaxDuration', label: 'Max Duration (minutes)', type: 'number', section: 'Operations' },
+  { key: 'budgetMaxTokens', label: 'Max Tokens', type: 'number', section: 'Operations' },
+  { key: 'budgetMaxCost', label: 'Max Cost', type: 'number', section: 'Operations' },
   { key: 'autoApprove', label: 'Auto-Approve Tools', type: 'boolean', section: 'Operations' },
   { key: 'maxThreads', label: 'Max Threads', type: 'number', section: 'Operations' },
   { key: 'dockerTimeout', label: 'Docker Timeout (s)', type: 'number', section: 'Operations' },

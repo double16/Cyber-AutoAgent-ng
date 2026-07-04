@@ -4,7 +4,7 @@
  * Operation Stream Simulation - Integration Test
  *
  * Uses TestExecutionService by setting CYBER_TEST_MODE=true and CYBER_TEST_EXECUTION=mock.
- * Verifies that step headers, reasoning, tool start/output, and overall stability occur.
+ * Verifies that progress updates, reasoning, tool start/output, and overall stability occur.
  */
 
 import { spawn } from 'node-pty';
@@ -116,7 +116,7 @@ function ensureTestConfig() {
     const clean = output.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
 
     const checks = [
-      { name: 'Step headers', ok: /\[TEST_EVENT\] step_header|\[STEP\s+1|\[STEP|\[SWARM|operation/i.test(clean) },
+      { name: 'Progress update', ok: /\[TEST_EVENT\] progress_update|\[PROGRESS\s+1|\[PROGRESS|\[SWARM|operation/i.test(clean) },
       { name: 'Reasoning or output present', ok: /\[TEST_EVENT\]\s+(reasoning|output|tool_start|metrics_update)|Analyzing target|Finalizing|HTTP\/1\.1 200 OK|hello/i.test(clean) },
     ];
 

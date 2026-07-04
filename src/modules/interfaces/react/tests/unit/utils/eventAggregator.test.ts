@@ -1,4 +1,4 @@
-import {jest} from '@jest/globals';
+import {describe, expect, it, jest} from '@jest/globals';
 import {EventAggregator} from '../../../src/utils/eventAggregator.js';
 
 describe('EventAggregator', () => {
@@ -10,13 +10,13 @@ describe('EventAggregator', () => {
         expect(aggregator.flush()).toEqual([]);
     });
 
-    it('buffers step headers until the first tool signal', () => {
+    it('buffers progress updates until the first tool signal', () => {
         const aggregator = new EventAggregator();
 
         expect(aggregator.processEvent({
-            type: 'step_header',
-            step: 1,
-            maxSteps: 3,
+            type: 'progress_update',
+            step: 20,
+            progressPercent: 20,
             operation: 'OP_TEST',
             duration: '0s',
         })).toEqual([]);
@@ -35,9 +35,9 @@ describe('EventAggregator', () => {
 
         expect(toolStart).toEqual([
             expect.objectContaining({
-                type: 'step_header',
-                step: 1,
-                maxSteps: 3,
+                type: 'progress_update',
+                step: 20,
+                progressPercent: 20,
                 operation: 'OP_TEST',
             }),
             expect.objectContaining({
@@ -49,7 +49,7 @@ describe('EventAggregator', () => {
         ]);
     });
 
-    it('keeps reasoning attached before pending step headers and ends active thinking', () => {
+    it('keeps reasoning attached before pending progress updates and ends active thinking', () => {
         const aggregator = new EventAggregator();
 
         expect(aggregator.processEvent({
@@ -60,7 +60,7 @@ describe('EventAggregator', () => {
             expect.objectContaining({type: 'thinking', context: 'startup', startTime: 1}),
         ]);
 
-        aggregator.processEvent({type: 'step_header', step: 2, maxSteps: 5});
+        aggregator.processEvent({type: 'progress_update', step: 1, progressPercent: 40});
         const reasoning = aggregator.processEvent({
             type: 'reasoning',
             content: '  analyzed prior output  ',
@@ -72,13 +72,13 @@ describe('EventAggregator', () => {
         ]);
 
         const toolStart = aggregator.processEvent({type: 'tool_start', tool_name: 'shell', toolId: 't2'});
-        expect(toolStart[0]).toEqual(expect.objectContaining({type: 'step_header', step: 2}));
+        expect(toolStart[0]).toEqual(expect.objectContaining({type: 'progress_update', step: 1, progressPercent: 40}));
     });
 
-    it('deduplicates tool starts by step and tool id until tool end cleanup', () => {
+    it('deduplicates tool starts by progress boundary and tool id until tool end cleanup', () => {
         const aggregator = new EventAggregator();
 
-        aggregator.processEvent({type: 'step_header', step: 1});
+        aggregator.processEvent({type: 'progress_update', step: 1, progressPercent: 20});
         expect(aggregator.processEvent({type: 'tool_start', tool_name: 'shell', toolId: 'dup'}))
             .toEqual(expect.arrayContaining([expect.objectContaining({type: 'tool_start', toolId: 'dup'})]));
 
@@ -89,12 +89,12 @@ describe('EventAggregator', () => {
             .toEqual([expect.objectContaining({type: 'tool_start', toolId: 'dup'})]);
     });
 
-    it('flushes pending step headers for shell_command and starts delayed thinking', () => {
+    it('flushes pending progress updates for shell_command and starts delayed thinking', () => {
         const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(12345);
 
         try {
             const aggregator = new EventAggregator();
-            aggregator.processEvent({type: 'step_header', step: 3});
+            aggregator.processEvent({type: 'progress_update', step: 3, progressPercent: 60});
             aggregator.processEvent({type: 'tool_start', tool_name: 'shell', toolId: 'shell-1'});
 
             const events = aggregator.processEvent({type: 'shell_command', command: 'whoami'});

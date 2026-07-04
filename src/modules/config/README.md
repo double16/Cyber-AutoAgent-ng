@@ -57,7 +57,7 @@ agent_config = AgentConfig(
 The configuration system uses a **three-tier precedence hierarchy**:
 
 1. **CLI/API Arguments** (Highest priority)
-   - Command-line flags: `--provider`, `--model`, `--iterations`
+   - Command-line flags: `--provider`, `--model`, `--max-duration`
    - Direct API parameters passed to configuration methods
 
 2. **Environment Variables** (Override defaults)

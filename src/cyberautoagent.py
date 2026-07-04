@@ -57,8 +57,8 @@ from modules.agents.cyber_autoagent import (
 from modules.config.models.factory import get_model_timeout, configure_model_rate_limits
 from modules.config.system.environment import auto_setup, clean_operation_memory, setup_logging
 from modules.config.manager import get_config_manager
-from modules.config.types import get_default_base_dir, DEFAULT_ITERATIONS
-from modules.handlers.base import StepLimitReached, is_docker
+from modules.config.types import get_default_base_dir, BudgetConfig, DEFAULT_MAX_DURATION
+from modules.handlers.base import BudgetLimitReached, is_docker
 from modules.handlers.conversation_budget import strip_reflection_snapshot_messages
 from modules.handlers.utils import (
     Colors,
@@ -305,11 +305,27 @@ def main():
         action="store_true",
         help="Run in service mode for containerized deployments (keeps container alive)",
     )
+    # Unified budget flags
     parser.add_argument(
-        "--iterations",
+        "--max-duration",
+        dest="max_duration",
         type=int,
-        default=DEFAULT_ITERATIONS,
-        help=f"Maximum tool executions before stopping (default: {DEFAULT_ITERATIONS})",
+        default=DEFAULT_MAX_DURATION,
+        help="Maximum duration in minutes for the operation",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        dest="max_tokens",
+        type=int,
+        default=None,
+        help="Maximum total tokens (input+output+cache) budget",
+    )
+    parser.add_argument(
+        "--max-cost",
+        dest="max_cost",
+        type=float,
+        default=None,
+        help="Maximum total cost budget (in provider currency, e.g., USD)",
     )
     parser.add_argument(
         "--verbose",
@@ -667,7 +683,12 @@ def main():
     logger.info("Operation %s initiated", operation_id)
     logger.info("Objective: %s", args.objective)
     logger.info("Target: %s", args.target)
-    logger.info("Max steps: %d", args.iterations)
+    logger.info(
+        "Budget: duration=%sm, tokens=%s, cost=%s",
+        str(args.max_duration) if args.max_duration is not None else "unset",
+        str(args.max_tokens) if args.max_tokens is not None else "unset",
+        str(args.max_cost) if args.max_cost is not None else "unset",
+    )
     logger.info("Provider: %s", args.provider)
     logger.info("Model: %s", server_config.llm.model_id)
     logger.info("Temperature: %s", server_config.llm.temperature)
@@ -706,7 +727,7 @@ def main():
 {Colors.BOLD}Operation ID:{Colors.RESET} {Colors.CYAN}{operation_id}{Colors.RESET}
 {Colors.BOLD}Objective:{Colors.RESET}    {Colors.YELLOW}{args.objective}{Colors.RESET}
 {Colors.BOLD}Target:{Colors.RESET}       {Colors.RED}{args.target}{Colors.RESET} (sanitized: {target_sanitized})
-{Colors.BOLD}Max Iterations:{Colors.RESET} {args.iterations} steps
+{Colors.BOLD}Budget:{Colors.RESET}        duration={args.max_duration}m, tokens={args.max_tokens or '—'}, cost={args.max_cost or '—'}
 {Colors.BOLD}Environment:{Colors.RESET} {len(available_tools)} existing cyber tools available
 {Colors.BOLD}MCP:{Colors.RESET}          {len(mcp_connections)} server(s) available
 {Colors.BOLD}Output Path:{Colors.RESET}  {output_path_display}
@@ -739,12 +760,23 @@ def main():
 
         print_status("Cyber-AutoAgent online and starting", "SUCCESS")
 
+        budget_cfg = BudgetConfig(
+            max_duration_minutes=int(args.max_duration) if args.max_duration is not None else 0,
+            max_tokens=int(args.max_tokens) if args.max_tokens is not None else None,
+            max_cost=float(args.max_cost) if args.max_cost is not None else None,
+        )
+
         # Create agent
-        logger.info("Creating agent with iterations=%d", args.iterations)
+        logger.info(
+            "Creating agent with budget: duration=%sm, tokens=%s, cost=%s",
+            budget_cfg.max_duration_minutes,
+            budget_cfg.max_tokens if budget_cfg.max_tokens is not None else "—",
+            budget_cfg.max_cost if budget_cfg.max_cost is not None else "—",
+        )
         config = AgentConfig(
             target=args.target,
             objective=args.objective,
-            max_steps=args.iterations,
+            budget=budget_cfg,
             available_tools=available_tools,
             op_id=operation_id,
             model_id=args.model,
@@ -772,20 +804,20 @@ def main():
                 agent.messages.append(Message(role="user", content=[{"text": active_task}]))
 
         # Execute autonomous operation
-        step0_retry = 2
+        initial_reasoning_retry = 2
         # the count of consecutive action-less results
-        actionless_step_count = 0
+        actionless_attempt_count = 0
 
         # SDK-aligned execution loop with continuation support
         while not interrupted and not args.report:
-            last_step = callback_handler.current_step
             last_tool_call_count = sum(callback_handler.tool_counts.values(), start=0)
             try:
                 # add reflection snapshot
                 if "<reflection_snapshot>" not in current_message and not current_message.startswith(initial_prompt):
+                    progress_percent = int(getattr(callback_handler, "get_budget_progress", lambda: 0)())
                     reflection_snapshot = get_reflection_snapshot(
-                        current_step=callback_handler.current_step,
-                        max_steps=callback_handler.max_steps,
+                        progress_percent=progress_percent,
+                        budget=budget_cfg,
                         plan_current_phase=None,
                     )
                     current_message = current_message + "\n\n" + f"<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
@@ -824,23 +856,17 @@ def main():
                             )
                             callback_handler.process_metrics(metrics_obj)
 
-                # Ensure step is incremented and detect lack of progress
-                if callback_handler and callback_handler.current_step == last_step:
-                    callback_handler.current_step += 1
-                    tool_total_count = sum(callback_handler.tool_counts.values())
-                    if tool_total_count > last_tool_call_count:
-                        actionless_step_count = 0
-                    else:
-                        actionless_step_count += 1
-                    logger.debug(
-                        "Incrementing step because agent returned but callback_handler did not, actionless_step_count=%d, pending_step_header=%s, tool_total_count=%d, reasoning_emitted_since_last_step_header=%s",
-                        actionless_step_count,
-                        str(callback_handler.pending_step_header),
-                        tool_total_count,
-                        str(getattr(callback_handler, '_reasoning_emitted_since_last_step_header', None))
-                    )
+                # Detect lack of tool progress
+                tool_total_count = sum(callback_handler.tool_counts.values())
+                if tool_total_count > last_tool_call_count:
+                    actionless_attempt_count = 0
                 else:
-                    actionless_step_count = 0
+                    actionless_attempt_count += 1
+                    logger.debug(
+                        "Agent returned without new tool calls, actionless_count=%d, tool_total_count=%d",
+                        actionless_attempt_count,
+                        tool_total_count,
+                    )
 
                 # Check if we should continue
                 if callback_handler and callback_handler.should_stop():
@@ -854,48 +880,42 @@ def main():
                             agent, args.target, args.objective, args.module
                         )
                     elif callback_handler.has_reached_limit():
-                        print_status("Step limit reached - terminating", "SUCCESS")
+                        print_status("Budget limit reached - terminating", "SUCCESS")
                     break
 
                 # Allow at least one assistant turn to emit reasoning before concluding no action
-                if callback_handler.current_step == 0:
+                if sum(callback_handler.tool_counts.values()) == 0:
                     # If we've seen any reasoning emitted, give the agent one more cycle
                     # This prevents premature termination when the first turn is pure reasoning
                     if getattr(callback_handler, "_emitted_any_reasoning", False):
                         logger.debug(
                             "Initial reasoning observed with no tools yet; continuing one more cycle"
                         )
-                    elif step0_retry <= 0:
+                    elif initial_reasoning_retry <= 0:
                         print_status("No actions taken - completing", "SUCCESS")
                         break
-                    step0_retry -= 1
+                    initial_reasoning_retry -= 1
                 # If agent hasn't done anything substantial for a while, break to avoid infinite loop
-                elif actionless_step_count > 2:
-                    termination_reason = f"No actions taken after {actionless_step_count} attempts"
+                elif actionless_attempt_count > 2:
+                    termination_reason = f"No actions taken after {actionless_attempt_count} attempts"
                     print_status(termination_reason, "WARNING")
                     if callback_handler:
                         callback_handler.emit_termination("stalled", termination_reason)
                     break
 
-                # Generate continuation prompt
-                remaining_steps = (
-                    args.iterations - callback_handler.current_step
-                    if callback_handler
-                    else args.iterations
-                )
-                logger.info(
-                    "Remaining steps check: iterations=%d, current_step=%d, remaining=%d",
-                    args.iterations,
-                    callback_handler.current_step if callback_handler else 0,
-                    remaining_steps,
-                )
-                if remaining_steps <= 0:
-                    break
+                # Generate continuation prompt - time-budget aware safety check in case callback_handler is None
+                try:
+                    elapsed = time.time() - operation_start
+                    if args.max_duration is not None and elapsed >= float(args.max_duration) * 60.0:
+                        logger.info("Duration budget reached (elapsed=%ss)", int(elapsed))
+                        break
+                except Exception:
+                    pass
 
                 current_message = ""
 
-                if actionless_step_count > 0:
-                    if actionless_step_count == 1:
+                if actionless_attempt_count > 0:
+                    if actionless_attempt_count == 1:
                         logger.warning(
                             "Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
 
@@ -912,7 +932,7 @@ def main():
                             else:
                                 break
 
-                        current_message += f"**MANDATORY ACTION**: Take your time to decide which tool to call for your next step. This tool MUST be called next to make progress."
+                        current_message += "**MANDATORY ACTION**: Take your time to decide which tool to call next. A tool MUST be called next to make progress."
                     else:
                         active_plan = get_memory_client(silent=True).get_active_plan()
                         if active_plan and active_plan.assessment_complete:
@@ -933,25 +953,25 @@ def main():
                             memories=memories,
                         )
 
-            except StepLimitReached:
-                # Handle step limit reached gracefully without context errors
+            except BudgetLimitReached:
+                # Handle budget limit reached gracefully without context errors
                 print_status(
-                    f"Step limit reached ({callback_handler.max_steps} steps)",
+                    "Budget limit reached",
                     "SUCCESS",
                 )
-                logger.debug("Step limit reached - terminating gracefully")
+                logger.debug("Budget limit reached - terminating gracefully")
                 break
 
             except StopIteration as error:
-                # Strands agent completed normally - continue if we have steps left
-                logger.debug("Agent iteration completed: %s", str(error))
+                # Strands agent completed normally; continue if budget remains.
+                logger.debug("Agent cycle completed: %s", str(error))
                 if (
                     callback_handler
-                    and callback_handler.current_step > callback_handler.max_steps
+                    and callback_handler.has_reached_limit()
                 ):
                     print_status("Step limit reached", "SUCCESS")
                     break
-                # Continue to next iteration
+                # Continue to next cycle.
 
             except Exception as error:
                 # Handle other termination scenarios
@@ -985,8 +1005,8 @@ def main():
                         else "Objective achieved"
                     )
                     print_status(f"Agent terminated: {reason}", "SUCCESS")
-                elif "step limit" in error_str:
-                    print_status("Step limit reached", "SUCCESS")
+                elif "budget limit" in error_str:
+                    print_status("Budget limit reached", "SUCCESS")
                 elif (
                         any(isinstance(error, error_class) for error_class in
                             [RequestsReadTimeout,
@@ -1074,7 +1094,7 @@ def main():
                 )
 
                 print(f"\n{Colors.BOLD}Execution Metrics:{Colors.RESET}")
-                print(f"  • Total Steps: {summary['total_steps']}/{args.iterations}")
+                print(f"  • Duration: {summary.get('duration', 'unknown')}")
                 print(f"  • Tools Created: {summary['tools_created']}")
                 print(f"  • Evidence Collected: {summary['evidence_collected']} items")
                 print(f"  • Memory Operations: {summary['memory_operations']} total")

@@ -86,14 +86,14 @@ export const OperationStatusDisplay: React.FC<OperationStatusDisplayProps> = Rea
     };
   }, [currentOperation?.status]);
 
-  // ETA estimation based on steps
+  // ETA estimation based on budget progress percentage
   const etaText = useMemo(() => {
     if (!currentOperation) return undefined;
     const { currentStep, totalSteps, startTime } = currentOperation;
     if (!totalSteps || totalSteps <= 0 || currentStep <= 0) return undefined;
     const elapsedSec = Math.max(1, Math.floor((Date.now() - startTime.getTime()) / 1000));
-    const perStep = elapsedSec / currentStep;
-    const remaining = Math.max(0, Math.round(perStep * (totalSteps - currentStep)));
+    const perPercent = elapsedSec / currentStep;
+    const remaining = Math.max(0, Math.round(perPercent * (totalSteps - currentStep)));
     const m = Math.floor(remaining / 60);
     const s = remaining % 60;
     return `${m}:${s.toString().padStart(2, '0')}`;
@@ -122,7 +122,7 @@ export const OperationStatusDisplay: React.FC<OperationStatusDisplayProps> = Rea
     return parts.join(' • ');
   }, [showFlowProgress, flowState.module, flowState.target, flowState.objective]);
 
-  // Compact progress bar for steps
+  // Compact progress bar for budget progress
   const progressBar = useMemo(() => {
     if (!currentOperation || !currentOperation.totalSteps) return null;
     const width = 20; // fixed small bar width for stability
@@ -159,7 +159,7 @@ export const OperationStatusDisplay: React.FC<OperationStatusDisplayProps> = Rea
 
             {/* Progress + elapsed + ETA */}
             <Box>
-              <Text color={theme.warning}>Step {currentOperation.currentStep}/{currentOperation.totalSteps}</Text>
+              <Text color={theme.warning}>Progress {currentOperation.currentStep}%</Text>
               {progressBar && (
                 <>
                   <Text color={theme.muted}> • </Text>

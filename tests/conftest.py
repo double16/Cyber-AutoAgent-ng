@@ -198,7 +198,7 @@ def sample_agent_config():
     return {
         "target": "test.example.com",
         "objective": "Test security assessment",
-        "max_steps": 10,
+        "budget": {"max_duration_minutes": 60},
         "available_tools": ["nmap", "nikto"],
         "model_id": None,
         "region_name": "us-east-1",

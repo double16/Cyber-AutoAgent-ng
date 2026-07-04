@@ -39,7 +39,7 @@ const args = [
   '--module', params.module,
   '--objective', objective,
   '--target', params.target,
-  '--iterations', String(config.iterations || 100),
+  '--max-duration', String(config.budgetMaxDuration || 60),
   '--provider', config.modelProvider || 'bedrock',
 ];
 ```
@@ -349,7 +349,7 @@ sequenceDiagram
 agent, callback_handler = create_agent(
     target=args.target,
     objective=args.objective,
-    max_steps=args.iterations,
+    budget=args.budget,
     available_tools=available_tools,
     op_id=local_operation_id,
     model_id=args.model,

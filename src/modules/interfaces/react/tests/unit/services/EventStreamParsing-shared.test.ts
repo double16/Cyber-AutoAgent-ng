@@ -21,7 +21,7 @@ describe('shared cyber event stream parsing behavior', () => {
     const emitted = captureEvents(service);
 
     service[method](wrapEvent({ type: 'tool_start', tool_name: toolName, timestamp: 1 }));
-    service[method](`raw output\n${wrapEvent({ type: 'step_header', content: 'next', timestamp: 2 })}`);
+    service[method](`raw output\n${wrapEvent({ type: 'progress_update', content: 'next', timestamp: 2 })}`);
 
     const chunks = emitted.filter(event => event?.metadata?.fromToolBuffer);
     expect(chunks).toHaveLength(1);

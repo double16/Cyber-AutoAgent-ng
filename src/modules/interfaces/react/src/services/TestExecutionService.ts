@@ -105,17 +105,17 @@ export class TestExecutionService extends EventEmitter implements ExecutionServi
     }
     // Default event sequence if no file provided
     return [
-      { type: 'step_header', step: 1, maxSteps: 3, operation: 'OP_TEST', duration: '0s' },
+      { type: 'progress_update', step: 1, progressPercent: 0, operation: 'OP_TEST', duration: '0s' },
       { type: 'reasoning', content: 'Analyzing target for vulnerabilities...' },
       { type: 'tool_start', tool_name: 'shell', tool_input: { command: 'echo hello' } },
       { type: 'output', content: 'hello' },
       { type: 'metrics_update', metrics: { inputTokens: 100, outputTokens: 50, duration: '2s' } },
       { type: 'tool_invocation_end' },
-      { type: 'step_header', step: 2, maxSteps: 3, operation: 'OP_TEST', duration: '2s' },
+      { type: 'progress_update', step: 2, progressPercent: 50, operation: 'OP_TEST', duration: '2s' },
       { type: 'tool_start', tool_name: 'http_request', tool_input: { method: 'GET', url: 'http://example.com' } },
       { type: 'output', content: 'HTTP/1.1 200 OK' },
       { type: 'tool_invocation_end' },
-      { type: 'step_header', step: 3, maxSteps: 3, operation: 'OP_TEST', duration: '3s' },
+      { type: 'progress_update', step: 3, progressPercent: 100, operation: 'OP_TEST', duration: '3s' },
       { type: 'output', content: 'Finalizing...' }
     ];
   }

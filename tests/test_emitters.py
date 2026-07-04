@@ -58,7 +58,7 @@ def test_emitter_always_json_format():
 
     events = [
         {"type": "operation_init", "operation_id": "test-123", "target": "example.com"},
-        {"type": "step_header", "step": 2, "maxSteps": 5},
+        {"type": "progress_update", "step": 1, "progressPercent": 40},
         {"type": "reasoning", "content": "Analyzing"},
         {"type": "tool_start", "tool_name": "nmap"},
         {"type": "output", "content": "Test output"},

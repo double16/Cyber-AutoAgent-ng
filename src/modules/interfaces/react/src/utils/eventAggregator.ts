@@ -12,7 +12,7 @@ export class EventAggregator {
   private lastEventType?: string;
   private activeThinking: boolean = false;
   private activeReasoningSession: boolean = false;
-  private pendingStepHeader?: DisplayStreamEvent;
+  private pendingProgressUpdate?: DisplayStreamEvent;
   // Track step gating to properly attribute early reasoning to the previous step
   private pendingStepNumber?: number;
   private hasToolForPendingStep: boolean = false;
@@ -64,7 +64,7 @@ export class EventAggregator {
             this.lastEventType = undefined;
             this.activeThinking = false;
             this.activeReasoningSession = false;
-            this.pendingStepHeader = undefined;
+            this.pendingProgressUpdate = undefined;
             this.pendingStepNumber = undefined;
             this.hasToolForPendingStep = false;
             this.lastEmittedStepNumber = undefined;
@@ -75,25 +75,25 @@ export class EventAggregator {
             this.swarmHandoffSequence = 0;
             break;
 
-      case 'step_header':
+      case 'progress_update':
         // End any active reasoning session
         this.activeReasoningSession = false;
-        // Track swarm agent from step header
+        // Track swarm agent from progress update
         if (event.is_swarm_operation && event.swarm_agent) {
           this.currentSwarmAgent = event.swarm_agent;
         }
-        // Buffer the step header; flush when the first tool event of this step arrives
-        this.pendingStepHeader = {
-          type: 'step_header',
+        // Buffer the progress update; flush when the first tool event of this step arrives
+        this.pendingProgressUpdate = {
+          type: 'progress_update',
           step: event.step,
-          maxSteps: event.maxSteps,
+          progressPercent: (event as any).progressPercent,
           operation: event.operation,
           duration: event.duration,
           is_swarm_operation: (event as any).is_swarm_operation,
           swarm_agent: (event as any).swarm_agent || this.currentSwarmAgent,
           swarm_sub_step: (event as any).swarm_sub_step,
           swarm_max_sub_steps: (event as any).swarm_max_sub_steps,
-          swarm_total_iterations: (event as any).swarm_total_iterations,
+          swarm_total_actions: (event as any).swarm_total_actions,
           swarm_max_iterations: (event as any).swarm_max_iterations,
           swarm_context: (event as any).swarm_context || (this.swarmActive ? 'Multi-Agent Operation' : undefined)
         } as DisplayStreamEvent;
@@ -127,7 +127,7 @@ export class EventAggregator {
             reasoningEvent.is_swarm_operation = event.is_swarm_operation;
           }
           
-          // IMPORTANT: If a new step header is pending and no tool has been seen for that step yet,
+          // IMPORTANT: If a new progress update is pending and no tool has been seen for that step yet,
           // keep this reasoning attached to the previous step by not flushing the header here.
           // This preserves the intuitive attribution (reasoning summarizing prior step results).
           results.push(reasoningEvent as DisplayStreamEvent);
@@ -176,12 +176,12 @@ export class EventAggregator {
           this.activeThinking = false;
         }
 
-        // If there is a pending step header, emit it now before the tool header
-        if (this.pendingStepHeader) {
-          results.push(this.pendingStepHeader);
+        // If there is a pending progress update, emit it now before the tool header
+        if (this.pendingProgressUpdate) {
+          results.push(this.pendingProgressUpdate);
           // Update step gating state
           this.lastEmittedStepNumber = this.pendingStepNumber ?? this.lastEmittedStepNumber;
-          this.pendingStepHeader = undefined;
+          this.pendingProgressUpdate = undefined;
           this.hasToolForPendingStep = true;
         }
 
@@ -243,10 +243,10 @@ export class EventAggregator {
         
       case 'shell_command':
         // Treat shell_command as evidence of a tool starting (in case a start event was missed)
-        if (this.pendingStepHeader && !this.hasToolForPendingStep) {
-          results.push(this.pendingStepHeader);
+        if (this.pendingProgressUpdate && !this.hasToolForPendingStep) {
+          results.push(this.pendingProgressUpdate);
           this.lastEmittedStepNumber = this.pendingStepNumber ?? this.lastEmittedStepNumber;
-          this.pendingStepHeader = undefined;
+          this.pendingProgressUpdate = undefined;
           this.hasToolForPendingStep = true;
         }
         results.push({
@@ -281,8 +281,8 @@ export class EventAggregator {
           this.lastOutputContent = event.content;
           this.lastOutputTime = currentTime;
           
-          // IMPORTANT: Do NOT flush a pending step header on generic 'output' events.
-          // Late output from the previous tool can arrive after a new step_header
+          // IMPORTANT: Do NOT flush a pending progress update on generic 'output' events.
+          // Late output from the previous tool can arrive after a new progress_update
           // (e.g., final buffer flush). Flushing here would incorrectly advance
           // the header before prior-step reasoning is rendered.
           // We only flush on explicit tool signals (tool_start/tool_output).
@@ -303,11 +303,11 @@ export class EventAggregator {
         
       case 'tool_output':
         // If a step is pending and we receive a standardized tool_output event,
-        // flush the step header before displaying output to keep attribution correct.
-        if (this.pendingStepHeader && !this.hasToolForPendingStep) {
-          results.push(this.pendingStepHeader);
+        // flush the progress update before displaying output to keep attribution correct.
+        if (this.pendingProgressUpdate && !this.hasToolForPendingStep) {
+          results.push(this.pendingProgressUpdate);
           this.lastEmittedStepNumber = this.pendingStepNumber ?? this.lastEmittedStepNumber;
-          this.pendingStepHeader = undefined;
+          this.pendingProgressUpdate = undefined;
           this.hasToolForPendingStep = true;
         }
         // Pass through the event as-is for StreamDisplay to render

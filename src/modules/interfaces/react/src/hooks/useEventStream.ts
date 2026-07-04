@@ -74,12 +74,10 @@ export const useEventStream = (
         const newState = { ...prev };
 
         switch (event.type) {
-          case EVENT_TYPES.STEP_HEADER:
-            if ('step' in event && typeof event.step === 'number') {
-              newState.currentStep = event.step;
-            }
-            if ('maxSteps' in event && typeof event.maxSteps === 'number') {
-              newState.maxSteps = event.maxSteps;
+          case EVENT_TYPES.PROGRESS_UPDATE:
+            if ('progressPercent' in event && typeof event.progressPercent === 'number') {
+              newState.currentStep = event.progressPercent;
+              newState.maxSteps = 100;
             }
             break;
 

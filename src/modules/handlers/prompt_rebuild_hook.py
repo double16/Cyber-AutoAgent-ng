@@ -2,11 +2,11 @@
 """
 Trigger-Based Prompt Rebuild Hook for Cyber-AutoAgent.
 
-Implements adaptive prompt rebuilding for extended operations (400+ steps)
-through context-aware rebuild triggers.
+Implements adaptive prompt rebuilding for extended operations through
+context-aware rebuild triggers.
 
 Key Features:
-- Configurable rebuild intervals (default: 20% of max steps) for context maintenance
+- Configurable rebuild intervals (default: every 20% of budget progress) for context maintenance
 - Automatic execution prompt optimization using memory analysis
 - LLM-based interpretation of raw memory content without pattern dependencies
 - Plan snapshot and finding injection for context preservation
@@ -34,33 +34,18 @@ logger = get_logger("Handlers.PromptRebuildHook")
 
 
 class PromptRebuildHook(HookProvider):
-    """Trigger-based prompt rebuilding (not every step).
+    """Trigger-based prompt rebuilding.
 
     Rebuilds system prompt only when:
-    - Interval reached (20% of max steps by default)
+    - Budget progress interval reached
     - Phase transition detected
     - Execution prompt modified (agent optimized it)
     - External force_rebuild flag set
     """
 
     @staticmethod
-    def compute_rebuild_interval(max_steps: int, cap: int = 30) -> int:
-        # 20% as an integer (floor).
-        twenty_pct = max_steps // 5
-
-        # avoid zero for small max_steps
-        if twenty_pct <= 0:
-            return 5
-
-        if twenty_pct <= cap:
-            return twenty_pct
-
-        # pick the largest <= cap that divides twenty_pct
-        for d in range(cap, 0, -1):
-            if twenty_pct % d == 0:
-                return d
-
-        return twenty_pct
+    def compute_rebuild_interval_percent() -> int:
+        return 20
 
     def __init__(
         self,
@@ -70,7 +55,7 @@ class PromptRebuildHook(HookProvider):
         target: str,
         objective: str,
         operation_id: str,
-        max_steps: int = 100,
+        budget=None,
         module: str = "web",
         rebuild_interval: Optional[int] = None,
         operation_root: Optional[str] = None,
@@ -80,15 +65,14 @@ class PromptRebuildHook(HookProvider):
         """Initialize the prompt rebuild hook.
 
         Args:
-            callback_handler: Callback handler with current_step tracking
+            callback_handler: Callback handler with budget progress tracking
             memory_instance: Memory client for querying findings
             config: Configuration object
             target: Target being assessed
             objective: Assessment objective
             operation_id: Operation identifier
-            max_steps: Maximum steps for operation
             module: Module name (e.g., 'web', 'ctf')
-            rebuild_interval: Steps between automatic rebuilds (default: 20% of max steps)
+            rebuild_interval: Percent budget progress between automatic rebuilds
         """
         self.callback_handler = callback_handler
         self.memory = memory_instance
@@ -97,14 +81,13 @@ class PromptRebuildHook(HookProvider):
         self.target = target
         self.objective = objective
         self.operation_id = str(operation_id)
-        self.max_steps = max_steps
+        self.budget = budget
         self.module = module
         self.tools_context = tools_context
 
         # Rebuild tracking
-        self.last_rebuild_step = 0
-        self.rebuild_interval = self.compute_rebuild_interval(
-            max_steps) if rebuild_interval is None else rebuild_interval
+        self.last_rebuild_progress = 0
+        self.rebuild_interval = self.compute_rebuild_interval_percent() if rebuild_interval is None else rebuild_interval
         self.force_rebuild = False
         self.last_phase = None
         self.last_exec_prompt_mtime = None
@@ -138,7 +121,7 @@ class PromptRebuildHook(HookProvider):
         )
 
         logger.info(
-            "PromptRebuildHook initialized: interval=%d, operation=%s",
+            "PromptRebuildHook initialized: interval=%d%%, operation=%s",
             self.rebuild_interval,
             self.operation_id,
         )
@@ -152,15 +135,15 @@ class PromptRebuildHook(HookProvider):
         """Check triggers and rebuild prompt if needed.
 
         Args:
-            event: BeforeToolCallEvent from Strands SDK
+            event: BeforeToolCallEvent from the Strands SDK
         """
-        current_step = self.callback_handler.current_step
+        current_progress = int(getattr(self.callback_handler, "get_budget_progress", lambda: 0)())
         execution_prompt_modified = self._execution_prompt_modified()
 
         # Determine if rebuild needed
         should_rebuild = (
             self.force_rebuild
-            or (current_step - self.last_rebuild_step >= self.rebuild_interval)
+            or (current_progress - self.last_rebuild_progress >= self.rebuild_interval)
             or self._phase_changed()
             or execution_prompt_modified
         )
@@ -169,9 +152,9 @@ class PromptRebuildHook(HookProvider):
             return  # Keep using existing prompt
 
         logger.info(
-            "Prompt rebuild triggered at step %d (last rebuild: step %d)",
-            current_step,
-            self.last_rebuild_step,
+            "Prompt rebuild triggered at budget progress %d%% (last rebuild: %d%%)",
+            current_progress,
+            self.last_rebuild_progress,
         )
 
         # Rebuild prompt with fresh context
@@ -188,8 +171,8 @@ class PromptRebuildHook(HookProvider):
                 target=self.target,
                 objective=self.objective,
                 operation_id=self.operation_id,
-                current_step=current_step,
-                max_steps=self.max_steps,
+                budget=self.budget,
+                progress_percent=current_progress,
                 provider=getattr(self.config, "provider", None),
                 has_memory_path=bool(self.has_memory_path),
                 has_existing_memories=(memory_overview["total_count"] > 0) if memory_overview else False,
@@ -205,10 +188,10 @@ class PromptRebuildHook(HookProvider):
                 plan_current_phase=plan_current_phase,
             )
 
-            # AUTO-OPTIMIZE EXECUTION PROMPT (if enabled and step > rebuild_interval)
+            # AUTO-OPTIMIZE EXECUTION PROMPT (if enabled after the first budget interval)
             # Disabled by default to prevent LLM-based prompt modifications
             if os.environ.get("CYBER_ENABLE_PROMPT_OPTIMIZER", "false").lower() == "true":
-                if current_step >= self.rebuild_interval and not execution_prompt_modified:
+                if current_progress >= self.rebuild_interval and not execution_prompt_modified:
                     self._auto_optimize_execution_prompt(parent_agent=event.agent)
 
             # Reload execution prompt from disk (may have been optimized above or by prompt_optimizer tool)
@@ -237,18 +220,18 @@ class PromptRebuildHook(HookProvider):
                 )
 
             # Check for low findings and inject warning if needed
-            findings_warning = self._check_findings_gap(current_step)
+            findings_warning = self._check_findings_gap(current_progress)
             if findings_warning:
                 new_prompt = new_prompt + "\n\n" + findings_warning
-                logger.warning("Injected findings gap warning at step %d", current_step)
+                logger.warning("Injected findings gap warning at budget progress %d%%", current_progress)
 
             # CRITICAL: Validate prompt before assignment
             # SDK contract: system_prompt should never be None or empty
             if not new_prompt or not new_prompt.strip():
                 logger.error(
-                    "Rebuilt prompt is empty or None at step %d. "
+                    "Rebuilt prompt is empty or None at budget progress %d%%. "
                     "Keeping existing prompt to prevent agent failure.",
-                    current_step
+                    current_progress
                 )
                 return  # Abort rebuild, keep existing prompt
 
@@ -256,7 +239,7 @@ class PromptRebuildHook(HookProvider):
             event.agent.system_prompt = new_prompt
 
             # Update tracking
-            self.last_rebuild_step = current_step
+            self.last_rebuild_progress = current_progress
             self.force_rebuild = False
 
             if logger.isEnabledFor(logging.DEBUG):
@@ -325,19 +308,18 @@ class PromptRebuildHook(HookProvider):
 
         return False
 
-    def _check_findings_gap(self, current_step: int) -> Optional[str]:
+    def _check_findings_gap(self, current_progress: int) -> Optional[str]:
         """Check if findings count is low compared to progress and inject warning.
 
         Returns warning message if findings gap detected, None otherwise.
         """
         # Only check at significant progress points (20%, 40%, 60%, 80%)
-        progress_pct = (current_step / self.max_steps) * 100
         checkpoint_thresholds = [20, 40, 60, 80]
 
         # Find nearest checkpoint
         nearest_checkpoint = None
         for threshold in checkpoint_thresholds:
-            if threshold - 5 <= progress_pct <= threshold + 5:
+            if threshold - 5 <= current_progress <= threshold + 5:
                 nearest_checkpoint = threshold
                 break
 
@@ -485,8 +467,8 @@ Without category='finding', your work will NOT appear in the final report.
         Direct LLM-based approach: Provides raw memories for natural language
         interpretation without hardcoded patterns or extraction logic.
         """
-        current_step = self.callback_handler.current_step
-        logger.info("Auto-optimizing execution prompt at step %d", current_step)
+        current_progress = int(getattr(self.callback_handler, "get_budget_progress", lambda: 0)())
+        logger.info("Auto-optimizing execution prompt at budget progress %d%%", current_progress)
 
         # Check if memory is available
         if not self.memory:

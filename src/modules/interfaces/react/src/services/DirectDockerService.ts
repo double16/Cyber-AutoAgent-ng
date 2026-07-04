@@ -193,9 +193,16 @@ export class DirectDockerService extends EventEmitter {
         '--module', params.module,
         '--objective', 'via environment',  // Placeholder, actual value comes from env
         '--target', params.target,
-        '--iterations', String(config.iterations || 100),
+        '--max-duration', String(config.budgetMaxDuration),
         '--provider', config.modelProvider || 'bedrock',
       ];
+
+      if (config.budgetMaxTokens) {
+        args.push('--max-tokens', String(config.budgetMaxTokens));
+      }
+      if (config.budgetMaxCost) {
+        args.push('--max-cost', String(config.budgetMaxCost));
+      }
 
       if (params.continueOperation === true || params.continueOperation === "") {
         args.push('--continue');

@@ -145,8 +145,8 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         ]
 
         with open(operation_dir / "cyber_operations.log", "w", encoding="utf-8") as f:
-            f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 209251, "inputTokens": 208136, "outputTokens": 1115, "totalTokens": 209251, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.75, "duration": "20m 0s", "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_171", "timestamp": "2026-01-26T21:29:49.060488"}}__CYBER_EVENT_END__\n')
-            f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 235860, "inputTokens": 234695, "outputTokens": 1165, "totalTokens": 235860, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 2.10, "duration": "21m 0s", "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_185", "timestamp": "2026-01-26T21:30:49.111082"}}__CYBER_EVENT_END__\n')
+            f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 209251, "inputTokens": 208136, "outputTokens": 1115, "totalTokens": 209251, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.75, "duration": "20m 0s", "budget": {{ "maxDurationMinutes": 60, "maxTokens": null, "maxCost": null }}, "progress": 0.1, "progressPercent": 10, "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_171", "timestamp": "2026-01-26T21:29:49.060488"}}__CYBER_EVENT_END__\n')
+            f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 235860, "inputTokens": 234695, "outputTokens": 1165, "totalTokens": 235860, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 2.10, "duration": "21m 0s", "budget": {{ "maxDurationMinutes": 60, "maxTokens": null, "maxCost": null }}, "progress": 0.15, "progressPercent": 15, "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_185", "timestamp": "2026-01-26T21:30:49.111082"}}__CYBER_EVENT_END__\n')
 
         out = build_report_sections(
             operation_id=op_id,

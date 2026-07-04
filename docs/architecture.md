@@ -272,15 +272,14 @@ graph TB
 
 **ReactBridgeHandler** extends the Strands SDK's callback system to emit structured events for the React terminal interface:
 
-```python
-# Event types emitted during operation
+### Event types emitted during operation
+
 - tool_start: Tool invocation with parameters
 - tool_end: Tool completion with results
 - reasoning: Agent decision-making context
-- step_header: Iteration tracking (step X/max_steps)
-- metrics_update: Token usage, cost, duration
+- metrics_update: Token usage, cost, duration, and budget progress
+- progress_update: progress updates
 - operation_init: Operation metadata and configuration
-```
 
 Events flow from the Python agent through stdout using the `__CYBER_EVENT__` protocol, enabling real-time monitoring without tight coupling between backend and frontend.
 

@@ -2,6 +2,7 @@ import React from 'react';
 import TestRenderer, {act} from 'react-test-renderer';
 import {useEventGroups, useEventStream, useSwarmTracking} from '../../../src/hooks/useEventStream.js';
 import {EVENT_TYPES} from '../../../src/constants/config.js';
+import {describe, expect, it} from "@jest/globals";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -44,7 +45,7 @@ describe('useEventStream hooks', () => {
         expect(hook.current[0].events).toHaveLength(1);
 
         act(() => {
-            hook.current[1].processEvent({type: EVENT_TYPES.STEP_HEADER, step: 3, maxSteps: 12} as any);
+            hook.current[1].processEvent({type: EVENT_TYPES.PROGRESS_UPDATE, step: 1, progressPercent: 30} as any);
             hook.current[1].processEvent({type: EVENT_TYPES.THINKING} as any);
             hook.current[1].processEvent({type: EVENT_TYPES.TOOL_START, tool_name: 'http_request'} as any);
             hook.current[1].processEvent({type: EVENT_TYPES.REASONING, content: 'first '} as any);
@@ -53,8 +54,8 @@ describe('useEventStream hooks', () => {
         });
 
         expect(hook.current[0]).toEqual(expect.objectContaining({
-            currentStep: 3,
-            maxSteps: 12,
+            currentStep: 30,
+            maxSteps: 100,
             isThinking: false,
             lastToolName: 'http_request',
             reasoningBuffer: ['first ', 'second'],
