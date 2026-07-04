@@ -1,6 +1,6 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 import TestRenderer, {act} from 'react-test-renderer';
 
 if (typeof global.TextEncoder === 'undefined') {
@@ -175,8 +175,7 @@ describe('status, log, operation, and wrapper components', () => {
                 flowState={{step: 'ready', module: 'web', target: 'example.com', objective: 'audit'}}
                 currentOperation={{
                     id: 'OP_1',
-                    currentStep: 40,
-                    totalSteps: 100,
+                    progressPercentage: 40,
                     description: 'Testing target',
                     startTime,
                     status: 'running',
@@ -191,22 +190,49 @@ describe('status, log, operation, and wrapper components', () => {
         expect(running).toContain('Progress 40%');
         expect(running).toContain('Findings: 1');
         expect(running).toContain('RUNNING');
-        expect(running).toContain('ETA');
+        expect(running).toContain('Budget ETA');
+
+        expect(render(
+            <OperationStatusDisplay
+                flowState={{step: 'ready'}}
+                currentOperation={{
+                    id: 'OP_STARTING',
+                    progressPercentage: 0,
+                    description: 'Starting target',
+                    startTime,
+                    status: 'running',
+                }}
+            />
+        ).lastFrame()).not.toContain('Budget ETA');
+
+        expect(render(
+            <OperationStatusDisplay
+                flowState={{step: 'ready'}}
+                currentOperation={{
+                    id: 'OP_COMPLETE_PROGRESS',
+                    progressPercentage: 100,
+                    description: 'Budget reached',
+                    startTime,
+                    status: 'running',
+                }}
+            />
+        ).lastFrame()).not.toContain('Budget ETA');
 
         for (const status of ['paused', 'completed', 'error', 'cancelled'] as const) {
-            expect(render(
+            const statusFrame = render(
                 <OperationStatusDisplay
                     flowState={{step: 'target', module: 'web'}}
                     currentOperation={{
                         id: `OP_${status}`,
-                        currentStep: 0,
-                        totalSteps: 0,
+                        progressPercentage: 40,
                         description: status,
                         startTime,
                         status,
                     }}
                 />
-            ).lastFrame()).toContain(status.toUpperCase());
+            ).lastFrame();
+            expect(statusFrame).toContain(status.toUpperCase());
+            expect(statusFrame).not.toContain('Budget ETA');
         }
     });
 

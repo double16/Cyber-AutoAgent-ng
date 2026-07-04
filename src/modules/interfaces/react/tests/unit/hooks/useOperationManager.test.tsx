@@ -217,8 +217,7 @@ describe('useOperationManager', () => {
 
     expect(operationManager.renameOperationId).toHaveBeenCalledWith('op-local', 'backend-op');
     expect(operationManager.updateOperation).toHaveBeenCalledWith('backend-op', expect.objectContaining({
-      currentStep: 40,
-      totalSteps: 100,
+      progressPercentage: 40,
     }));
     expect(operationManager.updateTokenUsage).toHaveBeenCalledWith('backend-op', 10, 5, 0.02, 0, 0);
     expect(actions.setUserHandoff).toHaveBeenCalledWith(true);

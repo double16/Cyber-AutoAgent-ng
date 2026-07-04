@@ -54,8 +54,7 @@ describe('useEventStream hooks', () => {
         });
 
         expect(hook.current[0]).toEqual(expect.objectContaining({
-            currentStep: 30,
-            maxSteps: 100,
+            progressPercentage: 30,
             isThinking: false,
             lastToolName: 'http_request',
             reasoningBuffer: ['first ', 'second'],
@@ -75,7 +74,7 @@ describe('useEventStream hooks', () => {
         });
         expect(hook.current[0]).toEqual(expect.objectContaining({
             events: [],
-            currentStep: 0,
+            progressPercentage: 0,
             reasoningBuffer: [],
             lastToolName: null,
         }));

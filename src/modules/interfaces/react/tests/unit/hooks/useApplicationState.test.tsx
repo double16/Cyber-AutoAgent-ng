@@ -106,7 +106,7 @@ describe('useApplicationState', () => {
             id: 'OP_1',
             status: 'running',
             findings: 0,
-            currentStep: 0,
+            progressPercentage: 0,
         } as any;
         const executionService = {cleanup: jest.fn()} as any;
 

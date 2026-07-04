@@ -11,8 +11,7 @@ import { EventStore } from '../utils/EventStore.js';
 interface EventStreamState {
   events: DisplayStreamEvent[];
   isThinking: boolean;
-  currentStep: number;
-  maxSteps: number;
+  progressPercentage: number;
   reasoningBuffer: string[];
   lastToolName: string | null;
 }
@@ -25,7 +24,7 @@ interface EventStreamActions {
 }
 
 export const useEventStream = (
-  initialMaxSteps: number = 100,
+  _initialMaxSteps: number = 100,
   maxEvents: number = 5000
 ): [EventStreamState, EventStreamActions] => {
   // Use EventStore for efficient event management
@@ -35,8 +34,7 @@ export const useEventStream = (
   const [state, setState] = React.useState<EventStreamState>({
     events: [],
     isThinking: false,
-    currentStep: 0,
-    maxSteps: initialMaxSteps,
+    progressPercentage: 0,
     reasoningBuffer: [],
     lastToolName: null,
   });
@@ -63,7 +61,7 @@ export const useEventStream = (
       setState(prev => ({
         ...prev,
         events: [],
-        currentStep: 0,
+        progressPercentage: 0,
         reasoningBuffer: [],
         lastToolName: null,
       }));
@@ -76,8 +74,7 @@ export const useEventStream = (
         switch (event.type) {
           case EVENT_TYPES.PROGRESS_UPDATE:
             if ('progressPercent' in event && typeof event.progressPercent === 'number') {
-              newState.currentStep = event.progressPercent;
-              newState.maxSteps = 100;
+              newState.progressPercentage = event.progressPercent;
             }
             break;
 

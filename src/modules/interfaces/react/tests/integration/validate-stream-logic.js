@@ -55,7 +55,7 @@ class StreamLogicValidator {
     const stepEvent = {
       type: 'progress_update',
       step: 3,
-      maxSteps: 100,
+      progressPercent: 3,
       is_swarm_operation: true,
       swarm_agent: 'recon_specialist',
       swarm_sub_step: 2,

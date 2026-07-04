@@ -436,8 +436,7 @@ export function useOperationManager({
         // Handle progress updates. progressPercent is budget progress; step is sequencing metadata.
         if (event.type === 'progress_update' && typeof event.progressPercent === 'number') {
           operationManager.updateOperation(operation.id, {
-            currentStep: event.progressPercent,
-            totalSteps: 100,
+            progressPercentage: event.progressPercent,
             description: event.content || operation.description
           });
         }

@@ -144,7 +144,7 @@ class TerminalStreamTestRunner {
     const testEvent = {
       type: 'progress_update',
       step: 3,
-      maxSteps: 100,
+      progressPercent: 3,
       operation: 'OP_TEST_123',
       duration: '15s',
       is_swarm_operation: true,
