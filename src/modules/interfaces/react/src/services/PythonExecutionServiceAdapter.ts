@@ -267,6 +267,10 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
     return this.pythonService.sendUserInput(input);
   }
 
+  async stop(): Promise<void> {
+    await this.pythonService.stop();
+  }
+
   cleanup(): void {
     if (this.pythonService) {
       this.pythonService.cleanup();

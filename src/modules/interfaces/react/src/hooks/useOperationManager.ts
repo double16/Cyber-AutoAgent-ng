@@ -15,6 +15,7 @@ import { ApplicationState } from './useApplicationState.js';
 import { useDebouncedState } from './useDebouncedState.js';
 import { ExecutionServiceFactory, ExecutionServiceSelectionError, ServiceSelectionResult } from '../services/ExecutionServiceFactory.js';
 import { ExecutionService, DEFAULT_EXECUTION_CONFIG } from '../services/ExecutionService.js';
+import {stopExecution} from '../services/executionLifecycle.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 
 export interface OperationHistoryEntry {
@@ -144,10 +145,12 @@ export function useOperationManager({
       }
       // Detach and cleanup any lingering execution service
       if (currentExecutionServiceRef.current) {
-        try {
-          currentExecutionServiceRef.current.removeAllListeners();
-          currentExecutionServiceRef.current.cleanup();
-        } catch {}
+        void stopExecution({
+          executionService: currentExecutionServiceRef.current,
+          cleanup: true,
+          removeListeners: true,
+        }).catch(() => {
+        });
         currentExecutionServiceRef.current = null;
       }
     };
@@ -206,10 +209,13 @@ export function useOperationManager({
   const handleAssessmentPause = useCallback(async () => {
     if (appState.activeOperation) {
       try {
-        // First, stop the execution service to kill the running Python process
+        // First, stop the execution service to kill the running Python/container process
         if (appState.executionService) {
           addOperationHistoryEntry('info', 'Stopping operation...');
-          await (appState.executionService as any).stop();
+          await stopExecution({
+            executionHandle: (appState.activeOperation as any).executionHandle,
+            executionService: appState.executionService,
+          });
         }
         
         // Then update the operation manager state
@@ -230,23 +236,12 @@ export function useOperationManager({
   const handleAssessmentCancel = useCallback(async () => {
     if (appState.activeOperation) {
       try {
-        // First, stop the execution using the executionHandle stored on the operation
-        const executionHandle = (appState.activeOperation as any).executionHandle;
-        if (executionHandle && executionHandle.stop) {
-          await executionHandle.stop();
-        } else if (appState.executionService) {
-          // Fallback: emit stop event to the service
-          appState.executionService.emit('stop');
-        }
-
-        // Proactively detach listeners and cleanup the execution service to avoid leaks
-        try {
-          const svc: any = appState.executionService;
-          if (svc) {
-            svc.removeAllListeners?.();
-            svc.cleanup?.();
-          }
-        } catch {}
+        await stopExecution({
+          executionHandle: (appState.activeOperation as any).executionHandle,
+          executionService: appState.executionService,
+          cleanup: true,
+          removeListeners: true,
+        });
         
         // Then update the operation manager state
         operationManager.pauseOperation(appState.activeOperation.id);
@@ -536,10 +531,12 @@ export function useOperationManager({
       
       // Cleanup function for event listeners and intervals
       const cleanupExecution = () => {
-        try {
-          executionService.removeAllListeners();
-          executionService.cleanup();
-        } catch {}
+        void stopExecution({
+          executionService,
+          cleanup: true,
+          removeListeners: true,
+        }).catch(() => {
+        });
         if (metricsIntervalRef.current) {
           clearInterval(metricsIntervalRef.current);
           metricsIntervalRef.current = null;

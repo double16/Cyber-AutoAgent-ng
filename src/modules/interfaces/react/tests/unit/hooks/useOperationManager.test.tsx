@@ -228,6 +228,9 @@ describe('useOperationManager', () => {
     act(() => {
       executionService.emit('complete', { ok: true });
     });
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(operationManager.updateOperation).toHaveBeenCalledWith('backend-op', expect.objectContaining({
       status: 'completed',
     }));
@@ -244,6 +247,7 @@ describe('useOperationManager', () => {
   });
 
   it('handles missing assessment parameters, selection errors, pause, and cancel', async () => {
+    jest.useRealTimers();
     const { useOperationManager } = await loadHook();
     const activeExecutionService = new EventEmitter() as any;
     activeExecutionService.stop = jest.fn(async () => undefined);
@@ -273,17 +277,15 @@ describe('useOperationManager', () => {
     await act(async () => {
       await hook.current.handleAssessmentPause();
     });
-    expect(activeExecutionService.stop).toHaveBeenCalled();
+    expect(executionHandle.stop).toHaveBeenCalled();
+    expect(activeExecutionService.stop).not.toHaveBeenCalled();
     expect(operationManager.pauseOperation).toHaveBeenCalledWith('active-op');
     expect(actions.setActiveOperation).toHaveBeenCalledWith(null);
 
     await act(async () => {
-      const pending = hook.current.handleAssessmentCancel();
-      await Promise.resolve();
-      jest.advanceTimersByTime(60);
-      await pending;
+      await hook.current.handleAssessmentCancel();
     });
-    expect(executionHandle.stop).toHaveBeenCalled();
+    expect(executionHandle.stop).toHaveBeenCalledTimes(2);
     expect(actions.setUserHandoff).toHaveBeenCalledWith(false);
     expect(assessmentFlow.resetCompleteWorkflow).toHaveBeenCalled();
     expect(hook.current.operationHistoryEntries).toEqual(expect.arrayContaining([

@@ -156,6 +156,11 @@ export interface ExecutionService extends EventEmitter {
   setup?(config: Config, onProgress?: (message: string) => void): Promise<void>;
 
   /**
+   * Stop the active execution, if any.
+   */
+  stop(): Promise<void>;
+
+  /**
    * Cleanup resources and stop any active executions
    */
   cleanup(): void;

@@ -88,6 +88,17 @@ export class TestExecutionService extends EventEmitter implements ExecutionServi
     this.active = false;
   }
 
+  async stop(): Promise<void> {
+    if (this.intervalHandle) {
+      clearInterval(this.intervalHandle);
+      this.intervalHandle = null;
+    }
+    if (this.active) {
+      this.active = false;
+      this.emit('stopped');
+    }
+  }
+
   isActive(): boolean {
     return this.active;
   }

@@ -9,6 +9,8 @@ import meow from 'meow';
 import { App } from './App.js';
 import { Config } from './contexts/ConfigContext.js';
 import { loggingService } from './services/LoggingService.js';
+import type {ExecutionHandle, ExecutionService} from './services/ExecutionService.js';
+import {stopExecution} from './services/executionLifecycle.js';
 import { enableConsoleSilence } from './utils/consoleSilencer.js';
 import { formatDuration } from './utils/logger.js';
 
@@ -184,6 +186,10 @@ const runAutoAssessment = async () => {
   if (cli.flags.autoRun && cli.flags.target) {
     loggingService.info(`🔐 Starting assessment: ${cli.flags.module} → ${cli.flags.target}`);
     loggingService.info(`📌 Objective: ${cli.flags.objective || 'General security assessment'}`);
+    let executionService: ExecutionService | null = null;
+    let executionHandle: ExecutionHandle | null = null;
+    let signalCleanup: (() => void) | null = null;
+    let stoppingForSignal = false;
 
     try {
       // Import config system to get proper defaults and merge with CLI overrides
@@ -315,9 +321,51 @@ const runAutoAssessment = async () => {
       // Import and use ExecutionServiceFactory to select proper service
       const { ExecutionServiceFactory } = await import('./services/ExecutionServiceFactory.js');
       const serviceResult = await ExecutionServiceFactory.selectService(finalConfig);
-      const executionService = serviceResult.service;
+      executionService = serviceResult.service;
 
       loggingService.info(`🔧 Using execution service: ${serviceResult.mode} (preferred: ${serviceResult.isPreferred})`);
+
+      const signalExitCode = (signal: NodeJS.Signals) => {
+        if (signal === 'SIGINT') return 130;
+        if (signal === 'SIGTERM') return 143;
+        if (signal === 'SIGHUP') return 129;
+        return 1;
+      };
+
+      const stopForSignal = async (signal: NodeJS.Signals) => {
+        if (stoppingForSignal) {
+          process.exit(signalExitCode(signal));
+        }
+        stoppingForSignal = true;
+        loggingService.info(`\nReceived ${signal}; stopping assessment...`);
+        try {
+          await stopExecution({
+            executionHandle,
+            executionService,
+            cleanup: true,
+            removeListeners: true,
+          });
+        } catch (error) {
+          loggingService.error('Failed to stop active assessment:', error);
+        } finally {
+          signalCleanup?.();
+          process.exit(signalExitCode(signal));
+        }
+      };
+
+      const signalHandlers = {
+        SIGINT: () => void stopForSignal('SIGINT'),
+        SIGTERM: () => void stopForSignal('SIGTERM'),
+        SIGHUP: () => void stopForSignal('SIGHUP'),
+      };
+      process.on('SIGINT', signalHandlers.SIGINT);
+      process.on('SIGTERM', signalHandlers.SIGTERM);
+      process.on('SIGHUP', signalHandlers.SIGHUP);
+      signalCleanup = () => {
+        process.off('SIGINT', signalHandlers.SIGINT);
+        process.off('SIGTERM', signalHandlers.SIGTERM);
+        process.off('SIGHUP', signalHandlers.SIGHUP);
+      };
 
       // Setup the execution environment if needed
       await executionService.setup(finalConfig, (message) => {
@@ -334,6 +382,7 @@ const runAutoAssessment = async () => {
 
       // Execute assessment and wait for completion
       const handle = await executionService.execute(assessmentParams, finalConfig);
+      executionHandle = handle;
 
       let lastMetricsUpdate = "";
       let lastTaskTitle = "";
@@ -391,10 +440,22 @@ const runAutoAssessment = async () => {
         loggingService.error(` Assessment failed: ${result.error}`);
       }
 
-      // Cleanup
+      signalCleanup?.();
+      signalCleanup = null;
       executionService.cleanup();
     } catch (error) {
       loggingService.error('Assessment failed:', error);
+      signalCleanup?.();
+      signalCleanup = null;
+      try {
+        await stopExecution({
+          executionHandle,
+          executionService,
+          cleanup: true,
+          removeListeners: true,
+        });
+      } catch {
+      }
       process.exit(1);
     }
 
