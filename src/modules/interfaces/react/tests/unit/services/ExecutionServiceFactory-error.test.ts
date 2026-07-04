@@ -1,5 +1,7 @@
+import {describe, expect, it, jest } from '@jest/globals';
 import { ExecutionMode } from '../../../src/services/ExecutionService.js';
 import {
+  ExecutionServiceFactory,
   ExecutionServiceSelectionError,
   RejectedServiceInfo
 } from '../../../src/services/ExecutionServiceFactory.js';
@@ -43,5 +45,22 @@ describe('ExecutionServiceSelectionError', () => {
     const secondDiagnostics = error.diagnostics[1];
     expect(secondDiagnostics).toContain('Local CLI');
     expect(secondDiagnostics).toContain('Python 3.11+ not available');
+  });
+
+  it('clears validation timeout handles when validation resolves first', async () => {
+    jest.useFakeTimers();
+    try {
+      const service = {
+        validate: jest.fn(async () => ({ valid: true, issues: [], warnings: [] })),
+      };
+
+      await expect(
+        (ExecutionServiceFactory as any).validateWithTimeout(service, {}, 1000)
+      ).resolves.toEqual({ valid: true, issues: [], warnings: [] });
+
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

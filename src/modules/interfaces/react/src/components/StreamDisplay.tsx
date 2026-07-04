@@ -266,15 +266,18 @@ const InlineReportViewer: React.FC<{
   );
 
   React.useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       try {
-        setError(null);
-        setResolvedPath(null);
+        if (!cancelled) {
+          setError(null);
+          setResolvedPath(null);
+        }
 
         const candidates = candidatePaths;
 
         if (candidates.length === 0) {
-          if (!fallbackContent) {
+          if (!cancelled && !fallbackContent) {
             setError('Report context unavailable');
           }
           return;
@@ -297,19 +300,22 @@ const InlineReportViewer: React.FC<{
         if (!loaded) {
           // We already populated content from fallbackContent above (if present).
           // If there is no fallbackContent, surface a clear error.
-          if (!fallbackContent) {
+          if (!cancelled && !fallbackContent) {
             setError('Report file not found');
           }
           // Prefer the first existing candidate for the "Report saved to" hint.
           try {
             const firstExisting = candidates.find(p => fsSync.existsSync(p));
+            if (cancelled) {
+              return;
+            }
             if (firstExisting) {
               setResolvedPath(firstExisting);
             } else if (reportPath && path.isAbsolute(reportPath)) {
               setResolvedPath(reportPath);
             }
           } catch {
-            if (reportPath && path.isAbsolute(reportPath)) {
+            if (!cancelled && reportPath && path.isAbsolute(reportPath)) {
               setResolvedPath(reportPath);
             }
           }
@@ -317,6 +323,9 @@ const InlineReportViewer: React.FC<{
         }
 
         // File read succeeded; prefer full file content over inline fallback.
+        if (cancelled) {
+          return;
+        }
         setContent(loaded);
         if (usedPath) {
           setResolvedPath(usedPath);
@@ -326,24 +335,30 @@ const InlineReportViewer: React.FC<{
       } catch (e: any) {
         // On unexpected errors, keep any existing content (seeded above) and
         // only surface an error if we had nothing to show.
-        if (!fallbackContent) {
+        if (!cancelled && !fallbackContent) {
           setError('Failed to load report');
         }
         try {
           const firstExisting = candidatePaths.find(p => fsSync.existsSync(p));
+          if (cancelled) {
+            return;
+          }
           if (firstExisting) {
             setResolvedPath(firstExisting);
           } else if (reportPath && path.isAbsolute(reportPath)) {
             setResolvedPath(reportPath);
           }
         } catch {
-          if (reportPath && path.isAbsolute(reportPath)) {
+          if (!cancelled && reportPath && path.isAbsolute(reportPath)) {
             setResolvedPath(reportPath);
           }
         }
       }
     };
     load();
+    return () => {
+      cancelled = true;
+    };
   }, [candidatePaths, fallbackContent, reportPath]);
 
   if (error) {

@@ -20,6 +20,7 @@ const createStream = () => {
     const stream = new EventEmitter() as any;
     stream.write = jest.fn();
     stream.destroy = jest.fn();
+    stream.unpipe = jest.fn();
     return stream;
 };
 
@@ -174,6 +175,59 @@ describe('DirectDockerService stop', () => {
         expect((service as any).activeExecRunId).toMatch(/^cyber-exec-/);
         expect((service as any).activeContainer).toBe(container);
         expect((service as any).activeContainerOwner).toBe(false);
+    });
+
+    it('releases exec stream and parser listeners when the stream ends', async () => {
+        const {DirectDockerService} = await load();
+        const service = new DirectDockerService();
+        const stream = createStream();
+        stream.pipe = jest.fn();
+        stream.removeAllListeners = jest.fn(EventEmitter.prototype.removeAllListeners.bind(stream));
+        const execStart = jest.fn((_opts: any, cb: any) => cb(null, stream));
+        const exec = {start: execStart};
+        const container = {
+            exec: jest.fn(async () => exec),
+        };
+        const stopped = jest.fn();
+        service.on('stopped', stopped);
+
+        await (service as any).execIntoContainer(container, ['--target', 'example.com'], ['A=B'], 'single-container');
+        const parser = (service as any).eventParser;
+        const parserRemoveAllListeners = jest.spyOn(parser, 'removeAllListeners');
+        const parserDestroy = jest.spyOn(parser, 'destroy');
+
+        stream.emit('end');
+
+        expect(stream.unpipe).toHaveBeenCalledWith(parser);
+        expect(stream.removeAllListeners).toHaveBeenCalled();
+        expect(stream.destroy).not.toHaveBeenCalled();
+        expect(parserRemoveAllListeners).toHaveBeenCalled();
+        expect(parserDestroy).toHaveBeenCalled();
+        expect((service as any).containerStream).toBeUndefined();
+        expect((service as any).eventParser).toBeUndefined();
+        expect((service as any).activeContainer).toBeUndefined();
+        expect((service as any).activeContainerOwner).toBe(false);
+        expect(stopped).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears pending service timers during cleanup', async () => {
+        jest.useFakeTimers();
+        try {
+            const {DirectDockerService} = await load();
+            const service = new DirectDockerService();
+            const callback = jest.fn();
+
+            (service as any).scheduleTimer(callback, 1000);
+            expect(jest.getTimerCount()).toBe(1);
+
+            service.cleanup();
+            expect(jest.getTimerCount()).toBe(0);
+
+            jest.advanceTimersByTime(1000);
+            expect(callback).not.toHaveBeenCalled();
+        } finally {
+            jest.useRealTimers();
+        }
     });
 
     it('cleanup stops only owned containers', async () => {
