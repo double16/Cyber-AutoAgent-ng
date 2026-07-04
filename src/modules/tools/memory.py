@@ -258,7 +258,7 @@ class OperationPlan:
 
         return OperationPlan(
             objective=str(obj.get("objective", "")),
-            current_phase=int(obj.get("current_phase")),
+            current_phase=int(obj.get("current_phase", 1)),
             total_phases=len(phases),
             phases=phases,
             assessment_complete=bool(obj.get("assessment_complete", False)),

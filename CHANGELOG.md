@@ -3,6 +3,7 @@
 - Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.
 - Cleanup React CLI logging.
 - Replace iteration-based operation limits with duration, token, and cost budgets; progress now reports the highest utilization across configured budgets.
+- Correct token and cost metrics by aggregating usage across multiple agents and apply per-agent model pricing.
 
 ## v0.9.0
 

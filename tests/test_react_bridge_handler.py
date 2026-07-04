@@ -1,7 +1,7 @@
 import json
-import os
 import threading
 import time
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,6 +16,8 @@ def make_handler():
     events = []
     handler._events = events
     handler.emit_ui_event = lambda event: events.append(event)
+    handler._state_lock = threading.RLock()
+    handler._emit_lock = threading.RLock()
     handler.operation_id = "OP_TEST"
     # Budget-only model
     handler.budget_max_duration = 5
@@ -75,12 +77,20 @@ def make_handler():
     )
     handler._metrics_thread = None
     handler._stop_metrics = False
+    handler._stop_metrics_event = threading.Event()
     handler._last_agent = None
-    handler._metrics_lock = threading.RLock()
+    handler._metrics_lock = handler._state_lock
     handler._sdk_input_tokens = 0
     handler._sdk_output_tokens = 0
     handler._sdk_cache_read_tokens = 0
     handler._sdk_cache_write_tokens = 0
+    handler._aggregate_input_tokens = 0
+    handler._aggregate_output_tokens = 0
+    handler._aggregate_cache_read_tokens = 0
+    handler._aggregate_cache_write_tokens = 0
+    handler._aggregate_cost = 0.0
+    handler._agent_usage_cache = OrderedDict()
+    handler._agent_usage_cache_size = 128
     handler.pricing_input = 1.0
     handler.pricing_output = 2.0
     handler.pricing_cache_read = 0.25
@@ -339,6 +349,118 @@ def test_budget_minutes_progress_and_internal_step_tracking(monkeypatch):
     progress_event = [event for event in handler._events if event["type"] == "progress_update"][-1]
     assert progress_event["step"] == 7
     assert progress_event["progressPercent"] == handler.get_budget_progress()
+
+
+def test_metrics_aggregate_multiple_agents_with_lru_eviction(monkeypatch):
+    handler = make_handler()
+    handler._agent_usage_cache_size = 1
+    handler.models_client = SimpleNamespace(
+        get_pricing=lambda model_id: {
+            "model-a": SimpleNamespace(input=10.0, output=20.0, cache_read=1.0, cache_write=2.0),
+            "model-b": SimpleNamespace(input=1.0, output=2.0, cache_read=0.1, cache_write=0.2),
+        }[model_id]
+    )
+    agent_models = {}
+
+    def fake_model_id(agent):
+        return agent_models[id(agent)]
+
+    monkeypatch.setattr(rb, "get_provider_from_agent", lambda _agent: "litellm")
+    monkeypatch.setattr(rb, "get_model_id_from_agent", fake_model_id)
+
+    agent_a = SimpleNamespace(event_loop_metrics=None)
+    agent_b = SimpleNamespace(event_loop_metrics=None)
+    agent_models[id(agent_a)] = "model-a"
+    agent_models[id(agent_b)] = "model-b"
+
+    handler.process_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 1_000_000, "outputTokens": 10, "cacheReadInputTokens": 0}),
+        agent=agent_a,
+    )
+    agent_a_uuid = getattr(agent_a, rb._AGENT_USAGE_UUID_ATTR)
+    handler.process_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 20, "outputTokens": 1_000_000, "cacheWriteInputTokens": 0}),
+        agent=agent_b,
+    )
+
+    assert getattr(agent_b, rb._AGENT_USAGE_UUID_ATTR) != agent_a_uuid
+    assert len(handler._agent_usage_cache) == 1
+    assert handler._aggregate_input_tokens == 1_000_000
+    assert handler.sdk_input_tokens == 1_000_020
+    assert handler.sdk_output_tokens == 1_000_010
+    assert handler._compute_total_cost_from_usage() == pytest.approx(12.00022)
+
+
+def test_metrics_without_agent_stays_in_legacy_usage_path():
+    handler = make_handler()
+
+    handler.process_metrics(
+        SimpleNamespace(
+            accumulated_usage={
+                "inputTokens": 100,
+                "outputTokens": 50,
+                "cacheReadInputTokens": 10,
+                "cacheWriteInputTokens": 5,
+            }
+        )
+    )
+
+    assert handler._agent_usage_cache == OrderedDict()
+    assert handler.sdk_input_tokens == 100
+    assert handler.sdk_output_tokens == 50
+    assert handler._compute_total_cost_from_usage() == pytest.approx(0.000205)
+
+
+def test_concurrent_agent_metrics_capture_is_thread_safe():
+    handler = make_handler()
+    handler._agent_usage_cache_size = 4
+    agents = [SimpleNamespace(event_loop_metrics=None) for _ in range(20)]
+    barrier = threading.Barrier(len(agents))
+
+    def capture(index, agent):
+        barrier.wait(timeout=5)
+        handler.process_metrics(
+            SimpleNamespace(
+                accumulated_usage={
+                    "inputTokens": index + 1,
+                    "outputTokens": (index + 1) * 2,
+                    "cacheReadInputTokens": 1,
+                    "cacheWriteInputTokens": 2,
+                }
+            ),
+            agent=agent,
+        )
+
+    threads = [threading.Thread(target=capture, args=(index, agent)) for index, agent in enumerate(agents)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len({getattr(agent, rb._AGENT_USAGE_UUID_ATTR) for agent in agents}) == len(agents)
+    assert len(handler._agent_usage_cache) == 4
+    assert handler.sdk_input_tokens == sum(range(1, 21))
+    assert handler.sdk_output_tokens == sum(value * 2 for value in range(1, 21))
+    assert handler.sdk_cache_read_tokens == 20
+    assert handler.sdk_cache_write_tokens == 40
+
+
+def test_concurrent_termination_emits_once():
+    handler = make_handler()
+
+    def terminate():
+        handler.emit_termination("budget_limit", "done")
+
+    threads = [threading.Thread(target=terminate) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert event_types(handler).count("termination_reason") == 1
+    assert handler.termination_reason == "budget_limit"
 
 
 def test_internal_step_and_event_defensive_paths(monkeypatch):

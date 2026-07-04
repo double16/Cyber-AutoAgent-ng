@@ -11,6 +11,8 @@ import re
 import threading
 import time
 import asyncio
+import uuid
+from collections import OrderedDict
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -42,6 +44,8 @@ from modules.handlers.utils import (
 logger = get_logger("Handlers.ReactBridge")
 
 _DEFAULT_REASONING_DEDUPE_TTL_S = 20.0
+_AGENT_USAGE_CACHE_SIZE = 128
+_AGENT_USAGE_UUID_ATTR = "_caa_react_bridge_usage_uuid"
 
 # Do not increment action count for planning tools
 _PLANNING_TOOL_NAMES = {
@@ -58,6 +62,15 @@ _PLANNING_TOOL_NAMES = {
 class _ReasoningSeenHolder:
     """Mutable per-callback holder to dedupe reasoning extraction without shared instance state."""
     seen: bool = False
+
+
+@dataclass
+class _AgentUsageEntry:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost: float = 0.0
 
 
 class ReactBridgeHandler(PrintingCallbackHandler):
@@ -91,6 +104,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         super().__init__()
 
         env_reader = EnvironmentReader()
+        self._state_lock = threading.RLock()
+        self._emit_lock = threading.RLock()
 
         # Operation configuration
         self.action_count = 0
@@ -138,13 +153,20 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         self.memory_ops = 0
         self.evidence_count = 0
         # Track SDK metrics as authoritative source
-        # THREAD SAFETY: Use lock to protect token counters accessed by metrics thread
-        self._metrics_lock = threading.RLock()
+        # THREAD SAFETY: Use the state lock to protect counters accessed by the metrics thread
+        self._metrics_lock = self._state_lock
         self._sdk_input_tokens = 0
         self._sdk_output_tokens = 0
         # Cache token metrics for prompt caching (Bedrock/Anthropic)
         self._sdk_cache_read_tokens = 0
         self._sdk_cache_write_tokens = 0
+        self._aggregate_input_tokens = 0
+        self._aggregate_output_tokens = 0
+        self._aggregate_cache_read_tokens = 0
+        self._aggregate_cache_write_tokens = 0
+        self._aggregate_cost = 0.0
+        self._agent_usage_cache: OrderedDict[str, _AgentUsageEntry] = OrderedDict()
+        self._agent_usage_cache_size = _AGENT_USAGE_CACHE_SIZE
         # Metrics emission handled by background thread
 
         try:
@@ -239,6 +261,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Metrics update thread
         self._metrics_thread = None
         self._stop_metrics = False
+        self._stop_metrics_event = threading.Event()
         self._last_agent = None  # Store agent reference for metrics
 
         # Emit initial metrics
@@ -296,16 +319,28 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         """
         # Minimal logging for production
 
-        # Transform SDK events to UI events
-        self._transform_sdk_event(kwargs)
+        # Transform SDK events to UI events. Strands can invoke callbacks from
+        # multiple worker threads during swarm execution, so serialize all
+        # mutable handler state transitions.
+        with self._state_lock:
+            self._transform_sdk_event(kwargs)
 
     @property
     def action_count(self) -> int:
-        return self._action_count
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            return self._action_count
+        with lock:
+            return self._action_count
 
     @action_count.setter
     def action_count(self, value: int) -> None:
-        self._action_count = value
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            self._action_count = value
+            return
+        with lock:
+            self._action_count = value
 
     def emit_ui_event(self, event: Dict[str, Any]) -> None:
         """
@@ -317,7 +352,12 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Use the pluggable emitter - maintains backward compatibility
         # The emitter handles timestamp addition and protocol formatting
         try:
-            self.emitter.emit(event)
+            emit_lock = getattr(self, "_emit_lock", None)
+            if emit_lock is None:
+                self.emitter.emit(event)
+            else:
+                with emit_lock:
+                    self.emitter.emit(event)
         except BrokenPipeError:
             # Frontend terminal closed (user interrupted) - suppress noisy traceback
             logger.debug(f"Frontend disconnected, skipping event {event.get('type')}")
@@ -336,46 +376,47 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         - Emit the termination_reason payload
         """
         try:
-            if self._termination_emitted:
-                return
-            self._termination_emitted = True
-            self._termination_reason = reason
+            with self._state_lock:
+                if self._termination_emitted:
+                    return
+                self._termination_emitted = True
+                self._termination_reason = reason
 
-            # Flush any accumulated reasoning so it doesn't appear after termination
-            try:
-                self._emit_accumulated_reasoning(force=True)
-            except Exception:
-                pass
+                # Flush any accumulated reasoning so it doesn't appear after termination
+                try:
+                    self._emit_accumulated_reasoning(force=True)
+                except Exception:
+                    pass
 
-            # End any active thinking indicator in the UI
-            try:
-                self.emit_ui_event({"type": "thinking_end"})
-            except Exception:
-                pass
+                # End any active thinking indicator in the UI
+                try:
+                    self.emit_ui_event({"type": "thinking_end"})
+                except Exception:
+                    pass
 
-            self.emit_ui_event(
-                {
-                    "type": "progress_update",
-                    "step": "TERMINATED",
-                    "progressPercent": self.get_budget_progress(),
-                    "operation": self.operation_id,
-                    "duration": self._format_duration(time.time() - self.start_time),
-                }
-            )
+                self.emit_ui_event(
+                    {
+                        "type": "progress_update",
+                        "step": "TERMINATED",
+                        "progressPercent": self.get_budget_progress(),
+                        "operation": self.operation_id,
+                        "duration": self._format_duration(time.time() - self.start_time),
+                    }
+                )
 
-            # Emit termination details
-            self.emit_ui_event(
-                {
-                    "type": "termination_reason",
-                    "reason": reason,
-                    "message": message,
-                    "budget": {
-                        "maxDurationMinutes": self.budget_max_duration,
-                        "maxTokens": self.budget_max_tokens,
-                        "maxCost": self.budget_max_cost,
-                    },
-                }
-            )
+                # Emit termination details
+                self.emit_ui_event(
+                    {
+                        "type": "termination_reason",
+                        "reason": reason,
+                        "message": message,
+                        "budget": {
+                            "maxDurationMinutes": self.budget_max_duration,
+                            "maxTokens": self.budget_max_tokens,
+                            "maxCost": self.budget_max_cost,
+                        },
+                    }
+                )
         except Exception as e:
             logger.debug("Failed to emit termination event: %s", e)
 
@@ -446,19 +487,15 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             )
 
         # 5) Metrics
-        if event_loop_metrics:
-            self.process_metrics(event_loop_metrics)
-
         agent = kwargs.get("agent")
+        if event_loop_metrics:
+            self.process_metrics(event_loop_metrics, agent=agent)
+
         if agent and hasattr(agent, "event_loop_metrics"):
             setattr(self, "_last_agent", agent)
             usage = agent.event_loop_metrics.accumulated_usage
             if usage:
-                self.sdk_input_tokens = usage.get("inputTokens", 0)
-                self.sdk_output_tokens = usage.get("outputTokens", 0)
-                # Extract cache metrics for prompt caching validation
-                self.sdk_cache_read_tokens = usage.get("cacheReadInputTokens", 0)
-                self.sdk_cache_write_tokens = usage.get("cacheWriteInputTokens", 0)
+                self._capture_agent_usage(agent, usage)
 
     # -- Thread-safe token counter properties --------------------------------
 
@@ -466,7 +503,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def sdk_input_tokens(self) -> int:
         """Thread-safe getter for input token count."""
         with self._metrics_lock:
-            return self._sdk_input_tokens
+            return self._current_usage_totals()["input_tokens"]
 
     @sdk_input_tokens.setter
     def sdk_input_tokens(self, value: int) -> None:
@@ -478,7 +515,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def sdk_output_tokens(self) -> int:
         """Thread-safe getter for output token count."""
         with self._metrics_lock:
-            return self._sdk_output_tokens
+            return self._current_usage_totals()["output_tokens"]
 
     @sdk_output_tokens.setter
     def sdk_output_tokens(self, value: int) -> None:
@@ -490,7 +527,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def sdk_cache_read_tokens(self) -> int:
         """Thread-safe getter for cache read token count."""
         with self._metrics_lock:
-            return self._sdk_cache_read_tokens
+            return self._current_usage_totals()["cache_read_tokens"]
 
     @sdk_cache_read_tokens.setter
     def sdk_cache_read_tokens(self, value: int) -> None:
@@ -502,13 +539,103 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def sdk_cache_write_tokens(self) -> int:
         """Thread-safe getter for cache write token count."""
         with self._metrics_lock:
-            return self._sdk_cache_write_tokens
+            return self._current_usage_totals()["cache_write_tokens"]
 
     @sdk_cache_write_tokens.setter
     def sdk_cache_write_tokens(self, value: int) -> None:
         """Thread-safe setter for cache write token count."""
         with self._metrics_lock:
             self._sdk_cache_write_tokens = value
+
+    def _current_usage_totals(self) -> Dict[str, Any]:
+        with self._metrics_lock:
+            input_tokens = int(getattr(self, "_aggregate_input_tokens", 0)) + int(
+                getattr(self, "_sdk_input_tokens", 0)
+            )
+            output_tokens = int(getattr(self, "_aggregate_output_tokens", 0)) + int(
+                getattr(self, "_sdk_output_tokens", 0)
+            )
+            cache_read_tokens = int(getattr(self, "_aggregate_cache_read_tokens", 0)) + int(
+                getattr(self, "_sdk_cache_read_tokens", 0)
+            )
+            cache_write_tokens = int(getattr(self, "_aggregate_cache_write_tokens", 0)) + int(
+                getattr(self, "_sdk_cache_write_tokens", 0)
+            )
+            cost = float(getattr(self, "_aggregate_cost", 0.0))
+
+            cache = getattr(self, "_agent_usage_cache", {})
+            for entry in list(cache.values()):
+                input_tokens += int(entry.input_tokens)
+                output_tokens += int(entry.output_tokens)
+                cache_read_tokens += int(entry.cache_read_tokens)
+                cache_write_tokens += int(entry.cache_write_tokens)
+                cost += float(entry.cost)
+
+            return {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+                "cost": cost,
+            }
+
+    def _get_or_assign_agent_usage_uuid(self, agent: Any) -> str:
+        agent_uuid = getattr(agent, _AGENT_USAGE_UUID_ATTR, None)
+        if agent_uuid:
+            return str(agent_uuid)
+        agent_uuid = str(uuid.uuid4())
+        try:
+            setattr(agent, _AGENT_USAGE_UUID_ATTR, agent_uuid)
+        except Exception:
+            agent_uuid = f"unassignable:{id(agent)}"
+        return agent_uuid
+
+    def _aggregate_usage_entry(self, entry: _AgentUsageEntry) -> None:
+        with self._metrics_lock:
+            self._aggregate_input_tokens = int(getattr(self, "_aggregate_input_tokens", 0)) + int(entry.input_tokens)
+            self._aggregate_output_tokens = int(getattr(self, "_aggregate_output_tokens", 0)) + int(entry.output_tokens)
+            self._aggregate_cache_read_tokens = int(getattr(self, "_aggregate_cache_read_tokens", 0)) + int(
+                entry.cache_read_tokens
+            )
+            self._aggregate_cache_write_tokens = int(getattr(self, "_aggregate_cache_write_tokens", 0)) + int(
+                entry.cache_write_tokens
+            )
+            self._aggregate_cost = float(getattr(self, "_aggregate_cost", 0.0)) + float(entry.cost)
+
+    def _capture_agent_usage(self, agent: Any, usage: Dict[str, Any]) -> None:
+        if not agent or not usage:
+            return
+        with self._metrics_lock:
+            if not hasattr(self, "_agent_usage_cache"):
+                self._agent_usage_cache = OrderedDict()
+            if not hasattr(self, "_agent_usage_cache_size"):
+                self._agent_usage_cache_size = _AGENT_USAGE_CACHE_SIZE
+
+            agent_uuid = self._get_or_assign_agent_usage_uuid(agent)
+            input_tokens = int(usage.get("inputTokens", 0) or 0)
+            output_tokens = int(usage.get("outputTokens", 0) or 0)
+            cache_read_tokens = int(usage.get("cacheReadInputTokens", 0) or 0)
+            cache_write_tokens = int(usage.get("cacheWriteInputTokens", 0) or 0)
+            cost = self._compute_cost_from_metrics(
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                agent=agent,
+            )
+
+            self._agent_usage_cache[agent_uuid] = _AgentUsageEntry(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                cost=cost,
+            )
+            self._agent_usage_cache.move_to_end(agent_uuid)
+
+            while len(self._agent_usage_cache) > self._agent_usage_cache_size:
+                _evicted_uuid, evicted = self._agent_usage_cache.popitem(last=False)
+                self._aggregate_usage_entry(evicted)
 
     # -- Helper methods ----------------------------------------------------
 
@@ -2382,12 +2509,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         """Return budget utilization percent as the max usage across configured caps."""
         try:
             total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
-            cost = self._compute_cost_from_metrics(
-                self.sdk_input_tokens,
-                self.sdk_output_tokens,
-                self.sdk_cache_read_tokens,
-                self.sdk_cache_write_tokens,
-            )
+            cost = self._compute_total_cost_from_usage()
             return self._calculate_budget_progress(total_tokens=total_tokens, cost=cost)[1]
         except Exception:
             return 0
@@ -2415,11 +2537,16 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             """Background loop to emit metrics every 5 seconds."""
             logger.debug("Metrics update thread started")
             update_count = 0
-            while not self._stop_metrics:
-                try:
-                    # Wait 5 seconds between updates - balanced for UI responsiveness without log spam
+            stop_event = getattr(self, "_stop_metrics_event", None)
+            while True:
+                if stop_event is not None:
+                    if stop_event.wait(5):
+                        break
+                else:
                     time.sleep(5)
-
+                    if self._stop_metrics:
+                        break
+                try:
                     # Only emit if we're not stopped
                     if not self._stop_metrics and not self.should_stop():
                         update_count += 1
@@ -2438,6 +2565,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def _stop_metrics_thread(self) -> None:
         """Stop the metrics update thread."""
         self._stop_metrics = True
+        stop_event = getattr(self, "_stop_metrics_event", None)
+        if stop_event is not None:
+            stop_event.set()
         if self._metrics_thread and self._metrics_thread.is_alive():
             self._metrics_thread.join(timeout=1)
 
@@ -2472,7 +2602,14 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         except Exception:
             return ""
 
-    def _compute_cost_from_metrics(self, input_tokens: int, output_tokens: int, cache_read_tokens: int, cache_write_tokens: int) -> float:
+    def _compute_cost_from_metrics(
+            self,
+            input_tokens: int,
+            output_tokens: int,
+            cache_read_tokens: int,
+            cache_write_tokens: int,
+            agent: Any = None,
+    ) -> float:
         cost = self.pricing_input * (input_tokens / 1_000_000) \
                + self.pricing_output * (output_tokens / 1_000_000) \
                + self.pricing_cache_read * (cache_read_tokens / 1_000_000) \
@@ -2481,10 +2618,11 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         if self.models_client is None:
             return cost
 
-        if hasattr(self, "_last_agent") and self._last_agent:
-            provider = get_provider_from_agent(self._last_agent)
+        pricing_agent = agent or getattr(self, "_last_agent", None)
+        if pricing_agent:
+            provider = get_provider_from_agent(pricing_agent)
             if provider not in [None, "ollama"]:
-                model_id = get_model_id_from_agent(self._last_agent)
+                model_id = get_model_id_from_agent(pricing_agent)
                 try:
                     pricing = None
                     try:
@@ -2513,104 +2651,110 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         return cost
 
+    def _compute_total_cost_from_usage(self) -> float:
+        with self._metrics_lock:
+            totals = self._current_usage_totals()
+            has_agent_usage = bool(getattr(self, "_agent_usage_cache", None)) or any(
+                [
+                    getattr(self, "_aggregate_input_tokens", 0),
+                    getattr(self, "_aggregate_output_tokens", 0),
+                    getattr(self, "_aggregate_cache_read_tokens", 0),
+                    getattr(self, "_aggregate_cache_write_tokens", 0),
+                    getattr(self, "_aggregate_cost", 0.0),
+                ]
+            )
+            if has_agent_usage:
+                legacy_cost = self._compute_cost_from_metrics(
+                    int(getattr(self, "_sdk_input_tokens", 0)),
+                    int(getattr(self, "_sdk_output_tokens", 0)),
+                    int(getattr(self, "_sdk_cache_read_tokens", 0)),
+                    int(getattr(self, "_sdk_cache_write_tokens", 0)),
+                )
+                return float(totals["cost"]) + legacy_cost
+            return self._compute_cost_from_metrics(
+                int(totals["input_tokens"]),
+                int(totals["output_tokens"]),
+                int(totals["cache_read_tokens"]),
+                int(totals["cache_write_tokens"]),
+            )
+
     def _emit_estimated_metrics(self, force=False) -> None:
         """Emit metrics based on SDK token counts.
 
         Args:
             force: If True, emit even if metrics have not changed (for periodic duration updates)
         """
-        # Try to get fresh metrics from stored agent reference if available
-        if hasattr(self, "_last_agent") and self._last_agent:
-            try:
-                if hasattr(self._last_agent, "event_loop_metrics"):
-                    usage = self._last_agent.event_loop_metrics.accumulated_usage
-                    if usage:
-                        self.sdk_input_tokens = usage.get(
-                            "inputTokens", self.sdk_input_tokens
-                        )
-                        self.sdk_output_tokens = usage.get(
-                            "outputTokens", self.sdk_output_tokens
-                        )
-                        # Extract cache metrics
-                        self.sdk_cache_read_tokens = usage.get(
-                            "cacheReadInputTokens", self.sdk_cache_read_tokens
-                        )
-                        self.sdk_cache_write_tokens = usage.get(
-                            "cacheWriteInputTokens", self.sdk_cache_write_tokens
-                        )
-            except Exception as e:
-                logger.debug(f"Could not get metrics from agent: {e}")
+        with self._state_lock:
+            # Try to get fresh metrics from stored agent reference if available
+            if hasattr(self, "_last_agent") and self._last_agent:
+                try:
+                    if hasattr(self._last_agent, "event_loop_metrics"):
+                        usage = self._last_agent.event_loop_metrics.accumulated_usage
+                        if usage:
+                            self._capture_agent_usage(self._last_agent, usage)
+                except Exception as e:
+                    logger.debug(f"Could not get metrics from agent: {e}")
 
-        total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
-        cost = self._compute_cost_from_metrics(self.sdk_input_tokens, self.sdk_output_tokens, self.sdk_cache_read_tokens, self.sdk_cache_write_tokens)
+            totals = self._current_usage_totals()
+            input_tokens = int(totals["input_tokens"])
+            output_tokens = int(totals["output_tokens"])
+            cache_read_tokens = int(totals["cache_read_tokens"])
+            cache_write_tokens = int(totals["cache_write_tokens"])
+            total_tokens = input_tokens + output_tokens
+            cost = self._compute_total_cost_from_usage()
 
-        progress, progress_percent = self._calculate_budget_progress(total_tokens=total_tokens, cost=cost)
+            progress, progress_percent = self._calculate_budget_progress(total_tokens=total_tokens, cost=cost)
 
-        # Build current metrics
-        current_metrics = {
-            "tokens": total_tokens,  # For Footer compatibility
-            "cost": cost,
-            "inputTokens": self.sdk_input_tokens,
-            "outputTokens": self.sdk_output_tokens,
-            "totalTokens": total_tokens,
-            # Cache metrics for prompt caching cost calculation
-            "cacheReadTokens": self.sdk_cache_read_tokens,
-            "cacheWriteTokens": self.sdk_cache_write_tokens,
-            "duration": self._format_duration(time.time() - self.start_time),
-            "memoryOps": self.memory_ops,
-            "evidence": self.evidence_count,
-            "budget": {
-                "maxDurationMinutes": self.budget_max_duration,
-                "maxTokens": self.budget_max_tokens,
-                "maxCost": self.budget_max_cost,
-            },
-            "progress": progress,
-            "progressPercent": progress_percent,
-        }
+            current_metrics = {
+                "tokens": total_tokens,  # For Footer compatibility
+                "cost": cost,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalTokens": total_tokens,
+                "cacheReadTokens": cache_read_tokens,
+                "cacheWriteTokens": cache_write_tokens,
+                "duration": self._format_duration(time.time() - self.start_time),
+                "memoryOps": self.memory_ops,
+                "evidence": self.evidence_count,
+                "budget": {
+                    "maxDurationMinutes": self.budget_max_duration,
+                    "maxTokens": self.budget_max_tokens,
+                    "maxCost": self.budget_max_cost,
+                },
+                "progress": progress,
+                "progressPercent": progress_percent,
+            }
 
-        # Compare only meaningful fields (not duration which always changes)
-        meaningful_fields = {
-            "tokens": total_tokens,
-            "memoryOps": self.memory_ops,
-            "evidence": self.evidence_count,
-        }
+            meaningful_fields = {
+                "tokens": total_tokens,
+                "memoryOps": self.memory_ops,
+                "evidence": self.evidence_count,
+            }
 
-        # Only emit if meaningful metrics have changed, it's the first emission, or forced
-        if (
-            force
-            or not hasattr(self, "_last_meaningful_metrics")
-            or self._last_meaningful_metrics != meaningful_fields
-        ):
+            should_emit = (
+                force
+                or not hasattr(self, "_last_meaningful_metrics")
+                or self._last_meaningful_metrics != meaningful_fields
+            )
+            if should_emit:
+                self._last_meaningful_metrics = meaningful_fields.copy()
+
+        if should_emit:
             logger.debug(
-                f"Emitting metrics: input={self.sdk_input_tokens}, output={self.sdk_output_tokens}, total={total_tokens}"
+                "Emitting metrics: input=%s, output=%s, total=%s",
+                current_metrics["inputTokens"],
+                current_metrics["outputTokens"],
+                current_metrics["totalTokens"],
             )
+            self.emit_ui_event({"type": "metrics_update", "metrics": current_metrics})
 
-            # Report both individual and total token counts for compatibility
-            # Cost calculation is handled by the React app using config values
-            self.emit_ui_event(
-                {
-                    "type": "metrics_update",
-                    "metrics": current_metrics,
-                }
-            )
-
-            # Store meaningful fields for comparison
-            self._last_meaningful_metrics = meaningful_fields.copy()
-
-    def process_metrics(self, event_loop_metrics: Dict[str, Any]) -> None:
+    def process_metrics(self, event_loop_metrics: Dict[str, Any], agent: Any = None) -> None:
         """Process SDK metrics - only updates internal counters."""
+
         usage = event_loop_metrics.accumulated_usage
 
-        # Update SDK token counts as authoritative source
-        self.sdk_input_tokens = usage.get("inputTokens", 0)
-        self.sdk_output_tokens = usage.get("outputTokens", 0)
-
-        # Update cache metrics for prompt caching validation
         cache_read = usage.get("cacheReadInputTokens", 0)
         cache_write = usage.get("cacheWriteInputTokens", 0)
-        self.sdk_cache_read_tokens = cache_read
-        self.sdk_cache_write_tokens = cache_write
-
         # Log cache activity for validation (only when caching is active)
         if cache_read > 0 or cache_write > 0:
             logger.info(
@@ -2618,6 +2762,15 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 cache_read,
                 cache_write,
             )
+
+        if agent:
+            self._capture_agent_usage(agent, usage)
+        else:
+            with self._metrics_lock:
+                self._sdk_input_tokens = usage.get("inputTokens", 0)
+                self._sdk_output_tokens = usage.get("outputTokens", 0)
+                self._sdk_cache_read_tokens = usage.get("cacheReadInputTokens", 0)
+                self._sdk_cache_write_tokens = usage.get("cacheWriteInputTokens", 0)
 
         # Metrics emission is handled by the background thread
         # This method only updates the internal counters
@@ -2632,7 +2785,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Emit explicit completion summary for UI/logs
         try:
             total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
-            cost = self._compute_cost_from_metrics(self.sdk_input_tokens, self.sdk_output_tokens, self.sdk_cache_read_tokens, self.sdk_cache_write_tokens)
+            cost = self._compute_total_cost_from_usage()
             self.emit_ui_event(
                 {
                     "type": "operation_complete",
@@ -3561,61 +3714,56 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         Also emits a termination_reason event once when a stop condition is detected.
         """
-        # Always stop if explicit stop tool used
-        if self._stop_tool_used:
-            return True
+        with self._state_lock:
+            # Always stop if explicit stop tool used
+            if self._stop_tool_used:
+                return True
 
-        if self._budget_limit_reached:
-            return True
+            if self._budget_limit_reached:
+                return True
 
+            # Budget checks
+            try:
+                # Duration cap
+                if isinstance(self.budget_max_duration, int) and self.budget_max_duration > 0:
+                    if (time.time() - self.start_time) >= float(self.budget_max_duration) * 60.0:
+                        if not self._termination_emitted:
+                            self.emit_termination(
+                                "budget_limit",
+                                f"Duration limit reached: {self.budget_max_duration}m",
+                            )
+                        self._budget_limit_reached = True
+                        self._budget_limit_reason = "duration"
+                        return True
 
-        # Budget checks
-        try:
-            # Duration cap
-            if isinstance(self.budget_max_duration, int) and self.budget_max_duration > 0:
-                if (time.time() - self.start_time) >= float(self.budget_max_duration) * 60.0:
-                    if not self._termination_emitted:
-                        self.emit_termination(
-                            "budget_limit",
-                            f"Duration limit reached: {self.budget_max_duration}m",
-                        )
-                    self._budget_limit_reached = True
-                    self._budget_limit_reason = "duration"
-                    return True
+                # Token cap
+                if isinstance(self.budget_max_tokens, int) and self.budget_max_tokens and self.budget_max_tokens > 0:
+                    total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
+                    if total_tokens >= int(self.budget_max_tokens):
+                        if not self._termination_emitted:
+                            self.emit_termination(
+                                "budget_limit",
+                                f"Token limit reached: {total_tokens}/{self.budget_max_tokens}",
+                            )
+                        self._budget_limit_reached = True
+                        self._budget_limit_reason = "tokens"
+                        return True
 
-            # Token cap
-            if isinstance(self.budget_max_tokens, int) and self.budget_max_tokens and self.budget_max_tokens > 0:
-                total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
-                if total_tokens >= int(self.budget_max_tokens):
-                    if not self._termination_emitted:
-                        self.emit_termination(
-                            "budget_limit",
-                            f"Token limit reached: {total_tokens}/{self.budget_max_tokens}",
-                        )
-                    self._budget_limit_reached = True
-                    self._budget_limit_reason = "tokens"
-                    return True
-
-            # Cost cap
-            if isinstance(self.budget_max_cost, (int, float)) and self.budget_max_cost and self.budget_max_cost > 0:
-                cost = self._compute_cost_from_metrics(
-                    self.sdk_input_tokens,
-                    self.sdk_output_tokens,
-                    self.sdk_cache_read_tokens,
-                    self.sdk_cache_write_tokens,
-                )
-                if cost >= float(self.budget_max_cost):
-                    if not self._termination_emitted:
-                        self.emit_termination(
-                            "budget_limit",
-                            f"Cost limit reached: {cost:.4f}/{self.budget_max_cost}",
-                        )
-                    self._budget_limit_reached = True
-                    self._budget_limit_reason = "cost"
-                    return True
-        except Exception:
-            # Never fail stop checks due to metric calculation errors
-            pass
+                # Cost cap
+                if isinstance(self.budget_max_cost, (int, float)) and self.budget_max_cost and self.budget_max_cost > 0:
+                    cost = self._compute_total_cost_from_usage()
+                    if cost >= float(self.budget_max_cost):
+                        if not self._termination_emitted:
+                            self.emit_termination(
+                                "budget_limit",
+                                f"Cost limit reached: {cost:.4f}/{self.budget_max_cost}",
+                            )
+                        self._budget_limit_reached = True
+                        self._budget_limit_reason = "cost"
+                        return True
+            except Exception:
+                # Never fail stop checks due to metric calculation errors
+                pass
 
         return False
 
@@ -3643,27 +3791,28 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
     def get_summary(self) -> Dict[str, Any]:
         """Get operation summary for reporting."""
-        # Build current metrics for summary
-        total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
-        cost = self._compute_cost_from_metrics(self.sdk_input_tokens, self.sdk_output_tokens, self.sdk_cache_read_tokens, self.sdk_cache_write_tokens)
-        current_metrics = {
-            "inputTokens": self.sdk_input_tokens,
-            "outputTokens": self.sdk_output_tokens,
-            "totalTokens": total_tokens,
-            "cost": cost,
-            # Cache metrics for prompt caching cost calculation
-            "cacheReadTokens": self.sdk_cache_read_tokens,
-            "cacheWriteTokens": self.sdk_cache_write_tokens,
-        }
+        with self._state_lock:
+            totals = self._current_usage_totals()
+            input_tokens = int(totals["input_tokens"])
+            output_tokens = int(totals["output_tokens"])
+            total_tokens = input_tokens + output_tokens
+            current_metrics = {
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalTokens": total_tokens,
+                "cost": self._compute_total_cost_from_usage(),
+                "cacheReadTokens": int(totals["cache_read_tokens"]),
+                "cacheWriteTokens": int(totals["cache_write_tokens"]),
+            }
 
-        return {
-            "total_actions": self.action_count,
-            "tools_created": len(self.tools_used),
-            "evidence_collected": self.evidence_count,
-            "memory_operations": self.memory_ops,
-            "capability_expansion": list(self.tools_used),
-            "memory_ops": self.memory_ops,
-            "evidence_count": self.evidence_count,
-            "duration": self._format_duration(time.time() - self.start_time),
-            "metrics": current_metrics,
-        }
+            return {
+                "total_actions": self.action_count,
+                "tools_created": len(self.tools_used),
+                "evidence_collected": self.evidence_count,
+                "memory_operations": self.memory_ops,
+                "capability_expansion": list(self.tools_used),
+                "memory_ops": self.memory_ops,
+                "evidence_count": self.evidence_count,
+                "duration": self._format_duration(time.time() - self.start_time),
+                "metrics": current_metrics,
+            }
