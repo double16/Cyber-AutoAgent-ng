@@ -144,6 +144,64 @@ class TestCLIArguments:
         assert args.output_dir == "/custom/output"
         assert args.keep_memory is True  # Default is now True
 
+    def test_budget_arguments(self):
+        """Test that token and cost budget arguments are properly parsed"""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--target", type=str, required=True)
+        parser.add_argument("--objective", type=str, required=True)
+        parser.add_argument("--max-duration", type=int, required=True)
+        parser.add_argument("--max-tokens", dest="max_tokens", type=int, default=None)
+        parser.add_argument("--max-cost", dest="max_cost", type=float, default=None)
+
+        args = parser.parse_args(
+            [
+                "--target",
+                "test.com",
+                "--objective",
+                "test objective",
+                "--max-duration",
+                "60",
+                "--max-tokens",
+                "250000",
+                "--max-cost",
+                "12.34",
+            ]
+        )
+
+        assert args.max_duration == 60
+        assert args.max_tokens == 250000
+        assert args.max_cost == 12.34
+
+    @pytest.mark.parametrize(
+        "flag,value",
+        [
+            ("--max-tokens", "not-an-int"),
+            ("--max-cost", "not-a-float"),
+        ],
+    )
+    def test_budget_arguments_reject_invalid_types(self, flag, value):
+        """Test that token and cost budget arguments reject invalid values"""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--target", type=str, required=True)
+        parser.add_argument("--objective", type=str, required=True)
+        parser.add_argument("--max-duration", type=int, required=True)
+        parser.add_argument("--max-tokens", dest="max_tokens", type=int, default=None)
+        parser.add_argument("--max-cost", dest="max_cost", type=float, default=None)
+
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "--target",
+                    "test.com",
+                    "--objective",
+                    "test objective",
+                    "--max-duration",
+                    "60",
+                    flag,
+                    value,
+                ]
+            )
+
 
 class TestMainFunction:
     """Test main function execution flow"""
@@ -823,6 +881,39 @@ def test_cli_main_service_mode_with_params_auto_runs(monkeypatch, tmp_path):
 
     cyberautoagent.main()
 
+    fake_agent.cleanup.assert_called_once()
+
+
+def test_cli_main_passes_token_and_cost_budgets_to_agent_config(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = SimpleNamespace(messages=[], model=SimpleNamespace(), cleanup=Mock())
+    _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "run",
+            "--max-duration",
+            "60",
+            "--max-tokens",
+            "250000",
+            "--max-cost",
+            "12.34",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    cyberautoagent.main()
+
+    config = cyberautoagent.create_agent.call_args.kwargs["config"]
+    assert config.budget.max_duration_minutes == 60
+    assert config.budget.max_tokens == 250000
+    assert config.budget.max_cost == 12.34
     fake_agent.cleanup.assert_called_once()
 
 
