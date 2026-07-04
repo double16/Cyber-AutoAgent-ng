@@ -1,7 +1,7 @@
 import React from 'react';
 import { TextEncoder, TextDecoder } from 'util';
-import { jest } from '@jest/globals';
-import TestRenderer, { act } from 'react-test-renderer';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
   global.TextEncoder = TextEncoder;
@@ -66,7 +66,7 @@ describe('text input components', () => {
   it('handles password input masking, backspace, escape, submit, and cursor blink', async () => {
     const { PasswordInput } = await load();
     const onSubmit = jest.fn();
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
 
     act(() => {
       view = TestRenderer.create(<PasswordInput onSubmit={onSubmit} fieldKey="secret" />);
@@ -92,7 +92,7 @@ describe('text input components', () => {
   it('handles token input status for long AWS bearer tokens', async () => {
     const { TokenInput } = await load();
     const onSubmit = jest.fn();
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
 
     act(() => {
       view = TestRenderer.create(<TokenInput onSubmit={onSubmit} fieldKey="awsBearerToken" />);
@@ -115,7 +115,7 @@ describe('text input components', () => {
     const onChange = jest.fn();
     const onSubmit = jest.fn();
     let value = '';
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     const render = () => (
       <ExtendedTextInput
         value={value}
@@ -162,7 +162,7 @@ describe('text input components', () => {
     const onChange = jest.fn();
     const onSubmit = jest.fn();
     let value = 'ab';
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     const render = (focus = true) => (
       <PasteAwareTextInput
         value={value}

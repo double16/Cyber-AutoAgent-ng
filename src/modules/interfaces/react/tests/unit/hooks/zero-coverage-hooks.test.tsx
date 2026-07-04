@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -33,7 +33,7 @@ jest.unstable_mockModule('../../../src/services/LoggingService.js', () => ({
 }));
 
 const renderHook = (hook: () => void) => {
-    let renderer!: TestRenderer.ReactTestRenderer;
+    let renderer!: ReactTestRenderer;
     const Harness = () => {
         hook();
         return null;

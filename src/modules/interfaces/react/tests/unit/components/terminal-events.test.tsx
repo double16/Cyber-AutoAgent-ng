@@ -2,7 +2,7 @@ import React from 'react';
 import {EventEmitter} from 'events';
 import {TextDecoder, TextEncoder} from 'util';
 import {jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -72,7 +72,7 @@ describe('Terminal event processing', () => {
         const onMetricsUpdate = jest.fn();
         const cleanupRef = {current: null as null | (() => void)};
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(
                 <Terminal
@@ -151,7 +151,7 @@ describe('Terminal event processing', () => {
 
     it('renders nothing when collapsed or without a service', async () => {
         const {Terminal} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(
@@ -171,7 +171,7 @@ describe('Terminal event processing', () => {
         const service = new MockExecutionService();
         const onEvent = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(
                 <Terminal

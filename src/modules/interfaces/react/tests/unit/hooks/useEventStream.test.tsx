@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {useEventGroups, useEventStream, useSwarmTracking} from '../../../src/hooks/useEventStream.js';
 import {EVENT_TYPES} from '../../../src/constants/config.js';
 import {describe, expect, it} from "@jest/globals";
@@ -13,7 +13,7 @@ function renderHook<T>(hook: () => T) {
         return null;
     };
 
-    let renderer: TestRenderer.ReactTestRenderer;
+    let renderer: ReactTestRenderer;
     act(() => {
         renderer = TestRenderer.create(<Harness/>);
     });

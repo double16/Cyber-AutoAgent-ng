@@ -1,7 +1,7 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -90,7 +90,7 @@ describe('input and selection components', () => {
         const onConfirm = jest.fn();
         const onCancel = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <SafetyWarning target="example.com" module="web" onConfirm={onConfirm} onCancel={onCancel}/>
@@ -146,7 +146,7 @@ describe('input and selection components', () => {
             {label: 'Gamma', value: 'c', description: 'third', badge: 'ready'},
         ];
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <RadioSelect
@@ -191,7 +191,7 @@ describe('input and selection components', () => {
         expect(render(<ThinkingIndicator message="Custom message"/>).lastFrame())
             .toContain('Custom message');
 
-        let inline!: TestRenderer.ReactTestRenderer;
+        let inline!: ReactTestRenderer;
         act(() => {
             inline = TestRenderer.create(<InlineThinking message="wait"/>);
         });

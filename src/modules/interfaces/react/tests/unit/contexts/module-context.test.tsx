@@ -1,7 +1,7 @@
 import React, {useEffect} from 'react';
 import {TextDecoder, TextEncoder} from 'util';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;

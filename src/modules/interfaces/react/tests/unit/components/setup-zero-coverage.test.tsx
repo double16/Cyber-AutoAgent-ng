@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,7 +37,7 @@ describe('setup screens with zero coverage', () => {
         const onContinue = jest.fn();
         const onSkip = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<WelcomeScreen onContinue={onContinue} onSkip={onSkip} terminalWidth={60}/>);
         });
@@ -57,7 +57,7 @@ describe('setup screens with zero coverage', () => {
         const onRetry = jest.fn();
         const onBack = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <ProgressScreen

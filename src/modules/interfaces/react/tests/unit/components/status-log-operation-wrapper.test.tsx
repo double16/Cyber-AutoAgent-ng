@@ -1,7 +1,7 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -104,7 +104,7 @@ describe('status, log, operation, and wrapper components', () => {
 
     it('renders compact StatusIndicator updates and cleanup', async () => {
         const {StatusIndicator} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<StatusIndicator compact deploymentMode="full-stack"/>);
@@ -127,7 +127,7 @@ describe('status, log, operation, and wrapper components', () => {
     it('renders detailed StatusIndicator service rows and fallback modes', async () => {
         const {StatusIndicator} = await load();
 
-        let detailed!: TestRenderer.ReactTestRenderer;
+        let detailed!: ReactTestRenderer;
         await act(async () => {
             detailed = TestRenderer.create(<StatusIndicator/>);
         });
@@ -142,7 +142,7 @@ describe('status, log, operation, and wrapper components', () => {
         expect(frame).toContain('API');
         expect(frame).toContain('Database');
 
-        let cli!: TestRenderer.ReactTestRenderer;
+        let cli!: ReactTestRenderer;
         await act(async () => {
             cli = TestRenderer.create(<StatusIndicator compact deploymentMode="cli"/>);
         });
@@ -151,7 +151,7 @@ describe('status, log, operation, and wrapper components', () => {
         });
         expect(textFromTree(cli.toJSON())).toContain('Python');
 
-        let agent!: TestRenderer.ReactTestRenderer;
+        let agent!: ReactTestRenderer;
         await act(async () => {
             agent = TestRenderer.create(<StatusIndicator compact deploymentMode="agent"/>);
         });
@@ -324,7 +324,7 @@ describe('status, log, operation, and wrapper components', () => {
 
         const onComplete = jest.fn();
         const onConfigOpen = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(

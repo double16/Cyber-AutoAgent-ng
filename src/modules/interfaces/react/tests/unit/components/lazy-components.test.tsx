@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {describe, expect, it} from '@jest/globals';
 import {
     ConfigEditorLazy,
@@ -20,7 +20,7 @@ const textFromTree = (node: any): string => {
 
 describe('LazyComponents', () => {
     it('renders descriptive suspense fallbacks for lazy component wrappers', () => {
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <>

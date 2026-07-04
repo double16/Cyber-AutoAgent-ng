@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -40,7 +40,7 @@ describe('MultiLineTextInput', () => {
         const onChange = jest.fn();
         const onSubmit = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <MultiLineTextInput
@@ -77,7 +77,7 @@ describe('MultiLineTextInput', () => {
     it('applies external value changes while idle', async () => {
         const {MultiLineTextInput} = await load();
         const onChange = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(<MultiLineTextInput value="one" onChange={onChange}/>);
@@ -94,7 +94,7 @@ describe('MultiLineTextInput', () => {
     it('handles single-line edits, pending external changes, and submits without a handler', async () => {
         const {MultiLineTextInput} = await load();
         const onChange = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(<MultiLineTextInput value="" onChange={onChange}/>);

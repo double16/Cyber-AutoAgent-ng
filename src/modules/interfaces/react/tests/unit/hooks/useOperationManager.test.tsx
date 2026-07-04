@@ -1,6 +1,6 @@
 import React from 'react';
 import { EventEmitter } from 'events';
-import TestRenderer, { act } from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -104,7 +104,7 @@ function renderHook<T>(hook: () => T) {
     return null;
   };
 
-  let renderer!: TestRenderer.ReactTestRenderer;
+  let renderer!: ReactTestRenderer;
   act(() => {
     renderer = TestRenderer.create(<Harness />);
   });
