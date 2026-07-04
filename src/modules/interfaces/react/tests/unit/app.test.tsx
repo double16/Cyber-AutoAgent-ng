@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from './test-renderer.js';
 import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -188,7 +188,7 @@ describe('App', () => {
 
     it('wires providers, hooks, module discovery, initialization completion, and modal controls', async () => {
         const {App} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(
@@ -197,7 +197,7 @@ describe('App', () => {
                     target="example.com"
                     objective="audit"
                     autoRun
-                    iterations={2}
+                    maxDuration={62}
                     provider="bedrock"
                     model="claude"
                     region="us-east-1"
@@ -222,7 +222,7 @@ describe('App', () => {
             target: 'example.com',
             module: 'web',
             objective: 'audit',
-            iterations: 2,
+            maxDuration: 62,
         }));
         expect(useKeyboardHandlers).toHaveBeenCalledWith(expect.objectContaining({
             activeOperation: null,
@@ -267,7 +267,7 @@ describe('App', () => {
 
         try {
             const {App} = await load();
-            let view!: TestRenderer.ReactTestRenderer;
+            let view!: ReactTestRenderer;
 
             await act(async () => {
                 view = TestRenderer.create(<App/>);

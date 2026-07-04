@@ -56,8 +56,8 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Execution results
 - `reasoning`: Agent decision context
-- `step_header`: Iteration tracking
-- `metrics_update`: Token usage and costs
+- `metrics_update`: Token, cost, duration, and budget progress
+- `progress_update`: Progress updates
 
 ### Event Processing
 
@@ -90,7 +90,7 @@ Application state follows unidirectional data flow using centralized state store
 - Operation metadata (target, objective, operation ID)
 - Execution progress (current step, status)
 - Event history (tool executions, outputs)
-- Configuration (provider, model, iterations)
+- Configuration (provider, model, duration/token/cost budgets)
 
 **State Updates:**
 - Event-driven mutations from agent operations
@@ -123,7 +123,7 @@ Configuration persists to `~/.cyber-autoagent/config.json`:
 **Managed Settings:**
 - Model provider selection (Bedrock, Ollama, LiteLLM)
 - Model identifiers and parameters
-- Execution limits (iterations)
+- Execution limits (duration, tokens, cost)
 - Memory persistence mode
 - Observability endpoints
 

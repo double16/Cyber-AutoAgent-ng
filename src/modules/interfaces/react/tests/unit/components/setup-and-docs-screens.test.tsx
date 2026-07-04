@@ -1,7 +1,7 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
 import {jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -121,7 +121,7 @@ describe('setup and documentation screens', () => {
             {id: '3', timestamp: '00:02', level: 'info', message: 'Observability complete'},
         ] as any;
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <SetupProgressScreen
@@ -181,7 +181,7 @@ describe('setup and documentation screens', () => {
         const {DocumentationViewer} = await load();
         const onClose = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(<DocumentationViewer onClose={onClose}/>);
         });
@@ -213,7 +213,7 @@ describe('setup and documentation screens', () => {
         const onComplete = jest.fn();
         const onSkip = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(
                 <DeploymentRecovery
@@ -272,7 +272,7 @@ describe('setup and documentation screens', () => {
         const onComplete = jest.fn();
         const onSkip = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(
                 <DeploymentRecovery

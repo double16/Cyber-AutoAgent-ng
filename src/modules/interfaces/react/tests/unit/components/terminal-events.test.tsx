@@ -2,7 +2,7 @@ import React from 'react';
 import {EventEmitter} from 'events';
 import {TextDecoder, TextEncoder} from 'util';
 import {jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -72,7 +72,7 @@ describe('Terminal event processing', () => {
         const onMetricsUpdate = jest.fn();
         const cleanupRef = {current: null as null | (() => void)};
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(
                 <Terminal
@@ -151,7 +151,7 @@ describe('Terminal event processing', () => {
 
     it('renders nothing when collapsed or without a service', async () => {
         const {Terminal} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(
@@ -171,7 +171,7 @@ describe('Terminal event processing', () => {
         const service = new MockExecutionService();
         const onEvent = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(
                 <Terminal
@@ -187,15 +187,14 @@ describe('Terminal event processing', () => {
         await act(async () => {
             service.emit('event', {type: 'output', content: 'booting'});
             jest.advanceTimersByTime(200);
-            service.emit('event', {type: 'operation_init', operation_id: 'op-2', target: 'example.com', max_steps: 3});
+            service.emit('event', {type: 'operation_init', operation_id: 'op-2', target: 'example.com'});
             service.emit('event', {
-                type: 'step_header',
+                type: 'progress_update',
                 step: 1,
-                maxSteps: 3,
                 is_swarm_operation: true,
                 swarm_agent: 'web_tester',
                 swarm_sub_step: 1,
-                swarm_total_iterations: 2,
+                swarm_total_actions: 2,
             });
             service.emit('event', {type: 'reasoning', content: ' First thought ', swarm_agent: 'web_tester'});
             jest.advanceTimersByTime(20);
@@ -224,7 +223,7 @@ describe('Terminal event processing', () => {
             service.emit('event', {type: 'output', content: 'output'});
             service.emit('event', {type: 'output', content: 'Report saved to: /tmp/report.md'});
             service.emit('event', {type: 'output', content: '# SECURITY ASSESSMENT REPORT\nBody'});
-            service.emit('event', {type: 'step_header', step: 'FINAL REPORT', maxSteps: 3});
+            service.emit('event', {type: 'progress_update', step: 'FINAL REPORT'});
             service.emit('event', {type: 'report_content', content: '# SECURITY ASSESSMENT REPORT\nFinal body'});
             service.emit('event', {type: 'assessment_complete', success: false});
             service.emit('event', {type: 'termination_reason', reason: 'user_stopped', message: 'Stopped'});

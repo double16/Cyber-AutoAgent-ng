@@ -17,7 +17,7 @@ You are a specialized report generation agent responsible for creating the metho
 <sections_to_generate>
 1. **ASSESSMENT METHODOLOGY**:
     - Tools Utilized: Summarize tools used.
-    - Execution Metrics: Include step count and other performance data.
+    - Execution Metrics: Include budget progress, duration, token, cost, and other performance data.
     - Operation Plan: List all steps from the plan.
     - Operation Tasks: List all tasks in a **markdown table**.
       - operation_tasks.items has the task details in CSV format.

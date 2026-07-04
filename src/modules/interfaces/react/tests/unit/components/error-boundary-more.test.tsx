@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -39,7 +39,7 @@ describe('ErrorBoundary additional coverage', () => {
     it('renders custom fallback and invokes onError', async () => {
         const {ErrorBoundary} = await load();
         const onError = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(
@@ -60,7 +60,7 @@ describe('ErrorBoundary additional coverage', () => {
 
     it('renders memory-exhaustion recovery copy', async () => {
         const {ErrorBoundary} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(
@@ -82,16 +82,17 @@ describe('ErrorBoundary additional coverage', () => {
 
     it('can reset error state through the retry handler', async () => {
         const {ErrorBoundary} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        const boundaryRef = React.createRef<any>();
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
-                <ErrorBoundary>
+                <ErrorBoundary ref={boundaryRef}>
                     <span>ok</span>
                 </ErrorBoundary>
             );
         });
 
-        const instance = view.root.findByType(ErrorBoundary).instance as any;
+        const instance = boundaryRef.current;
         act(() => {
             instance.setState({hasError: true, error: new Error('temporary'), errorInfo: null});
         });
@@ -108,17 +109,18 @@ describe('ErrorBoundary additional coverage', () => {
         const originalEnv = process.env.NODE_ENV;
         const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
         Object.defineProperty(process.env, 'NODE_ENV', {value: 'development', configurable: true});
-        let view!: TestRenderer.ReactTestRenderer;
+        const boundaryRef = React.createRef<any>();
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(
-                <ErrorBoundary>
+                <ErrorBoundary ref={boundaryRef}>
                     <span>ok</span>
                 </ErrorBoundary>
             );
         });
 
-        const instance = view.root.findByType(ErrorBoundary).instance as any;
+        const instance = boundaryRef.current;
         const error = new Error('ordinary failure');
         error.stack = 'stack line';
         act(() => {

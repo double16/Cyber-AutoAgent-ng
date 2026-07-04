@@ -92,16 +92,12 @@ def test_stop_error_active_task_remains():
     plan.total_phases = 2
 
     agent = MagicMock()
-    agent.callback_handler.current_step = 5
-    agent.callback_handler.max_steps = 100
+    del agent.callback_handler
 
     active_task = MagicMock(spec=Task)
 
     plan.total_phases = 3
     plan.current_phase = 2
-    # phase_step_start = 100 * (2 - 1) // 3 = 33
-    # 0.9 * 33 = 29.7
-    agent.callback_handler.current_step = 20  # 20 < 29.7 is True
 
     with patch("modules.tools.stop.get_memory_client") as mock_get_client, \
             patch("modules.tools.stop.active_task_message") as mock_msg:
@@ -129,8 +125,6 @@ def test_stop_error_no_active_task_but_plan_incomplete():
     plan.total_phases = 3
 
     agent = MagicMock()
-    agent.callback_handler.current_step = 10
-    agent.callback_handler.max_steps = 100
 
     with patch("modules.tools.stop.get_memory_client") as mock_get_client:
         mock_client = MagicMock()
@@ -145,7 +139,7 @@ def test_stop_error_no_active_task_but_plan_incomplete():
         assert "stop_event_loop" not in request_state
 
 
-def test_stop_success_above_threshold():
+def test_stop_error_active_task_even_when_budget_progress_high():
     tool_use = {"toolUseId": "test_id", "input": {}}
     request_state = {}
 
@@ -155,23 +149,24 @@ def test_stop_success_above_threshold():
     plan.total_phases = 3
 
     agent = MagicMock()
-    agent.callback_handler.max_steps = 100
-    # phase_step_start = 100 * (2 - 1) // 3 = 33
-    # 0.9 * 33 = 29.7
-    agent.callback_handler.current_step = 35  # 35 < 29.7 is False
+    agent.callback_handler.get_budget_progress.return_value = 89
 
     active_task = MagicMock(spec=Task)
 
-    with patch("modules.tools.stop.get_memory_client") as mock_get_client:
+    with patch("modules.tools.stop.get_memory_client") as mock_get_client, \
+            patch("modules.tools.stop.active_task_message") as mock_msg:
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
         mock_client.get_active_plan.return_value = plan
         mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
+        mock_msg.return_value = "Run Task 1"
 
         result = stop(tool_use, request_state=request_state, agent=agent)
 
-        assert result["status"] == "success"
-        assert request_state["stop_event_loop"] is True
+        assert result["status"] == "error"
+        assert "MANDATORY ACTION" in result["content"][0]["text"]
+        assert "Run Task 1" in result["content"][0]["text"]
+        assert "stop_event_loop" not in request_state
 
 
 def test_stop_success_no_agent_or_callback():
@@ -183,10 +178,19 @@ def test_stop_success_no_agent_or_callback():
     plan.current_phase = 1
     plan.total_phases = 3
 
+    active_task = Task(
+        task_uid="test_task_uid",
+        title="title",
+        objective="objective",
+        phase=1,
+        status="active",
+    )
+
     with patch("modules.tools.stop.get_memory_client") as mock_get_client:
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
         mock_client.get_active_plan.return_value = plan
+        mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
 
         # Case 1: No agent
         result = stop(tool_use, request_state=request_state)
@@ -203,17 +207,6 @@ def test_stop_success_no_agent_or_callback():
 
         agent = SimpleAgent()
         result = stop(tool_use, request_state=request_state, agent=agent)
-        assert result["status"] == "success"
-        assert request_state["stop_event_loop"] is True
-
-        # Case 3: Callback handler missing current_step or max_steps
-        request_state = {}
-
-        class AgentWithEmptyHandler:
-            def __init__(self):
-                self.callback_handler = SimpleAgent()
-
-        agent = AgentWithEmptyHandler()
-        result = stop(tool_use, request_state=request_state, agent=agent)
-        assert result["status"] == "success"
-        assert request_state["stop_event_loop"] is True
+        assert result["status"] == "error"
+        assert "MANDATORY ACTION" in result["content"][0]["text"]
+        assert "stop_event_loop" not in request_state

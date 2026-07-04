@@ -7,8 +7,8 @@ import modules.handlers.agent_repair_hook as tcrh
 
 
 class FakeCallbackHandler:
-    def __init__(self):
-        self.current_step = 0
+    def get_budget_progress(self) -> dict:
+        return {"progress_percent": 0}
 
 
 class FakeAgent:

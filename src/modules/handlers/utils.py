@@ -376,11 +376,11 @@ def dumpstacks(signal, frame):
             trace.append('File: "%s", line %d, in %s' % (filename, lineno, name))
             if line:
                 trace.append("  %s" % (line.strip()))
-    print("\n".join(trace))
+    print("\n".join(trace), file=sys.stderr)
     try:
         from guppy import hpy
         h = hpy()
-        print("\n".join(h.heap()[0:12]))
+        print(str((h.heap())), file=sys.stderr)
     except ImportError:
         pass
 

@@ -1,7 +1,7 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -104,7 +104,7 @@ describe('status, log, operation, and wrapper components', () => {
 
     it('renders compact StatusIndicator updates and cleanup', async () => {
         const {StatusIndicator} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<StatusIndicator compact deploymentMode="full-stack"/>);
@@ -127,7 +127,7 @@ describe('status, log, operation, and wrapper components', () => {
     it('renders detailed StatusIndicator service rows and fallback modes', async () => {
         const {StatusIndicator} = await load();
 
-        let detailed!: TestRenderer.ReactTestRenderer;
+        let detailed!: ReactTestRenderer;
         await act(async () => {
             detailed = TestRenderer.create(<StatusIndicator/>);
         });
@@ -142,7 +142,7 @@ describe('status, log, operation, and wrapper components', () => {
         expect(frame).toContain('API');
         expect(frame).toContain('Database');
 
-        let cli!: TestRenderer.ReactTestRenderer;
+        let cli!: ReactTestRenderer;
         await act(async () => {
             cli = TestRenderer.create(<StatusIndicator compact deploymentMode="cli"/>);
         });
@@ -151,7 +151,7 @@ describe('status, log, operation, and wrapper components', () => {
         });
         expect(textFromTree(cli.toJSON())).toContain('Python');
 
-        let agent!: TestRenderer.ReactTestRenderer;
+        let agent!: ReactTestRenderer;
         await act(async () => {
             agent = TestRenderer.create(<StatusIndicator compact deploymentMode="agent"/>);
         });
@@ -175,8 +175,7 @@ describe('status, log, operation, and wrapper components', () => {
                 flowState={{step: 'ready', module: 'web', target: 'example.com', objective: 'audit'}}
                 currentOperation={{
                     id: 'OP_1',
-                    currentStep: 2,
-                    totalSteps: 5,
+                    progressPercentage: 40,
                     description: 'Testing target',
                     startTime,
                     status: 'running',
@@ -188,25 +187,52 @@ describe('status, log, operation, and wrapper components', () => {
         expect(running).toContain('Setup');
         expect(running).toContain('Module: web');
         expect(running).toContain('Testing target');
-        expect(running).toContain('Step 2/5');
+        expect(running).toContain('Progress 40%');
         expect(running).toContain('Findings: 1');
         expect(running).toContain('RUNNING');
-        expect(running).toContain('ETA');
+        expect(running).toContain('Budget ETA');
+
+        expect(render(
+            <OperationStatusDisplay
+                flowState={{step: 'ready'}}
+                currentOperation={{
+                    id: 'OP_STARTING',
+                    progressPercentage: 0,
+                    description: 'Starting target',
+                    startTime,
+                    status: 'running',
+                }}
+            />
+        ).lastFrame()).not.toContain('Budget ETA');
+
+        expect(render(
+            <OperationStatusDisplay
+                flowState={{step: 'ready'}}
+                currentOperation={{
+                    id: 'OP_COMPLETE_PROGRESS',
+                    progressPercentage: 100,
+                    description: 'Budget reached',
+                    startTime,
+                    status: 'running',
+                }}
+            />
+        ).lastFrame()).not.toContain('Budget ETA');
 
         for (const status of ['paused', 'completed', 'error', 'cancelled'] as const) {
-            expect(render(
+            const statusFrame = render(
                 <OperationStatusDisplay
                     flowState={{step: 'target', module: 'web'}}
                     currentOperation={{
                         id: `OP_${status}`,
-                        currentStep: 0,
-                        totalSteps: 0,
+                        progressPercentage: 40,
                         description: status,
                         startTime,
                         status,
                     }}
                 />
-            ).lastFrame()).toContain(status.toUpperCase());
+            ).lastFrame();
+            expect(statusFrame).toContain(status.toUpperCase());
+            expect(statusFrame).not.toContain('Budget ETA');
         }
     });
 
@@ -298,7 +324,7 @@ describe('status, log, operation, and wrapper components', () => {
 
         const onComplete = jest.fn();
         const onConfigOpen = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(

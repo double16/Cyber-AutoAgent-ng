@@ -210,7 +210,7 @@ Parameters come from subsequent `metadata` event emitted by `_emit_generic_tool_
 
 ### 1. Step Header (if new step)
 ```
-[STEP 2/10] ────────────────────────────────────────
+[PROGRESS 20%] ────────────────────────────────────────
 ```
 
 ### 2. Reasoning (if agent is thinking)
@@ -441,12 +441,9 @@ execute [objective]       # Start assessment
 
 # Configuration
 /config                   # View/edit
-/provider <name>          # Switch provider
-/iterations <n>           # Set max iterations
 
 # Utility
 /plugins                  # Select modules
-/memory <list|search>     # Memory ops
 /health                   # System status
 ```
 
@@ -483,7 +480,7 @@ CYBER_THEME=retro
 {
   "modelProvider": "bedrock",
   "modelId": "claude-sonnet-4",
-  "iterations": 100,
+  "budgetMaxDuration": 60,
   "observability": true,
   "deploymentMode": "full-stack"
 }

@@ -628,7 +628,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         target=config.target,
         objective=config.objective,
         operation_id=operation_id,
-        max_steps=config.max_steps,
+        budget=config.budget,
         provider=config.provider,
         has_memory_path=bool(config.memory_path),
         has_existing_memories=has_existing_memories,
@@ -695,7 +695,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         setup_output_interception()
 
     callback_handler = ReactBridgeHandler(
-        max_steps=config.max_steps,
         operation_id=operation_id,
         provider_id=config.provider,
         model_id=config.model_id,
@@ -734,6 +733,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
                     else {}
                 ),
             },
+            "budget": config.budget.to_ui_dict(),
             "observability": config_manager.getenv_bool("ENABLE_OBSERVABILITY", False),
             "ui_mode": config_manager.getenv("CYBER_UI_MODE", "cli").lower(),
         },
@@ -784,7 +784,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             target=config.target,
             objective=config.objective,
             operation_id=operation_id,
-            max_steps=config.max_steps,
+            budget=config.budget,
             module=config.module,
             tools_context=full_tools_context if full_tools_context else None,
         )
@@ -894,7 +894,9 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             "operation.id": operation_id,
             "operation.type": "security_assessment",
             "operation.start_time": datetime.now().isoformat(),
-            "operation.max_steps": config.max_steps,
+            "operation.budget.max_duration_minutes": config.budget.max_duration_minutes,
+            "operation.budget.max_tokens": config.budget.max_tokens,
+            "operation.budget.max_cost": config.budget.max_cost,
             # Target and objective
             "target.host": config.target,
             "objective.description": config.objective,

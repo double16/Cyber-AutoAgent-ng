@@ -17,7 +17,31 @@ DEFAULT_TEMPERATURE_EXECUTION = 0.5
 DEFAULT_TEMPERATURE_SWARM = 0.4
 DEFAULT_TEMPERATURE_EXPLOITATION = 0.6
 
-DEFAULT_ITERATIONS = 100
+DEFAULT_MAX_DURATION = 60
+
+
+@dataclass
+class BudgetConfig:
+    """Execution budget configuration."""
+
+    max_duration_minutes: int
+    max_tokens: Optional[int] = None
+    max_cost: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.max_duration_minutes <= 0:
+            raise ValueError("max_duration_minutes must be greater than 0")
+        if self.max_tokens is not None and self.max_tokens <= 0:
+            raise ValueError("max_tokens must be greater than 0 when provided")
+        if self.max_cost is not None and self.max_cost <= 0:
+            raise ValueError("max_cost must be greater than 0 when provided")
+
+    def to_ui_dict(self) -> Dict[str, Any]:
+        return {
+            "maxDurationMinutes": self.max_duration_minutes,
+            "maxTokens": self.max_tokens,
+            "maxCost": self.max_cost,
+        }
 
 LITELLM_EMBEDDING_DEFAULTS: Dict[str, Tuple[str, int]] = {
     "openai": ("openai/text-embedding-3-small", 1536),
@@ -277,7 +301,7 @@ class AgentConfig:
 
     target: str
     objective: str
-    max_steps: int = DEFAULT_ITERATIONS
+    budget: BudgetConfig = field(default_factory=lambda: BudgetConfig(max_duration_minutes=DEFAULT_MAX_DURATION))
     available_tools: Optional[List[str]] = None
     op_id: Optional[str] = None
     model_id: Optional[str] = None

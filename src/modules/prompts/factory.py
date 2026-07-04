@@ -23,6 +23,7 @@ from urllib import parse as _urlparse
 from urllib import request as _urlreq
 
 from modules.config.system.logger import get_logger
+from modules.config.types import BudgetConfig
 from modules.tools.memory import OperationPlan
 
 logger = get_logger("Prompts.Factory")
@@ -459,7 +460,7 @@ def _format_overlay_directives(payload: Any) -> List[str]:
 def _render_overlay_block(
     output_config: Optional[Dict[str, Any]],
     operation_id: str,
-    current_step: int,
+    current_progress: int,
 ) -> str:
     overlay_path = _get_overlay_file(output_config, operation_id)
     if not overlay_path:
@@ -469,15 +470,15 @@ def _render_overlay_block(
     if not overlay_data:
         return ""
 
-    expires_after = overlay_data.get("expires_after_steps")
-    applied_step = overlay_data.get("current_step")
+    expires_after = overlay_data.get("expires_after_progress")
+    applied_progress = overlay_data.get("budget_progress")
 
     try:
         if (
             isinstance(expires_after, int)
             and expires_after > 0
-            and isinstance(applied_step, int)
-            and current_step >= applied_step + expires_after
+            and isinstance(applied_progress, int)
+            and current_progress >= applied_progress + expires_after
         ):
             overlay_path.unlink(missing_ok=True)
             return ""
@@ -494,10 +495,10 @@ def _render_overlay_block(
         header_meta.append(f"origin={overlay_data['origin']}")
     if overlay_data.get("reviewer"):
         header_meta.append(f"reviewer={overlay_data['reviewer']}")
-    if isinstance(applied_step, int):
-        header_meta.append(f"applied_step={applied_step}")
+    if isinstance(applied_progress, int):
+        header_meta.append(f"applied_progress={applied_progress}%")
     if isinstance(expires_after, int):
-        header_meta.append(f"expires_after_steps={expires_after}")
+        header_meta.append(f"expires_after_progress={expires_after}%")
 
     title = "## ADAPTIVE DIRECTIVES"
     if header_meta:
@@ -519,9 +520,8 @@ def get_system_prompt(
     target: str,
     objective: str,
     operation_id: str,
-    current_step: int = 0,
-    max_steps: int = 100,
-    remaining_steps: Optional[int] = None,
+    budget: Optional[BudgetConfig] = None,
+    progress_percent: int = 0,
     has_existing_memories: bool = False,
     memory_overview: Optional[Dict[str, Any]] = None,
     # Extended, centralized parameters
@@ -534,11 +534,7 @@ def get_system_prompt(
 ) -> str:
     """Build the system prompt using the master template."""
 
-    if remaining_steps is None:
-        remaining_steps = max(0, max_steps - current_step)
-
-    # 1. Calculate Reflection Snapshot (Budget & Checkpoints)
-    reflection_snapshot = get_reflection_snapshot(current_step, max_steps, plan_current_phase)
+    reflection_snapshot = get_reflection_snapshot(progress_percent, budget, plan_current_phase)
 
     # 2. Extract and format operation directories from output_config
     operation_paths_block = ""
@@ -583,9 +579,6 @@ def get_system_prompt(
     prompt = system_template.replace("{{ target }}", str(target))
     prompt = prompt.replace("{{ objective }}", str(objective))
     prompt = prompt.replace("{{ operation_id }}", str(operation_id))
-    prompt = prompt.replace("{{ current_step }}", str(current_step))
-    prompt = prompt.replace("{{ max_steps }}", str(max_steps))
-    prompt = prompt.replace("{{ remaining_steps }}", str(remaining_steps))
     prompt = prompt.replace("{{ memory_context }}", memory_context_text)
     prompt = prompt.replace("{{ reflection_snapshot }}", reflection_snapshot)  # reflection_snapshot is done with each step, not necessary in the system prompt
     prompt = prompt.replace("{{ tools_guide }}", tools_guide_text)
@@ -598,7 +591,7 @@ def get_system_prompt(
     prompt = prompt.replace("{{ environmental_context }}", env_context_str)
 
     # 7. Append Overlay (Adaptive Directives)
-    overlay_block = _render_overlay_block(output_config, operation_id, current_step)
+    overlay_block = _render_overlay_block(output_config, operation_id, progress_percent)
     if overlay_block:
         prompt += f"\n\n{overlay_block}"
 
@@ -609,21 +602,28 @@ def get_system_prompt(
     return prompt
 
 
-def get_reflection_snapshot(current_step: int, max_steps: int, plan_current_phase: int | None) -> str:
+def get_reflection_snapshot(
+    progress_percent: int,
+    budget: Optional[BudgetConfig],
+    plan_current_phase: int | None,
+) -> str:
     reflection_snapshot = ""
     try:
-        _budget_pct = int((current_step / max_steps) * 100) if max_steps > 0 else 0
-        _checkpoints = [int(max_steps * pct) for pct in [0.2, 0.4, 0.6, 0.8]]
-        _next_checkpoint = next((cp for cp in _checkpoints if cp > current_step), max_steps)
-        _steps_until = max(0, _next_checkpoint - current_step)
-        remaining_steps = max(0, max_steps - current_step)
-
-        lines = [f"Budget Used: {_budget_pct}%, step {current_step}/{max_steps}, {remaining_steps} remaining steps"]
+        _budget_pct = max(0, int(progress_percent))
+        budget_parts = []
+        if budget:
+            budget_parts.append(f"duration cap {budget.max_duration_minutes}m")
+            if budget.max_tokens is not None:
+                budget_parts.append(f"token cap {budget.max_tokens}")
+            if budget.max_cost is not None:
+                budget_parts.append(f"cost cap {budget.max_cost}")
+        budget_text = ", ".join(budget_parts) if budget_parts else "not configured"
+        lines = [f"Budget Used: {_budget_pct}% ({budget_text})"]
 
         # Checkpoint-specific actionable guidance
-        if current_step in _checkpoints or (current_step > 0 and current_step == _checkpoints[0]):
-            checkpoint_idx = _checkpoints.index(current_step) if current_step in _checkpoints else 0
-            checkpoint_pct = [20, 40, 60, 80][checkpoint_idx]
+        reached_checkpoints = [pct for pct in [20, 40, 60, 80] if _budget_pct >= pct]
+        if reached_checkpoints:
+            checkpoint_pct = reached_checkpoints[-1]
             lines.append(f"**CHECKPOINT {checkpoint_pct}% REACHED**")
 
             if checkpoint_pct == 20:
@@ -636,10 +636,8 @@ def get_reflection_snapshot(current_step: int, max_steps: int, plan_current_phas
             elif checkpoint_pct == 80:
                 lines.append("ACTION: Call `get_plan`. Focus ONLY on highest-confidence path. No new exploration.")
         else:
-            lines.append(f"Next Checkpoint: Step {_next_checkpoint} (in {_steps_until} steps)")
-            # Add warning if close to checkpoint
-            if 3 >= _steps_until > 0:
-                lines.append(f"Checkpoint approaching. Prepare to evaluate plan.")
+            next_checkpoint = next((pct for pct in [20, 40, 60, 80] if pct > _budget_pct), 100)
+            lines.append(f"Next Checkpoint: {next_checkpoint}% budget use")
 
         if plan_current_phase is not None:
             lines.append(f"Current Phase: {plan_current_phase}")

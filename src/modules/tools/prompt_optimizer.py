@@ -188,22 +188,19 @@ def _clean_optional(
 
 
 def _get_overlay_cooldown_state(overlay_record: dict[str, Any]) -> tuple[Optional[str], Optional[int]]:
-    """Return (operation_id, last_step) for cooldown enforcement.
-
-    Backward compatible with older overlays that only stored `operation_id` and `current_step`.
-    """
+    """Return (operation_id, last_progress) for cooldown enforcement."""
     cooldown = overlay_record.get("cooldown")
     if isinstance(cooldown, dict):
         op_id = cooldown.get("operation_id")
-        last_step = cooldown.get("last_step")
-        if isinstance(op_id, str) and isinstance(last_step, int):
-            return op_id, last_step
+        last_progress = cooldown.get("last_progress")
+        if isinstance(op_id, str) and isinstance(last_progress, int):
+            return op_id, last_progress
 
     op_id = overlay_record.get("operation_id")
-    last_step = overlay_record.get("current_step")
+    last_progress = overlay_record.get("budget_progress")
     return (
         op_id if isinstance(op_id, str) else None,
-        last_step if isinstance(last_step, int) else None,
+        last_progress if isinstance(last_progress, int) else None,
     )
 
 
@@ -214,8 +211,8 @@ def prompt_optimizer(
     trigger: Optional[str] = None,
     reviewer: Optional[str] = None,
     note: Optional[str] = None,
-    current_step: Optional[int] = None,
-    expires_after_steps: Optional[int] = None,
+    budget_progress: Optional[int] = None,
+    expires_after_progress: Optional[int] = None,
     metadata: Optional[dict[str, Any]] = None,
     prompt: Optional[str] = None,
     context: Optional[str] = None,
@@ -241,8 +238,8 @@ def prompt_optimizer(
         trigger: Context for why the overlay was generated (e.g., ``agent_reflection``).
         reviewer: Optional reviewer or approval context.
         note: Optional annotation describing the change.
-        current_step: Agent step number when applying (used for cooldown/TTL enforcement).
-        expires_after_steps: Optional TTL in steps.
+        budget_progress: Current budget progress percentage when applying.
+        expires_after_progress: Optional TTL in budget progress percentage points.
         metadata: Extra metadata to persist with the overlay record.
         prompt: Free-form prompt text when using ``update``/``rewrite``/``view`` helpers.
         context: Additional context to append when using ``add_context``.
@@ -343,21 +340,21 @@ def prompt_optimizer(
         }
 
     # Mutating paths beyond this point
-    cooldown_steps = 8
-    if current_step is not None and existing_overlay and operation_id:
-        last_op_id, last_step = _get_overlay_cooldown_state(existing_overlay)
-        if last_op_id == operation_id and isinstance(last_step, int):
-            # If steps go backwards, treat as a reset/new timeline.
-            if current_step < last_step:
+    cooldown_progress = 8
+    if budget_progress is not None and existing_overlay and operation_id:
+        last_op_id, last_progress = _get_overlay_cooldown_state(existing_overlay)
+        if last_op_id == operation_id and isinstance(last_progress, int):
+            # If progress goes backwards, treat as a reset/new timeline.
+            if budget_progress < last_progress:
                 logger.debug(
-                    "Cooldown reset: current_step %s < last_step %s for operation %s",
-                    current_step,
-                    last_step,
+                    "Cooldown reset: budget_progress %s < last_progress %s for operation %s",
+                    budget_progress,
+                    last_progress,
                     operation_id,
                 )
-            elif current_step - last_step < cooldown_steps:
+            elif budget_progress - last_progress < cooldown_progress:
                 raise PromptOptimizerError(
-                    "Adaptive overlay recently updated; wait a few steps before applying another change."
+                    "Adaptive overlay recently updated; wait for more budget progress before applying another change."
                 )
 
     overlay_payload: Optional[Dict[str, Any]] = None
@@ -400,9 +397,13 @@ def prompt_optimizer(
     if overlay_payload is None:
         raise PromptOptimizerError("Unable to construct overlay payload")
 
-    if expires_after_steps is not None:
-        if not isinstance(expires_after_steps, int) or expires_after_steps <= 0:
-            raise PromptOptimizerError("expires_after_steps must be a positive integer")
+    if budget_progress is not None:
+        if not isinstance(budget_progress, int) or not 0 <= budget_progress <= 100:
+            raise PromptOptimizerError("budget_progress must be a non-negative integer percentage")
+
+    if expires_after_progress is not None:
+        if not isinstance(expires_after_progress, int) or expires_after_progress <= 0:
+            raise PromptOptimizerError("expires_after_progress must be a positive integer")
 
     history: List[Dict[str, Any]] = []
     if existing_overlay and isinstance(existing_overlay, dict):
@@ -435,25 +436,25 @@ def prompt_optimizer(
         "note": note_value,
         "payload": overlay_payload,
         "applied_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "current_step": current_step,
+        "budget_progress": budget_progress,
         "cooldown": {
             "operation_id": operation_id,
-            "last_step": current_step,
-            "cooldown_steps": 8,
+            "last_progress": budget_progress,
+            "cooldown_progress": cooldown_progress,
         }
-        if (operation_id and isinstance(operation_id, str) and isinstance(current_step, int))
+        if (operation_id and isinstance(operation_id, str) and isinstance(budget_progress, int))
         else None,
     }
 
     if record.get("cooldown") is None:
         record.pop("cooldown", None)
 
-    if expires_after_steps is not None:
-        record["expires_after_steps"] = expires_after_steps
+    if expires_after_progress is not None:
+        record["expires_after_progress"] = expires_after_progress
     elif existing_overlay and isinstance(
-        existing_overlay.get("expires_after_steps"), int
+        existing_overlay.get("expires_after_progress"), int
     ):
-        record["expires_after_steps"] = existing_overlay["expires_after_steps"]
+        record["expires_after_progress"] = existing_overlay["expires_after_progress"]
 
     if metadata and isinstance(metadata, dict):
         record["metadata"] = metadata
@@ -479,8 +480,8 @@ def prompt_optimizer(
         summary_lines.append(f"Reviewer: {reviewer_value}")
     if note_value:
         summary_lines.append(f"Note: {note_value}")
-    if record.get("expires_after_steps"):
-        summary_lines.append(f"Expires after: {record['expires_after_steps']} steps")
+    if record.get("expires_after_progress"):
+        summary_lines.append(f"Expires after: {record['expires_after_progress']}% budget progress")
 
     preview = _format_directives_preview(overlay_payload, limit=4)
     if preview:
@@ -705,7 +706,7 @@ Look for these BEHAVIORAL patterns in evidence (not just keywords):
 3. **Premature Stop**: stop() invoked at <95% budget without objective achieved
 4. **Phase 4 Missed**: Extraction events (hash/credentials/token) without immediate direct-use testing
 5. **Validation Ignored**: Tool calls without reasoning that answers validation questions
-6. **Technique Fixation**: High iteration count on single approach without capability class switch
+6. **Technique Fixation**: Repeated attempts on a single approach without capability class switch
 
 If patterns found → Apply corresponding strengthening strategy below.
 If NO patterns → Return prompt UNCHANGED (conservative behavior when no evidence).
@@ -719,7 +720,7 @@ TRANSFORM: "FIRST tool call MUST be: `get_plan()`"
 TO: "BEFORE selecting next tool, complete:\nSTEP 1: `get_plan()`\nSTEP 2: Answer validation questions\nSTEP 3: Update plan\nSTEP 4: ONLY AFTER above: Select next tool"
 RATIONALE: Sequential steps create completion structure, numbered gates harder to skip
 
-**B. Technique Fixation** (5+ iterations same approach):
+**B. Technique Fixation** (5+ repeated attempts with same approach):
 TRANSFORM: "Multiple failures → different method"
 TO: "3 failures same technique → MUST pivot to different method | 5+ failures → MUST switch capability class | After 3rd failure: next action uses DIFFERENT approach"
 RATIONALE: Explicit thresholds remove "multiple" ambiguity, make counters trackable
@@ -854,11 +855,11 @@ WORKING TACTICS: {focus_str}
 PHASE 1 - BEHAVIORAL ANALYSIS:
 Scan evidence for the 6 behavioral patterns listed in your system prompt:
 - Checkpoint skipping (20%/40%/60%/80% budget intervals without `get_plan`)
-- Repeated technique (5+ iterations same approach)
+- Repeated technique (5+ attempts with same approach)
 - Premature stop (<95% budget without objective)
 - Phase 4 missed (extraction without direct-use testing)
 - Validation ignored (tool calls without answering questions)
-- Technique fixation (high iteration count on single approach)
+- Technique fixation (repeated attempts on a single approach)
 
 PHASE 2 - STRUCTURAL TRANSFORMATION:
 For EACH pattern found, apply corresponding strengthening strategy A-F from system prompt.

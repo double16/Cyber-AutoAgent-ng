@@ -42,11 +42,11 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'metrics_update', metrics: { tokens: 1 } },
       { type: 'content_block_delta', delta: 'visible', isReasoning: false },
       { type: 'content_block_delta', delta: 'think', isReasoning: true },
-      { type: 'step_header', step: 2, maxSteps: 5, totalTools: 4 },
-      { type: 'step_header', step: 'FINAL REPORT', maxSteps: 5 },
-      { type: 'step_header', step: 'TERMINATED' },
-      { type: 'step_header', step: 1, maxSteps: 3, is_swarm_operation: true },
-      { type: 'step_header', step: 1, maxSteps: 3, swarm_agent: 'web_tester', swarm_sub_step: 2, swarm_total_iterations: 7 },
+      { type: 'progress_update', step: 1, progressPercent: 40, totalTools: 4 },
+      { type: 'progress_update', step: 'FINAL REPORT' },
+      { type: 'progress_update', step: 'TERMINATED' },
+      { type: 'progress_update', step: 1, progressPercent: 25, is_swarm_operation: true },
+      { type: 'progress_update', step: 1, progressPercent: 25, swarm_agent: 'web_tester', swarm_sub_step: 2, swarm_total_actions: 7 },
       { type: 'task_started', title: 'Enumerate target' },
       { type: 'thinking', context: 'reasoning', startTime: Date.now(), message: 'working' },
       { type: 'task_done', title: 'Enumerate target' },
@@ -73,7 +73,7 @@ describe('StreamDisplay broad event rendering', () => {
 
     expect(output).toContain('model invocation started');
     expect(output).toContain('Event loop cycle started');
-    expect(output).toContain('[STEP 2/5 | 4 tools]');
+    expect(output).toContain('[PROGRESS 40% | 4 tools]');
     expect(output).toContain('[FINAL REPORT]');
     expect(output).toContain('NETWORK TIMEOUT');
     expect(output).toContain('TOKEN LIMIT');
@@ -125,7 +125,7 @@ describe('StreamDisplay broad event rendering', () => {
     const { computeDisplayGroups, StreamDisplay, StaticStreamDisplay, EventLine, render } = await load();
     const events: any[] = [
       { type: 'operation_init', operation_id: 'op2', target: 'example.com' },
-      { type: 'step_header', step: 1, maxSteps: 2 },
+      { type: 'progress_update', step: 2, progressPercent: 50 },
       { type: 'tool_start', tool_name: 'shell', tool_input: { command: 'whoami' } },
       { type: 'output', content: 'root', metadata: { fromToolBuffer: true, tool: 'shell' } },
       { type: 'tool_output', tool: 'shell', status: 'success', output: { stdout: 'ok' } },

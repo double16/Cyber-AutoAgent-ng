@@ -37,10 +37,8 @@ MAX_CONTENT_DISPLAY_LENGTH = 500
 class HandlerState:
     """State management for handler operations."""
 
-    # Step tracking
-    steps: int = 0
-    max_steps: int = 100
-    step_limit_reached: bool = False
+    # Budget tracking
+    budget_limit_reached: bool = False
 
     # Tool tracking
     shown_tools: set = field(default_factory=set)
@@ -67,7 +65,6 @@ class HandlerState:
     # Swarm operation tracking
     in_swarm_operation: bool = False
     swarm_agents: List[str] = field(default_factory=list)
-    swarm_step_count: int = 0
     current_swarm_agent: Optional[str] = None
 
     # Tool effectiveness tracking
@@ -78,5 +75,5 @@ class HandlerError(Exception):
     """Base exception for handler-related errors."""
 
 
-class StepLimitReached(HandlerError):
-    """Raised when the step limit is reached."""
+class BudgetLimitReached(HandlerError):
+    """Raised when an execution budget limit is reached."""

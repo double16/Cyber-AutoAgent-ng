@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {describe, expect, it, jest} from '@jest/globals';
 import {ObservabilityConfig} from '../../../src/components/ObservabilityConfig.js';
 
@@ -25,7 +25,7 @@ const baseConfig = {
 describe('ObservabilityConfig', () => {
     it('renders enabled observability fields and emits config changes', () => {
         const onConfigChange = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<ObservabilityConfig config={baseConfig} onConfigChange={onConfigChange}/>);
         });
@@ -72,7 +72,7 @@ describe('ObservabilityConfig', () => {
     });
 
     it('renders disabled status without optional observability panels', () => {
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <ObservabilityConfig
@@ -89,7 +89,7 @@ describe('ObservabilityConfig', () => {
     });
 
     it('uses fallback values and auto-detected status copy', () => {
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <ObservabilityConfig

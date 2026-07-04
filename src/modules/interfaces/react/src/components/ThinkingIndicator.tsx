@@ -36,7 +36,6 @@ const THINKING_PHRASES = [
   'Connecting dots',
   'Crunching data',
   'Running scenarios',
-  'Mapping vectors',
   'Testing theories',
   'Building game plan',
   'Formulating tactics',
@@ -44,7 +43,6 @@ const THINKING_PHRASES = [
   'Piecing together',
   'Assembling strategy',
   'Decoding patterns',
-  'Optimizing route',
   'Spinning up ideas',
   'Cooking up plan'
 ];

@@ -28,8 +28,7 @@ export interface SwarmAgent {
   result?: string;
   startTime?: number;
   endTime?: number;
-  currentStep?: number;
-  maxSteps?: number;
+  progressPercent?: number;
   tokensUsed?: number;
 }
 
@@ -140,8 +139,8 @@ export const SwarmDisplay: React.FC<SwarmDisplayProps> = ({ swarmState, collapse
                 {agent.role && (
                   <Text color={theme.muted}> - {agent.role}</Text>
                 )}
-                {agent.currentStep && agent.maxSteps && (
-                  <Text color={theme.info}> [{agent.currentStep}/{agent.maxSteps}]</Text>
+                {agent.progressPercent !== undefined && (
+                  <Text color={theme.info}> [{agent.progressPercent}%]</Text>
                 )}
                 {agent.tools && agent.tools.length > 0 && (
                   <Text color={theme.muted}> ({agent.tools.join(', ')})</Text>

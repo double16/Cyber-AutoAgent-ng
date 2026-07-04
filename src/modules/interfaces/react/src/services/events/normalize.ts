@@ -145,11 +145,10 @@ function normalizeToolInput(toolName: string, input: any): any {
     if (cloneInput.note) normalized.note = clampString(String(cloneInput.note), 400);
     if (cloneInput.context) normalized.context = clampString(String(cloneInput.context), 400);
     if (cloneInput.prompt) normalized.prompt = clampString(String(cloneInput.prompt), 400);
-    if (cloneInput.current_step != null) normalized.current_step = Number(cloneInput.current_step);
-    if (cloneInput.expires_after_steps != null) {
-      normalized.expires_after_steps = Number(cloneInput.expires_after_steps);
+    if (cloneInput.budget_progress != null) normalized.budget_progress = Number(cloneInput.budget_progress);
+    if (cloneInput.expires_after_progress != null) {
+      normalized.expires_after_progress = Number(cloneInput.expires_after_progress);
     }
-
     const overlayRaw = cloneInput.overlay;
     let overlayObj: any = overlayRaw;
     if (typeof overlayRaw === 'string') {

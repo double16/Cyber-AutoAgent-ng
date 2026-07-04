@@ -258,7 +258,7 @@ class OperationPlan:
 
         return OperationPlan(
             objective=str(obj.get("objective", "")),
-            current_phase=int(obj.get("current_phase")),
+            current_phase=int(obj.get("current_phase", 1)),
             total_phases=len(phases),
             phases=phases,
             assessment_complete=bool(obj.get("assessment_complete", False)),
@@ -984,15 +984,11 @@ def store_plan(
 
     if not plan_obj.assessment_complete and prev_plan and \
             plan_obj.current_phase != prev_plan.current_phase and \
-            tool_context and tool_context.agent and tool_context.agent.callback_handler and \
-            hasattr(tool_context.agent.callback_handler, 'current_step') and \
-            hasattr(tool_context.agent.callback_handler, 'max_steps'):
-        current_step = tool_context.agent.callback_handler.current_step
-        max_steps = tool_context.agent.callback_handler.max_steps
+            tool_context and tool_context.agent and hasattr(tool_context.agent, "callback_handler"):
         active_task, _ = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=prev_plan.current_phase)
+        budget_progress = getattr(tool_context.agent.callback_handler, "get_budget_progress", lambda: 0)()
 
-        phase_step_start = max_steps * (plan_obj.current_phase - 1) // plan_obj.total_phases
-        if active_task and current_step < phase_step_start * 0.9:
+        if active_task and budget_progress < 90:
             raise ValueError(
                 "Cannot advance phase due to activate tasks remaining.\n"
                 "**MANDATORY ACTION**: Continue by executing this active task:\n" + active_task_message(active_task)

@@ -7,6 +7,14 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Dict, Optional, Protocol
 
+DEDUP_EVENT_TYPES = (
+    "tool_start",
+    "tool_end",
+    "tool_invocation_start",
+    "tool_invocation_end",
+    "metrics_update",
+)
+
 
 class EventEmitter(Protocol):
     """Protocol for event emitters - minimal interface."""
@@ -71,13 +79,7 @@ class StdoutEventEmitter:
         # Skip duplicate events based on signature
         # Tool events and metrics updates should not be deduplicated
         event_type = event.get("type", "")
-        if event_type not in (
-            "tool_start",
-            "tool_end",
-            "tool_invocation_start",
-            "tool_invocation_end",
-            "metrics_update",
-        ):
+        if event_type not in DEDUP_EVENT_TYPES:
             # Create signature for deduplication (only when needed)
             signature = self._create_signature(event)
             if signature in self._recent_signatures:
@@ -141,13 +143,7 @@ class StdoutEventEmitter:
         print(f"__CYBER_EVENT__{json_str}__CYBER_EVENT_END__\n", end="", flush=True)
 
         # Track for deduplication (except tool events and metrics updates)
-        if event_type not in (
-            "tool_start",
-            "tool_end",
-            "tool_invocation_start",
-            "tool_invocation_end",
-            "metrics_update",
-        ):
+        if event_type not in DEDUP_EVENT_TYPES:
             self._recent_signatures.append(self._create_signature(event))
 
     def _clean_event_for_json(self, event: Dict[str, Any]) -> Dict[str, Any]:
@@ -199,13 +195,7 @@ class StdoutEventEmitter:
         event_type = event.get("type", "")
 
         # Tool events and metrics updates should have unique signatures to avoid deduplication
-        if event_type in (
-            "tool_start",
-            "tool_end",
-            "tool_invocation_start",
-            "tool_invocation_end",
-            "metrics_update",
-        ):
+        if event_type in DEDUP_EVENT_TYPES:
             # Include timestamp to make each event unique
             return f"{event_type}_{event.get('tool_name', '')}_{event.get('timestamp', datetime.now().isoformat())}"
 

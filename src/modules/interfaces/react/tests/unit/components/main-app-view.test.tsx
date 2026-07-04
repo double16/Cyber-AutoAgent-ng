@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {ModalType} from '../../../src/hooks/useModalManager.js';
 
@@ -104,7 +104,7 @@ describe('MainAppView', () => {
     it('renders header, filtered history, input, and footer on the main screen', async () => {
         const {MainAppView} = await load();
         const props = createProps();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(<MainAppView {...props as any}/>);
             await Promise.resolve();
@@ -140,7 +140,7 @@ describe('MainAppView', () => {
             },
         });
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(<MainAppView {...props as any}/>);
             await Promise.resolve();

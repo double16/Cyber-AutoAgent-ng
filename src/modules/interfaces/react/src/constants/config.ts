@@ -37,7 +37,7 @@ export const DISPLAY_LIMITS = {
 // Event types for consistency
 export const EVENT_TYPES = {
   // Core events
-  STEP_HEADER: 'step_header',
+  PROGRESS_UPDATE: 'progress_update',
   REASONING: 'reasoning',
   THINKING: 'thinking',
   THINKING_END: 'thinking_end',

@@ -84,15 +84,14 @@ def stop(tool: ToolUse, **kwargs: Any) -> ToolResult:
 
     if plan and not plan.assessment_complete and \
             plan.current_phase != plan.total_phases and \
-            agent and getattr(agent, 'callback_handler', None) and \
-            hasattr(agent.callback_handler, 'current_step') and \
-            hasattr(agent.callback_handler, 'max_steps'):
-        current_step = agent.callback_handler.current_step
-        max_steps = agent.callback_handler.max_steps
+            agent:
         active_task, *_ = memory_client.get_or_activate_next_task_in_phase(phase=plan.current_phase)
+        if hasattr(agent, "callback_handler"):
+            budget_progress = getattr(agent.callback_handler, "get_budget_progress", lambda: 0)()
+        else:
+            budget_progress = 0
 
-        phase_step_start = max_steps * (plan.current_phase - 1) // plan.total_phases
-        if active_task and current_step < phase_step_start * 0.9:
+        if active_task and budget_progress < 90:
             return {
                 "toolUseId": tool_use_id,
                 "status": "error",

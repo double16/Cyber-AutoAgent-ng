@@ -14,8 +14,7 @@ export interface Operation {
   objective: string;
   startTime: Date;
   endTime?: Date;
-  currentStep: number;
-  totalSteps: number;
+  progressPercentage: number;
   status: 'running' | 'paused' | 'completed' | 'error' | 'cancelled';
   description: string;
   findings: number;
@@ -244,8 +243,7 @@ export class OperationManager {
       target,
       objective,
       startTime: new Date(),
-      currentStep: 0,
-      totalSteps: 50, // Default, will be updated
+      progressPercentage: 0,
       status: 'running',
       description: 'Initializing operation...',
       findings: 0,
@@ -272,15 +270,14 @@ export class OperationManager {
   }
 
   // Update operation progress
-  updateProgress(operationId: string, step: number, totalSteps: number, description: string): void {
+  updateProgress(operationId: string, progressPercentage: number, description: string): void {
     const operation = this.operations.get(operationId);
     if (!operation) return;
 
-    operation.currentStep = step;
-    operation.totalSteps = totalSteps;
+    operation.progressPercentage = progressPercentage;
     operation.description = description;
     
-    this.addLog(operationId, 'info', `Step ${step}/${totalSteps}: ${description}`);
+    this.addLog(operationId, 'info', `Progress ${progressPercentage}%: ${description}`);
   }
 
   // Update operation with partial updates
@@ -388,7 +385,7 @@ export class OperationManager {
       level,
       message,
       tool,
-      step: operation.currentStep
+      step: operation.progressPercentage
     });
   }
 
@@ -422,8 +419,7 @@ export class OperationManager {
       target.target = op.target || target.target;
       target.objective = op.objective || target.objective;
       target.startTime = op.startTime || target.startTime;
-      target.currentStep = op.currentStep || target.currentStep;
-      target.totalSteps = op.totalSteps || target.totalSteps;
+      target.progressPercentage = op.progressPercentage || target.progressPercentage;
       target.status = op.status || target.status;
       target.description = op.description || target.description;
       target.findings = Math.max(op.findings, target.findings);

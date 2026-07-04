@@ -32,7 +32,7 @@ The interface communicates with the Python agent through structured events emitt
 
 ```typescript
 interface CyberEvent {
-  type: 'tool_start' | 'tool_output' | 'reasoning' | 'step_header';
+  type: 'tool_start' | 'tool_output' | 'reasoning' | 'progress_update';
   timestamp: string;
   data: EventData;
 }
@@ -90,7 +90,7 @@ Configuration persists to `~/.cyber-autoagent/config.json`:
 - LiteLLM (universal gateway)
 
 **Runtime Parameters:**
-- Maximum iterations (default: 100)
+- Required maximum duration, with optional token and cost budgets
 - Model selection
 - Memory persistence mode
 - Observability endpoints
@@ -142,8 +142,8 @@ Event types handled by interface:
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Tool execution results
 - `reasoning`: Agent decision-making context
-- `step_header`: Iteration counter and timing
-- `metrics_update`: Token usage and costs
+- `progress_update`: Progress boundary; `step` is internal sequence metadata and `progressPercent` is budget usage
+- `metrics_update`: Token usage, costs and budget usage
 
 ## Testing
 

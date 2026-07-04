@@ -9,6 +9,8 @@ import meow from 'meow';
 import { App } from './App.js';
 import { Config } from './contexts/ConfigContext.js';
 import { loggingService } from './services/LoggingService.js';
+import type {ExecutionHandle, ExecutionService} from './services/ExecutionService.js';
+import {stopExecution} from './services/executionLifecycle.js';
 import { enableConsoleSilence } from './utils/consoleSilencer.js';
 import { formatDuration } from './utils/logger.js';
 
@@ -61,7 +63,9 @@ const cli = meow(`
     --target, -t        Target system/network to assess
     --objective, -o     Security assessment objective
     --module, -m        Security module to use (default: web)
-    --iterations, -i    Maximum tool executions (default: 100)
+    --max-duration      Required: Maximum duration in minutes for the operation
+    --max-tokens        Optional: Total token budget (input+output+cache)
+    --max-cost          Optional: Total cost budget (e.g., USD)
     --auto-run          Start assessment immediately without UI
     --auto-approve      Auto-approve tool executions (no confirmations)
     --memory-mode       Memory mode: auto (default) or fresh
@@ -99,9 +103,14 @@ const cli = meow(`
       shortFlag: 'm',
       default: 'web'
     },
-    iterations: {
+    maxDuration: {
       type: 'number',
-      shortFlag: 'i',
+    },
+    maxTokens: {
+      type: 'number',
+    },
+    maxCost: {
+      type: 'number',
     },
     autoRun: {
       type: 'boolean',
@@ -177,6 +186,10 @@ const runAutoAssessment = async () => {
   if (cli.flags.autoRun && cli.flags.target) {
     loggingService.info(`🔐 Starting assessment: ${cli.flags.module} → ${cli.flags.target}`);
     loggingService.info(`📌 Objective: ${cli.flags.objective || 'General security assessment'}`);
+    let executionService: ExecutionService | null = null;
+    let executionHandle: ExecutionHandle | null = null;
+    let signalCleanup: (() => void) | null = null;
+    let stoppingForSignal = false;
 
     try {
       // Import config system to get proper defaults and merge with CLI overrides
@@ -207,7 +220,9 @@ const runAutoAssessment = async () => {
         configOverrides.swarmModel = cli.flags.model;
       }
       if (cli.flags.region) configOverrides.awsRegion = cli.flags.region;
-      if (cli.flags.iterations) configOverrides.iterations = cli.flags.iterations;
+      if (cli.flags.maxDuration) configOverrides.budgetMaxDuration = cli.flags.maxDuration;
+      if (cli.flags.maxTokens) configOverrides.budgetMaxTokens = cli.flags.maxTokens;
+      if (cli.flags.maxCost) configOverrides.budgetMaxCost = cli.flags.maxCost;
       if (cli.flags.observability !== undefined) configOverrides.observability = cli.flags.observability;
       if (cli.flags.debug) configOverrides.verbose = cli.flags.debug;
       if (cli.flags.deploymentMode) configOverrides.deploymentMode = cli.flags.deploymentMode as 'local-cli' | 'single-container' | 'full-stack';
@@ -253,7 +268,7 @@ const runAutoAssessment = async () => {
         dockerImage: 'cyber-autoagent:latest',
         dockerTimeout: 300,
         volumes: [],
-        iterations: 100,
+        budgetMaxDuration: 60,
         autoApprove: true,
         confirmations: false,
         maxThreads: 10,
@@ -295,16 +310,62 @@ const runAutoAssessment = async () => {
       // Merge in priority order: defaults → saved config → CLI overrides
       const finalConfig = { ...defaultConfig, ...savedConfig, ...configOverrides } as Config;
 
-      loggingService.info(`⚙️ Config: ${finalConfig.iterations} iterations, ${finalConfig.modelProvider}/${finalConfig.modelId}`);
+      const budgetParts = [] as string[];
+      if (finalConfig.budgetMaxDuration) budgetParts.push(`duration=${finalConfig.budgetMaxDuration}m`);
+      if (finalConfig.budgetMaxTokens) budgetParts.push(`tokens=${finalConfig.budgetMaxTokens}`);
+      if (finalConfig.budgetMaxCost) budgetParts.push(`cost=${finalConfig.budgetMaxCost}`);
+      loggingService.info(`⚙️ Config: budget{${budgetParts.join(', ')}}; model ${finalConfig.modelProvider}/${finalConfig.modelId}`);
       loggingService.info(`🔭 Observability: ${finalConfig.observability ? 'enabled' : 'disabled'}`);
       loggingService.info(`🏗️ Deployment Mode: ${finalConfig.deploymentMode || 'local-cli'}`);
 
       // Import and use ExecutionServiceFactory to select proper service
       const { ExecutionServiceFactory } = await import('./services/ExecutionServiceFactory.js');
       const serviceResult = await ExecutionServiceFactory.selectService(finalConfig);
-      const executionService = serviceResult.service;
+      executionService = serviceResult.service;
 
       loggingService.info(`🔧 Using execution service: ${serviceResult.mode} (preferred: ${serviceResult.isPreferred})`);
+
+      const signalExitCode = (signal: NodeJS.Signals) => {
+        if (signal === 'SIGINT') return 130;
+        if (signal === 'SIGTERM') return 143;
+        if (signal === 'SIGHUP') return 129;
+        return 1;
+      };
+
+      const stopForSignal = async (signal: NodeJS.Signals) => {
+        if (stoppingForSignal) {
+          process.exit(signalExitCode(signal));
+        }
+        stoppingForSignal = true;
+        loggingService.info(`\nReceived ${signal}; stopping assessment...`);
+        try {
+          await stopExecution({
+            executionHandle,
+            executionService,
+            cleanup: true,
+            removeListeners: true,
+          });
+        } catch (error) {
+          loggingService.error('Failed to stop active assessment:', error);
+        } finally {
+          signalCleanup?.();
+          process.exit(signalExitCode(signal));
+        }
+      };
+
+      const signalHandlers = {
+        SIGINT: () => void stopForSignal('SIGINT'),
+        SIGTERM: () => void stopForSignal('SIGTERM'),
+        SIGHUP: () => void stopForSignal('SIGHUP'),
+      };
+      process.on('SIGINT', signalHandlers.SIGINT);
+      process.on('SIGTERM', signalHandlers.SIGTERM);
+      process.on('SIGHUP', signalHandlers.SIGHUP);
+      signalCleanup = () => {
+        process.off('SIGINT', signalHandlers.SIGINT);
+        process.off('SIGTERM', signalHandlers.SIGTERM);
+        process.off('SIGHUP', signalHandlers.SIGHUP);
+      };
 
       // Setup the execution environment if needed
       await executionService.setup(finalConfig, (message) => {
@@ -321,10 +382,10 @@ const runAutoAssessment = async () => {
 
       // Execute assessment and wait for completion
       const handle = await executionService.execute(assessmentParams, finalConfig);
+      executionHandle = handle;
 
       let lastMetricsUpdate = "";
       let lastTaskTitle = "";
-      let stepsExecuted = 0;
 
       // In auto-run mode, listen to events and display them to console
       // This provides real-time progress visibility during assessment
@@ -345,10 +406,9 @@ const runAutoAssessment = async () => {
                 loggingService.info(`💰 Cost: ${event.metrics.tokens.toLocaleString()} (${event.metrics.inputTokens.toLocaleString()} input + ${event.metrics.outputTokens.toLocaleString()} output) | $ ${event.metrics.cost.toFixed(6)}`);
             }
         }
-        else if (event.type === 'step_header') {
-          if (Number.isInteger(event.step) && Number.isInteger(event.maxSteps)) {
-            loggingService.info(`➡️ Step ${event.step}/${event.maxSteps}`);
-            stepsExecuted = event.step;
+        else if (event.type === 'progress_update') {
+          if (Number.isFinite(event.progressPercent)) {
+            loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}`);
           }
         }
         else if (event.type === 'task_started') {
@@ -376,15 +436,26 @@ const runAutoAssessment = async () => {
 
       if (result.success) {
         loggingService.info(` Assessment completed successfully in ${formatDuration(result.durationMs)}`);
-        loggingService.info(` Steps executed: ${stepsExecuted}`);
       } else {
         loggingService.error(` Assessment failed: ${result.error}`);
       }
 
-      // Cleanup
+      signalCleanup?.();
+      signalCleanup = null;
       executionService.cleanup();
     } catch (error) {
       loggingService.error('Assessment failed:', error);
+      signalCleanup?.();
+      signalCleanup = null;
+      try {
+        await stopExecution({
+          executionHandle,
+          executionService,
+          cleanup: true,
+          removeListeners: true,
+        });
+      } catch {
+      }
       process.exit(1);
     }
 
@@ -477,7 +548,9 @@ function renderReactApp() {
       target={cli.flags.target}
       objective={cli.flags.objective}
       autoRun={cli.flags.autoRun}
-      iterations={cli.flags.iterations}
+      maxDuration={cli.flags.maxDuration}
+      maxTokens={cli.flags.maxTokens}
+      maxCost={cli.flags.maxCost}
       provider={cli.flags.provider}
       model={cli.flags.model}
       region={cli.flags.region}

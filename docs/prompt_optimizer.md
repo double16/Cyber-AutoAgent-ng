@@ -17,7 +17,7 @@ Static prompts suffer from fundamental limitations that degrade performance over
 ### The Meta-Prompting Approach
 
 Our system implements true AGI principles through natural language understanding:
-- **Automatic Optimization**: Every N steps (20% of max steps), the LLM reviews operational history
+- **Automatic Optimization**: At progress checkpoints, the LLM reviews operational history
 - **Natural Language Processing**: Raw memories interpreted without pattern matching
 - **Pattern-Free Design**: No regex or hardcoded rules, handles any format
 - **Context Preservation**: Critical sections protected through XML tagging
@@ -101,7 +101,7 @@ hook_instance = PromptRebuildHook(
     target=target,
     objective=objective,
     operation_id=operation_id,
-    max_steps=100  # Optimization frequency (steps) is computed at 20% to match checkpoints
+    budget=config.budget,
 )
 
 strands_sdk = StrandsSDK(
@@ -114,11 +114,11 @@ strands_sdk = StrandsSDK(
 ```python
 # handlers/prompt_rebuild_hook.py
 def check_if_rebuild_needed(self, event: BeforeModelInvocationEvent):
-    current_step = self.callback_handler.current_step
+    current_progress = self.callback_handler.get_budget_progress()
 
     should_rebuild = (
         self.force_rebuild
-        or (current_step - self.last_rebuild_step >= self.rebuild_interval)
+        or (current_progress - self.last_rebuild_progress >= self.rebuild_interval)
         or self._phase_changed()
         or self._execution_prompt_modified()
     )
@@ -332,19 +332,19 @@ The system processes raw memories without pattern extraction:
 
 ## Triggers and Timing
 
-| Trigger           | When                                   | Action                          | Configuration        |
-|-------------------|----------------------------------------|---------------------------------|----------------------|
-| **Interval**      | Every N steps (default: 20% of max)    | Auto-optimize + context refresh | `rebuild_interval`   |
-| **Phase Change**  | Phase transition detected in plan      | Rebuild with new phase context  | Automatic            |
-| **File Modified** | execution_prompt_optimized.txt changed | Reload from disk                | Automatic            |
-| **Manual**        | Force rebuild flag set                 | Immediate optimization          | `force_rebuild=True` |
+| Trigger           | When                                    | Action                          | Configuration        |
+|-------------------|-----------------------------------------|---------------------------------|----------------------|
+| **Interval**      | Every N% budget progress (default: 20%) | Auto-optimize + context refresh | `rebuild_interval`   |
+| **Phase Change**  | Phase transition detected in plan       | Rebuild with new phase context  | Automatic            |
+| **File Modified** | execution_prompt_optimized.txt changed  | Reload from disk                | Automatic            |
+| **Manual**        | Force rebuild flag set                  | Immediate optimization          | `force_rebuild=True` |
 
 ### Trigger Implementation
 ```python
-# Automatic trigger every N steps
-if (current_step - self.last_rebuild_step) >= self.rebuild_interval:
+# Automatic trigger every N% budget progress
+if (current_progress - self.last_rebuild_progress) >= self.rebuild_interval:
     self._auto_optimize_execution_prompt()
-    self.last_rebuild_step = current_step
+    self.last_rebuild_progress = current_progress
 
 # Phase transition detection (checks memory for plan changes)
 if self._phase_changed():
@@ -366,15 +366,15 @@ if current_mtime != self.last_exec_prompt_mtime:
 prompt_optimizer(
     action="apply",
     overlay={"directives": ["Focus on authentication bypass"]},
-    current_step=45,
-    expires_after_steps=20  # Expires at step 65
+    budget_progress=45,
+    expires_after_progress=20  # Expires at 65% budget progress
 )
 ```
 
 **Rebuild Cooldown**:
-- Minimum interval enforced via `last_rebuild_step` tracking
+- Minimum interval enforced via `last_rebuild_progress` tracking
 - Prevents excessive optimization overhead
-- Default: 20% of max steps between automatic optimizations
+- Default: 20 percentage points of budget progress between automatic optimizations
 
 ## Performance Metrics
 

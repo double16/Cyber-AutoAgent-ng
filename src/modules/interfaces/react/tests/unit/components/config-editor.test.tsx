@@ -1,7 +1,7 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -137,7 +137,7 @@ describe('ConfigEditor', () => {
         const {ConfigEditor} = await load();
         const onClose = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={onClose}/>);
             await Promise.resolve();
@@ -185,7 +185,7 @@ describe('ConfigEditor', () => {
         }));
         (globalThis as any).fetch = fetchMock;
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
@@ -254,7 +254,7 @@ describe('ConfigEditor', () => {
         };
         inputHandlers.length = 0;
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
@@ -299,7 +299,7 @@ describe('ConfigEditor', () => {
 
     it('renders configuration status and deployment description branches', async () => {
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         config = {
             ...config,
@@ -387,7 +387,7 @@ describe('ConfigEditor', () => {
             .mockResolvedValueOnce({status: 500, text: async () => 'server exploded'});
         (globalThis as any).fetch = fetchMock;
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
@@ -431,7 +431,7 @@ describe('ConfigEditor', () => {
             },
         };
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);

@@ -346,6 +346,10 @@ export class DockerExecutionServiceAdapter extends EventEmitter implements Execu
     }
   }
 
+  async stop(): Promise<void> {
+    await this.dockerService.stop();
+  }
+
   cleanup(): void {
     if (this.dockerService) {
       this.dockerService.cleanup();

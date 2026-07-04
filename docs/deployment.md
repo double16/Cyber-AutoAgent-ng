@@ -24,7 +24,7 @@ export KMP_DUPLICATE_LIB_OK="TRUE"
 uv run python src/cyberautoagent.py \
   --target "https://example.com" \
   --objective "Bug bounty assessment" \
-  --iterations 150 \
+  --max-duration 120 \
   --provider litellm
 ```
 
@@ -38,7 +38,7 @@ cd src/modules/interfaces/react
 npm start -- --auto-run \
   --target "https://example.com" \
   --objective "Security assessment" \
-  --iterations 50
+  --max-duration 60
 ```
 
 **Configure via** `~/.cyber-autoagent/config.json`:
@@ -82,7 +82,7 @@ docker run --rm --entrypoint python \
   src/cyberautoagent.py \
   --target https://example.com \
   --objective "Security assessment" \
-  --iterations 50 \
+  --max-duration 60 \
   --provider litellm
 ```
 
@@ -238,7 +238,7 @@ Settings are applied in this priority order:
 
 ```
 1. CLI/API Arguments (Highest)
-   └─ Flags: --provider, --model, --iterations
+   └─ Flags: --provider, --model, --max-duration, --max-tokens, --max-cost
    └─ Direct parameters to create_agent()
 
 2. Environment Variables (Override)
@@ -480,7 +480,7 @@ Common deployment issues:
 1. **Container fails to start**: Check Docker logs with `docker logs cyber-autoagent`
 2. **AWS credentials error**: Ensure IAM role has Bedrock access and correct region
 3. **Ollama connection failed**: Verify Ollama is running and accessible at specified host
-4. **Out of memory**: Increase Docker memory limits or reduce `--iterations` parameter
+4. **Out of memory**: Increase Docker memory limits or reduce token-heavy workloads
 5. **React interface issues**: Run `npm run build` after any code changes
 6. **Memory backend errors**: Verify environment variables and network connectivity
 7. **Model not found**: Check model ID format (use `provider/model` for LiteLLM)

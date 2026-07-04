@@ -237,7 +237,7 @@ Some integration tests rely on a controlled test mode:
 In test mode the UI will:
 - Auto-open and auto-confirm the safety prompt.
 - Auto-drive the guided flow (target → objective → execute) for mock runs.
-- Emit `[TEST_EVENT]` markers (e.g., step headers, tool starts, metrics updates) to stdout for robust assertions.
+- Emit `[TEST_EVENT]` markers (e.g., progress updates, tool starts, metrics updates) to stdout for robust assertions.
 
 These behaviors are gated to test mode and do not affect production.
 

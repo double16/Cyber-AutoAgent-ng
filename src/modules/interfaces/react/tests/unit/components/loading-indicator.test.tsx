@@ -1,6 +1,6 @@
 import React from 'react';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -28,7 +28,7 @@ describe('LoadingIndicator', () => {
 
     it('renders custom text when phases are disabled and animates dots', async () => {
         const {LoadingIndicator} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(
@@ -47,7 +47,7 @@ describe('LoadingIndicator', () => {
 
     it('cycles through phase messages and wraps dot animation', async () => {
         const {LoadingIndicator} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(<LoadingIndicator/>);

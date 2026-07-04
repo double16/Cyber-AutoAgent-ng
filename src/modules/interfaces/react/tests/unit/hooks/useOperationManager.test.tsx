@@ -1,6 +1,6 @@
 import React from 'react';
 import { EventEmitter } from 'events';
-import TestRenderer, { act } from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -104,7 +104,7 @@ function renderHook<T>(hook: () => T) {
     return null;
   };
 
-  let renderer!: TestRenderer.ReactTestRenderer;
+  let renderer!: ReactTestRenderer;
   act(() => {
     renderer = TestRenderer.create(<Harness />);
   });
@@ -206,7 +206,7 @@ describe('useOperationManager', () => {
 
     act(() => {
       executionService.emit('event', { type: 'operation_init', operation_id: 'backend-op' });
-      executionService.emit('event', { step: 2, total_steps: 5, content: 'Enumerating' });
+      executionService.emit('event', { type: 'progress_update', step: 1, progressPercent: 40, content: 'Enumerating' });
       executionService.emit('event', {
         type: 'metrics_update',
         metrics: { inputTokens: 10, outputTokens: 5, cost: 0.02, duration: '6s', memoryOps: 2, evidence: 3 },
@@ -217,8 +217,7 @@ describe('useOperationManager', () => {
 
     expect(operationManager.renameOperationId).toHaveBeenCalledWith('op-local', 'backend-op');
     expect(operationManager.updateOperation).toHaveBeenCalledWith('backend-op', expect.objectContaining({
-      currentStep: 2,
-      totalSteps: 5,
+      progressPercentage: 40,
     }));
     expect(operationManager.updateTokenUsage).toHaveBeenCalledWith('backend-op', 10, 5, 0.02, 0, 0);
     expect(actions.setUserHandoff).toHaveBeenCalledWith(true);
@@ -228,6 +227,9 @@ describe('useOperationManager', () => {
 
     act(() => {
       executionService.emit('complete', { ok: true });
+    });
+    await act(async () => {
+      await Promise.resolve();
     });
     expect(operationManager.updateOperation).toHaveBeenCalledWith('backend-op', expect.objectContaining({
       status: 'completed',
@@ -245,6 +247,7 @@ describe('useOperationManager', () => {
   });
 
   it('handles missing assessment parameters, selection errors, pause, and cancel', async () => {
+    jest.useRealTimers();
     const { useOperationManager } = await loadHook();
     const activeExecutionService = new EventEmitter() as any;
     activeExecutionService.stop = jest.fn(async () => undefined);
@@ -274,17 +277,15 @@ describe('useOperationManager', () => {
     await act(async () => {
       await hook.current.handleAssessmentPause();
     });
-    expect(activeExecutionService.stop).toHaveBeenCalled();
+    expect(executionHandle.stop).toHaveBeenCalled();
+    expect(activeExecutionService.stop).not.toHaveBeenCalled();
     expect(operationManager.pauseOperation).toHaveBeenCalledWith('active-op');
     expect(actions.setActiveOperation).toHaveBeenCalledWith(null);
 
     await act(async () => {
-      const pending = hook.current.handleAssessmentCancel();
-      await Promise.resolve();
-      jest.advanceTimersByTime(60);
-      await pending;
+      await hook.current.handleAssessmentCancel();
     });
-    expect(executionHandle.stop).toHaveBeenCalled();
+    expect(executionHandle.stop).toHaveBeenCalledTimes(2);
     expect(actions.setUserHandoff).toHaveBeenCalledWith(false);
     expect(assessmentFlow.resetCompleteWorkflow).toHaveBeenCalled();
     expect(hook.current.operationHistoryEntries).toEqual(expect.arrayContaining([

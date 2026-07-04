@@ -63,6 +63,7 @@ export class PythonExecutionService extends EventEmitter {
   private readonly requirementsPath: string;
   private pythonCommand: string = 'python3'; // Will be updated by checkPythonVersion
   private stderrBuffer: string = '';
+  private startupTimers = new Set<NodeJS.Timeout>();
   
   constructor() {
     super();
@@ -85,6 +86,22 @@ export class PythonExecutionService extends EventEmitter {
     this.pipPath = path.join(this.venvPath, venvBinDir, pipExecutable);
     this.requirementsPath = path.join(this.projectRoot, 'pyproject.toml');
     // Note: Python version detection is performed in checkPythonVersion(), not in the constructor
+  }
+
+  private scheduleStartupTimer(callback: () => void, delayMs: number): NodeJS.Timeout {
+    const timer = setTimeout(() => {
+      this.startupTimers.delete(timer);
+      callback();
+    }, delayMs) as NodeJS.Timeout;
+    this.startupTimers.add(timer);
+    return timer;
+  }
+
+  private clearStartupTimers(): void {
+    for (const timer of this.startupTimers) {
+      clearTimeout(timer);
+    }
+    this.startupTimers.clear();
   }
 
   /**
@@ -279,6 +296,7 @@ export class PythonExecutionService extends EventEmitter {
   async stop(): Promise<void> {
     // Mark as user-initiated stop so exit handler treats non-zero exit as intentional
     this.userStopRequested = true;
+    this.clearStartupTimers();
     if (this.activeProcess) {
       this.logger.info('Stopping Python process', { pid: this.activeProcess.pid });
 
@@ -346,6 +364,7 @@ export class PythonExecutionService extends EventEmitter {
    */
   public cleanup(): void {
     try {
+      this.clearStartupTimers();
       // Best-effort stop
       void this.stop();
     } catch {}
@@ -612,9 +631,16 @@ export class PythonExecutionService extends EventEmitter {
         '--module', params.module,
         '--objective', 'via environment',  // Placeholder, actual value comes from env
         '--target', params.target,
-        '--iterations', String(config.iterations || 100),
+        '--max-duration', String(config.budgetMaxDuration),
         '--provider', config.modelProvider || 'bedrock',
       ];
+
+      if (config.budgetMaxTokens) {
+        args.push('--max-tokens', String(config.budgetMaxTokens));
+      }
+      if (config.budgetMaxCost) {
+        args.push('--max-cost', String(config.budgetMaxCost));
+      }
 
       if (params.continueOperation === true || params.continueOperation === "") {
         args.push('--continue');
@@ -790,7 +816,7 @@ export class PythonExecutionService extends EventEmitter {
       // Python backend will emit thinking(startup, urgent=true) immediately after operation_init
       // No need to emit it here as it causes activeThinkingRef to be set prematurely
       
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         this.emit('event', {
           type: 'output',
           content: '◆ Python environment ready',
@@ -798,7 +824,7 @@ export class PythonExecutionService extends EventEmitter {
         });
       }, 500);
       
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         this.emit('event', {
           type: 'output',
           content: '◆ Setting up direct Python security assessment environment',
@@ -807,7 +833,7 @@ export class PythonExecutionService extends EventEmitter {
       }, 1000);
 
       // Emit objective/target and plugin details early in the run
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         const objective = params.objective || `Comprehensive ${params.module.replace('_', ' ')} security assessment`;
         this.emit('event', {
           type: 'output',
@@ -828,7 +854,7 @@ export class PythonExecutionService extends EventEmitter {
       const resolvedOutputDir = path.isAbsolute(config.outputDir || '')
         ? (config.outputDir as string)
         : path.resolve(this.projectRoot, config.outputDir || './outputs');
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         this.emit('event', { type: 'output', content: '▶ Preflight checks', timestamp: Date.now() });
         // Python path and version
         try {
@@ -859,7 +885,7 @@ export class PythonExecutionService extends EventEmitter {
         }
       }, 900);
       
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         this.emit('event', {
           type: 'output',
           content: '◆ Loading Python-based cybersecurity tools...',
@@ -909,6 +935,7 @@ export class PythonExecutionService extends EventEmitter {
       // Handle process exit
       this.activeProcess.on('exit', (code, signal) => {
         this.isExecutionActive = false;
+        this.clearStartupTimers();
         
         const intentionalStop = this.userStopRequested || signal === 'SIGTERM' || signal === 'SIGINT' || signal === 'SIGKILL';
         if (intentionalStop) {
@@ -1000,6 +1027,7 @@ export class PythonExecutionService extends EventEmitter {
       // Handle process error
       this.activeProcess.on('error', (error) => {
         this.logger.error('Process error', error);
+        this.clearStartupTimers();
         this.emit('error', error);
         this.isExecutionActive = false;
         this.activeProcess = undefined;
@@ -1008,6 +1036,7 @@ export class PythonExecutionService extends EventEmitter {
       
       } catch (error) {
         this.isExecutionActive = false;
+        this.clearStartupTimers();
         this.logger.error('Failed to start assessment', error as Error);
         reject(error);
       }

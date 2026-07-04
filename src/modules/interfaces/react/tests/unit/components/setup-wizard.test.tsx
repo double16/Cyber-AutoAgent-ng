@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -109,7 +109,7 @@ describe('SetupWizard', () => {
         const {SetupWizard} = await load();
         const onComplete = jest.fn();
         process.env.CYBER_SHOW_SETUP = 'true';
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<SetupWizard onComplete={onComplete} terminalWidth={80}/>);
         });
@@ -132,7 +132,7 @@ describe('SetupWizard', () => {
             availableDeployments: [{mode: 'local-cli', isHealthy: true}],
         });
         const onComplete = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<SetupWizard onComplete={onComplete}/>);
         });
@@ -162,7 +162,7 @@ describe('SetupWizard', () => {
         const {SetupWizard} = await load();
         wizardState = {...wizardState, currentStep: 'progress', selectedMode: 'single-container'};
         const onComplete = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<SetupWizard onComplete={onComplete}/>);
         });

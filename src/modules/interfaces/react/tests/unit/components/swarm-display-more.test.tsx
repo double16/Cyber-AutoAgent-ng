@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {SwarmDisplay, type SwarmState} from '../../../src/components/SwarmDisplay.js';
 
@@ -33,8 +33,7 @@ const baseState = (): SwarmState => ({
             tools: ['think', 'delegate'],
             model_id: 'provider/model-name:tag',
             temperature: 0.2,
-            currentStep: 1,
-            maxSteps: 4,
+            progressPercent: 25,
             toolCalls: [{tool: 'think', input: {goal: 'map'}}],
             result: 'short result',
         },
@@ -64,7 +63,7 @@ describe('SwarmDisplay additional coverage', () => {
     });
 
     it('renders collapsed swarm summary with agent status counts and details', () => {
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<SwarmDisplay swarmState={baseState()} collapsed/>);
         });
@@ -75,13 +74,13 @@ describe('SwarmDisplay additional coverage', () => {
         expect(text).toContain('1 active');
         expect(text).toContain('1 completed');
         expect(text).toContain('Planner - Plans the work');
-        expect(text).toContain('[1/4]');
+        expect(text).toContain('[25%]');
         expect(text).toContain('(think, delegate)');
     });
 
     it('renders full swarm details and updates elapsed time while running', () => {
         const state = baseState();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<SwarmDisplay swarmState={state}/>);
         });
@@ -113,7 +112,7 @@ describe('SwarmDisplay additional coverage', () => {
             startTime: 1000,
             endTime: 4000,
         };
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<SwarmDisplay swarmState={state}/>);
         });

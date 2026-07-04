@@ -45,7 +45,7 @@ interface TerminalProps {
   terminalWidth?: number;
   collapsed?: boolean;
   onEvent?: (event: any) => void;
-  onMetricsUpdate?: (metrics: { tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number }) => void;
+  onMetricsUpdate?: (metrics: { tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number; progressPercent?: number }) => void;
   animationsEnabled?: boolean;
   cleanupRef?: React.MutableRefObject<(() => void) | null>;
 }
@@ -136,7 +136,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     cost: 0,
     duration: '0s',
     memoryOps: 0,
-    evidence: 0
+    evidence: 0,
+    progressPercent: 0
   });
   
   // Deduplication state: track seen output fingerprints per tool session and globally
@@ -390,7 +391,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     pendingMetricsRef.current = null;
     lastMetricsTsRef.current = 0;
     lastEmitRef.current = 0;
-    setMetrics({ tokens: 0, cost: 0, duration: '0s', memoryOps: 0, evidence: 0 });
+    setMetrics({ tokens: 0, cost: 0, duration: '0s', memoryOps: 0, evidence: 0, progressPercent: 0 });
 
     completedBufRef.current.clear();
     activeBufRef.current.clear();
@@ -504,26 +505,24 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     }
   };
   
-  // Step gating state (anchor step headers until first tool signal)
-  const pendingStepHeaderRef = useRef<DisplayStreamEvent | null>(null);
+  // Step gating state (anchor progress updates until first tool signal)
+  const pendingProgressUpdateRef = useRef<DisplayStreamEvent | null>(null);
   const pendingStepNumberRef = useRef<number | undefined>(undefined);
   const hasToolForPendingStepRef = useRef<boolean>(false);
   const lastEmittedStepNumberRef = useRef<number | undefined>(undefined);
 
-  const flushPendingStepHeader = (collector: DisplayStreamEvent[]) => {
-    if (pendingStepHeaderRef.current && !hasToolForPendingStepRef.current) {
-      collector.push(pendingStepHeaderRef.current);
+  const flushPendingProgressUpdate = (collector: DisplayStreamEvent[]) => {
+    if (pendingProgressUpdateRef.current && !hasToolForPendingStepRef.current) {
+      collector.push(pendingProgressUpdateRef.current);
       lastEmittedStepNumberRef.current = pendingStepNumberRef.current ?? lastEmittedStepNumberRef.current;
-      pendingStepHeaderRef.current = null;
+      pendingProgressUpdateRef.current = null;
       hasToolForPendingStepRef.current = true;
     }
   };
 
-  // Track max steps and operation id from operation_init for synthetic headers
-  const opMaxStepsRef = useRef<number | undefined>(undefined);
+  // Track operation metadata for synthetic headers
   const operationIdRef = useRef<string | undefined>(undefined);
   const targetRef = useRef<string | undefined>(undefined);
-  const stepCounterRef = useRef<number>(0);
   const lastPushedTypeRef = useRef<string | null>(null);
   const firstHeaderSeenRef = useRef<boolean>(false);
   // Buffer for operation summary lines (paths) so we can show them after report preview/content
@@ -601,17 +600,12 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         }
 
         // Cache operation metadata
-        if (typeof event.max_steps === 'number') {
-          opMaxStepsRef.current = event.max_steps;
-        }
         if (typeof event.operation_id === 'string') {
           operationIdRef.current = event.operation_id;
         }
         if (typeof event.target === 'string') {
       targetRef.current = event.target;
     }
-    // Reset counters at operation start
-    stepCounterRef.current = 0;
     lastPushedTypeRef.current = null;
     results.push(event as DisplayStreamEvent);
 
@@ -637,8 +631,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     }
     break;
 
-      case 'step_header':
-        emitTestMarker(`step_header step=${event.step} max=${event.maxSteps}`);
+      case 'progress_update':
+        emitTestMarker(`progress_update step=${event.step ?? ''} progress=${event.progressPercent ?? ''}`);
         cancelDelayedThinking();
         cancelPostReasoningIdleTimer();
         // End any active reasoning session
@@ -648,7 +642,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Reset output suppression for next operation phase
         suppressTerminationBannerRef.current = false;
         
-        // Track swarm agent from step header
+        // Track swarm agent from progress update
         if (event.is_swarm_operation && event.swarm_agent) {
           setCurrentSwarmAgent(event.swarm_agent);
         }
@@ -659,9 +653,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         flushPendingReasoning(results);
 
         const headerEvent: DisplayStreamEvent = {
-          type: 'step_header',
+          type: 'progress_update',
           step: event.step,
-          maxSteps: event.maxSteps,
+          progressPercent: event.progressPercent,
           operation: event.operation,
           duration: event.duration,
           is_swarm_operation: event.is_swarm_operation,
@@ -669,7 +663,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           swarm_sub_step: event.swarm_sub_step,
           swarm_max_sub_steps: event.swarm_max_sub_steps,
           swarm_agent_max: event.swarm_agent_max,
-          swarm_total_iterations: event.swarm_total_iterations,
+          swarm_total_actions: event.swarm_total_actions,
           swarm_max_iterations: event.swarm_max_iterations,
           agent_count: event.agent_count,
           swarm_context: event.swarm_context || (swarmActive ? 'Multi-Agent Operation' : undefined)
@@ -682,19 +676,16 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (event.step === 'FINAL REPORT') {
           finalReportActiveRef.current = true;
           setFinalReportEvents(prev => {
-            const base = prev && prev.length > 0 ? prev.filter(e => e.type !== 'step_header' || (e as any).step !== 'FINAL REPORT') : [];
+            const base = prev && prev.length > 0 ? prev.filter(e => e.type !== 'progress_update' || (e as any).step !== 'FINAL REPORT') : [];
             return [...base, headerEvent];
           });
         }
 
         // Mark that we've seen the first header
         firstHeaderSeenRef.current = true;
-        if (typeof event.step === 'number') {
-          stepCounterRef.current = event.step;
-        }
-        lastPushedTypeRef.current = 'step_header';
+        lastPushedTypeRef.current = 'progress_update';
 
-        // Show thinking spinner while waiting for tool selection after step header
+        // Show thinking spinner while waiting for tool selection after progress update
         // Always reset and show spinner regardless of previous thinking state
         if (animationsEnabled) {
           setActiveThinking(true);
@@ -870,7 +861,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
         // Reset last tool output timestamp for new tool
         lastToolOutputTsRef.current = 0;
-        // Do not flush pending reasoning here; wait for step_header to ensure correct attribution
+        // Do not flush pending reasoning here; wait for progress_update to ensure correct attribution
         // Get the tool ID from the event (support both camel/snake)
         let toolId: string | undefined = event.toolId || event.tool_id;
         // Some tools (e.g., orchestrators) don't emit IDs; use a stable fallback so headers render.
@@ -993,7 +984,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         break;
         
       case 'shell_command':
-        // Do not flush pending reasoning here; wait for step_header to ensure correct attribution
+        // Do not flush pending reasoning here; wait for progress_update to ensure correct attribution
         results.push({
           type: 'shell_command',
           command: event.command,
@@ -1255,7 +1246,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         cancelDelayedThinking();
         seenThinkingThisPhaseRef.current = false;
 
-        // Don't flush reasoning here - let it accumulate until step_header
+        // Don't flush reasoning here - let it accumulate until progress_update
         // This ensures all reasoning within a step appears as one block
 
         results.push({
@@ -1331,8 +1322,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         
       case 'tool_output':
         // Standardized tool output: treat as first tool signal for pending step
-        flushPendingStepHeader(results);
-        // Do not flush pending reasoning here; wait for step_header to ensure correct attribution
+        flushPendingProgressUpdate(results);
+        // Do not flush pending reasoning here; wait for progress_update to ensure correct attribution
         results.push(event as DisplayStreamEvent);
         break;
 
@@ -1505,7 +1496,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // Duration and counts can be replaced
           duration: event.metrics.duration || metrics.duration,
           memoryOps: event.metrics.memoryOps !== undefined ? event.metrics.memoryOps : metrics.memoryOps,
-          evidence: event.metrics.evidence !== undefined ? event.metrics.evidence : metrics.evidence
+          evidence: event.metrics.evidence !== undefined ? event.metrics.evidence : metrics.evidence,
+          progressPercent: event.metrics.progressPercent !== undefined ? event.metrics.progressPercent : metrics.progressPercent
         };
         // Emit a test marker for metrics updates to aid PTY-based assertions
         try {
@@ -1652,9 +1644,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         }
 
         if (regularEvents.length > 0) {
-          // Before anything else, if a new step header arrived, flush current aggregated output into completed
-          const stepHeaders = regularEvents.filter(e => e.type === 'step_header');
-          if (stepHeaders.length > 0) {
+          // Before anything else, if a new progress update arrived, flush current aggregated output into completed
+          const progressUpdates = regularEvents.filter(e => e.type === 'progress_update');
+          if (progressUpdates.length > 0) {
             const aggEv = buildAggDisplayEvent();
             if (aggEv) {
               completedBufRef.current.push(aggEv as any);

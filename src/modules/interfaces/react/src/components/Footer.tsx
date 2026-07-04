@@ -14,6 +14,7 @@ interface FooterProps {
     duration?: string;
     memoryOps?: number;
     evidence?: number;
+    progressPercent?: number;
   };
   connectionStatus?: 'connected' | 'connecting' | 'error' | 'offline';
   modelProvider?: string;
@@ -61,6 +62,7 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   const connIcon = getConnectionIcon();
   const totalCost = formatCost(operationMetrics?.cost || 0);
   const totalTokens = (operationMetrics?.tokens || 0).toLocaleString();
+  const progressPercent = operationMetrics?.progressPercent;
   const hasDuration = !!operationMetrics?.duration && operationMetrics?.duration !== '0s';
   const hasMem = (operationMetrics?.memoryOps || 0) > 0;
 
@@ -69,6 +71,7 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   const left = `${connIcon.icon} ${deploymentMode || ''}`.trim();
   const rightParts: string[] = [];
   if (model) rightParts.push(model);
+  if (progressPercent !== undefined) rightParts.push(`${progressPercent}% budget`);
   rightParts.push(`${totalTokens} tokens`, totalCost);
   if (hasDuration) rightParts.push(operationMetrics!.duration);
   if (hasMem) rightParts.push(`${operationMetrics!.memoryOps} mem`);

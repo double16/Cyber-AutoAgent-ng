@@ -41,7 +41,7 @@ describe('OperationManager + ModelsCatalog/pricing', () => {
       dockerImage: 'image',
       dockerTimeout: 300,
       volumes: [],
-      iterations: 10,
+      budgetMaxDuration: 60,
       autoApprove: true,
       confirmations: false,
       maxThreads: 5,

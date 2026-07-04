@@ -82,7 +82,10 @@ def test_agent_repair_hook_json_patch_and_state_paths(monkeypatch):
     monkeypatch.setattr("modules.handlers.agent_repair_hook.patch_ollama_model_json_toolcalls", patch_call)
 
     event = SimpleNamespace(
-        agent=SimpleNamespace(callback_handler=SimpleNamespace(current_step=1), messages=[]),
+        agent=SimpleNamespace(
+            callback_handler=SimpleNamespace(get_budget_progress=lambda: {"progress_percent": 1}),
+            messages=[],
+        ),
         exception=None,
         stop_response=SimpleNamespace(
             stop_reason="end_turn",
@@ -96,7 +99,10 @@ def test_agent_repair_hook_json_patch_and_state_paths(monkeypatch):
     patch_call.assert_called_once()
 
     parse_error_event = SimpleNamespace(
-        agent=SimpleNamespace(callback_handler=SimpleNamespace(current_step=2), messages=[]),
+        agent=SimpleNamespace(
+            callback_handler=SimpleNamespace(get_budget_progress=lambda: {"progress_percent": 2}),
+            messages=[],
+        ),
         exception=RuntimeError("error parsing tool call invalid character"),
         stop_response=None,
         retry=False,
@@ -117,7 +123,7 @@ def test_agent_repair_hook_json_patch_and_state_paths(monkeypatch):
 def test_agent_repair_hook_max_tokens_stop_response_replaces_last_message(monkeypatch):
     hook = AgentRepairHook()
     agent = SimpleNamespace(
-        callback_handler=SimpleNamespace(current_step=1, max_steps=5, reasoning_buffer=[]),
+        callback_handler=SimpleNamespace(get_budget_progress=lambda: {"progress_percent": 1}, reasoning_buffer=[]),
         messages=[
             {"role": "assistant", "content": [{"text": "repeat repeat repeat"}]},
         ],
@@ -135,4 +141,3 @@ def test_agent_repair_hook_max_tokens_stop_response_replaces_last_message(monkey
     )
     hook.after_model_call_check(event)
     assert event.retry is True
-

@@ -25,8 +25,8 @@ export const EventRenderer = ({ event, context = {} }) => {
   // Apply context to event if needed
   const processedEvent = { ...event };
   
-  // If this is a step_header during swarm, enhance it
-  if (event.type === 'step_header' && context.swarmActive) {
+  // If this is a progress_update during swarm, enhance it
+  if (event.type === 'progress_update' && context.swarmActive) {
     processedEvent.is_swarm_operation = true;
     processedEvent.swarm_agent = processedEvent.swarm_agent || context.currentAgent;
   }

@@ -17,8 +17,8 @@ export class EventStreamEmulator {
   operationInit(op: Partial<EmittedEvent> = {}) {
     this.emit('event', { type: 'operation_init', ...op });
   }
-  stepHeader(step: number, extra: Partial<EmittedEvent> = {}) {
-    this.emit('event', { type: 'step_header', step, ...extra });
+  progressUpdate(progressUpdate: number, step: number, extra: Partial<EmittedEvent> = {}) {
+    this.emit('event', { type: 'progress_update', progressUpdate, step, ...extra });
   }
   toolStart(tool_name: string, args: any = {}, extra: Partial<EmittedEvent> = {}) {
     const ts = Date.now();

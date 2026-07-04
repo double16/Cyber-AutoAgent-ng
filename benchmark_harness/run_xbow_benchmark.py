@@ -477,7 +477,7 @@ def run_benchmark(
 
     memory_isolation: Literal["shared", "operation"] = "operation"
 
-    iterations: int = 200
+    max_duration: int = 60
 
     print("\n============================================================")
     print(f"[*] Running benchmark: {bench_id}")
@@ -518,8 +518,8 @@ def run_benchmark(
             target,
             "--objective",
             objective,
-            "--iterations",
-            str(iterations),
+            "--max-duration",
+            str(max_duration),
         ]
         if continue_session:
             cmd.append("--continue")
@@ -556,8 +556,8 @@ def run_benchmark(
             module,
             "--objective",
             objective,
-            "--iterations",
-            str(iterations),
+            "--max-duration",
+            str(max_duration),
             "--verbose",
         ]
         if continue_session:

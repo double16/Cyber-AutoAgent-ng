@@ -15,6 +15,7 @@ import { ApplicationState } from './useApplicationState.js';
 import { useDebouncedState } from './useDebouncedState.js';
 import { ExecutionServiceFactory, ExecutionServiceSelectionError, ServiceSelectionResult } from '../services/ExecutionServiceFactory.js';
 import { ExecutionService, DEFAULT_EXECUTION_CONFIG } from '../services/ExecutionService.js';
+import {stopExecution} from '../services/executionLifecycle.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 
 export interface OperationHistoryEntry {
@@ -85,6 +86,7 @@ export function useOperationManager({
     duration: string;
     memoryOps: number;
     evidence: number;
+    progressPercent?: number;
   }) => {
     const now = Date.now();
     if (now - (lastMetricsUpdateRef.current || 0) < 300) {
@@ -143,10 +145,12 @@ export function useOperationManager({
       }
       // Detach and cleanup any lingering execution service
       if (currentExecutionServiceRef.current) {
-        try {
-          currentExecutionServiceRef.current.removeAllListeners();
-          currentExecutionServiceRef.current.cleanup();
-        } catch {}
+        void stopExecution({
+          executionService: currentExecutionServiceRef.current,
+          cleanup: true,
+          removeListeners: true,
+        }).catch(() => {
+        });
         currentExecutionServiceRef.current = null;
       }
     };
@@ -205,10 +209,13 @@ export function useOperationManager({
   const handleAssessmentPause = useCallback(async () => {
     if (appState.activeOperation) {
       try {
-        // First, stop the execution service to kill the running Python process
+        // First, stop the execution service to kill the running Python/container process
         if (appState.executionService) {
           addOperationHistoryEntry('info', 'Stopping operation...');
-          await (appState.executionService as any).stop();
+          await stopExecution({
+            executionHandle: (appState.activeOperation as any).executionHandle,
+            executionService: appState.executionService,
+          });
         }
         
         // Then update the operation manager state
@@ -229,23 +236,12 @@ export function useOperationManager({
   const handleAssessmentCancel = useCallback(async () => {
     if (appState.activeOperation) {
       try {
-        // First, stop the execution using the executionHandle stored on the operation
-        const executionHandle = (appState.activeOperation as any).executionHandle;
-        if (executionHandle && executionHandle.stop) {
-          await executionHandle.stop();
-        } else if (appState.executionService) {
-          // Fallback: emit stop event to the service
-          appState.executionService.emit('stop');
-        }
-
-        // Proactively detach listeners and cleanup the execution service to avoid leaks
-        try {
-          const svc: any = appState.executionService;
-          if (svc) {
-            svc.removeAllListeners?.();
-            svc.cleanup?.();
-          }
-        } catch {}
+        await stopExecution({
+          executionHandle: (appState.activeOperation as any).executionHandle,
+          executionService: appState.executionService,
+          cleanup: true,
+          removeListeners: true,
+        });
         
         // Then update the operation manager state
         operationManager.pauseOperation(appState.activeOperation.id);
@@ -403,8 +399,8 @@ export function useOperationManager({
           if (process.env.CYBER_TEST_MODE === 'true') {
             const t = event?.type || 'unknown';
             // Include some details for key types
-            if (t === 'step_header') {
-              console.log(`[TEST_EVENT] step_header step=${event.step} max=${event.maxSteps || event.total_steps || ''}`);
+            if (t === 'progress_update') {
+              console.log(`[TEST_EVENT] progress_update progress=${event.progressPercent ?? event.step ?? ''}`);
             } else if (t === 'tool_start') {
               console.log(`[TEST_EVENT] tool_start tool=${event.toolName || event.tool_name || ''}`);
             } else if (t === 'metrics_update') {
@@ -432,11 +428,10 @@ export function useOperationManager({
           }
         }
 
-        // Handle progress updates
-        if (event.step && event.total_steps) {
+        // Handle progress updates. progressPercent is budget progress; step is sequencing metadata.
+        if (event.type === 'progress_update' && typeof event.progressPercent === 'number') {
           operationManager.updateOperation(operation.id, {
-            currentStep: event.step,
-            totalSteps: event.total_steps,
+            progressPercentage: event.progressPercent,
             description: event.content || operation.description
           });
         }
@@ -459,7 +454,8 @@ export function useOperationManager({
                 cost: currentOp.cost.estimatedCost,
                 duration: event.metrics.duration || operationManager.getOperationDuration(operation.id),
                 memoryOps: event.metrics.memoryOps || currentOp.findings,
-                evidence: event.metrics.evidence || currentOp.findings
+                evidence: event.metrics.evidence || currentOp.findings,
+                progressPercent: event.metrics.progressPercent
               });
             }
           }
@@ -535,10 +531,12 @@ export function useOperationManager({
       
       // Cleanup function for event listeners and intervals
       const cleanupExecution = () => {
-        try {
-          executionService.removeAllListeners();
-          executionService.cleanup();
-        } catch {}
+        void stopExecution({
+          executionService,
+          cleanup: true,
+          removeListeners: true,
+        }).catch(() => {
+        });
         if (metricsIntervalRef.current) {
           clearInterval(metricsIntervalRef.current);
           metricsIntervalRef.current = null;

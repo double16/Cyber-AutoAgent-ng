@@ -81,7 +81,6 @@ class TestMemoryAwareAgentIntegration:
         config = AgentConfig(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             op_id="OP_20240101_120000",
             provider="bedrock",
         )
@@ -145,7 +144,6 @@ class TestMemoryAwareAgentIntegration:
         config = AgentConfig(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             op_id="OP_20240101_120000",
             provider="bedrock",
         )
@@ -220,7 +218,6 @@ class TestMemoryAwareAgentIntegration:
             config = AgentConfig(
                 target="test.com",
                 objective="test objective",
-                max_steps=50,
                 op_id="OP_20240101_120000",
                 provider="bedrock",
                 memory_path="/test/memory/path",
@@ -284,7 +281,6 @@ class TestMemoryAwareAgentIntegration:
         config = AgentConfig(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             op_id="OP_20240101_120000",
             provider="bedrock",
         )
@@ -350,7 +346,6 @@ class TestMemoryAwareAgentIntegration:
         config = AgentConfig(
             target="test.com",
             objective="test objective",
-            max_steps=50,
             op_id="OP_20240101_120000",
             provider="ollama",
         )

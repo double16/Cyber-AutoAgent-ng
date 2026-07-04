@@ -40,7 +40,7 @@
   - 60%+ budget with no capability achieved + reflection confirms need for hypothesis-diverse exploration
   - 75%+ budget as last resort
 - Required: 2–3 agents max; each agent MUST use a distinct approach class and include an explicit handoff trigger.
-- Failure hint: no progress/0 iterations usually means no handoffs or prompts too similar → rewrite prompts.
+- Failure hint: no progress usually means no handoffs or prompts too similar → rewrite prompts.
 - Not for: minor payload variations, early recon, or single-capability grinding.
 
 **editor + load_tool** (meta-tooling)

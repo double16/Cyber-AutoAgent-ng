@@ -54,7 +54,7 @@ const resolveProjectRoot = (): string | null => {
 // Extended event types for UI-specific events not covered by the core SDK events
 // These events are used for UI state management and display formatting
 export type AdditionalStreamEvent = 
-  | { type: 'step_header'; step: number | string; maxSteps?: number; totalTools?: number; operation?: string; duration?: string; [key: string]: any }
+  | { type: 'progress_update'; step: number | string; progressPercent?: number; totalTools?: number; operation?: string; duration?: string; [key: string]: any }
   | { type: 'reasoning'; content: string; [key: string]: any }
   | { type: 'thinking'; context?: 'reasoning' | 'tool_preparation' | 'tool_execution' | 'waiting' | 'startup' | 'rate_limit'; startTime?: number; urgent?: boolean; [key: string]: any }
   | { type: 'thinking_end'; [key: string]: any }
@@ -266,15 +266,18 @@ const InlineReportViewer: React.FC<{
   );
 
   React.useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       try {
-        setError(null);
-        setResolvedPath(null);
+        if (!cancelled) {
+          setError(null);
+          setResolvedPath(null);
+        }
 
         const candidates = candidatePaths;
 
         if (candidates.length === 0) {
-          if (!fallbackContent) {
+          if (!cancelled && !fallbackContent) {
             setError('Report context unavailable');
           }
           return;
@@ -297,19 +300,22 @@ const InlineReportViewer: React.FC<{
         if (!loaded) {
           // We already populated content from fallbackContent above (if present).
           // If there is no fallbackContent, surface a clear error.
-          if (!fallbackContent) {
+          if (!cancelled && !fallbackContent) {
             setError('Report file not found');
           }
           // Prefer the first existing candidate for the "Report saved to" hint.
           try {
             const firstExisting = candidates.find(p => fsSync.existsSync(p));
+            if (cancelled) {
+              return;
+            }
             if (firstExisting) {
               setResolvedPath(firstExisting);
             } else if (reportPath && path.isAbsolute(reportPath)) {
               setResolvedPath(reportPath);
             }
           } catch {
-            if (reportPath && path.isAbsolute(reportPath)) {
+            if (!cancelled && reportPath && path.isAbsolute(reportPath)) {
               setResolvedPath(reportPath);
             }
           }
@@ -317,6 +323,9 @@ const InlineReportViewer: React.FC<{
         }
 
         // File read succeeded; prefer full file content over inline fallback.
+        if (cancelled) {
+          return;
+        }
         setContent(loaded);
         if (usedPath) {
           setResolvedPath(usedPath);
@@ -326,24 +335,30 @@ const InlineReportViewer: React.FC<{
       } catch (e: any) {
         // On unexpected errors, keep any existing content (seeded above) and
         // only surface an error if we had nothing to show.
-        if (!fallbackContent) {
+        if (!cancelled && !fallbackContent) {
           setError('Failed to load report');
         }
         try {
           const firstExisting = candidatePaths.find(p => fsSync.existsSync(p));
+          if (cancelled) {
+            return;
+          }
           if (firstExisting) {
             setResolvedPath(firstExisting);
           } else if (reportPath && path.isAbsolute(reportPath)) {
             setResolvedPath(reportPath);
           }
         } catch {
-          if (reportPath && path.isAbsolute(reportPath)) {
+          if (!cancelled && reportPath && path.isAbsolute(reportPath)) {
             setResolvedPath(reportPath);
           }
         }
       }
     };
     load();
+    return () => {
+      cancelled = true;
+    };
   }, [candidatePaths, fallbackContent, reportPath]);
 
   if (error) {
@@ -550,41 +565,43 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       );
       
     // =======================================================================
-    // LEGACY EVENT HANDLERS - Backward compatibility
+    // EVENT BOUNDARY HANDLERS
     // =======================================================================
-    case 'step_header':
+    case 'progress_update':
       // Detect if this is a swarm step and format appropriately
       let stepDisplay = '';
       
       // Access properties through bracket notation to bypass TypeScript checks
       const swarmAgent = (event as any)['swarm_agent'];
       const swarmSubStep = (event as any)['swarm_sub_step'];
-      const swarmTotalIterations = (event as any)['swarm_total_iterations'];
-      const swarmMaxIterations = (event as any)['swarm_max_iterations'];
       const isSwarmOperation = (event as any)['is_swarm_operation'];
       
       if (event.step === "FINAL REPORT") {
         stepDisplay = "[FINAL REPORT]";
       } else if (typeof event.step === 'string' && String(event.step).toUpperCase() === 'TERMINATED') {
-        // Clean termination header without confusing step counters
+        // Clean termination header without confusing progress values
         stepDisplay = "[TERMINATED]";
       } else if (swarmAgent && swarmSubStep) {
-        // For swarm operations, show agent name with their step count and swarm-wide progress
+        // For swarm operations, show agent activity and budget progress.
         // Use replaceAll to handle multi-word agent names correctly
         const agentName = String(swarmAgent).toUpperCase().replaceAll('_', ' ');
-        // Show agent's step count and swarm-wide iteration progress (no max cap shown)
-        const swarmTotal = (event as any)['swarm_total_iterations'] ?? swarmSubStep;
-        stepDisplay = `[SWARM: ${agentName} • STEP ${swarmSubStep} | SWARM TOTAL ${swarmTotal}]`;
+        const swarmTotal = (event as any)['swarm_total_actions'] ?? swarmSubStep;
+        const eventProgress = (event as any).progressPercent;
+        const progress = typeof eventProgress === 'number' ? ` | PROGRESS ${eventProgress}%` : '';
+        stepDisplay = `[SWARM: ${agentName} • ACTION ${swarmSubStep} | SWARM TOTAL ${swarmTotal}${progress}]`;
       } else if (isSwarmOperation) {
-        // Generic swarm operation without specific agent
-        stepDisplay = `[SWARM • STEP ${event.step}/${event.maxSteps}]`;
+        const eventProgress = (event as any).progressPercent;
+        const progress = typeof eventProgress === 'number' ? `${eventProgress}%` : String(event.step || '');
+        stepDisplay = `[SWARM • PROGRESS ${progress}]`;
       } else {
-        // Regular step header with tool count for budget transparency
+        // Regular progress header with tool count for budget transparency
         const toolCount = (event as any)['totalTools'];
+        const eventProgress = (event as any).progressPercent;
+        const progress = typeof eventProgress === 'number' ? `${eventProgress}%` : String(event.step || '');
         if (toolCount && toolCount > 0) {
-          stepDisplay = `[STEP ${event.step}/${event.maxSteps} | ${toolCount} tools]`;
+          stepDisplay = `[PROGRESS ${progress} | ${toolCount} tools]`;
         } else {
-          stepDisplay = `[STEP ${event.step}/${event.maxSteps}]`;
+          stepDisplay = `[PROGRESS ${progress}]`;
         }
       }
       
@@ -664,8 +681,8 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         case 'stop_tool':
           reasonLabel = 'STOP TOOL';
           break;
-        case 'step_limit':
-          reasonLabel = 'STEP LIMIT';
+        case 'budget_limit':
+          reasonLabel = 'BUDGET LIMIT';
           break;
         case 'user_abort':
           reasonLabel = 'TERMINATED';
@@ -1936,7 +1953,7 @@ const method = latestInput.method || 'GET';
       };
 
       // Use the compact summary view; the detailed per-agent view can be very
-      // tall and is redundant with the swarm step headers that follow.
+      // tall and is redundant with the swarm progress updates that follow.
       return (
         <Box marginTop={1} marginBottom={1}>
           <SwarmDisplay swarmState={swarmState} collapsed={true} />
@@ -1982,8 +1999,7 @@ const method = latestInput.method || 'GET';
       const finalAgent = 'final_agent' in event ? String(event.final_agent || 'unknown') : 'unknown';
       const executionCount = 'execution_count' in event ? Number(event.execution_count || 0) : 0;
       const handoffCount = 'handoff_count' in event ? Number(event.handoff_count || 0) : executionCount - 1;
-      const totalSteps = 'total_steps' in event ? Number(event.total_steps || 0) : 0;
-      const totalIterations = 'total_iterations' in event ? Number(event.total_iterations || 0) : 0;
+      const totalActions = 'total_actions' in event ? Number(event.total_actions || 0) : 0;
       const duration = 'duration' in event ? String(event.duration || 'unknown') : 'unknown';
       const totalTokens = 'total_tokens' in event ? Number(event.total_tokens || 0) : 0;
       const agentMetrics = 'agent_metrics' in event ? (event.agent_metrics as any[] || []) : [];
@@ -1998,7 +2014,7 @@ const method = latestInput.method || 'GET';
       
       return (
         <Box flexDirection="column" marginTop={1}>
-          <Text color={statusColor} bold>[SWARM: {statusText}] {completedAgents.length || agentMetrics.length || 0} agents, {handoffCount} handoffs, {totalIterations > 0 ? totalIterations : totalSteps} iterations</Text>
+          <Text color={statusColor} bold>[SWARM: {statusText}] {completedAgents.length || agentMetrics.length || 0} agents, {handoffCount} handoffs, {totalActions} actions</Text>
           {duration !== 'unknown' && (
             <Box marginLeft={2}>
               <Text dimColor>├─ duration: {duration}</Text>
@@ -2029,7 +2045,7 @@ const method = latestInput.method || 'GET';
             const prefix = isLast ? '└─' : '├─';
             return (
               <Box key={idx} marginLeft={2}>
-                <Text dimColor>{prefix} {metric.name}: {metric.steps} steps, {metric.tools} tools, {metric.tokens} tokens</Text>
+                <Text dimColor>{prefix} {metric.name}: {metric.steps} actions, {metric.tools} tools, {metric.tokens} tokens</Text>
               </Box>
             );
           })}
@@ -2082,9 +2098,6 @@ const method = latestInput.method || 'GET';
           ) : null}
           {('objective' in event && event.objective) ? (
             <Text dimColor>  Objective: {event.objective}</Text>
-          ) : null}
-          {('max_steps' in event && event.max_steps) ? (
-            <Text dimColor>  Max Steps: {event.max_steps}</Text>
           ) : null}
           {('model_id' in event && event.model_id) ? (
             <Text dimColor>  Model: {event.model_id}</Text>
@@ -2509,7 +2522,7 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   let finalReportIndex = -1;
   for (let i = 0; i < totalGroups; i++) {
     const group = displayGroups[i];
-    if (group.events.some(e => e.type === 'step_header' && (e as any).step === 'FINAL REPORT')) {
+    if (group.events.some(e => e.type === 'progress_update' && (e as any).step === 'FINAL REPORT')) {
       finalReportIndex = i;
       break;
     }

@@ -1,7 +1,7 @@
 import React from 'react';
 import { TextEncoder, TextDecoder } from 'util';
-import { jest } from '@jest/globals';
-import TestRenderer, { act } from 'react-test-renderer';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
   global.TextEncoder = TextEncoder;
@@ -47,7 +47,7 @@ describe('useSetupWizard additional coverage', () => {
       snapshots.push(hook);
       return <span>{hook.state.currentStep}</span>;
     };
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     act(() => {
       view = TestRenderer.create(<Consumer />);
     });

@@ -1,4 +1,4 @@
-import {jest} from '@jest/globals';
+import {describe, expect, it, jest} from '@jest/globals';
 import {OperationManager} from '../../../src/services/OperationManager.js';
 import type {Config} from '../../../src/contexts/ConfigContext.js';
 
@@ -21,8 +21,7 @@ describe('OperationManager lifecycle', () => {
             target: 'example.com',
             objective: 'objective',
             status: 'running',
-            currentStep: 0,
-            totalSteps: 50,
+            progressPercentage: 0,
             continueOperation: true,
             reportOnly: 'OP_OLD',
         }));
@@ -39,7 +38,7 @@ describe('OperationManager lifecycle', () => {
         const manager = new OperationManager(config);
         const op = manager.startOperation('web', 'example.com', 'objective', 'model-a');
 
-        manager.updateProgress(op.id, 2, 10, 'Testing auth');
+        manager.updateProgress(op.id, 20, 'Testing auth');
         manager.addFinding(op.id, 'SQL injection');
         expect(manager.switchModel(op.id, 'model-b')).toBe(true);
         manager.updateTokenUsage(op.id, 100, 50, 0.01, 10, 5);
@@ -47,8 +46,7 @@ describe('OperationManager lifecycle', () => {
 
         const updated = manager.getOperation(op.id)!;
         expect(updated).toEqual(expect.objectContaining({
-            currentStep: 2,
-            totalSteps: 10,
+            progressPercentage: 20,
             description: 'Testing auth',
             findings: 1,
             model: 'model-b',
@@ -62,7 +60,7 @@ describe('OperationManager lifecycle', () => {
             estimatedCost: 0.02,
         });
         expect(updated.logs.map(log => log.message)).toEqual(expect.arrayContaining([
-            'Step 2/10: Testing auth',
+            'Progress 20%: Testing auth',
             'Finding #1: SQL injection',
             'Model switched from model-a to model-b',
         ]));
@@ -154,7 +152,7 @@ describe('OperationManager lifecycle', () => {
             expect(manager.pauseOperation('missing')).toBe(false);
             expect(manager.resumeOperation('missing')).toBe(false);
             expect(manager.switchModel('missing', 'model-b')).toBe(false);
-            manager.updateProgress('missing', 1, 1, 'noop');
+            manager.updateProgress('missing', 1, 'noop');
             manager.updateOperation('missing', {status: 'cancelled'});
             manager.addFinding('missing', 'noop');
             manager.updateTokenUsage('missing', 1, 1, 1);

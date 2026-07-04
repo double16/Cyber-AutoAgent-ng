@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {afterEach, beforeEach, describe, expect, it} from '@jest/globals';
 import {EventEmitter} from 'events';
 import {useTerminalSize} from '../../../src/hooks/useTerminalSize.js';
@@ -33,7 +33,7 @@ describe('useTerminalSize', () => {
             return null;
         };
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<Harness/>);
         });

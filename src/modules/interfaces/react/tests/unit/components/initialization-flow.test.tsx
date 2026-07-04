@@ -1,7 +1,7 @@
 import React from 'react';
 import { EventEmitter } from 'events';
-import { jest } from '@jest/globals';
-import TestRenderer, { act } from 'react-test-renderer';
+import {beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -109,7 +109,7 @@ describe('InitializationFlow', () => {
   it('renders welcome, navigates deployment choices, and exits with escape', async () => {
     const { InitializationFlow } = await load();
     const onComplete = jest.fn();
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
 
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
@@ -132,7 +132,7 @@ describe('InitializationFlow', () => {
   it('sets up local CLI mode and auto-completes after success', async () => {
     const { InitializationFlow } = await load();
     const onComplete = jest.fn();
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
 
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
@@ -157,7 +157,7 @@ describe('InitializationFlow', () => {
   it('sets up container mode with progress logs and health refresh', async () => {
     const { InitializationFlow } = await load();
     const onComplete = jest.fn();
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
 
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
@@ -185,7 +185,7 @@ describe('InitializationFlow', () => {
       error: 'Python 3.11+ is required',
     } as never);
 
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
     });
@@ -221,7 +221,7 @@ describe('InitializationFlow', () => {
     const onComplete = jest.fn();
     containerManager.switchToMode.mockRejectedValueOnce(new Error('Cannot connect to the Docker daemon'));
 
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
     });
@@ -262,7 +262,7 @@ describe('InitializationFlow', () => {
     const onComplete = jest.fn();
     pythonService.checkPythonVersion.mockRejectedValueOnce(new Error('Python not found'));
 
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
     });

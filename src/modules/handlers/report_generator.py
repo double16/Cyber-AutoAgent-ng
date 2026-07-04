@@ -806,8 +806,6 @@ def build_report_sections(
         metrics_total = 0
         metrics_duration = ""
         metrics_cost = 0.0
-        last_step = 0
-        total_steps = 0
         tools_used_from_log = []
         try:
             safe_target_name = sanitize_target_name(target)
@@ -818,7 +816,7 @@ def build_report_sections(
                     for line in f:
                         if (
                                 "__CYBER_EVENT__" in line
-                                and ('"type": "metrics_update"' in line or '"type": "step_header"' in line or '"type": "tool_start"' in line)
+                                and ('"type": "metrics_update"' in line or '"type": "tool_start"' in line)
                         ):
                             # Extract JSON between markers
                             try:
@@ -845,15 +843,9 @@ def build_report_sections(
                                             metrics_cost = max(metrics_cost, float(m.get("cost")))
                                         except Exception:
                                             pass
-                                elif payload.get("type") == "step_header":
-                                    if "step" in payload:
-                                        current_step = int(payload.get("step"))
-                                        if current_step < last_step:
-                                            # new operation started
-                                            total_steps += last_step
-                                        last_step = current_step
-                                        if "timestamp" in payload:
-                                            operation_date = payload.get("timestamp")[0:10]
+                                elif payload.get("type") == "progress_update":
+                                    if "timestamp" in payload:
+                                        operation_date = payload.get("timestamp")[0:10]
                                 elif payload.get("type") == "tool_start":
                                     if "tool_name" in payload:
                                         tool_name = payload.get("tool_name")
@@ -874,9 +866,6 @@ def build_report_sections(
         except Exception:
             # Ignore metrics extraction failures silently
             pass
-        total_steps += last_step
-        if total_steps > steps_executed:
-            steps_executed = total_steps
         if not tools_used:
             tools_used = tools_used_from_log
 

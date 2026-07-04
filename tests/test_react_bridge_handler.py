@@ -1,7 +1,7 @@
 import json
-import os
 import threading
 import time
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,9 +16,13 @@ def make_handler():
     events = []
     handler._events = events
     handler.emit_ui_event = lambda event: events.append(event)
+    handler._state_lock = threading.RLock()
+    handler._emit_lock = threading.RLock()
     handler.operation_id = "OP_TEST"
-    handler.current_step = 0
-    handler.max_steps = 5
+    # Budget-only model
+    handler.budget_max_duration = 5
+    handler.budget_max_tokens = None
+    handler.budget_max_cost = None
     handler.start_time = time.time() - 65
     handler.provider_id = "litellm"
     handler.model_id = "model"
@@ -39,12 +43,15 @@ def make_handler():
     handler._emitted_any_reasoning = False
     handler._recent_reasoning_by_agent = {}
     handler._recent_reasoning_ttl = 60
-    handler._reasoning_required_for_current_step = False
-    handler.pending_step_header = False
-    handler._reasoning_step_header_emitted = False
-    handler._any_step_header_emitted = False
-    handler._reasoning_emitted_since_last_step_header = False
+    handler.action_count = 0
+    handler._reasoning_required_for_current_action = False
+    handler.pending_action_header = False
+    handler._reasoning_action_header_emitted = False
+    handler._any_action_header_emitted = False
+    handler._reasoning_emitted_since_last_action_header = False
     handler._stop_tool_used = False
+    handler._budget_limit_reached = False
+    handler._budget_limit_reason = None
     handler._report_generated = False
     handler.in_swarm_operation = False
     handler.swarm_agents = []
@@ -55,9 +62,8 @@ def make_handler():
     handler._termination_reason = None
     handler.swarm_agent_steps = {}
     handler._python_preview_emitted = set()
-    handler.swarm_max_iterations = None
+    # Iteration limits removed in new model
     handler.swarm_max_handoffs = None
-    handler.swarm_iteration_count = 0
     handler.swarm_tool_id = None
     handler.swarm_agent_tools = {}
     handler.swarm_agent_details = []
@@ -71,12 +77,20 @@ def make_handler():
     )
     handler._metrics_thread = None
     handler._stop_metrics = False
+    handler._stop_metrics_event = threading.Event()
     handler._last_agent = None
-    handler._metrics_lock = threading.RLock()
+    handler._metrics_lock = handler._state_lock
     handler._sdk_input_tokens = 0
     handler._sdk_output_tokens = 0
     handler._sdk_cache_read_tokens = 0
     handler._sdk_cache_write_tokens = 0
+    handler._aggregate_input_tokens = 0
+    handler._aggregate_output_tokens = 0
+    handler._aggregate_cache_read_tokens = 0
+    handler._aggregate_cache_write_tokens = 0
+    handler._aggregate_cost = 0.0
+    handler._agent_usage_cache = OrderedDict()
+    handler._agent_usage_cache_size = 128
     handler.pricing_input = 1.0
     handler.pricing_output = 2.0
     handler.pricing_cache_read = 0.25
@@ -144,7 +158,10 @@ def test_tool_announcement_streaming_update_and_message_processing():
         }
     )
 
-    assert "step_header" in event_types(handler)
+    progress_updates = [event for event in handler._events if event["type"] == "progress_update"]
+    assert progress_updates
+    assert progress_updates[0]["step"] == 1
+    assert progress_updates[0]["progressPercent"] == handler.get_budget_progress()
     assert any(event["type"] == "tool_input_update" for event in handler._events) is False
     assert handler.tool_counts["shell"] == 1
     assert handler._parse_tool_input_from_stream({"value": '{"a": 1}'}) == {"a": 1}
@@ -297,17 +314,246 @@ def test_constructor_emits_init_and_metrics(monkeypatch):
     emitter = SimpleNamespace(emit=lambda event: events.append(event))
 
     handler = ReactBridgeHandler(
-        max_steps=3,
         operation_id="OP_INIT",
         provider_id="ollama",
         model_id="ollama/llama3",
         emitter=emitter,
-        init_context={"target": "example.com", "memory": {"backend": "custom"}},
+        init_context={
+            "target": "example.com",
+            "memory": {"backend": "custom"},
+            "budget": {"maxDurationMinutes": 60, "maxTokens": None, "maxCost": None},
+        },
     )
 
     assert handler.operation_id == "OP_INIT"
     assert any(event["type"] == "operation_init" and event["memory"]["backend"] == "custom" for event in events)
     assert any(event["type"] == "thinking" for event in events)
+
+
+def test_budget_minutes_progress_and_internal_step_tracking(monkeypatch):
+    handler = make_handler()
+    handler.budget_max_duration = 1
+    handler.budget_max_tokens = 200
+    handler.budget_max_cost = 0.0001
+    handler.start_time = time.time() - 30
+    handler.sdk_input_tokens = 40
+    handler.sdk_output_tokens = 10
+
+    progress, percent = handler._calculate_budget_progress(total_tokens=50, cost=0.000025)
+
+    assert progress == pytest.approx(0.5)
+    assert percent == 50
+
+    handler.action_count = 7
+    handler._record_action_boundary()
+    progress_event = [event for event in handler._events if event["type"] == "progress_update"][-1]
+    assert progress_event["step"] == 7
+    assert progress_event["progressPercent"] == handler.get_budget_progress()
+
+
+def test_metrics_aggregate_multiple_agents_with_lru_eviction(monkeypatch):
+    handler = make_handler()
+    handler._agent_usage_cache_size = 1
+    handler.models_client = SimpleNamespace(
+        get_pricing=lambda model_id: {
+            "model-a": SimpleNamespace(input=10.0, output=20.0, cache_read=1.0, cache_write=2.0),
+            "model-b": SimpleNamespace(input=1.0, output=2.0, cache_read=0.1, cache_write=0.2),
+        }[model_id]
+    )
+    agent_models = {}
+
+    def fake_model_id(agent):
+        return agent_models[id(agent)]
+
+    monkeypatch.setattr(rb, "get_provider_from_agent", lambda _agent: "litellm")
+    monkeypatch.setattr(rb, "get_model_id_from_agent", fake_model_id)
+
+    agent_a = SimpleNamespace(event_loop_metrics=None)
+    agent_b = SimpleNamespace(event_loop_metrics=None)
+    agent_models[id(agent_a)] = "model-a"
+    agent_models[id(agent_b)] = "model-b"
+
+    handler.process_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 1_000_000, "outputTokens": 10, "cacheReadInputTokens": 0}),
+        agent=agent_a,
+    )
+    agent_a_uuid = getattr(agent_a, rb._AGENT_USAGE_UUID_ATTR)
+    handler.process_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 20, "outputTokens": 1_000_000, "cacheWriteInputTokens": 0}),
+        agent=agent_b,
+    )
+
+    assert getattr(agent_b, rb._AGENT_USAGE_UUID_ATTR) != agent_a_uuid
+    assert len(handler._agent_usage_cache) == 1
+    assert handler._aggregate_input_tokens == 1_000_000
+    assert handler.sdk_input_tokens == 1_000_020
+    assert handler.sdk_output_tokens == 1_000_010
+    assert handler._compute_total_cost_from_usage() == pytest.approx(12.00022)
+
+
+def test_metrics_without_agent_stays_in_legacy_usage_path():
+    handler = make_handler()
+
+    handler.process_metrics(
+        SimpleNamespace(
+            accumulated_usage={
+                "inputTokens": 100,
+                "outputTokens": 50,
+                "cacheReadInputTokens": 10,
+                "cacheWriteInputTokens": 5,
+            }
+        )
+    )
+
+    assert handler._agent_usage_cache == OrderedDict()
+    assert handler.sdk_input_tokens == 100
+    assert handler.sdk_output_tokens == 50
+    assert handler._compute_total_cost_from_usage() == pytest.approx(0.000205)
+
+
+def test_concurrent_agent_metrics_capture_is_thread_safe():
+    handler = make_handler()
+    handler._agent_usage_cache_size = 4
+    agents = [SimpleNamespace(event_loop_metrics=None) for _ in range(20)]
+    barrier = threading.Barrier(len(agents))
+
+    def capture(index, agent):
+        barrier.wait(timeout=5)
+        handler.process_metrics(
+            SimpleNamespace(
+                accumulated_usage={
+                    "inputTokens": index + 1,
+                    "outputTokens": (index + 1) * 2,
+                    "cacheReadInputTokens": 1,
+                    "cacheWriteInputTokens": 2,
+                }
+            ),
+            agent=agent,
+        )
+
+    threads = [threading.Thread(target=capture, args=(index, agent)) for index, agent in enumerate(agents)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len({getattr(agent, rb._AGENT_USAGE_UUID_ATTR) for agent in agents}) == len(agents)
+    assert len(handler._agent_usage_cache) == 4
+    assert handler.sdk_input_tokens == sum(range(1, 21))
+    assert handler.sdk_output_tokens == sum(value * 2 for value in range(1, 21))
+    assert handler.sdk_cache_read_tokens == 20
+    assert handler.sdk_cache_write_tokens == 40
+
+
+def test_concurrent_termination_emits_once():
+    handler = make_handler()
+
+    def terminate():
+        handler.emit_termination("budget_limit", "done")
+
+    threads = [threading.Thread(target=terminate) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert event_types(handler).count("termination_reason") == 1
+    assert handler.termination_reason == "budget_limit"
+
+
+def test_internal_step_and_event_defensive_paths(monkeypatch):
+    handler = make_handler()
+
+    handler.emitter = SimpleNamespace(emit=Mock(side_effect=BrokenPipeError()))
+    handler.emit_ui_event({"type": "progress_update"})
+    handler.emitter = SimpleNamespace(emit=Mock(side_effect=RuntimeError("emit failed")))
+    handler.emit_ui_event({"type": "progress_update"})
+
+    handler._termination_emitted = False
+    handler._emit_accumulated_reasoning = Mock(side_effect=RuntimeError("flush failed"))
+    calls = []
+
+    def emit_with_thinking_failure(event):
+        calls.append(event)
+        if event["type"] == "thinking_end":
+            raise RuntimeError("thinking failed")
+
+    handler.emit_ui_event = emit_with_thinking_failure
+    handler.emit_termination("budget_limit", "done")
+
+    assert handler._termination_emitted is True
+    assert any(event["type"] == "termination_reason" for event in calls)
+
+
+def test_constructor_defaults_invalid_budget_values(monkeypatch):
+    events = []
+    monkeypatch.setattr(rb, "get_models_client", Mock(side_effect=RuntimeError("models unavailable")))
+    monkeypatch.setattr(ReactBridgeHandler, "_start_metrics_thread", lambda self: None)
+    emitter = SimpleNamespace(emit=lambda event: events.append(event))
+
+    handler = ReactBridgeHandler(
+        operation_id="OP_BAD_BUDGET",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        init_context={
+            "budget": {
+                "maxDurationMinutes": "not-a-number",
+                "maxTokens": "not-a-number",
+                "maxCost": "not-a-number",
+            }
+        },
+    )
+
+    assert handler.budget_max_duration == 0
+    assert handler.budget_max_tokens is None
+    assert handler.budget_max_cost is None
+    assert any(event["type"] == "metrics_update" for event in events)
+
+
+def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
+    events = []
+    monkeypatch.setattr(rb, "get_models_client", lambda: SimpleNamespace())
+    monkeypatch.setattr(ReactBridgeHandler, "_start_metrics_thread", lambda self: None)
+    emitter = SimpleNamespace(emit=lambda event: events.append(event))
+
+    class BadContext(dict):
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError("bad context")
+
+    handler = ReactBridgeHandler(
+        operation_id="OP_BAD_CONTEXT",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        init_context=BadContext(),
+    )
+    assert handler.budget_max_duration == 60
+
+    events.clear()
+    monkeypatch.setenv("MEM0_API_KEY", "token")
+    ReactBridgeHandler(
+        operation_id="OP_MEM0",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        init_context={},
+    )
+    assert any(event.get("memory", {}).get("backend") == "mem0_cloud" for event in events)
+
+    events.clear()
+    monkeypatch.delenv("MEM0_API_KEY", raising=False)
+    monkeypatch.setenv("OPENSEARCH_HOST", "https://opensearch.example")
+    ReactBridgeHandler(
+        operation_id="OP_OPENSEARCH",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        init_context={},
+    )
+    assert any(event.get("memory", {}).get("backend") == "opensearch" for event in events)
 
 
 def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
@@ -327,7 +573,6 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     handler.operation_id = "OP_REPORT"
     handler.memory_ops = 2
     handler.evidence_count = 1
-    handler.current_step = 4
     handler.tool_counts = {"shell": 2, "http_request": 1}
     handler.emitter = SimpleNamespace(flush_immediate=lambda: handler._events.append({"type": "flushed"}))
 
@@ -394,14 +639,13 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     handler.trigger_evaluation_on_completion()
     assert "evaluation_complete" in event_types(handler)
     handler.wait_for_evaluation_completion(timeout=1)
-
-    handler.current_step = 10
-    handler.max_steps = 1
+    # Budget-based stop check: simulate duration exceeded
+    handler.budget_max_duration = 1
+    handler.start_time = time.time() - 61
     assert handler.should_stop() is True
     assert handler.has_reached_limit() is True
-    assert handler.state.step_limit_reached is True
     summary = handler.get_summary()
-    assert summary["total_steps"] == 10
+    assert isinstance(summary.get("duration"), str)
 
 
 def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatch):
@@ -456,7 +700,7 @@ def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatc
     handler.in_swarm_operation = True
     handler.swarm_agents = ["recon_agent", "web_agent"]
     handler.current_swarm_agent = "recon_agent"
-    handler.swarm_agent_steps = {"recon_agent": 1}
+    handler.swarm_agent_actions = {"recon_agent": 1}
     handler.swarm_agent_tools = {"web_agent": ["advanced_payload_coordinator"]}
     handler._synthesize_swarm_tool_start("advanced_payload_coordinator", "testphp.vulnweb.com")
     assert any(event.get("synthetic") for event in handler._events)
@@ -479,7 +723,5 @@ def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatc
     assert "swarm_agent_transition" in event_types(handler)
 
     handler = make_handler()
-    handler.max_steps = 0
-    with pytest.raises(Exception):
-        handler._process_tool_announcement({"name": "shell", "id": "limit", "input": {"cmd": "id"}})
-    assert handler.termination_reason == "step_limit"
+    # No step limit anymore; ensure processing works without raising
+    handler._process_tool_announcement({"name": "shell", "id": "limit", "input": {"cmd": "id"}})

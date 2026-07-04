@@ -91,6 +91,8 @@ export enum EventType {
   SECTION = 'section',
   /** AI reasoning and thought process */
   REASONING = 'reasoning',
+  /** Progress update with percentage of budget used */
+  PROGRESS_UPDATE = 'progress_update',
   
   // =============================================================================
   // SPECIALIZED TOOL EVENTS - Specific security assessment tools
@@ -467,13 +469,13 @@ export interface ReportContentEvent {
  * Termination Reason Event Interface
  * 
  * Event emitted when an operation terminates, indicating the reason
- * (e.g., step limit reached, stop tool invoked, network timeout, token limit)
+ * (e.g., budget limit reached, stop tool invoked, network timeout, token limit)
  */
 export interface TerminationReasonEvent {
   type: 'termination_reason';
   // Known reasons from backend + forward-compatible string type
   reason:
-    | 'step_limit'
+    | 'budget_limit'
     | 'stop_tool'
     | 'network_timeout'
     | 'network_error'
@@ -482,8 +484,6 @@ export interface TerminationReasonEvent {
     | 'rate_limited'
     | 'model_error';
   message: string;
-  current_step?: number;
-  max_steps?: number;
   id?: string;
   timestamp?: string;
 }

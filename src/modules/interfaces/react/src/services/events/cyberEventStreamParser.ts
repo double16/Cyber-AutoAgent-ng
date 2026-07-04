@@ -101,7 +101,7 @@ function updateToolExecutionState(
   if (
     eventData.type === 'tool_invocation_end' ||
     eventData.type === 'tool_result' ||
-    eventData.type === 'step_header' ||
+    eventData.type === 'progress_update' ||
     eventData.type === 'tool_end'
   ) {
     if (!state.sawBackendToolOutput) {

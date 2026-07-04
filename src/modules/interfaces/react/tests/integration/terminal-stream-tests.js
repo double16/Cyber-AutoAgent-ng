@@ -131,20 +131,20 @@ class TerminalStreamTestRunner {
   }
 
   /**
-   * Test: Step Header with Swarm Agent Context
+   * Test: Progress Update with Swarm Agent Context
    * 
-   * Validates that step headers properly display:
+   * Validates that progress updates properly display:
    * - Agent name in swarm operations
    * - Sub-step numbering for agents
-   * - Proper formatting: [SWARM: AGENT_NAME • STEP X/Y]
+   * - Proper formatting: [SWARM: AGENT_NAME • PROGRESS X%]
    */
-  async testSwarmStepHeaders() {
+  async testSwarmProgressUpdates() {
     console.log(chalk.blue('\n🔧 Testing Swarm Step Headers...'));
     
     const testEvent = {
-      type: 'step_header',
+      type: 'progress_update',
       step: 3,
-      maxSteps: 100,
+      progressPercent: 3,
       operation: 'OP_TEST_123',
       duration: '15s',
       is_swarm_operation: true,
@@ -166,7 +166,7 @@ class TerminalStreamTestRunner {
       },
       {
         name: 'Sub-step numbering',
-        check: /STEP\s+2(\/5)?/i.test(output) || /SWARM TOTAL\s+2\//i.test(output)
+        check: /PROGRESS\s+40%?/i.test(output) || /SWARM TOTAL\s+2\//i.test(output)
       },
       {
         name: 'Divider line shown',
@@ -177,7 +177,7 @@ class TerminalStreamTestRunner {
     const passed = checks.every(c => c.check);
     
     if (this.verbose) {
-      console.log(chalk.gray('\nExpected format: [SWARM: RECON_SPECIALIST • STEP 2/5]'));
+      console.log(chalk.gray('\nExpected format: [SWARM: RECON_SPECIALIST • PROGRESS 40%]'));
       console.log(chalk.gray('Actual output:'));
       console.log(chalk.gray(output.substring(0, 200)));
     }
@@ -482,7 +482,7 @@ setTimeout(() => process.exit(0), 500);
 
     // Run test suite
     await this.testSwarmStartDisplay();
-    await this.testSwarmStepHeaders();
+    await this.testSwarmProgressUpdates();
     await this.testHandoffTransformation();
     await this.testToolOutputStream();
     await this.testEventDeduplication();

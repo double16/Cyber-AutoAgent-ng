@@ -4,7 +4,7 @@ Unit tests for AgentRepairHook MaxTokensReachedException handling.
 
 Covers:
 - after_model_call_check sets retry + state flag on MaxTokensReachedException
-- resets retry counter when current_step advances
+- resets retry counter after a successful model call
 - stops retrying after 2 retries
 - before_model_call_inject consumes state flag and injects reduced assistant text + system continue instructions
 """
@@ -26,13 +26,15 @@ from strands.hooks.events import AfterModelCallEvent
 
 @dataclass
 class FakeCallbackHandler:
-    current_step: int = 0
-    max_steps: int = 10
+    budget_progress: int = 0
     reasoning_buffer: List[str] = None
 
     def __post_init__(self) -> None:
         if self.reasoning_buffer is None:
             self.reasoning_buffer = []
+
+    def get_budget_progress(self) -> dict:
+        return {"progress_percent": self.budget_progress}
 
     def _emit_accumulated_reasoning(self, force: bool = False) -> None:
         # Called in a try/except, but we keep it harmless.
@@ -86,7 +88,7 @@ class _ReducedText:
 
 def test_after_model_call_maxtokens_no_message(monkeypatch):
     hook = AgentRepairHook()
-    cb = FakeCallbackHandler(current_step=1)
+    cb = FakeCallbackHandler(budget_progress=1)
     agent = FakeAgent(messages=[], callback_handler=cb)
 
     event_state: Dict[str, Any] = {}
@@ -105,7 +107,7 @@ def test_after_model_call_maxtokens_no_message(monkeypatch):
 
 def test_after_model_call_sets_retry_and_state_for_maxtokens_exception(monkeypatch):
     hook = AgentRepairHook()
-    cb = FakeCallbackHandler(current_step=1, reasoning_buffer=["Repeated reasoning. Repeated reasoning."])
+    cb = FakeCallbackHandler(budget_progress=1, reasoning_buffer=["Repeated reasoning. Repeated reasoning."])
     agent = FakeAgent(messages=[], callback_handler=cb)
 
     event_state: Dict[str, Any] = {}
@@ -125,7 +127,7 @@ def test_after_model_call_sets_retry_and_state_for_maxtokens_exception(monkeypat
 
 def test_after_model_call_sets_retry_and_state_for_maxtokens_stop_reason(monkeypatch):
     hook = AgentRepairHook()
-    cb = FakeCallbackHandler(current_step=1, reasoning_buffer=["Repeated reasoning. Repeated reasoning."])
+    cb = FakeCallbackHandler(budget_progress=1, reasoning_buffer=["Repeated reasoning. Repeated reasoning."])
     agent = FakeAgent(messages=[], callback_handler=cb)
 
     event_state: Dict[str, Any] = {}
@@ -143,10 +145,10 @@ def test_after_model_call_sets_retry_and_state_for_maxtokens_stop_reason(monkeyp
     assert arh._REASONING_LOOP_RETRY_STATE_KEY in event_state
 
 
-def test_after_model_call_resets_retry_count_when_step_advances(monkeypatch):
+def test_after_model_call_resets_retry_count_after_success(monkeypatch):
     hook = AgentRepairHook()
 
-    cb = FakeCallbackHandler(current_step=5)
+    cb = FakeCallbackHandler(budget_progress=5)
     agent = FakeAgent(messages=[], callback_handler=cb)
 
     setattr(agent, "_max_tokens_retry_count", 2)  # simulate prior retries
@@ -169,7 +171,7 @@ def test_after_model_call_resets_retry_count_when_step_advances(monkeypatch):
 def test_after_model_call_does_not_retry_after_two_retries(monkeypatch):
     hook = AgentRepairHook()
 
-    cb = FakeCallbackHandler(current_step=7)
+    cb = FakeCallbackHandler(budget_progress=7)
     agent = FakeAgent(messages=[], callback_handler=cb)
 
     setattr(agent, "_max_tokens_retry_count", 2)  # at limit
@@ -196,7 +198,7 @@ def test_before_model_call_inject_replaces_last_assistant_with_reduced_text_and_
     monkeypatch.setattr(arh, "reduce_lines_lossy", lambda *_args, **_kwargs: _ReducedText("REDUCED"))
     monkeypatch.setattr(arh, "get_reflection_snapshot", lambda **_kwargs: "REFLECTION_SNAPSHOT")
 
-    cb = FakeCallbackHandler(current_step=2, max_steps=10)
+    cb = FakeCallbackHandler(budget_progress=20)
 
     # Provide a last assistant message so truncated_message path is used (avoids the callback_handler early-return bug).
     agent = FakeAgent(
@@ -233,7 +235,7 @@ def test_before_model_call_inject_appends_reduced_if_last_not_assistant(monkeypa
     monkeypatch.setattr(arh, "reduce_lines_lossy", lambda *_args, **_kwargs: _ReducedText("REDUCED"))
     monkeypatch.setattr(arh, "get_reflection_snapshot", lambda **_kwargs: "REFLECTION_SNAPSHOT")
 
-    cb = FakeCallbackHandler(current_step=3, max_steps=10)
+    cb = FakeCallbackHandler(budget_progress=30)
 
     agent = FakeAgent(
         messages=[

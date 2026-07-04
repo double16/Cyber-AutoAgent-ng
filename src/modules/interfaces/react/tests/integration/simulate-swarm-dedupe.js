@@ -47,7 +47,7 @@ function writeSwarmEventsFile() {
 
   // Step header for auth_specialist
   lines.push(JSON.stringify({
-    type: 'step_header',
+    type: 'progress_update',
     is_swarm_operation: true,
     swarm_agent: 'auth_specialist',
     swarm_sub_step: 1,
@@ -88,9 +88,9 @@ function writeSwarmEventsFile() {
   const rtext = 'I will test authentication flow using test/test credentials.';
   lines.push(JSON.stringify({ type: 'reasoning', content: rtext, swarm_agent: 'auth_specialist', is_swarm_operation: true }));
 
-  // Next swarm step header (context changes)
+  // Next swarm progress update (context changes)
   lines.push(JSON.stringify({
-    type: 'step_header',
+    type: 'progress_update',
     is_swarm_operation: true,
     swarm_agent: 'auth_specialist',
     swarm_sub_step: 2,

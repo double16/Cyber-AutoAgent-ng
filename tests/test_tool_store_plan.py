@@ -90,9 +90,8 @@ def test_store_plan_phase_change_validation_refusal():
     new_plan = OperationPlan.from_obj(new_plan_data)
     mock_tool_context = MagicMock(spec=ToolContext)
     mock_agent = MagicMock()
+    mock_agent.callback_handler.get_budget_progress.return_value = 89
     mock_tool_context.agent = mock_agent
-    mock_agent.callback_handler.current_step = 1
-    mock_agent.callback_handler.max_steps = 100
     with patch("modules.tools.memory._ensure_memory_client") as mc, patch(
             "modules.tools.memory._user_id") as mui, patch("modules.tools.memory.active_task_message") as mock_msg:
         mock_client = MagicMock()
@@ -123,8 +122,6 @@ def test_store_plan_phase_change_allowed_no_tasks():
     mock_tool_context = MagicMock(spec=ToolContext)
     mock_agent = MagicMock()
     mock_tool_context.agent = mock_agent
-    mock_agent.callback_handler.current_step = 1
-    mock_agent.callback_handler.max_steps = 100
     with patch("modules.tools.memory._ensure_memory_client") as mc, patch("modules.tools.memory._user_id") as mui:
         mock_client = MagicMock()
         mc.return_value = mock_client
@@ -137,7 +134,7 @@ def test_store_plan_phase_change_allowed_no_tasks():
         assert "Test,2,2" in result
 
 
-def test_store_plan_phase_change_allowed_budget_exhausted():
+def test_store_plan_phase_change_refused_with_active_task_at_high_budget_progress():
     prev_plan_data = {
         "objective": "Test",
         "current_phase": 1,
@@ -154,21 +151,18 @@ def test_store_plan_phase_change_allowed_budget_exhausted():
     mock_tool_context = MagicMock(spec=ToolContext)
     mock_agent = MagicMock()
     mock_tool_context.agent = mock_agent
-    mock_agent.callback_handler.current_step = 46
-    mock_agent.callback_handler.max_steps = 100
-    with patch("modules.tools.memory._ensure_memory_client") as mc, patch("modules.tools.memory._user_id") as mui:
+    mock_agent.callback_handler.get_budget_progress.return_value = 89
+    with patch("modules.tools.memory._ensure_memory_client") as mc, patch(
+            "modules.tools.memory._user_id") as mui, patch("modules.tools.memory.active_task_message") as mock_msg:
         mock_client = MagicMock()
         mc.return_value = mock_client
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = prev_plan
-        # Active task remaining but budget is exhausted (current_step > phase_step_start * 0.9)
-        # phase_step_start = 100 * (2-1) // 2 = 50. 46 > 50 * 0.9 = 45.
         active_task = Task(task_uid="uuid", title="T1", objective="O1", phase=1, status="active")
         mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
-        mock_client.store_plan.return_value = {"status": "success", "plan": new_plan.to_toon()}
-        result = store_plan(new_plan, tool_context=mock_tool_context)
-        assert "plan_overview[1]" in result
-        assert "Test,2,2" in result
+        mock_msg.return_value = "msg"
+        with pytest.raises(ValueError, match="Cannot advance phase due to activate tasks remaining"):
+            store_plan(new_plan, tool_context=mock_tool_context)
 
 
 def test_store_plan_assessment_complete_reminder():

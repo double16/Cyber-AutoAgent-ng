@@ -54,17 +54,17 @@ describe('TestExecutionService', () => {
         await Promise.resolve();
 
         expect(events.map(event => event.type)).toEqual([
-            'step_header',
+            'progress_update',
             'reasoning',
             'tool_start',
             'output',
             'metrics_update',
             'tool_invocation_end',
-            'step_header',
+            'progress_update',
             'tool_start',
             'output',
             'tool_invocation_end',
-            'step_header',
+            'progress_update',
             'output',
         ]);
         expect(complete).toHaveBeenCalledWith(expect.objectContaining({success: true}));
