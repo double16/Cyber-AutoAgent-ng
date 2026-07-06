@@ -9,6 +9,7 @@ from modules.handlers.utils import (
     filter_none_values,
     get_output_path,
     sanitize_target_name,
+    update_latest_output_pointer,
     validate_output_path,
 )
 
@@ -182,6 +183,100 @@ class TestCreateOutputDirectory:
         result = create_output_directory(test_path)
         # Should return False on permission error
         assert result is False
+
+
+class TestUpdateLatestOutputPointer:
+    """Test latest operation pointer updates."""
+
+    def test_creates_relative_latest_symlink(self, tmp_path):
+        result = update_latest_output_pointer("example.com", "OP_20260706_120000", str(tmp_path))
+        latest_path = tmp_path / "example.com" / "latest"
+
+        assert result.success is True
+        assert result.mode == "symlink"
+        assert latest_path.is_symlink()
+        assert os.readlink(latest_path) == "OP_20260706_120000"
+        assert (tmp_path / "example.com" / "OP_20260706_120000").is_dir()
+
+    def test_replaces_existing_latest_symlink(self, tmp_path):
+        target_dir = tmp_path / "example.com"
+        old_operation = target_dir / "OP_20260706_110000"
+        old_operation.mkdir(parents=True)
+        latest_path = target_dir / "latest"
+        latest_path.symlink_to("OP_20260706_110000")
+
+        result = update_latest_output_pointer("example.com", "OP_20260706_120000", str(tmp_path))
+
+        assert result.success is True
+        assert result.mode == "symlink"
+        assert latest_path.is_symlink()
+        assert os.readlink(latest_path) == "OP_20260706_120000"
+
+    def test_replaces_existing_latest_fallback_file(self, tmp_path):
+        target_dir = tmp_path / "example.com"
+        target_dir.mkdir(parents=True)
+        latest_path = target_dir / "latest"
+        latest_path.write_text("/old/path\n", encoding="utf-8")
+
+        result = update_latest_output_pointer("example.com", "OP_20260706_120000", str(tmp_path))
+
+        assert result.success is True
+        assert result.mode == "symlink"
+        assert latest_path.is_symlink()
+        assert os.readlink(latest_path) == "OP_20260706_120000"
+
+    def test_writes_fallback_file_when_symlink_creation_fails(self, tmp_path, monkeypatch):
+        def fail_symlink(_src, _dst):
+            raise OSError("symlink unsupported")
+
+        monkeypatch.setattr("modules.handlers.utils.os.symlink", fail_symlink)
+
+        result = update_latest_output_pointer("example.com", "OP_20260706_120000", str(tmp_path))
+        latest_path = tmp_path / "example.com" / "latest"
+        operation_path = tmp_path / "example.com" / "OP_20260706_120000"
+
+        assert result.success is True
+        assert result.mode == "file"
+        assert latest_path.is_file()
+        assert latest_path.read_text(encoding="utf-8") == f"{operation_path.resolve()}\n"
+
+    def test_preserves_existing_latest_directory(self, tmp_path):
+        latest_path = tmp_path / "example.com" / "latest"
+        latest_path.mkdir(parents=True)
+
+        result = update_latest_output_pointer("example.com", "OP_20260706_120000", str(tmp_path))
+
+        assert result.success is False
+        assert result.mode == "skipped"
+        assert latest_path.is_dir()
+
+    def test_reports_failure_when_operation_directory_cannot_be_created(self, tmp_path, monkeypatch):
+        def fail_makedirs(_path, exist_ok=False):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr("modules.handlers.utils.os.makedirs", fail_makedirs)
+
+        result = update_latest_output_pointer("example.com", "OP_20260706_120000", str(tmp_path))
+
+        assert result.success is False
+        assert result.mode == "failed"
+        assert "Could not create operation directory" in result.message
+
+    def test_reports_failure_when_symlink_and_fallback_file_fail(self, tmp_path, monkeypatch):
+        def fail_symlink(_src, _dst):
+            raise OSError("symlink unsupported")
+
+        def fail_open(*_args, **_kwargs):
+            raise OSError("write denied")
+
+        monkeypatch.setattr("modules.handlers.utils.os.symlink", fail_symlink)
+        monkeypatch.setattr("builtins.open", fail_open)
+
+        result = update_latest_output_pointer("example.com", "OP_20260706_120000", str(tmp_path))
+
+        assert result.success is False
+        assert result.mode == "failed"
+        assert "Could not update latest pointer" in result.message
 
 
 class TestFilterNoneValues:

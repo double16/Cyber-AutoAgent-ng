@@ -18,7 +18,18 @@ import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
+
+
+@dataclass
+class LatestOutputPointerResult:
+    """Result from updating the per-target latest operation pointer."""
+
+    success: bool
+    mode: str
+    pointer_path: str
+    operation_path: str
+    message: str = ""
 
 
 def get_terminal_width(default=80):
@@ -155,6 +166,75 @@ def create_output_directory(path: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def update_latest_output_pointer(
+    target_name: str,
+    operation_id: str,
+    base_dir: Optional[str] = None,
+) -> LatestOutputPointerResult:
+    """Update {base_dir}/{target_name}/latest to point at the current operation.
+
+    The preferred pointer is a relative symlink named "latest". When symlinks
+    are unavailable, fall back to a regular text file containing the absolute
+    operation directory path. Existing directories are preserved.
+    """
+    target_dir = get_output_path(target_name, "", "", base_dir)
+    operation_dir = get_output_path(target_name, operation_id, "", base_dir)
+    latest_path = os.path.join(target_dir, "latest")
+    operation_path = os.path.abspath(operation_dir)
+
+    try:
+        os.makedirs(operation_dir, exist_ok=True)
+    except OSError as exc:
+        return LatestOutputPointerResult(
+            success=False,
+            mode="failed",
+            pointer_path=latest_path,
+            operation_path=operation_path,
+            message=f"Could not create operation directory: {exc}",
+        )
+
+    try:
+        if os.path.lexists(latest_path):
+            if os.path.islink(latest_path) or os.path.isfile(latest_path):
+                os.unlink(latest_path)
+            else:
+                return LatestOutputPointerResult(
+                    success=False,
+                    mode="skipped",
+                    pointer_path=latest_path,
+                    operation_path=operation_path,
+                    message="latest exists and is not a symlink or regular file",
+                )
+
+        os.symlink(operation_id, latest_path)
+        return LatestOutputPointerResult(
+            success=True,
+            mode="symlink",
+            pointer_path=latest_path,
+            operation_path=operation_path,
+            message=f"latest -> {operation_id}",
+        )
+    except OSError as symlink_exc:
+        try:
+            with open(latest_path, "w", encoding="utf-8") as latest_file:
+                latest_file.write(operation_path + "\n")
+            return LatestOutputPointerResult(
+                success=True,
+                mode="file",
+                pointer_path=latest_path,
+                operation_path=operation_path,
+                message=f"latest fallback file written after symlink failure: {symlink_exc}",
+            )
+        except OSError as file_exc:
+            return LatestOutputPointerResult(
+                success=False,
+                mode="failed",
+                pointer_path=latest_path,
+                operation_path=operation_path,
+                message=f"Could not update latest pointer: {file_exc}",
+            )
 
 
 # ANSI color codes for terminal output
