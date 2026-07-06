@@ -326,6 +326,12 @@ def test_generate_security_report_emits_indexed_report_progress(
     assert all(event["operation_stage"] == "final_report" for event in progress_events)
     assert progress_events[1]["report_step_label"] == "Finding: High Finding"
     assert progress_events[3]["report_step_label"] == "Observation: Useful Observation"
+    callback_handler.set_report_items.assert_called_once_with(mock_build_sections.return_value["raw_evidence"])
+    assert callback_handler.mark_report_step_started.call_count == 5
+    assert all(
+        call.kwargs.get("callback_handler") is not callback_handler
+        for call in mock_report_gen.create_report_agent.call_args_list
+    )
 
 @patch("modules.handlers.report_generator.ReportGenerator")
 @patch("modules.handlers.report_generator.get_output_path")

@@ -13,6 +13,7 @@
 
 ### Fixes
 
+- Reserve estimated final-report token and cost budget during assessment so constrained runs stop early enough to generate reports.
 - Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.
 - Update the React footer connection indicator from deployment detection and color the status icon.
 - Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.

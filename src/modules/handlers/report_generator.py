@@ -66,6 +66,8 @@ def _emit_report_progress(
         return
 
     try:
+        if hasattr(callback_handler, "mark_report_step_started"):
+            callback_handler.mark_report_step_started()
         callback_handler.emit_ui_event(
             {
                 "type": "progress_update",
@@ -80,6 +82,33 @@ def _emit_report_progress(
         )
     except Exception:
         logger.debug("Unable to emit report progress event", exc_info=True)
+
+
+class _ReportMetricsCallback:
+    """Record report-agent metrics without streaming report-agent internals to the UI."""
+
+    def __init__(self, callback_handler: Any) -> None:
+        self.callback_handler = callback_handler
+
+    def __call__(self, **kwargs: Any) -> None:
+        handler = self.callback_handler
+        if not handler or not hasattr(handler, "record_report_metrics"):
+            return
+
+        try:
+            event_loop_metrics = kwargs.get("event_loop_metrics")
+            agent_result = kwargs.get("result")
+            if agent_result and hasattr(agent_result, "metrics"):
+                event_loop_metrics = agent_result.metrics
+            agent = kwargs.get("agent")
+            if event_loop_metrics:
+                handler.record_report_metrics(event_loop_metrics, agent=agent)
+            elif agent and hasattr(agent, "event_loop_metrics"):
+                usage = agent.event_loop_metrics.accumulated_usage
+                if usage:
+                    handler.record_report_metrics(agent.event_loop_metrics, agent=agent)
+        except Exception:
+            logger.debug("Unable to record report-agent metrics", exc_info=True)
 
 def generate_security_report(
     target: str,
@@ -189,6 +218,12 @@ def generate_security_report(
 
         report_parts_files = []
         raw_findings = sections.get("raw_evidence", [])
+        if callback_handler and hasattr(callback_handler, "set_report_items"):
+            try:
+                callback_handler.set_report_items(raw_findings)
+            except Exception:
+                logger.debug("Unable to set exact report item counts", exc_info=True)
+        report_metrics_callback = _ReportMetricsCallback(callback_handler)
         report_findings = [
             (i, finding)
             for i, finding in enumerate(raw_findings)
@@ -209,6 +244,7 @@ def generate_security_report(
             model_id=model_id,
             operation_id=operation_id,
             target=target,
+            callback_handler=report_metrics_callback,
             system_prompt=get_report_executive_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_executive_system_prompt
         )
         
@@ -261,6 +297,7 @@ Use the following data:
                 model_id=model_id,
                 operation_id=operation_id,
                 target=target,
+                callback_handler=report_metrics_callback,
                 system_prompt=get_report_finding_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_finding_system_prompt
             )
             
@@ -305,6 +342,7 @@ Finding Data:
                 model_id=model_id,
                 operation_id=operation_id,
                 target=target,
+                callback_handler=report_metrics_callback,
                 system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_observation_system_prompt
             )
 
@@ -347,6 +385,7 @@ Observation Data:
             model_id=model_id,
             operation_id=operation_id,
             target=target,
+            callback_handler=report_metrics_callback,
             system_prompt=get_report_appendix_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_appendix_system_prompt
         )
 

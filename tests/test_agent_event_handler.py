@@ -1,4 +1,5 @@
 import json
+import math
 import threading
 import time
 from collections import OrderedDict
@@ -8,7 +9,7 @@ from unittest.mock import Mock, MagicMock
 import pytest
 
 from modules.handlers.react import agent_event_handler as rb
-from modules.handlers.react.agent_event_handler import OperationEventCoordinator, AgentEventHandler
+from modules.handlers.react.agent_event_handler import OperationEventCoordinator, AgentEventHandler, ReportBudgetEstimate
 
 
 def make_handler():
@@ -19,6 +20,7 @@ def make_handler():
     handler._state_lock = threading.RLock()
     handler._emit_lock = threading.RLock()
     handler.operation_id = "OP_TEST"
+    handler.agent_run_id = "test-agent-1"
     handler.coordinator = OperationEventCoordinator(operation_id="unittest", emitter=MagicMock())
     handler.emit_operation_init = True
     handler.start_metrics_thread = False
@@ -56,6 +58,7 @@ def make_handler():
     handler._budget_limit_reached = False
     handler._budget_limit_reason = None
     handler._report_generated = False
+    handler._report_generation_active = False
     handler._termination_emitted = False
     handler._termination_reason = None
     handler._python_preview_emitted = set()
@@ -90,6 +93,62 @@ def make_handler():
 
 def event_types(handler):
     return [event["type"] for event in handler._events]
+
+
+def test_report_budget_estimator_zero_evidence_and_pricing_fallback(monkeypatch):
+    monkeypatch.setattr(rb, "get_config_manager", Mock(side_effect=RuntimeError("no config")))
+    coordinator = OperationEventCoordinator("OP_EST", MagicMock())
+
+    estimate = coordinator.report_budget_estimate(
+        provider_id="litellm",
+        model_id="test-model",
+        models_client=None,
+        pricing_fallback={"input": 1.0, "output": 2.0},
+    )
+
+    assert estimate.input_tokens == 5405
+    assert estimate.output_tokens == 3105
+    assert estimate.total_tokens == 8510
+    assert estimate.cost == pytest.approx((5405 + (3105 * 2)) / 1_000_000)
+    assert estimate.findings == 0
+    assert estimate.observations == 0
+    assert estimate.remaining_steps == 2
+
+
+def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
+    monkeypatch.setattr(rb, "token_calc", lambda chars, model_id=None: int(chars))
+    coordinator = OperationEventCoordinator("OP_EST_ITEMS", MagicMock())
+
+    coordinator.record_memory(evidence=True, category="finding", content_length=100)
+    coordinator.record_memory(evidence=True, category="observation", content_length=40)
+    coordinator.record_memory(evidence=True, category="observation", severity="HIGH", content_length=25)
+
+    estimate = coordinator.report_budget_estimate(
+        provider_id="litellm",
+        model_id="test-model",
+        pricing_fallback={"input": 0.0, "output": 0.0},
+    )
+
+    assert estimate.findings == 2
+    assert estimate.observations == 1
+    assert estimate.input_tokens == math.ceil((2500 + 1900 + 1825 + 1440 + 2200) * 1.15)
+    assert estimate.output_tokens == math.ceil((1500 + 1800 + 1800 + 900 + 1200) * 1.15)
+    assert estimate.remaining_steps == 5
+
+    coordinator.set_report_items(
+        [
+            {"category": "finding", "severity": "MEDIUM", "content": "a" * 10},
+            {"category": "discovery", "severity": "INFO", "content": "b" * 20},
+        ],
+        model_id="test-model",
+    )
+    coordinator.mark_report_step_started()
+    tightened = coordinator.report_budget_estimate(provider_id="litellm", model_id="test-model")
+
+    assert tightened.findings == 1
+    assert tightened.observations == 1
+    assert tightened.remaining_steps == 3
+    assert tightened.input_tokens == math.ceil((1810 + 1420 + 2200) * 1.15)
 
 
 def test_reasoning_termination_metrics_and_basic_helpers():
@@ -204,6 +263,26 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert handler.memory_ops == 1
     assert handler.evidence_count == 1
     assert handler._stop_tool_used is True
+
+
+def test_mem0_store_success_updates_report_estimate_without_memory_reads(monkeypatch):
+    handler = make_handler()
+    monkeypatch.setattr(rb, "token_calc", lambda chars, model_id=None: int(chars))
+
+    handler.tool_name_buffer["high_obs"] = "mem0_store"
+    handler.tool_input_buffer["high_obs"] = {
+        "content": "x" * 37,
+        "metadata": {"category": "observation", "severity": "HIGH"},
+    }
+    handler._process_tool_result_from_message(
+        {"toolUseId": "high_obs", "status": "success", "content": [{"text": "stored"}]}
+    )
+
+    assert handler.memory_ops == 1
+    assert handler.evidence_count == 1
+    assert handler.coordinator.report_findings == 1
+    assert handler.coordinator.report_observations == 0
+    assert handler.coordinator.report_finding_content_tokens == 37
 
 
 def test_python_repl_preview_and_empty_result_paths(monkeypatch):
@@ -366,13 +445,14 @@ def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
 
     assert progress_event["agent_name"] == "validation_specialist"
     assert progress_event["duration"] == "5m 0s"
-    assert progress_event["progressPercent"] == 50
+    assert progress_event["progressPercent"] == 869
     assert metrics_event["metrics"]["inputTokens"] == 125
     assert metrics_event["metrics"]["outputTokens"] == 60
     assert metrics_event["metrics"]["totalTokens"] == 185
     assert metrics_event["metrics"]["cost"] == pytest.approx(0.000245)
     assert metrics_event["metrics"]["duration"] == "5m 0s"
-    assert metrics_event["metrics"]["progressPercent"] == 50
+    assert metrics_event["metrics"]["progressPercent"] == 869
+    assert metrics_event["metrics"]["reportEstimate"]["totalTokens"] == 8510
 
 
 def test_constructor_emits_init_and_metrics(monkeypatch):
@@ -417,6 +497,54 @@ def test_budget_minutes_progress_and_internal_step_tracking(monkeypatch):
     progress_event = [event for event in handler._events if event["type"] == "progress_update"][-1]
     assert progress_event["step"] == 7
     assert progress_event["progressPercent"] == handler.get_budget_progress()
+
+
+def test_budget_progress_and_stop_include_report_reservation_for_tokens_and_cost(monkeypatch):
+    handler = make_handler()
+    handler.budget_max_duration = 0
+    handler.budget_max_tokens = 100
+    handler.budget_max_cost = None
+    handler.sdk_input_tokens = 45
+    handler.sdk_output_tokens = 5
+    monkeypatch.setattr(
+        handler,
+        "_report_budget_estimate",
+        lambda: ReportBudgetEstimate(input_tokens=55, output_tokens=0, total_tokens=55, cost=0.0),
+    )
+
+    assert handler.get_budget_progress() == 105
+    assert handler.should_stop() is True
+    assert handler._budget_limit_reason == "tokens"
+
+    handler = make_handler()
+    handler.budget_max_duration = 0
+    handler.budget_max_tokens = None
+    handler.budget_max_cost = 0.001
+    handler._aggregate_cost = 0.0004
+    monkeypatch.setattr(
+        handler,
+        "_report_budget_estimate",
+        lambda: ReportBudgetEstimate(input_tokens=0, output_tokens=0, total_tokens=0, cost=0.0007),
+    )
+
+    assert handler.get_budget_progress() == 110
+    assert handler.should_stop() is True
+    assert handler._budget_limit_reason == "cost"
+
+
+def test_report_generation_active_disables_budget_stop_checks():
+    handler = make_handler()
+    handler.budget_max_duration = 1
+    handler.budget_max_tokens = 1
+    handler.budget_max_cost = 0.000001
+    handler.start_time = time.time() - 120
+    handler.sdk_input_tokens = 10
+    handler._aggregate_cost = 1.0
+    handler._budget_limit_reached = True
+    handler._report_generation_active = True
+
+    assert handler.should_stop() is False
+    assert handler.has_reached_limit() is True
 
 
 def test_metrics_aggregate_multiple_agents_with_lru_eviction(monkeypatch):
