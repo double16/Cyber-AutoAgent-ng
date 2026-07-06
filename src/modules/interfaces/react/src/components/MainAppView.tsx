@@ -288,6 +288,8 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
             onInput={onInput}
             disabled={!isTerminalInteractive && !appState.userHandoffActive}
             userHandoffActive={appState.userHandoffActive}
+            commandHistory={appState.commandHistory}
+            onCommandHistoryPush={actions.pushCommandHistory}
           />
         )}
         

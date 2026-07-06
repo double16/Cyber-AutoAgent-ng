@@ -10,6 +10,7 @@ import { useReducer, useRef, useCallback, useEffect, useMemo } from 'react';
 import { Operation } from '../services/OperationManager.js';
 import { useDebouncedState } from './useDebouncedState.js';
 import { ExecutionService } from '../services/ExecutionService.js';
+import { appendCommandHistory, loadCommandHistory } from '../utils/commandHistory.js';
 
 // State shape definition
 export interface ApplicationState {
@@ -43,6 +44,7 @@ export interface ApplicationState {
   
   // Recent activity  
   recentTargets: string[];
+  commandHistory: string[];
   
   // Terminal dimensions
   terminalDisplayHeight: number;
@@ -74,6 +76,7 @@ export enum ActionType {
   
   // Target management
   ADD_RECENT_TARGET = 'ADD_RECENT_TARGET',
+  PUSH_COMMAND_HISTORY = 'PUSH_COMMAND_HISTORY',
   
   // Error handling
   INCREMENT_ERROR_COUNT = 'INCREMENT_ERROR_COUNT',
@@ -104,6 +107,7 @@ type Action =
   | { type: ActionType.UPDATE_METRICS; payload: any }
   | { type: ActionType.SET_EXECUTION_SERVICE; payload: ExecutionService | null }
   | { type: ActionType.ADD_RECENT_TARGET; payload: string }
+  | { type: ActionType.PUSH_COMMAND_HISTORY; payload: string[] }
   | { type: ActionType.INCREMENT_ERROR_COUNT }
   | { type: ActionType.RESET_ERROR_COUNT }
   | { type: ActionType.SET_DOCKER_AVAILABLE; payload: boolean }
@@ -183,6 +187,9 @@ function applicationReducer(state: ApplicationState, action: Action): Applicatio
     case ActionType.ADD_RECENT_TARGET:
       const targets = [action.payload, ...state.recentTargets.filter(t => t !== action.payload)];
       return { ...state, recentTargets: targets.slice(0, 5) };
+
+    case ActionType.PUSH_COMMAND_HISTORY:
+      return { ...state, commandHistory: action.payload };
       
     case ActionType.INCREMENT_ERROR_COUNT:
       return { ...state, sessionErrorCount: state.sessionErrorCount + 1 };
@@ -227,6 +234,7 @@ function getInitialState(): ApplicationState {
     operationMetrics: null,
     executionService: null,
     recentTargets: [],
+    commandHistory: loadCommandHistory(),
     terminalDisplayHeight: process.stdout.rows || 24,
     terminalDisplayWidth: process.stdout.columns || 80,
   };
@@ -250,6 +258,7 @@ function getInitialState(): ApplicationState {
  */
 export function useApplicationState() {
   const [state, dispatch] = useReducer(applicationReducer, getInitialState());
+  const commandHistoryRef = useRef<string[]>(state.commandHistory);
   
   const [debouncedMetrics, setDebouncedMetrics, flushMetrics] = useDebouncedState(null, 50);
   const [debouncedContextUsage, setDebouncedContextUsage, flushContextUsage] = useDebouncedState(0, 50);
@@ -347,6 +356,12 @@ export function useApplicationState() {
   const addRecentTarget = (target: string) => {
     dispatch({ type: ActionType.ADD_RECENT_TARGET, payload: target });
   };
+
+  const pushCommandHistory = (command: string) => {
+    const nextHistory = appendCommandHistory(commandHistoryRef.current, command);
+    commandHistoryRef.current = nextHistory;
+    dispatch({ type: ActionType.PUSH_COMMAND_HISTORY, payload: nextHistory });
+  };
   
   const incrementErrorCount = () => {
     dispatch({ type: ActionType.INCREMENT_ERROR_COUNT });
@@ -392,6 +407,7 @@ export function useApplicationState() {
     setUserHandoff,
     updateMetrics,
     addRecentTarget,
+    pushCommandHistory,
     incrementErrorCount,
     resetErrorCount,
     setDockerAvailable,
@@ -403,7 +419,7 @@ export function useApplicationState() {
     setTerminalVisible, refreshStatic, refreshStaticImmediate, setStaticNeedsRefresh, updateTerminalSize,
     setHasCompletedOperation, clearCompletedOperation,
     setActiveOperation, updateOperation, setUserHandoff, updateMetrics,
-    addRecentTarget, incrementErrorCount, resetErrorCount, setDockerAvailable, 
+    addRecentTarget, pushCommandHistory, incrementErrorCount, resetErrorCount, setDockerAvailable, 
     updateContextUsage, setExecutionService, registerCleanup
   ]);
   
