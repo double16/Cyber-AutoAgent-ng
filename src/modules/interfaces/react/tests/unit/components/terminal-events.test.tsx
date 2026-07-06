@@ -167,6 +167,101 @@ describe('Terminal event processing', () => {
         expect(textFromTree(view.toJSON())).toBe('');
     });
 
+    it('shows an initial thinking spinner before backend events arrive', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-initial-spinner"
+                    terminalWidth={90}
+                    animationsEnabled
+                />
+            );
+            await Promise.resolve();
+        });
+        act(() => {
+            jest.advanceTimersByTime(25);
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('spinner:dots');
+        expect(text).toContain('Initializing');
+        expect(text).not.toMatch(/^\n+/);
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
+    it('keeps the thinking spinner visible after metrics and progress updates', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-spinner"
+                    terminalWidth={90}
+                    animationsEnabled
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'operation_init', operation_id: 'run-spinner', target: 'example.com'});
+            service.emit('event', {type: 'metrics_update', metrics: {duration: 1, progressPercent: 2}});
+            service.emit('event', {type: 'progress_update', step: 1, progressPercent: 5});
+            jest.advanceTimersByTime(50);
+            await Promise.resolve();
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('spinner:dots');
+        expect(text).toContain('\nspinner:dots');
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
+    it('keeps task title context in the thinking spinner', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-task-spinner"
+                    terminalWidth={90}
+                    animationsEnabled
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'task_started', title: 'Enumerate target'});
+            service.emit('event', {type: 'progress_update', step: 1, progressPercent: 5});
+            jest.advanceTimersByTime(50);
+            await Promise.resolve();
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('spinner:dots');
+        expect(text).toContain('Enumerate target');
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
     it('processes uncommon event transitions without duplicating or crashing', async () => {
         const {Terminal} = await load();
         const service = new MockExecutionService();
@@ -224,6 +319,22 @@ describe('Terminal event processing', () => {
             service.emit('event', {type: 'output', content: 'Report saved to: /tmp/report.md'});
             service.emit('event', {type: 'output', content: '# SECURITY ASSESSMENT REPORT\nBody'});
             service.emit('event', {type: 'progress_update', step: 'FINAL REPORT'});
+            service.emit('event', {
+                type: 'progress_update',
+                step: 'REPORT_AGENT',
+                operation_stage: 'final_report',
+                report_step_index: 1,
+                report_step_total: 2,
+                report_step_label: 'Executive summary',
+            });
+            service.emit('event', {
+                type: 'progress_update',
+                step: 'REPORT_AGENT',
+                operation_stage: 'final_report',
+                report_step_index: 2,
+                report_step_total: 2,
+                report_step_label: 'Assessment methodology',
+            });
             service.emit('event', {type: 'report_content', content: '# SECURITY ASSESSMENT REPORT\nFinal body'});
             service.emit('event', {type: 'assessment_complete', success: false});
             service.emit('event', {type: 'termination_reason', reason: 'user_stopped', message: 'Stopped'});
@@ -236,6 +347,10 @@ describe('Terminal event processing', () => {
         const text = textFromTree(view.toJSON());
         expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({type: 'operation_init'}));
         expect(text).toContain('SECURITY ASSESSMENT REPORT');
+        expect(text).toContain('[FINAL REPORT 1/2] Executive summary');
+        expect(text).toContain('[FINAL REPORT 2/2] Assessment methodology');
+        expect((text.match(/\[FINAL REPORT 1\/2\] Executive summary/g) || []).length).toBe(1);
+        expect((text.match(/\[FINAL REPORT 2\/2\] Assessment methodology/g) || []).length).toBe(1);
         expect(text).toContain('TERMINATED: Stopped');
 
         act(() => {

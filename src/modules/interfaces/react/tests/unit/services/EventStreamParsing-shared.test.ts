@@ -30,6 +30,27 @@ describe('shared cyber event stream parsing behavior', () => {
   });
 
   it.each([
+    ['DirectDockerService', () => new DirectDockerService(), 'parseEvents'],
+    ['PythonExecutionService', () => new PythonExecutionService(), 'processOutputStream'],
+  ])('%s marks synthetic tool_start output for UI suppression', (_name, createService, method) => {
+    const service: any = createService();
+    const emitted = captureEvents(service);
+
+    service[method](wrapEvent({ type: 'tool_start', tool_name: 'shell', tool_input: { command: 'id' }, timestamp: 1 }));
+
+    expect(emitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'output',
+        metadata: expect.objectContaining({ syntheticToolStart: true }),
+      }),
+      expect.objectContaining({
+        type: 'tool_start',
+        tool_name: 'shell',
+      }),
+    ]));
+  });
+
+  it.each([
     ['DirectDockerService', () => new DirectDockerService(), 'parseEvents', 'python_repl'],
     ['PythonExecutionService', () => new PythonExecutionService(), 'processOutputStream', 'shell'],
   ])('%s does not flush buffered raw output again after backend tool output', (_name, createService, method, toolName) => {

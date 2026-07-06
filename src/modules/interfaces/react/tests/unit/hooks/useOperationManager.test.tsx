@@ -143,6 +143,8 @@ describe('useOperationManager', () => {
     currentModule = 'web';
     availableModules = { web: {}, api: {} };
     config = { deploymentMode: 'local-cli', modelProvider: 'openai', modelId: 'gpt-4o' };
+    delete process.env.CYBER_MAX_OPERATION_HISTORY_ENTRIES;
+    delete process.env.CYBER_MAX_OPERATION_HISTORY_CONTENT_CHARS;
     jest.clearAllMocks();
     executionService.removeAllListeners();
   });
@@ -337,6 +339,38 @@ describe('useOperationManager', () => {
       expect.objectContaining({ type: 'error', content: expect.stringContaining('Timed out stopping execution') }),
       expect.objectContaining({ type: 'info', content: 'Operation terminated. Start a new assessment or review partial results.' }),
     ]));
+
+    hook.unmount();
+  });
+
+  it('bounds operation history entries and truncates large history content', async () => {
+    process.env.CYBER_MAX_OPERATION_HISTORY_ENTRIES = '21';
+    process.env.CYBER_MAX_OPERATION_HISTORY_CONTENT_CHARS = '1001';
+
+    const { useOperationManager } = await loadHook();
+    const actions = createActions();
+    const hook = renderHook(() => useOperationManager({
+      appState: {
+        activeOperation: null,
+        executionService: null,
+        userHandoffActive: false,
+      } as any,
+      actions,
+      applicationConfig: { modelId: 'gpt-4o' },
+    }));
+
+    act(() => {
+      for (let index = 0; index < 25; index += 1) {
+        hook.current.addOperationHistoryEntry('info', `entry-${index}-${'x'.repeat(1200)}`, operation as any);
+      }
+      jest.advanceTimersByTime(150);
+    });
+
+    expect(hook.current.operationHistoryEntries).toHaveLength(21);
+    expect(hook.current.operationHistoryEntries[0].content).toContain('entry-4');
+    expect(hook.current.operationHistoryEntries.at(-1)?.content).toContain('entry-24');
+    expect(hook.current.operationHistoryEntries.at(-1)?.content).toContain('history entry truncated');
+    expect(hook.current.operationHistoryEntries.at(-1)).not.toHaveProperty('operation');
 
     hook.unmount();
   });

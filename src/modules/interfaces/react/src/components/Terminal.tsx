@@ -74,7 +74,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       }
     } catch {}
   };
-// Direct event rendering without Static component
+  // Completed history uses append-style Static rendering; live events stay dynamic.
   // Limit event buffer to prevent memory leaks - events are already persisted to disk
   // Use stricter defaults for docker-stack (full-stack) mode
   const serviceMode = (executionService && typeof (executionService as any).getMode === 'function')
@@ -82,6 +82,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     : undefined;
   const isDockerStack = serviceMode === 'docker-stack';
   const MAX_EVENTS = Number(process.env.CYBER_MAX_EVENTS || (isDockerStack ? 2000 : 3000)); // Keep last N events
+  const MAX_FINAL_REPORT_EVENTS = Number(process.env.CYBER_MAX_FINAL_REPORT_EVENTS || 300);
+  const MAX_GLOBAL_OUTPUT_FINGERPRINTS = Number(process.env.CYBER_MAX_GLOBAL_OUTPUT_FINGERPRINTS || 5000);
+  const MAX_TOOL_OUTPUT_FINGERPRINTS = Number(process.env.CYBER_MAX_TOOL_OUTPUT_FINGERPRINTS || 1000);
+  const MAX_TOOL_DEDUPE_SESSIONS = Number(process.env.CYBER_MAX_TOOL_DEDUPE_SESSIONS || 100);
+  const MAX_OPERATION_SUMMARY_EVENTS = Number(process.env.CYBER_MAX_OPERATION_SUMMARY_EVENTS || 20);
   const [completedEvents, setCompletedEvents] = useState<DisplayStreamEvent[]>([]);
   const [activeEvents, setActiveEvents] = useState<DisplayStreamEvent[]>([]);
   // Dedicated buffer for FINAL REPORT and its inline preview, rendered via a
@@ -131,6 +136,12 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     }
   ));
   const activeBufRef = useRef(new RingBuffer<DisplayStreamEvent>(Math.min(200, Math.floor(MAX_EVENTS / 5))));
+  const appendFinalReportEvent = useCallback((event: DisplayStreamEvent) => {
+    setFinalReportEvents(prev => {
+      const next = [...(prev ?? []), event];
+      return next.length > MAX_FINAL_REPORT_EVENTS ? next.slice(-MAX_FINAL_REPORT_EVENTS) : next;
+    });
+  }, [MAX_FINAL_REPORT_EVENTS]);
   const [metrics, setMetrics] = useState({
     tokens: 0,
     cost: 0,
@@ -143,6 +154,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   // Deduplication state: track seen output fingerprints per tool session and globally
   const perToolOutputSeenRef = useRef<Map<string, Set<string>>>(new Map());
   const globalOutputSeenRef = useRef<Set<string>>(new Set());
+  const globalOutputSeenOrderRef = useRef<string[]>([]);
   
   // Throttle state for metrics emissions to parent
   const lastEmitRef = useRef<number>(0);
@@ -157,10 +169,52 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   // Keep a ref in sync with activeThinking to avoid setState race conditions
   const activeThinkingRef = useRef(false);
   useEffect(() => { activeThinkingRef.current = activeThinking; }, [activeThinking]);
+  const setThinkingActive = useCallback((value: boolean, context?: string, message?: string) => {
+    activeThinkingRef.current = value;
+    setActiveThinking(value);
+  }, []);
   const [activeReasoning, setActiveReasoning] = useState(false);
-  const [currentToolId, setCurrentToolId] = useState<string | undefined>(undefined);
-  const [lastOutputContent, setLastOutputContent] = useState('');
-  const [lastOutputTime, setLastOutputTime] = useState(0);
+  const currentToolIdRef = useRef<string | undefined>(undefined);
+  const setCurrentToolId = (toolId: string | undefined) => {
+    currentToolIdRef.current = toolId;
+  };
+  const lastOutputContentRef = useRef('');
+  const lastOutputTimeRef = useRef(0);
+
+  const rememberGlobalOutputFingerprint = (fingerprint: string): boolean => {
+    if (globalOutputSeenRef.current.has(fingerprint)) {
+      return true;
+    }
+    globalOutputSeenRef.current.add(fingerprint);
+    globalOutputSeenOrderRef.current.push(fingerprint);
+    while (globalOutputSeenOrderRef.current.length > MAX_GLOBAL_OUTPUT_FINGERPRINTS) {
+      const oldest = globalOutputSeenOrderRef.current.shift();
+      if (oldest) globalOutputSeenRef.current.delete(oldest);
+    }
+    return false;
+  };
+
+  const rememberToolOutputFingerprint = (toolId: string, fingerprint: string): boolean => {
+    let seenForTool = perToolOutputSeenRef.current.get(toolId);
+    if (!seenForTool) {
+      seenForTool = new Set();
+      perToolOutputSeenRef.current.set(toolId, seenForTool);
+    }
+    if (seenForTool.has(fingerprint)) {
+      return true;
+    }
+    seenForTool.add(fingerprint);
+    if (seenForTool.size > MAX_TOOL_OUTPUT_FINGERPRINTS) {
+      seenForTool.clear();
+      seenForTool.add(fingerprint);
+    }
+    while (perToolOutputSeenRef.current.size > MAX_TOOL_DEDUPE_SESSIONS) {
+      const oldestKey = perToolOutputSeenRef.current.keys().next().value;
+      if (!oldestKey) break;
+      perToolOutputSeenRef.current.delete(oldestKey);
+    }
+    return false;
+  };
 
   // Per-step aggregated output (to display a single 'output' block per step)
   const stepAggRef = useRef<{ step?: number | null; head: string; tail: string; omitted: number } | null>({ step: null, head: '', tail: '', omitted: 0 });
@@ -258,6 +312,46 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     }, ACTIVE_EMIT_INTERVAL_MS);
   };
 
+  function activateThinking(
+    context: string = 'tool_execution',
+    message?: string,
+    extra: Partial<DisplayStreamEvent> = {},
+    immediate = false
+  ) {
+    setThinkingActive(true, context, message);
+    const thinkingEvent = {
+      type: 'thinking',
+      context,
+      startTime: Date.now(),
+      ...(message ? { message } : {}),
+      ...extra,
+    } as DisplayStreamEvent;
+
+    const updateActiveTail = () => {
+      const existing = activeBufRef.current.toArray().filter(e => e.type !== 'thinking' && e.type !== 'thinking_end');
+      activeBufRef.current.clear();
+      activeBufRef.current.push(thinkingEvent);
+      for (const event of existing) activeBufRef.current.push(event);
+      return activeBufRef.current.toArray();
+    };
+
+    if (immediate) {
+      setActiveEvents(updateActiveTail());
+    } else {
+      setActiveThrottled(updateActiveTail);
+    }
+  }
+
+  function deactivateThinking() {
+    setThinkingActive(false);
+    setActiveThrottled(() => {
+      const existing = activeBufRef.current.toArray().filter(e => e.type !== 'thinking' && e.type !== 'thinking_end');
+      activeBufRef.current.clear();
+      for (const event of existing) activeBufRef.current.push(event);
+      return activeBufRef.current.toArray();
+    });
+  }
+
   // Batch completed events updates to prevent memory churn
   const completedUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
   const scheduleCompletedEventsUpdate = () => {
@@ -304,16 +398,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     const delay = Math.max(0, opts?.delay ?? 100);
     emitTestMarker && emitTestMarker(`scheduleDelayedThinking request ctx=${opts?.context || 'tool_execution'} delay=${delay}`);
     delayedThinkingTimerRef.current = setTimeout(() => {
-      // If a thinking spinner is already active AND visible in the active tail, do not schedule another
-      const activeHasThinking = (() => {
-        try {
-          const arr = activeBufRef.current.toArray();
-          return arr.some(e => e && (e as any).type === 'thinking');
-        } catch {
-          return false;
-        }
-      })();
-      if (activeThinkingRef.current && activeHasThinking) {
+      if (activeThinkingRef.current) {
         emitTestMarker && emitTestMarker('scheduleDelayedThinking skipped (already visible)');
         delayedThinkingTimerRef.current = null;
         return;
@@ -326,30 +411,14 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         scheduleCompletedEventsUpdate();
       }
 
-      const thinkingEvent: DisplayStreamEvent = {
-        type: 'thinking',
-        context: opts?.context || 'tool_execution',
-        startTime: Date.now(),
+      const thinkingContext = opts?.context || 'tool_execution';
+      activateThinking(thinkingContext, undefined, {
         ...(opts?.toolName ? { toolName: opts.toolName } : {}),
-        ...(opts?.toolCategory ? { toolCategory: opts.toolCategory } : {})
-      } as DisplayStreamEvent;
-
-      // Mark spinner active so backend 'thinking' doesn't duplicate it
-      setActiveThinking(true);
+        ...(opts?.toolCategory ? { toolCategory: opts.toolCategory } : {}),
+      });
       seenThinkingThisPhaseRef.current = true;
 
-      // Remove any existing thinking before adding a new one, but preserve
-      // existing active tail content (e.g., aggregated tool output) to avoid flicker.
-      // Insert thinking at the FRONT so the spinner is visible above output.
-      setActiveThrottled(() => {
-        const existing = activeBufRef.current.toArray().filter(e => e.type !== 'thinking');
-        activeBufRef.current.clear();
-        activeBufRef.current.push(thinkingEvent);
-        for (const e of existing) activeBufRef.current.push(e);
-        return activeBufRef.current.toArray();
-      });
-
-      emitTestMarker && emitTestMarker(`scheduleDelayedThinking fired ctx=${(thinkingEvent as any).context}`);
+      emitTestMarker && emitTestMarker(`scheduleDelayedThinking fired ctx=${thinkingContext}`);
       delayedThinkingTimerRef.current = null;
     }, delay) as unknown as NodeJS.Timeout;
   };
@@ -372,14 +441,16 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     suppressTerminationBannerRef.current = false;
     lastReasoningTextRef.current = null;
     finalReportActiveRef.current = false;
+    hasSeenOperationActivityRef.current = false;
     setFinalReportEvents(null);
     perToolOutputSeenRef.current.clear();
     globalOutputSeenRef.current.clear();
+    globalOutputSeenOrderRef.current = [];
     setCurrentToolId(undefined);
-    setActiveThinking(false);
+    setThinkingActive(false);
     setActiveReasoning(false);
-    setLastOutputContent('');
-    setLastOutputTime(0);
+    lastOutputContentRef.current = '';
+    lastOutputTimeRef.current = 0;
     pendingMetricsRef.current = null;
     lastMetricsTsRef.current = 0;
     lastEmitRef.current = 0;
@@ -393,7 +464,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     setStaticSessionKey(prev => prev + 1);
     scheduleCompletedEventsUpdate();
     setActiveEvents(activeBufRef.current.toArray());
-  }, [cancelDelayedThinking, setActiveEvents, setCompletedEvents, setActiveThinking, setActiveReasoning, setStaticSessionKey]);
+  }, [cancelDelayedThinking, setActiveEvents, setCompletedEvents, setThinkingActive, setActiveReasoning, setStaticSessionKey]);
   
   // Constants for event processing
   const COMMAND_BUFFER_MS = 100;
@@ -476,7 +547,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     if (collapsed) return;
     // Only schedule if no spinner is active AND no events have rendered yet
     if (!activeThinkingRef.current && !activeReasoning && activeEvents.length === 0 && completedEvents.length === 0) {
-      scheduleDelayedThinking({ delay: 150, context: 'startup', addSpacer: false });
+      cancelDelayedThinking();
+      activateThinking('startup', undefined, { compact: true }, true);
+      seenThinkingThisPhaseRef.current = true;
     }
     // Cleanup is handled by the main effect's cleanup and cancelDelayedThinking()
     // to avoid duplicate timers and ensure consistent teardown.
@@ -515,6 +588,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   // Track operation metadata for synthetic headers
   const operationIdRef = useRef<string | undefined>(undefined);
   const targetRef = useRef<string | undefined>(undefined);
+  const hasSeenOperationActivityRef = useRef<boolean>(false);
   const lastPushedTypeRef = useRef<string | null>(null);
   const firstHeaderSeenRef = useRef<boolean>(false);
   // Buffer for operation summary lines (paths) so we can show them after report preview/content
@@ -571,9 +645,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     
     switch (event.type) {
       case 'operation_init':
+        hasSeenOperationActivityRef.current = true;
         // Reset all dedup sets and internal refs at operation start
         perToolOutputSeenRef.current.clear();
         globalOutputSeenRef.current.clear();
+        globalOutputSeenOrderRef.current = [];
         pendingReasoningsRef.current = [];
         opSummaryBufferRef.current = [];
         
@@ -602,26 +678,18 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     // This ensures proper integration with the event loop and prevents race conditions
     if (animationsEnabled) {
       cancelDelayedThinking();
-      setActiveThinking(true);
+      activateThinking('waiting');
       seenThinkingThisPhaseRef.current = true;
 
-      // Immediately show urgent thinking event to bypass any delays
-      const thinkingEvent: DisplayStreamEvent = {
-        type: 'thinking',
-        context: 'waiting',
-        startTime: Date.now(),
-        urgent: true
-      } as DisplayStreamEvent;
-
-      // Push to results so it gets processed by the event loop
-      results.push(thinkingEvent);
     }
     break;
 
       case 'progress_update':
+        hasSeenOperationActivityRef.current = true;
         emitTestMarker(`progress_update step=${event.step ?? ''} progress=${event.progressPercent ?? ''}`);
         cancelDelayedThinking();
         cancelPostReasoningIdleTimer();
+        const isReportProgress = event.operation_stage === 'final_report';
         // End any active reasoning session
         setActiveReasoning(false);
         // Reset last reasoning dedupe on new step
@@ -645,7 +713,12 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           agent_type: event.agent_type,
           parent_agent_run_id: event.parent_agent_run_id,
           agent_sub_step: event.agent_sub_step,
-          agent_total_actions: event.agent_total_actions
+          agent_total_actions: event.agent_total_actions,
+          operation_stage: event.operation_stage,
+          report_step_index: event.report_step_index,
+          report_step_total: event.report_step_total,
+          report_step_kind: event.report_step_kind,
+          report_step_label: event.report_step_label
         } as DisplayStreamEvent;
 
         results.push(headerEvent);
@@ -656,8 +729,12 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           finalReportActiveRef.current = true;
           setFinalReportEvents(prev => {
             const base = prev && prev.length > 0 ? prev.filter(e => e.type !== 'progress_update' || (e as any).step !== 'FINAL REPORT') : [];
-            return [...base, headerEvent];
+            const next = [...base, headerEvent];
+            return next.length > MAX_FINAL_REPORT_EVENTS ? next.slice(-MAX_FINAL_REPORT_EVENTS) : next;
           });
+        } else if (isReportProgress) {
+          finalReportActiveRef.current = true;
+          appendFinalReportEvent(headerEvent);
         }
 
         // Mark that we've seen the first header
@@ -666,28 +743,17 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
         // Show thinking spinner while waiting for tool selection after progress update
         // Always reset and show spinner regardless of previous thinking state
-        if (animationsEnabled) {
-          setActiveThinking(true);
+        if (animationsEnabled && !isReportProgress) {
+          activateThinking('tool_preparation', undefined, {}, true);
           seenThinkingThisPhaseRef.current = true;
 
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'tool_preparation',
-            startTime: Date.now(),
-            urgent: true  // Bypass throttle for immediate display
-          } as DisplayStreamEvent;
-
-          results.push(thinkingEvent);
-
-          // Update active buffer immediately to show spinner without delay
-          activeBufRef.current.clear();
-          activeBufRef.current.push(thinkingEvent);
-          setActiveEvents(activeBufRef.current.toArray());
+          // Footer owns the busy indicator; do not add spinner nodes to the stream.
         }
         break;
         
         
       case 'reasoning':
+        hasSeenOperationActivityRef.current = true;
         emitTestMarker('reasoning');
         // Any pending post-tool idle spinner is no longer needed
         cancelPostToolIdleTimer();
@@ -699,8 +765,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (event.content && event.content.trim()) {
           // Clear any active thinking animations when reasoning is shown
           if (activeThinking) {
-            results.push({ type: 'thinking_end' } as DisplayStreamEvent);
-            setActiveThinking(false);
+            deactivateThinking();
           }
           // Cancel any pending delayed thinking and mark seen
           cancelDelayedThinking();
@@ -744,22 +809,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
                   // End the visible reasoning session
                   setActiveReasoning(false);
                   if (!activeThinkingRef.current) {
-                    setActiveThinking(true);
+                    activateThinking('reasoning');
                     seenThinkingThisPhaseRef.current = true;
-
-                    // Add thinking to active buffer, preserving any existing content
-                    const thinkingEvent: DisplayStreamEvent = {
-                      type: 'thinking',
-                      context: 'reasoning',
-                      startTime: Date.now(),
-                      urgent: true  // Bypass throttle to avoid post-reasoning gaps
-                    } as DisplayStreamEvent;
-
-                    const existing = activeBufRef.current.toArray().filter(e => e.type !== 'thinking' && e.type !== 'reasoning');
-                    activeBufRef.current.clear();
-                    activeBufRef.current.push(thinkingEvent);
-                    for (const e of existing) activeBufRef.current.push(e);
-                    setActiveEvents(activeBufRef.current.toArray());  // Immediate update
                   }
                   postReasoningIdleTimerRef.current = null;
                 }, 10) as unknown as NodeJS.Timeout;
@@ -779,30 +830,15 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           seenThinkingThisPhaseRef.current = true;
           // Ensure the internal flag is set (fallback: it may already be true)
           if (!activeThinkingRef.current) {
-            setActiveThinking(true);
+            activateThinking(event.context);
           }
-          // Create thinking event with urgent flag preserved
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: event.context,
-            startTime: event.startTime || Date.now(),
-            metadata: event.metadata,
-            urgent: (event as any).urgent || false  // Preserve urgent flag for immediate rendering
-          } as DisplayStreamEvent;
-
-          // ALWAYS add to results so event loop processes it
-          // The urgent flag will trigger immediate rendering in the event loop (line 1516-1518)
-          results.push(thinkingEvent);
         }
         break;
         
       case 'thinking_end':
-        if (activeThinking) {
-          setActiveThinking(false);
-          results.push({
-            type: 'thinking_end'
-          } as DisplayStreamEvent);
-        }
+        // Keep the spinner visible until the next visible event replaces it.
+        // Some backends emit thinking_end before reasoning/tool events arrive,
+        // which otherwise leaves a blank tail during long model waits.
         break;
         
       case 'delayed_thinking_start':
@@ -812,28 +848,19 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         }
         // Handle delayed thinking start - pass through and mark as active
         if (!activeThinking && !activeReasoning) {
-          setActiveThinking(true);
-          results.push(event as DisplayStreamEvent);
+          activateThinking((event as any).context || 'tool_execution');
         }
         break;
         
       case 'tool_start':
+        hasSeenOperationActivityRef.current = true;
         emitTestMarker(`tool_start tool=${event.toolName || event.tool_name}`);
         cancelPostToolIdleTimer();
         cancelPostReasoningIdleTimer();
 
         // Keep spinner showing during tool execution, just change context
         if (!activeThinking && animationsEnabled) {
-          setActiveThinking(true);
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'tool_execution',
-            startTime: Date.now(),
-            urgent: true
-          } as DisplayStreamEvent;
-
-          results.push(thinkingEvent);
-          // Event loop will handle immediate rendering via urgent flag
+          activateThinking('tool_execution');
         }
 
         // Reset last tool output timestamp for new tool
@@ -853,7 +880,16 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Always render the tool header now that we have a deterministic id
         
         // Initialize per-tool dedup set
-        try { if (toolId) perToolOutputSeenRef.current.set(toolId, new Set()); } catch {}
+        try {
+          if (toolId) {
+            perToolOutputSeenRef.current.set(toolId, new Set());
+            while (perToolOutputSeenRef.current.size > MAX_TOOL_DEDUPE_SESSIONS) {
+              const oldestKey = perToolOutputSeenRef.current.keys().next().value;
+              if (!oldestKey) break;
+              perToolOutputSeenRef.current.delete(oldestKey);
+            }
+          }
+        } catch {}
         
         // Reset phase flags
         seenThinkingThisPhaseRef.current = false;
@@ -882,13 +918,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (!activeThinkingRef.current) {
           cancelDelayedThinking();
           
-          setActiveThinking(true);
+          activateThinking('tool_execution');
           seenThinkingThisPhaseRef.current = true;
-          results.push({
-            type: 'thinking',
-            context: 'tool_execution',
-            startTime: Date.now()
-          } as DisplayStreamEvent);
         }
         break;
         
@@ -919,6 +950,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         break;
         
       case 'tool_invocation_end':
+        hasSeenOperationActivityRef.current = true;
         // Some backends emit tool_invocation_end without a corresponding tool_end.
         // Ensure we stop any active thinking spinner and reset tool state to avoid "still running" UI.
         cancelPostToolIdleTimer();
@@ -926,24 +958,14 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Mark end of tool streaming
         lastToolOutputTsRef.current = Date.now();
         if (activeThinking) {
-          results.push({ type: 'thinking_end' } as DisplayStreamEvent);
-          setActiveThinking(false);
+          deactivateThinking();
         }
         cancelDelayedThinking();
         seenThinkingThisPhaseRef.current = false;
         setCurrentToolId(undefined);
         // Immediately show a spinner while the agent processes the tool result and prepares reasoning
         if (animationsEnabled && !activeReasoning) {
-          setActiveThinking(true);
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'waiting',
-            startTime: Date.now(),
-            urgent: true  // Bypass throttle for immediate display
-          } as DisplayStreamEvent;
-
-          results.push(thinkingEvent);
-          // Event loop will handle immediate rendering via urgent flag (no manual buffer manipulation)
+          activateThinking('waiting');
         }
         // Optionally, we do not emit a separate tool_end display item here to avoid duplicates
         break;
@@ -953,7 +975,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         results.push({
           type: 'shell_command',
           command: event.command,
-          toolId: currentToolId,
+          toolId: currentToolIdRef.current,
           id: `shell_${Date.now()}`,
           timestamp: new Date().toISOString(),
           sessionId: 'current'
@@ -972,18 +994,14 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         break;
         
       case 'model_invocation_start':
+        hasSeenOperationActivityRef.current = true;
         // When the model is invoked (post-tool), show a spinner immediately to indicate
         // the agent is preparing reasoning. This covers gaps before the first reasoning block.
         cancelDelayedThinking();
         cancelPostToolIdleTimer();
         cancelPostReasoningIdleTimer();
         if (!activeThinkingRef.current && animationsEnabled) {
-          setActiveThinking(true);
-          results.push({
-            type: 'thinking',
-            context: 'reasoning',
-            startTime: Date.now()
-          } as DisplayStreamEvent);
+          activateThinking('reasoning');
         }
         // Do not render the model event itself; UI shows spinner instead
         break;
@@ -995,16 +1013,19 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
       case 'output':
         emitTestMarker('output');
+        if ((event as any)?.metadata?.syntheticToolStart) {
+          break;
+        }
         // Normalize content to detect empty/whitespace-only lines
         const rawOut = (event as any).content != null ? String((event as any).content) : '';
         const isEmptyOut = rawOut.trim().length === 0;
         // Determine whether this output belongs to a tool buffer regardless of content
-        const fromToolBufferFlag = !!(((event as any)?.metadata?.fromToolBuffer) || ((event as any)?.metadata?.tool) || Boolean(currentToolId));
+        const activeToolId = currentToolIdRef.current;
+        const fromToolBufferFlag = !!(((event as any)?.metadata?.fromToolBuffer) || ((event as any)?.metadata?.tool) || Boolean(activeToolId));
 
         // Maintain post-tool bridging behavior even for empty outputs
         if (activeThinking && fromToolBufferFlag) {
-          results.push({ type: 'thinking_end' } as DisplayStreamEvent);
-          setActiveThinking(false);
+          deactivateThinking();
         }
 
         if (fromToolBufferFlag) {
@@ -1025,8 +1046,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // If a non-tool output arrives shortly after tool output, bridge with a spinner
           const sinceLastToolMs = Date.now() - (lastToolOutputTsRef.current || 0);
           if (sinceLastToolMs > 0 && sinceLastToolMs < 1500 && !activeThinkingRef.current && !activeReasoning) {
-            setActiveThinking(true);
-            results.push({ type: 'thinking', context: 'waiting', startTime: Date.now() } as DisplayStreamEvent);
+            activateThinking('waiting');
             // Also exit tool phase since we've transitioned to waiting for reasoning
             setCurrentToolId(undefined);
           }
@@ -1039,7 +1059,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
         // If we are still before operation_init, keep a startup spinner visible even as
         // status/output lines arrive. This avoids a dead UI during initial setup.
-        if (!operationIdRef.current && !activeThinkingRef.current && animationsEnabled) {
+        if (!operationIdRef.current && !hasSeenOperationActivityRef.current && !activeThinkingRef.current && animationsEnabled) {
           scheduleDelayedThinking({ delay: 0, context: 'startup', addSpacer: false });
         }
 
@@ -1066,6 +1086,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // Enhanced deduplication - check for similar content
           const currentTime = Date.now();
           const contentStr = String(event.content);
+          const lastOutputContent = lastOutputContentRef.current;
+          const lastOutputTime = lastOutputTimeRef.current;
           
           // Check if this is a duplicate or subset of the last output
           if (lastOutputContent && currentTime - lastOutputTime < OUTPUT_DEDUPE_TIME_MS) {
@@ -1085,28 +1107,21 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // Fingerprint-based dedup across tool session
           try {
             const fp = fingerprintContent(contentStr);
-            const set = currentToolId ? (perToolOutputSeenRef.current.get(currentToolId) || null) : null;
             let seen = false;
-            if (set) {
-              if (set.has(fp)) {
-                seen = true;
-              } else {
-                set.add(fp);
-              }
+            if (activeToolId) {
+              seen = rememberToolOutputFingerprint(activeToolId, fp);
             } else {
-              if (globalOutputSeenRef.current.has(fp)) {
-                seen = true;
-              } else {
-                globalOutputSeenRef.current.add(fp);
-              }
+              seen = rememberGlobalOutputFingerprint(fp);
             }
             if (seen) {
               break; // skip duplicate chunk/content for this tool/session
             }
           } catch {}
 
-          setLastOutputContent(contentStr);
-          setLastOutputTime(currentTime);
+          lastOutputContentRef.current = contentStr.length > 4096
+            ? `${contentStr.slice(0, 2048)}\n${contentStr.slice(-2048)}`
+            : contentStr;
+          lastOutputTimeRef.current = currentTime;
           
           // above we already handled spinner transitions irrespective of content
 
@@ -1127,8 +1142,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             opSummaryBufferRef.current.push({
               type: 'output',
               content: event.content,
-              toolId: currentToolId
+              toolId: activeToolId
             } as DisplayStreamEvent);
+            if (opSummaryBufferRef.current.length > MAX_OPERATION_SUMMARY_EVENTS) {
+              opSummaryBufferRef.current = opSummaryBufferRef.current.slice(-MAX_OPERATION_SUMMARY_EVENTS);
+            }
             break;
           }
 
@@ -1147,7 +1165,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           const outEvt: DisplayStreamEvent = {
             type: 'output',
             content: cleanedContent,
-            toolId: currentToolId,
+            toolId: activeToolId,
             // Preserve metadata so the renderer can identify tool-buffer outputs
             ...(event.metadata ? { metadata: event.metadata } : {})
           } as DisplayStreamEvent;
@@ -1175,27 +1193,18 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         break;
         
       case 'tool_end':
+        hasSeenOperationActivityRef.current = true;
         cancelPostToolIdleTimer();
         cancelPostReasoningIdleTimer();
         // Clear any active thinking when tool ends
         if (activeThinking) {
-          results.push({ type: 'thinking_end' } as DisplayStreamEvent);
-          setActiveThinking(false);
+          deactivateThinking();
         }
         // Exit tool phase on tool_end
         setCurrentToolId(undefined);
         // Immediately show a short waiting spinner while transitioning to reasoning
         if (animationsEnabled && !activeReasoning) {
-          setActiveThinking(true);
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'waiting',
-            startTime: Date.now(),
-            urgent: true  // Bypass throttle for immediate display
-          } as DisplayStreamEvent;
-
-          results.push(thinkingEvent);
-          // Event loop will handle immediate rendering via urgent flag
+          activateThinking('waiting');
         }
         // Reset flags and cancel pending delayed thinking
         cancelDelayedThinking();
@@ -1224,7 +1233,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
       case 'operation_complete':
         // Clear any active states
-        setActiveThinking(false);
+        deactivateThinking();
         // Flush any pending reasoning before we finalize
         flushPendingReasoning(results);
         setActiveReasoning(false);
@@ -1305,10 +1314,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // finalReportEvents cluster so StreamDisplay can compute reportDetails
         // (path + inline content) for InlineReportViewer.
         if (finalReportActiveRef.current) {
-          setFinalReportEvents(prev => {
-            const base = prev ?? [];
-            return [...base, displayRcEvent];
-          });
+          appendFinalReportEvent(displayRcEvent);
         }
         // Synthesize a paths section immediately below the report
         try {
@@ -1332,10 +1338,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           results.push(pathsEvent);
 
           if (finalReportActiveRef.current) {
-            setFinalReportEvents(prev => {
-              const baseEvents = prev ?? [];
-              return [...baseEvents, pathsEvent];
-            });
+            appendFinalReportEvent(pathsEvent);
           }
         } catch {}
         // Then flush any buffered operation summary (paths) so they appear beneath the report as well
@@ -1349,10 +1352,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         const acEvent = event as DisplayStreamEvent;
         results.push(acEvent);
         if (finalReportActiveRef.current) {
-          setFinalReportEvents(prev => {
-            const base = prev ?? [];
-            return [...base, acEvent];
-          });
+          appendFinalReportEvent(acEvent);
           // FINAL REPORT phase is complete once assessment_complete arrives
           finalReportActiveRef.current = false;
         }
@@ -1362,20 +1362,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       case 'rate_limit':
         if (animationsEnabled) {
           cancelDelayedThinking();
-          setActiveThinking(true);
+          activateThinking('rate_limit', `Rate Limit for ${Math.ceil(event.wait_total)}s${event.message ? `: ${event.message}` : ''}`);
           seenThinkingThisPhaseRef.current = true;
-
-          // Immediately show urgent thinking event to bypass any delays
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'rate_limit',
-            message: `Rate Limit for ${Math.ceil(event.wait_total)}s${event.message ? `: ${event.message}` : ''}`,
-            startTime: Date.now(),
-            urgent: true
-          } as DisplayStreamEvent;
-
-          // Push to results so it gets processed by the event loop
-          results.push(thinkingEvent);
         }
         break;
 
@@ -1504,7 +1492,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           }
 
           if (processedEvent.type === 'thinking_end') {
-            // End spinner but keep aggregated output visible in active tail
+            // End stream spinner but keep aggregated output visible in active tail.
+            deactivateThinking();
             setActiveThrottled(prev => {
               activeBufRef.current.clear();
               const aggEv = buildAggDisplayEvent();
@@ -1519,7 +1508,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             try {
               const any: any = processedEvent as any;
               // Consider output as tool-buffered if metadata says so OR we have an active toolId
-              const isToolBuffer = Boolean(any?.metadata?.fromToolBuffer || any?.metadata?.tool || Boolean(currentToolId));
+              const isToolBuffer = Boolean(
+                any?.metadata?.fromToolBuffer || any?.metadata?.tool || Boolean(currentToolIdRef.current)
+              );
               if (isToolBuffer) {
                 let contentStr = '';
                 if (typeof any.content === 'string') contentStr = any.content;
@@ -1532,47 +1523,30 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             } catch {}
           }
           
+          if (processedEvent.type === 'thinking') {
+            activateThinking(
+              (processedEvent as any).context,
+              (processedEvent as any).message
+            );
+            continue;
+          }
+
           regularEvents.push(processedEvent);
         }
 
-        // Keep current thinking (if any) and aggregated output in active tail without duplication
-        // This runs on EVERY event to preserve thinking across all events
-        const thinkingEvents = regularEvents.filter(e => e.type === 'thinking');
-        // Preserve existing thinking even if no new events - prevents thinking from disappearing
-        const existingThinking = activeBufRef.current.toArray().filter(e => e.type === 'thinking');
-        const hasThinkingToDisplay = thinkingEvents.length > 0 || existingThinking.length > 0 || currentAggDisplayEvent;
-
-        if (hasThinkingToDisplay) {
-          // Check if any thinking event is marked urgent - needs immediate rendering
-          const hasUrgent = thinkingEvents.some(e => (e as any).urgent === true);
-
-          const updateActiveBuf = () => {
-            // Preserve existing thinking if no new thinking events in this batch
-            const thinkingToKeep = thinkingEvents.length > 0 ? thinkingEvents : existingThinking;
-            // Rebuild active tail: keep thinking, then aggregated output if present
+        if (currentAggDisplayEvent) {
+          setActiveThrottled(() => {
             activeBufRef.current.clear();
-            // Deduplicate thinking entries by identity (type-only for safety)
-            const uniqueThinking: DisplayStreamEvent[] = [];
-            for (const t of thinkingToKeep) {
-              if (!uniqueThinking.some(u => u.type === t.type)) uniqueThinking.push(t);
-            }
-            for (const t of uniqueThinking) activeBufRef.current.push(t);
-            if (currentAggDisplayEvent) activeBufRef.current.push(currentAggDisplayEvent);
+            activeBufRef.current.push(currentAggDisplayEvent as DisplayStreamEvent);
             return activeBufRef.current.toArray();
-          };
-
-          // Bypass throttle for urgent events (startup, post-reasoning) to ensure immediate visibility
-          if (hasUrgent) {
-            const events = updateActiveBuf();
-            setActiveEvents(events);
-          } else {
-            setActiveThrottled(updateActiveBuf);
-          }
+          });
         }
 
         if (regularEvents.length > 0) {
           // Before anything else, if a new progress update arrived, flush current aggregated output into completed
-          const progressUpdates = regularEvents.filter(e => e.type === 'progress_update');
+          const progressUpdates = regularEvents.filter(e =>
+            e.type === 'progress_update' && (e as any).operation_stage !== 'final_report'
+          );
           if (progressUpdates.length > 0) {
             const aggEv = buildAggDisplayEvent();
             if (aggEv) {
@@ -1580,18 +1554,18 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
               scheduleCompletedEventsUpdate();
               resetStepAgg();
             }
-            // Clear any live tail from previous step (reasoning/output) to prevent leakage
-            setActiveThrottled(() => {
-              activeBufRef.current.clear();
-              return activeBufRef.current.toArray();
-            });
-            // End any active thinking/reasoning state at step boundary
-            if (activeThinkingRef.current) setActiveThinking(false);
+            // End any active reasoning state at step boundary
             setActiveReasoning(false);
-            // Schedule a brief delayed spinner for the new step while waiting for tool/tool args
             cancelDelayedThinking();
-            if (animationsEnabled) {
-              scheduleDelayedThinking({ delay: 0, context: 'tool_execution', addSpacer: false });
+            const hasActiveThinking = activeBufRef.current.toArray().some(e => e.type === 'thinking');
+            if (!hasActiveThinking) {
+              // Clear any live tail from previous step (reasoning/output) to prevent leakage.
+              activeBufRef.current.clear();
+              setActiveEvents(activeBufRef.current.toArray());
+              // Show stream spinner for the new step while waiting for tool/tool args.
+              if (animationsEnabled) {
+                activateThinking('tool_execution', undefined, {}, true);
+              }
             }
           }
 
@@ -1600,7 +1574,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             e.type !== 'thinking' &&
             e.type !== 'output' &&
             e.type !== 'separator' &&
-            e.type !== 'divider'
+            e.type !== 'divider' &&
+            !(e.type === 'progress_update' && (e as any).operation_stage === 'final_report')
           );
           if (newCompletedEvents.length > 0) {
 completedBufRef.current.pushMany(newCompletedEvents);
@@ -1668,11 +1643,6 @@ completedBufRef.current.pushMany(newCompletedEvents);
     return null;
   }
 
-
-  // Check if we have thinking-only events (spinner without other content)
-  const hasOnlyThinkingInActive = activeEvents.length > 0 &&
-    activeEvents.every(e => e.type === 'thinking' || e.type === 'thinking_end' || e.type === 'rate_limit');
-
   const hasFinalReportCluster = finalReportEvents != null && finalReportEvents.length > 0;
 
   return (
@@ -1698,20 +1668,9 @@ completedBufRef.current.pushMany(newCompletedEvents);
         />
       )}
 
-      {/* Thinking-only spinner rendered IMMEDIATELY after completed content for visibility
-          (suppressed once FINAL REPORT cluster is active). */}
-      {!hasFinalReportCluster && hasOnlyThinkingInActive && (
-        <StreamDisplay
-          events={activeEvents}
-          animationsEnabled={animationsEnabled}
-          terminalWidth={terminalWidth}
-          availableHeight={availableHeight}
-        />
-      )}
-
       {/* Active events with content (reasoning, output, etc.) - suppressed once FINAL
           REPORT cluster takes over the dynamic tail. */}
-      {!hasFinalReportCluster && activeEvents.length > 0 && !hasOnlyThinkingInActive && (
+      {!hasFinalReportCluster && activeEvents.length > 0 && (
         <StreamDisplay
           events={activeEvents}
           animationsEnabled={animationsEnabled}

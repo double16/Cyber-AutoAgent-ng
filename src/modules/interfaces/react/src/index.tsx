@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './utils/performanceTimelineGuard.js';
 import React from 'react';
 import fs from 'node:fs';
 import os from 'node:os';

@@ -96,7 +96,6 @@ export const Footer: React.FC<FooterProps> = React.memo(({
     ? Math.round((elapsedSeconds / (progressPercent / 100)))
     : null;
   const hasMem = (operationMetrics?.memoryOps || 0) > 0;
-
   // Build a single-line footer string and hard-truncate to terminal width to avoid Ink layout bugs
   const cols = Number.isFinite(process.stdout.columns) && process.stdout.columns ? Math.floor(process.stdout.columns) : 80;
   const left = deploymentMode || '';

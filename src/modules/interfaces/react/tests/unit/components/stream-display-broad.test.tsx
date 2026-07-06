@@ -203,6 +203,21 @@ describe('StreamDisplay broad event rendering', () => {
     expect(longOutput).toContain('line 49');
   });
 
+  it('renders long static history through append-style output', async () => {
+    const { StaticStreamDisplay, render } = await load();
+    const events = Array.from({ length: 540 }, (_, index) => ({
+      type: 'output',
+      content: `line-${index}`,
+    }));
+
+    const output = render(
+      <StaticStreamDisplay events={events as any} terminalWidth={100} availableHeight={40} />
+    ).lastFrame();
+
+    expect(output).toContain('line-0');
+    expect(output).toContain('line-539');
+  });
+
   it('resolves report path candidates across absolute, relative, inferred, and unsafe inputs', async () => {
     const { mapContainerReportPath, getReportPathCandidates } = await load();
 
