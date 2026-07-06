@@ -86,7 +86,7 @@ export function useOperationManager({
     duration: string;
     memoryOps: number;
     evidence: number;
-    progressPercent?: number;
+    progressPercent: number;
   }) => {
     const now = Date.now();
     if (now - (lastMetricsUpdateRef.current || 0) < 300) {
@@ -234,46 +234,64 @@ export function useOperationManager({
 
   // Assessment cancel handler
   const handleAssessmentCancel = useCallback(async () => {
-    if (appState.activeOperation) {
-      try {
-        await stopExecution({
-          executionHandle: (appState.activeOperation as any).executionHandle,
-          executionService: appState.executionService,
-          cleanup: true,
-          removeListeners: true,
-        });
-        
-        // Then update the operation manager state
-        operationManager.pauseOperation(appState.activeOperation.id);
-        actions.setActiveOperation(null);
-        actions.setExecutionService(null); // Clear the execution service reference
-        actions.setUserHandoff(false);
-        actions.setHasCompletedOperation(true); // Mark as completed to show the message
-        
-        // Reset the assessment flow for next operation and preserve current module from UI
-        assessmentFlowManager.setDefaultModule(currentModule || 'web');
-        assessmentFlowManager.resetCompleteWorkflow();
-        // Ensure the flow module matches the UI prompt immediately to prevent mismatches
-        if (currentModule) {
-          assessmentFlowManager.setModule(currentModule);
-        }
-        
-        // Clear existing operation logs first
-        clearOperationHistory();
-        
-        // Add a small delay to ensure clear is processed
-        await new Promise(resolve => setTimeout(resolve, 50));
-        
-        addOperationHistoryEntry('error', 'ESC Kill Switch activated');
-        addOperationHistoryEntry('info', 'Operation terminated. Start a new assessment or review partial results.');
-        
-        // Ensure messages are visible immediately (bypass debounce)
-        try { (flushHistoryEntries as any)?.(); } catch {}
-      } catch (error) {
-        addOperationHistoryEntry('error', `Failed to cancel assessment: ${error.message}`);
-      }
+    const activeOperation = appState.activeOperation;
+    if (!activeOperation) {
+      return;
     }
-  }, [appState.activeOperation, appState.executionService, operationManager, actions, addOperationHistoryEntry]);
+
+    let stopError: unknown;
+    try {
+      await stopExecution({
+        executionHandle: (activeOperation as any).executionHandle,
+        executionService: appState.executionService,
+        cleanup: true,
+        removeListeners: true,
+      });
+    } catch (error) {
+      stopError = error;
+    }
+
+    // Detach frontend state even if backend termination timed out. This keeps exit and new commands responsive.
+    operationManager.pauseOperation(activeOperation.id);
+    actions.setActiveOperation(null);
+    actions.setExecutionService(null); // Clear the execution service reference
+    actions.setUserHandoff(false);
+    actions.setHasCompletedOperation(true); // Mark as completed to show the message
+
+    // Reset the assessment flow for next operation and preserve current module from UI
+    assessmentFlowManager.setDefaultModule(currentModule || 'web');
+    assessmentFlowManager.resetCompleteWorkflow();
+    // Ensure the flow module matches the UI prompt immediately to prevent mismatches
+    if (currentModule) {
+      assessmentFlowManager.setModule(currentModule);
+    }
+
+    // Clear existing operation logs first
+    clearOperationHistory();
+
+    // Add a small delay to ensure clear is processed
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    addOperationHistoryEntry('error', 'ESC Kill Switch activated');
+    if (stopError instanceof Error) {
+      addOperationHistoryEntry('error', `Operation stop cleanup warning: ${stopError.message}`);
+    } else if (stopError) {
+      addOperationHistoryEntry('error', `Operation stop cleanup warning: ${String(stopError)}`);
+    }
+    addOperationHistoryEntry('info', 'Operation terminated. Start a new assessment or review partial results.');
+
+    // Ensure messages are visible immediately (bypass debounce)
+    try { (flushHistoryEntries as any)?.(); } catch {}
+  }, [
+    appState.activeOperation,
+    appState.executionService,
+    operationManager,
+    actions,
+    assessmentFlowManager,
+    currentModule,
+    addOperationHistoryEntry,
+    flushHistoryEntries,
+  ]);
 
   // Clear operation history
   const clearOperationHistory = useCallback(() => {
@@ -320,7 +338,8 @@ export function useOperationManager({
         cost: appState.operationMetrics?.cost || 0,
         duration: '0s',
         memoryOps: appState.operationMetrics?.memoryOps || 0,
-        evidence: appState.operationMetrics?.evidence || 0
+        evidence: appState.operationMetrics?.evidence || 0,
+        progressPercent: appState.operationMetrics?.progressPercent || 0,
       });
       
       // Add to operation history with deployment mode
@@ -455,7 +474,7 @@ export function useOperationManager({
                 duration: event.metrics.duration || operationManager.getOperationDuration(operation.id),
                 memoryOps: event.metrics.memoryOps || currentOp.findings,
                 evidence: event.metrics.evidence || currentOp.findings,
-                progressPercent: event.metrics.progressPercent
+                progressPercent: event.metrics.progressPercent,
               });
             }
           }

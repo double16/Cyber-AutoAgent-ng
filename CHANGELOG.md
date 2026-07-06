@@ -1,9 +1,18 @@
 # Cyber-AutoAgent-ng Changelog
 
-- Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.
-- Cleanup React CLI logging.
-- Replace iteration-based operation limits with duration, token, and cost budgets; progress now reports the highest utilization across configured budgets.
+### Features
+
+- Replace iteration-based operation limits with duration, token, and cost budgets; progress reports the highest utilization across configured budgets.
 - Correct token and cost metrics by aggregating usage across multiple agents and apply per-agent model pricing.
+- Generalize React event handling for multi-agent workflows with per-agent handlers and operation-wide metric aggregation.
+- Add persistent command history recall to the React terminal input, excluding slash commands.
+- Add React footer ETA display after duration using progress percentage and formatted remaining time.
+
+### Fixes
+
+- Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.
+- Update the React footer connection indicator from deployment detection and color the status icon.
+- Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.
 
 ## v0.9.0
 

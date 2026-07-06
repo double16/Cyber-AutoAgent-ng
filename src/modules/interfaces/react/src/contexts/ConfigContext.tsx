@@ -55,7 +55,7 @@ export interface Config {
   embeddingModel?: string;
   /** Quality evaluation model for assessment validation */
   evaluationModel?: string;
-  /** Multi-agent swarm coordination model */
+  /** Swarm tool coordination model */
   swarmModel?: string;
   /** AWS region for Bedrock API calls */
   awsRegion: string;

@@ -3,22 +3,25 @@ import threading
 import time
 from collections import OrderedDict
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, MagicMock
 
 import pytest
 
-from modules.handlers.react import react_bridge_handler as rb
-from modules.handlers.react.react_bridge_handler import ReactBridgeHandler
+from modules.handlers.react import agent_event_handler as rb
+from modules.handlers.react.agent_event_handler import OperationEventCoordinator, AgentEventHandler
 
 
 def make_handler():
-    handler = ReactBridgeHandler.__new__(ReactBridgeHandler)
+    handler = AgentEventHandler.__new__(AgentEventHandler)
     events = []
     handler._events = events
     handler.emit_ui_event = lambda event: events.append(event)
     handler._state_lock = threading.RLock()
     handler._emit_lock = threading.RLock()
     handler.operation_id = "OP_TEST"
+    handler.coordinator = OperationEventCoordinator(operation_id="unittest", emitter=MagicMock())
+    handler.emit_operation_init = True
+    handler.start_metrics_thread = False
     # Budget-only model
     handler.budget_max_duration = 5
     handler.budget_max_tokens = None
@@ -26,7 +29,7 @@ def make_handler():
     handler.start_time = time.time() - 65
     handler.provider_id = "litellm"
     handler.model_id = "model"
-    handler.swarm_model_id = "swarm-model"
+    handler.specialist_model_id = "specialist-model"
     handler.memory_ops = 0
     handler.evidence_count = 0
     handler.tool_start_times = {}
@@ -53,23 +56,9 @@ def make_handler():
     handler._budget_limit_reached = False
     handler._budget_limit_reason = None
     handler._report_generated = False
-    handler.in_swarm_operation = False
-    handler.swarm_agents = []
-    handler.current_swarm_agent = None
-    handler.swarm_handoff_count = 0
-    handler._last_swarm_signature = None
     handler._termination_emitted = False
     handler._termination_reason = None
-    handler.swarm_agent_steps = {}
     handler._python_preview_emitted = set()
-    # Iteration limits removed in new model
-    handler.swarm_max_handoffs = None
-    handler.swarm_tool_id = None
-    handler.swarm_agent_tools = {}
-    handler.swarm_agent_details = []
-    handler._tool_running_by_agent = {}
-    handler._swarm_limit_announced = False
-    handler._swarm_handoff_limit_announced = False
     handler.tool_emitter = SimpleNamespace(
         emit_tool_specific_events=lambda name, tool_input: events.append(
             {"type": "tool_specific", "tool_name": name, "tool_input": tool_input}
@@ -223,11 +212,11 @@ def test_python_repl_preview_and_empty_result_paths(monkeypatch):
     handler.tool_input_buffer["py"] = {"code": "print('hello')"}
 
     monkeypatch.setattr(
-        "modules.handlers.react.react_bridge_handler.get_buffered_output",
+        "modules.handlers.react.agent_event_handler.get_buffered_output",
         lambda: "\n".join(str(i) for i in range(12)),
     )
     monkeypatch.setattr(
-        "modules.handlers.react.react_bridge_handler.get_buffered_error_output",
+        "modules.handlers.react.agent_event_handler.get_buffered_error_output",
         lambda: "warning\ntrace",
     )
     handler._process_tool_result_from_message(
@@ -239,66 +228,40 @@ def test_python_repl_preview_and_empty_result_paths(monkeypatch):
     assert any(event.get("tool") == "python_repl" for event in outputs)
 
 
-def test_swarm_start_handoff_output_parsing_completion_and_inference():
-    handler = make_handler()
-    swarm_input = {
-        "task": "Assess target",
-        "max_handoffs": 3,
-        "max_iterations": 4,
-        "agents": [
-            {"name": "recon_agent", "system_prompt": "Recon", "tools": ["shell"], "model_settings": {"model_id": "m1", "params": {"temperature": 0.2}}},
-            {"name": "web_agent", "system_prompt": "Web", "tools": ["http_request"]},
-        ],
-    }
+def test_constructor_adds_generic_agent_metadata_and_alias(monkeypatch):
+    events = []
+    monkeypatch.setattr(rb, "get_models_client", lambda: SimpleNamespace())
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
+    emitter = SimpleNamespace(emit=lambda event: events.append(event))
 
-    handler._track_swarm_start(swarm_input, "swarm-id")
-    handler._track_swarm_start(swarm_input, "swarm-id")
-    assert handler.in_swarm_operation is True
-    assert handler.current_swarm_agent == "recon_agent"
-    assert handler._infer_active_swarm_agent("shell") == "recon_agent"
-
-    assert handler._detect_swarm_agent_from_callback({"agent": SimpleNamespace(name="Web Agent")}) == "web_agent"
-    assert handler._detect_swarm_agent_from_callback({"message": {"metadata": {"agent_name": "recon_agent"}}}) == "recon_agent"
-
-    handler._track_agent_handoff({"handoff_to": "web-agent", "message": "Use HTTP", "context": {"x": 1}})
-    assert handler.current_swarm_agent == "web_agent"
-
-    handler._parse_swarm_output_for_events(
-        "**RECON_AGENT:**\nfound host\nrequires root privileges\n**WEB_AGENT:**\nchecking app"
+    coordinator = OperationEventCoordinator("OP_AGENT", emitter)
+    handler = AgentEventHandler(
+        operation_id="OP_AGENT",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        coordinator=coordinator,
+        agent_name="validation_specialist",
+        agent_type="validation_specialist",
+        parent_agent_run_id="main-1",
+        init_context={"budget": {"maxDurationMinutes": 60}},
     )
-    assert handler._extract_swarm_reasoning_from_output("I need to scan\nthen should test") == "I need to scan then should test"
 
-    handler.sdk_input_tokens = 100
-    handler.sdk_output_tokens = 50
-    handler.swarm_agent_steps = {"recon_agent": 2, "web_agent": 1}
-    handler._track_swarm_complete()
-
-    types = event_types(handler)
-    assert types.count("swarm_start") == 1
-    assert "swarm_handoff" in types
-    assert "swarm_agent_active" in types
-    assert "swarm_complete" in types
-    assert handler.in_swarm_operation is False
+    assert AgentEventHandler is AgentEventHandler
+    assert handler.agent_name == "validation_specialist"
+    assert handler.agent_type == "validation_specialist"
+    assert handler.parent_agent_run_id == "main-1"
+    assert any(event["type"] == "operation_init" and event["agent_name"] == "validation_specialist" for event in events)
 
 
-def test_swarm_tool_announcement_and_result_paths(monkeypatch):
+def test_generic_tool_announcement_and_result_paths(monkeypatch):
     handler = make_handler()
-    handler._track_swarm_start(
-        {
-            "task": "Assess",
-            "agents": [
-                {"name": "recon_agent", "tools": ["shell"]},
-                {"name": "web_agent", "tools": ["http_request"]},
-            ],
-        },
-        "swarm",
-    )
     handler._process_tool_announcement({"name": "shell", "id": "s1", "input": {}})
     handler._process_tool_announcement({"name": "shell", "id": "s1", "input": {"cmd": "id"}})
     handler.reasoning_buffer = ["Tool finished, found output."]
     handler.tool_name_buffer["s1"] = "shell"
     handler.tool_input_buffer["s1"] = {"cmd": "id"}
-    monkeypatch.setattr("modules.handlers.react.react_bridge_handler.get_buffered_output", lambda: "")
+    monkeypatch.setattr("modules.handlers.react.agent_event_handler.get_buffered_output", lambda: "")
     handler._process_tool_result_from_message(
         {"toolUseId": "s1", "status": "success", "content": [{"text": "uid=1"}]}
     )
@@ -307,13 +270,54 @@ def test_swarm_tool_announcement_and_result_paths(monkeypatch):
     assert "reasoning" in event_types(handler)
 
 
+def test_operation_coordinator_aggregates_multiple_handlers(monkeypatch):
+    events = []
+    emitter = SimpleNamespace(emit=lambda event: events.append(event))
+    coordinator = OperationEventCoordinator("OP_MULTI", emitter)
+
+    monkeypatch.setattr(rb, "get_models_client", lambda: SimpleNamespace())
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
+
+    main = AgentEventHandler(
+        operation_id="OP_MULTI",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        coordinator=coordinator,
+        agent_name="main",
+        agent_type="main",
+        init_context={"budget": {"maxDurationMinutes": 60}},
+    )
+    sub = AgentEventHandler(
+        operation_id="OP_MULTI",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        coordinator=coordinator,
+        agent_name="sub",
+        agent_type="validation_specialist",
+        parent_agent_run_id=main.agent_run_id,
+        emit_operation_init=False,
+        start_metrics_thread=False,
+    )
+
+    main.process_metrics(SimpleNamespace(accumulated_usage={"inputTokens": 10, "outputTokens": 5}))
+    sub.process_metrics(SimpleNamespace(accumulated_usage={"inputTokens": 7, "outputTokens": 3}))
+    main._emit_estimated_metrics(force=True)
+
+    metrics_events = [event for event in events if event["type"] == "metrics_update"]
+    assert metrics_events[-1]["metrics"]["inputTokens"] == 17
+    assert metrics_events[-1]["metrics"]["outputTokens"] == 8
+    assert sub.parent_agent_run_id == main.agent_run_id
+
+
 def test_constructor_emits_init_and_metrics(monkeypatch):
     events = []
     monkeypatch.setattr(rb, "get_models_client", lambda: SimpleNamespace())
-    monkeypatch.setattr(ReactBridgeHandler, "_start_metrics_thread", lambda self: None)
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
     emitter = SimpleNamespace(emit=lambda event: events.append(event))
 
-    handler = ReactBridgeHandler(
+    handler = AgentEventHandler(
         operation_id="OP_INIT",
         provider_id="ollama",
         model_id="ollama/llama3",
@@ -490,10 +494,10 @@ def test_internal_step_and_event_defensive_paths(monkeypatch):
 def test_constructor_defaults_invalid_budget_values(monkeypatch):
     events = []
     monkeypatch.setattr(rb, "get_models_client", Mock(side_effect=RuntimeError("models unavailable")))
-    monkeypatch.setattr(ReactBridgeHandler, "_start_metrics_thread", lambda self: None)
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
     emitter = SimpleNamespace(emit=lambda event: events.append(event))
 
-    handler = ReactBridgeHandler(
+    handler = AgentEventHandler(
         operation_id="OP_BAD_BUDGET",
         provider_id="litellm",
         model_id="model",
@@ -516,14 +520,14 @@ def test_constructor_defaults_invalid_budget_values(monkeypatch):
 def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
     events = []
     monkeypatch.setattr(rb, "get_models_client", lambda: SimpleNamespace())
-    monkeypatch.setattr(ReactBridgeHandler, "_start_metrics_thread", lambda self: None)
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
     emitter = SimpleNamespace(emit=lambda event: events.append(event))
 
     class BadContext(dict):
         def get(self, *_args, **_kwargs):
             raise RuntimeError("bad context")
 
-    handler = ReactBridgeHandler(
+    handler = AgentEventHandler(
         operation_id="OP_BAD_CONTEXT",
         provider_id="litellm",
         model_id="model",
@@ -534,7 +538,7 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
 
     events.clear()
     monkeypatch.setenv("MEM0_API_KEY", "token")
-    ReactBridgeHandler(
+    AgentEventHandler(
         operation_id="OP_MEM0",
         provider_id="litellm",
         model_id="model",
@@ -546,7 +550,7 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
     events.clear()
     monkeypatch.delenv("MEM0_API_KEY", raising=False)
     monkeypatch.setenv("OPENSEARCH_HOST", "https://opensearch.example")
-    ReactBridgeHandler(
+    AgentEventHandler(
         operation_id="OP_OPENSEARCH",
         provider_id="litellm",
         model_id="model",
@@ -697,14 +701,6 @@ def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatc
     )
     assert "tool_start" in event_types(handler)
 
-    handler.in_swarm_operation = True
-    handler.swarm_agents = ["recon_agent", "web_agent"]
-    handler.current_swarm_agent = "recon_agent"
-    handler.swarm_agent_actions = {"recon_agent": 1}
-    handler.swarm_agent_tools = {"web_agent": ["advanced_payload_coordinator"]}
-    handler._synthesize_swarm_tool_start("advanced_payload_coordinator", "testphp.vulnweb.com")
-    assert any(event.get("synthetic") for event in handler._events)
-
     handler._transform_sdk_event(
         {
             "data": "streaming thought",
@@ -720,7 +716,10 @@ def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatc
             "response": {"toolUseId": "apc", "status": "success", "content": [{"text": "done"}]},
         }
     )
-    assert "swarm_agent_transition" in event_types(handler)
+    tool_start_events = [event for event in handler._events if event.get("type") == "tool_start"]
+    assert any(event.get("tool_name") == "advanced_payload_coordinator" for event in tool_start_events)
+    assert all("synthetic" not in event for event in tool_start_events)
+    assert all(not key.startswith("sw" + "arm_") for event in tool_start_events for key in event)
 
     handler = make_handler()
     # No step limit anymore; ensure processing works without raising

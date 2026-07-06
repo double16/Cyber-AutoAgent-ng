@@ -1,23 +1,24 @@
 """
-React UI integration handlers.
+Structured event integration handlers.
 
-This module contains handlers and utilities for integrating with the React
-terminal UI, including event emission, tool handling, and SDK hooks.
+This module contains handlers and utilities for emitting structured events
+from SDK callbacks, including tool handling and lifecycle hooks.
 """
 
+from .agent_event_handler import AgentEventHandler, OperationEventCoordinator
 from .hooks import ReactHooks
 
-# Output interception is provided by unified handler in modules.handlers.output_interceptor
+# Unified handler provides output interception in modules.handlers.output_interceptor
 from modules.handlers.output_interceptor import (
     OutputInterceptor,
     intercept_output,
     setup_output_interception,
 )
-from .react_bridge_handler import ReactBridgeHandler
 from .tool_emitters import ToolEventEmitter
 
 __all__ = [
-    "ReactBridgeHandler",
+    "AgentEventHandler",
+    "OperationEventCoordinator",
     "ReactHooks",
     "ToolEventEmitter",
     "OutputInterceptor",

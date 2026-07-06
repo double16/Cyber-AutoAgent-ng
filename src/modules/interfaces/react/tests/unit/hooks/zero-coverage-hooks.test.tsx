@@ -285,7 +285,7 @@ describe('zero-coverage hooks', () => {
     it('useDeploymentDetection shows setup, auto-selects healthy deployments, and prompts missing model config', async () => {
         jest.useFakeTimers();
         const {useDeploymentDetection} = await import('../../../src/hooks/useDeploymentDetection.js');
-        const actions = {setInitializationFlow: jest.fn()};
+        const actions = {setInitializationFlow: jest.fn(), setDockerAvailable: jest.fn()};
         const updateConfig = jest.fn();
         const saveConfig = jest.fn(async () => undefined);
         const openConfig = jest.fn();
@@ -305,9 +305,16 @@ describe('zero-coverage hooks', () => {
             await Promise.resolve();
         });
         expect(actions.setInitializationFlow).toHaveBeenCalledWith(true);
+        expect(actions.setDockerAvailable).toHaveBeenLastCalledWith(false);
         hook.unmount();
 
-        detectDeployments.mockResolvedValueOnce({availableDeployments: [{mode: 'local-cli', isHealthy: true}], needsSetup: false});
+        detectDeployments.mockResolvedValueOnce({
+            availableDeployments: [
+                {mode: 'local-cli', isHealthy: true},
+                {mode: 'single-container', isHealthy: false, details: {dockerRunning: true}},
+            ],
+            needsSetup: false,
+        });
         hook = renderHook(() => useDeploymentDetection({
             isConfigLoading: false,
             appState: {isInitializationFlowActive: false, hasUserDismissedInit: true, isConfigLoaded: true},
@@ -323,6 +330,7 @@ describe('zero-coverage hooks', () => {
         });
         expect(updateConfig).toHaveBeenCalledWith({deploymentMode: 'local-cli', isConfigured: true, hasSeenWelcome: true});
         expect(saveConfig).toHaveBeenCalled();
+        expect(actions.setDockerAvailable).toHaveBeenLastCalledWith(true);
         hook.unmount();
 
         detectDeployments.mockResolvedValueOnce({availableDeployments: [], needsSetup: false});
@@ -348,7 +356,7 @@ describe('zero-coverage hooks', () => {
 
     it('useDeploymentDetection respects loading, forced setup, existing healthy config, and first-run failures', async () => {
         const {useDeploymentDetection} = await import('../../../src/hooks/useDeploymentDetection.js');
-        const actions = {setInitializationFlow: jest.fn()};
+        const actions = {setInitializationFlow: jest.fn(), setDockerAvailable: jest.fn()};
         const openConfig = jest.fn();
 
         let hook = renderHook(() => useDeploymentDetection({
@@ -376,6 +384,7 @@ describe('zero-coverage hooks', () => {
             await Promise.resolve();
         });
         expect(actions.setInitializationFlow).toHaveBeenCalledWith(true);
+        expect(actions.setDockerAvailable).toHaveBeenLastCalledWith(false);
         hook.unmount();
         delete process.env.CYBER_SHOW_SETUP;
 

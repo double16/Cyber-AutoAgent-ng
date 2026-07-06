@@ -55,18 +55,16 @@ const load = async () => {
     const [
         {render},
         {StatusIndicator},
-        {OperationStatusDisplay},
         {LogContainer, CompactLogDisplay},
         {InitializationWrapper},
     ] = await Promise.all([
         import('ink-testing-library'),
         import('../../../src/components/StatusIndicator.js'),
-        import('../../../src/components/OperationStatusDisplay.js'),
         import('../../../src/components/LogContainer.js'),
         import('../../../src/components/InitializationWrapper.js'),
     ]);
 
-    return {render, StatusIndicator, OperationStatusDisplay, LogContainer, CompactLogDisplay, InitializationWrapper};
+    return {render, StatusIndicator, LogContainer, CompactLogDisplay, InitializationWrapper};
 };
 
 const healthStatus = {
@@ -159,81 +157,6 @@ describe('status, log, operation, and wrapper components', () => {
             healthSubscriber?.({...healthStatus, overall: 'unhealthy', dockerRunning: true});
         });
         expect(textFromTree(agent.toJSON())).toContain('Docker');
-    });
-
-    it('renders operation flow and operation status variants', async () => {
-        const {render, OperationStatusDisplay} = await load();
-        const startTime = new Date(Date.now() - 5000);
-
-        expect(render(
-            <OperationStatusDisplay flowState={{step: 'idle'}} showFlowProgress={false}/>
-        ).lastFrame()).toBe('');
-
-        const running = render(
-            <OperationStatusDisplay
-                terminalWidth={120}
-                flowState={{step: 'ready', module: 'web', target: 'example.com', objective: 'audit'}}
-                currentOperation={{
-                    id: 'OP_1',
-                    progressPercentage: 40,
-                    description: 'Testing target',
-                    startTime,
-                    status: 'running',
-                    findings: 1,
-                }}
-            />
-        ).lastFrame();
-
-        expect(running).toContain('Setup');
-        expect(running).toContain('Module: web');
-        expect(running).toContain('Testing target');
-        expect(running).toContain('Progress 40%');
-        expect(running).toContain('Findings: 1');
-        expect(running).toContain('RUNNING');
-        expect(running).toContain('Budget ETA');
-
-        expect(render(
-            <OperationStatusDisplay
-                flowState={{step: 'ready'}}
-                currentOperation={{
-                    id: 'OP_STARTING',
-                    progressPercentage: 0,
-                    description: 'Starting target',
-                    startTime,
-                    status: 'running',
-                }}
-            />
-        ).lastFrame()).not.toContain('Budget ETA');
-
-        expect(render(
-            <OperationStatusDisplay
-                flowState={{step: 'ready'}}
-                currentOperation={{
-                    id: 'OP_COMPLETE_PROGRESS',
-                    progressPercentage: 100,
-                    description: 'Budget reached',
-                    startTime,
-                    status: 'running',
-                }}
-            />
-        ).lastFrame()).not.toContain('Budget ETA');
-
-        for (const status of ['paused', 'completed', 'error', 'cancelled'] as const) {
-            const statusFrame = render(
-                <OperationStatusDisplay
-                    flowState={{step: 'target', module: 'web'}}
-                    currentOperation={{
-                        id: `OP_${status}`,
-                        progressPercentage: 40,
-                        description: status,
-                        startTime,
-                        status,
-                    }}
-                />
-            ).lastFrame();
-            expect(statusFrame).toContain(status.toUpperCase());
-            expect(statusFrame).not.toContain('Budget ETA');
-        }
     });
 
     it('renders log containers with slicing, details, ansi stripping, and compact mode', async () => {

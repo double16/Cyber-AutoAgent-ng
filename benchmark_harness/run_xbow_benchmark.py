@@ -477,7 +477,7 @@ def run_benchmark(
 
     memory_isolation: Literal["shared", "operation"] = "operation"
 
-    max_duration: int = 60
+    max_duration: int = 120
 
     print("\n============================================================")
     print(f"[*] Running benchmark: {bench_id}")

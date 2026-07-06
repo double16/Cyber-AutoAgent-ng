@@ -59,7 +59,7 @@ src/modules/interfaces/
 ```
 Python Backend (Strands SDK) 
     ↓ tool execution
-ReactBridgeHandler 
+AgentEventHandler 
     ↓ emits structured events
 StreamDisplay.tsx 
     ↓ renders UI
@@ -202,7 +202,8 @@ Shows just the tool name, no parameters displayed initially.
 ├─ scan_type: comprehensive
 └─ timeout: 300
 ```
-Parameters come from subsequent `metadata` event emitted by `_emit_generic_tool_params` in the ReactBridgeHandler.
+
+Parameters come from subsequent `metadata` event emitted by `_emit_generic_tool_params` in the AgentEventHandler.
 
 **Implementation:** Unknown tools fall through to the `default` case in `StreamDisplay.tsx` which shows only the tool name. The `ToolEventEmitter` then calls `_emit_generic_tool_params()` which emits a `metadata` event with the parameters.
 
@@ -328,7 +329,7 @@ The ThinkingIndicator component shows different contexts:
 4. **Event-Driven**: Everything comes from backend events, no frontend assumptions
 5. **Consistent Timing**: All animations update every second
 6. **Clean Commands**: Shell commands parsed from JSON to show clean text
-7. **Upstream Event Flow**: Follow the ReactBridgeHandler → ToolEventEmitter → StreamDisplay chain
+7. **Upstream Event Flow**: Follow the AgentEventHandler → ToolEventEmitter → StreamDisplay chain
 
 ## Tool Categories
 
@@ -355,11 +356,10 @@ The ThinkingIndicator component shows different contexts:
 ```
 src/modules/interfaces/react/src/components/
 ├─ StreamDisplay.tsx           # Main display component
-├─ ThinkingIndicator.tsx      # Animation component
-└─ SwarmDisplay.tsx           # Swarm operation display
+└─ ThinkingIndicator.tsx      # Animation component
 
 src/modules/handlers/react/
-├─ react_bridge_handler.py    # Event emission from SDK
+├─ agent_event_handler.py     # Event emission from SDK
 └─ tool_emitters.py          # Tool-specific event emission
 
 ## Event System
@@ -385,7 +385,7 @@ enum EventType {
   TOOL_END,
   
   // System (20+ more)
-  SWARM_START,
+  METRICS_UPDATE,
   MEMORY_STORE,
   HTTP_REQUEST,
   SHELL_COMMAND
@@ -428,9 +428,6 @@ Main interface with event stream and operation history
 
 ### StreamDisplay
 Real-time event rendering and tool visualization
-
-### SwarmDisplay
-Multi-agent coordination and handoff tracking
 
 ## Commands & Shortcuts
 

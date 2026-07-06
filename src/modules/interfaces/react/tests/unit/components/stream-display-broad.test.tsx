@@ -1,6 +1,6 @@
 import React from 'react';
 import { TextEncoder, TextDecoder } from 'util';
-import { jest } from '@jest/globals';
+import {describe, expect, it, jest} from '@jest/globals';
 
 if (typeof global.TextEncoder === 'undefined') {
   global.TextEncoder = TextEncoder;
@@ -45,8 +45,15 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'progress_update', step: 1, progressPercent: 40, totalTools: 4 },
       { type: 'progress_update', step: 'FINAL REPORT' },
       { type: 'progress_update', step: 'TERMINATED' },
-      { type: 'progress_update', step: 1, progressPercent: 25, is_swarm_operation: true },
-      { type: 'progress_update', step: 1, progressPercent: 25, swarm_agent: 'web_tester', swarm_sub_step: 2, swarm_total_actions: 7 },
+      {type: 'progress_update', step: 1, progressPercent: 25},
+      {
+        type: 'progress_update',
+        step: 1,
+        progressPercent: 25,
+        agent_name: 'web_tester',
+        agent_sub_step: 2,
+        agent_total_actions: 7
+      },
       { type: 'task_started', title: 'Enumerate target' },
       { type: 'thinking', context: 'reasoning', startTime: Date.now(), message: 'working' },
       { type: 'task_done', title: 'Enumerate target' },
@@ -121,6 +128,38 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('unknown_tool');
   });
 
+  it('renders agent names on tool_start headers', async () => {
+    const {EventLine, render} = await load();
+    const toolEvents: any[] = [
+      {
+        type: 'tool_start',
+        tool_name: 'http_request',
+        tool_input: {method: 'GET', url: 'https://example.com'},
+        agent_name: 'web_tester',
+      },
+      {
+        type: 'tool_start',
+        tool_name: 'shell',
+        tool_input: {command: 'whoami'},
+        agent_name: 'recon_agent',
+      },
+      {
+        type: 'tool_start',
+        tool_name: 'custom_tool',
+        tool_input: {alpha: 1},
+        agent_name: 'custom_agent',
+      },
+    ];
+
+    const output = toolEvents
+      .map(event => render(<EventLine event={event} animationsEnabled={false}/>).lastFrame())
+      .join('\n');
+
+    expect(output).toContain('tool: http_request (web_tester)');
+    expect(output).toContain('tool: shell (recon_agent)');
+    expect(output).toContain('tool: custom_tool (custom_agent)');
+  });
+
   it('groups stream events, renders batch/static streams, and handles output variants', async () => {
     const { computeDisplayGroups, StreamDisplay, StaticStreamDisplay, EventLine, render } = await load();
     const events: any[] = [
@@ -131,9 +170,6 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'tool_output', tool: 'shell', status: 'success', output: { stdout: 'ok' } },
       { type: 'report_content', content: '# Report\nFinding' },
       { type: 'batch', id: 'batch-1', events: [{ type: 'output', content: 'batched output' }] },
-      { type: 'swarm_start', task: 'audit', agent_names: ['recon', 'web'] },
-      { type: 'swarm_handoff', from_agent: 'recon', to_agent: 'web', message: 'handoff' },
-      { type: 'swarm_complete', final_agent: 'web', execution_count: 2 },
       { type: 'specialist_start', specialist: 'auth', task: 'test login', finding: 'weak session', artifactPaths: ['/tmp/a'] },
       { type: 'specialist_progress', specialist: 'auth', gate: 1, totalGates: 3, tool: 'browser', status: 'running' },
       { type: 'specialist_end', specialist: 'auth', result: { status: 'done', summary: 'ok' } },

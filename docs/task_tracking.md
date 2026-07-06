@@ -224,7 +224,7 @@ Use `blocked` when a dependency prevents progress (missing auth, missing capabil
 | Prompt directives     | `system_prompt.md`        | Task capture + execution loop + invariants                        |
 | Prompt assembly       | `factory.py`              | Startup guidance (seed tasks, capture gates)                      |
 | Context management    | `conversation_budget.py`  | Dedupe/preserve `<active_task>` + plan toolResult + evidence refs |
-| UI event bridge       | `react_bridge_handler.py` | Emit `task_activated` / `task_done` events                        |
+| UI event bridge       | `agent_event_handler.py`  | Emit `task_activated` / `task_done` events                        |
 
 ---
 

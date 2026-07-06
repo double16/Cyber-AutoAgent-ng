@@ -322,4 +322,31 @@ describe('App', () => {
             jest.useRealTimers();
         }
     });
+
+    it('routes idle keyboard ESC through the forced process exit path', async () => {
+        jest.useFakeTimers();
+        const originalExit = (process as any).exit;
+        const exitProcess = jest.fn();
+        Object.defineProperty(process, 'exit', {value: exitProcess, configurable: true});
+
+        try {
+            const {App} = await load();
+
+            await act(async () => {
+                TestRenderer.create(<App/>);
+                await Promise.resolve();
+            });
+
+            const keyboardArgs = useKeyboardHandlers.mock.calls.at(-1)![0];
+            act(() => {
+                keyboardArgs.onEscapeExit();
+                jest.advanceTimersByTime(300);
+            });
+
+            expect(exitProcess).toHaveBeenCalledWith(0);
+        } finally {
+            Object.defineProperty(process, 'exit', {value: originalExit, configurable: true});
+            jest.useRealTimers();
+        }
+    });
 });

@@ -68,7 +68,14 @@ describe('EventAggregator', () => {
 
         expect(reasoning).toEqual([
             {type: 'thinking_end'},
-            {type: 'reasoning', content: 'analyzed prior output', swarm_agent: undefined},
+            {
+                type: 'reasoning',
+                content: 'analyzed prior output',
+                agent_run_id: undefined,
+                agent_name: undefined,
+                agent_type: undefined,
+                parent_agent_run_id: undefined
+            },
         ]);
 
         const toolStart = aggregator.processEvent({type: 'tool_start', tool_name: 'shell', toolId: 't2'});
@@ -144,13 +151,8 @@ describe('EventAggregator', () => {
         }
     });
 
-    it('transforms handoff_to_agent tool starts during swarm operations', () => {
+    it('passes handoff_to_agent tool starts through as normal tool events', () => {
         const aggregator = new EventAggregator();
-
-        aggregator.processEvent({
-            type: 'swarm_start',
-            agent_names: ['recon'],
-        });
 
         const events = aggregator.processEvent({
             type: 'tool_start',
@@ -161,44 +163,33 @@ describe('EventAggregator', () => {
                 context: {target: 'example.com'},
             },
             toolId: 'handoff-1',
+            agent_name: 'auth',
+            agent_run_id: 'auth-1',
             timestamp: 99,
         });
 
         expect(events).toEqual([
             expect.objectContaining({
-                type: 'swarm_handoff',
-                from_agent: 'recon',
-                to_agent: 'auth',
-                message: 'check login',
-                shared_context: {target: 'example.com'},
-                timestamp: 99,
-                sequence: 1,
-            }),
-            expect.objectContaining({
                 type: 'tool_start',
                 tool_name: 'handoff_to_agent',
-                _handoff_processed: true,
+                toolId: 'handoff-1',
+                agent_name: 'auth',
+                agent_run_id: 'auth-1',
             }),
         ]);
 
-        expect(aggregator.processEvent({type: 'reasoning', content: 'now auth works'})).toEqual([
+        expect(aggregator.processEvent({
+            type: 'reasoning',
+            content: 'now auth works',
+            agent_name: 'auth',
+            agent_run_id: 'auth-1',
+        })).toEqual([
             expect.objectContaining({
                 type: 'reasoning',
                 content: 'now auth works',
-                swarm_agent: 'auth',
+                agent_name: 'auth',
+                agent_run_id: 'auth-1',
             }),
-        ]);
-    });
-
-    it('handles swarm event pass-through and reset cases', () => {
-        const aggregator = new EventAggregator();
-
-        expect(aggregator.processEvent({type: 'swarm_handoff'})).toEqual([]);
-        expect(aggregator.processEvent({type: 'swarm_handoff', to_agent: 'auth', message: 'go'})).toEqual([
-            {type: 'swarm_handoff', to_agent: 'auth', message: 'go'},
-        ]);
-        expect(aggregator.processEvent({type: 'swarm_complete', status: 'done'})).toEqual([
-            {type: 'swarm_complete', status: 'done'},
         ]);
     });
 

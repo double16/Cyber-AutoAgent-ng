@@ -35,7 +35,8 @@ class ReactHooks(HookProvider):
 
     def __init__(
             self, emitter: Optional[EventEmitter] = None, operation_id: Optional[str] = None,
-            agent_config: Optional[AgentConfig] = None
+            agent_config: Optional[AgentConfig] = None,
+            emit_tool_lifecycle: bool = True,
     ):
         """
         Initialize the React hooks provider.
@@ -48,6 +49,7 @@ class ReactHooks(HookProvider):
         self.emitter = emitter or get_emitter(operation_id=operation_id)
         self.tool_start_times: Dict[str, float] = {}
         self.agent_config = agent_config
+        self.emit_tool_lifecycle = emit_tool_lifecycle
 
     def register_hooks(self, registry: HookRegistry) -> None:
         """
@@ -65,8 +67,9 @@ class ReactHooks(HookProvider):
         """
         Handle tool invocation start events.
 
-        Emits tool_start and tool_invocation_start events with parsed
-        tool arguments for display in the UI.
+        Optionally emits tool_start and tool_invocation_start events with parsed
+        tool arguments. When AgentEventHandler owns lifecycle emission, only
+        ancillary correction events are emitted here.
 
         Args:
             event: The before tool invocation event from the SDK.
@@ -107,24 +110,25 @@ class ReactHooks(HookProvider):
                     except json.JSONDecodeError:
                         pass  # Keep original if parsing fails
 
-            # Emit structured events with already-parsed input
-            event_dict = {
-                "type": "tool_start",
-                "tool_name": tool_name,
-                "tool_id": tool_id,
-                "tool_input": tool_input,
-            }
-
             # Log the tool invocation at INFO level for visibility
             logger.info("Tool invocation: %s (id=%s)", tool_name, tool_id)
             logger.debug("Tool input: %s", tool_input)
 
-            # Emit the tool_start event with complete information
-            self.emitter.emit(event_dict)
+            if self.emit_tool_lifecycle:
+                # Emit structured events with already-parsed input
+                event_dict = {
+                    "type": "tool_start",
+                    "tool_name": tool_name,
+                    "tool_id": tool_id,
+                    "tool_input": tool_input,
+                }
 
-            # Emit tool_invocation_start for backward compatibility
-            # This simpler event is used by some UI components
-            self.emitter.emit({"type": "tool_invocation_start", "tool_name": tool_name})
+                # Emit the tool_start event with complete information
+                self.emitter.emit(event_dict)
+
+                # Emit tool_invocation_start for backward compatibility
+                # This simpler event is used by some UI components
+                self.emitter.emit({"type": "tool_invocation_start", "tool_name": tool_name})
 
             # Still emit tool_input_corrected for compatibility with existing code
             # that might rely on this event
@@ -145,8 +149,9 @@ class ReactHooks(HookProvider):
         """
         Handle tool invocation completion events.
 
-        Emits tool_end and tool_invocation_end events with results
-        and execution metrics.
+        Optionally emits tool_end and tool_invocation_end events with results
+        and execution metrics. When AgentEventHandler owns lifecycle emission,
+        this hook only emits thinking_end.
 
         Args:
             event: The after tool invocation event from the SDK.
@@ -182,23 +187,31 @@ class ReactHooks(HookProvider):
                 "Tool completed: %s (id=%s) in %.2fs", tool_name, tool_id, duration
             )
 
-            # Extra debug for swarm tool
-            if tool_name == "swarm":
-                logger.debug(f"Swarm execution took {duration:.2f}s")
-                logger.debug(f"Success: {success}, Output length: {len(output)}")
-                if output:
-                    logger.debug(
-                        f"Swarm output preview: {output[:200]}..."
-                        if len(output) > 200
-                        else output
-                    )
-
             # Emit thinking_end to stop animations
             self.emitter.emit(
                 {"type": "thinking_end", "tool_name": tool_name, "tool_id": tool_id}
             )
 
-            # ReactBridgeHandler handles tool_end emission with full context
+            if self.emit_tool_lifecycle:
+                self.emitter.emit(
+                    {
+                        "type": "tool_invocation_end",
+                        "success": success,
+                        "tool_name": tool_name,
+                    }
+                )
+                self.emitter.emit(
+                    {
+                        "type": "tool_end",
+                        "tool_name": tool_name,
+                        "tool_id": tool_id,
+                        "success": success,
+                        "duration": f"{duration:.2f}s",
+                    }
+                )
+
+            # AgentEventHandler handles tool_end emission with full context when
+            # lifecycle emission is disabled.
             if tool_id and duration > 0:
                 logger.debug(
                     f"Tool {tool_name} (id={tool_id}) completed in {duration:.2f}s"

@@ -122,34 +122,6 @@ export const ProgressIndicator: React.FC<ProgressIndicatorProps> = ({
 };
 
 /**
- * Connection status indicator
- */
-interface ConnectionStatusProps {
-  status: 'connected' | 'connecting' | 'disconnected' | 'error';
-  showLabel?: boolean;
-}
-
-export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({ status, showLabel = true }) => {
-  const theme = themeManager.getCurrentTheme();
-  
-  const indicators = {
-    connected: { icon: '[ACTIVE]', color: theme.success, label: 'Connected' },
-    connecting: { icon: <Spinner type="dots" />, color: theme.warning, label: 'Connecting' },
-    disconnected: { icon: '[WAIT]', color: theme.muted, label: 'Disconnected' },
-    error: { icon: '[ERR]', color: theme.danger, label: 'Error' }
-  };
-  
-  const { icon, color, label } = indicators[status];
-  
-  return (
-    <Text color={color}>
-      {icon}
-      {showLabel && ` ${label}`}
-    </Text>
-  );
-};
-
-/**
  * Bullet point for lists
  */
 export const Bullet: React.FC<{ level?: number }> = ({ level = 0 }) => {
@@ -201,27 +173,4 @@ export const SecurityIcon: React.FC<{ type: 'scanning' | 'vulnerable' | 'secure'
   
   const { icon, color } = icons[type];
   return <Text color={color}>{icon}</Text>;
-};
-
-/**
- * Operation step indicator
- */
-export const StepIndicator: React.FC<{ 
-  current: number; 
-  total: number; 
-  status?: 'active' | 'completed' | 'pending' 
-}> = ({ current, total, status = 'active' }) => {
-  const theme = themeManager.getCurrentTheme();
-  
-  const statusColors = {
-    active: theme.primary,
-    completed: theme.success,
-    pending: theme.muted
-  };
-  
-  return (
-    <Text color={statusColors[status]}>
-      Step {current}/{total}
-    </Text>
-  );
 };

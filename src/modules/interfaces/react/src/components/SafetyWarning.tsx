@@ -26,6 +26,7 @@ export const SafetyWarning: React.FC<SafetyWarningProps> = React.memo(({
   const [acknowledged, setAcknowledged] = useState(false);
   const acknowledgedRef = useRef(false);
   const confirmedRef = useRef(false);
+  const cancelledRef = useRef(false);
 
   // In test mode, auto-acknowledge and auto-confirm to bypass manual input
   React.useEffect(() => {
@@ -44,11 +45,17 @@ export const SafetyWarning: React.FC<SafetyWarningProps> = React.memo(({
 
   useInput((input, key) => {
     if (key.escape) {
+      if (cancelledRef.current || confirmedRef.current) {
+        return;
+      }
+      cancelledRef.current = true;
       onCancel();
       return;
     }
-    
-    if (input === 'y' || input === 'Y') {
+
+    const normalizedInput = input.trim().toLowerCase();
+
+    if (normalizedInput === 'y' || normalizedInput === 'yes') {
       if (acknowledgedRef.current) {
         if (confirmedRef.current) {
           return;
@@ -63,8 +70,12 @@ export const SafetyWarning: React.FC<SafetyWarningProps> = React.memo(({
       }
       return;
     }
-    
-    if (input === 'n' || input === 'N') {
+
+    if (normalizedInput === 'n' || normalizedInput === 'no') {
+      if (cancelledRef.current || confirmedRef.current) {
+        return;
+      }
+      cancelledRef.current = true;
       onCancel();
       return;
     }

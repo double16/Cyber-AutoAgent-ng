@@ -95,7 +95,7 @@ def install_fake_toolregistry(monkeypatch):
 
     # Ensure parent module `strands.tools` exists in sys.modules
     try:
-        import strands.tools  # type: ignore
+        importlib.import_module("strands.tools")
     except Exception:
         # If strands.tools isn't importable for some reason, create a placeholder.
         tools_mod = types.ModuleType("strands.tools")

@@ -11,7 +11,7 @@ from modules.agents.cyber_autoagent import AgentConfig, create_agent
 @patch("modules.config.ConfigManager.validate_requirements")
 @patch("modules.config.models.factory.create_ollama_model")
 @patch("modules.agents.cyber_autoagent.Agent")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.prompts.get_system_prompt")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
 @patch("modules.agents.cyber_autoagent.get_memory_client")

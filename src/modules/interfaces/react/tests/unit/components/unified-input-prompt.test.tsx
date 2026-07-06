@@ -93,6 +93,7 @@ describe('UnifiedInputPrompt', () => {
                     flowState={{step: 'idle'}}
                     onInput={onInput}
                     recentTargets={['https://recent.example']}
+                    commandHistory={['target persisted.example', 'execute persisted objective']}
                 />
             );
         });
@@ -114,8 +115,9 @@ describe('UnifiedInputPrompt', () => {
 
         sendInput('', {escape: true});
         sendInput('', {upArrow: true});
-        expect(textFromTree(view.toJSON())).toContain('execute old objective');
+        expect(textFromTree(view.toJSON())).toContain('execute persisted objective');
         sendInput('', {downArrow: true});
+        expect(textFromTree(view.toJSON())).toContain('input:/help');
 
         act(() => {
             buttons.find(button => button.props.children === 'change-line')!.props.onClick();
@@ -129,6 +131,70 @@ describe('UnifiedInputPrompt', () => {
         });
         expect(onInput).toHaveBeenCalledWith(expect.stringContaining('line one'));
         expect((global as any).CYBER_APP_STATE_ACTIONS.pushCommandHistory).toHaveBeenCalledWith(expect.stringContaining('line one'));
+    });
+
+    it('pushes submitted commands through explicit persistent history props', async () => {
+        const {UnifiedInputPrompt} = await load();
+        const onInput = jest.fn();
+        const onCommandHistoryPush = jest.fn();
+
+        let view!: ReactTestRenderer;
+        act(() => {
+            view = TestRenderer.create(
+                <UnifiedInputPrompt
+                    flowState={{step: 'idle'}}
+                    onInput={onInput}
+                    commandHistory={['target persisted.example']}
+                    onCommandHistoryPush={onCommandHistoryPush}
+                />
+            );
+        });
+
+        sendInput('', {upArrow: true});
+        expect(textFromTree(view.toJSON())).toContain('target persisted.example');
+
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'submit')!.props.onClick();
+            jest.runOnlyPendingTimers();
+        });
+
+        expect(onCommandHistoryPush).toHaveBeenCalledWith('target persisted.example');
+        expect(onInput).toHaveBeenCalledWith('target persisted.example');
+        expect((global as any).CYBER_APP_STATE_ACTIONS.pushCommandHistory).not.toHaveBeenCalledWith('target persisted.example');
+    });
+
+    it('does not add submitted slash commands to command history', async () => {
+        const {UnifiedInputPrompt} = await load();
+        const onInput = jest.fn();
+        const onCommandHistoryPush = jest.fn();
+
+        let view!: ReactTestRenderer;
+        act(() => {
+            view = TestRenderer.create(
+                <UnifiedInputPrompt
+                    flowState={{step: 'idle'}}
+                    onInput={onInput}
+                    commandHistory={['target persisted.example']}
+                    onCommandHistoryPush={onCommandHistoryPush}
+                />
+            );
+        });
+
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'change-help')!.props.onClick();
+        });
+        sendInput('', {tab: true});
+
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'submit')!.props.onClick();
+            jest.runOnlyPendingTimers();
+        });
+
+        expect(onInput).toHaveBeenCalledWith('/help');
+        expect(onCommandHistoryPush).not.toHaveBeenCalled();
+
+        sendInput('', {upArrow: true});
+        expect(textFromTree(view.toJSON())).toContain('target persisted.example');
     });
 
     it('updates placeholders for flow states and handles disabled and handoff modes', async () => {

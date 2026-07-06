@@ -1,8 +1,8 @@
-"""
-React Bridge Handler - Integrates Strands SDK callbacks with React UI.
+"""Agent event handler for structured SDK callback emission.
 
-This handler extends the SDK's PrintingCallbackHandler to emit structured
-events for the React terminal UI, providing real-time operation visibility.
+The handler converts Strands SDK callbacks into Cyber-AutoAgent stream events.
+It is intentionally UI-agnostic: the React terminal is one consumer, but the
+event protocol is shared by CLI/logging/automation surfaces.
 """
 
 import json
@@ -40,12 +40,11 @@ from modules.handlers.utils import (
     sanitize_target_name,
 )
 
-
-logger = get_logger("Handlers.ReactBridge")
+logger = get_logger("Handlers.AgentEvent")
 
 _DEFAULT_REASONING_DEDUPE_TTL_S = 20.0
 _AGENT_USAGE_CACHE_SIZE = 128
-_AGENT_USAGE_UUID_ATTR = "_caa_react_bridge_usage_uuid"
+_AGENT_USAGE_UUID_ATTR = "_caa_agent_event_usage_uuid"
 
 # Do not increment action count for planning tools
 _PLANNING_TOOL_NAMES = {
@@ -73,13 +72,96 @@ class _AgentUsageEntry:
     cost: float = 0.0
 
 
-class ReactBridgeHandler(PrintingCallbackHandler):
+class OperationEventCoordinator:
+    """Shared operation-level state for multiple agent event handlers."""
+
+    def __init__(
+            self,
+            operation_id: str,
+            emitter: EventEmitter,
+            budget_max_duration: int = 0,
+            budget_max_tokens: Optional[int] = None,
+            budget_max_cost: Optional[float] = None,
+    ) -> None:
+        self.operation_id = operation_id
+        self.emitter = emitter
+        self.budget_max_duration = budget_max_duration
+        self.budget_max_tokens = budget_max_tokens
+        self.budget_max_cost = budget_max_cost
+        self.start_time = time.time()
+        self._lock = threading.RLock()
+        self._agent_sequence = 0
+        self._termination_emitted = False
+        self._termination_reason: Optional[str] = None
+        self._report_generated = False
+        self.memory_ops = 0
+        self.evidence_count = 0
+        self.tool_counts: Dict[str, int] = {}
+        self._handler_usage: Dict[str, _AgentUsageEntry] = {}
+
+    def next_agent_run_id(self, agent_name: str) -> str:
+        with self._lock:
+            self._agent_sequence += 1
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", agent_name or "agent").strip("_") or "agent"
+            return f"{safe_name}-{self._agent_sequence}"
+
+    def emit(self, event: Dict[str, Any]) -> None:
+        with self._lock:
+            self.emitter.emit(event)
+
+    def update_usage(self, handler_id: str, entry: _AgentUsageEntry) -> None:
+        with self._lock:
+            self._handler_usage[handler_id] = entry
+
+    def current_usage(self) -> _AgentUsageEntry:
+        with self._lock:
+            total = _AgentUsageEntry()
+            for entry in self._handler_usage.values():
+                total.input_tokens += int(entry.input_tokens)
+                total.output_tokens += int(entry.output_tokens)
+                total.cache_read_tokens += int(entry.cache_read_tokens)
+                total.cache_write_tokens += int(entry.cache_write_tokens)
+                total.cost += float(entry.cost)
+            return total
+
+    def record_tool(self, tool_name: str) -> None:
+        if not tool_name:
+            return
+        with self._lock:
+            self.tool_counts[tool_name] = self.tool_counts.get(tool_name, 0) + 1
+
+    def record_memory(self, evidence: bool = False) -> None:
+        with self._lock:
+            self.memory_ops += 1
+            if evidence:
+                self.evidence_count += 1
+
+    def mark_termination(self, reason: str) -> bool:
+        with self._lock:
+            if self._termination_emitted:
+                return False
+            self._termination_emitted = True
+            self._termination_reason = reason
+            return True
+
+    @property
+    def termination_emitted(self) -> bool:
+        with self._lock:
+            return self._termination_emitted
+
+    @property
+    def termination_reason(self) -> Optional[str]:
+        with self._lock:
+            return self._termination_reason
+
+
+class AgentEventHandler(PrintingCallbackHandler):
     """
-    Handler that bridges SDK callbacks to React UI events.
+    Handler that bridges SDK callbacks to Cyber-AutoAgent stream events.
 
     This handler processes SDK callbacks and emits structured events that
-    the React UI can display. It handles tool execution, reasoning text,
-    metrics tracking, and operation state management.
+    downstream interfaces can display. It handles tool execution, reasoning
+    text, metrics tracking, and per-agent state management.
     """
 
     def __init__(
@@ -87,9 +169,16 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         operation_id: str = None,
         provider_id: str = None,
         model_id: str = None,
-        swarm_model_id: str = None,
+            specialist_model_id: str = None,
         emitter: EventEmitter = None,
         init_context: Dict[str, Any] = None,
+            coordinator: OperationEventCoordinator = None,
+            agent_name: str = "Cyber-AutoAgent",
+            agent_type: str = "main_orchestrator",
+            agent_run_id: str = None,
+            parent_agent_run_id: str = None,
+            emit_operation_init: bool = True,
+            start_metrics_thread: bool = True,
     ):
         """
         Initialize the React bridge handler.
@@ -97,15 +186,21 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         Args:
             operation_id: Unique operation identifier
             model_id: Model ID for accurate pricing calculations
-            swarm_model_id: Model ID to use for swarm agents
+            specialist_model_id: Optional model ID used by specialist/sub-agent runs
             emitter: Event emitter to use (defaults to stdout)
             init_context: Optional initialization context with rich operation details
+            coordinator: Shared operation coordinator for multi-agent runs
+            agent_name: Human-readable agent name for event metadata
+            agent_type: Stable agent role/type for event metadata
+            agent_run_id: Unique run ID for this agent instance
+            parent_agent_run_id: Optional parent agent run ID
+            emit_operation_init: Emit operation initialization events from this handler
+            start_metrics_thread: Start this handler's periodic metrics thread
         """
         super().__init__()
 
         env_reader = EnvironmentReader()
         self._state_lock = threading.RLock()
-        self._emit_lock = threading.RLock()
 
         # Operation configuration
         self.action_count = 0
@@ -115,10 +210,15 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         # Initialize emitter with operation context
         self.emitter = emitter or get_emitter(operation_id=self.operation_id)
+        self.agent_name = agent_name or "Cyber-AutoAgent"
+        self.agent_type = agent_type or "agent"
+        self.parent_agent_run_id = parent_agent_run_id
+        self.emit_operation_init = emit_operation_init
+        self.start_metrics_thread = start_metrics_thread
         self.start_time = time.time()
         self.provider_id = provider_id
         self.model_id = model_id
-        self.swarm_model_id = swarm_model_id or model_id
+        self.specialist_model_id = specialist_model_id or model_id
         self.init_context = init_context or {}
 
         # Unified budget caps
@@ -144,6 +244,15 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             )
         except Exception:
             self.budget_max_cost = None
+
+        self.coordinator = coordinator or OperationEventCoordinator(
+            operation_id=self.operation_id,
+            emitter=self.emitter,
+            budget_max_duration=self.budget_max_duration,
+            budget_max_tokens=self.budget_max_tokens,
+            budget_max_cost=self.budget_max_cost,
+        )
+        self.agent_run_id = agent_run_id or self.coordinator.next_agent_run_id(self.agent_name)
 
         # Track budget termination once
         self._budget_limit_reached = False
@@ -204,7 +313,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Recent reasoning dedupe per agent (TTL-based to prevent repeated summaries)
         self._recent_reasoning_by_agent = {}
         reasoning_dedupe_ttl_s = _DEFAULT_REASONING_DEDUPE_TTL_S
-        if "ollama" in self.provider_id or "ollama/" in self.model_id:
+        provider_text = str(self.provider_id or "")
+        model_text = str(self.model_id or "")
+        if "ollama" in provider_text or "ollama/" in model_text:
             reasoning_dedupe_ttl_s = 90.0
         try:
             self._recent_reasoning_ttl = float(
@@ -226,34 +337,11 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         self._stop_tool_used = False
         self._report_generated = False
 
-        # Swarm operation tracking
-        self.in_swarm_operation = False
-        self.swarm_agents = []
-        self.current_swarm_agent = None
-        self.swarm_handoff_count = 0
-        # Track last emitted swarm signature to prevent duplicates
-        self._last_swarm_signature = None
-
         # Termination tracking (stop tool or budget limit)
         self._termination_emitted = False
         self._termination_reason: Optional[str] = None
-        # Track sub-agent tool counts separately
-        self.swarm_agent_actions = {}  # {agent_name: action_count}
         # Track python_repl preview emission per tool id to suppress generic completion
         self._python_preview_emitted = set()
-        self.swarm_max_handoffs = (
-            None  # Max handoffs across the swarm (provided by tool input)
-        )
-        self.swarm_action_count = 0  # Track total tool actions across all agents
-        self.swarm_tool_id = None  # Track the swarm tool's specific ID
-
-        # Swarm agent tool mapping for intelligent agent detection
-        self.swarm_agent_tools = {}  # {agent_name: [tool_list]}
-        self.swarm_agent_details = []  # Store full agent details
-        # Track in-flight tool execution per agent to control reasoning flush timing
-        self._tool_running_by_agent: Dict[str, bool] = {}
-        # Emit swarm handoff limit notice only once
-        self._swarm_handoff_limit_announced = False
 
         # Initialize tool emitter
         self.tool_emitter = ToolEventEmitter(self.emit_ui_event)
@@ -265,13 +353,17 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         self._last_agent = None  # Store agent reference for metrics
 
         # Emit initial metrics
-        self._emit_initial_metrics()
+        if self.emit_operation_init:
+            self._emit_initial_metrics()
 
         # Start periodic metrics updates
-        self._start_metrics_thread()
+        if self.start_metrics_thread:
+            self._start_metrics_thread()
 
         # Emit operation initialization details if provided
         try:
+            if not self.emit_operation_init:
+                return
             op_event = {
                 "type": "operation_init",
                 "operation_id": self.operation_id,
@@ -314,53 +406,44 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         This is the main entry point for all SDK callbacks. It routes
         different callback types to appropriate handlers.
 
-        When in swarm operation context, callbacks are attributed to the
-        currently active swarm agent for proper visibility in the UI.
+        Events are attributed to this handler's agent metadata. Multiple
+        handlers can safely share one operation coordinator.
         """
         # Minimal logging for production
 
-        # Transform SDK events to UI events. Strands can invoke callbacks from
-        # multiple worker threads during swarm execution, so serialize all
-        # mutable handler state transitions.
+        # Transform SDK events to stream events. Strands can invoke callbacks
+        # from multiple worker threads, so serialize mutable handler state.
         with self._state_lock:
             self._transform_sdk_event(kwargs)
 
     @property
     def action_count(self) -> int:
-        lock = getattr(self, "_state_lock", None)
-        if lock is None:
-            return self._action_count
-        with lock:
+        with self._state_lock:
             return self._action_count
 
     @action_count.setter
     def action_count(self, value: int) -> None:
-        lock = getattr(self, "_state_lock", None)
-        if lock is None:
-            self._action_count = value
-            return
-        with lock:
+        with self._state_lock:
             self._action_count = value
 
     def emit_ui_event(self, event: Dict[str, Any]) -> None:
         """
-        Emit structured event for the React UI.
+        Emit a structured event for downstream interfaces.
 
-        All events are emitted with a specific format that the React UI
-        can parse and display appropriately.
+        Agent metadata is attached centrally so all consumers can correlate
+        interleaved multi-agent streams without tool-specific state.
         """
-        # Use the pluggable emitter - maintains backward compatibility
-        # The emitter handles timestamp addition and protocol formatting
         try:
-            emit_lock = getattr(self, "_emit_lock", None)
-            if emit_lock is None:
-                self.emitter.emit(event)
-            else:
-                with emit_lock:
-                    self.emitter.emit(event)
+            event = dict(event)
+            event.setdefault("operation_id", self.operation_id)
+            event.setdefault("agent_run_id", self.agent_run_id)
+            event.setdefault("agent_name", self.agent_name)
+            event.setdefault("agent_type", self.agent_type)
+            if self.parent_agent_run_id:
+                event.setdefault("parent_agent_run_id", self.parent_agent_run_id)
+            self.coordinator.emit(event)
         except BrokenPipeError:
-            # Frontend terminal closed (user interrupted) - suppress noisy traceback
-            logger.debug(f"Frontend disconnected, skipping event {event.get('type')}")
+            logger.debug("Frontend disconnected, skipping event %s", event.get("type"))
         except Exception as e:
             logger.error(
                 f"Failed to emit event {event.get('type')}: {e}", exc_info=True
@@ -377,7 +460,12 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         """
         try:
             with self._state_lock:
-                if self._termination_emitted:
+                coordinator = self.coordinator
+                if coordinator is not None and not coordinator.mark_termination(reason):
+                    self._termination_emitted = True
+                    self._termination_reason = coordinator.termination_reason
+                    return
+                if coordinator is None and self._termination_emitted:
                     return
                 self._termination_emitted = True
                 self._termination_reason = reason
@@ -425,9 +513,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         Delegates to small helpers to keep this method readable and testable.
         """
-        # Swarm agent detection from callback context
-        self._maybe_switch_swarm_agent(kwargs)
-
         # Extract common fields
         message = kwargs.get("message")
         reasoning_text = kwargs.get("reasoningText")
@@ -455,7 +540,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             self._handle_streaming_reasoning(data)
             recent_reasoning_seen.seen = True
 
-        # 2) Message (tool blocks, result blocks, and optional swarm reasoning extraction)
+        # 2) Message (tool blocks and result blocks)
         if message and isinstance(message, dict):
             self._process_message(
                 message,
@@ -549,21 +634,13 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
     def _current_usage_totals(self) -> Dict[str, Any]:
         with self._metrics_lock:
-            input_tokens = int(getattr(self, "_aggregate_input_tokens", 0)) + int(
-                getattr(self, "_sdk_input_tokens", 0)
-            )
-            output_tokens = int(getattr(self, "_aggregate_output_tokens", 0)) + int(
-                getattr(self, "_sdk_output_tokens", 0)
-            )
-            cache_read_tokens = int(getattr(self, "_aggregate_cache_read_tokens", 0)) + int(
-                getattr(self, "_sdk_cache_read_tokens", 0)
-            )
-            cache_write_tokens = int(getattr(self, "_aggregate_cache_write_tokens", 0)) + int(
-                getattr(self, "_sdk_cache_write_tokens", 0)
-            )
-            cost = float(getattr(self, "_aggregate_cost", 0.0))
+            input_tokens = self._aggregate_input_tokens + self._sdk_input_tokens
+            output_tokens = self._aggregate_output_tokens + self._sdk_output_tokens
+            cache_read_tokens = self._aggregate_cache_read_tokens + self._sdk_cache_read_tokens
+            cache_write_tokens = self._aggregate_cache_write_tokens + self._sdk_cache_write_tokens
+            cost = self._aggregate_cost
 
-            cache = getattr(self, "_agent_usage_cache", {})
+            cache = self._agent_usage_cache
             for entry in list(cache.values()):
                 input_tokens += int(entry.input_tokens)
                 output_tokens += int(entry.output_tokens)
@@ -579,6 +656,38 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 "cost": cost,
             }
 
+    def _publish_usage_to_coordinator(self) -> None:
+        try:
+            totals = self._current_usage_totals()
+            coordinator = self.coordinator
+            if coordinator is not None:
+                coordinator.update_usage(
+                    self.agent_run_id,
+                    _AgentUsageEntry(
+                        input_tokens=int(totals["input_tokens"]),
+                        output_tokens=int(totals["output_tokens"]),
+                        cache_read_tokens=int(totals["cache_read_tokens"]),
+                        cache_write_tokens=int(totals["cache_write_tokens"]),
+                        cost=float(totals["cost"]),
+                    ),
+                )
+        except Exception:
+            pass
+
+    def _operation_usage_totals(self) -> Dict[str, Any]:
+        self._publish_usage_to_coordinator()
+        coordinator = self.coordinator
+        if coordinator is None:
+            return self._current_usage_totals()
+        usage = coordinator.current_usage()
+        return {
+            "input_tokens": int(usage.input_tokens),
+            "output_tokens": int(usage.output_tokens),
+            "cache_read_tokens": int(usage.cache_read_tokens),
+            "cache_write_tokens": int(usage.cache_write_tokens),
+            "cost": float(usage.cost),
+        }
+
     def _get_or_assign_agent_usage_uuid(self, agent: Any) -> str:
         agent_uuid = getattr(agent, _AGENT_USAGE_UUID_ATTR, None)
         if agent_uuid:
@@ -592,25 +701,16 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
     def _aggregate_usage_entry(self, entry: _AgentUsageEntry) -> None:
         with self._metrics_lock:
-            self._aggregate_input_tokens = int(getattr(self, "_aggregate_input_tokens", 0)) + int(entry.input_tokens)
-            self._aggregate_output_tokens = int(getattr(self, "_aggregate_output_tokens", 0)) + int(entry.output_tokens)
-            self._aggregate_cache_read_tokens = int(getattr(self, "_aggregate_cache_read_tokens", 0)) + int(
-                entry.cache_read_tokens
-            )
-            self._aggregate_cache_write_tokens = int(getattr(self, "_aggregate_cache_write_tokens", 0)) + int(
-                entry.cache_write_tokens
-            )
-            self._aggregate_cost = float(getattr(self, "_aggregate_cost", 0.0)) + float(entry.cost)
+            self._aggregate_input_tokens += int(entry.input_tokens)
+            self._aggregate_output_tokens += int(entry.output_tokens)
+            self._aggregate_cache_read_tokens += int(entry.cache_read_tokens)
+            self._aggregate_cache_write_tokens += int(entry.cache_write_tokens)
+            self._aggregate_cost += float(entry.cost)
 
     def _capture_agent_usage(self, agent: Any, usage: Dict[str, Any]) -> None:
         if not agent or not usage:
             return
         with self._metrics_lock:
-            if not hasattr(self, "_agent_usage_cache"):
-                self._agent_usage_cache = OrderedDict()
-            if not hasattr(self, "_agent_usage_cache_size"):
-                self._agent_usage_cache_size = _AGENT_USAGE_CACHE_SIZE
-
             agent_uuid = self._get_or_assign_agent_usage_uuid(agent)
             input_tokens = int(usage.get("inputTokens", 0) or 0)
             output_tokens = int(usage.get("outputTokens", 0) or 0)
@@ -639,29 +739,15 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
     # -- Helper methods ----------------------------------------------------
 
-    def _maybe_switch_swarm_agent(self, kwargs: Dict[str, Any]) -> None:
-        if not self.in_swarm_operation:
-            return
-        detected = self._detect_swarm_agent_from_callback(kwargs)
-        if detected and detected != self.current_swarm_agent:
-            # In swarm mode, do NOT flush reasoning on agent switches; keep rationale
-            # buffered and let it flush after the next tool_end to preserve ordering.
-            if self.reasoning_buffer:
-                self._emit_accumulated_reasoning()
-            self.current_swarm_agent = detected
-            if detected not in self.swarm_agent_actions:
-                self.swarm_agent_actions[detected] = 0
-
     def _handle_reasoning(self, text: str) -> None:
         """Handle reasoning text with per-agent TTL dedupe, then accumulate.
 
-        We avoid emitting identical reasoning fragments repeatedly within a short
-        window per agent, which commonly happens in swarm mode.
+        We avoid emitting identical reasoning fragments repeatedly within a short window.
         """
         if not text:
             return
         try:
-            agent_key = self.current_swarm_agent or "main"
+            agent_key = self.agent_run_id or "main"
             # Normalize whitespace to compare fragments robustly
             norm = re.sub(r"\s+", " ", str(text))
             if not norm.strip():
@@ -672,7 +758,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             # Prune expired entries
             if recent:
                 for k, ts in list(recent.items()):
-                    if now - ts > getattr(self, "_recent_reasoning_ttl", _DEFAULT_REASONING_DEDUPE_TTL_S):
+                    if now - ts > self._recent_reasoning_ttl:
                         del recent[k]
             # Skip if we've seen this fragment very recently for this agent
             if ' ' in norm and len(norm) > 10 and norm in recent:
@@ -721,32 +807,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             return None
 
     def _handle_tool_announcement(self, tool_use: Dict[str, Any]) -> None:
-        # Swarm context agent inference
-        if self.in_swarm_operation:
-            tool_name = tool_use.get("name", "")
-            # Do not flush reasoning here; action header will pre-flush once to avoid duplicates
-            if tool_name not in ["swarm", "complete_swarm_task", "handoff_to_agent"]:
-                active_agent = self._infer_active_swarm_agent(tool_name)
-                if active_agent and active_agent != self.current_swarm_agent:
-                    if self.reasoning_buffer:
-                        # Avoid duplicate emissions: agent switch flush is allowed; header pre-flush will see empty buffer
-                        self._emit_accumulated_reasoning()
-                    prev = self.current_swarm_agent
-                    self.current_swarm_agent = active_agent
-                    if active_agent not in self.swarm_agent_actions:
-                        self.swarm_agent_actions[active_agent] = 0
-                    self.emit_ui_event(
-                        {
-                            "type": "swarm_agent_transition",
-                            "from_agent": prev,
-                            "to_agent": active_agent,
-                            "via_tool": tool_name,
-                        }
-                    )
         self._process_tool_announcement(tool_use)
 
     def _handle_tool_result(self, tool_result: Any) -> None:
-        # In swarm mode, do not flush reasoning here; defer until after tool_end
         self._process_tool_result_from_message(tool_result)
 
     def _handle_alternate_results(
@@ -799,7 +862,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Handle action progression
         if message.get("role") == "assistant":
             # Identify the very first assistant turn (before any actions are counted)
-            initial_assistant = not self.in_swarm_operation and self.action_count == 0
+            initial_assistant = self.action_count == 0
 
             if has_tool_use:
                 # Reset batch tracking for new assistant response with tools
@@ -841,64 +904,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 if isinstance(item, dict) and "text" in item:
                     pass  # Token counting via SDK metrics
 
-        # Emit swarm agent reasoning from assistant message text prior to tool_use blocks
-        # This captures agent rationale that may not arrive via reasoningText callbacks.
-        # Avoid duplicate emission if explicit reasoningText/streaming already seen for this callback.
-        if (
-            self.in_swarm_operation
-            and message.get("role") == "assistant"
-                and not recent_reasoning_seen.seen
-            and not skip_reasoning_extraction
-        ):
-            try:
-                for block in content:
-                    # Stop at first tool_use/toolUse block to avoid pulling post-tool text
-                    if isinstance(block, dict) and (
-                        block.get("type") == "tool_use" or "toolUse" in block
-                    ):
-                        break
-                    if isinstance(block, dict) and isinstance(block.get("text"), str):
-                        text_val = block.get("text", "").strip()
-                        if text_val:
-                            # Reuse existing reasoning pipeline (adds swarm_agent metadata and flushes appropriately)
-                            self._handle_reasoning(text_val)
-                            # Mark so we don't double-extract within same callback
-                            recent_reasoning_seen.seen = True
-            except Exception:
-                # Never allow parsing issues to break streaming
-                pass
-
-        # Additionally, in swarm, capture one trailing text block that appears AFTER a tool_use
-        # in the same assistant message (common pattern for short rationale)
-        if (
-            self.in_swarm_operation
-            and message.get("role") == "assistant"
-            and has_tool_use
-                and not recent_reasoning_seen.seen
-            and not skip_reasoning_extraction
-        ):
-            try:
-                seen_tool = False
-                for block in content:
-                    if isinstance(block, dict) and (
-                        block.get("type") == "tool_use" or "toolUse" in block
-                    ):
-                        seen_tool = True
-                        continue
-                    if (
-                        seen_tool
-                        and isinstance(block, dict)
-                        and isinstance(block.get("text"), str)
-                    ):
-                        txt = block.get("text", "").strip()
-                        # Skip JSON-like blocks and empty
-                        if txt and not txt.startswith("{") and not txt.startswith("["):
-                            self._handle_reasoning(txt)
-                            recent_reasoning_seen.seen = True
-                            break
-            except Exception:
-                pass
-
         # Process tool uses in message content
         for block in content:
             if isinstance(block, dict):
@@ -934,8 +939,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def _process_tool_announcement(self, tool_use: Dict[str, Any]) -> None:
         """Process tool usage announcements.
 
-        For main agent: ReactHooks handles tool events via SDK hooks.
-        For swarm agents: We handle events here since they lack hooks.
+        Emits generic tool lifecycle events from SDK callbacks. Consumers dedupe
+        duplicate hook/callback emissions by tool id.
         """
         tool_name = tool_use.get("name", "")
         tool_id = self._tool_use_id(tool_use)
@@ -948,43 +953,29 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             if self.reasoning_buffer:
                 self._emit_accumulated_reasoning()
 
-        # Check if this is a swarm agent tool (needs immediate emission)
-        is_swarm_agent_tool = (
-            self.in_swarm_operation
-            and self.current_swarm_agent
-            and tool_name not in ["swarm", "complete_swarm_task", "handoff_to_agent"]
-        )
-
         # Only process new tools
         if tool_id and tool_id not in self.announced_tools:
-            # Ensure a action header will be emitted for each new tool (non-swarm)
+            # Ensure a action header will be emitted for each new tool.
             # IMPORTANT: Only emit header for the FIRST tool in a multi-tool response
             # Models can invoke multiple tools in parallel within the same response
-            if not self.in_swarm_operation:
-                # Check if this is the first tool announcement since the last action header
-                if self.action_count == 0 or not hasattr(
-                    self, "_tools_in_action_count"
-                ):
-                    self._tools_in_action_count = []
-                    self.pending_action_header = True
-                    # Emit accumulated reasoning first (for non-swarm or if not already emitted)
-                    self._emit_accumulated_reasoning()
+            if self.action_count == 0 or not hasattr(self, "_tools_in_action_count"):
+                self._tools_in_action_count = []
+                self.pending_action_header = True
+                self._emit_accumulated_reasoning()
 
-                # Track this tool as part of current action
-                self._tools_in_action_count.append(tool_id)
+            # Track this tool as part of current action
+            self._tools_in_action_count.append(tool_id)
 
             # Emit progress update ONLY if pending (i.e., this is the first tool in the response)
             if (self.action_count == 0 or self.pending_action_header) and tool_name not in _PLANNING_TOOL_NAMES:
                 if self.action_count == 0:
                     # First tool ever - increment action
-                    if not self.in_swarm_operation:
-                        self.action_count += 1
+                    self.action_count += 1
                 elif self.pending_action_header and not hasattr(
                     self, "_action_header_emitted_for_batch"
                 ):
                     # First tool in this batch - increment action
-                    if not self.in_swarm_operation:
-                        self.action_count += 1
+                    self.action_count += 1
                     self._action_header_emitted_for_batch = True
 
                 if self.should_stop():
@@ -999,6 +990,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             # Increment per-tool usage count once per announced tool id
             try:
                 self.tool_counts[tool_name] = self.tool_counts.get(tool_name, 0) + 1
+                if self.coordinator is not None:
+                    self.coordinator.record_tool(tool_name)
             except Exception as e:
                 # Defensive: never allow metrics to break streaming
                 logger.debug("Incrementing tool_counts", exc_info=e)
@@ -1006,17 +999,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             # Track tool name for correct attribution
             self.tool_name_buffer[tool_id] = tool_name
 
-            # Intelligently detect which swarm agent is active based on tool usage
-            if self.in_swarm_operation and tool_name != "swarm":
-                inferred_agent = self._infer_active_swarm_agent(tool_name)
-                if inferred_agent and inferred_agent != self.current_swarm_agent:
-                    # Agent has changed! Update tracking
-                    self.current_swarm_agent = inferred_agent
-                    # Initialize action count if needed
-                    if inferred_agent not in self.swarm_agent_actions:
-                        self.swarm_agent_actions[inferred_agent] = 0
-
-            # Emit tool_start for meaningful input OR swarm agents (which need immediate emission)
+            # Emit tool_start once meaningful input is available.
             has_meaningful_input = (
                 bool(tool_input)
                 and tool_input != {}
@@ -1029,26 +1012,13 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             ):
                 has_meaningful_input = False
 
-            # For swarm agents, delay emission until we have input
-            if is_swarm_agent_tool and not has_meaningful_input:
-                # Don't emit yet for swarm agents without input
-                # The tool_input_update will handle it
-                return
-
-            # Only the swarm path emits tool headers from the bridge; main agent headers come from ReactHooks
-            should_emit = self.in_swarm_operation and (
-                has_meaningful_input or is_swarm_agent_tool
-            )
+            # Emit tool headers generically from the callback handler. Legacy
+            # ReactHooks may also emit them; consumers dedupe by tool_id.
+            should_emit = has_meaningful_input
 
             if should_emit:
                 # Suppress OutputInterceptor during tool execution
                 set_tool_execution_state(True)
-                # Mark tool running for this agent to prevent mid-tool reasoning flushes
-                try:
-                    agent_key = self.current_swarm_agent or "main"
-                    self._tool_running_by_agent[agent_key] = True
-                except Exception:
-                    pass
 
                 # Record start time for duration calculation
                 if tool_id:
@@ -1063,15 +1033,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 }
 
                 # Mark as having complete input if it's meaningful
-                if has_meaningful_input or (is_swarm_agent_tool and tool_input):
+                if has_meaningful_input:
                     self.tools_with_complete_input.add(tool_id)
-
-                # Add swarm context if applicable
-                if self.in_swarm_operation and self.current_swarm_agent:
-                    tool_event["swarm_agent"] = self.current_swarm_agent
-                    tool_event["swarm_action"] = self.swarm_agent_actions.get(
-                        self.current_swarm_agent, 1
-                    )
 
                 self.emit_ui_event(tool_event)
 
@@ -1080,12 +1043,10 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                     "type": "tool_invocation_start",
                     "tool_name": tool_name,
                 }
-                if self.in_swarm_operation and self.current_swarm_agent:
-                    invocation_event["swarm_agent"] = self.current_swarm_agent
                 self.emit_ui_event(invocation_event)
 
-            # Emit tool-specific events (skip 'swarm' to avoid duplicate swarm_start emissions)
-            if tool_input and self._is_valid_input(tool_input) and tool_name != "swarm":
+            # Emit tool-specific events for all tools.
+            if tool_input and self._is_valid_input(tool_input):
                 self.tool_emitter.emit_tool_specific_events(tool_name, tool_input)
 
             # Emit thinking animation ONLY after a tool_start has been emitted
@@ -1100,58 +1061,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                     }
                 )
 
-            # Handle swarm tracking (only here; ToolEventEmitter is skipped for 'swarm')
-            if tool_name == "swarm":
-                try:
-                    self._track_swarm_start(tool_input, tool_id)
-                    # Emit a status update about swarm execution
-                    self.emit_ui_event(
-                        {
-                            "type": "info",
-                            "content": "Swarm agents executing in parallel - this may take a few minutes...",
-                            "metadata": {"swarm_status": "executing"},
-                        }
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "SWARM_START parsing failed: %s; input=%s", e, raw_input
-                    )
-            elif tool_name == "handoff_to_agent":
-                try:
-                    # Track handoff and ensure we have valid agent tracking
-                    if tool_input:
-                        # Normalize agent field: prefer explicit agent_name, fall back to handoff_to alias
-                        agent_name = (
-                            tool_input.get("agent_name")
-                            or tool_input.get("handoff_to")
-                            or ""
-                        )
-                        if agent_name:
-                            tool_input["agent_name"] = (
-                                agent_name  # ensure consistent key for downstream
-                            )
-                            # Emit accumulated reasoning before handoff
-                            if self.reasoning_buffer:
-                                self._emit_accumulated_reasoning()
-                            self._track_agent_handoff(tool_input)
-                        else:
-                            # Try to extract agent from message or other fields
-                            message = tool_input.get("message", "")
-                            if message:
-                                # Look for agent name in message
-                                for known_agent in self.swarm_agents:
-                                    if known_agent.lower() in message.lower():
-                                        tool_input["agent_name"] = known_agent
-                                        self._track_agent_handoff(tool_input)
-                                        break
-                            else:
-                                pass  # No known agent found in input
-                except Exception as e:
-                    logger.warning(
-                        "AGENT_HANDOFF parsing failed: %s; input=%s", e, raw_input
-                    )
-            elif tool_name == "complete_swarm_task":
-                self._track_swarm_complete()
+            # Multi-agent coordination is represented by generic agent metadata,
+            # not tool-specific lifecycle events.
 
         # Handle streaming updates - buffer and emit ONLY when complete
         elif tool_id in self.announced_tools and raw_input:
@@ -1194,41 +1105,34 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 # Suppress OutputInterceptor during tool execution
                 set_tool_execution_state(True)
 
-                # For swarm agents, emit proper tool_start if not already done
+                # Emit proper tool_start if not already done once streamed input completes.
                 if (
-                    self.in_swarm_operation
-                    and self.current_swarm_agent
-                    and tool_id in self.announced_tools
+                        tool_id in self.announced_tools
                     and tool_id not in self.tools_with_complete_input
+                        and not (
+                        tool_name == "handoff_to_agent"
+                        and self._handoff_input_complete(new_input)
+                )
                 ):
-                    # Emit complete tool_start event now that we have the input
-                    self.emit_ui_event(
-                        {
-                            "type": "tool_start",
-                            "tool_name": tool_name,
-                            "tool_id": tool_id,
-                            "tool_input": new_input,
-                            "swarm_agent": self.current_swarm_agent,
-                            "swarm_action": self.swarm_agent_actions.get(
-                                self.current_swarm_agent, 1
-                            ),
-                        }
-                    )
+                    tool_event = {
+                        "type": "tool_start",
+                        "tool_name": tool_name,
+                        "tool_id": tool_id,
+                        "tool_input": new_input,
+                    }
+                    self.emit_ui_event(tool_event)
                     # Also emit tool_invocation_start for compatibility
-                    self.emit_ui_event(
-                        {
-                            "type": "tool_invocation_start",
-                            "tool_name": tool_name,
-                            "swarm_agent": self.current_swarm_agent,
-                        }
-                    )
+                    invocation_event = {
+                        "type": "tool_invocation_start",
+                        "tool_name": tool_name,
+                    }
+                    self.emit_ui_event(invocation_event)
                     # Mark as having complete input now
                     self.tools_with_complete_input.add(tool_id)
 
-                # For non-swarm handoff_to_agent, emit tool_start now that input is complete and skip tool_input_update
+                # For handoff_to_agent, emit tool_start now that input is complete and skip tool_input_update.
                 elif (
-                    not self.in_swarm_operation
-                    and tool_name == "handoff_to_agent"
+                        tool_name == "handoff_to_agent"
                     and tool_id in self.announced_tools
                     and tool_id not in self.tools_with_complete_input
                     and self._handoff_input_complete(new_input)
@@ -1266,78 +1170,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 except Exception:
                     pass
 
-                # Emit tool-specific events now that we have the real input (skip 'swarm')
-                if self._is_valid_input(new_input) and tool_name != "swarm":
+                # Emit tool-specific events now that we have the real input.
+                if self._is_valid_input(new_input):
                     self.tool_emitter.emit_tool_specific_events(tool_name, new_input)
-
-                # Handle swarm tracking with real input (single source of truth)
-                if tool_name == "swarm":
-                    try:
-                        self._track_swarm_start(new_input, tool_id)
-                    except Exception as e:
-                        logger.warning(
-                            "SWARM_START streaming update parsing failed: %s; input=%s",
-                            e,
-                            raw_input,
-                        )
-                        self._track_swarm_start(new_input, tool_id)
-
-    def _synthesize_swarm_tool_start(
-        self, tool_name: str, buffered_output: str = None
-    ) -> None:
-        """Synthesize a tool_start event for swarm agents when missing.
-
-        This elegant workaround addresses SDK limitations where swarm agent
-        tool invocations don't emit proper start events.
-        """
-        if not self.in_swarm_operation or tool_name in [
-            "swarm",
-            "handoff_to_agent",
-            "complete_swarm_task",
-        ]:
-            return
-
-        # Infer which agent is using this tool
-        inferred_agent = self._infer_active_swarm_agent(tool_name)
-        if inferred_agent and inferred_agent != self.current_swarm_agent:
-            # Agent has changed - emit transition event
-            prev_agent = self.current_swarm_agent
-            self.current_swarm_agent = inferred_agent
-            if inferred_agent not in self.swarm_agent_actions:
-                self.swarm_agent_actions[inferred_agent] = 0
-
-            # Emit agent transition for UI visibility
-            self.emit_ui_event(
-                {
-                    "type": "swarm_agent_transition",
-                    "from_agent": prev_agent,
-                    "to_agent": inferred_agent,
-                    "via_tool": tool_name,
-                }
-            )
-
-        # Extract tool input from buffered output if available
-        tool_input = {}
-        if buffered_output and tool_name in [
-            "specialized_recon_orchestrator",
-            "auth_chain_analyzer",
-            "sql_injection_tester",
-            "advanced_payload_coordinator",
-        ]:
-            # Parse target from output for these tools
-            if "testphp.vulnweb.com" in buffered_output:
-                tool_input = {"target": "testphp.vulnweb.com"}
-
-        # Emit synthetic tool_start
-        self.emit_ui_event(
-            {
-                "type": "tool_start",
-                "tool_name": tool_name,
-                "tool_input": tool_input,
-                "swarm_agent": self.current_swarm_agent,
-                "synthetic": True,  # Mark as synthetic for transparency
-            }
-        )
 
     def _process_tool_result_from_message(self, tool_result: Any) -> None:
         """Process tool execution results."""
@@ -1366,37 +1201,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             )
             return
         tool_name = self.tool_name_buffer.get(tool_use_id) or tool_result_dict.get("name") or "unknown_tool"
-
-        # Do not flush reasoning here; for swarm we want reasoning to follow tool output
-
-        # Ensure we have proper tracking for swarm agents
-        if (
-            self.in_swarm_operation
-            and not self.current_swarm_agent
-            and self.swarm_agents
-        ):
-            # If no current agent set but we're in swarm, use first agent
-            self.current_swarm_agent = self.swarm_agents[0]
-            logger.info(
-                f"Swarm operation started with agent: {self.current_swarm_agent}"
-            )
-
-        # Parse swarm output for agent events if this is the swarm tool completing
-        if tool_name == "swarm" and buffered_output:
-            self._parse_swarm_output_for_events(buffered_output)
-
-        # Also check for swarm timeout or failure patterns
-        if self.in_swarm_operation and buffered_output:
-            # Look for timeout indicators
-            # TODO: the logic here needs to be better
-            if "300001ms" in buffered_output or "timeout" in buffered_output.lower():
-                self.emit_ui_event(
-                    {
-                        "type": "warning",
-                        "content": "⚠️ Swarm execution timeout - agents may have encountered issues with tool permissions or connectivity",
-                        "metadata": {"swarm_timeout": True},
-                    }
-                )
 
         # Stop thinking animation
         self.emit_ui_event({"type": "thinking_end"})
@@ -1492,11 +1296,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Get original tool input
         tool_input = self.tool_input_buffer.get(tool_use_id, {})
 
-        # For swarm agents, ensure we have proper tool visibility
-        # The tool_start should have been emitted when processing toolUse blocks
-        # This is the tool_end event
-
-        # Emit tool completion event with swarm context
         success = status != "error"
 
         # For stop tool, emit termination after tool header (below where output would go)
@@ -1536,6 +1335,10 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                         category = str(metadata.get("category", "")).lower()
                         if category in ("finding", "signal", "observation", "discovery"):
                             self.evidence_count += 1
+                            if self.coordinator is not None:
+                                self.coordinator.record_memory(evidence=True)
+                        elif self.coordinator is not None:
+                            self.coordinator.record_memory(evidence=False)
         except Exception:
             # Never allow metrics update errors to disrupt output
             pass
@@ -1554,28 +1357,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         }
         if duration is not None:
             _deferred_tool_end["duration"] = f"{duration:.2f}s"
-        if self.in_swarm_operation and self.current_swarm_agent:
-            _deferred_tool_end["swarm_agent"] = self.current_swarm_agent
-
-        # Exit swarm mode when swarm tool completes
-        # Check if we're exiting THE swarm tool specifically (not just any tool during swarm operation)
-        # Compare tool IDs to ensure we're detecting the swarm tool itself ending
-        is_swarm_tool_ending = (
-            (tool_use_id == self.swarm_tool_id)
-            if self.swarm_tool_id
-            else (tool_name == "swarm")
-        )
-
-        if is_swarm_tool_ending and self.in_swarm_operation:
-            logger.info(
-                "Swarm tool completed, emitting swarm_complete and exiting swarm mode (actions: %d)",
-                self.swarm_action_count,
-            )
-            try:
-                # Emit proper completion summary and reset swarm state
-                self._track_swarm_complete()
-            except Exception as e:
-                logger.warning("Failed to emit swarm_complete on swarm tool end: %s", e)
         # Handle errors with tool-specific processing
         if status == "error":
             error_text = ""
@@ -1675,9 +1456,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 )
                 # Emit tool_end after output and invocation_end
                 self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
-                # Flush reasoning after tool end for swarm
-                if self.in_swarm_operation and self.reasoning_buffer:
-                    self._emit_accumulated_reasoning(force=True)
 
                 # Mark that we've emitted output for this tool invocation
                 if tool_use_id:
@@ -1708,22 +1486,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             output_text = self._parse_shell_tool_output_detailed(output_text)
         elif tool_name == "editor":
             output_text = self._parse_editor_tool_output(output_text)
-        elif tool_name == "swarm" and "Status.FAILED" in output_text:
-            # Override SDK's incorrect timeout metrics with cached actual metrics
-            if hasattr(self, "last_swarm_metrics"):
-                metrics = self.last_swarm_metrics
-                output_text = f"""🎯 **Swarm Execution Timed Out**
-📊 **Status:** Partial Success (Timeout after {metrics["duration"]})
-🤖 **Agents Run:** {len(metrics["completed_agents"])}/{metrics["total_agents"]} agents
-🔄 **Actions Completed:** {metrics["total_actions"]}
-📈 **Tokens Used:** {metrics["total_tokens"]:,}
-
-**Agent Activity:**"""
-                for agent, activity in metrics.get("agent_activity", {}).items():
-                    if activity["active"]:
-                        output_text += f"\n• {agent}: {activity['actions']} actions ✓"
-                    else:
-                        output_text += f"\n• {agent}: Not started"
 
         if not output_text.strip():
             # For python_repl with no textual output, emit executed code and suppress generic message if a preview was shown
@@ -1732,7 +1494,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                     preview_emitted = bool(
                         tool_use_id
                         and tool_use_id
-                        in getattr(self, "_python_preview_emitted", set())
+                        in self._python_preview_emitted
                     )
                     code_input = self.tool_input_buffer.get(tool_use_id, {})
                     code_text = self._extract_code_from_input(code_input)
@@ -1743,9 +1505,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                             "status": "success",
                             "output": {"text": code_text},
                         }
-                        if self.in_swarm_operation and self.current_swarm_agent:
-                            code_event["swarm_agent"] = self.current_swarm_agent
-                        self.emit_ui_event(code_event)
+                    self.emit_ui_event(code_event)
                     if preview_emitted:
                         if tool_use_id:
                             self.tool_use_output_emitted[tool_use_id] = True
@@ -1782,8 +1542,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             )
             # Emit tool_end after output and invocation_end
             self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
-            if self.in_swarm_operation and self.reasoning_buffer:
-                self._emit_accumulated_reasoning(force=True)
             return
 
         # Task lifecycle events
@@ -1848,9 +1606,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         if not hasattr(self, "_processed_outputs"):
             self._processed_outputs = set()
 
-        # Agent tracking is handled through explicit handoff events only
-        # No text parsing needed - it's unreliable and causes false positives
-
         # Mark this output as processed
         self._processed_outputs.add(output_key)
         # Mark meaningful output for this tool invocation
@@ -1865,32 +1620,18 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             }
         )
 
-        # Emit tool completion with swarm context
         tool_inv_end_event = {
             "type": "tool_invocation_end",
             "success": success,
             "tool_name": tool_name,
         }
-        if self.in_swarm_operation and self.current_swarm_agent:
-            tool_inv_end_event["swarm_agent"] = self.current_swarm_agent
         self.emit_ui_event(tool_inv_end_event)
         # Emit tool_end after output and invocation_end
         self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
-        # Mark tool no longer running and flush any pending reasoning now
-        try:
-            agent_key = self.current_swarm_agent or "main"
-            if agent_key in self._tool_running_by_agent:
-                self._tool_running_by_agent[agent_key] = False
-        except Exception:
-            pass
-        if self.in_swarm_operation and self.reasoning_buffer:
-            self._emit_accumulated_reasoning(force=True)
 
         # Ensure exactly one reasoning per action: if none occurred in this action, emit a brief rationale now
         try:
-            if (not self.in_swarm_operation) and bool(
-                getattr(self, "_reasoning_required_for_current_action", False)
-            ):
+            if self._reasoning_required_for_current_action:
                 fallback = f"Reviewed {tool_name or 'tool'} results and determined next action."
                 self.emit_ui_event({"type": "reasoning", "content": fallback})
                 self._emitted_any_reasoning = True
@@ -2192,166 +1933,14 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         now = time.time()
         self.last_reasoning_time = now
 
-        # In swarm mode, never flush based on timers/size; defer until tool_end or explicit completion
-        if self.in_swarm_operation and self.current_swarm_agent:
-            try:
-                self._last_reasoning_flush = (
-                    self._last_reasoning_flush
-                )  # no-op keep attribute stable
-            except Exception:
-                self._last_reasoning_flush = 0
-            return
-
-    def _parse_swarm_output_for_events(self, output_text: str) -> None:
-        """Parse swarm execution output to extract and emit missing agent events.
-
-        Since SDK doesn't emit events for swarm agents due to callback limitations,
-        we parse the structured output to identify agent transitions. We avoid
-        hardcoded patterns and instead focus on the structured format that the
-        swarm tool provides in its output.
-        """
-        if not output_text or not self.in_swarm_operation:
-            return
-
-        lines = output_text.split("\n")
-        current_agent = None
-        agent_content_buffer = []
-        error_messages = []
-
-        for line in lines:
-            # Check for common error patterns
-            if "requires root privileges" in line:
-                error_messages.append(
-                    "⚠️ Some tools require root privileges - agents may use alternative approaches"
-                )
-            elif "QUITTING!" in line:
-                continue  # Skip redundant quit messages
-
-            # Look for agent section headers in the structured output (e.g., "**RECON_SPECIALIST:**")
-            # This is a reliable format from the swarm tool's structured output
-            agent_match = re.match(r"\*\*([A-Z_]+):\*\*", line)
-            if agent_match:
-                # If we had a previous agent with content, emit it
-                if current_agent and agent_content_buffer:
-                    agent_output = "\n".join(agent_content_buffer)
-                    if agent_output.strip():
-                        # Emit the complete agent contribution as output
-                        self.emit_ui_event(
-                            {
-                                "type": "output",
-                                "content": f"[{current_agent.upper().replace('_', ' ')}]\n{agent_output}",
-                                "metadata": {
-                                    "swarm_agent": current_agent,
-                                    "fromSwarmAgent": True,
-                                },
-                            }
-                        )
-                    agent_content_buffer = []
-
-                # Start tracking new agent
-                agent_name = agent_match.group(1).lower()
-                if agent_name != current_agent:
-                    current_agent = agent_name
-                    # Update current swarm agent
-                    if agent_name in self.swarm_agents:
-                        self.current_swarm_agent = agent_name
-                        if agent_name not in self.swarm_agent_actions:
-                            self.swarm_agent_actions[agent_name] = 0
-                        # Increment action count for this agent's contribution
-                        self.swarm_agent_actions[agent_name] += 1
-
-                        # Emit a structured event for agent transition
-                        self.emit_ui_event(
-                            {
-                                "type": "swarm_agent_active",
-                                "agent": agent_name,
-                                "action": self.swarm_agent_actions[agent_name],
-                                "metadata": {"fromSwarmOutput": True},
-                            }
-                        )
-                        logger.debug(
-                            f"Swarm agent transition detected: {agent_name} (action {self.swarm_agent_actions[agent_name]})"
-                        )
-                continue
-
-            # Collect content for current agent (everything after their header)
-            if current_agent and line.strip() and not line.startswith("**"):
-                # Filter out repetitive error messages
-                if "QUITTING!" not in line:
-                    agent_content_buffer.append(line)
-
-        # Handle any remaining buffered content
-        if current_agent and agent_content_buffer:
-            agent_output = "\n".join(agent_content_buffer)
-            if agent_output.strip():
-                self.emit_ui_event(
-                    {
-                        "type": "output",
-                        "content": f"[{current_agent.upper().replace('_', ' ')}]\n{agent_output}",
-                        "metadata": {
-                            "swarm_agent": current_agent,
-                            "fromSwarmAgent": True,
-                        },
-                    }
-                )
-
-        # Emit unique error messages if any
-        if error_messages:
-            for msg in set(error_messages):  # Use set to deduplicate
-                self.emit_ui_event(
-                    {
-                        "type": "info",
-                        "content": msg,
-                        "metadata": {"swarm_error_context": True},
-                    }
-                )
-
-    def _extract_swarm_reasoning_from_output(self, output_text: str) -> Optional[str]:
-        """Extract reasoning patterns from swarm agent output.
-
-        Swarm agents often embed their reasoning in their output.
-        This method extracts it for better visibility.
-        """
-        if not output_text or not self.in_swarm_operation:
-            return None
-
-        # Common reasoning patterns in swarm agent outputs
-        reasoning_indicators = [
-            "need to",
-            "should",
-            "will",
-            "found",
-            "identified",
-            "discovered",
-            "detected",
-            "analyzing",
-            "checking",
-            "scanning",
-            "testing",
-        ]
-
-        lines = output_text.split("\n")
-        reasoning_lines = []
-
-        for line in lines[:10]:  # Check first 10 lines
-            line_lower = line.lower().strip()
-            if any(indicator in line_lower for indicator in reasoning_indicators):
-                reasoning_lines.append(line.strip())
-                if len(reasoning_lines) >= 2:  # Limit extraction
-                    break
-
-        if reasoning_lines:
-            return " ".join(reasoning_lines)
-        return None
-
     def _begin_reasoning_action_if_needed(self) -> None:
-        """Pre-emit action header for reasoning-only cycles (non-swarm) once per cycle.
+        """Pre-emit action header for reasoning-only cycles once per cycle.
 
         Special case: Do NOT pre-emit for the initial reasoning (before any action starts).
         The initial reasoning should appear above the first progress boundary.
         """
         try:
-            if self.in_swarm_operation or self._reasoning_action_header_emitted:
+            if self._reasoning_action_header_emitted:
                 return
             # If no actions yet, do not emit a header here; the first tool will establish action 1
             if self.action_count == 0:
@@ -2368,22 +1957,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def _emit_accumulated_reasoning(self, force: bool = False) -> None:
         """Emit accumulated reasoning text as a complete block.
 
-        In swarm mode, never emit reasoning while a tool is actively running
-        for the current agent. This guarantees reasoning is rendered after
-        the tool output (post tool_end), not between tool args and output.
-
         Args:
             force: If True, bypass per-action gating (used at action transitions and completion)
         """
-        # Guard: if a tool is running for this agent in swarm, defer emission
-        try:
-            if self.in_swarm_operation:
-                agent_key = self.current_swarm_agent or "main"
-                if bool(self._tool_running_by_agent.get(agent_key, False)):
-                    return
-        except Exception:
-            pass
-
         if not self.reasoning_buffer:
             return
 
@@ -2402,21 +1978,14 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             # Keep buffer for next action header flush
             return
 
-        # Include swarm agent metadata in reasoning event
         reasoning_event = {"type": "reasoning", "content": combined_reasoning}
-        if self.in_swarm_operation and self.current_swarm_agent:
-            # Add agent name to the event metadata only; avoid prefixing content to prevent duplication in UI
-            reasoning_event["swarm_agent"] = self.current_swarm_agent
 
         self.emit_ui_event(reasoning_event)
         # Mark that we have emitted reasoning at least once in this operation
         self._emitted_any_reasoning = True
         self._reasoning_emitted_since_last_action_header = True
         # This action now has its reasoning
-        try:
-            self._reasoning_required_for_current_action = False
-        except Exception:
-            pass
+        self._reasoning_required_for_current_action = False
         # Update last flush time for streaming control
         self._last_reasoning_flush = time.time()
 
@@ -2434,8 +2003,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         # Reset per-action reasoning gate for the new action and flush buffered reasoning before header
         flushed_here = False
         try:
-            # In swarm mode, do NOT pre-flush at headers; flush occurs after tool_end for proper ordering
-            if (not self.in_swarm_operation) and self.reasoning_buffer:
+            if self.reasoning_buffer:
                 # Flush accumulated reasoning for the upcoming action (appears above header)
                 self._emit_accumulated_reasoning(force=True)
                 flushed_here = True
@@ -2508,8 +2076,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def get_budget_progress(self) -> int:
         """Return budget utilization percent as the max usage across configured caps."""
         try:
-            total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
-            cost = self._compute_total_cost_from_usage()
+            totals = self._operation_usage_totals()
+            total_tokens = int(totals["input_tokens"]) + int(totals["output_tokens"])
+            cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
             return self._calculate_budget_progress(total_tokens=total_tokens, cost=cost)[1]
         except Exception:
             return 0
@@ -2537,15 +2106,9 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             """Background loop to emit metrics every 5 seconds."""
             logger.debug("Metrics update thread started")
             update_count = 0
-            stop_event = getattr(self, "_stop_metrics_event", None)
             while True:
-                if stop_event is not None:
-                    if stop_event.wait(5):
-                        break
-                else:
-                    time.sleep(5)
-                    if self._stop_metrics:
-                        break
+                if self._stop_metrics_event.wait(5):
+                    break
                 try:
                     # Only emit if we're not stopped
                     if not self._stop_metrics and not self.should_stop():
@@ -2565,9 +2128,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def _stop_metrics_thread(self) -> None:
         """Stop the metrics update thread."""
         self._stop_metrics = True
-        stop_event = getattr(self, "_stop_metrics_event", None)
-        if stop_event is not None:
-            stop_event.set()
+        self._stop_metrics_event.set()
         if self._metrics_thread and self._metrics_thread.is_alive():
             self._metrics_thread.join(timeout=1)
 
@@ -2618,7 +2179,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         if self.models_client is None:
             return cost
 
-        pricing_agent = agent or getattr(self, "_last_agent", None)
+        pricing_agent = agent or self._last_agent
         if pricing_agent:
             provider = get_provider_from_agent(pricing_agent)
             if provider not in [None, "ollama"]:
@@ -2654,21 +2215,21 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def _compute_total_cost_from_usage(self) -> float:
         with self._metrics_lock:
             totals = self._current_usage_totals()
-            has_agent_usage = bool(getattr(self, "_agent_usage_cache", None)) or any(
+            has_agent_usage = bool(self._agent_usage_cache) or any(
                 [
-                    getattr(self, "_aggregate_input_tokens", 0),
-                    getattr(self, "_aggregate_output_tokens", 0),
-                    getattr(self, "_aggregate_cache_read_tokens", 0),
-                    getattr(self, "_aggregate_cache_write_tokens", 0),
-                    getattr(self, "_aggregate_cost", 0.0),
+                    self._aggregate_input_tokens,
+                    self._aggregate_output_tokens,
+                    self._aggregate_cache_read_tokens,
+                    self._aggregate_cache_write_tokens,
+                    self._aggregate_cost,
                 ]
             )
             if has_agent_usage:
                 legacy_cost = self._compute_cost_from_metrics(
-                    int(getattr(self, "_sdk_input_tokens", 0)),
-                    int(getattr(self, "_sdk_output_tokens", 0)),
-                    int(getattr(self, "_sdk_cache_read_tokens", 0)),
-                    int(getattr(self, "_sdk_cache_write_tokens", 0)),
+                    int(self._sdk_input_tokens),
+                    int(self._sdk_output_tokens),
+                    int(self._sdk_cache_read_tokens),
+                    int(self._sdk_cache_write_tokens),
                 )
                 return float(totals["cost"]) + legacy_cost
             return self._compute_cost_from_metrics(
@@ -2686,7 +2247,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
         """
         with self._state_lock:
             # Try to get fresh metrics from stored agent reference if available
-            if hasattr(self, "_last_agent") and self._last_agent:
+            if self._last_agent:
                 try:
                     if hasattr(self._last_agent, "event_loop_metrics"):
                         usage = self._last_agent.event_loop_metrics.accumulated_usage
@@ -2695,13 +2256,18 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 except Exception as e:
                     logger.debug(f"Could not get metrics from agent: {e}")
 
-            totals = self._current_usage_totals()
+            self._publish_usage_to_coordinator()
+            totals = (
+                self._operation_usage_totals()
+                if self.emit_operation_init
+                else self._current_usage_totals()
+            )
             input_tokens = int(totals["input_tokens"])
             output_tokens = int(totals["output_tokens"])
             cache_read_tokens = int(totals["cache_read_tokens"])
             cache_write_tokens = int(totals["cache_write_tokens"])
             total_tokens = input_tokens + output_tokens
-            cost = self._compute_total_cost_from_usage()
+            cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
 
             progress, progress_percent = self._calculate_budget_progress(total_tokens=total_tokens, cost=cost)
 
@@ -2714,8 +2280,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 "cacheReadTokens": cache_read_tokens,
                 "cacheWriteTokens": cache_write_tokens,
                 "duration": self._format_duration(time.time() - self.start_time),
-                "memoryOps": self.memory_ops,
-                "evidence": self.evidence_count,
+                "memoryOps": self.coordinator.memory_ops,
+                "evidence": self.coordinator.evidence_count,
                 "budget": {
                     "maxDurationMinutes": self.budget_max_duration,
                     "maxTokens": self.budget_max_tokens,
@@ -2727,8 +2293,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
             meaningful_fields = {
                 "tokens": total_tokens,
-                "memoryOps": self.memory_ops,
-                "evidence": self.evidence_count,
+                "memoryOps": self.coordinator.memory_ops,
+                "evidence": self.coordinator.evidence_count,
             }
 
             should_emit = (
@@ -2772,6 +2338,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 self._sdk_cache_read_tokens = usage.get("cacheReadInputTokens", 0)
                 self._sdk_cache_write_tokens = usage.get("cacheWriteInputTokens", 0)
 
+        self._publish_usage_to_coordinator()
+
         # Metrics emission is handled by the background thread
         # This method only updates the internal counters
 
@@ -2784,23 +2352,30 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         # Emit explicit completion summary for UI/logs
         try:
-            total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
-            cost = self._compute_total_cost_from_usage()
+            totals = (
+                self._operation_usage_totals()
+                if self.emit_operation_init
+                else self._current_usage_totals()
+            )
+            input_tokens = int(totals["input_tokens"])
+            output_tokens = int(totals["output_tokens"])
+            total_tokens = input_tokens + output_tokens
+            cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
             self.emit_ui_event(
                 {
                     "type": "operation_complete",
                     "operation": self.operation_id,
                     "duration": self._format_duration(time.time() - self.start_time),
                     "metrics": {
-                        "inputTokens": self.sdk_input_tokens,
-                        "outputTokens": self.sdk_output_tokens,
+                        "inputTokens": input_tokens,
+                        "outputTokens": output_tokens,
                         "totalTokens": total_tokens,
                         "cost": cost,
                         # Cache metrics for prompt caching cost calculation
-                        "cacheReadTokens": self.sdk_cache_read_tokens,
-                        "cacheWriteTokens": self.sdk_cache_write_tokens,
-                        "memoryOps": self.memory_ops,
-                        "evidence": self.evidence_count,
+                        "cacheReadTokens": int(totals["cache_read_tokens"]),
+                        "cacheWriteTokens": int(totals["cache_write_tokens"]),
+                        "memoryOps": self.coordinator.memory_ops,
+                        "evidence": self.coordinator.evidence_count,
                     },
                 }
             )
@@ -2809,459 +2384,6 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
         # Stop metrics thread on completion
         self._stop_metrics_thread()
-
-    def _track_swarm_start(
-        self, tool_input: Dict[str, Any], tool_id: str = None
-    ) -> None:
-        """Track swarm operation start. Emit a single, well-formed swarm_start.
-
-        Agent Tracking Flow:
-        1. The initial agent is set from the agent list (first agent)
-        2. Agent changes are tracked ONLY through explicit handoff_to_agent events
-        3. No text parsing is used - it's unreliable and causes false positives
-        4. The current_swarm_agent is displayed in action headers and events
-        """
-        logger.debug("=== SWARM START TRACKING ===")
-        logger.debug(f"Tool ID: {tool_id}")
-
-        if not isinstance(tool_input, dict):
-            tool_input = {}
-        agents = tool_input.get("agents", [])
-        task = tool_input.get("task", "")
-
-        logger.debug(f"Tool input keys: {list(tool_input.keys())}")
-        logger.debug(f"Task: {task or 'No task'}")
-        logger.debug(
-            f"Number of agents: {len(agents) if isinstance(agents, list) else 0}"
-        )
-        logger.debug(f"Max handoffs: {tool_input.get('max_handoffs')}")
-        logger.debug(f"Max iterations: {tool_input.get('max_iterations')}")
-        logger.debug(f"Execution timeout: {tool_input.get('execution_timeout')}")
-
-        # Store the swarm tool's ID for proper completion detection
-        if tool_id:
-            self.swarm_tool_id = tool_id
-
-        # Mark swarm start time and token baseline for accurate metrics
-        try:
-            self._swarm_start_time = time.time()
-            self._swarm_tokens_start = int(self.sdk_input_tokens) + int(
-                self.sdk_output_tokens
-            )
-        except Exception:
-            # Fallbacks if metrics not yet available
-            self._swarm_start_time = time.time()
-            self._swarm_tokens_start = 0
-
-        # Build agent names and details lists
-        agent_names: List[str] = []
-        agent_details: List[Dict[str, Any]] = []
-
-        if isinstance(agents, list):
-            for i, agent in enumerate(agents):
-                if isinstance(agent, dict):
-                    name = agent.get("name") or agent.get("role") or f"agent_{i + 1}"
-                    system_prompt = agent.get("system_prompt", "")
-                    tools = agent.get("tools", [])
-
-                    agent_names.append(name)
-                    # Extract model info from model_settings or use parent config
-                    model_settings = agent.get("model_settings", {})
-                    model_provider = agent.get("model_provider", "bedrock")
-
-                    # Prefer per-agent model_id when provided; fall back to configured swarm model for display
-                    agent_model_id = None
-                    try:
-                        # Common locations for per-agent model identifiers
-                        agent_model_id = model_settings.get(
-                            "model_id"
-                        ) or model_settings.get("model")
-                    except Exception:
-                        agent_model_id = None
-                    model_id = agent_model_id or self.swarm_model_id
-
-                    agent_details.append(
-                        {
-                            "name": name,
-                            "role": system_prompt,  # Full system prompt as role
-                            "system_prompt": system_prompt,  # Keep for compatibility
-                            "tools": tools if isinstance(tools, list) else [],
-                            "model_provider": model_provider,
-                            "model_id": model_id,
-                            "temperature": model_settings.get("params", {}).get(
-                                "temperature", 0.7
-                            ),
-                        }
-                    )
-                elif isinstance(agent, str):
-                    agent_names.append(agent)
-                    agent_details.append(
-                        {
-                            "name": agent,
-                            "system_prompt": "",
-                            "tools": [],
-                            "model_provider": "default",
-                            "model_id": "default",
-                        }
-                    )
-
-        # Skip emitting if we have no meaningful content yet (pre-stream empty input)
-        if not agent_names and not task:
-            logger.debug("Skipping swarm_start - no agents and no task")
-            return
-
-        # Skip emitting if agents list is empty but task exists (partial/empty agent data)
-        if task and not agent_names:
-            logger.debug(
-                "Skipping swarm_start emission - task exists but no agents yet"
-            )
-            return
-
-        logger.debug(f"Found {len(agent_names)} agents: {agent_names}")
-        for i, detail in enumerate(agent_details):
-            logger.debug(
-                f"Agent {i + 1} '{detail['name']}': tools={detail.get('tools', [])}"
-            )
-
-        # Compute signature to dedupe repeated emissions
-        signature = json.dumps({"agents": agent_names, "task": task}, sort_keys=True)
-        if self._last_swarm_signature == signature:
-            return
-        self._last_swarm_signature = signature
-
-        # Check if this is a NEW swarm operation or an update to existing
-        is_new_swarm = not self.in_swarm_operation
-        logger.debug(
-            f"Is new swarm: {is_new_swarm}, Currently in swarm: {self.in_swarm_operation}"
-        )
-
-        # Update state
-        self.in_swarm_operation = True
-        self.swarm_agents = agent_names
-        self.current_swarm_agent = agent_names[0] if agent_names else None
-        logger.debug(f"Set current swarm agent to: {self.current_swarm_agent}")
-
-        # Only reset counters for NEW swarm operations
-        if is_new_swarm:
-            logger.debug("Resetting swarm counters for NEW swarm operation")
-            self.swarm_handoff_count = 0
-            # Reset sub-agent action tracking for new swarm
-            self.swarm_agent_actions = {}
-            # Only reset action count for NEW swarm
-            self.swarm_action_count = 0
-        else:
-            logger.debug(
-                f"Continuing existing swarm - handoffs: {self.swarm_handoff_count}, actions: {self.swarm_action_count}"
-            )
-
-        # Build tool-to-agent mapping for intelligent agent detection
-        self.swarm_agent_tools = {}
-        self.swarm_agent_details = agent_details
-        logger.debug("Building tool-to-agent mapping:")
-        for agent_detail in agent_details:
-            agent_name = agent_detail.get("name")
-            agent_tools = agent_detail.get("tools", [])
-            if agent_name and agent_tools:
-                self.swarm_agent_tools[agent_name] = agent_tools
-                logger.debug(
-                    f"  Agent '{agent_name}': {len(agent_tools)} tools - {agent_tools}"
-                )
-
-        # Initialize action counter for first agent if new
-        if (
-            self.current_swarm_agent
-            and self.current_swarm_agent not in self.swarm_agent_actions
-        ):
-            self.swarm_agent_actions[self.current_swarm_agent] = 0
-
-        # Set max iterations and handoffs from tool input (no hardcoded defaults)
-        self.swarm_max_iterations = None
-        try:
-            if (
-                "max_iterations" in tool_input
-                and tool_input.get("max_iterations") is not None
-            ):
-                self.swarm_max_iterations = int(tool_input.get("max_iterations"))
-        except Exception:
-            self.swarm_max_iterations = None
-        try:
-            self.swarm_max_handoffs = (
-                int(tool_input.get("max_handoffs"))
-                if tool_input.get("max_handoffs") is not None
-                else None
-            )
-        except Exception:
-            self.swarm_max_handoffs = None
-        try:
-            self.swarm_max_handoffs = int(tool_input.get("max_handoffs", 20))
-        except Exception:
-            self.swarm_max_handoffs = 20
-
-        # Emit a single swarm_start UI event with full agent details
-        try:
-            event = {
-                "type": "swarm_start",
-                "agent_names": agent_names,
-                "agent_count": len(agent_names),
-                "agent_details": agent_details,
-                "task": task,
-            }
-            # Include config fields only if provided by tool input
-            if tool_input.get("max_handoffs") is not None:
-                event["max_handoffs"] = tool_input.get("max_handoffs")
-            if tool_input.get("max_iterations") is not None:
-                event["max_iterations"] = tool_input.get("max_iterations")
-            if tool_input.get("node_timeout") is not None:
-                event["node_timeout"] = tool_input.get("node_timeout")
-            if tool_input.get("execution_timeout") is not None:
-                event["execution_timeout"] = tool_input.get("execution_timeout")
-            logger.debug(f"Emitting swarm_start event with {len(agent_names)} agents")
-            self.emit_ui_event(event)
-            logger.debug("=== SWARM START TRACKING COMPLETE ===")
-        except Exception as e:
-            logger.warning("Failed to emit swarm_start: %s", e)
-            logger.debug(f"Exception details: {str(e)}", exc_info=True)
-
-    def _detect_swarm_agent_from_callback(
-        self, kwargs: Dict[str, Any]
-    ) -> Optional[str]:
-        """Detect active swarm agent from callback context.
-
-        The SDK passes agent information in callbacks - we can use this
-        to reliably determine which swarm agent is active.
-        """
-        if not self.in_swarm_operation:
-            return None
-
-        # Check for agent reference in the callback
-        agent = kwargs.get("agent")
-        if agent:
-            # Try to get agent name from object attributes
-            if hasattr(agent, "name"):
-                agent_name = str(agent.name)
-                # Check if this matches any of our known swarm agents
-                for known_agent in self.swarm_agents:
-                    # Compare normalized names (lowercase, underscores)
-                    normalized_known = known_agent.lower().replace("-", "_")
-                    normalized_name = (
-                        agent_name.lower().replace("-", "_").replace(" ", "_")
-                    )
-                    if normalized_known in normalized_name:
-                        logger.debug(
-                            f"Detected swarm agent from callback agent.name: {known_agent}"
-                        )
-                        return known_agent
-
-            # Try to get from agent ID or other attributes
-            if hasattr(agent, "id"):
-                agent_id = str(agent.id)
-                for known_agent in self.swarm_agents:
-                    if known_agent.lower() in agent_id.lower():
-                        logger.debug(
-                            f"Detected swarm agent from callback agent.id: {known_agent}"
-                        )
-                        return known_agent
-
-        # Check for agent context in message metadata
-        message = kwargs.get("message")
-        if message and isinstance(message, dict):
-            # Check metadata for agent information
-            metadata = message.get("metadata", {})
-            if isinstance(metadata, dict):
-                agent_info = (
-                    metadata.get("agent")
-                    or metadata.get("agent_name")
-                    or metadata.get("source")
-                )
-                if agent_info:
-                    agent_str = str(agent_info).lower()
-                    for known_agent in self.swarm_agents:
-                        if known_agent.lower() in agent_str:
-                            logger.debug(
-                                f"Detected swarm agent from message metadata: {known_agent}"
-                            )
-                            return known_agent
-
-        return None
-
-    def _infer_active_swarm_agent(self, tool_name: str) -> Optional[str]:
-        """Intelligently infer which swarm agent is active based on tool usage.
-
-        Each swarm agent has specific tools. When we see a tool invocation,
-        we can determine which agent must be active.
-        """
-        if not self.in_swarm_operation or not self.swarm_agent_tools:
-            return None
-
-        # Check which agents have this tool
-        possible_agents = []
-        for agent_name, tools in self.swarm_agent_tools.items():
-            if tool_name in tools:
-                possible_agents.append(agent_name)
-
-        if len(possible_agents) == 1:
-            # Only one agent has this tool - we found our agent!
-            logger.debug(
-                f"Swarm agent detected via tool {tool_name}: {possible_agents[0]}"
-            )
-            return possible_agents[0]
-        elif len(possible_agents) > 1:
-            # Multiple agents have this tool - use heuristics
-            # Prefer the current agent if it's one of the possibilities
-            if self.current_swarm_agent in possible_agents:
-                return self.current_swarm_agent
-            # Otherwise return the first possibility
-            logger.debug(
-                f"Multiple agents have tool {tool_name}: {possible_agents}, using {possible_agents[0]}"
-            )
-            return possible_agents[0]
-
-        # Tool not found in any agent's toolkit - might be a general tool
-        logger.debug(
-            f"Tool {tool_name} not found in agent toolkits, keeping current agent"
-        )
-        return self.current_swarm_agent
-
-    def _track_agent_handoff(self, tool_input: Dict[str, Any]) -> None:
-        """Track agent handoffs in swarm and emit appropriate events."""
-        if self.in_swarm_operation:
-            if not isinstance(tool_input, dict):
-                tool_input = self._parse_tool_input_from_stream(tool_input)
-                if not isinstance(tool_input, dict):
-                    tool_input = {}
-
-            # Normalize agent field from either agent_name or handoff_to
-            if not tool_input.get("agent_name") and tool_input.get("handoff_to"):
-                tool_input["agent_name"] = tool_input.get("handoff_to")
-
-            agent_name = tool_input.get("agent_name", "")
-            message = tool_input.get("message", "")
-            message_preview = message[:100] + "..." if len(message) > 100 else message
-
-            from_agent = self.current_swarm_agent or "unknown"
-
-            # Normalize agent name to match our stored agent names
-            if agent_name:
-                # Find matching agent from our known agents
-                normalized_new = agent_name.lower().replace("-", "_").replace(" ", "_")
-                for known_agent in self.swarm_agents:
-                    normalized_known = known_agent.lower().replace("-", "_")
-                    if (
-                        normalized_known == normalized_new
-                        or normalized_known in normalized_new
-                    ):
-                        agent_name = known_agent
-                        break
-
-                # Update current agent
-                self.current_swarm_agent = agent_name
-                self.swarm_handoff_count += 1
-                # Initialize action count for new agent if not exists
-                if agent_name not in self.swarm_agent_actions:
-                    self.swarm_agent_actions[agent_name] = 0
-                # Do not emit UI termination on handoff limits; SDK enforces limits internally.
-            else:
-                # Log warning but don't break the flow
-                logger.warning("Handoff with empty agent_name from %s", from_agent)
-
-            self.emit_ui_event(
-                {
-                    "type": "swarm_handoff",
-                    "from_agent": from_agent,
-                    "to_agent": agent_name,
-                    "message": message_preview,
-                    "shared_context": tool_input.get("context", {}),
-                }
-            )
-
-            # Mark subsequent actions clearly by emitting a new action header on handoff
-            try:
-                # Only increment global action count when not in swarm operation
-                if not self.in_swarm_operation:
-                    self.action_count += 1
-                if self.should_stop():
-                    raise BudgetLimitReached("Budget limit reached")
-                self._record_action_boundary()
-            except Exception as _:
-                # Do not break stream on header failure
-                pass
-
-    def _track_swarm_complete(self) -> None:
-        """Track swarm completion with enhanced metrics."""
-        if self.in_swarm_operation:
-            final_agent = self.current_swarm_agent or "unknown"
-            # Compute duration relative to swarm start if available
-            try:
-                start_ref = getattr(self, "_swarm_start_time", None) or self.start_time
-            except Exception:
-                start_ref = self.start_time
-            duration = time.time() - start_ref
-
-            # Calculate agent completion stats
-            completed_agents = [
-                agent for agent in self.swarm_agents if agent in self.swarm_agent_actions
-            ]
-
-            # Build detailed agent activity summary
-            agent_activity = {}
-            for agent in self.swarm_agents:
-                if agent in self.swarm_agent_actions:
-                    agent_activity[agent] = {
-                        "actions": self.swarm_agent_actions[agent],
-                        "active": agent in completed_agents,
-                    }
-
-            # Compute token delta for this swarm (best-effort)
-            try:
-                current_tokens = int(self.sdk_input_tokens) + int(
-                    self.sdk_output_tokens
-                )
-                baseline = getattr(self, "_swarm_tokens_start", 0)
-                token_delta = max(0, current_tokens - baseline)
-            except Exception:
-                token_delta = self.sdk_input_tokens + self.sdk_output_tokens
-
-            # Cache swarm metrics for potential timeout override
-            # Use SDK-aligned actions: sum of emitted agent sub-actions during swarm
-            total_actions = (
-                sum(self.swarm_agent_actions.values()) if self.swarm_agent_actions else 0
-            )
-
-            self.last_swarm_metrics = {
-                "final_agent": final_agent,
-                # Align with SDK: execution_count equals total actions (node executions)
-                "execution_count": total_actions,
-                "handoff_count": self.swarm_handoff_count,
-                "duration": f"{duration:.1f}s",
-                "total_tokens": token_delta,
-                "completed_agents": completed_agents,
-                "total_agents": len(self.swarm_agents),
-                "agent_activity": agent_activity,
-                "total_actions": total_actions,
-            }
-
-            self.emit_ui_event(
-                {
-                    "type": "swarm_complete",
-                    **self.last_swarm_metrics,
-                    "total_actions": (
-                        sum(self.swarm_agent_actions.values())
-                        if self.swarm_agent_actions
-                        else 0
-                    ),  # Sum of all agent actions
-                }
-            )
-
-            # Reset swarm state
-            logger.debug("Resetting swarm tracking state")
-            self.in_swarm_operation = False
-            self.swarm_agents = []
-            self.current_swarm_agent = None
-            self.swarm_handoff_count = 0
-            self.swarm_agent_actions = {}
-            # No need to track a separate swarm_action_count; totals are derived from agent sub-actions
-            self.swarm_tool_id = None
-            logger.debug("=== SWARM COMPLETE TRACKING DONE ===")
 
     def _is_valid_input(self, tool_input: Any) -> bool:
         """Check if tool input is valid."""
@@ -3408,8 +2530,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             # If nothing was persisted to memory/evidence, skip report generation
             # But also check FAISS files as a fallback (metrics may undercount)
             try:
-                mem_ops = int(getattr(self, "memory_ops", 0) or 0)
-                ev_count = int(getattr(self, "evidence_count", 0) or 0)
+                mem_ops = self.memory_ops
+                ev_count = self.evidence_count
             except Exception:
                 mem_ops, ev_count = 0, 0
 
@@ -3495,7 +2617,7 @@ class ReactBridgeHandler(PrintingCallbackHandler):
             # Prepare config data for report generation
             # Build tools_used list reflecting true usage counts for accurate reporting
             try:
-                if getattr(self, "tool_counts", None):
+                if self.tool_counts:
                     tools_used_list = []
                     # Deterministic order for reproducibility
                     for name in sorted(self.tool_counts.keys()):
@@ -3738,7 +2860,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
                 # Token cap
                 if isinstance(self.budget_max_tokens, int) and self.budget_max_tokens and self.budget_max_tokens > 0:
-                    total_tokens = self.sdk_input_tokens + self.sdk_output_tokens
+                    totals = self._operation_usage_totals()
+                    total_tokens = int(totals["input_tokens"]) + int(totals["output_tokens"])
                     if total_tokens >= int(self.budget_max_tokens):
                         if not self._termination_emitted:
                             self.emit_termination(
@@ -3751,7 +2874,8 @@ class ReactBridgeHandler(PrintingCallbackHandler):
 
                 # Cost cap
                 if isinstance(self.budget_max_cost, (int, float)) and self.budget_max_cost and self.budget_max_cost > 0:
-                    cost = self._compute_total_cost_from_usage()
+                    totals = self._operation_usage_totals()
+                    cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
                     if cost >= float(self.budget_max_cost):
                         if not self._termination_emitted:
                             self.emit_termination(
@@ -3792,7 +2916,11 @@ class ReactBridgeHandler(PrintingCallbackHandler):
     def get_summary(self) -> Dict[str, Any]:
         """Get operation summary for reporting."""
         with self._state_lock:
-            totals = self._current_usage_totals()
+            totals = (
+                self._operation_usage_totals()
+                if self.emit_operation_init
+                else self._current_usage_totals()
+            )
             input_tokens = int(totals["input_tokens"])
             output_tokens = int(totals["output_tokens"])
             total_tokens = input_tokens + output_tokens
@@ -3800,19 +2928,22 @@ class ReactBridgeHandler(PrintingCallbackHandler):
                 "inputTokens": input_tokens,
                 "outputTokens": output_tokens,
                 "totalTokens": total_tokens,
-                "cost": self._compute_total_cost_from_usage(),
+                "cost": float(totals.get("cost", self._compute_total_cost_from_usage())),
                 "cacheReadTokens": int(totals["cache_read_tokens"]),
                 "cacheWriteTokens": int(totals["cache_write_tokens"]),
             }
+            memory_ops = self.coordinator.memory_ops
+            evidence_count = self.coordinator.evidence_count
+            tool_counts = self.coordinator.tool_counts
 
             return {
                 "total_actions": self.action_count,
-                "tools_created": len(self.tools_used),
-                "evidence_collected": self.evidence_count,
-                "memory_operations": self.memory_ops,
-                "capability_expansion": list(self.tools_used),
-                "memory_ops": self.memory_ops,
-                "evidence_count": self.evidence_count,
+                "tools_created": len(tool_counts),
+                "evidence_collected": evidence_count,
+                "memory_operations": memory_ops,
+                "capability_expansion": list(tool_counts.keys()),
+                "memory_ops": memory_ops,
+                "evidence_count": evidence_count,
                 "duration": self._format_duration(time.time() - self.start_time),
                 "metrics": current_metrics,
             }
