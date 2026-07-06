@@ -215,6 +215,7 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
 @patch("modules.handlers.report_generator.build_report_sections")
 def test_generate_security_report_no_evidence(mock_build_sections, tmp_path):
     mock_build_sections.return_value = {"evidence_count": 0}
+    callback_handler = MagicMock()
     
     report_file = tmp_path / "no_report.md"
     
@@ -223,10 +224,108 @@ def test_generate_security_report_no_evidence(mock_build_sections, tmp_path):
         objective="Test",
         operation_id="OP123",
         config_params={},
+        callback_handler=callback_handler,
         filename=str(report_file)
     )
     
     assert not report_file.exists()
+    callback_handler.emit_ui_event.assert_not_called()
+
+
+@patch("modules.handlers.report_generator.ReportGenerator")
+@patch("modules.handlers.report_generator.get_output_path")
+@patch("modules.handlers.report_generator.build_report_sections")
+@patch("modules.handlers.report_generator.get_config_manager")
+def test_generate_security_report_emits_indexed_report_progress(
+    mock_get_config,
+    mock_build_sections,
+    mock_get_output_path,
+    mock_report_gen,
+    tmp_path,
+):
+    target = "example.com"
+    objective = "Test Objective"
+    operation_id = "OP_PROGRESS"
+    output_dir = tmp_path / "output_progress"
+    output_dir.mkdir()
+    mock_get_output_path.return_value = str(output_dir)
+
+    mock_config = MagicMock()
+    mock_config.get_provider.return_value = "test_provider"
+    mock_config.get_llm_config.return_value.model_id = "test_model"
+    mock_config.get_swarm_config.return_value.llm.model_id = "test_swarm_model"
+    mock_get_config.return_value = mock_config
+
+    mock_build_sections.return_value = {
+        "evidence_count": 3,
+        "steps_executed": 5,
+        "overview": "Overview content",
+        "findings_table": "Findings table",
+        "risk_assessment": "Risk assessment",
+        "severity_counts": {"HIGH": 1, "MEDIUM": 1, "INFO": 1},
+        "summary_table": "Summary table",
+        "raw_evidence": [
+            {
+                "id": "f1",
+                "title": "High Finding",
+                "severity": "HIGH",
+                "category": "finding",
+                "content": "High finding content",
+            },
+            {
+                "id": "f2",
+                "title": "Medium Finding",
+                "severity": "MEDIUM",
+                "category": "finding",
+                "content": "Medium finding content",
+            },
+            {
+                "id": "o1",
+                "title": "Useful Observation",
+                "severity": "INFO",
+                "category": "observation",
+                "content": "Observation content",
+            },
+        ],
+        "operation_plan": {},
+        "operation_tasks": [],
+        "tools_summary": "",
+    }
+
+    mock_agent = MagicMock()
+    mock_result = MagicMock()
+    mock_result.message = {"content": [{"text": "## Section Content\n"}]}
+    mock_agent.return_value = mock_result
+    mock_report_gen.create_report_agent.return_value = mock_agent
+    callback_handler = MagicMock()
+
+    generate_security_report(
+        target=target,
+        objective=objective,
+        operation_id=operation_id,
+        config_params={"steps_executed": 5, "tools_used": ["nmap"]},
+        callback_handler=callback_handler,
+        filename=str(tmp_path / "final_report.md"),
+    )
+
+    progress_events = [
+        call.args[0]
+        for call in callback_handler.emit_ui_event.call_args_list
+        if call.args[0].get("type") == "progress_update"
+    ]
+
+    assert [event["report_step_index"] for event in progress_events] == [1, 2, 3, 4, 5]
+    assert {event["report_step_total"] for event in progress_events} == {5}
+    assert [event["report_step_kind"] for event in progress_events] == [
+        "executive",
+        "finding",
+        "finding",
+        "observation",
+        "methodology",
+    ]
+    assert all(event["operation_stage"] == "final_report" for event in progress_events)
+    assert progress_events[1]["report_step_label"] == "Finding: High Finding"
+    assert progress_events[3]["report_step_label"] == "Observation: Useful Observation"
 
 @patch("modules.handlers.report_generator.ReportGenerator")
 @patch("modules.handlers.report_generator.get_output_path")

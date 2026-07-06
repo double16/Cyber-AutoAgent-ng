@@ -4,10 +4,10 @@
  */
 
 import React from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 import { ThinkingIndicator } from './ThinkingIndicator.js';
 import { StreamEvent } from '../types/events.js';
-import { formatToolInput } from '../utils/toolFormatters.js';
+import { formatGenericToolInput, formatToolInput } from '../utils/toolFormatters.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
 // Removed toolCategories import - using clean tool display without emojis
 import * as fs from 'fs/promises';
@@ -568,8 +568,17 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
 
       const eventAgent = (event as any)['agent_name'];
       const agentSubStep = (event as any)['agent_sub_step'];
+      const operationStage = (event as any)['operation_stage'];
       
-      if (event.step === "FINAL REPORT") {
+      if (operationStage === 'final_report') {
+        const reportIndex = Number((event as any)['report_step_index']);
+        const reportTotal = Number((event as any)['report_step_total']);
+        const reportLabel = String((event as any)['report_step_label'] || '').trim();
+        const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
+          ? `${reportIndex}/${reportTotal}`
+          : 'REPORT';
+        stepDisplay = `[FINAL REPORT ${progressLabel}]${reportLabel ? ` ${reportLabel}` : ''}`;
+      } else if (event.step === "FINAL REPORT") {
         stepDisplay = "[FINAL REPORT]";
       } else if (typeof event.step === 'string' && String(event.step).toUpperCase() === 'TERMINATED') {
         // Clean termination header without confusing progress values
@@ -2364,15 +2373,164 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   );
 });
 
-// Static variant to render an immutable, deduplicated history without re-renders.
-// Uses the same normalization/grouping to avoid duplicate headers/banners.
-import { Static } from 'ink';
+const formatProgressUpdateForScrollback = (event: DisplayStreamEvent): string => {
+  const any = event as any;
+  if (any.operation_stage === 'final_report') {
+    const reportIndex = Number(any.report_step_index);
+    const reportTotal = Number(any.report_step_total);
+    const reportLabel = String(any.report_step_label || '').trim();
+    const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
+      ? `${reportIndex}/${reportTotal}`
+      : 'REPORT';
+    return `[FINAL REPORT ${progressLabel}]${reportLabel ? ` ${reportLabel}` : ''}`;
+  }
+  if (any.step === 'FINAL REPORT') {
+    return '[FINAL REPORT]';
+  }
+  if (typeof any.step === 'string' && String(any.step).toUpperCase() === 'TERMINATED') {
+    return '[TERMINATED]';
+  }
+  if (any.agent_name && any.agent_sub_step) {
+    const agentName = String(any.agent_name).toUpperCase().replaceAll('_', ' ');
+    const agentTotal = any.agent_total_actions ?? any.agent_sub_step;
+    const progress = typeof any.progressPercent === 'number' ? ` | PROGRESS ${any.progressPercent}%` : '';
+    return `[AGENT: ${agentName} - ACTION ${any.agent_sub_step} | TOTAL ${agentTotal}${progress}]`;
+  }
+  const progress = typeof any.progressPercent === 'number' ? `${any.progressPercent}%` : String(any.step || '');
+  return any.totalTools && any.totalTools > 0
+    ? `[PROGRESS ${progress} | ${any.totalTools} tools]`
+    : `[PROGRESS ${progress}]`;
+};
+
+const stringifyToolValue = (value: any): string => {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(item => stringifyToolValue(item)).filter(Boolean).join(' ');
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+};
+
+const formatToolStartForScrollback = (event: DisplayStreamEvent): string => {
+  const any = event as any;
+  const toolName = any.tool_name || any.toolName || 'tool';
+  const agentContext = any.agent_name ? ` (${any.agent_name})` : '';
+  const input = any.tool_input || any.toolInput || {};
+  const raw =
+    input.command ??
+    input.commands ??
+    input.url ??
+    input.method ??
+    input.action ??
+    input.instruction ??
+    input.observation_goal ??
+    input.task ??
+    input.content ??
+    input.query ??
+    '';
+  const preview = stringifyToolValue(raw || formatGenericToolInput(input)).trim();
+  return preview
+    ? `tool: ${toolName}${agentContext}\n  ${preview}`
+    : `tool: ${toolName}${agentContext}`;
+};
+
+const formatEventForScrollback = (event: DisplayStreamEvent): string => {
+  try {
+    const any = event as any;
+    switch (event.type) {
+      case 'progress_update':
+        return formatProgressUpdateForScrollback(event);
+      case 'operation_init': {
+        const lines = ['Operation initialization complete'];
+        if (any.operation_id) lines.push(`  Operation ID: ${any.operation_id}`);
+        if (any.target) lines.push(`  Target: ${any.target}`);
+        if (any.objective) lines.push(`  Objective: ${any.objective}`);
+        if (any.model_id) lines.push(`  Model: ${any.model_id}`);
+        if (any.provider) lines.push(`  Provider: ${any.provider}`);
+        return lines.join('\n');
+      }
+      case 'reasoning':
+        return `${any.agent_name ? `reasoning (${any.agent_name})` : 'reasoning'}\n${String(any.content || '')}`;
+      case 'tool_start':
+        return formatToolStartForScrollback(event);
+      case 'tool_input_update':
+      case 'tool_input_corrected':
+        return any.tool_input ? `tool input updated: ${formatGenericToolInput(any.tool_input)}` : '';
+      case 'output':
+      case 'command':
+      case 'error':
+        return stripAnsi(String(any.content || any.command || ''));
+      case 'report_content':
+        return stripAnsi(String(any.content || ''));
+      case 'report_paths':
+        return [
+          any.outputDir ? `Outputs stored in: ${any.outputDir}` : '',
+          any.reportPath ? `Report saved to: ${any.reportPath}` : '',
+          any.logPath ? `Operation logs: ${any.logPath}` : '',
+          any.memoryPath ? `Memory stored in: ${any.memoryPath}` : ''
+        ].filter(Boolean).join('\n');
+      case 'metadata':
+        return any.content ? Object.entries(any.content).map(([key, value]) => `${key}: ${value}`).join('\n') : '';
+      case 'user_handoff':
+        return `AGENT REQUESTING USER INPUT\n${String(any.message || '')}`;
+      case 'task_started':
+        return any.title ? `Starting task "${any.title}"` : '';
+      case 'task_done':
+        return any.title ? `Task "${any.title}" ${any.status || 'done'}` : '';
+      case 'termination_reason':
+        return any.message || any.reason || '';
+      case 'rate_limit':
+        return any.message || (any.wait_total ? `Rate limit - waiting ${Math.ceil(any.wait_total)}s` : 'Rate limit');
+      case 'specialist_start':
+        return `[SUB-AGENT] ${any.specialist || 'validation'}_specialist\n  ${any.task || 'Sub-agent analysis'}`;
+      case 'specialist_progress':
+        return any.status || '';
+      case 'specialist_end':
+        return `${any.specialist || 'validation'}_specialist ${any.result?.validationStatus || any.result?.validation_status || 'done'}`;
+      case 'tool_output':
+        return any.output ? `${any.tool || 'tool'} output: ${stringifyToolValue(any.output)}` : '';
+      default:
+        return '';
+    }
+  } catch {
+    return '';
+  }
+};
 
 export const StaticStreamDisplay: React.FC<{
   events: DisplayStreamEvent[];
   terminalWidth?: number;
   availableHeight?: number;
 }> = React.memo(({ events, terminalWidth, availableHeight }) => {
+  const { write } = useStdout();
+  const eventKeyMapRef = React.useRef<WeakMap<object, string>>(new WeakMap());
+  const eventSeqRef = React.useRef(0);
+  const renderedKeysRef = React.useRef<Set<string>>(new Set());
+  const renderedKeyOrderRef = React.useRef<string[]>([]);
+  const maxSeenKeys = React.useMemo(() => {
+    const env = Number(process.env.CYBER_MAX_STATIC_SEEN_KEYS);
+    if (Number.isFinite(env) && env > 500) return Math.floor(env);
+    return 5000;
+  }, []);
+  const stableEventKey = React.useCallback((event: DisplayStreamEvent): string => {
+    const any = event as any;
+    const explicit = any?.id ?? any?.toolId ?? any?.tool_id;
+    if (explicit) return `${String(any?.type ?? 'event')}-${String(explicit)}`;
+    if (any?.timestamp) return `${String(any?.type ?? 'event')}-${String(any.timestamp)}`;
+    if (event && typeof event === 'object') {
+      const existing = eventKeyMapRef.current.get(event as object);
+      if (existing) return existing;
+      const next = `${String(any?.type ?? 'event')}-seq-${eventSeqRef.current++}`;
+      eventKeyMapRef.current.set(event as object, next);
+      return next;
+    }
+    return `event-seq-${eventSeqRef.current++}`;
+  }, []);
   const groups = React.useMemo(() => computeDisplayGroups(events), [events]);
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
@@ -2437,11 +2595,13 @@ export const StaticStreamDisplay: React.FC<{
     return { operationId: opId, target, reportPath: reportDetails.path };
   }, [events, reportDetails.path]);
 
-  // Flatten groups into discrete render items with stable keys
-  type Item = { key: string; render: () => React.ReactNode };
+  // Flatten groups into discrete scrollback items with stable keys.
+  // Production writes plain text directly to stdout to avoid retaining Ink
+  // trees and to keep completed history out of Yoga/WASM layout.
+  type Item = { key: string; text: string; render: () => React.ReactNode };
   const items: Item[] = React.useMemo(() => {
     const out: Item[] = [];
-    groups.forEach((group, gIdx) => {
+    groups.forEach((group) => {
       if (group.type === 'reasoning_group') {
         // Use reduce for better performance with large arrays
         const combinedContent = group.events.reduce((acc, e) => {
@@ -2473,9 +2633,10 @@ export const StaticStreamDisplay: React.FC<{
             ? `reasoning (${agentName})`
           : 'reasoning';
         
-        const key = `rg-${group.startIdx}`;
+        const key = `rg-${stableEventKey(group.events[0])}`;
         out.push({
           key,
+          text: `${reasoningLabel}\n${stripAnsi(combinedContent)}`,
           render: () => (
             <Box key={key} flexDirection="column" marginTop={1}>
               <Text color="cyan" bold>{reasoningLabel}</Text>
@@ -2487,10 +2648,14 @@ export const StaticStreamDisplay: React.FC<{
         });
       } else {
         group.events.forEach((event, i) => {
-          const eid = (event as any)?.id ?? (event as any)?.timestamp ?? `${gIdx}-${i}`;
-          const key = `ev-${eid}`;
+          const key = `ev-${stableEventKey(event)}`;
+          const text = formatEventForScrollback(event).trim();
+          if (!text) {
+            return;
+          }
           out.push({
             key,
+            text,
             render: () => (
               <MemoizedEventLine
                 key={key}
@@ -2510,11 +2675,49 @@ export const StaticStreamDisplay: React.FC<{
       }
     });
     return out;
-  }, [groups, operationContext, reportDetails.path, reportDetails.content, projectRoot]);
+  }, [groups, operationContext, reportDetails.path, reportDetails.content, projectRoot, stableEventKey]);
 
-  return (
-    <Static items={items}>
-      {(item: Item) => item.render()}
-    </Static>
-  );
+  const newItems = React.useMemo(() => {
+    const out: Item[] = [];
+    for (const item of items) {
+      if (renderedKeysRef.current.has(item.key)) {
+        continue;
+      }
+      renderedKeysRef.current.add(item.key);
+      renderedKeyOrderRef.current.push(item.key);
+      out.push(item);
+    }
+    while (renderedKeyOrderRef.current.length > maxSeenKeys) {
+      const oldest = renderedKeyOrderRef.current.shift();
+      if (oldest) renderedKeysRef.current.delete(oldest);
+    }
+    return out;
+  }, [items, maxSeenKeys]);
+
+  React.useEffect(() => {
+    if (newItems.length === 0) {
+      return;
+    }
+
+    const rendered = newItems
+      .map(item => item.text.replace(/\s+$/g, ''))
+      .filter(Boolean)
+      .join('\n');
+
+    if (rendered) {
+      write(`${rendered}\n`);
+    }
+  }, [newItems, write]);
+
+  if (process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID) {
+    return (
+      <Box flexDirection="column">
+        {newItems.map(item => (
+          <React.Fragment key={item.key}>{item.render()}</React.Fragment>
+        ))}
+      </Box>
+    );
+  }
+
+  return null;
 });

@@ -49,6 +49,31 @@ describe('EventAggregator', () => {
         ]);
     });
 
+    it('emits final report progress updates immediately', () => {
+        const aggregator = new EventAggregator();
+
+        expect(aggregator.processEvent({
+            type: 'progress_update',
+            step: 'REPORT_AGENT',
+            operation_stage: 'final_report',
+            report_step_index: 1,
+            report_step_total: 3,
+            report_step_kind: 'executive',
+            report_step_label: 'Executive summary',
+            operation: 'OP_TEST',
+        })).toEqual([
+            expect.objectContaining({
+                type: 'progress_update',
+                step: 'REPORT_AGENT',
+                operation_stage: 'final_report',
+                report_step_index: 1,
+                report_step_total: 3,
+                report_step_label: 'Executive summary',
+                operation: 'OP_TEST',
+            }),
+        ]);
+    });
+
     it('keeps reasoning attached before pending progress updates and ends active thinking', () => {
         const aggregator = new EventAggregator();
 

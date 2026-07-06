@@ -70,6 +70,21 @@ export class EventAggregator {
       case 'progress_update':
         // End any active reasoning session
         this.activeReasoningSession = false;
+        if ((event as any).operation_stage === 'final_report') {
+          results.push({
+            type: 'progress_update',
+            step: event.step,
+            progressPercent: (event as any).progressPercent,
+            operation: event.operation,
+            duration: event.duration,
+            operation_stage: (event as any).operation_stage,
+            report_step_index: (event as any).report_step_index,
+            report_step_total: (event as any).report_step_total,
+            report_step_kind: (event as any).report_step_kind,
+            report_step_label: (event as any).report_step_label,
+          } as DisplayStreamEvent);
+          break;
+        }
         // Buffer the progress update; flush when the first tool event of this step arrives
         this.pendingProgressUpdate = {
           type: 'progress_update',

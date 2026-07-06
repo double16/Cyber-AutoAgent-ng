@@ -407,7 +407,16 @@ const runAutoAssessment = async () => {
             }
         }
         else if (event.type === 'progress_update') {
-          if (Number.isFinite(event.progressPercent)) {
+          if (event.operation_stage === 'final_report') {
+            const reportIndex = Number(event.report_step_index);
+            const reportTotal = Number(event.report_step_total);
+            const reportLabel = typeof event.report_step_label === 'string' ? event.report_step_label : '';
+            const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
+              ? `${reportIndex}/${reportTotal}`
+              : 'report';
+            loggingService.info(`➡️ Final report ${progressLabel}${reportLabel ? `: ${reportLabel}` : ''}`);
+          }
+          else if (Number.isFinite(event.progressPercent)) {
             loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}`);
           }
         }

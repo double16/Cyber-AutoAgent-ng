@@ -12,7 +12,7 @@ import os
 import re
 from collections import Counter
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional
 
 from modules.agents.report_agent import ReportGenerator
 from modules.config import get_config_manager
@@ -30,15 +30,56 @@ from modules.prompts.factory import (
     get_report_observation_system_prompt,
     get_report_appendix_system_prompt,
 )
-from modules.tools.memory import memory_create_time, OperationPlan, Task
+from modules.tools.memory import Task
 from modules.tools.memory import get_memory_client, memory_is_cross_operation
-from strands.types.content import Message, ContentBlock
 
 logger = get_logger("Handlers.ReportGenerator")
 
 MAX_REPORT_FINDINGS = int(os.getenv("CYBER_REPORT_MAX_FINDINGS", "200"))
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 _PAGE_BREAK = """\n<div class="page-break" style="page-break-before: always;"></div>\n\n"""
+
+
+def _report_item_title(item: Dict[str, Any], default: str) -> str:
+    """Return a compact title for report progress labels."""
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    title = (
+        item.get("title")
+        or parsed.get("title")
+        or parsed.get("vulnerability")
+        or item.get("content")
+        or default
+    )
+    return safe_truncate(str(title).strip() or default, 80)
+
+
+def _emit_report_progress(
+    callback_handler: Any,
+    operation_id: str,
+    index: int,
+    total: int,
+    kind: str,
+    label: str,
+) -> None:
+    """Emit an indexed progress event for a single report agent call."""
+    if not callback_handler or not hasattr(callback_handler, "emit_ui_event"):
+        return
+
+    try:
+        callback_handler.emit_ui_event(
+            {
+                "type": "progress_update",
+                "step": "REPORT_AGENT",
+                "operation_stage": "final_report",
+                "operation": operation_id,
+                "report_step_index": index,
+                "report_step_total": total,
+                "report_step_kind": kind,
+                "report_step_label": label,
+            }
+        )
+    except Exception:
+        logger.debug("Unable to emit report progress event", exc_info=True)
 
 def generate_security_report(
     target: str,
@@ -113,11 +154,20 @@ def generate_security_report(
         module_report_prompt = _get_module_report_prompt(module)
         try:
             from modules.prompts import get_module_loader  # Dynamic import required
+
             module_loader = get_module_loader()
-            module_report_agent_executive_system_prompt = get_module_loader().load_module_report_agent_executive_system_prompt(module) or ""
-            module_report_agent_finding_system_prompt = get_module_loader().load_module_report_agent_finding_system_prompt(module) or ""
-            module_report_agent_observation_system_prompt = get_module_loader().load_module_report_agent_observation_system_prompt(module) or ""
-            module_report_agent_appendix_system_prompt = get_module_loader().load_module_report_agent_appendix_system_prompt(module) or ""
+            module_report_agent_executive_system_prompt = (
+                module_loader.load_module_report_agent_executive_system_prompt(module) or ""
+            )
+            module_report_agent_finding_system_prompt = (
+                module_loader.load_module_report_agent_finding_system_prompt(module) or ""
+            )
+            module_report_agent_observation_system_prompt = (
+                module_loader.load_module_report_agent_observation_system_prompt(module) or ""
+            )
+            module_report_agent_appendix_system_prompt = (
+                module_loader.load_module_report_agent_appendix_system_prompt(module) or ""
+            )
         except Exception:
             module_report_agent_executive_system_prompt = ""
             module_report_agent_finding_system_prompt = ""
@@ -138,6 +188,19 @@ def generate_security_report(
         )
 
         report_parts_files = []
+        raw_findings = sections.get("raw_evidence", [])
+        report_findings = [
+            (i, finding)
+            for i, finding in enumerate(raw_findings)
+            if finding.get("severity") in ["CRITICAL", "HIGH"] or finding.get("category") == "finding"
+        ]
+        report_observations = [
+            (i, finding)
+            for i, finding in enumerate(raw_findings)
+            if finding.get("category") in ["signal", "observation", "discovery"]
+        ]
+        report_step_total = 2 + len(report_findings) + len(report_observations)
+        report_step_index = 0
 
         # Part 1: Executive Summary
         logger.info("Generating Executive Summary...")
@@ -158,6 +221,15 @@ Module: {module_str}
 Use the following data:
 {json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts']})}
 """
+        report_step_index += 1
+        _emit_report_progress(
+            callback_handler,
+            operation_id,
+            report_step_index,
+            report_step_total,
+            "executive",
+            "Executive summary",
+        )
         exec_result = exec_agent(exec_prompt)
         exec_content = _extract_text_from_result(exec_result)
 
@@ -182,13 +254,7 @@ Use the following data:
             f.write(findings_header)
         report_parts_files.append(findings_header_file)
 
-        raw_findings = sections.get("raw_evidence", [])
-
-        for i, finding in enumerate(raw_findings):
-            if finding.get("severity") not in ["CRITICAL", "HIGH"]:
-                if finding.get("category") != "finding":
-                    continue
-
+        for i, finding in report_findings:
             logger.info(f"Generating report for finding {i+1}: {finding.get('content')}")
             finding_agent = ReportGenerator.create_report_agent(
                 provider=provider,
@@ -204,6 +270,15 @@ Target: {target}
 Finding Data:
 {json.dumps(finding)}
 """
+            report_step_index += 1
+            _emit_report_progress(
+                callback_handler,
+                operation_id,
+                report_step_index,
+                report_step_total,
+                "finding",
+                f"Finding: {_report_item_title(finding, f'Finding {i + 1}')}",
+            )
             finding_result = finding_agent(finding_prompt)
             finding_text = _extract_text_from_result(finding_result)
             
@@ -222,33 +297,41 @@ Finding Data:
         # Pre-create observation parts list to only add header if there are observations
         observation_parts_files = []
 
-        for i, finding in enumerate(raw_findings):
-            if finding.get("category") in ["signal", "observation", "discovery"]:
-                has_observations = True
-                logger.info(f"Generating report for observation {i+1}: {finding.get('content')}")
-                obs_agent = ReportGenerator.create_report_agent(
-                    provider=provider,
-                    model_id=model_id,
-                    operation_id=operation_id,
-                    target=target,
-                    system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_observation_system_prompt
-                )
-                
-                obs_prompt = f"""
+        for i, finding in report_observations:
+            has_observations = True
+            logger.info(f"Generating report for observation {i+1}: {finding.get('content')}")
+            obs_agent = ReportGenerator.create_report_agent(
+                provider=provider,
+                model_id=model_id,
+                operation_id=operation_id,
+                target=target,
+                system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_observation_system_prompt
+            )
+
+            obs_prompt = f"""
 Generate a brief report for the following observation/discovery.
 Target: {target}
 Observation Data:
 {json.dumps(finding)}
 """
-                obs_result = obs_agent(obs_prompt)
-                obs_text = _extract_text_from_result(obs_result)
-                
-                if obs_text:
-                    obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
-                    obs_path = os.path.join(output_path, obs_filename)
-                    with open(obs_path, "w") as f:
-                        f.write(_PAGE_BREAK + obs_text + "\n\n")
-                    observation_parts_files.append(obs_path)
+            report_step_index += 1
+            _emit_report_progress(
+                callback_handler,
+                operation_id,
+                report_step_index,
+                report_step_total,
+                "observation",
+                f"Observation: {_report_item_title(finding, f'Observation {i + 1}')}",
+            )
+            obs_result = obs_agent(obs_prompt)
+            obs_text = _extract_text_from_result(obs_result)
+
+            if obs_text:
+                obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
+                obs_path = os.path.join(output_path, obs_filename)
+                with open(obs_path, "w") as f:
+                    f.write(_PAGE_BREAK + obs_text + "\n\n")
+                observation_parts_files.append(obs_path)
 
         if has_observations:
             observations_header_file = os.path.join(output_path, "report_observations_header.md")
@@ -276,6 +359,15 @@ Steps Executed: {steps_executed}
 Use the following data:
 {json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'tools_summary']})}
 """
+        report_step_index += 1
+        _emit_report_progress(
+            callback_handler,
+            operation_id,
+            report_step_index,
+            report_step_total,
+            "methodology",
+            "Assessment methodology",
+        )
         appendix_result = appendix_agent(appendix_prompt)
         appendix_content = _extract_text_from_result(appendix_result)
         
@@ -506,7 +598,7 @@ def _sanitize_mermaid_diagrams(text: str) -> str:
 
             processed_lines.append(line)
 
-        return f"```mermaid\n" + "\n".join(processed_lines) + "\n```"
+        return "```mermaid\n" + "\n".join(processed_lines) + "\n```"
 
     # Match ```mermaid ... ``` blocks
     return _RE_MERMAID_BLOCK.sub(process_mermaid_block, text)

@@ -54,6 +54,14 @@ describe('StreamDisplay broad event rendering', () => {
         agent_sub_step: 2,
         agent_total_actions: 7
       },
+      {
+        type: 'progress_update',
+        step: 'REPORT_AGENT',
+        operation_stage: 'final_report',
+        report_step_index: 2,
+        report_step_total: 5,
+        report_step_label: 'Finding: SQL injection'
+      },
       { type: 'task_started', title: 'Enumerate target' },
       { type: 'thinking', context: 'reasoning', startTime: Date.now(), message: 'working' },
       { type: 'task_done', title: 'Enumerate target' },
@@ -82,6 +90,7 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Event loop cycle started');
     expect(output).toContain('[PROGRESS 40% | 4 tools]');
     expect(output).toContain('[FINAL REPORT]');
+    expect(output).toContain('[FINAL REPORT 2/5] Finding: SQL injection');
     expect(output).toContain('NETWORK TIMEOUT');
     expect(output).toContain('TOKEN LIMIT');
     expect(output).toContain('I should inspect');

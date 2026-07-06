@@ -2,6 +2,7 @@
 
 ### Features
 
+- Show indexed progress for each final report agent call in both the React terminal UI and headless output.
 - Replace iteration-based operation limits with duration, token, and cost budgets; progress reports the highest utilization across configured budgets.
 - Correct token and cost metrics by aggregating usage across multiple agents and apply per-agent model pricing.
 - Generalize React event handling for multi-agent workflows with per-agent handlers and operation-wide metric aggregation.
