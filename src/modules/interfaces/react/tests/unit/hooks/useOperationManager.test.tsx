@@ -294,4 +294,50 @@ describe('useOperationManager', () => {
 
     hook.unmount();
   });
+
+  it('clears operation state when cancellation stop times out', async () => {
+    const { useOperationManager } = await loadHook();
+    const activeExecutionService = new EventEmitter() as any;
+    activeExecutionService.stop = jest.fn(async () => undefined);
+    activeExecutionService.cleanup = jest.fn();
+    const executionHandle = {
+      stop: jest.fn(() => new Promise<void>(() => undefined)),
+    };
+    const activeOperation = { ...operation, id: 'stuck-op', executionHandle };
+    const actions = createActions();
+
+    const hook = renderHook(() => useOperationManager({
+      appState: {
+        activeOperation,
+        executionService: activeExecutionService,
+        userHandoffActive: false,
+      } as any,
+      actions,
+      applicationConfig: { modelId: 'gpt-4o' },
+    }));
+
+    let cancelPromise!: Promise<void>;
+    act(() => {
+      cancelPromise = hook.current.handleAssessmentCancel();
+    });
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(5050);
+      await cancelPromise;
+    });
+
+    expect(executionHandle.stop).toHaveBeenCalledTimes(1);
+    expect(activeExecutionService.cleanup).toHaveBeenCalledTimes(1);
+    expect(operationManager.pauseOperation).toHaveBeenCalledWith('stuck-op');
+    expect(actions.setActiveOperation).toHaveBeenCalledWith(null);
+    expect(actions.setExecutionService).toHaveBeenCalledWith(null);
+    expect(actions.setUserHandoff).toHaveBeenCalledWith(false);
+    expect(hook.current.operationHistoryEntries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'error', content: 'ESC Kill Switch activated' }),
+      expect.objectContaining({ type: 'error', content: expect.stringContaining('Timed out stopping execution') }),
+      expect.objectContaining({ type: 'info', content: 'Operation terminated. Start a new assessment or review partial results.' }),
+    ]));
+
+    hook.unmount();
+  });
 });

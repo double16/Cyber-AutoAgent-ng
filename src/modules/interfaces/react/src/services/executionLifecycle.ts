@@ -5,21 +5,41 @@ export interface StopExecutionOptions {
     executionService?: ExecutionService | null;
     cleanup?: boolean;
     removeListeners?: boolean;
+    stopTimeoutMs?: number;
 }
+
+const withTimeout = async (promise: Promise<void>, timeoutMs: number): Promise<void> => {
+    let timeout: NodeJS.Timeout | undefined;
+
+    try {
+        await Promise.race([
+            promise,
+            new Promise<void>((_, reject) => {
+                timeout = setTimeout(() => reject(new Error(`Timed out stopping execution after ${timeoutMs}ms`)), timeoutMs);
+                timeout.unref?.();
+            }),
+        ]);
+    } finally {
+        if (timeout) {
+            clearTimeout(timeout);
+        }
+    }
+};
 
 export async function stopExecution({
                                         executionHandle,
                                         executionService,
                                         cleanup = false,
                                         removeListeners = false,
+                                        stopTimeoutMs = 5000,
                                     }: StopExecutionOptions): Promise<void> {
     let stopError: unknown;
 
     try {
         if (executionHandle) {
-            await executionHandle.stop();
+            await withTimeout(executionHandle.stop(), stopTimeoutMs);
         } else if (executionService) {
-            await executionService.stop();
+            await withTimeout(executionService.stop(), stopTimeoutMs);
         }
     } catch (error) {
         stopError = error;
@@ -44,4 +64,3 @@ export async function stopExecution({
         throw stopError;
     }
 }
-

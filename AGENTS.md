@@ -1,6 +1,6 @@
 ## Critical rules the agent must follow before doing anything
 - Read `README.md` before acting.
-- Update `CHANGELOG.md` for user-facing changes.
+- Update `CHANGELOG.md` for user-facing changes. Categorize using `## Features` and `## Fixes`.
 
 ## Testing and contribution
 - Always write unit tests and check that they pass for new and changed business logic.

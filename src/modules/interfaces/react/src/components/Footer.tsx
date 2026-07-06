@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { themeManager } from '../themes/theme-manager.js';
+import { formatDuration } from '../utils/toolFormatters.js';
 
 interface FooterProps {
   model?: string;
@@ -46,6 +47,28 @@ export const Footer: React.FC<FooterProps> = React.memo(({
     return cost < 0.01 ? '<$0.01' : `$${cost.toFixed(2)}`;
   };
 
+  const parseDurationSeconds = (duration: string): number | null => {
+    const matches = [...duration.matchAll(/(\d+)\s*([hms])/g)];
+    if (matches.length === 0) {
+      return null;
+    }
+
+    const normalizedDuration = duration.replace(/\s+/g, '');
+    const consumedDuration = matches.map((match) => `${match[1]}${match[2]}`).join('');
+    if (normalizedDuration !== consumedDuration) {
+      return null;
+    }
+
+    return matches.reduce((totalSeconds, match) => {
+      const value = Number(match[1]);
+      const unit = match[2];
+
+      if (unit === 'h') return totalSeconds + (value * 3600);
+      if (unit === 'm') return totalSeconds + (value * 60);
+      return totalSeconds + value;
+    }, 0);
+  };
+
   const getConnectionIcon = () => {
     switch (connectionStatus) {
       case 'connected':
@@ -64,6 +87,14 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   const totalTokens = (operationMetrics?.tokens || 0).toLocaleString();
   const progressPercent = operationMetrics?.progressPercent;
   const hasDuration = !!operationMetrics?.duration && operationMetrics?.duration !== '0s';
+  const elapsedSeconds = hasDuration ? parseDurationSeconds(operationMetrics!.duration) : null;
+  const etaSeconds = elapsedSeconds !== null
+    && progressPercent !== undefined
+    && Number.isFinite(progressPercent)
+    && progressPercent > 0
+    && progressPercent < 100
+    ? Math.round((elapsedSeconds / (progressPercent / 100)))
+    : null;
   const hasMem = (operationMetrics?.memoryOps || 0) > 0;
 
   // Build a single-line footer string and hard-truncate to terminal width to avoid Ink layout bugs
@@ -74,6 +105,7 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   if (progressPercent !== undefined) rightParts.push(`${progressPercent}% budget`);
   rightParts.push(`${totalTokens} tokens`, totalCost);
   if (hasDuration) rightParts.push(operationMetrics!.duration);
+  if (etaSeconds !== null && etaSeconds > 0) rightParts.push(`ETA ${formatDuration(etaSeconds, false)}`);
   if (hasMem) rightParts.push(`${operationMetrics!.memoryOps} mem`);
   if (errorCount > 0) rightParts.push(`${errorCount} error${errorCount > 1 ? 's' : ''}`);
   rightParts.push('[ESC] Kill Switch');

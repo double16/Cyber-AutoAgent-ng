@@ -5,6 +5,27 @@
  */
 
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import React from 'react';
+import TestRenderer, { act } from '../test-renderer.js';
+import { SafetyWarning } from '../../../src/components/SafetyWarning.js';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+const textFromTree = (node: unknown): string => {
+  if (node === null || node === undefined) {
+    return '';
+  }
+  if (typeof node === 'string') {
+    return node;
+  }
+  if (Array.isArray(node)) {
+    return node.map(textFromTree).join('');
+  }
+  if (typeof node === 'object' && 'children' in node) {
+    return textFromTree((node as { children?: unknown }).children);
+  }
+  return '';
+};
 
 describe('SafetyWarning Component Logic', () => {
   let mockOnConfirm: jest.MockedFunction<() => void>;
@@ -66,6 +87,68 @@ describe('SafetyWarning Component Logic', () => {
   });
 
   describe('Safety Authorization Logic', () => {
+    it('should update the rendered prompt after a full yes response and confirm on the second yes', async () => {
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      act(() => {
+        renderer = TestRenderer.create(
+          <SafetyWarning
+            target="https://authorized.example"
+            module="web"
+            onConfirm={mockOnConfirm}
+            onCancel={mockOnCancel}
+          />
+        );
+      });
+
+      expect(textFromTree(renderer!.toJSON())).toContain('Do you acknowledge that you have proper authorization?');
+
+      await act(async () => {
+        (global as any).__inkInputHandler('yes', {});
+      });
+
+      expect(textFromTree(renderer!.toJSON())).toContain('Authorization acknowledged');
+      expect(textFromTree(renderer!.toJSON())).toContain('Proceed with cyber operation?');
+      expect(mockOnConfirm).not.toHaveBeenCalled();
+
+      await act(async () => {
+        (global as any).__inkInputHandler('yes', {});
+        (global as any).__inkInputHandler('yes', {});
+      });
+
+      expect(mockOnConfirm).toHaveBeenCalledTimes(1);
+      expect(mockOnCancel).not.toHaveBeenCalled();
+
+      act(() => {
+        renderer!.unmount();
+      });
+    });
+
+    it('should accept full no responses and cancel once', async () => {
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      act(() => {
+        renderer = TestRenderer.create(
+          <SafetyWarning
+            target="https://authorized.example"
+            module="web"
+            onConfirm={mockOnConfirm}
+            onCancel={mockOnCancel}
+          />
+        );
+      });
+
+      await act(async () => {
+        (global as any).__inkInputHandler('no', {});
+        (global as any).__inkInputHandler('no', {});
+      });
+
+      expect(mockOnCancel).toHaveBeenCalledTimes(1);
+      expect(mockOnConfirm).not.toHaveBeenCalled();
+
+      act(() => {
+        renderer!.unmount();
+      });
+    });
+
     it('should require double confirmation pattern', () => {
       // Simulate the component's state logic
       let acknowledged = false;

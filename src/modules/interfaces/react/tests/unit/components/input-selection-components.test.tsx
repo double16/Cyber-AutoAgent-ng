@@ -107,10 +107,21 @@ describe('input and selection components', () => {
         sendInput('y');
         expect(onConfirm).toHaveBeenCalledTimes(1);
 
-        act(() => view.update(<SafetyWarning target="example.org" module="recon" onConfirm={onConfirm}
-                                             onCancel={onCancel}/>));
+        act(() => {
+            view.unmount();
+            view = TestRenderer.create(
+                <SafetyWarning target="example.org" module="recon" onConfirm={onConfirm} onCancel={onCancel}/>
+            );
+        });
         sendInput('n');
         expect(onCancel).toHaveBeenCalledTimes(1);
+
+        act(() => {
+            view.unmount();
+            view = TestRenderer.create(
+                <SafetyWarning target="example.net" module="cloud" onConfirm={onConfirm} onCancel={onCancel}/>
+            );
+        });
         sendInput('', {escape: true});
         expect(onCancel).toHaveBeenCalledTimes(2);
     });
