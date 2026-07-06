@@ -93,7 +93,7 @@ describe('Terminal event processing', () => {
         await act(async () => {
             service.emit('event', {
                 type: 'metrics_update',
-                metrics: {tokens: 12, cost: 0.02, duration: '3s', memoryOps: 1, evidence: 2},
+                metrics: {tokens: 12, cost: 0.02, duration: '3s', memoryOps: 1, evidence: 2, progressPercent: 5},
             });
             service.emit('event', {
                 type: 'operation_init',
@@ -122,6 +122,7 @@ describe('Terminal event processing', () => {
             duration: '3s',
             memoryOps: 1,
             evidence: 2,
+            progressPercent: 5,
         });
         expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({type: 'metrics_update'}));
         expect(textFromTree(view.toJSON())).toContain('SECURITY ASSESSMENT REPORT');

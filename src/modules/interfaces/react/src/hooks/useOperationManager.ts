@@ -86,7 +86,7 @@ export function useOperationManager({
     duration: string;
     memoryOps: number;
     evidence: number;
-    progressPercent?: number;
+    progressPercent: number;
   }) => {
     const now = Date.now();
     if (now - (lastMetricsUpdateRef.current || 0) < 300) {
@@ -320,7 +320,8 @@ export function useOperationManager({
         cost: appState.operationMetrics?.cost || 0,
         duration: '0s',
         memoryOps: appState.operationMetrics?.memoryOps || 0,
-        evidence: appState.operationMetrics?.evidence || 0
+        evidence: appState.operationMetrics?.evidence || 0,
+        progressPercent: appState.operationMetrics?.progressPercent || 0,
       });
       
       // Add to operation history with deployment mode
@@ -455,7 +456,7 @@ export function useOperationManager({
                 duration: event.metrics.duration || operationManager.getOperationDuration(operation.id),
                 memoryOps: event.metrics.memoryOps || currentOp.findings,
                 evidence: event.metrics.evidence || currentOp.findings,
-                progressPercent: event.metrics.progressPercent
+                progressPercent: event.metrics.progressPercent,
               });
             }
           }

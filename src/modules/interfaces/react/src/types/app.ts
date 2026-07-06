@@ -30,6 +30,7 @@ export interface OperationMetrics {
   duration: string;
   memoryOps: number;
   evidence: number;
+  progressPercent: number;
 }
 
 /**

@@ -159,7 +159,7 @@ describe('useOperationManager', () => {
         activeOperation: null,
         executionService: null,
         userHandoffActive: false,
-        operationMetrics: { tokens: 3, cost: 0.01, memoryOps: 0, evidence: 0 },
+        operationMetrics: { tokens: 3, cost: 0.01, memoryOps: 0, evidence: 0, progressPercent: 5 },
       } as any,
       actions,
       applicationConfig: { modelId: 'gpt-4o' },
@@ -209,7 +209,7 @@ describe('useOperationManager', () => {
       executionService.emit('event', { type: 'progress_update', step: 1, progressPercent: 40, content: 'Enumerating' });
       executionService.emit('event', {
         type: 'metrics_update',
-        metrics: { inputTokens: 10, outputTokens: 5, cost: 0.02, duration: '6s', memoryOps: 2, evidence: 3 },
+        metrics: { inputTokens: 10, outputTokens: 5, cost: 0.02, duration: '6s', memoryOps: 2, evidence: 3, progressPercent: 5 },
       });
       executionService.emit('event', { type: 'error', content: 'CRITICAL finding' });
       executionService.emit('event', { type: 'user_handoff' });

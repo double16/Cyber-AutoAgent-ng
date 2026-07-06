@@ -147,7 +147,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   // Throttle state for metrics emissions to parent
   const lastEmitRef = useRef<number>(0);
   const pendingTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const pendingMetricsRef = useRef<{ tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number } | null>(null);
+  const pendingMetricsRef = useRef<{ tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number; progressPercent: number } | null>(null);
   const EMIT_INTERVAL_MS = 16;
   const METRICS_COALESCE_MS = 50;
   const lastMetricsTsRef = useRef<number>(0);
@@ -1448,7 +1448,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
               cost: newMetrics.cost,
               duration: newMetrics.duration,
               memoryOps: newMetrics.memoryOps,
-              evidence: newMetrics.evidence
+              evidence: newMetrics.evidence,
+              progressPercent: newMetrics.progressPercent,
             });
           } else {
             // Queue latest metrics and schedule trailing emit
@@ -1457,7 +1458,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
               cost: newMetrics.cost,
               duration: newMetrics.duration,
               memoryOps: newMetrics.memoryOps,
-              evidence: newMetrics.evidence
+              evidence: newMetrics.evidence,
+              progressPercent: newMetrics.progressPercent,
             };
             if (!pendingTimerRef.current) {
               const delay = EMIT_INTERVAL_MS - (now - lastEmitRef.current);

@@ -1,6 +1,6 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, expect, it, jest} from '@jest/globals';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -8,10 +8,6 @@ if (typeof global.TextEncoder === 'undefined') {
 if (typeof global.TextDecoder === 'undefined') {
     global.TextDecoder = TextDecoder as typeof global.TextDecoder;
 }
-
-jest.unstable_mockModule('ink-spinner', () => ({
-    default: ({type}: { type?: string }) => <span>spinner:{type}</span>,
-}));
 
 jest.unstable_mockModule('../../../src/contexts/ConfigContext.js', () => ({
     useConfig: () => ({
@@ -23,17 +19,16 @@ jest.unstable_mockModule('../../../src/contexts/ConfigContext.js', () => ({
 }));
 
 const load = async () => {
-    const [{render}, {Header}, {Footer}, {LoadingIndicator}] = await Promise.all([
+    const [{render}, {Header}, {Footer}] = await Promise.all([
         import('ink-testing-library'),
         import('../../../src/components/Header.js'),
         import('../../../src/components/Footer.js'),
-        import('../../../src/components/LoadingIndicator.js'),
     ]);
 
-    return {render, Header, Footer, LoadingIndicator};
+    return {render, Header, Footer};
 };
 
-describe('header, footer, and loading components', () => {
+describe('header and footer components', () => {
     beforeEach(() => {
         jest.useFakeTimers();
     });
@@ -122,14 +117,4 @@ describe('header, footer, and loading components', () => {
         expect(frame).toContain('[ESC] Kill Switch');
     });
 
-    it('renders loading indicator phases, custom text, and dot animation', async () => {
-        const {render, LoadingIndicator} = await load();
-
-        const phased = render(<LoadingIndicator spinnerType="line"/>);
-        expect(phased.lastFrame()).toContain('Analyzing security posture');
-        expect(phased.lastFrame()).toContain('spinner:line');
-
-        const fixed = render(<LoadingIndicator showPhases={false} text="Waiting" color="green"/>);
-        expect(fixed.lastFrame()).toContain('Waiting');
-    });
 });

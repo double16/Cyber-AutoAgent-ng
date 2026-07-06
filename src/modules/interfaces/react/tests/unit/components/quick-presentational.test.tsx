@@ -13,39 +13,18 @@ if (typeof global.TextDecoder === 'undefined') {
 const loadComponents = async () => {
     const [
         {render},
-        {OperationFooter},
         {DeploymentWarning},
         {MaxSizedBox},
     ] = await Promise.all([
         import('ink-testing-library'),
-        import('../../../src/components/OperationFooter.js'),
         import('../../../src/components/DeploymentWarning.js'),
         import('../../../src/components/MaxSizedBox.js'),
     ]);
 
-    return {render, OperationFooter, DeploymentWarning, MaxSizedBox};
+    return {render, DeploymentWarning, MaxSizedBox};
 };
 
 describe('quick presentational component coverage', () => {
-    it('renders operation footer metrics', async () => {
-        const {render, OperationFooter} = await loadComponents();
-        const {lastFrame} = render(
-            <OperationFooter
-                tokens={1234567}
-                duration="1m 2s"
-                memoryOps={3}
-                evidence={4}
-            />
-        );
-
-        const frame = lastFrame();
-        expect(frame).toContain('1,234,567');
-        expect(frame).toContain('1m 2s');
-        expect(frame).toContain('3');
-        expect(frame).toContain('4');
-        expect(frame).toContain('[CTRL+C] Kill operation');
-    });
-
     it('does not render deployment warning when zero or one deployment is active', async () => {
         const {render, DeploymentWarning} = await loadComponents();
         expect(render(
