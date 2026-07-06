@@ -238,6 +238,7 @@ describe('useOperationManager', () => {
     }));
     expect(actions.setHasCompletedOperation).toHaveBeenCalledWith(true);
     expect(assessmentFlow.resetCompleteWorkflow).toHaveBeenCalled();
+    expect(executionService.stop).not.toHaveBeenCalled();
     expect(executionService.cleanup).toHaveBeenCalled();
 
     act(() => {

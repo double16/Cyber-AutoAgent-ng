@@ -370,6 +370,16 @@ export class PythonExecutionService extends EventEmitter {
     } catch {}
     this.removeAllListeners();
   }
+
+  public clearRuntimeState(): void {
+    this.clearStartupTimers();
+    this.streamEventBuffer = '';
+    this.toolOutputBuffer = '';
+    this.stderrBuffer = '';
+    this.inToolExecution = false;
+    this.sawBackendToolOutput = false;
+    this.currentToolName = undefined;
+  }
   
   /**
    * Check current environment status
@@ -936,6 +946,7 @@ export class PythonExecutionService extends EventEmitter {
       this.activeProcess.on('exit', (code, signal) => {
         this.isExecutionActive = false;
         this.clearStartupTimers();
+        this.activeProcess = undefined;
         
         const intentionalStop = this.userStopRequested || signal === 'SIGTERM' || signal === 'SIGINT' || signal === 'SIGKILL';
         if (intentionalStop) {
@@ -1020,8 +1031,7 @@ export class PythonExecutionService extends EventEmitter {
           reject(error); // Process failed
         }
 
-        this.activeProcess = undefined;
-        this.stderrBuffer = '';
+        this.clearRuntimeState();
       });
       
       // Handle process error
@@ -1031,6 +1041,7 @@ export class PythonExecutionService extends EventEmitter {
         this.emit('error', error);
         this.isExecutionActive = false;
         this.activeProcess = undefined;
+        this.clearRuntimeState();
         reject(error); // Process startup failed
       });
       

@@ -1175,10 +1175,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // ASCII summary banner) in the dynamic final report cluster so it
           // appears directly beneath the inline preview.
           if (finalReportActiveRef.current) {
-            setFinalReportEvents(prev => {
-              const base = prev ?? [];
-              return [...base, outEvt];
-            });
+            appendFinalReportEvent(outEvt);
           }
 
           // If this is a report preview block, immediately flush any buffered operation summary below it

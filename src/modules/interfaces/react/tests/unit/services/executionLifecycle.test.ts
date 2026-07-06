@@ -42,6 +42,23 @@ describe('executionLifecycle', () => {
         expect(service.cleanup).not.toHaveBeenCalled();
     });
 
+    it('can detach and clean up a naturally completed service without stopping it again', async () => {
+        const service = new EventEmitter() as any;
+        service.stop = jest.fn(async () => undefined);
+        service.cleanup = jest.fn();
+
+        await stopExecution({
+            executionService: service,
+            skipStop: true,
+            cleanup: true,
+            removeListeners: true,
+        });
+
+        expect(service.stop).not.toHaveBeenCalled();
+        expect(service.cleanup).toHaveBeenCalledTimes(1);
+        expect(service.listenerCount('event')).toBe(0);
+    });
+
     it('still cleans up before rethrowing stop errors', async () => {
         const service = new EventEmitter() as any;
         const error = new Error('stop failed');

@@ -538,7 +538,7 @@ export function useOperationManager({
           actions.clearCompletedOperation();
         }, 2000);
         
-        cleanupExecution();
+        cleanupExecution({ stop: false });
       };
       
       const handleExecutionError = (error: any) => {
@@ -564,9 +564,10 @@ export function useOperationManager({
       };
       
       // Cleanup function for event listeners and intervals
-      const cleanupExecution = () => {
+      const cleanupExecution = ({ stop = true }: { stop?: boolean } = {}) => {
         void stopExecution({
           executionService,
+          skipStop: !stop,
           cleanup: true,
           removeListeners: true,
         }).catch(() => {

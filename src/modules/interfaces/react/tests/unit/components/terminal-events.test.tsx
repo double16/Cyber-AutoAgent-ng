@@ -50,6 +50,7 @@ describe('Terminal event processing', () => {
     });
 
     afterEach(() => {
+        delete process.env.CYBER_MAX_FINAL_REPORT_EVENTS;
         jest.useRealTimers();
     });
 
@@ -224,6 +225,47 @@ describe('Terminal event processing', () => {
         const text = textFromTree(view.toJSON());
         expect(text).toContain('spinner:dots');
         expect(text).toContain('\nspinner:dots');
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
+    it('bounds final report output events while the report cluster is active', async () => {
+        process.env.CYBER_MAX_FINAL_REPORT_EVENTS = '3';
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-final-report-cap"
+                    terminalWidth={90}
+                    animationsEnabled={false}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {
+                type: 'progress_update',
+                step: 'FINAL REPORT',
+                operation_stage: 'final_report',
+            });
+            for (let index = 0; index < 5; index += 1) {
+                service.emit('event', {type: 'output', content: `final-output-${index}`});
+            }
+            jest.advanceTimersByTime(100);
+            await Promise.resolve();
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).not.toContain('final-output-0');
+        expect(text).not.toContain('final-output-1');
+        expect(text).toContain('final-output-2');
+        expect(text).toContain('final-output-4');
 
         act(() => {
             view.unmount();
