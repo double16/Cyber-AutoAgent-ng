@@ -13,7 +13,9 @@ import { loggingService } from './services/LoggingService.js';
 import type {ExecutionHandle, ExecutionService} from './services/ExecutionService.js';
 import {stopExecution} from './services/executionLifecycle.js';
 import { enableConsoleSilence } from './utils/consoleSilencer.js';
+import { estimateEtaSeconds } from './utils/duration.js';
 import { formatDuration } from './utils/logger.js';
+import { formatDuration as formatToolDuration } from './utils/toolFormatters.js';
 
 // Check for --debug flag early (before meow parsing) to enable logging
 if (process.argv.includes('--debug') || process.argv.includes('-d')) {
@@ -418,7 +420,11 @@ const runAutoAssessment = async () => {
             loggingService.info(`➡️ Final report ${progressLabel}${reportLabel ? `: ${reportLabel}` : ''}`);
           }
           else if (Number.isFinite(event.progressPercent)) {
-            loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}`);
+            const etaSeconds = estimateEtaSeconds(event.duration, event.progressPercent);
+            const etaText = etaSeconds !== null && etaSeconds > 0
+              ? ` | ETA ${formatToolDuration(etaSeconds, false)}`
+              : '';
+            loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}${etaText}`);
           }
         }
         else if (event.type === 'task_started') {
