@@ -43,6 +43,8 @@ export function useDeploymentDetection({
         const detector = DeploymentDetector.getInstance();
         const detection = await detector.detectDeployments(applicationConfig);
         const hasHealthy = detection.availableDeployments?.some(d => d.isHealthy);
+        const isDockerAvailable = detection.availableDeployments?.some(d => d.details?.dockerRunning === true) ?? false;
+        actions.setDockerAvailable?.(isDockerAvailable);
 
         const configMissing = !applicationConfig?.isConfigured || !applicationConfig?.deploymentMode;
 
@@ -80,6 +82,7 @@ export function useDeploymentDetection({
           return;
         }
       } catch {
+        actions.setDockerAvailable?.(false);
         // On detection failure, be safe and prompt setup for first-time users
         if (!appState.hasUserDismissedInit) {
           actions.setInitializationFlow(true);

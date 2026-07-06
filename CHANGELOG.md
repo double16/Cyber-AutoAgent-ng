@@ -1,5 +1,6 @@
 # Cyber-AutoAgent-ng Changelog
 
+- Update the React footer connection indicator from deployment detection and color the status icon.
 - Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.
 - Cleanup React CLI logging.
 - Replace iteration-based operation limits with duration, token, and cost budgets; progress now reports the highest utilization across configured budgets.

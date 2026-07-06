@@ -68,7 +68,7 @@ export const Footer: React.FC<FooterProps> = React.memo(({
 
   // Build a single-line footer string and hard-truncate to terminal width to avoid Ink layout bugs
   const cols = Number.isFinite(process.stdout.columns) && process.stdout.columns ? Math.floor(process.stdout.columns) : 80;
-  const left = `${connIcon.icon} ${deploymentMode || ''}`.trim();
+  const left = deploymentMode || '';
   const rightParts: string[] = [];
   if (model) rightParts.push(model);
   if (progressPercent !== undefined) rightParts.push(`${progressPercent}% budget`);
@@ -82,17 +82,19 @@ export const Footer: React.FC<FooterProps> = React.memo(({
 
   // Ensure at least one space between left and right; clamp to available columns
   const spacer = ' ';
-  let line = `${left}${spacer}${right}`;
-  if (line.length > cols) {
+  let line = left ? `${left}${spacer}${right}` : right;
+  const textCols = Math.max(0, cols - connIcon.icon.length - 1);
+  if (line.length > textCols) {
     // Prefer keeping the right-side info; trim left if necessary
-    const keepRight = Math.min(right.length + 1, cols - 1);
-    const trimmedLeft = left.slice(0, Math.max(0, cols - keepRight - 1));
-    line = `${trimmedLeft}${spacer}${right}`.slice(0, cols);
+    const keepRight = Math.min(right.length + 1, Math.max(0, textCols - 1));
+    const trimmedLeft = left.slice(0, Math.max(0, textCols - keepRight - 1));
+    line = `${trimmedLeft}${spacer}${right}`.slice(0, textCols);
   }
 
   return (
     <Box>
-      <Text color={theme.muted}>{line}</Text>
+      <Text color={connIcon.color}>{connIcon.icon}</Text>
+      <Text color={theme.muted}>{line ? ` ${line}` : ''}</Text>
     </Box>
   );
 });

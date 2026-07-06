@@ -1,6 +1,6 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {afterEach, beforeEach, describe, expect, expect, it, jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -82,6 +82,7 @@ describe('header and footer components', () => {
             expect(frame).toContain('10s');
             expect(frame).toContain('3 mem');
             expect(frame).toContain('2 errors');
+            expect(frame).toContain('style="color:#A6E3A1"');
 
             Object.defineProperty(process.stdout, 'columns', {value: 24, configurable: true});
             expect(render(
