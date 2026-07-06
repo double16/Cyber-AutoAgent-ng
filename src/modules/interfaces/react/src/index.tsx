@@ -16,6 +16,7 @@ import { enableConsoleSilence } from './utils/consoleSilencer.js';
 import { estimateEtaSeconds } from './utils/duration.js';
 import { formatDuration } from './utils/logger.js';
 import { formatDuration as formatToolDuration } from './utils/toolFormatters.js';
+import { resolveRecordingMode } from './utils/recordingMode.js';
 
 // Check for --debug flag early (before meow parsing) to enable logging
 if (process.argv.includes('--debug') || process.argv.includes('-d')) {
@@ -83,6 +84,7 @@ const cli = meow(`
     --deployment-mode   Deployment mode: local-cli, single-container, full-stack
     --mcp-enabled       Enable MCP servers
     --mcp-conns         Define MCP servers using JSON
+    --recording         Optimize terminal output for screen recording
 
   Examples
     $ cyber-react
@@ -164,9 +166,16 @@ const cli = meow(`
     },
     mcpConns: {
       type: 'string',
+    },
+    recording: {
+      type: 'boolean',
+      default: false
     }
   }
 });
+
+const recordingMode = resolveRecordingMode(cli.flags.recording);
+process.env.CYBER_RECORDING_MODE = recordingMode ? 'true' : 'false';
 
 // Emit an immediate welcome line in headless test mode to aid terminal capture timing
 try {

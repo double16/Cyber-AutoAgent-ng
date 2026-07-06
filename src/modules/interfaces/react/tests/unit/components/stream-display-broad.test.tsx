@@ -30,6 +30,34 @@ const load = async () => {
 };
 
 describe('StreamDisplay broad event rendering', () => {
+  it('keeps compact startup elapsed time static in recording mode', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-07-06T12:00:00Z'));
+    process.env.CYBER_RECORDING_MODE = 'true';
+    try {
+      const { EventLine, render } = await load();
+      const startTime = Date.now() - 7_000;
+      const view = render(
+        <EventLine
+          event={{ type: 'thinking', context: 'startup', compact: true, startTime, message: 'Initializing' } as any}
+          animationsEnabled
+        />
+      );
+
+      const beforeTick = view.lastFrame() || '';
+      expect(beforeTick).toContain('⌛');
+      const beforeElapsed = beforeTick.match(/\[[0-9]+s\]/)?.[0];
+      expect(beforeElapsed).toBeTruthy();
+
+      jest.advanceTimersByTime(4_000);
+      const afterTick = view.lastFrame() || '';
+      expect(afterTick).toContain(beforeElapsed || '');
+    } finally {
+      delete process.env.CYBER_RECORDING_MODE;
+      jest.useRealTimers();
+    }
+  });
+
   it('renders SDK, lifecycle, reasoning, termination, and metadata event variants', async () => {
     const { EventLine, render } = await load();
     const events: any[] = [

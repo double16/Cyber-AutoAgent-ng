@@ -31,13 +31,35 @@ const CompactStartupThinking: React.FC<{
   startTime?: number;
 }> = ({ enabled = true, message, startTime }) => {
   const theme = themeManager.getCurrentTheme();
-  const elapsedSeconds = startTime ? Math.max(0, Math.floor((Date.now() - startTime) / 1000)) : 0;
+  const isRecordingMode = process.env.CYBER_RECORDING_MODE === 'true';
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!startTime || !enabled) {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    if (isRecordingMode) {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    const updateElapsed = () => {
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startTime) / 1000)));
+    };
+
+    updateElapsed();
+
+    const interval = setInterval(updateElapsed, 1000);
+    return () => clearInterval(interval);
+  }, [startTime, enabled, isRecordingMode]);
 
   return (
     <Box>
       {enabled ? (
         <Text color={theme.primary}>
-          <Spinner type="dots" />
+          {isRecordingMode ? '⌛' : <Spinner type="dots" />}
         </Text>
       ) : (
         <Text color={theme.muted}>[BUSY]</Text>
