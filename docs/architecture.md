@@ -270,7 +270,7 @@ graph TB
 
 ## Event System and UI Integration
 
-**ReactBridgeHandler** extends the Strands SDK's callback system to emit structured events for the React terminal interface:
+**AgentEventHandler** extends the Strands SDK's callback system to emit structured events for UI consumers:
 
 ### Event types emitted during operation
 

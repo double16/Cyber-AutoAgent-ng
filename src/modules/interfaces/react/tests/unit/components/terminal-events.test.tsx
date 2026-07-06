@@ -1,7 +1,7 @@
 import React from 'react';
 import {EventEmitter} from 'events';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
@@ -191,12 +191,11 @@ describe('Terminal event processing', () => {
             service.emit('event', {
                 type: 'progress_update',
                 step: 1,
-                is_swarm_operation: true,
-                swarm_agent: 'web_tester',
-                swarm_sub_step: 1,
-                swarm_total_actions: 2,
+                agent_name: 'web_tester',
+                agent_sub_step: 1,
+                agent_total_actions: 2,
             });
-            service.emit('event', {type: 'reasoning', content: ' First thought ', swarm_agent: 'web_tester'});
+            service.emit('event', {type: 'reasoning', content: ' First thought ', agent_name: 'web_tester'});
             jest.advanceTimersByTime(20);
             service.emit('event', {type: 'thinking', context: 'waiting', startTime: Date.now(), metadata: {phase: 'x'}});
             service.emit('event', {type: 'thinking_end'});
@@ -206,7 +205,7 @@ describe('Terminal event processing', () => {
                 timestamp: new Date().toISOString(),
                 tool_name: 'handoff_to_agent',
                 tool_input: {agent_name: 'auth_agent'},
-                swarm_agent: 'web_tester',
+                agent_name: 'web_tester',
             });
             service.emit('event', {type: 'tool_input_update', tool_id: 'tool-1', tool_input: {command: 'whoami'}});
             service.emit('event', {type: 'tool_input_corrected', toolId: 'tool-1', tool_input: {command: 'id'}});

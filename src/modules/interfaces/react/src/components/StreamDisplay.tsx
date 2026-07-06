@@ -7,7 +7,6 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { ThinkingIndicator } from './ThinkingIndicator.js';
 import { StreamEvent } from '../types/events.js';
-import { SwarmDisplay, SwarmState, SwarmAgent } from './SwarmDisplay.js';
 import { formatToolInput } from '../utils/toolFormatters.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
 // Removed toolCategories import - using clean tool display without emojis
@@ -77,9 +76,6 @@ export type AdditionalStreamEvent =
   | { type: 'tool_invocation_end'; duration?: number; success?: boolean; [key: string]: any }
   | { type: 'event_loop_cycle_start'; cycleNumber?: number; [key: string]: any }
   | { type: 'content_block_delta'; delta?: string; isReasoning?: boolean; [key: string]: any }
-  | { type: 'swarm_start'; agent_names?: any[]; agent_details?: any[]; task?: string; [key: string]: any }
-  | { type: 'swarm_handoff'; from_agent?: string; to_agent?: string; message?: string; [key: string]: any }
-  | { type: 'swarm_complete'; final_agent?: string; execution_count?: number; [key: string]: any }
   | { type: 'specialist_start'; specialist?: string; task?: string; finding?: string; artifactPaths?: string[]; [key: string]: any }
   | { type: 'specialist_progress'; specialist?: string; gate?: number; totalGates?: number; tool?: string; status?: string; [key: string]: any }
   | { type: 'specialist_end'; specialist?: string; result?: any; [key: string]: any }
@@ -568,31 +564,22 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
     // EVENT BOUNDARY HANDLERS
     // =======================================================================
     case 'progress_update':
-      // Detect if this is a swarm step and format appropriately
       let stepDisplay = '';
-      
-      // Access properties through bracket notation to bypass TypeScript checks
-      const swarmAgent = (event as any)['swarm_agent'];
-      const swarmSubStep = (event as any)['swarm_sub_step'];
-      const isSwarmOperation = (event as any)['is_swarm_operation'];
+
+      const eventAgent = (event as any)['agent_name'];
+      const agentSubStep = (event as any)['agent_sub_step'];
       
       if (event.step === "FINAL REPORT") {
         stepDisplay = "[FINAL REPORT]";
       } else if (typeof event.step === 'string' && String(event.step).toUpperCase() === 'TERMINATED') {
         // Clean termination header without confusing progress values
         stepDisplay = "[TERMINATED]";
-      } else if (swarmAgent && swarmSubStep) {
-        // For swarm operations, show agent activity and budget progress.
-        // Use replaceAll to handle multi-word agent names correctly
-        const agentName = String(swarmAgent).toUpperCase().replaceAll('_', ' ');
-        const swarmTotal = (event as any)['swarm_total_actions'] ?? swarmSubStep;
+      } else if (eventAgent && agentSubStep) {
+        const agentName = String(eventAgent).toUpperCase().replaceAll('_', ' ');
+        const agentTotal = (event as any)['agent_total_actions'] ?? agentSubStep;
         const eventProgress = (event as any).progressPercent;
         const progress = typeof eventProgress === 'number' ? ` | PROGRESS ${eventProgress}%` : '';
-        stepDisplay = `[SWARM: ${agentName} • ACTION ${swarmSubStep} | SWARM TOTAL ${swarmTotal}${progress}]`;
-      } else if (isSwarmOperation) {
-        const eventProgress = (event as any).progressPercent;
-        const progress = typeof eventProgress === 'number' ? `${eventProgress}%` : String(event.step || '');
-        stepDisplay = `[SWARM • PROGRESS ${progress}]`;
+        stepDisplay = `[AGENT: ${agentName} • ACTION ${agentSubStep} | TOTAL ${agentTotal}${progress}]`;
       } else {
         // Regular progress header with tool count for budget transparency
         const toolCount = (event as any)['totalTools'];
@@ -755,12 +742,12 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
     case 'reasoning':
       // This case should not be reached anymore as reasoning is handled in StreamDisplay
       // But keep it as fallback
-      const swarmAgentLabel = ('swarm_agent' in event && event.swarm_agent)
-        ? ` (${event.swarm_agent})`
+      const agentLabel = ('agent_name' in event && (event as any).agent_name)
+          ? ` (${(event as any).agent_name})`
         : '';
       return (
         <Box flexDirection="column">
-          <Text color="cyan" bold>reasoning{swarmAgentLabel}</Text>
+          <Text color="cyan" bold>reasoning{agentLabel}</Text>
           <Box paddingLeft={0}>
             <Text color="cyan">{event.content}</Text>
           </Box>
@@ -809,6 +796,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       } else {
         latestInput = hasEventInput ? eventInput : (hasMapInput ? mapInput : {});
       }
+      const agentContext = ('agent_name' in event && (event as any).agent_name)
+        ? ` (${(event as any).agent_name})`
+        : '';
       
       // Always show a tool header even if args are not yet available.
       // Individual tool renderers will gracefully handle missing fields.
@@ -825,7 +815,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
 
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="yellow" bold>tool: swarm</Text>
+              <Text color="yellow" bold>tool: swarm{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ deploying {agentCount} agents: {agentNames}</Text>
               </Box>
@@ -858,7 +848,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
 
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: {event.tool_name}</Text>
+              <Text color="green" bold>tool: {event.tool_name}{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ action: {action === 'store' ? 'storing' : action === 'retrieve' ? 'retrieving' : action}</Text>
               </Box>
@@ -878,8 +868,6 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
           
         case 'shell': {
           // Show tool header with command(s) if available
-          const agentContext = ('swarm_agent' in event && event.swarm_agent) 
-            ? ` (${event.swarm_agent})` : '';
 
           // Pull raw commands from the most permissive set of fields
           const rawInput: any = (latestInput as any) || {};
@@ -990,7 +978,7 @@ const method = latestInput.method || 'GET';
           const urlDisplay = url && url.trim().length > 0 ? url : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: http_request</Text>
+              <Text color="green" bold>tool: http_request{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ method: {method}</Text>
               </Box>
@@ -1006,7 +994,7 @@ const method = latestInput.method || 'GET';
           const urlDisplay = url && url.trim().length > 0 ? url : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_goto_url</Text>
+              <Text color="green" bold>tool: browser_goto_url{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ url: {urlDisplay}</Text>
               </Box>
@@ -1019,7 +1007,7 @@ const method = latestInput.method || 'GET';
           const actionDisplay = action && action.trim().length > 0 ? action : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_perform_action</Text>
+              <Text color="green" bold>tool: browser_perform_action{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ action: {actionDisplay}</Text>
               </Box>
@@ -1032,7 +1020,7 @@ const method = latestInput.method || 'GET';
           const instructionDisplay = instruction && instruction.trim().length > 0 ? instruction : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_observe_page</Text>
+              <Text color="green" bold>tool: browser_observe_page{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ instruction: {instructionDisplay}</Text>
               </Box>
@@ -1045,7 +1033,7 @@ const method = latestInput.method || 'GET';
           const expressionDisplay = expression && expression.trim().length > 0 ? expression : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_evaluate_js</Text>
+              <Text color="green" bold>tool: browser_evaluate_js{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ instruction: {expressionDisplay}</Text>
               </Box>
@@ -1056,7 +1044,7 @@ const method = latestInput.method || 'GET';
         case 'browser_get_cookies': {
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_get_cookies</Text>
+              <Text color="green" bold>tool: browser_get_cookies{agentContext}</Text>
             </Box>
           );
         }
@@ -1066,7 +1054,7 @@ const method = latestInput.method || 'GET';
           // Still, show a short description so the user understands what is happening.
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_get_page_html</Text>
+              <Text color="green" bold>tool: browser_get_page_html{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ capture HTML of the current page and save as an artifact</Text>
               </Box>
@@ -1079,7 +1067,7 @@ const method = latestInput.method || 'GET';
           const headersDisplay = Object.keys(headers).length > 0 ? JSON.stringify(headers) : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_set_headers</Text>
+              <Text color="green" bold>tool: browser_set_headers{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ headers: {headersDisplay}</Text>
               </Box>
@@ -1092,7 +1080,7 @@ const method = latestInput.method || 'GET';
           const fileContent = latestInput.content || '';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: file_write</Text>
+              <Text color="green" bold>tool: file_write{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ path: {filePath}</Text>
               </Box>
@@ -1115,7 +1103,7 @@ const method = latestInput.method || 'GET';
           const lineCount = contentStr ? (contentStr.split('\n').length) : 0;
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: editor</Text>
+              <Text color="green" bold>tool: editor{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ command: {editorCmd}</Text>
               </Box>
@@ -1138,7 +1126,7 @@ const method = latestInput.method || 'GET';
           
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: think</Text>
+              <Text color="green" bold>tool: think{agentContext}</Text>
               {thought && (
                 <Box marginLeft={2}>
                   <Text dimColor>└─ {thought.length > 100 ? thought.substring(0, 100) + '...' : thought}</Text>
@@ -1170,7 +1158,7 @@ const method = latestInput.method || 'GET';
           }
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: python_repl</Text>
+              <Text color="green" bold>tool: python_repl{agentContext}</Text>
               <Box marginLeft={2} flexDirection="column">
                 <Text dimColor>└─ code:</Text>
                 {codeDisplayLines.length === 0 ? (
@@ -1196,7 +1184,7 @@ const method = latestInput.method || 'GET';
           const reportType = latestInput.report_type || latestInput.type || 'general';
           return (
             <Box flexDirection="column">
-              <Text color="green" bold>tool: report_generator</Text>
+              <Text color="green" bold>tool: report_generator{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ target: {target}</Text>
               </Box>
@@ -1214,7 +1202,7 @@ const method = latestInput.method || 'GET';
           const msgPreview = handoffMsg.length > 80 ? handoffMsg.substring(0, 80) + '...' : handoffMsg;
           return (
             <Box flexDirection="column">
-              <Text color="green" bold>tool: handoff_to_agent</Text>
+              <Text color="green" bold>tool: handoff_to_agent{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ handoff_to: {handoffTo}</Text>
               </Box>
@@ -1235,7 +1223,7 @@ const method = latestInput.method || 'GET';
           const hasDesc = !!toolDescription;
           return (
             <Box flexDirection="column">
-              <Text color="green" bold>tool: load_tool</Text>
+              <Text color="green" bold>tool: load_tool{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>{hasPath || hasDesc ? '├─' : '└─'} loading: {toolName}</Text>
               </Box>
@@ -1258,7 +1246,7 @@ const method = latestInput.method || 'GET';
           const stopReason = (latestInput && (latestInput.reason || latestInput.message)) || 'Manual stop requested';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: stop</Text>
+              <Text color="green" bold>tool: stop{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ reason: {stopReason}</Text>
               </Box>
@@ -1267,9 +1255,7 @@ const method = latestInput.method || 'GET';
         }
 
         default: {
-          // Enhanced tool display with swarm agent context and structured parameters
-          const agentContext = ('swarm_agent' in event && event.swarm_agent) 
-            ? ` (${event.swarm_agent})` : '';
+          // Enhanced tool display with agent context and structured parameters
           
           // Check if tool_input is an object with multiple properties for structured display
           const toolInput = latestInput;
@@ -1920,144 +1906,6 @@ const method = latestInput.method || 'GET';
         </>
       );
       
-    case 'swarm_start': {
-      // Create and display SwarmDisplay component immediately.
-      // We treat a swarm_start as the beginning of an active swarm run so that
-      // the UI shows agents as running rather than permanently "initializing".
-      const swarmEvent = event as any;
-      const agents: SwarmAgent[] = (swarmEvent.agent_details || swarmEvent.agents || []).map((agent: any, index: number) => ({
-        id: `agent_${agent.name}_${index}`, // Unique id for each agent
-        name: agent.name,
-        role: agent.role || (agent.system_prompt ? agent.system_prompt.split('.')[0].trim() : ''),
-        // Mark the first agent as active to reflect that it will receive the
-        // first swarm step; others remain pending.
-        status: index === 0 ? 'active' : 'pending',
-        tools: agent.tools || [],
-        model_id: agent.model_id,
-        model_provider: agent.model_provider,
-        temperature: agent.temperature,
-        recentToolCalls: []
-      }));
-
-      const swarmState: SwarmState = {
-        id: `swarm_${Date.now()}`,
-        task: swarmEvent.task || 'Multi-agent operation',
-        status: 'running',
-        agents,
-        startTime: Date.now(),
-        totalTokens: 0,
-        maxHandoffs: swarmEvent.max_handoffs,
-        maxIterations: swarmEvent.max_iterations,
-        nodeTimeout: swarmEvent.node_timeout,
-        executionTimeout: swarmEvent.execution_timeout
-      };
-
-      // Use the compact summary view; the detailed per-agent view can be very
-      // tall and is redundant with the swarm progress updates that follow.
-      return (
-        <Box marginTop={1} marginBottom={1}>
-          <SwarmDisplay swarmState={swarmState} collapsed={true} />
-        </Box>
-      );
-    }
-      
-    case 'swarm_handoff':
-      // Enhanced agent handoff display
-      const fromAgent = 'from_agent' in event ? String(event.from_agent || 'unknown') : 'unknown';
-      const toAgent = 'to_agent' in event ? String(event.to_agent || 'unknown') : 'unknown';
-      const handoffMessage = 'message' in event ? String(event.message || '') : '';
-      const sharedContext = 'shared_context' in event ? event.shared_context : {};
-      
-      return (
-        <Box flexDirection="column" marginTop={1}>
-          <Box>
-            <Text color="magenta" bold>[HANDOFF] </Text>
-            <Text color="cyan">{fromAgent}</Text>
-            <Text color="gray"> → </Text>
-            <Text color="green">{toAgent}</Text>
-          </Box>
-          {handoffMessage && (
-            <Box marginLeft={2}>
-              <Text dimColor>└─ "{handoffMessage}"</Text>
-            </Box>
-          )}
-          {typeof sharedContext === 'object' && Object.keys(sharedContext).length > 0 && (
-            <Box marginLeft={2} flexDirection="column">
-              <Text dimColor>   Context transferred:</Text>
-              {Object.entries(sharedContext).slice(0, 3).map(([key, value]) => (
-                <Box key={key} marginLeft={4}>
-                  <Text dimColor>• {key}: {String(value).substring(0, 50)}{String(value).length > 50 ? '...' : ''}</Text>
-                </Box>
-              ))}
-            </Box>
-          )}
-        </Box>
-      );
-      
-    case 'swarm_complete': {
-      // Enhanced swarm completion display
-      const finalAgent = 'final_agent' in event ? String(event.final_agent || 'unknown') : 'unknown';
-      const executionCount = 'execution_count' in event ? Number(event.execution_count || 0) : 0;
-      const handoffCount = 'handoff_count' in event ? Number(event.handoff_count || 0) : executionCount - 1;
-      const totalActions = 'total_actions' in event ? Number(event.total_actions || 0) : 0;
-      const duration = 'duration' in event ? String(event.duration || 'unknown') : 'unknown';
-      const totalTokens = 'total_tokens' in event ? Number(event.total_tokens || 0) : 0;
-      const agentMetrics = 'agent_metrics' in event ? (event.agent_metrics as any[] || []) : [];
-      const swarmStatus = 'status' in event ? String(event.status || 'completed') : 'completed';
-      const completedAgents = 'completed_agents' in event ? (event.completed_agents as string[] || []) : [];
-      const failedAgents = 'failed_agents' in event ? (event.failed_agents as string[] || []) : [];
-      
-      // Determine if this was a timeout/failure
-      const isTimeout = swarmStatus.toLowerCase().includes('failed') || swarmStatus.toLowerCase().includes('timeout');
-      const statusColor = isTimeout ? 'red' : 'green';
-      const statusText = isTimeout ? 'TIMEOUT' : 'COMPLETE';
-      
-      return (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color={statusColor} bold>[SWARM: {statusText}] {completedAgents.length || agentMetrics.length || 0} agents, {handoffCount} handoffs, {totalActions} actions</Text>
-          {duration !== 'unknown' && (
-            <Box marginLeft={2}>
-              <Text dimColor>├─ duration: {duration}</Text>
-            </Box>
-          )}
-          {totalTokens > 0 && (
-            <Box marginLeft={2}>
-              <Text dimColor>├─ tokens: {totalTokens.toLocaleString()}</Text>
-            </Box>
-          )}
-          {isTimeout && (
-            <Box marginLeft={2}>
-              <Text color="yellow">├─ ⚠️ Swarm execution timed out - continuing with manual fallback</Text>
-            </Box>
-          )}
-          {completedAgents.length > 0 && (
-            <Box marginLeft={2}>
-              <Text color="green">├─ completed: {completedAgents.join(', ')}</Text>
-            </Box>
-          )}
-          {failedAgents.length > 0 && (
-            <Box marginLeft={2}>
-              <Text color="red">└─ failed: {failedAgents.join(', ')}</Text>
-            </Box>
-          )}
-          {agentMetrics.length > 0 && agentMetrics.map((metric, idx) => {
-            const isLast = idx === agentMetrics.length - 1 && completedAgents.length === 0 && failedAgents.length === 0;
-            const prefix = isLast ? '└─' : '├─';
-            return (
-              <Box key={idx} marginLeft={2}>
-                <Text dimColor>{prefix} {metric.name}: {metric.steps} actions, {metric.tools} tools, {metric.tokens} tokens</Text>
-              </Box>
-            );
-          })}
-          {agentMetrics.length === 0 && completedAgents.length === 0 && (
-            <Box marginLeft={2}>
-              <Text dimColor>└─ final_agent: {finalAgent}</Text>
-            </Box>
-          )}
-        </Box>
-      );
-    }
-      
     case 'batch':
       // Handle batched events from backend
       // Recursively render each event in the batch
@@ -2319,83 +2167,7 @@ export const computeDisplayGroups = (events: DisplayStreamEvent[]): DisplayGroup
 
 
 export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events, animationsEnabled = true }) => {
-  // Track active swarm operations
-  const [swarmStates, setSwarmStates] = React.useState<Map<string, SwarmState>>(new Map());
-  // Process swarm events to build state with a stable ID to avoid remount flicker
-  React.useEffect(() => {
-    // Derive a stable signature from the latest swarm_start event
-    let latestSignature: string | null = null;
-    let latestTask: string | null = null;
-    let latestAgents: SwarmAgent[] | null = null;
-
-    events.forEach(event => {
-      if (event.type === 'swarm_start') {
-        const names = 'agent_names' in event && Array.isArray(event.agent_names)
-          ? (event.agent_names as any[]).map(a => typeof a === 'string' ? a : (a && (a.name || a.role)) || '').join(',')
-          : '';
-        const task = event.task || 'Unknown task';
-        const signature = `${names}|${task}`;
-        latestSignature = signature;
-        latestTask = task;
-
-        const agentDetails = event.agent_details || [];
-        const agents: SwarmAgent[] = [];
-        if (Array.isArray(agentDetails)) {
-          agentDetails.forEach((detail: any, i: number) => {
-            const agentName = detail.name || `Agent ${i + 1}`;
-            const systemPrompt = detail.system_prompt || '';
-            const agentTools = detail.tools || [];
-            const role = systemPrompt.split('.')[0].trim() || 'Agent';
-            agents.push({
-              id: `agent_${i}`,
-              name: agentName,
-              role,
-              task: role,
-              status: 'pending',
-              tools: Array.isArray(agentTools) ? agentTools : []
-            });
-          });
-        }
-        latestAgents = agents;
-      }
-    });
-
-    // If we have no new swarm info, do nothing
-    if (!latestSignature || !latestTask) {
-      return;
-    }
-
-    // Update swarm state incrementally and only if something changed
-    setSwarmStates(prev => {
-      const next = new Map(prev);
-      const existing = next.get(latestSignature!);
-      const now = Date.now();
-      const updated: SwarmState = {
-        id: latestSignature!,
-        task: latestTask!,
-        status: existing?.status || 'initializing',
-        agents: latestAgents && latestAgents.length > 0 ? latestAgents : (existing?.agents || []),
-        startTime: existing?.startTime || now,
-        endTime: existing?.endTime,
-        totalTokens: existing?.totalTokens,
-        result: existing?.result
-      };
-
-      // Shallow compare to avoid unnecessary state updates
-      const hasChanged = !existing 
-        || existing.task !== updated.task
-        || existing.status !== updated.status
-        || existing.agents.length !== updated.agents.length;
-
-      if (hasChanged) {
-        next.set(latestSignature!, updated);
-        return next;
-      }
-      return prev; // no change
-    });
-  }, [events]);
-  
-  // Track tool inputs (for handling tool_input_update events from swarm agents)
+  // Track tool inputs (for handling streamed tool_input_update events)
   const [toolInputs, setToolInputs] = React.useState<Map<string, any>>(new Map());
   
   // Resolve output base directory from config so report resolution matches backend outputDir
@@ -2445,18 +2217,6 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   
   // Group consecutive reasoning events to prevent multiple labels
   const displayGroups = React.useMemo(() => computeDisplayGroups(events), [events]);
-  
-  // Memoize active swarm lookup - expensive operation
-  const activeSwarm = React.useMemo(() => {
-    return Array.from(swarmStates.values()).find(s => 
-      s.status === 'running' || s.status === 'initializing'
-    );
-  }, [swarmStates]);
-  
-  // Memoize swarm event check
-  const hasSwarmStartEvent = React.useMemo(() => {
-    return events.some(e => e.type === 'swarm_start');
-  }, [events]);
   
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
@@ -2536,13 +2296,6 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
 
   return (
     <Box flexDirection="column">
-      {/* Only display swarm if we have actual swarm events in this session */}
-      {activeSwarm && hasSwarmStartEvent && (
-        <Box marginBottom={1}>
-          <SwarmDisplay swarmState={activeSwarm} collapsed={false} />
-        </Box>
-      )}
-
       {/* Omitted items banner to indicate truncated history in the viewport */}
       {omittedCount > 0 && (
         <Box marginBottom={1}>
@@ -2573,15 +2326,13 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
             }
             return acc;
           }, '');
-          
-          // Check if this is swarm agent reasoning
-          const swarmAgent = group.events[0] && 'swarm_agent' in group.events[0] 
-            ? group.events[0].swarm_agent 
+
+          const agentName = group.events[0] && 'agent_name' in group.events[0]
+              ? (group.events[0] as any).agent_name
             : null;
-          
-          // Create reasoning label with agent info if available
-          const reasoningLabel = swarmAgent 
-            ? `reasoning (${swarmAgent})`
+
+          const reasoningLabel = agentName
+              ? `reasoning (${agentName})`
             : 'reasoning';
           
           return (
@@ -2713,15 +2464,13 @@ export const StaticStreamDisplay: React.FC<{
           }
           return acc;
         }, '');
-        
-        // Check if this is swarm agent reasoning
-        const swarmAgent = group.events[0] && 'swarm_agent' in group.events[0] 
-          ? (group.events[0] as any).swarm_agent 
+
+        const agentName = group.events[0] && 'agent_name' in group.events[0]
+            ? (group.events[0] as any).agent_name
           : null;
-        
-        // Create reasoning label with agent info if available
-        const reasoningLabel = swarmAgent 
-          ? `reasoning (${swarmAgent})`
+
+        const reasoningLabel = agentName
+            ? `reasoning (${agentName})`
           : 'reasoning';
         
         const key = `rg-${group.startIdx}`;

@@ -17,9 +17,6 @@ node run-enhanced-tests.js --skip-visual --skip-performance
 # Run only Jest unit tests
 cd .. && npm test
 
-# Run terminal stream rendering tests (uses tsx)
-node integration/terminal-stream-tests.js --verbose
-
 # Headless UI smoke test
 node integration/headless-auto-run.js
 
@@ -52,24 +49,12 @@ node integration/operation-stream-simulation.js
 - **`interactive-component-tests.js`** - Component interaction testing
 - **`automated-test-suite.js`** - Full application testing
 - **`journey-validation-tests.js`** - User journey validation
-- **`terminal-stream-tests.js`** - Terminal stream rendering tests (uses a JSX harness with `tsx` and `EventRenderer.jsx`)
 - **`operation-stream-simulation.js`** - PTY-driven mock execution flow with stream assertions
 - **`headless-auto-run.js`** - Headless UI smoke test (opens config, checks responsiveness)
 - **`comprehensive-capture.js`** - Screen capture generation
 - **`validate-captures.js`** - Visual regression validation
 - **`frame-analyzer.js`** - Terminal frame analysis utilities
 - **`EventRenderer.jsx`** - Lightweight JSX wrapper that renders `EventLine` directly for integration tests
-
-### Terminal Stream Tests
-
-- Purpose: Validate the real terminal UI rendering pipeline for streamed events (same code paths used in production: `Terminal` → `normalizeEvent` → `StreamDisplay` → `EventLine`).
-- Execution:
-  - `node integration/terminal-stream-tests.js --verbose`
-- Under the hood:
-  - Spawns a tiny JSX app via `npx tsx` that renders `EventRenderer.jsx`, which uses the real `EventLine` from `src/components/StreamDisplay.tsx`.
-  - Saves a JSON report to `tests/fixtures/test-results/`.
-- Environment:
-  - No special env needed; runner ensures the results directory exists.
 
 ### Mock Operation Stream Tests
 
@@ -153,7 +138,6 @@ tests/
 │   ├── interactive-component-tests.js  # PTY-based interaction tests
 │   ├── automated-test-suite.js         # Full application testing
 │   ├── journey-validation-tests.js     # End-to-end user journeys
-│   ├── terminal-stream-tests.js        # Terminal stream rendering tests (uses tsx + EventRenderer)
 │   ├── operation-stream-simulation.js  # PTY-driven mock execution stream
 │   ├── headless-auto-run.js            # Headless UI smoke test
 │   └── EventRenderer.jsx               # JSX harness for rendering EventLine
@@ -203,9 +187,6 @@ node integration/interactive-component-tests.js
 
 # User journey validation
 node integration/journey-validation-tests.js
-
-# Terminal stream rendering tests
-node integration/terminal-stream-tests.js --verbose
 
 # Headless UI smoke test
 node integration/headless-auto-run.js

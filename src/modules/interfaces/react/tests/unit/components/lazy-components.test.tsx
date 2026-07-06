@@ -5,7 +5,6 @@ import {
     ConfigEditorLazy,
     DocumentationViewerLazy,
     ModuleSelectorLazy,
-    SwarmDisplayLazy,
     TerminalLazy,
 } from '../../../src/components/LazyComponents.js';
 
@@ -27,7 +26,6 @@ describe('LazyComponents', () => {
                     <ConfigEditorLazy/>
                     <DocumentationViewerLazy/>
                     <ModuleSelectorLazy/>
-                    <SwarmDisplayLazy/>
                     <TerminalLazy/>
                 </>
             );
@@ -37,7 +35,6 @@ describe('LazyComponents', () => {
         expect(text).toContain('Loading Configuration Editor...');
         expect(text).toContain('Loading Documentation...');
         expect(text).toContain('Loading Module Selector...');
-        expect(text).toContain('Loading Swarm Display...');
         expect(text).toContain('Loading Terminal...');
     });
 });

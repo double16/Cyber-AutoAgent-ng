@@ -115,6 +115,7 @@ def patch_toolregistry_register_tool() -> None:
 class AgentFactoryConfig:
     hooks: Optional[List[HookProvider]] = None
     callback_handler: Optional[Callable[..., Any]] = None
+    callback_handler_factory: Optional[Callable[..., Any]] = None
     conversation_manager: Optional[ConversationManager] = None
     context_manager: Optional[str] = None
     base_trace_attributes: Optional[Dict[str, Any]] = None
@@ -162,7 +163,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
         agent_type = agent_type or name
 
         kwargs = kwargs.copy()
-        if not "load_tools_from_directory" in kwargs:
+        if "load_tools_from_directory" not in kwargs:
             kwargs["load_tools_from_directory"] = True
 
         # Configure model provider
@@ -239,10 +240,19 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
             # we must have this for providers whose toolUseId is broken
             agent_hooks.append(ToolUseIdHook())
 
+        callback_handler = config.callback_handler
+        if config.callback_handler_factory is not None:
+            callback_handler = config.callback_handler_factory(
+                name=name,
+                agent_type=agent_type,
+                model_id=swarm_model_id,
+                provider_id=provider,
+            )
+
         agent_kwargs: Dict[str, Any] = {
             "model": strands_model,
             "name": name,
-            "callback_handler": config.callback_handler,
+            "callback_handler": callback_handler,
             "trace_attributes": trace_attributes,
             "hooks": agent_hooks,
             **kwargs,

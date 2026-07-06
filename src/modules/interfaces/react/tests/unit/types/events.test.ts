@@ -6,7 +6,6 @@ describe('event type definitions', () => {
         expect(EventType.AGENT_INITIALIZED).toBe('agent_initialized');
         expect(EventType.TOOL_START).toBe('tool_start');
         expect(EventType.SHELL_OUTPUT).toBe('shell_output');
-        expect(EventType.SWARM_HANDOFF).toBe('swarm_handoff');
         expect(EventType.SPECIALIST_END).toBe('specialist_end');
         expect(EventType.USAGE_UPDATE).toBe('usage_update');
         expect(EventType.AGENT_COMPLETE).toBe('agent_complete');

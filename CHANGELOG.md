@@ -4,6 +4,9 @@
 - Cleanup React CLI logging.
 - Replace iteration-based operation limits with duration, token, and cost budgets; progress now reports the highest utilization across configured budgets.
 - Correct token and cost metrics by aggregating usage across multiple agents and apply per-agent model pricing.
+- Generalize React event handling for multi-agent workflows with per-agent handlers and operation-wide metric aggregation.
+- Stop hook-level duplicate tool start events when agent event handlers own tool lifecycle emission.
+- Show agent names on React terminal tool output headers.
 
 ## v0.9.0
 

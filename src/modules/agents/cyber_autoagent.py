@@ -59,7 +59,7 @@ from modules.handlers.conversation_budget import (
     PRESERVE_LAST_DEFAULT,
     PRESERVE_FIRST_DEFAULT,
 )
-from modules.handlers.react import ReactBridgeHandler
+from modules.handlers.react import AgentEventHandler
 from modules.handlers.agent_repair_hook import AgentRepairHook
 from modules.handlers.tool_router import ToolRouterHook
 from modules.config.models.capabilities import get_capabilities
@@ -122,7 +122,7 @@ def create_agent(
     target: str,
     objective: str,
     config: Optional[AgentConfig] = None,
-) -> Tuple[Agent, ReactBridgeHandler]:
+) -> Tuple[Agent, AgentEventHandler]:
     """Create autonomous agent"""
 
     # Enable comprehensive SDK logging for debugging
@@ -416,7 +416,7 @@ Preferred over command line.
     if config.available_tools:
         tool_count += len(config.available_tools)
         tools_by_caps = get_cyber_tools_by_caps(config.available_tools)
-        tools_context = f"""
+        tools_context = """
 ### COMMAND LINE PROGRAMS
 
 - Use the **shell** tool for command line programs.
@@ -469,7 +469,7 @@ Before using browser traffic, call `browser_set_headers` with these headers. For
         full_tools_context = f"{full_tools_context}\n\n{marker_context}" if full_tools_context else marker_context
 
     if full_tools_context:
-        full_tools_context = f"""
+        full_tools_context = """
 ## TOOLS
 
 Prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
@@ -685,7 +685,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         logger.debug("system_prompt_payload %s", json.dumps(system_prompt_payload))
 
     # It works in both CLI and React modes
-    from modules.handlers.react.react_bridge_handler import ReactBridgeHandler
+    from modules.handlers.react.agent_event_handler import AgentEventHandler
 
     # Set up output interception to prevent duplicate output
     # This must be done before creating the handler to ensure all stdout is captured
@@ -694,11 +694,13 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
         setup_output_interception()
 
-    callback_handler = ReactBridgeHandler(
+    callback_handler = AgentEventHandler(
         operation_id=operation_id,
         provider_id=config.provider,
         model_id=config.model_id,
-        swarm_model_id=server_config.swarm.llm.model_id,
+        specialist_model_id=server_config.swarm.llm.model_id,
+        agent_name=f"Cyber-AutoAgent {config.op_id or operation_id}",
+        agent_type="main_orchestrator",
         init_context={
             "objective": config.objective,
             "target": config.target,
@@ -755,7 +757,10 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
     # Use the same emitter as the callback handler for consistency
     react_hooks = ReactHooks(
-        emitter=callback_handler.emitter, operation_id=operation_id, agent_config=config
+        emitter=callback_handler.emitter,
+        operation_id=operation_id,
+        agent_config=config,
+        emit_tool_lifecycle=False,
     )
 
     tool_call_repair_hook = AgentRepairHook()
@@ -771,7 +776,8 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
     # hooks to include in agents, order is important
     hooks: List[HookProvider] = list(filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
-    swarm_hooks: List[HookProvider] = list(filter(bool, [tool_call_repair_hook, tool_router_hook, prompt_budget_hook]))
+    subagent_hooks: List[HookProvider] = list(
+        filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
 
     if enable_prompt_optimization:
         # Create prompt rebuild hook for intelligent prompt updates
@@ -818,7 +824,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         if prompt_token_limit <= 49_152:
             preserve_recent_messages = 2
 
-    # Create and register conversation manager for all agents (including swarm children)
+    # Create and register conversation manager for all agents.
     # Use environment variables for preservation to enable effective pruning
     # Keep preserve_last low (5) to allow pruning: first (1) + last (5) = 6 preserved out of 120 window
     conversation_manager = MappingConversationManager(
@@ -849,11 +855,11 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     # Register toolUseId hook for patching toolUseId, must be last
     tool_use_id_hook = ToolUseIdHook()
     hooks.append(tool_use_id_hook)
-    swarm_hooks.append(tool_use_id_hook)
+    subagent_hooks.append(tool_use_id_hook)
 
     agent_logger.info(
-        "HOOK REGISTRATION: will register %d hooks total (%d shared with swarm agents)",
-        len(hooks), len(swarm_hooks)
+        "HOOK REGISTRATION: will register %d hooks total (%d shared with sub-agents)",
+        len(hooks), len(subagent_hooks)
     )
 
     agent_kwargs = {
@@ -930,10 +936,32 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             # project-specific conversation manager remains authoritative.
             agent_kwargs["context_manager"] = sdk_context_manager
 
+    def create_subagent_callback_handler(
+            name: str,
+            agent_type: str,
+            model_id: str = None,
+            provider_id: str = None,
+    ) -> AgentEventHandler:
+        return AgentEventHandler(
+            operation_id=operation_id,
+            provider_id=provider_id or config.provider,
+            model_id=model_id or server_config.swarm.llm.model_id,
+            specialist_model_id=server_config.swarm.llm.model_id,
+            emitter=callback_handler.emitter,
+            init_context={"ui_mode": config_manager.getenv("CYBER_UI_MODE", "cli").lower()},
+            coordinator=callback_handler.coordinator,
+            agent_name=name,
+            agent_type=agent_type,
+            parent_agent_run_id=callback_handler.agent_run_id,
+            emit_operation_init=False,
+            start_metrics_thread=False,
+        )
+
     # apply wrapper to provide agent_factory to any tool that has a parameter named such
     agent_factory_config = AgentFactoryConfig(
-        hooks = swarm_hooks,
+        hooks=subagent_hooks,
         callback_handler = callback_handler,
+        callback_handler_factory=create_subagent_callback_handler,
         conversation_manager = conversation_manager,
         context_manager = sdk_context_manager,
         base_trace_attributes = agent_kwargs["trace_attributes"],
@@ -963,11 +991,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         setattr(agent, "system_prompt", system_prompt)
     except Exception:
         pass
-    try:
-        setattr(agent, "swarm_hooks", swarm_hooks)
-    except Exception as e:
-        logger.error("Could not set swarm_hooks on agent, swarm agents may not behave as intended", exc_info=e)
-
     agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))
 
     agent_logger.debug("Agent initialized successfully")

@@ -6,14 +6,9 @@ used across different handler components.
 """
 
 import os
-from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
 
 
-# Environment configuration
-
-# Helper function to detect if running in Docker
 @lru_cache(maxsize=1)
 def is_docker():
     """Check if running inside a Docker container."""
@@ -31,44 +26,6 @@ LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "sk-lf-placeholder")
 # Display configuration
 CONTENT_PREVIEW_LENGTH = 200
 MAX_CONTENT_DISPLAY_LENGTH = 500
-
-
-@dataclass
-class HandlerState:
-    """State management for handler operations."""
-
-    # Budget tracking
-    budget_limit_reached: bool = False
-
-    # Tool tracking
-    shown_tools: set = field(default_factory=set)
-    tool_use_map: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    tool_results: Dict[str, Any] = field(default_factory=dict)
-    tools_used: List[str] = field(default_factory=list)
-
-    # Display state
-    last_was_tool: bool = False
-    last_was_reasoning: bool = False
-    suppress_parent_handler: bool = False
-    suppress_parent_output: bool = False
-
-    # Operation tracking
-    operation_id: Optional[str] = None
-    report_generated: bool = False
-    memory_operations: int = 0
-    stop_tool_used: bool = False
-    created_tools: List[str] = field(default_factory=list)
-    start_time: float = 0.0
-    evaluation_triggered: bool = False
-    evaluation_thread: Optional[Any] = None
-
-    # Swarm operation tracking
-    in_swarm_operation: bool = False
-    swarm_agents: List[str] = field(default_factory=list)
-    current_swarm_agent: Optional[str] = None
-
-    # Tool effectiveness tracking
-    tool_effectiveness: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 class HandlerError(Exception):

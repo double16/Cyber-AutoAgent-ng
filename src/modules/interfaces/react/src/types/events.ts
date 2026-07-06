@@ -105,18 +105,6 @@ export enum EventType {
   SHELL_ERROR = 'shell_error',
   
   // =============================================================================
-  // MULTI-AGENT COORDINATION EVENTS - Swarm intelligence system
-  // =============================================================================
-  /** Multi-agent swarm session initiated */
-  SWARM_START = 'swarm_start',
-  /** Individual agent activity */
-  SWARM_AGENT = 'swarm_agent',
-  /** Agent handoff with context transfer */
-  SWARM_HANDOFF = 'swarm_handoff',
-  /** Multi-agent swarm session completed */
-  SWARM_END = 'swarm_end',
-
-  // =============================================================================
   // SPECIALIST SUB-AGENT EVENTS - Validation and specialized analysis
   // =============================================================================
   /** Specialist sub-agent initialized */
@@ -338,16 +326,6 @@ export interface ShellEvent extends BaseEvent {
   isStreaming?: boolean;
 }
 
-// Swarm events
-export interface SwarmEvent extends BaseEvent {
-  type: EventType.SWARM_START | EventType.SWARM_AGENT | EventType.SWARM_HANDOFF | EventType.SWARM_END;
-  agentName?: string;
-  agentId?: string;
-  handoffTo?: string;
-  handoffReason?: string;
-  result?: any;
-}
-
 // Specialist sub-agent events
 export interface SpecialistEvent extends BaseEvent {
   type: EventType.SPECIALIST_START | EventType.SPECIALIST_PROGRESS | EventType.SPECIALIST_END;
@@ -505,7 +483,6 @@ export type StreamEvent =
   // Legacy Events (backward compatibility)
   | ToolEvent
   | ShellEvent
-  | SwarmEvent
   | SpecialistEvent
   | HttpEvent
   | MemoryEvent

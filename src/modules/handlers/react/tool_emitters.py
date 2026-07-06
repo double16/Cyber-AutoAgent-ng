@@ -1,15 +1,10 @@
-"""
-Tool-specific event emitters for the React UI bridge.
-
-This module contains specialized event emitters for different tool types,
-converting tool inputs and outputs into structured events for the React UI.
-"""
+"""Tool-specific structured event emitters."""
 
 from typing import Any, Callable, Dict
 
 
 class ToolEventEmitter:
-    """Handles emission of tool-specific events for the React UI."""
+    """Handles emission of tool-specific side-channel events."""
 
     def __init__(self, emit_func: Callable[[Dict[str, Any]], None]):
         """
@@ -30,10 +25,8 @@ class ToolEventEmitter:
         """
         emitter_map = {
             "http_request": self._emit_http_request,
-            "swarm": self._emit_swarm_operation,
             "python_repl": self._emit_python_repl,
             "generate_security_report": self._emit_report_generator,
-            "complete_swarm_task": self._emit_swarm_complete,
             "think": self._emit_think_operation,
         }
 
@@ -65,82 +58,6 @@ class ToolEventEmitter:
         # This was the root cause of the duplicate tool parameter display issue.
         pass
 
-    def _emit_swarm_operation(self, tool_input: Any) -> None:
-        """Emit swarm orchestration details."""
-        if isinstance(tool_input, dict):
-            agents = tool_input.get("agents", [])
-            task = tool_input.get("task", "")
-
-            # Don't emit empty swarm events - these are invalid and cause UI spam
-            if not agents and not task:
-                return
-
-            # Get agent specifications
-            agent_details = []
-            for i, agent in enumerate(agents):
-                if isinstance(agent, dict):
-                    # Get name or generate default
-                    name = agent.get("name", f"agent_{i + 1}")
-
-                    # Get full system prompt without parsing
-                    system_prompt = agent.get("system_prompt", "")
-
-                    # Get tools list
-                    tools = agent.get("tools", [])
-                    if not isinstance(tools, list):
-                        tools = []
-
-                    # Get model info with defaults
-                    model_provider = agent.get("model_provider", "default")
-                    model_settings = agent.get("model_settings", {})
-                    if isinstance(model_settings, dict):
-                        model_id = model_settings.get("model_id", "default")
-                    else:
-                        model_id = "default"
-
-                    detail = {
-                        "name": str(name),
-                        "system_prompt": str(system_prompt),
-                        "tools": [str(t) for t in tools],
-                        "model_provider": str(model_provider),
-                        "model_id": str(model_id),
-                    }
-                    agent_details.append(detail)
-                elif isinstance(agent, str):
-                    # Handle simple string agent definitions
-                    agent_details.append(
-                        {
-                            "name": agent,
-                            "system_prompt": "",
-                            "tools": [],
-                            "model_provider": "default",
-                            "model_id": "default",
-                        }
-                    )
-
-            # Only emit swarm start event if we have valid data
-            if len(agent_details) > 0 or task:
-                # Extract agent names for backward compatibility
-                agent_names = [
-                    agent.get("name", f"agent_{i}")
-                    for i, agent in enumerate(agent_details)
-                ]
-
-                # Emit rich swarm_start event with both names and full details
-                self.emit_ui_event(
-                    {
-                        "type": "swarm_start",
-                        "task": str(task),
-                        "agent_count": len(agent_details),
-                        "agent_names": agent_names,
-                        "agent_details": agent_details,
-                        "max_handoffs": tool_input.get("max_handoffs", 20),
-                        "max_iterations": tool_input.get("max_iterations", 20),
-                        "node_timeout": tool_input.get("node_timeout", 4800),
-                        "execution_timeout": tool_input.get("execution_timeout", 5400),
-                    }
-                )
-
     def _emit_python_repl(self, tool_input: Any) -> None:
         """Emit Python REPL execution details."""
         if isinstance(tool_input, dict):
@@ -166,10 +83,6 @@ class ToolEventEmitter:
             self.emit_ui_event(
                 {"type": "metadata", "content": {"target": target, "type": report_type}}
             )
-
-    def _emit_swarm_complete(self, tool_input: Any) -> None:
-        """Emit swarm completion event (placeholder for main handler)."""
-        # This is handled by the main handler due to state dependencies
 
     def _emit_think_operation(self, tool_input: Any) -> None:
         """Emit think operation details."""

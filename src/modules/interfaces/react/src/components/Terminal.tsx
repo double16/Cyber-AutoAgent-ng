@@ -219,10 +219,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   };
   const resetStepAgg = () => { stepAggRef.current = { step: null, head: '', tail: '', omitted: 0 }; };
   
-  // Swarm operation tracking for proper event enhancement
-  const [swarmActive, setSwarmActive] = useState(false);
-  const [currentSwarmAgent, setCurrentSwarmAgent] = useState<string | null>(null);
-  const swarmHandoffSequenceRef = useRef(0);
   const delayedThinkingTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Track whether we're currently within the FINAL REPORT phase so we can
   // accumulate a dynamic event cluster for inline preview rendering.
@@ -237,7 +233,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   const lastReasoningTextRef = useRef<string | null>(null);
   // Timestamp of the most recent tool-buffered output chunk
   const lastToolOutputTsRef = useRef<number>(0);
-  // Duplicate emission resolved in ReactBridgeHandler
+  // Duplicate emission resolved in the agent event handler.
   // Throttle for active tail updates when animations are disabled
   const activeUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingActiveUpdaterRef = useRef<((prev: DisplayStreamEvent[]) => DisplayStreamEvent[]) | null>(null);
@@ -372,7 +368,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     stepAggRef.current = { step: null, head: '', tail: '', omitted: 0 };
     pendingReasoningsRef.current = [];
     opSummaryBufferRef.current = [];
-    swarmHandoffSequenceRef.current = 0;
     seenThinkingThisPhaseRef.current = false;
     suppressTerminationBannerRef.current = false;
     lastReasoningTextRef.current = null;
@@ -385,9 +380,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     setActiveReasoning(false);
     setLastOutputContent('');
     setLastOutputTime(0);
-    setSwarmActive(false);
-    setCurrentSwarmAgent(null);
-    swarmHandoffSequenceRef.current = 0;
     pendingMetricsRef.current = null;
     lastMetricsTsRef.current = 0;
     lastEmitRef.current = 0;
@@ -401,7 +393,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     setStaticSessionKey(prev => prev + 1);
     scheduleCompletedEventsUpdate();
     setActiveEvents(activeBufRef.current.toArray());
-  }, [cancelDelayedThinking, setActiveEvents, setCompletedEvents, setActiveThinking, setActiveReasoning, setSwarmActive, setCurrentSwarmAgent, setStaticSessionKey]);
+  }, [cancelDelayedThinking, setActiveEvents, setCompletedEvents, setActiveThinking, setActiveReasoning, setStaticSessionKey]);
   
   // Constants for event processing
   const COMMAND_BUFFER_MS = 100;
@@ -552,8 +544,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       const merged = parts.join('\n\n');
       if (merged) {
         const mergedEvent: any = { type: 'reasoning', content: merged };
-        // Preserve swarm context from the last reasoning in the queue if present
-        if (last && (last as any).swarm_agent) mergedEvent.swarm_agent = (last as any).swarm_agent;
+        // Preserve agent context from the last reasoning in the queue if present
+        if (last && (last as any).agent_name) mergedEvent.agent_name = (last as any).agent_name;
         collector.push(mergedEvent as DisplayStreamEvent);
       }
       pendingReasoningsRef.current = [];
@@ -563,10 +555,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       setActiveEvents(activeBufRef.current.toArray());
     }
   };
-
-  // Track swarm sub-steps per agent for synthesized headers
-  const swarmAgentStepsRef = useRef<Map<string, number>>(new Map());
-
 
   // Event processing function - replaces EventAggregator.processEvent
   const processEvent = (event: any): DisplayStreamEvent[] => {
@@ -586,7 +574,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Reset all dedup sets and internal refs at operation start
         perToolOutputSeenRef.current.clear();
         globalOutputSeenRef.current.clear();
-        swarmAgentStepsRef.current.clear();
         pendingReasoningsRef.current = [];
         opSummaryBufferRef.current = [];
         
@@ -642,11 +629,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Reset output suppression for next operation phase
         suppressTerminationBannerRef.current = false;
         
-        // Track swarm agent from progress update
-        if (event.is_swarm_operation && event.swarm_agent) {
-          setCurrentSwarmAgent(event.swarm_agent);
-        }
-        
         // Push header immediately (no gating)
         // Before starting a new step, flush any pending reasoning from the previous tool call
         // so it appears at the end of the previous step (below its outputs)
@@ -658,15 +640,12 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           progressPercent: event.progressPercent,
           operation: event.operation,
           duration: event.duration,
-          is_swarm_operation: event.is_swarm_operation,
-          swarm_agent: event.swarm_agent || currentSwarmAgent,
-          swarm_sub_step: event.swarm_sub_step,
-          swarm_max_sub_steps: event.swarm_max_sub_steps,
-          swarm_agent_max: event.swarm_agent_max,
-          swarm_total_actions: event.swarm_total_actions,
-          swarm_max_iterations: event.swarm_max_iterations,
-          agent_count: event.agent_count,
-          swarm_context: event.swarm_context || (swarmActive ? 'Multi-Agent Operation' : undefined)
+          agent_run_id: event.agent_run_id,
+          agent_name: event.agent_name,
+          agent_type: event.agent_type,
+          parent_agent_run_id: event.parent_agent_run_id,
+          agent_sub_step: event.agent_sub_step,
+          agent_total_actions: event.agent_total_actions
         } as DisplayStreamEvent;
 
         results.push(headerEvent);
@@ -727,18 +706,16 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           cancelDelayedThinking();
           seenThinkingThisPhaseRef.current = true;
           
-          // Update swarm agent if present in event
-          if (event.swarm_agent && swarmActive) {
-            setCurrentSwarmAgent(event.swarm_agent);
-          }
-          
           // Start reasoning session
           setActiveReasoning(true);
 
           const reasoningEvent: DisplayStreamEvent = {
             type: 'reasoning',
             content: String(event.content).trim(),
-            ...(swarmActive && currentSwarmAgent ? { swarm_agent: currentSwarmAgent } : {})
+            agent_run_id: event.agent_run_id,
+            agent_name: event.agent_name,
+            agent_type: event.agent_type,
+            parent_agent_run_id: event.parent_agent_run_id
           } as DisplayStreamEvent;
 
           // Queue reasoning for final placement under this step
@@ -871,22 +848,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           toolId = `${name}-${bucket}`;
         }
         
-        // Update swarm agent if present in event
-        if (event.swarm_agent && swarmActive) {
-          setCurrentSwarmAgent(event.swarm_agent);
-        }
-        
-        // Check if this is a handoff_to_agent tool and update swarm agent
         const toolName = event.toolName || event.tool_name || '';
-        if (toolName === 'handoff_to_agent' && swarmActive) {
-          // Extract target agent from tool_input
-          const toolInput = event.args || event.tool_input || {};
-          // Check both 'agent' and 'agent_name' fields (backend uses agent_name)
-          const targetAgent = toolInput.agent || toolInput.agent_name;
-          if (targetAgent) {
-            setCurrentSwarmAgent(targetAgent);
-          }
-        }
         
         // Always render the tool header now that we have a deterministic id
         
@@ -901,7 +863,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           setActiveReasoning(false);
         }
         
-        // Note: Do NOT synthesize swarm_handoff here; backend already emits swarm_handoff events
         // Always emit the tool event
         results.push({
           type: 'tool_start',
@@ -909,7 +870,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           tool_input: event.args || event.tool_input || {},
           toolId: toolId,
           toolName: event.toolName,
-          tool_id: toolId  // Include tool_id for compatibility
+          tool_id: toolId,  // Include tool_id for compatibility
+          agent_run_id: event.agent_run_id,
+          agent_name: event.agent_name,
+          agent_type: event.agent_type,
+          parent_agent_run_id: event.parent_agent_run_id
         } as DisplayStreamEvent);
 
         // Show single unified thinking animation
@@ -1082,11 +1047,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // If output appears, we do NOT auto-flush pending reasoning; it may belong under the next header
         // Handle tool output or general output with deduplication
         if (event.content) {
-          // Update swarm agent if present in event
-          if (event.swarm_agent && swarmActive) {
-            setCurrentSwarmAgent(event.swarm_agent);
-          }
-          
           // Suppress verbose termination block lines after ESC
           if (suppressTerminationBannerRef.current) {
             const line = String(event.content).trim();
@@ -1217,11 +1177,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       case 'tool_end':
         cancelPostToolIdleTimer();
         cancelPostReasoningIdleTimer();
-        // Update swarm agent if present in event
-        if (event.swarm_agent && swarmActive) {
-          setCurrentSwarmAgent(event.swarm_agent);
-        }
-        
         // Clear any active thinking when tool ends
         if (activeThinking) {
           results.push({ type: 'thinking_end' } as DisplayStreamEvent);
@@ -1253,6 +1208,10 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           type: 'tool_end',
           toolId: event.toolId,
           tool: event.toolName || 'unknown',
+          agent_run_id: event.agent_run_id,
+          agent_name: event.agent_name,
+          agent_type: event.agent_type,
+          parent_agent_run_id: event.parent_agent_run_id,
           id: `tool_end_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           timestamp: new Date().toISOString(),
           sessionId: 'current'
@@ -1327,40 +1286,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         results.push(event as DisplayStreamEvent);
         break;
 
-        
-      case 'swarm_start':
-        // Mark swarm as active and reset tracking
-        setSwarmActive(true);
-        swarmHandoffSequenceRef.current = 0;
-        
-        // Extract first agent if available
-        if (event.agent_names && Array.isArray(event.agent_names) && event.agent_names.length > 0) {
-          setCurrentSwarmAgent(event.agent_names[0]);
-        }
-        
-        // Pass through swarm_start event with all details
-        results.push(event as DisplayStreamEvent);
-        break;
-        
-      case 'swarm_handoff':
-        // This event type doesn't exist in actual SDK - keeping for backwards compatibility
-        // Actual handoffs use handoff_to_agent tool
-        if (event.to_agent) {
-          setCurrentSwarmAgent(event.to_agent);
-        }
-        results.push(event as DisplayStreamEvent);
-        break;
-        
-      case 'swarm_end':
-      case 'swarm_complete':
-        // Reset swarm tracking
-        setSwarmActive(false);
-        setCurrentSwarmAgent(null);
-        swarmHandoffSequenceRef.current = 0;
-        
-        // Pass through swarm end event
-        results.push(event as DisplayStreamEvent);
-        break;
         
       case 'report_content':
         // Trim massive report content to prevent OOM and rely on InlineReportViewer for full content.

@@ -1,12 +1,13 @@
+import importlib
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from strands.types.exceptions import MaxTokensReachedException
 
 # this import helps the hooks import avoid a circular dependency
-import cyberautoagent as cli
-from modules.handlers.agent_repair_hook import AgentRepairHook
-from modules.handlers.react.hooks import ReactHooks
+importlib.import_module("cyberautoagent")
+from modules.handlers.agent_repair_hook import AgentRepairHook  # noqa: E402
+from modules.handlers.react.hooks import ReactHooks  # noqa: E402
 
 
 class RecordingEmitter:
@@ -43,10 +44,42 @@ def test_react_hooks_lifecycle_and_result_processing():
     )
     hooks._on_after_tool(after)
     assert any(event["type"] == "thinking_end" for event in emitter.events)
+    assert any(event["type"] == "tool_invocation_end" for event in emitter.events)
+    assert any(event["type"] == "tool_end" for event in emitter.events)
     assert hooks._process_tool_result(None) == (True, "")
     assert hooks._process_tool_result({"status": "success", "content": "ok"}) == (True, "ok")
     assert hooks._process_tool_result("plain") == (True, "plain")
     assert hooks._calculate_duration("missing") == 0.0
+
+
+def test_react_hooks_can_disable_tool_lifecycle_when_callback_handler_owns_it():
+    emitter = RecordingEmitter()
+    hooks = ReactHooks(emitter=emitter, operation_id="OP", emit_tool_lifecycle=False)
+
+    before = SimpleNamespace(
+        tool_use={
+            "name": "shell",
+            "toolUseId": "tool-1",
+            "input": {"command": '["id", "whoami"]'},
+        }
+    )
+    hooks._on_before_tool(before)
+
+    assert [event["type"] for event in emitter.events] == ["tool_input_corrected"]
+    assert emitter.events[0]["tool_input"]["command"] == ["id", "whoami"]
+
+    after = SimpleNamespace(
+        tool_use={"name": "shell", "toolUseId": "tool-1"},
+        result={"status": "success", "content": [{"text": "ok"}]},
+    )
+    hooks._on_after_tool(after)
+
+    event_types = [event["type"] for event in emitter.events]
+    assert "thinking_end" in event_types
+    assert "tool_start" not in event_types
+    assert "tool_invocation_start" not in event_types
+    assert "tool_invocation_end" not in event_types
+    assert "tool_end" not in event_types
 
 
 def test_react_hooks_swarm_rewrite():

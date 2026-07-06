@@ -37,7 +37,7 @@ def _minimal_server_config():
 @patch("modules.agents.cyber_autoagent.get_config_manager")
 @patch("modules.config.models.factory.create_litellm_model")
 @patch("modules.handlers.react.hooks.ReactHooks")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
 @patch("modules.agents.cyber_autoagent.get_memory_client", return_value=None)
 def test_agent_creation_litellm(
@@ -81,7 +81,7 @@ def test_agent_creation_litellm(
 @patch("modules.agents.cyber_autoagent.get_config_manager")
 @patch("modules.config.models.factory._handle_model_creation_error")
 @patch("modules.handlers.react.hooks.ReactHooks")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
 @patch("modules.agents.cyber_autoagent.get_memory_client", return_value=None)
 def test_agent_creation_unsupported_provider_raises(

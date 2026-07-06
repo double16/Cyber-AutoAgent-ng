@@ -49,11 +49,6 @@ export const EVENT_TYPES = {
   DIVIDER: 'divider',
   RATE_LIMIT: 'rate_limit',
 
-  // Swarm events
-  SWARM_START: 'swarm_start',
-  SWARM_HANDOFF: 'swarm_handoff',
-  SWARM_COMPLETE: 'swarm_complete',
-
   // User interaction
   USER_HANDOFF: 'user_handoff',
   USER_INPUT: 'user_input',

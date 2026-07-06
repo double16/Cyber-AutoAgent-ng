@@ -1,6 +1,6 @@
 import React from 'react';
 import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
-import {useEventGroups, useEventStream, useSwarmTracking} from '../../../src/hooks/useEventStream.js';
+import {useEventGroups, useEventStream} from '../../../src/hooks/useEventStream.js';
 import {EVENT_TYPES} from '../../../src/constants/config.js';
 import {describe, expect, it} from "@jest/globals";
 
@@ -109,45 +109,6 @@ describe('useEventStream hooks', () => {
             {type: 'single', events: [events[2]], startIdx: 2},
             {type: 'reasoning_group', events: [events[3]], startIdx: 3},
         ]);
-        hook.unmount();
-    });
-
-    it('tracks swarm operations and ignores handoffs without an active swarm', () => {
-        const hook = renderHook(() => useSwarmTracking());
-
-        act(() => {
-            hook.current.handoffAgent('none', 'ignored');
-        });
-        expect(hook.current.getActiveSwarm()).toBeNull();
-
-        act(() => {
-            hook.current.startSwarm('swarm-1', ['planner', 'tester']);
-        });
-        expect(hook.current.activeSwarmId).toBe('swarm-1');
-        expect(hook.current.getActiveSwarm()).toEqual(expect.objectContaining({
-            id: 'swarm-1',
-            currentAgent: 'planner',
-            handoffCount: 0,
-            status: 'running',
-        }));
-
-        act(() => {
-            hook.current.handoffAgent('planner', 'tester');
-        });
-        expect(hook.current.getActiveSwarm()).toEqual(expect.objectContaining({
-            currentAgent: 'tester',
-            handoffCount: 1,
-        }));
-
-        act(() => {
-            hook.current.completeSwarm('swarm-1', 'failed');
-        });
-        expect(hook.current.activeSwarmId).toBeNull();
-        expect(hook.current.swarmOperations.get('swarm-1')).toEqual(expect.objectContaining({
-            status: 'failed',
-            endTime: expect.any(Number),
-        }));
-
         hook.unmount();
     });
 });
