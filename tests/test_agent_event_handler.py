@@ -311,6 +311,70 @@ def test_operation_coordinator_aggregates_multiple_handlers(monkeypatch):
     assert sub.parent_agent_run_id == main.agent_run_id
 
 
+def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
+    events = []
+    emitter = SimpleNamespace(emit=lambda event: events.append(event))
+    coordinator = OperationEventCoordinator(
+        "OP_SUB_PROGRESS",
+        emitter,
+        budget_max_duration=10,
+        budget_max_tokens=1000,
+        budget_max_cost=1.0,
+    )
+    coordinator.start_time = time.time() - 300
+
+    monkeypatch.setattr(rb, "get_models_client", lambda: None)
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
+
+    main = AgentEventHandler(
+        operation_id="OP_SUB_PROGRESS",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        coordinator=coordinator,
+        agent_name="main",
+        agent_type="main",
+        init_context={"budget": {"maxDurationMinutes": 10, "maxTokens": 1000, "maxCost": 1.0}},
+    )
+    sub = AgentEventHandler(
+        operation_id="OP_SUB_PROGRESS",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        coordinator=coordinator,
+        agent_name="validation_specialist",
+        agent_type="validation_specialist",
+        parent_agent_run_id=main.agent_run_id,
+        emit_operation_init=False,
+        start_metrics_thread=False,
+    )
+    sub.start_time = time.time()
+    main.pricing_input = 1.0
+    main.pricing_output = 2.0
+    sub.pricing_input = 1.0
+    sub.pricing_output = 2.0
+
+    main.process_metrics(SimpleNamespace(accumulated_usage={"inputTokens": 100, "outputTokens": 50}))
+    sub.process_metrics(SimpleNamespace(accumulated_usage={"inputTokens": 25, "outputTokens": 10}))
+
+    sub.action_count = 1
+    sub._record_action_boundary()
+    sub._emit_estimated_metrics(force=True)
+
+    progress_event = [event for event in events if event["type"] == "progress_update"][-1]
+    metrics_event = [event for event in events if event["type"] == "metrics_update"][-1]
+
+    assert progress_event["agent_name"] == "validation_specialist"
+    assert progress_event["duration"] == "5m 0s"
+    assert progress_event["progressPercent"] == 50
+    assert metrics_event["metrics"]["inputTokens"] == 125
+    assert metrics_event["metrics"]["outputTokens"] == 60
+    assert metrics_event["metrics"]["totalTokens"] == 185
+    assert metrics_event["metrics"]["cost"] == pytest.approx(0.000245)
+    assert metrics_event["metrics"]["duration"] == "5m 0s"
+    assert metrics_event["metrics"]["progressPercent"] == 50
+
+
 def test_constructor_emits_init_and_metrics(monkeypatch):
     events = []
     monkeypatch.setattr(rb, "get_models_client", lambda: SimpleNamespace())

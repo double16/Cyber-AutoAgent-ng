@@ -124,6 +124,10 @@ class OperationEventCoordinator:
                 total.cost += float(entry.cost)
             return total
 
+    def elapsed_seconds(self) -> float:
+        with self._lock:
+            return max(0.0, time.time() - self.start_time)
+
     def record_tool(self, tool_name: str) -> None:
         if not tool_name:
             return
@@ -488,7 +492,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "step": "TERMINATED",
                         "progressPercent": self.get_budget_progress(),
                         "operation": self.operation_id,
-                        "duration": self._format_duration(time.time() - self.start_time),
+                        "duration": self._format_duration(self._operation_elapsed_seconds()),
                     }
                 )
 
@@ -499,9 +503,9 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "reason": reason,
                         "message": message,
                         "budget": {
-                            "maxDurationMinutes": self.budget_max_duration,
-                            "maxTokens": self.budget_max_tokens,
-                            "maxCost": self.budget_max_cost,
+                            "maxDurationMinutes": self._budget_max_duration(),
+                            "maxTokens": self._budget_max_tokens(),
+                            "maxCost": self._budget_max_cost(),
                         },
                     }
                 )
@@ -668,7 +672,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         output_tokens=int(totals["output_tokens"]),
                         cache_read_tokens=int(totals["cache_read_tokens"]),
                         cache_write_tokens=int(totals["cache_write_tokens"]),
-                        cost=float(totals["cost"]),
+                        cost=float(self._compute_total_cost_from_usage()),
                     ),
                 )
         except Exception:
@@ -2024,7 +2028,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "step": self.action_count,
                     "progressPercent": progress_percent,
                     "operation": self.operation_id,
-                    "duration": self._format_duration(time.time() - self.start_time),
+                    "duration": self._format_duration(self._operation_elapsed_seconds()),
                     "totalTools": len(self.tools_used),
                 }
             )
@@ -2063,9 +2067,9 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "memoryOps": 0,
                     "evidence": 0,
                     "budget": {
-                        "maxDurationMinutes": self.budget_max_duration,
-                        "maxTokens": self.budget_max_tokens,
-                        "maxCost": self.budget_max_cost,
+                        "maxDurationMinutes": self._budget_max_duration(),
+                        "maxTokens": self._budget_max_tokens(),
+                        "maxCost": self._budget_max_cost(),
                     },
                     "progress": 0.0,
                     "progressPercent": 0,
@@ -2084,20 +2088,60 @@ class AgentEventHandler(PrintingCallbackHandler):
             return 0
 
     def _calculate_budget_progress(self, total_tokens: int, cost: float) -> tuple[float, int]:
-        try:
-            elapsed_s = max(0.0, time.time() - self.start_time)
-        except Exception:
-            elapsed_s = 0.0
+        elapsed_s = self._operation_elapsed_seconds()
+        max_duration = self._budget_max_duration()
+        max_tokens = self._budget_max_tokens()
+        max_cost = self._budget_max_cost()
         utilizations = []
-        if isinstance(self.budget_max_duration, int) and self.budget_max_duration > 0:
-            utilizations.append(elapsed_s / (float(self.budget_max_duration) * 60.0))
-        if isinstance(self.budget_max_tokens, int) and self.budget_max_tokens > 0:
-            utilizations.append(float(total_tokens) / float(self.budget_max_tokens))
-        if isinstance(self.budget_max_cost, (int, float)) and self.budget_max_cost > 0:
-            utilizations.append(float(cost) / float(self.budget_max_cost))
+        if isinstance(max_duration, int) and max_duration > 0:
+            utilizations.append(elapsed_s / (float(max_duration) * 60.0))
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            utilizations.append(float(total_tokens) / float(max_tokens))
+        if isinstance(max_cost, (int, float)) and max_cost > 0:
+            utilizations.append(float(cost) / float(max_cost))
         progress = max(utilizations) if utilizations else 0.0
         progress = max(0.0, progress)
         return progress, int(progress * 100)
+
+    def _operation_elapsed_seconds(self) -> float:
+        start_times = []
+        coordinator = self.coordinator
+        if coordinator is not None:
+            try:
+                start_times.append(float(coordinator.start_time))
+            except Exception:
+                pass
+        try:
+            start_times.append(float(self.start_time))
+        except Exception:
+            pass
+        if not start_times:
+            return 0.0
+        try:
+            return max(0.0, time.time() - min(start_times))
+        except Exception:
+            return 0.0
+
+    def _budget_max_duration(self) -> int:
+        coordinator = self.coordinator
+        if coordinator is not None and isinstance(coordinator.budget_max_duration, int):
+            if coordinator.budget_max_duration > 0:
+                return coordinator.budget_max_duration
+        return self.budget_max_duration
+
+    def _budget_max_tokens(self) -> Optional[int]:
+        coordinator = self.coordinator
+        if coordinator is not None and isinstance(coordinator.budget_max_tokens, int):
+            if coordinator.budget_max_tokens > 0:
+                return coordinator.budget_max_tokens
+        return self.budget_max_tokens
+
+    def _budget_max_cost(self) -> Optional[float]:
+        coordinator = self.coordinator
+        if coordinator is not None and isinstance(coordinator.budget_max_cost, (int, float)):
+            if coordinator.budget_max_cost > 0:
+                return float(coordinator.budget_max_cost)
+        return self.budget_max_cost
 
     def _start_metrics_thread(self) -> None:
         """Start a background thread for periodic metrics updates."""
@@ -2257,11 +2301,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     logger.debug(f"Could not get metrics from agent: {e}")
 
             self._publish_usage_to_coordinator()
-            totals = (
-                self._operation_usage_totals()
-                if self.emit_operation_init
-                else self._current_usage_totals()
-            )
+            totals = self._operation_usage_totals()
             input_tokens = int(totals["input_tokens"])
             output_tokens = int(totals["output_tokens"])
             cache_read_tokens = int(totals["cache_read_tokens"])
@@ -2279,13 +2319,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "totalTokens": total_tokens,
                 "cacheReadTokens": cache_read_tokens,
                 "cacheWriteTokens": cache_write_tokens,
-                "duration": self._format_duration(time.time() - self.start_time),
+                "duration": self._format_duration(self._operation_elapsed_seconds()),
                 "memoryOps": self.coordinator.memory_ops,
                 "evidence": self.coordinator.evidence_count,
                 "budget": {
-                    "maxDurationMinutes": self.budget_max_duration,
-                    "maxTokens": self.budget_max_tokens,
-                    "maxCost": self.budget_max_cost,
+                    "maxDurationMinutes": self._budget_max_duration(),
+                    "maxTokens": self._budget_max_tokens(),
+                    "maxCost": self._budget_max_cost(),
                 },
                 "progress": progress,
                 "progressPercent": progress_percent,
@@ -2352,11 +2392,7 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         # Emit explicit completion summary for UI/logs
         try:
-            totals = (
-                self._operation_usage_totals()
-                if self.emit_operation_init
-                else self._current_usage_totals()
-            )
+            totals = self._operation_usage_totals()
             input_tokens = int(totals["input_tokens"])
             output_tokens = int(totals["output_tokens"])
             total_tokens = input_tokens + output_tokens
@@ -2365,7 +2401,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 {
                     "type": "operation_complete",
                     "operation": self.operation_id,
-                    "duration": self._format_duration(time.time() - self.start_time),
+                    "duration": self._format_duration(self._operation_elapsed_seconds()),
                     "metrics": {
                         "inputTokens": input_tokens,
                         "outputTokens": output_tokens,
@@ -2592,7 +2628,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "step": "FINAL REPORT",
                     "progressPercent": self.get_budget_progress(),
                     "operation": self.operation_id,
-                    "duration": self._format_duration(time.time() - self.start_time),
+                    "duration": self._format_duration(self._operation_elapsed_seconds()),
                 }
             )
 
@@ -2847,40 +2883,43 @@ class AgentEventHandler(PrintingCallbackHandler):
             # Budget checks
             try:
                 # Duration cap
-                if isinstance(self.budget_max_duration, int) and self.budget_max_duration > 0:
-                    if (time.time() - self.start_time) >= float(self.budget_max_duration) * 60.0:
+                max_duration = self._budget_max_duration()
+                if isinstance(max_duration, int) and max_duration > 0:
+                    if self._operation_elapsed_seconds() >= float(max_duration) * 60.0:
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
-                                f"Duration limit reached: {self.budget_max_duration}m",
+                                f"Duration limit reached: {max_duration}m",
                             )
                         self._budget_limit_reached = True
                         self._budget_limit_reason = "duration"
                         return True
 
                 # Token cap
-                if isinstance(self.budget_max_tokens, int) and self.budget_max_tokens and self.budget_max_tokens > 0:
+                max_tokens = self._budget_max_tokens()
+                if isinstance(max_tokens, int) and max_tokens > 0:
                     totals = self._operation_usage_totals()
                     total_tokens = int(totals["input_tokens"]) + int(totals["output_tokens"])
-                    if total_tokens >= int(self.budget_max_tokens):
+                    if total_tokens >= int(max_tokens):
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
-                                f"Token limit reached: {total_tokens}/{self.budget_max_tokens}",
+                                f"Token limit reached: {total_tokens}/{max_tokens}",
                             )
                         self._budget_limit_reached = True
                         self._budget_limit_reason = "tokens"
                         return True
 
                 # Cost cap
-                if isinstance(self.budget_max_cost, (int, float)) and self.budget_max_cost and self.budget_max_cost > 0:
+                max_cost = self._budget_max_cost()
+                if isinstance(max_cost, (int, float)) and max_cost > 0:
                     totals = self._operation_usage_totals()
                     cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
-                    if cost >= float(self.budget_max_cost):
+                    if cost >= float(max_cost):
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
-                                f"Cost limit reached: {cost:.4f}/{self.budget_max_cost}",
+                                f"Cost limit reached: {cost:.4f}/{max_cost}",
                             )
                         self._budget_limit_reached = True
                         self._budget_limit_reason = "cost"
@@ -2916,11 +2955,7 @@ class AgentEventHandler(PrintingCallbackHandler):
     def get_summary(self) -> Dict[str, Any]:
         """Get operation summary for reporting."""
         with self._state_lock:
-            totals = (
-                self._operation_usage_totals()
-                if self.emit_operation_init
-                else self._current_usage_totals()
-            )
+            totals = self._operation_usage_totals()
             input_tokens = int(totals["input_tokens"])
             output_tokens = int(totals["output_tokens"])
             total_tokens = input_tokens + output_tokens
@@ -2944,6 +2979,6 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "capability_expansion": list(tool_counts.keys()),
                 "memory_ops": memory_ops,
                 "evidence_count": evidence_count,
-                "duration": self._format_duration(time.time() - self.start_time),
+                "duration": self._format_duration(self._operation_elapsed_seconds()),
                 "metrics": current_metrics,
             }
