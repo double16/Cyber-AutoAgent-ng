@@ -379,25 +379,26 @@ class ConfigManager:
         )
 
         # Build evaluation configuration (with env-aware defaults)
+        evaluation_config_default = EvaluationConfig(llm=None, embedding=None)
         evaluation_config = EvaluationConfig(
             llm=self._get_evaluation_llm_config(provider, defaults),
             embedding=self._get_evaluation_embedding_config(provider, defaults),
-            min_tool_calls=self.getenv_int("EVAL_MIN_TOOL_CALLS", 3),
-            min_evidence=self.getenv_int("EVAL_MIN_EVIDENCE", 1),
-            max_wait_secs=self.getenv_int("EVALUATION_MAX_WAIT_SECS", 30),
-            poll_interval_secs=self.getenv_int("EVALUATION_POLL_INTERVAL_SECS", 5),
-            summary_max_chars=self.getenv_int("EVAL_SUMMARY_MAX_CHARS", 8000),
-            rubric_enabled=self.getenv_bool("EVAL_RUBRIC_ENABLED", False),
-            judge_temperature=self.getenv_float("EVAL_JUDGE_TEMPERATURE", 0.2),
-            judge_max_tokens=self.getenv_int("EVAL_JUDGE_MAX_TOKENS", 800),
-            rubric_profile=self.getenv("EVAL_RUBRIC_PROFILE", "default"),
+            min_tool_calls=self.getenv_int("EVAL_MIN_TOOL_CALLS", evaluation_config_default.min_tool_calls),
+            min_evidence=self.getenv_int("EVAL_MIN_EVIDENCE", evaluation_config_default.min_evidence),
+            max_wait_secs=self.getenv_int("EVALUATION_MAX_WAIT_SECS", evaluation_config_default.max_wait_secs),
+            poll_interval_secs=self.getenv_int("EVALUATION_POLL_INTERVAL_SECS", evaluation_config_default.poll_interval_secs),
+            summary_max_chars=self.getenv_int("EVAL_SUMMARY_MAX_CHARS", evaluation_config_default.summary_max_chars),
+            rubric_enabled=self.getenv_bool("EVAL_RUBRIC_ENABLED", evaluation_config_default.rubric_enabled),
+            judge_temperature=self.getenv_float("EVAL_JUDGE_TEMPERATURE", evaluation_config_default.judge_temperature),
+            judge_max_tokens=self.getenv_int("EVAL_JUDGE_MAX_TOKENS", evaluation_config_default.judge_max_tokens),
+            rubric_profile=self.getenv("EVAL_RUBRIC_PROFILE", evaluation_config_default.rubric_profile),
             judge_system_prompt=self.getenv("EVAL_JUDGE_SYSTEM_PROMPT"),
             judge_user_template=self.getenv("EVAL_JUDGE_USER_TEMPLATE"),
             skip_if_insufficient_evidence=self.getenv_bool(
-                "EVAL_SKIP_IF_INSUFFICIENT_EVIDENCE", True
+                "EVAL_SKIP_IF_INSUFFICIENT_EVIDENCE", evaluation_config_default.skip_if_insufficient_evidence
             ),
             rationale_persist_mode=self.getenv(
-                "EVAL_RATIONALE_PERSIST_MODE", "metadata"
+                "EVAL_RATIONALE_PERSIST_MODE", evaluation_config_default.rationale_persist_mode
             ),
         )
 
@@ -414,14 +415,24 @@ class ConfigManager:
         host = self.get_ollama_host() if provider == "ollama" else None
 
         # Build SDK configuration with environment overrides
+        sdk_config_default = SDKConfig()
         sdk_config = SDKConfig(
-            enable_hooks=overrides.get("enable_hooks", True),
-            enable_streaming=overrides.get("enable_streaming", True),
+            enable_hooks=overrides.get(
+                "enable_hooks",
+                self.getenv_bool("CYBER_SDK_ENABLE_HOOKS", sdk_config_default.enable_hooks)
+            ),
+            enable_streaming=overrides.get(
+                "enable_streaming",
+                self.getenv_bool("CYBER_SDK_ENABLE_STREAMING", sdk_config_default.enable_streaming)
+            ),
             conversation_window_size=overrides.get(
                 "conversation_window_size",
-                self.getenv_int("CYBER_CONVERSATION_WINDOW", 100)
+                self.getenv_int("CYBER_CONVERSATION_WINDOW", sdk_config_default.conversation_window_size)
             ),
-            enable_telemetry=self.getenv_bool("ENABLE_SDK_TELEMETRY", True),
+            enable_telemetry=overrides.get(
+                "enable_telemetry",
+                self.getenv_bool("ENABLE_SDK_TELEMETRY", sdk_config_default.enable_telemetry),
+            )
         )
 
         config = ServerConfig(

@@ -28,6 +28,7 @@ from modules.config.types import (
     ModelConfig,
     ModelProvider,
     OutputConfig,
+    SDKConfig,
     ServerConfig,
     SwarmConfig,
     get_default_base_dir,
@@ -295,6 +296,34 @@ class TestConfigManager:
         assert isinstance(config, EvaluationConfig)
         assert config.llm.provider == ModelProvider.OLLAMA
         assert config.embedding.provider == ModelProvider.OLLAMA
+
+    def test_get_sdk_config_uses_default_streaming_mode(self):
+        """Test SDK streaming defaults to the dataclass default."""
+        with patch.dict(os.environ, {}, clear=True):
+            self.config_manager._config_cache = {}
+
+            config = self.config_manager.get_sdk_config("ollama")
+
+        assert isinstance(config, SDKConfig)
+        assert config.enable_streaming is False
+
+    @patch.dict(os.environ, {"CYBER_SDK_ENABLE_STREAMING": "true"}, clear=True)
+    def test_get_sdk_config_reads_streaming_mode_from_environment(self):
+        """Test SDK streaming can be enabled through environment config."""
+        self.config_manager._config_cache = {}
+
+        config = self.config_manager.get_sdk_config("ollama")
+
+        assert config.enable_streaming is True
+
+    @patch.dict(os.environ, {"CYBER_SDK_ENABLE_STREAMING": "true"}, clear=True)
+    def test_get_sdk_config_streaming_override_takes_precedence(self):
+        """Test explicit SDK streaming overrides take precedence over environment config."""
+        self.config_manager._config_cache = {}
+
+        config = self.config_manager.get_sdk_config("ollama", enable_streaming=False)
+
+        assert config.enable_streaming is False
 
     def test_get_swarm_config(self):
         """Test getting swarm configuration."""
@@ -1276,4 +1305,3 @@ def test_validation_aws_and_ollama_requirements(monkeypatch):
     monkeypatch.setattr(validation.requests, "get", Mock(side_effect=RuntimeError("down")))
     with pytest.raises(ConnectionError):
         validation.validate_ollama_requirements(env, "http://localhost:11434")
-

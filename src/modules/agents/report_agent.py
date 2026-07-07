@@ -94,6 +94,7 @@ class ReportGenerator:
                 region_name=region,
                 temperature=_REPORT_TEMPERATURE if capabilities.supports_temperature else None,
                 boto_client_config=boto_config,
+                streaming=False,
             )
         elif prov == "gemini":
             # Always use the primary model from config
@@ -126,6 +127,7 @@ class ReportGenerator:
                 },
                 keep_alive=cfg.get_ollama_keep_alive(),
                 options=cfg.get_ollama_options(),
+                stream=False,
             )
         else:  # litellm
             llm_cfg = cfg.get_llm_config("litellm")
@@ -140,7 +142,7 @@ class ReportGenerator:
                 "num_retries": 5,
                 "timeout": 1200,
             }
-            model = LiteLLMModel(model_id=mid, params=params, client_args=client_args)
+            model = LiteLLMModel(model_id=mid, params=params, client_args=client_args, stream=False)
 
         # Create agent with report-specific configuration
         trace_attrs = {

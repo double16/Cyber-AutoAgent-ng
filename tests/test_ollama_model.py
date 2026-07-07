@@ -18,6 +18,15 @@ def _model():
     )
 
 
+def _non_streaming_model():
+    return mod.OllamaModel(
+        host="http://ollama.test",
+        model_id="llama3",
+        max_tokens=128,
+        stream=False,
+    )
+
+
 def test_format_request_flattens_messages_tools_and_options():
     model = _model()
     messages = [
@@ -50,6 +59,7 @@ def test_format_request_flattens_messages_tools_and_options():
     }
     assert request["messages"][3] == {"role": "tool", "content": '{"ok": true}'}
     assert request["tools"][0]["function"]["name"] == "scan"
+    assert request["stream"] is True
     assert request["options"] == {
         "num_ctx": 4096,
         "num_predict": 128,
@@ -59,6 +69,14 @@ def test_format_request_flattens_messages_tools_and_options():
     }
     assert request["keep_alive"] == "5m"
     assert request["extra"] == "value"
+
+
+def test_format_request_uses_configured_non_streaming_mode():
+    model = _non_streaming_model()
+
+    request = model.format_request([{"role": "user", "content": [{"text": "hello"}]}])
+
+    assert request["stream"] is False
 
 
 def test_format_request_supports_reasoning_and_images_and_rejects_unknown_content():
@@ -157,6 +175,54 @@ async def test_structured_output_parses_non_streaming_response(monkeypatch):
     chunks = [chunk async for chunk in model.structured_output(Output, [{"role": "user", "content": [{"text": "go"}]}])]
 
     assert chunks == [{"output": Output(answer=7)}]
+
+
+@pytest.mark.asyncio
+async def test_stream_handles_non_streaming_chat_response(monkeypatch):
+    response = mod.ChatResponse(
+        message=mod.ollama.Message(role="assistant", content="done", thinking="thought"),
+        done_reason="stop",
+        prompt_eval_count=2,
+        eval_count=3,
+        total_duration=4_000_000,
+    )
+
+    class FakeClient:
+        async def chat(self, **request):
+            assert request["stream"] is False
+            return response
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: FakeClient())
+
+    chunks = [chunk async for chunk in _non_streaming_model().stream([{"role": "user", "content": [{"text": "go"}]}])]
+
+    assert chunks == [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockStart": {"start": {}}},
+        {"contentBlockDelta": {"delta": {"text": "done"}}},
+        {"contentBlockDelta": {"delta": {"reasoningContent": {"text": "thought"}}}},
+        {"contentBlockStop": {}},
+        {"messageStop": {"stopReason": "end_turn"}},
+        {
+            "metadata": {
+                "usage": {"inputTokens": 2, "outputTokens": 3, "totalTokens": 5},
+                "metrics": {"latencyMs": 4},
+            }
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_raises_value_error_for_invalid_response_type(monkeypatch):
+    class FakeClient:
+        async def chat(self, **request):
+            return object()
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: FakeClient())
+
+    with pytest.raises(ValueError, match="Invalid response type"):
+        async for _chunk in _non_streaming_model().stream([{"role": "user", "content": [{"text": "go"}]}]):
+            pass
 
 
 @pytest.mark.asyncio

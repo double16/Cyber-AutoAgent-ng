@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from modules.config.types import SDKConfig
 from modules.tools.prompt_optimizer import (
     PromptOptimizerError,
     prompt_optimizer,
@@ -33,6 +34,9 @@ def _install_llm_rewrite_stubs(monkeypatch: pytest.MonkeyPatch, *, response_text
 
         def get_server_config(self, provider: str):
             return _DummyServerConfig()
+
+        def get_sdk_config(self, provider: str):
+            return SDKConfig()
 
         def get_default_region(self) -> str:
             return "us-east-1"

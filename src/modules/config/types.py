@@ -351,7 +351,7 @@ class SDKConfig:
     hook_timeout_ms: int = 1000
 
     # Streaming configuration
-    enable_streaming: bool = True
+    enable_streaming: bool = False
     stream_buffer_ms: int = 0  # No buffering for real-time streaming
 
     # Conversation management
