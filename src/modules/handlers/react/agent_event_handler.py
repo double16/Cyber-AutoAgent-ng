@@ -6,6 +6,7 @@ event protocol is shared by CLI/logging/automation surfaces.
 """
 
 import json
+import math
 import os
 import re
 import threading
@@ -29,10 +30,12 @@ from ..output_interceptor import (
 )
 from .tool_emitters import ToolEventEmitter
 from modules.config.system.logger import get_logger
+from ...config import get_config_manager
 from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
 from ...config.types import DEFAULT_MAX_DURATION
+from ..conversation_budget import token_calc
 from ...utils.text_reducer import collapse_first_repeated_sequence
 
 from modules.handlers.utils import (
@@ -72,6 +75,17 @@ class _AgentUsageEntry:
     cost: float = 0.0
 
 
+@dataclass
+class ReportBudgetEstimate:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cost: float = 0.0
+    findings: int = 0
+    observations: int = 0
+    remaining_steps: int = 0
+
+
 class OperationEventCoordinator:
     """Shared operation-level state for multiple agent event handlers."""
 
@@ -98,6 +112,14 @@ class OperationEventCoordinator:
         self.evidence_count = 0
         self.tool_counts: Dict[str, int] = {}
         self._handler_usage: Dict[str, _AgentUsageEntry] = {}
+        self.report_findings = 0
+        self.report_observations = 0
+        self.report_finding_content_tokens = 0
+        self.report_observation_content_tokens = 0
+        self._report_finding_content_token_items: List[int] = []
+        self._report_observation_content_token_items: List[int] = []
+        self._report_exact_counts = False
+        self._report_steps_started = 0
 
     def next_agent_run_id(self, agent_name: str) -> str:
         with self._lock:
@@ -124,17 +146,175 @@ class OperationEventCoordinator:
                 total.cost += float(entry.cost)
             return total
 
+    def elapsed_seconds(self) -> float:
+        with self._lock:
+            return max(0.0, time.time() - self.start_time)
+
     def record_tool(self, tool_name: str) -> None:
         if not tool_name:
             return
         with self._lock:
             self.tool_counts[tool_name] = self.tool_counts.get(tool_name, 0) + 1
 
-    def record_memory(self, evidence: bool = False) -> None:
+    def record_memory(
+            self,
+            evidence: bool = False,
+            category: Optional[str] = None,
+            severity: Optional[str] = None,
+            content_length: int = 0,
+            model_id: Optional[str] = None,
+    ) -> None:
         with self._lock:
             self.memory_ops += 1
             if evidence:
                 self.evidence_count += 1
+            if self._report_exact_counts:
+                return
+
+            normalized_category = str(category or "").strip().lower()
+            normalized_severity = str(severity or "").strip().upper()
+            content_tokens = token_calc(max(0, int(content_length or 0)), model_id=model_id)
+            if normalized_category == "finding" or normalized_severity in {"CRITICAL", "HIGH"}:
+                self.report_findings += 1
+                self.report_finding_content_tokens += content_tokens
+                self._report_finding_content_token_items.append(content_tokens)
+            elif normalized_category in {"signal", "observation", "discovery"}:
+                self.report_observations += 1
+                self.report_observation_content_tokens += content_tokens
+                self._report_observation_content_token_items.append(content_tokens)
+
+    def set_report_items(self, items: List[Dict[str, Any]], model_id: Optional[str] = None) -> None:
+        findings = 0
+        observations = 0
+        finding_content_tokens = 0
+        observation_content_tokens = 0
+        finding_items: List[int] = []
+        observation_items: List[int] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            category = str(item.get("category") or "").strip().lower()
+            severity = str(item.get("severity") or "").strip().upper()
+            content = item.get("content") or item.get("memory") or ""
+            content_tokens = token_calc(len(str(content)), model_id=model_id)
+            if category == "finding" or severity in {"CRITICAL", "HIGH"}:
+                findings += 1
+                finding_content_tokens += content_tokens
+                finding_items.append(content_tokens)
+            elif category in {"signal", "observation", "discovery"}:
+                observations += 1
+                observation_content_tokens += content_tokens
+                observation_items.append(content_tokens)
+        with self._lock:
+            self.report_findings = findings
+            self.report_observations = observations
+            self.report_finding_content_tokens = finding_content_tokens
+            self.report_observation_content_tokens = observation_content_tokens
+            self._report_finding_content_token_items = finding_items
+            self._report_observation_content_token_items = observation_items
+            self._report_exact_counts = True
+            self._report_steps_started = 0
+
+    def mark_report_step_started(self) -> None:
+        with self._lock:
+            total_steps = 2 + self.report_findings + self.report_observations
+            self._report_steps_started = min(total_steps, self._report_steps_started + 1)
+
+    def report_budget_estimate(
+            self,
+            provider_id: Optional[str],
+            model_id: Optional[str],
+            models_client: Any = None,
+            pricing_fallback: Optional[Dict[str, float]] = None,
+    ) -> ReportBudgetEstimate:
+        with self._lock:
+            findings = int(self.report_findings)
+            observations = int(self.report_observations)
+            finding_content_tokens = int(self.report_finding_content_tokens)
+            observation_content_tokens = int(self.report_observation_content_tokens)
+            finding_items = list(self._report_finding_content_token_items)
+            observation_items = list(self._report_observation_content_token_items)
+            steps_started = int(self._report_steps_started)
+
+        remaining_steps = max(0, 2 + findings + observations - steps_started)
+        if remaining_steps <= 0:
+            return ReportBudgetEstimate(findings=findings, observations=observations, remaining_steps=0)
+
+        if len(finding_items) != findings:
+            finding_items = [0] * findings
+            if findings > 0:
+                finding_items[-1] = finding_content_tokens
+        if len(observation_items) != observations:
+            observation_items = [0] * observations
+            if observations > 0:
+                observation_items[-1] = observation_content_tokens
+
+        step_costs: List[tuple[int, int]] = [(2500, 1500)]
+        step_costs.extend((1800 + content_tokens, 1800) for content_tokens in finding_items)
+        step_costs.extend((1400 + content_tokens, 900) for content_tokens in observation_items)
+        step_costs.append((2200, 1200))
+        remaining_costs = step_costs[steps_started:]
+        input_tokens = math.ceil(sum(item[0] for item in remaining_costs) * 1.15)
+        output_tokens = math.ceil(sum(item[1] for item in remaining_costs) * 1.15)
+        cost = self._estimate_report_cost(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            provider_id=provider_id,
+            model_id=model_id,
+            models_client=models_client,
+            pricing_fallback=pricing_fallback,
+        )
+        return ReportBudgetEstimate(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            cost=cost,
+            findings=findings,
+            observations=observations,
+            remaining_steps=remaining_steps,
+        )
+
+    def _estimate_report_cost(
+            self,
+            input_tokens: int,
+            output_tokens: int,
+            provider_id: Optional[str],
+            model_id: Optional[str],
+            models_client: Any = None,
+            pricing_fallback: Optional[Dict[str, float]] = None,
+    ) -> float:
+        provider = str(provider_id or "").lower()
+        resolved_model = model_id
+        try:
+            if not resolved_model:
+                config_manager = get_config_manager()
+                resolved_model = config_manager.get_llm_config(provider or config_manager.get_provider()).model_id
+        except Exception:
+            resolved_model = model_id
+
+        if models_client is not None and provider != "ollama":
+            try:
+                pricing = None
+                if provider and provider != "litellm" and resolved_model:
+                    try:
+                        pricing = models_client.get_pricing(f"{provider}/{resolved_model}")
+                    except Exception:
+                        pricing = None
+                if pricing is None and resolved_model:
+                    pricing = models_client.get_pricing(resolved_model)
+                if pricing is not None:
+                    return (
+                        float(pricing.input or 0.0) * (input_tokens / 1_000_000)
+                        + float(pricing.output or 0.0) * (output_tokens / 1_000_000)
+                    )
+            except Exception:
+                logger.debug("Unable to price report reservation for model %s", resolved_model, exc_info=True)
+
+        fallback = pricing_fallback or {}
+        return (
+            float(fallback.get("input", 0.0) or 0.0) * (input_tokens / 1_000_000)
+            + float(fallback.get("output", 0.0) or 0.0) * (output_tokens / 1_000_000)
+        )
 
     def mark_termination(self, reason: str) -> bool:
         with self._lock:
@@ -336,6 +516,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         # Operation state
         self._stop_tool_used = False
         self._report_generated = False
+        self._report_generation_active = False
 
         # Termination tracking (stop tool or budget limit)
         self._termination_emitted = False
@@ -488,7 +669,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "step": "TERMINATED",
                         "progressPercent": self.get_budget_progress(),
                         "operation": self.operation_id,
-                        "duration": self._format_duration(time.time() - self.start_time),
+                        "duration": self._format_duration(self._operation_elapsed_seconds()),
                     }
                 )
 
@@ -499,9 +680,9 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "reason": reason,
                         "message": message,
                         "budget": {
-                            "maxDurationMinutes": self.budget_max_duration,
-                            "maxTokens": self.budget_max_tokens,
-                            "maxCost": self.budget_max_cost,
+                            "maxDurationMinutes": self._budget_max_duration(),
+                            "maxTokens": self._budget_max_tokens(),
+                            "maxCost": self._budget_max_cost(),
                         },
                     }
                 )
@@ -668,7 +849,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         output_tokens=int(totals["output_tokens"]),
                         cache_read_tokens=int(totals["cache_read_tokens"]),
                         cache_write_tokens=int(totals["cache_write_tokens"]),
-                        cost=float(totals["cost"]),
+                        cost=float(self._compute_total_cost_from_usage()),
                     ),
                 )
         except Exception:
@@ -687,6 +868,57 @@ class AgentEventHandler(PrintingCallbackHandler):
             "cache_write_tokens": int(usage.cache_write_tokens),
             "cost": float(usage.cost),
         }
+
+    def _report_budget_estimate(self) -> ReportBudgetEstimate:
+        coordinator = self.coordinator
+        if coordinator is None:
+            return ReportBudgetEstimate()
+        return coordinator.report_budget_estimate(
+            provider_id=self.provider_id,
+            model_id=self.model_id,
+            models_client=self.models_client,
+            pricing_fallback={
+                "input": self.pricing_input,
+                "output": self.pricing_output,
+            },
+        )
+
+    def _report_budget_estimate_payload(self) -> Dict[str, Any]:
+        estimate = self._report_budget_estimate()
+        return {
+            "inputTokens": estimate.input_tokens,
+            "outputTokens": estimate.output_tokens,
+            "totalTokens": estimate.total_tokens,
+            "cost": estimate.cost,
+            "findings": estimate.findings,
+            "observations": estimate.observations,
+            "remainingSteps": estimate.remaining_steps,
+        }
+
+    def _budgeted_usage_totals(self) -> Dict[str, Any]:
+        totals = self._operation_usage_totals()
+        estimate = self._report_budget_estimate()
+        input_tokens = int(totals["input_tokens"]) + int(estimate.input_tokens)
+        output_tokens = int(totals["output_tokens"]) + int(estimate.output_tokens)
+        return {
+            **totals,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cost": float(totals.get("cost", self._compute_total_cost_from_usage())) + float(estimate.cost),
+            "report_estimate": estimate,
+        }
+
+    def set_report_items(self, items: List[Dict[str, Any]]) -> None:
+        if self.coordinator is not None:
+            self.coordinator.set_report_items(items, model_id=self.model_id)
+
+    def mark_report_step_started(self) -> None:
+        if self.coordinator is not None:
+            self.coordinator.mark_report_step_started()
+
+    def record_report_metrics(self, event_loop_metrics: Any, agent: Any = None) -> None:
+        self.process_metrics(event_loop_metrics, agent=agent)
 
     def _get_or_assign_agent_usage_uuid(self, agent: Any) -> str:
         agent_uuid = getattr(agent, _AGENT_USAGE_UUID_ATTR, None)
@@ -1333,12 +1565,26 @@ class AgentEventHandler(PrintingCallbackHandler):
                             else {}
                         )
                         category = str(metadata.get("category", "")).lower()
+                        severity = str(metadata.get("severity", "") or tool_input.get("severity", ""))
+                        content = tool_input.get("content") or tool_input.get("memory") or ""
                         if category in ("finding", "signal", "observation", "discovery"):
                             self.evidence_count += 1
                             if self.coordinator is not None:
-                                self.coordinator.record_memory(evidence=True)
+                                self.coordinator.record_memory(
+                                    evidence=True,
+                                    category=category,
+                                    severity=severity,
+                                    content_length=len(str(content)),
+                                    model_id=self.model_id,
+                                )
                         elif self.coordinator is not None:
-                            self.coordinator.record_memory(evidence=False)
+                            self.coordinator.record_memory(
+                                evidence=False,
+                                category=category,
+                                severity=severity,
+                                content_length=len(str(content)),
+                                model_id=self.model_id,
+                            )
         except Exception:
             # Never allow metrics update errors to disrupt output
             pass
@@ -2024,7 +2270,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "step": self.action_count,
                     "progressPercent": progress_percent,
                     "operation": self.operation_id,
-                    "duration": self._format_duration(time.time() - self.start_time),
+                    "duration": self._format_duration(self._operation_elapsed_seconds()),
                     "totalTools": len(self.tools_used),
                 }
             )
@@ -2062,10 +2308,11 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "duration": "0s",
                     "memoryOps": 0,
                     "evidence": 0,
+                    "reportEstimate": self._report_budget_estimate_payload(),
                     "budget": {
-                        "maxDurationMinutes": self.budget_max_duration,
-                        "maxTokens": self.budget_max_tokens,
-                        "maxCost": self.budget_max_cost,
+                        "maxDurationMinutes": self._budget_max_duration(),
+                        "maxTokens": self._budget_max_tokens(),
+                        "maxCost": self._budget_max_cost(),
                     },
                     "progress": 0.0,
                     "progressPercent": 0,
@@ -2076,7 +2323,7 @@ class AgentEventHandler(PrintingCallbackHandler):
     def get_budget_progress(self) -> int:
         """Return budget utilization percent as the max usage across configured caps."""
         try:
-            totals = self._operation_usage_totals()
+            totals = self._budgeted_usage_totals()
             total_tokens = int(totals["input_tokens"]) + int(totals["output_tokens"])
             cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
             return self._calculate_budget_progress(total_tokens=total_tokens, cost=cost)[1]
@@ -2084,20 +2331,60 @@ class AgentEventHandler(PrintingCallbackHandler):
             return 0
 
     def _calculate_budget_progress(self, total_tokens: int, cost: float) -> tuple[float, int]:
-        try:
-            elapsed_s = max(0.0, time.time() - self.start_time)
-        except Exception:
-            elapsed_s = 0.0
+        elapsed_s = self._operation_elapsed_seconds()
+        max_duration = self._budget_max_duration()
+        max_tokens = self._budget_max_tokens()
+        max_cost = self._budget_max_cost()
         utilizations = []
-        if isinstance(self.budget_max_duration, int) and self.budget_max_duration > 0:
-            utilizations.append(elapsed_s / (float(self.budget_max_duration) * 60.0))
-        if isinstance(self.budget_max_tokens, int) and self.budget_max_tokens > 0:
-            utilizations.append(float(total_tokens) / float(self.budget_max_tokens))
-        if isinstance(self.budget_max_cost, (int, float)) and self.budget_max_cost > 0:
-            utilizations.append(float(cost) / float(self.budget_max_cost))
+        if isinstance(max_duration, int) and max_duration > 0:
+            utilizations.append(elapsed_s / (float(max_duration) * 60.0))
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            utilizations.append(float(total_tokens) / float(max_tokens))
+        if isinstance(max_cost, (int, float)) and max_cost > 0:
+            utilizations.append(float(cost) / float(max_cost))
         progress = max(utilizations) if utilizations else 0.0
         progress = max(0.0, progress)
         return progress, int(progress * 100)
+
+    def _operation_elapsed_seconds(self) -> float:
+        start_times = []
+        coordinator = self.coordinator
+        if coordinator is not None:
+            try:
+                start_times.append(float(coordinator.start_time))
+            except Exception:
+                pass
+        try:
+            start_times.append(float(self.start_time))
+        except Exception:
+            pass
+        if not start_times:
+            return 0.0
+        try:
+            return max(0.0, time.time() - min(start_times))
+        except Exception:
+            return 0.0
+
+    def _budget_max_duration(self) -> int:
+        coordinator = self.coordinator
+        if coordinator is not None and isinstance(coordinator.budget_max_duration, int):
+            if coordinator.budget_max_duration > 0:
+                return coordinator.budget_max_duration
+        return self.budget_max_duration
+
+    def _budget_max_tokens(self) -> Optional[int]:
+        coordinator = self.coordinator
+        if coordinator is not None and isinstance(coordinator.budget_max_tokens, int):
+            if coordinator.budget_max_tokens > 0:
+                return coordinator.budget_max_tokens
+        return self.budget_max_tokens
+
+    def _budget_max_cost(self) -> Optional[float]:
+        coordinator = self.coordinator
+        if coordinator is not None and isinstance(coordinator.budget_max_cost, (int, float)):
+            if coordinator.budget_max_cost > 0:
+                return float(coordinator.budget_max_cost)
+        return self.budget_max_cost
 
     def _start_metrics_thread(self) -> None:
         """Start a background thread for periodic metrics updates."""
@@ -2257,19 +2544,22 @@ class AgentEventHandler(PrintingCallbackHandler):
                     logger.debug(f"Could not get metrics from agent: {e}")
 
             self._publish_usage_to_coordinator()
-            totals = (
-                self._operation_usage_totals()
-                if self.emit_operation_init
-                else self._current_usage_totals()
-            )
+            totals = self._operation_usage_totals()
             input_tokens = int(totals["input_tokens"])
             output_tokens = int(totals["output_tokens"])
             cache_read_tokens = int(totals["cache_read_tokens"])
             cache_write_tokens = int(totals["cache_write_tokens"])
             total_tokens = input_tokens + output_tokens
             cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
+            budgeted_totals = self._budgeted_usage_totals()
+            budgeted_tokens = int(budgeted_totals["input_tokens"]) + int(budgeted_totals["output_tokens"])
+            budgeted_cost = float(budgeted_totals["cost"])
+            report_estimate = self._report_budget_estimate_payload()
 
-            progress, progress_percent = self._calculate_budget_progress(total_tokens=total_tokens, cost=cost)
+            progress, progress_percent = self._calculate_budget_progress(
+                total_tokens=budgeted_tokens,
+                cost=budgeted_cost,
+            )
 
             current_metrics = {
                 "tokens": total_tokens,  # For Footer compatibility
@@ -2279,13 +2569,14 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "totalTokens": total_tokens,
                 "cacheReadTokens": cache_read_tokens,
                 "cacheWriteTokens": cache_write_tokens,
-                "duration": self._format_duration(time.time() - self.start_time),
+                "duration": self._format_duration(self._operation_elapsed_seconds()),
                 "memoryOps": self.coordinator.memory_ops,
                 "evidence": self.coordinator.evidence_count,
+                "reportEstimate": report_estimate,
                 "budget": {
-                    "maxDurationMinutes": self.budget_max_duration,
-                    "maxTokens": self.budget_max_tokens,
-                    "maxCost": self.budget_max_cost,
+                    "maxDurationMinutes": self._budget_max_duration(),
+                    "maxTokens": self._budget_max_tokens(),
+                    "maxCost": self._budget_max_cost(),
                 },
                 "progress": progress,
                 "progressPercent": progress_percent,
@@ -2295,6 +2586,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "tokens": total_tokens,
                 "memoryOps": self.coordinator.memory_ops,
                 "evidence": self.coordinator.evidence_count,
+                "reportEstimate": report_estimate,
             }
 
             should_emit = (
@@ -2352,11 +2644,7 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         # Emit explicit completion summary for UI/logs
         try:
-            totals = (
-                self._operation_usage_totals()
-                if self.emit_operation_init
-                else self._current_usage_totals()
-            )
+            totals = self._operation_usage_totals()
             input_tokens = int(totals["input_tokens"])
             output_tokens = int(totals["output_tokens"])
             total_tokens = input_tokens + output_tokens
@@ -2365,7 +2653,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 {
                     "type": "operation_complete",
                     "operation": self.operation_id,
-                    "duration": self._format_duration(time.time() - self.start_time),
+                    "duration": self._format_duration(self._operation_elapsed_seconds()),
                     "metrics": {
                         "inputTokens": input_tokens,
                         "outputTokens": output_tokens,
@@ -2592,7 +2880,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "step": "FINAL REPORT",
                     "progressPercent": self.get_budget_progress(),
                     "operation": self.operation_id,
-                    "duration": self._format_duration(time.time() - self.start_time),
+                    "duration": self._format_duration(self._operation_elapsed_seconds()),
                 }
             )
 
@@ -2661,14 +2949,18 @@ class AgentEventHandler(PrintingCallbackHandler):
                 output_dir, "security_assessment_report.md"
             )
 
-            generate_security_report(
-                target=target,
-                objective=objective,
-                operation_id=self.operation_id,
-                config_params=config_params,
-                callback_handler=self,
-                filename=report_path,
-            )
+            self._report_generation_active = True
+            try:
+                generate_security_report(
+                    target=target,
+                    objective=objective,
+                    operation_id=self.operation_id,
+                    config_params=config_params,
+                    callback_handler=self,
+                    filename=report_path,
+                )
+            finally:
+                self._report_generation_active = False
 
             # Read report from file
             report_content = ""
@@ -2841,46 +3133,52 @@ class AgentEventHandler(PrintingCallbackHandler):
             if self._stop_tool_used:
                 return True
 
+            if getattr(self, "_report_generation_active", False):
+                return False
+
             if self._budget_limit_reached:
                 return True
 
             # Budget checks
             try:
                 # Duration cap
-                if isinstance(self.budget_max_duration, int) and self.budget_max_duration > 0:
-                    if (time.time() - self.start_time) >= float(self.budget_max_duration) * 60.0:
+                max_duration = self._budget_max_duration()
+                if isinstance(max_duration, int) and max_duration > 0:
+                    if self._operation_elapsed_seconds() >= float(max_duration) * 60.0:
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
-                                f"Duration limit reached: {self.budget_max_duration}m",
+                                f"Duration limit reached: {max_duration}m",
                             )
                         self._budget_limit_reached = True
                         self._budget_limit_reason = "duration"
                         return True
 
                 # Token cap
-                if isinstance(self.budget_max_tokens, int) and self.budget_max_tokens and self.budget_max_tokens > 0:
-                    totals = self._operation_usage_totals()
+                max_tokens = self._budget_max_tokens()
+                if isinstance(max_tokens, int) and max_tokens > 0:
+                    totals = self._budgeted_usage_totals()
                     total_tokens = int(totals["input_tokens"]) + int(totals["output_tokens"])
-                    if total_tokens >= int(self.budget_max_tokens):
+                    if total_tokens >= int(max_tokens):
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
-                                f"Token limit reached: {total_tokens}/{self.budget_max_tokens}",
+                                f"Token limit reached: {total_tokens}/{max_tokens}",
                             )
                         self._budget_limit_reached = True
                         self._budget_limit_reason = "tokens"
                         return True
 
                 # Cost cap
-                if isinstance(self.budget_max_cost, (int, float)) and self.budget_max_cost and self.budget_max_cost > 0:
-                    totals = self._operation_usage_totals()
+                max_cost = self._budget_max_cost()
+                if isinstance(max_cost, (int, float)) and max_cost > 0:
+                    totals = self._budgeted_usage_totals()
                     cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
-                    if cost >= float(self.budget_max_cost):
+                    if cost >= float(max_cost):
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
-                                f"Cost limit reached: {cost:.4f}/{self.budget_max_cost}",
+                                f"Cost limit reached: {cost:.4f}/{max_cost}",
                             )
                         self._budget_limit_reached = True
                         self._budget_limit_reason = "cost"
@@ -2916,11 +3214,7 @@ class AgentEventHandler(PrintingCallbackHandler):
     def get_summary(self) -> Dict[str, Any]:
         """Get operation summary for reporting."""
         with self._state_lock:
-            totals = (
-                self._operation_usage_totals()
-                if self.emit_operation_init
-                else self._current_usage_totals()
-            )
+            totals = self._operation_usage_totals()
             input_tokens = int(totals["input_tokens"])
             output_tokens = int(totals["output_tokens"])
             total_tokens = input_tokens + output_tokens
@@ -2944,6 +3238,6 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "capability_expansion": list(tool_counts.keys()),
                 "memory_ops": memory_ops,
                 "evidence_count": evidence_count,
-                "duration": self._format_duration(time.time() - self.start_time),
+                "duration": self._format_duration(self._operation_elapsed_seconds()),
                 "metrics": current_metrics,
             }

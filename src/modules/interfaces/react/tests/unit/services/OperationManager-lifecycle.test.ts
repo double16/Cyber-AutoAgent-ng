@@ -1,4 +1,4 @@
-import {describe, expect, it, jest} from '@jest/globals';
+import {afterEach, describe, expect, it, jest} from '@jest/globals';
 import {OperationManager} from '../../../src/services/OperationManager.js';
 import type {Config} from '../../../src/contexts/ConfigContext.js';
 
@@ -12,6 +12,11 @@ const config = {
 } as unknown as Config;
 
 describe('OperationManager lifecycle', () => {
+    afterEach(() => {
+        delete process.env.CYBER_MAX_OPERATION_LOGS;
+        delete process.env.CYBER_MAX_OPERATION_LOG_MESSAGE_CHARS;
+    });
+
     it('starts operations with logs and resets cumulative token state', () => {
         const manager = new OperationManager(config);
         const op = manager.startOperation('web', 'example.com', 'objective', 'model-a', true, 'OP_OLD');
@@ -162,5 +167,21 @@ describe('OperationManager lifecycle', () => {
         } finally {
             warnSpy.mockRestore();
         }
+    });
+
+    it('bounds per-operation logs and truncates large log messages', () => {
+        process.env.CYBER_MAX_OPERATION_LOGS = '21';
+        process.env.CYBER_MAX_OPERATION_LOG_MESSAGE_CHARS = '1001';
+        const manager = new OperationManager(config);
+        const op = manager.startOperation('web', 'example.com', 'objective', 'model-a');
+
+        for (let index = 0; index < 25; index += 1) {
+            manager.addLog(op.id, 'info', `log-${index}-${'x'.repeat(1200)}`);
+        }
+
+        expect(op.logs).toHaveLength(21);
+        expect(op.logs[0].message).toContain('log-4');
+        expect(op.logs.at(-1)?.message).toContain('log-24');
+        expect(op.logs.at(-1)?.message).toContain('operation log truncated');
     });
 });

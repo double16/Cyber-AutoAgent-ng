@@ -72,12 +72,18 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
   enabled = true
 }) => {
   const theme = themeManager.getCurrentTheme();
+  const isRecordingMode = process.env.CYBER_RECORDING_MODE === 'true';
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [phraseIndex, setPhraseIndex] = useState(Math.floor(Math.random() * THINKING_PHRASES.length));
 
   // Elapsed time tracking (single interval)
   useEffect(() => {
     if (!startTime || !enabled) {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    if (isRecordingMode) {
       setElapsedSeconds(0);
       return;
     }
@@ -90,7 +96,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
     const interval = setInterval(updateElapsed, 1000);
 
     return () => clearInterval(interval);
-  }, [startTime, enabled]);
+  }, [startTime, enabled, isRecordingMode]);
 
   // Cycle through phrases every 18 seconds (only for non-startup contexts)
   useEffect(() => {
@@ -122,7 +128,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
       <Box>
         {enabled ? (
           <Text color={theme.primary}>
-            <Spinner type="dots" />
+            {isRecordingMode ? '⌛' : <Spinner type="dots" />}
           </Text>
         ) : (
           <Text color={theme.muted}>[BUSY]</Text>
@@ -134,7 +140,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
         {startTime && (
           <>
             <Text color={theme.muted}> </Text>
-            <Text color={theme.muted}>[{formatElapsed(enabled ? elapsedSeconds : Math.floor(((startTime && Date.now()) ? (Date.now() - startTime) : 0) / 1000))}]</Text>
+            <Text color={theme.muted}>[{formatElapsed(elapsedSeconds)}]</Text>
           </>
         )}
       </Box>

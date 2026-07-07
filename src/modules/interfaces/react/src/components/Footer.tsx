@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { themeManager } from '../themes/theme-manager.js';
+import { estimateEtaSeconds } from '../utils/duration.js';
 import { formatDuration } from '../utils/toolFormatters.js';
 
 interface FooterProps {
@@ -47,28 +48,6 @@ export const Footer: React.FC<FooterProps> = React.memo(({
     return cost < 0.01 ? '<$0.01' : `$${cost.toFixed(2)}`;
   };
 
-  const parseDurationSeconds = (duration: string): number | null => {
-    const matches = [...duration.matchAll(/(\d+)\s*([hms])/g)];
-    if (matches.length === 0) {
-      return null;
-    }
-
-    const normalizedDuration = duration.replace(/\s+/g, '');
-    const consumedDuration = matches.map((match) => `${match[1]}${match[2]}`).join('');
-    if (normalizedDuration !== consumedDuration) {
-      return null;
-    }
-
-    return matches.reduce((totalSeconds, match) => {
-      const value = Number(match[1]);
-      const unit = match[2];
-
-      if (unit === 'h') return totalSeconds + (value * 3600);
-      if (unit === 'm') return totalSeconds + (value * 60);
-      return totalSeconds + value;
-    }, 0);
-  };
-
   const getConnectionIcon = () => {
     switch (connectionStatus) {
       case 'connected':
@@ -87,16 +66,8 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   const totalTokens = (operationMetrics?.tokens || 0).toLocaleString();
   const progressPercent = operationMetrics?.progressPercent;
   const hasDuration = !!operationMetrics?.duration && operationMetrics?.duration !== '0s';
-  const elapsedSeconds = hasDuration ? parseDurationSeconds(operationMetrics!.duration) : null;
-  const etaSeconds = elapsedSeconds !== null
-    && progressPercent !== undefined
-    && Number.isFinite(progressPercent)
-    && progressPercent > 0
-    && progressPercent < 100
-    ? Math.round((elapsedSeconds / (progressPercent / 100)))
-    : null;
+  const etaSeconds = estimateEtaSeconds(operationMetrics?.duration, progressPercent);
   const hasMem = (operationMetrics?.memoryOps || 0) > 0;
-
   // Build a single-line footer string and hard-truncate to terminal width to avoid Ink layout bugs
   const cols = Number.isFinite(process.stdout.columns) && process.stdout.columns ? Math.floor(process.stdout.columns) : 80;
   const left = deploymentMode || '';

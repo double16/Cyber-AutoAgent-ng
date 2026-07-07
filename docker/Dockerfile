@@ -73,5 +73,4 @@ VOLUME ["/app/outputs", "/app/tools", "/app/external_plugins", "/app/home_plugin
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD bash -c "exit 0"
 
-# Default entrypoint: React terminal (which spawns Python agent as subprocess)
-ENTRYPOINT ["node", "/app/src/modules/interfaces/react/dist/index.js"]
+ENTRYPOINT ["python3", "/app/src/cyberautoagent.py", "--service-mode"]

@@ -110,7 +110,8 @@ export const useStdin = () => ({
 });
 
 export const useStdout = () => ({
-  stdout: { write: () => {}, columns: 80, rows: 24 }
+  stdout: { write: () => {}, columns: 80, rows: 24 },
+  write: () => {}
 });
 
 export const useApp = () => ({

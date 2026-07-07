@@ -30,6 +30,34 @@ const load = async () => {
 };
 
 describe('StreamDisplay broad event rendering', () => {
+  it('keeps compact startup elapsed time static in recording mode', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-07-06T12:00:00Z'));
+    process.env.CYBER_RECORDING_MODE = 'true';
+    try {
+      const { EventLine, render } = await load();
+      const startTime = Date.now() - 7_000;
+      const view = render(
+        <EventLine
+          event={{ type: 'thinking', context: 'startup', compact: true, startTime, message: 'Initializing' } as any}
+          animationsEnabled
+        />
+      );
+
+      const beforeTick = view.lastFrame() || '';
+      expect(beforeTick).toContain('⌛');
+      const beforeElapsed = beforeTick.match(/\[[0-9]+s\]/)?.[0];
+      expect(beforeElapsed).toBeTruthy();
+
+      jest.advanceTimersByTime(4_000);
+      const afterTick = view.lastFrame() || '';
+      expect(afterTick).toContain(beforeElapsed || '');
+    } finally {
+      delete process.env.CYBER_RECORDING_MODE;
+      jest.useRealTimers();
+    }
+  });
+
   it('renders SDK, lifecycle, reasoning, termination, and metadata event variants', async () => {
     const { EventLine, render } = await load();
     const events: any[] = [
@@ -53,6 +81,14 @@ describe('StreamDisplay broad event rendering', () => {
         agent_name: 'web_tester',
         agent_sub_step: 2,
         agent_total_actions: 7
+      },
+      {
+        type: 'progress_update',
+        step: 'REPORT_AGENT',
+        operation_stage: 'final_report',
+        report_step_index: 2,
+        report_step_total: 5,
+        report_step_label: 'Finding: SQL injection'
       },
       { type: 'task_started', title: 'Enumerate target' },
       { type: 'thinking', context: 'reasoning', startTime: Date.now(), message: 'working' },
@@ -82,6 +118,7 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Event loop cycle started');
     expect(output).toContain('[PROGRESS 40% | 4 tools]');
     expect(output).toContain('[FINAL REPORT]');
+    expect(output).toContain('[FINAL REPORT 2/5] Finding: SQL injection');
     expect(output).toContain('NETWORK TIMEOUT');
     expect(output).toContain('TOKEN LIMIT');
     expect(output).toContain('I should inspect');
@@ -192,6 +229,21 @@ describe('StreamDisplay broad event rendering', () => {
     ).lastFrame();
     expect(longOutput).toContain('line 0');
     expect(longOutput).toContain('line 49');
+  });
+
+  it('renders long static history through append-style output', async () => {
+    const { StaticStreamDisplay, render } = await load();
+    const events = Array.from({ length: 540 }, (_, index) => ({
+      type: 'output',
+      content: `line-${index}`,
+    }));
+
+    const output = render(
+      <StaticStreamDisplay events={events as any} terminalWidth={100} availableHeight={40} />
+    ).lastFrame();
+
+    expect(output).toContain('line-0');
+    expect(output).toContain('line-539');
   });
 
   it('resolves report path candidates across absolute, relative, inferred, and unsafe inputs', async () => {

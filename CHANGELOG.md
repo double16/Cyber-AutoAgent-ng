@@ -2,6 +2,9 @@
 
 ### Features
 
+- Add recording-aware terminal mode with `--recording` override and automatic parent-process detection for `asciinema`.
+- Maintain an `outputs/<target>/latest` pointer to the current operation directory.
+- Show indexed progress for each final report agent call in both the React terminal UI and headless output.
 - Replace iteration-based operation limits with duration, token, and cost budgets; progress reports the highest utilization across configured budgets.
 - Correct token and cost metrics by aggregating usage across multiple agents and apply per-agent model pricing.
 - Generalize React event handling for multi-agent workflows with per-agent handlers and operation-wide metric aggregation.
@@ -10,6 +13,7 @@
 
 ### Fixes
 
+- Reserve estimated final-report token and cost budget during assessment so constrained runs stop early enough to generate reports.
 - Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.
 - Update the React footer connection indicator from deployment detection and color the status icon.
 - Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.

@@ -4,11 +4,13 @@
  */
 
 import React from 'react';
-import { Box, Text } from 'ink';
+import { Box, Static, Text } from 'ink';
+import Spinner from 'ink-spinner';
 import { ThinkingIndicator } from './ThinkingIndicator.js';
 import { StreamEvent } from '../types/events.js';
 import { formatToolInput } from '../utils/toolFormatters.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
+import { themeManager } from '../themes/theme-manager.js';
 // Removed toolCategories import - using clean tool display without emojis
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
@@ -22,6 +24,57 @@ let cachedProjectRoot: string | null | undefined;
 
 // Tracks the most recently-started task title so it can be shown in the ThinkingIndicator.
 let activeTaskTitle: string | null = null;
+
+const CompactStartupThinking: React.FC<{
+  enabled?: boolean;
+  message?: string | null;
+  startTime?: number;
+}> = ({ enabled = true, message, startTime }) => {
+  const theme = themeManager.getCurrentTheme();
+  const isRecordingMode = process.env.CYBER_RECORDING_MODE === 'true';
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!startTime || !enabled) {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    if (isRecordingMode) {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    const updateElapsed = () => {
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startTime) / 1000)));
+    };
+
+    updateElapsed();
+
+    const interval = setInterval(updateElapsed, 1000);
+    return () => clearInterval(interval);
+  }, [startTime, enabled, isRecordingMode]);
+
+  return (
+    <Box>
+      {enabled ? (
+        <Text color={theme.primary}>
+          {isRecordingMode ? '⌛' : <Spinner type="dots" />}
+        </Text>
+      ) : (
+        <Text color={theme.muted}>[BUSY]</Text>
+      )}
+      <Text color={theme.muted}> </Text>
+      <Text color={theme.foreground}>{message || 'Initializing'}</Text>
+      {startTime && (
+        <>
+          <Text color={theme.muted}> </Text>
+          <Text color={theme.muted}>[{elapsedSeconds}s]</Text>
+        </>
+      )}
+    </Box>
+  );
+};
 
 const resolveProjectRoot = (): string | null => {
   if (cachedProjectRoot !== undefined) {
@@ -568,8 +621,17 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
 
       const eventAgent = (event as any)['agent_name'];
       const agentSubStep = (event as any)['agent_sub_step'];
+      const operationStage = (event as any)['operation_stage'];
       
-      if (event.step === "FINAL REPORT") {
+      if (operationStage === 'final_report') {
+        const reportIndex = Number((event as any)['report_step_index']);
+        const reportTotal = Number((event as any)['report_step_total']);
+        const reportLabel = String((event as any)['report_step_label'] || '').trim();
+        const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
+          ? `${reportIndex}/${reportTotal}`
+          : 'REPORT';
+        stepDisplay = `[FINAL REPORT ${progressLabel}]${reportLabel ? ` ${reportLabel}` : ''}`;
+      } else if (event.step === "FINAL REPORT") {
         stepDisplay = "[FINAL REPORT]";
       } else if (typeof event.step === 'string' && String(event.step).toUpperCase() === 'TERMINATED') {
         // Clean termination header without confusing progress values
@@ -636,6 +698,15 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
     }
 
     case 'thinking':
+      if (event.context === 'startup' && event.compact) {
+        return (
+          <CompactStartupThinking
+            enabled={animationsEnabled}
+            message={event.message ?? null}
+            startTime={event.startTime}
+          />
+        );
+      }
       return (
         <ThinkingIndicator
           context={event.context}
@@ -2364,15 +2435,34 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   );
 });
 
-// Static variant to render an immutable, deduplicated history without re-renders.
-// Uses the same normalization/grouping to avoid duplicate headers/banners.
-import { Static } from 'ink';
-
 export const StaticStreamDisplay: React.FC<{
   events: DisplayStreamEvent[];
   terminalWidth?: number;
   availableHeight?: number;
 }> = React.memo(({ events, terminalWidth, availableHeight }) => {
+  const eventKeyMapRef = React.useRef<WeakMap<object, string>>(new WeakMap());
+  const eventSeqRef = React.useRef(0);
+  const renderedKeysRef = React.useRef<Set<string>>(new Set());
+  const renderedKeyOrderRef = React.useRef<string[]>([]);
+  const maxSeenKeys = React.useMemo(() => {
+    const env = Number(process.env.CYBER_MAX_STATIC_SEEN_KEYS);
+    if (Number.isFinite(env) && env > 500) return Math.floor(env);
+    return 5000;
+  }, []);
+  const stableEventKey = React.useCallback((event: DisplayStreamEvent): string => {
+    const any = event as any;
+    const explicit = any?.id ?? any?.toolId ?? any?.tool_id;
+    if (explicit) return `${String(any?.type ?? 'event')}-${String(explicit)}`;
+    if (any?.timestamp) return `${String(any?.type ?? 'event')}-${String(any.timestamp)}`;
+    if (event && typeof event === 'object') {
+      const existing = eventKeyMapRef.current.get(event as object);
+      if (existing) return existing;
+      const next = `${String(any?.type ?? 'event')}-seq-${eventSeqRef.current++}`;
+      eventKeyMapRef.current.set(event as object, next);
+      return next;
+    }
+    return `event-seq-${eventSeqRef.current++}`;
+  }, []);
   const groups = React.useMemo(() => computeDisplayGroups(events), [events]);
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
@@ -2437,11 +2527,11 @@ export const StaticStreamDisplay: React.FC<{
     return { operationId: opId, target, reportPath: reportDetails.path };
   }, [events, reportDetails.path]);
 
-  // Flatten groups into discrete render items with stable keys
+  // Flatten groups into discrete render items with stable keys.
   type Item = { key: string; render: () => React.ReactNode };
   const items: Item[] = React.useMemo(() => {
     const out: Item[] = [];
-    groups.forEach((group, gIdx) => {
+    groups.forEach((group) => {
       if (group.type === 'reasoning_group') {
         // Use reduce for better performance with large arrays
         const combinedContent = group.events.reduce((acc, e) => {
@@ -2473,7 +2563,7 @@ export const StaticStreamDisplay: React.FC<{
             ? `reasoning (${agentName})`
           : 'reasoning';
         
-        const key = `rg-${group.startIdx}`;
+        const key = `rg-${stableEventKey(group.events[0])}`;
         out.push({
           key,
           render: () => (
@@ -2487,8 +2577,7 @@ export const StaticStreamDisplay: React.FC<{
         });
       } else {
         group.events.forEach((event, i) => {
-          const eid = (event as any)?.id ?? (event as any)?.timestamp ?? `${gIdx}-${i}`;
-          const key = `ev-${eid}`;
+          const key = `ev-${stableEventKey(event)}`;
           out.push({
             key,
             render: () => (
@@ -2510,10 +2599,27 @@ export const StaticStreamDisplay: React.FC<{
       }
     });
     return out;
-  }, [groups, operationContext, reportDetails.path, reportDetails.content, projectRoot]);
+  }, [groups, operationContext, reportDetails.path, reportDetails.content, projectRoot, stableEventKey]);
+
+  const newItems = React.useMemo(() => {
+    const out: Item[] = [];
+    for (const item of items) {
+      if (renderedKeysRef.current.has(item.key)) {
+        continue;
+      }
+      renderedKeysRef.current.add(item.key);
+      renderedKeyOrderRef.current.push(item.key);
+      out.push(item);
+    }
+    while (renderedKeyOrderRef.current.length > maxSeenKeys) {
+      const oldest = renderedKeyOrderRef.current.shift();
+      if (oldest) renderedKeysRef.current.delete(oldest);
+    }
+    return out;
+  }, [items, maxSeenKeys]);
 
   return (
-    <Static items={items}>
+    <Static items={newItems}>
       {(item: Item) => item.render()}
     </Static>
   );

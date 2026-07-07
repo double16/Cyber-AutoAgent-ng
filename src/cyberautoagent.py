@@ -22,6 +22,7 @@ import json
 import asyncio
 import atexit
 import base64
+import importlib
 import os
 import re
 import signal
@@ -69,6 +70,7 @@ from modules.handlers.utils import (
     print_status,
     sanitize_target_name,
     dumpstacks,
+    update_latest_output_pointer,
 )
 from modules.prompts.factory import get_reflection_snapshot
 from modules.tools import browser, channel_close_all, get_active_task, get_plan, mem0_list, get_memory_client
@@ -430,7 +432,7 @@ def main():
 
     if args.heap_monitor or os.getenv("CYBER_HEAP_MONITOR", "").lower() == "true":
         # side effect is the heap monitor starts when imported
-        from src.modules.utils import heap_monitor
+        importlib.import_module("src.modules.utils.heap_monitor")
 
     bug_bounty_headers = {}
     if not args.bug_bounty_header:
@@ -609,6 +611,23 @@ def main():
         or os.environ.get("CYBER_DEBUG", "").lower() == "true"
     )
     logger = setup_logging(log_file=log_file, verbose=verbose_mode)
+
+    latest_pointer = update_latest_output_pointer(
+        target_sanitized,
+        operation_id,
+        server_config.output.base_dir,
+    )
+    if latest_pointer.success:
+        logger.info(
+            "Latest output pointer updated: %s (%s)",
+            latest_pointer.pointer_path,
+            latest_pointer.mode,
+        )
+    else:
+        logger.warning(
+            "Latest output pointer not updated: %s",
+            latest_pointer.message,
+        )
 
     # Setup telemetry (always enabled for token counting) and observability (deployment-aware)
     telemetry = setup_telemetry(logger)
@@ -1296,7 +1315,7 @@ def ensure_workspace_marker_files():
             for f in [p / "THIS IS THE WORKSPACE.txt", p / "THIS IS _NOT_ THE TARGET.txt"]:
                 try:
                     f.write_text("This is the operation workspace, NOT the target.")
-                except Exception as e:
+                except Exception:
                     pass
 
 

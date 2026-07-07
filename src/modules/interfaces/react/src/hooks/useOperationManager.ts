@@ -78,6 +78,17 @@ export function useOperationManager({
   const metricsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const currentExecutionServiceRef = useRef<ExecutionService | null>(null);
   const lastMetricsUpdateRef = useRef<number>(0);
+  const maxHistoryEntries = React.useMemo(() => {
+    const configured = Number(process.env.CYBER_MAX_OPERATION_HISTORY_ENTRIES);
+    return Number.isFinite(configured) && configured > 20 ? Math.floor(configured) : 200;
+  }, []);
+  const maxHistoryContentChars = React.useMemo(() => {
+    const configured = Number(process.env.CYBER_MAX_OPERATION_HISTORY_CONTENT_CHARS);
+    return Number.isFinite(configured) && configured > 1000 ? Math.floor(configured) : 12000;
+  }, []);
+  const trimHistoryEntries = useCallback((entries: OperationHistoryEntry[]): OperationHistoryEntry[] => {
+    return entries.length > maxHistoryEntries ? entries.slice(-maxHistoryEntries) : entries;
+  }, [maxHistoryEntries]);
 
   // Throttled metrics updater to avoid excessive re-renders during streaming
   const updateMetricsThrottled = useCallback((metrics: {
@@ -162,19 +173,23 @@ export function useOperationManager({
     content: string, 
     operation?: Operation
   ) => {
+    void operation;
+    const normalizedContent = String(content ?? '');
+    const trimmedContent = normalizedContent.length > maxHistoryContentChars
+      ? `${normalizedContent.slice(0, maxHistoryContentChars)}\n... (history entry truncated)`
+      : normalizedContent;
     const entry: OperationHistoryEntry = {
       id: `${Date.now()}-${Math.random()}`,
       timestamp: new Date(),
       type,
-      content,
-      operation
+      content: trimmedContent
     };
     
     // For critical messages (errors), update immediately
     if (type === 'error') {
       if (!isMountedRef.current) return; // don't set state after unmount
       setOperationHistoryEntries(prev => {
-        const newEntries = [...prev, entry];
+        const newEntries = trimHistoryEntries([...prev, entry]);
         if (isMountedRef.current) {
           setDebouncedHistoryEntries(newEntries); // Update debounced state immediately for errors
         }
@@ -186,7 +201,7 @@ export function useOperationManager({
     // For other messages, debounce the updates to prevent UI flicker
     if (!isMountedRef.current) return;
     setOperationHistoryEntries(prev => {
-      const newEntries = [...prev, entry];
+      const newEntries = trimHistoryEntries([...prev, entry]);
       
       // Clear any existing timeout
       if (historyUpdateTimeoutRef.current) {
@@ -203,7 +218,7 @@ export function useOperationManager({
       
       return newEntries;
     });
-  }, [setDebouncedHistoryEntries]);
+  }, [maxHistoryContentChars, setDebouncedHistoryEntries, trimHistoryEntries]);
 
   // Assessment pause handler (implements documented Ctrl+C and ESC behavior)
   const handleAssessmentPause = useCallback(async () => {
@@ -523,7 +538,7 @@ export function useOperationManager({
           actions.clearCompletedOperation();
         }, 2000);
         
-        cleanupExecution();
+        cleanupExecution({ stop: false });
       };
       
       const handleExecutionError = (error: any) => {
@@ -549,9 +564,10 @@ export function useOperationManager({
       };
       
       // Cleanup function for event listeners and intervals
-      const cleanupExecution = () => {
+      const cleanupExecution = ({ stop = true }: { stop?: boolean } = {}) => {
         void stopExecution({
           executionService,
+          skipStop: !stop,
           cleanup: true,
           removeListeners: true,
         }).catch(() => {

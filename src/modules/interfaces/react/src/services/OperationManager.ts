@@ -58,6 +58,8 @@ export class OperationManager {
   private operations: Map<string, Operation> = new Map();
   private currentOperation: Operation | null = null;
   private config: Config;
+  private readonly maxOperationLogs: number;
+  private readonly maxOperationLogMessageChars: number;
   private sessionCost: CostInfo = {
     tokensUsed: 0,
     estimatedCost: 0,
@@ -69,6 +71,14 @@ export class OperationManager {
 
   constructor(config: Config) {
     this.config = config;
+    const configuredMaxLogs = Number(process.env.CYBER_MAX_OPERATION_LOGS);
+    this.maxOperationLogs = Number.isFinite(configuredMaxLogs) && configuredMaxLogs > 20
+      ? Math.floor(configuredMaxLogs)
+      : 500;
+    const configuredMaxMessageChars = Number(process.env.CYBER_MAX_OPERATION_LOG_MESSAGE_CHARS);
+    this.maxOperationLogMessageChars = Number.isFinite(configuredMaxMessageChars) && configuredMaxMessageChars > 1000
+      ? Math.floor(configuredMaxMessageChars)
+      : 12000;
     // Load session data if available
     this.loadSessionData();
   }
@@ -380,13 +390,21 @@ export class OperationManager {
     const operation = this.operations.get(operationId);
     if (!operation) return;
 
+    const normalizedMessage = String(message ?? '');
+    const trimmedMessage = normalizedMessage.length > this.maxOperationLogMessageChars
+      ? `${normalizedMessage.slice(0, this.maxOperationLogMessageChars)}\n... (operation log truncated)`
+      : normalizedMessage;
+
     operation.logs.push({
       timestamp: new Date(),
       level,
-      message,
+      message: trimmedMessage,
       tool,
       step: operation.progressPercentage
     });
+    if (operation.logs.length > this.maxOperationLogs) {
+      operation.logs.splice(0, operation.logs.length - this.maxOperationLogs);
+    }
   }
 
   // Get current operation

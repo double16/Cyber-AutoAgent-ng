@@ -5,6 +5,7 @@ export interface StopExecutionOptions {
     executionService?: ExecutionService | null;
     cleanup?: boolean;
     removeListeners?: boolean;
+    skipStop?: boolean;
     stopTimeoutMs?: number;
 }
 
@@ -31,12 +32,15 @@ export async function stopExecution({
                                         executionService,
                                         cleanup = false,
                                         removeListeners = false,
+                                        skipStop = false,
                                         stopTimeoutMs = 5000,
                                     }: StopExecutionOptions): Promise<void> {
     let stopError: unknown;
 
     try {
-        if (executionHandle) {
+        if (skipStop) {
+            // Natural completion paths only need listener/resource cleanup.
+        } else if (executionHandle) {
             await withTimeout(executionHandle.stop(), stopTimeoutMs);
         } else if (executionService) {
             await withTimeout(executionService.stop(), stopTimeoutMs);

@@ -30,6 +30,7 @@ const logger = createLogger('PythonExecutionServiceAdapter');
 export class PythonExecutionServiceAdapter extends EventEmitter implements ExecutionService {
   private pythonService: PythonExecutionService;
   private activeHandle?: ExecutionHandle;
+  private completed = false;
 
   constructor() {
     super();
@@ -221,6 +222,7 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
       throw new Error('Python execution already active');
     }
 
+    this.completed = false;
     const startTime = Date.now();
     const handleId = `python-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -273,7 +275,12 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
 
   cleanup(): void {
     if (this.pythonService) {
-      this.pythonService.cleanup();
+      if (this.completed) {
+        this.pythonService.clearRuntimeState();
+        this.pythonService.removeAllListeners();
+      } else {
+        this.pythonService.cleanup();
+      }
     }
     this.removeAllListeners();
   }
@@ -286,6 +293,7 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
     if (this.activeHandle) {
       this.activeHandle = undefined;
     }
+    this.completed = true;
     this.emit('complete', {
       success: true,
       durationMs: 0 // Will be calculated by handle

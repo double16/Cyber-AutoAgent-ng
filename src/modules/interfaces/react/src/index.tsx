@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './utils/performanceTimelineGuard.js';
 import React from 'react';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -12,7 +13,10 @@ import { loggingService } from './services/LoggingService.js';
 import type {ExecutionHandle, ExecutionService} from './services/ExecutionService.js';
 import {stopExecution} from './services/executionLifecycle.js';
 import { enableConsoleSilence } from './utils/consoleSilencer.js';
+import { estimateEtaSeconds } from './utils/duration.js';
 import { formatDuration } from './utils/logger.js';
+import { formatDuration as formatToolDuration } from './utils/toolFormatters.js';
+import { resolveRecordingMode } from './utils/recordingMode.js';
 
 // Check for --debug flag early (before meow parsing) to enable logging
 if (process.argv.includes('--debug') || process.argv.includes('-d')) {
@@ -80,6 +84,7 @@ const cli = meow(`
     --deployment-mode   Deployment mode: local-cli, single-container, full-stack
     --mcp-enabled       Enable MCP servers
     --mcp-conns         Define MCP servers using JSON
+    --recording         Optimize terminal output for screen recording
 
   Examples
     $ cyber-react
@@ -161,9 +166,16 @@ const cli = meow(`
     },
     mcpConns: {
       type: 'string',
+    },
+    recording: {
+      type: 'boolean',
+      default: false
     }
   }
 });
+
+const recordingMode = resolveRecordingMode(cli.flags.recording);
+process.env.CYBER_RECORDING_MODE = recordingMode ? 'true' : 'false';
 
 // Emit an immediate welcome line in headless test mode to aid terminal capture timing
 try {
@@ -407,8 +419,21 @@ const runAutoAssessment = async () => {
             }
         }
         else if (event.type === 'progress_update') {
-          if (Number.isFinite(event.progressPercent)) {
-            loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}`);
+          if (event.operation_stage === 'final_report') {
+            const reportIndex = Number(event.report_step_index);
+            const reportTotal = Number(event.report_step_total);
+            const reportLabel = typeof event.report_step_label === 'string' ? event.report_step_label : '';
+            const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
+              ? `${reportIndex}/${reportTotal}`
+              : 'report';
+            loggingService.info(`➡️ Final report ${progressLabel}${reportLabel ? `: ${reportLabel}` : ''}`);
+          }
+          else if (Number.isFinite(event.progressPercent)) {
+            const etaSeconds = estimateEtaSeconds(event.duration, event.progressPercent);
+            const etaText = etaSeconds !== null && etaSeconds > 0
+              ? ` | ETA ${formatToolDuration(etaSeconds, false)}`
+              : '';
+            loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}${etaText}`);
           }
         }
         else if (event.type === 'task_started') {

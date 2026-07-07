@@ -202,6 +202,18 @@ describe('input and selection components', () => {
         expect(render(<ThinkingIndicator message="Custom message"/>).lastFrame())
             .toContain('Custom message');
 
+        process.env.CYBER_RECORDING_MODE = 'true';
+        const recordingView = render(<ThinkingIndicator startTime={Date.now() - 5_000} message="Recording"/>);
+        const beforeTick = recordingView.lastFrame() || '';
+        expect(beforeTick).toContain('⌛');
+        expect(beforeTick).toContain('[0s]');
+        act(() => {
+            jest.advanceTimersByTime(3_000);
+        });
+        const afterTick = recordingView.lastFrame() || '';
+        expect(afterTick).toContain('[0s]');
+        delete process.env.CYBER_RECORDING_MODE;
+
         let inline!: ReactTestRenderer;
         act(() => {
             inline = TestRenderer.create(<InlineThinking message="wait"/>);

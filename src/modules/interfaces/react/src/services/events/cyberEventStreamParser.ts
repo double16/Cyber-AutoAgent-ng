@@ -92,6 +92,7 @@ function updateToolExecutionState(
       emitEvent({
         type: 'output',
         content: `◆ ${eventData.tool_name} ${JSON.stringify(eventData.tool_input)}`,
+        metadata: { syntheticToolStart: true },
         timestamp: Date.now(),
       });
     }
