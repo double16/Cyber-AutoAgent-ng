@@ -332,6 +332,7 @@ class TestServerValidation:
 class TestCreateAgent:
     """Test agent creation functionality"""
 
+    @pytest.mark.ollama
     @patch("modules.config.ConfigManager.validate_requirements")
     @patch("modules.config.models.factory.create_bedrock_model")
     @patch("modules.agents.cyber_autoagent.Agent")
