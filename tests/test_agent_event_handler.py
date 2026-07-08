@@ -83,6 +83,10 @@ def make_handler():
     handler._aggregate_cost = 0.0
     handler._agent_usage_cache = OrderedDict()
     handler._agent_usage_cache_size = 128
+    handler._report_metrics_input_baseline = 0
+    handler._report_metrics_output_baseline = 0
+    handler._report_metrics_cache_read_baseline = 0
+    handler._report_metrics_cache_write_baseline = 0
     handler.pricing_input = 1.0
     handler.pricing_output = 2.0
     handler.pricing_cache_read = 0.25
@@ -605,6 +609,53 @@ def test_metrics_without_agent_stays_in_legacy_usage_path():
     assert handler.sdk_input_tokens == 100
     assert handler.sdk_output_tokens == 50
     assert handler._compute_total_cost_from_usage() == pytest.approx(0.000205)
+
+
+def test_report_metrics_without_agent_accumulate_across_reset_steps():
+    handler = make_handler()
+    handler.sdk_input_tokens = 1_000
+    handler.sdk_output_tokens = 100
+    handler._report_generation_active = True
+
+    handler.mark_report_step_started()
+    handler.record_report_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 300, "outputTokens": 50})
+    )
+    handler._emit_estimated_metrics(force=True)
+
+    handler.mark_report_step_started()
+    handler.record_report_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 200, "outputTokens": 75})
+    )
+    handler._emit_estimated_metrics(force=True)
+
+    metrics_events = [event for event in handler._events if event["type"] == "metrics_update"]
+    assert [event["metrics"]["totalTokens"] for event in metrics_events[-2:]] == [1_450, 1_725]
+    assert metrics_events[-1]["metrics"]["inputTokens"] == 1_500
+    assert metrics_events[-1]["metrics"]["outputTokens"] == 225
+
+
+def test_report_metrics_without_agent_ignore_within_step_decrease():
+    handler = make_handler()
+    handler.sdk_input_tokens = 1_000
+    handler.sdk_output_tokens = 100
+    handler._report_generation_active = True
+
+    handler.mark_report_step_started()
+    handler.record_report_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 300, "outputTokens": 80})
+    )
+    handler.record_report_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 290, "outputTokens": 70})
+    )
+    handler.record_report_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 330, "outputTokens": 90})
+    )
+
+    assert handler.sdk_input_tokens == 1_330
+    assert handler.sdk_output_tokens == 190
+    assert handler._aggregate_input_tokens == 330
+    assert handler._aggregate_output_tokens == 90
 
 
 def test_concurrent_agent_metrics_capture_is_thread_safe():

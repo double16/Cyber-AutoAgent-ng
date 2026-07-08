@@ -456,6 +456,10 @@ class AgentEventHandler(PrintingCallbackHandler):
         self._aggregate_cost = 0.0
         self._agent_usage_cache: OrderedDict[str, _AgentUsageEntry] = OrderedDict()
         self._agent_usage_cache_size = _AGENT_USAGE_CACHE_SIZE
+        self._report_metrics_input_baseline = 0
+        self._report_metrics_output_baseline = 0
+        self._report_metrics_cache_read_baseline = 0
+        self._report_metrics_cache_write_baseline = 0
         # Metrics emission handled by background thread
 
         try:
@@ -916,6 +920,11 @@ class AgentEventHandler(PrintingCallbackHandler):
     def mark_report_step_started(self) -> None:
         if self.coordinator is not None:
             self.coordinator.mark_report_step_started()
+        with self._metrics_lock:
+            self._report_metrics_input_baseline = 0
+            self._report_metrics_output_baseline = 0
+            self._report_metrics_cache_read_baseline = 0
+            self._report_metrics_cache_write_baseline = 0
 
     def record_report_metrics(self, event_loop_metrics: Any, agent: Any = None) -> None:
         self.process_metrics(event_loop_metrics, agent=agent)
@@ -968,6 +977,47 @@ class AgentEventHandler(PrintingCallbackHandler):
             while len(self._agent_usage_cache) > self._agent_usage_cache_size:
                 _evicted_uuid, evicted = self._agent_usage_cache.popitem(last=False)
                 self._aggregate_usage_entry(evicted)
+
+    def _capture_report_usage(self, usage: Dict[str, Any]) -> None:
+        """Accumulate no-agent report metrics as per-step deltas.
+
+        Report generation creates short-lived agents. Some callbacks only expose
+        result metrics and not the agent object, so their accumulated usage resets
+        for each report step. Treating those values as replacement SDK totals can
+        make operation totals decrease between steps.
+        """
+        input_tokens = int(usage.get("inputTokens", 0) or 0)
+        output_tokens = int(usage.get("outputTokens", 0) or 0)
+        cache_read_tokens = int(usage.get("cacheReadInputTokens", 0) or 0)
+        cache_write_tokens = int(usage.get("cacheWriteInputTokens", 0) or 0)
+
+        with self._metrics_lock:
+            input_delta = max(0, input_tokens - self._report_metrics_input_baseline)
+            output_delta = max(0, output_tokens - self._report_metrics_output_baseline)
+            cache_read_delta = max(0, cache_read_tokens - self._report_metrics_cache_read_baseline)
+            cache_write_delta = max(0, cache_write_tokens - self._report_metrics_cache_write_baseline)
+
+            self._aggregate_input_tokens += input_delta
+            self._aggregate_output_tokens += output_delta
+            self._aggregate_cache_read_tokens += cache_read_delta
+            self._aggregate_cache_write_tokens += cache_write_delta
+            self._aggregate_cost += self._compute_cost_from_metrics(
+                input_delta,
+                output_delta,
+                cache_read_delta,
+                cache_write_delta,
+            )
+
+            self._report_metrics_input_baseline = max(self._report_metrics_input_baseline, input_tokens)
+            self._report_metrics_output_baseline = max(self._report_metrics_output_baseline, output_tokens)
+            self._report_metrics_cache_read_baseline = max(
+                self._report_metrics_cache_read_baseline,
+                cache_read_tokens,
+            )
+            self._report_metrics_cache_write_baseline = max(
+                self._report_metrics_cache_write_baseline,
+                cache_write_tokens,
+            )
 
     # -- Helper methods ----------------------------------------------------
 
@@ -2623,6 +2673,8 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         if agent:
             self._capture_agent_usage(agent, usage)
+        elif getattr(self, "_report_generation_active", False):
+            self._capture_report_usage(usage)
         else:
             with self._metrics_lock:
                 self._sdk_input_tokens = usage.get("inputTokens", 0)

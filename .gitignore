@@ -16,9 +16,7 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
@@ -188,11 +186,7 @@ coverage/
 .yarn-integrity
 
 # parcel-bundler cache (https://parceljs.org/)
-.cache
 .parcel-cache
-
-# Rollup.js default build output
-dist/
 
 # Temporary folders
 tmp/
@@ -226,7 +220,6 @@ test-results/
 src/modules/interfaces/react/tests/fixtures/captures/
 src/modules/interfaces/react/tests/fixtures/test-results/
 src/modules/interfaces/react/tests/fixtures/coverage/
-repl_state/
 
 # Development artifacts
 test-*.js
@@ -276,3 +269,4 @@ THIS IS _NOT_ THE TARGET.txt
 *.tar.gz
 /benchmark_harness/validation-benchmarks/
 /benchmark_harness/results.csv
+config.*
