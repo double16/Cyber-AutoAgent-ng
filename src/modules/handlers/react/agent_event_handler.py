@@ -226,6 +226,7 @@ class OperationEventCoordinator:
             model_id: Optional[str],
             models_client: Any = None,
             pricing_fallback: Optional[Dict[str, float]] = None,
+            pricing_override: bool = False,
     ) -> ReportBudgetEstimate:
         with self._lock:
             findings = int(self.report_findings)
@@ -263,6 +264,7 @@ class OperationEventCoordinator:
             model_id=model_id,
             models_client=models_client,
             pricing_fallback=pricing_fallback,
+            pricing_override=pricing_override,
         )
         return ReportBudgetEstimate(
             input_tokens=input_tokens,
@@ -282,9 +284,18 @@ class OperationEventCoordinator:
             model_id: Optional[str],
             models_client: Any = None,
             pricing_fallback: Optional[Dict[str, float]] = None,
+            pricing_override: bool = False,
     ) -> float:
         provider = str(provider_id or "").lower()
         resolved_model = model_id
+        fallback = pricing_fallback or {}
+        fallback_cost = (
+            float(fallback.get("input", 0.0) or 0.0) * (input_tokens / 1_000_000)
+            + float(fallback.get("output", 0.0) or 0.0) * (output_tokens / 1_000_000)
+        )
+        if pricing_override:
+            return fallback_cost
+
         try:
             if not resolved_model:
                 config_manager = get_config_manager()
@@ -310,11 +321,7 @@ class OperationEventCoordinator:
             except Exception:
                 logger.debug("Unable to price report reservation for model %s", resolved_model, exc_info=True)
 
-        fallback = pricing_fallback or {}
-        return (
-            float(fallback.get("input", 0.0) or 0.0) * (input_tokens / 1_000_000)
-            + float(fallback.get("output", 0.0) or 0.0) * (output_tokens / 1_000_000)
-        )
+        return fallback_cost
 
     def mark_termination(self, reason: str) -> bool:
         with self._lock:
@@ -468,6 +475,13 @@ class AgentEventHandler(PrintingCallbackHandler):
         except Exception as e:
             logger.warning("Failed to initialize models.dev client, model cost will not be reported", exc_info=e)
             self.models_client = None
+        pricing_env_names = [
+            "CYBER_AGENT_PRICING_INPUT",
+            "CYBER_AGENT_PRICING_OUTPUT",
+            "CYBER_AGENT_PRICING_CACHE_READ",
+            "CYBER_AGENT_PRICING_CACHE_WRITE",
+        ]
+        self._pricing_override_configured = any(os.environ.get(name) not in [None, ""] for name in pricing_env_names)
         self.pricing_input = env_reader.get_float("CYBER_AGENT_PRICING_INPUT", 0.0)
         self.pricing_output = env_reader.get_float("CYBER_AGENT_PRICING_OUTPUT", 0.0)
         self.pricing_cache_read = env_reader.get_float("CYBER_AGENT_PRICING_CACHE_READ", 0.0)
@@ -885,6 +899,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "input": self.pricing_input,
                 "output": self.pricing_output,
             },
+            pricing_override=self._pricing_override_configured,
         )
 
     def _report_budget_estimate_payload(self) -> Dict[str, Any]:
@@ -2513,39 +2528,46 @@ class AgentEventHandler(PrintingCallbackHandler):
                + self.pricing_cache_read * (cache_read_tokens / 1_000_000) \
                + self.pricing_cache_write * (cache_write_tokens / 1_000_000)
 
+        if self._pricing_override_configured:
+            return cost
+
         if self.models_client is None:
             return cost
 
         pricing_agent = agent or self._last_agent
         if pricing_agent:
             provider = get_provider_from_agent(pricing_agent)
-            if provider not in [None, "ollama"]:
-                model_id = get_model_id_from_agent(pricing_agent)
+            model_id = get_model_id_from_agent(pricing_agent)
+        else:
+            provider = self.provider_id
+            model_id = self.model_id
+
+        if provider not in [None, "ollama"] and model_id:
+            try:
+                pricing = None
                 try:
-                    pricing = None
-                    try:
-                        if provider != "litellm":
-                            pricing = self.models_client.get_pricing(provider + "/" + model_id)
-                    except Exception:
-                        pass
-                    if pricing is None:
-                        pricing = self.models_client.get_pricing(model_id)
-                    if pricing is None:
-                        raise Exception(f"No pricing for model {model_id}")
-                    return (pricing.input or 0.0) * (input_tokens / 1_000_000) \
-                        + (pricing.output or 0.0) * (output_tokens / 1_000_000) \
-                        + (pricing.cache_read or 0.0) * (cache_read_tokens / 1_000_000) \
-                        + (pricing.cache_write or 0.0) * (cache_write_tokens / 1_000_000)
-                except Exception as e:
-                    # only report this once
-                    if hasattr(self, "_pricing_failures"):
-                        pricing_failures = getattr(self, "_pricing_failures")
-                    else:
-                        pricing_failures = set()
-                        setattr(self, "_pricing_failures", pricing_failures)
-                    if model_id not in pricing_failures:
-                        pricing_failures.add(model_id)
-                        logger.debug("Error getting pricing: {}".format(e), exc_info=True)
+                    if provider != "litellm":
+                        pricing = self.models_client.get_pricing(provider + "/" + model_id)
+                except Exception:
+                    pass
+                if pricing is None:
+                    pricing = self.models_client.get_pricing(model_id)
+                if pricing is None:
+                    raise Exception(f"No pricing for model {model_id}")
+                return (pricing.input or 0.0) * (input_tokens / 1_000_000) \
+                    + (pricing.output or 0.0) * (output_tokens / 1_000_000) \
+                    + (pricing.cache_read or 0.0) * (cache_read_tokens / 1_000_000) \
+                    + (pricing.cache_write or 0.0) * (cache_write_tokens / 1_000_000)
+            except Exception as e:
+                # only report this once
+                if hasattr(self, "_pricing_failures"):
+                    pricing_failures = getattr(self, "_pricing_failures")
+                else:
+                    pricing_failures = set()
+                    setattr(self, "_pricing_failures", pricing_failures)
+                if model_id not in pricing_failures:
+                    pricing_failures.add(model_id)
+                    logger.debug("Error getting pricing: {}".format(e), exc_info=True)
 
         return cost
 
@@ -2673,7 +2695,7 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         if agent:
             self._capture_agent_usage(agent, usage)
-        elif getattr(self, "_report_generation_active", False):
+        elif self._report_generation_active:
             self._capture_report_usage(usage)
         else:
             with self._metrics_lock:
@@ -2858,68 +2880,14 @@ class AgentEventHandler(PrintingCallbackHandler):
     ) -> None:
         """Generate final security assessment report.
 
-        If no memories/evidence were collected, skip report generation to avoid
-        producing an empty or meaningless report.
+        Report generation is allowed to query persisted memory so report-only
+        runs can rebuild reports from previous operation evidence.
         """
         if self._report_generated:
             return
 
         try:
             self._report_generated = True
-
-            # If nothing was persisted to memory/evidence, skip report generation
-            # But also check FAISS files as a fallback (metrics may undercount)
-            try:
-                mem_ops = self.memory_ops
-                ev_count = self.evidence_count
-            except Exception:
-                mem_ops, ev_count = 0, 0
-
-            # Check if FAISS files exist with meaningful data (fallback for metrics issues)
-            has_memory_data = False
-            try:
-                target_name = sanitize_target_name(target)
-                output_dir = get_output_path(target_name, self.operation_id, "")
-
-                # Memory path depends on MEMORY_ISOLATION mode (default: "operation")
-                # - "operation" mode: outputs/<target>/memory/<operation_id>/plan_store.db
-                # - "shared" mode: outputs/<target>/memory/plan_store.db
-                isolation_mode = os.environ.get("MEMORY_ISOLATION", "operation")
-                memory_base = Path(output_dir).parent / "memory"
-
-                if isolation_mode == "operation":
-                    # Per-operation isolation (default) - include operation_id
-                    faiss_file = memory_base / self.operation_id / "mem0.faiss"
-                else:
-                    # Shared mode - no operation_id in path
-                    faiss_file = memory_base / "mem0.faiss"
-
-                # FAISS file > 5KB indicates meaningful stored data (not just initialization)
-                if faiss_file.exists() and faiss_file.stat().st_size > 5000:
-                    has_memory_data = True
-            except Exception:
-                pass
-
-            if mem_ops <= 0 and ev_count <= 0 and not has_memory_data:
-                # Inform the UI and conclude cleanly without generating a report
-                try:
-                    self.emit_ui_event(
-                        {
-                            "type": "output",
-                            "content": "◆ No memories or evidence were collected during this operation. Skipping report generation.",
-                        }
-                    )
-                    # Emit completion marker for a clean UI transition
-                    self.emit_ui_event(
-                        {
-                            "type": "assessment_complete",
-                            "operation_id": self.operation_id,
-                            "report_path": None,
-                        }
-                    )
-                except Exception:
-                    pass
-                return
 
             # Import report generator function (not a tool, called directly by handler)
             from modules.handlers.report_generator import generate_security_report
@@ -2936,9 +2904,9 @@ class AgentEventHandler(PrintingCallbackHandler):
                 }
             )
 
-            # Determine provider from agent model
-            provider = "bedrock"
-            if hasattr(agent, "model"):
+            # Determine provider from handler configuration first. In report-only mode there is no main agent.
+            provider = self.provider_id or "bedrock"
+            if agent is not None and hasattr(agent, "model"):
                 model_class = agent.model.__class__.__name__
                 if "Bedrock" in model_class:
                     provider = "bedrock"
@@ -3053,6 +3021,22 @@ class AgentEventHandler(PrintingCallbackHandler):
                 logger.info(
                     "Report generation skipped - no evidence collected during operation"
                 )
+                try:
+                    self.emit_ui_event(
+                        {
+                            "type": "output",
+                            "content": "◆ No memories or evidence were collected during this operation. Skipping report generation.",
+                        }
+                    )
+                    self.emit_ui_event(
+                        {
+                            "type": "assessment_complete",
+                            "operation_id": self.operation_id,
+                            "report_path": None,
+                        }
+                    )
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.error("Error generating final report: %s", e)
@@ -3185,7 +3169,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             if self._stop_tool_used:
                 return True
 
-            if getattr(self, "_report_generation_active", False):
+            if self._report_generation_active:
                 return False
 
             if self._budget_limit_reached:

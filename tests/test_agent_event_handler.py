@@ -91,6 +91,7 @@ def make_handler():
     handler.pricing_output = 2.0
     handler.pricing_cache_read = 0.25
     handler.pricing_cache_write = 0.5
+    handler._pricing_override_configured = False
     handler.models_client = None
     return handler
 
@@ -117,6 +118,24 @@ def test_report_budget_estimator_zero_evidence_and_pricing_fallback(monkeypatch)
     assert estimate.findings == 0
     assert estimate.observations == 0
     assert estimate.remaining_steps == 2
+
+
+def test_report_budget_estimator_pricing_override_precedes_model_pricing():
+    coordinator = OperationEventCoordinator("OP_EST_OVERRIDE", MagicMock())
+    models_client = SimpleNamespace(
+        get_pricing=Mock(return_value=SimpleNamespace(input=10.0, output=20.0, cache_read=0.0, cache_write=0.0))
+    )
+
+    estimate = coordinator.report_budget_estimate(
+        provider_id="litellm",
+        model_id="test-model",
+        models_client=models_client,
+        pricing_fallback={"input": 1.0, "output": 2.0},
+        pricing_override=True,
+    )
+
+    assert estimate.cost == pytest.approx((5405 + (3105 * 2)) / 1_000_000)
+    models_client.get_pricing.assert_not_called()
 
 
 def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
@@ -611,6 +630,62 @@ def test_metrics_without_agent_stays_in_legacy_usage_path():
     assert handler._compute_total_cost_from_usage() == pytest.approx(0.000205)
 
 
+def test_compute_cost_without_agent_uses_handler_model_id():
+    handler = make_handler()
+    handler.model_id = "fallback-model"
+    handler.provider_id = "litellm"
+    handler.models_client = SimpleNamespace(
+        get_pricing=lambda model_id: {
+            "fallback-model": SimpleNamespace(input=10.0, output=20.0, cache_read=1.0, cache_write=2.0),
+        }[model_id]
+    )
+
+    cost = handler._compute_cost_from_metrics(
+        input_tokens=1_000_000,
+        output_tokens=2_000_000,
+        cache_read_tokens=3_000_000,
+        cache_write_tokens=4_000_000,
+    )
+
+    assert cost == pytest.approx(61.0)
+
+
+def test_compute_cost_pricing_env_override_precedes_model_pricing():
+    handler = make_handler()
+    handler.model_id = "fallback-model"
+    handler.provider_id = "litellm"
+    handler._pricing_override_configured = True
+    handler.models_client = SimpleNamespace(
+        get_pricing=Mock(return_value=SimpleNamespace(input=10.0, output=20.0, cache_read=1.0, cache_write=2.0))
+    )
+
+    cost = handler._compute_cost_from_metrics(
+        input_tokens=100,
+        output_tokens=50,
+        cache_read_tokens=10,
+        cache_write_tokens=5,
+    )
+
+    assert cost == pytest.approx(0.000205)
+    handler.models_client.get_pricing.assert_not_called()
+
+
+def test_compute_cost_without_agent_skips_model_pricing_for_ollama():
+    handler = make_handler()
+    handler.model_id = "local-model"
+    handler.provider_id = "ollama"
+    handler.models_client = SimpleNamespace(get_pricing=Mock(side_effect=AssertionError("pricing should not be used")))
+
+    cost = handler._compute_cost_from_metrics(
+        input_tokens=100,
+        output_tokens=50,
+        cache_read_tokens=10,
+        cache_write_tokens=5,
+    )
+
+    assert cost == pytest.approx(0.000205)
+
+
 def test_report_metrics_without_agent_accumulate_across_reset_steps():
     handler = make_handler()
     handler.sdk_input_tokens = 1_000
@@ -804,16 +879,35 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
 
 
 def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
+    output_dir = tmp_path / "example.com" / "OP_REPORT"
+    monkeypatch.setattr(rb, "get_output_path", lambda *_args: str(output_dir))
+    monkeypatch.setattr(rb, "sanitize_target_name", lambda value: value.replace(".", "_"))
+    monkeypatch.setattr(
+        "modules.config.manager.get_config_manager",
+        lambda: SimpleNamespace(get_llm_config=lambda _provider: SimpleNamespace(model_id="report-model")),
+    )
+
+    import modules.handlers.report_generator as report_generator
+
+    generated_calls = []
+
+    def fake_empty_generate_security_report(**kwargs):
+        generated_calls.append(kwargs)
+
+    monkeypatch.setattr(report_generator, "generate_security_report", fake_empty_generate_security_report)
+
     handler = make_handler()
     handler.operation_id = "OP_REPORT"
     handler.memory_ops = 0
     handler.evidence_count = 0
     handler.ensure_report_generated(
-        agent=SimpleNamespace(model=type("OllamaThing", (), {})()),
+        agent=None,
         target="example.com",
         objective="assess",
         module="web",
     )
+    assert generated_calls
+    assert generated_calls[0]["config_params"]["provider"] == "litellm"
     assert any(event["type"] == "assessment_complete" and event["report_path"] is None for event in handler._events)
 
     handler = make_handler()
@@ -823,22 +917,12 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     handler.tool_counts = {"shell": 2, "http_request": 1}
     handler.emitter = SimpleNamespace(flush_immediate=lambda: handler._events.append({"type": "flushed"}))
 
-    output_dir = tmp_path / "example.com" / "OP_REPORT"
-    monkeypatch.setattr(rb, "get_output_path", lambda *_args: str(output_dir))
-    monkeypatch.setattr(rb, "sanitize_target_name", lambda value: value.replace(".", "_"))
-
-    import modules.handlers.report_generator as report_generator
-
     def fake_generate_security_report(**kwargs):
         assert kwargs["config_params"]["tools_used"].count("shell") == 2
         with open(kwargs["filename"], "w", encoding="utf-8") as report:
             report.write("# Report\nConfirmed finding")
 
     monkeypatch.setattr(report_generator, "generate_security_report", fake_generate_security_report)
-    monkeypatch.setattr(
-        "modules.config.manager.get_config_manager",
-        lambda: SimpleNamespace(get_llm_config=lambda _provider: SimpleNamespace(model_id="report-model")),
-    )
 
     handler.ensure_report_generated(
         agent=SimpleNamespace(model=type("LiteLLMThing", (), {})()),
