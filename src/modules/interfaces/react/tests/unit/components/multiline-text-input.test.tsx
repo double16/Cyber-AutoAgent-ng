@@ -4,15 +4,6 @@ import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-let lastTextInputProps: any;
-
-jest.unstable_mockModule('ink-text-input', () => ({
-    default: (props: any) => {
-        lastTextInputProps = props;
-        return <input data-value={props.value} placeholder={props.placeholder}/>;
-    },
-}));
-
 const load = async () => {
     const {MultiLineTextInput} = await import('../../../src/components/MultiLineTextInput.js');
     return {MultiLineTextInput};
@@ -28,12 +19,19 @@ const textFromTree = (node: any): string => {
 describe('MultiLineTextInput', () => {
     beforeEach(() => {
         jest.useFakeTimers();
-        lastTextInputProps = undefined;
+        delete (global as any).__inkInputHandler;
     });
 
     afterEach(() => {
         jest.useRealTimers();
+        delete (global as any).__inkInputHandler;
     });
+
+    const sendInput = (input = '', key: Record<string, boolean> = {}) => {
+        act(() => {
+            (global as any).__inkInputHandler?.(input, key);
+        });
+    };
 
     it('renders previous lines and debounces changes to the parent value', async () => {
         const {MultiLineTextInput} = await load();
@@ -56,22 +54,21 @@ describe('MultiLineTextInput', () => {
         });
 
         expect(textFromTree(view.toJSON())).toContain('first');
-        expect(lastTextInputProps.value).toBe('second');
+        expect(textFromTree(view.toJSON())).toContain('second');
 
-        act(() => {
-            lastTextInputProps.onChange('updated');
-        });
+        sendInput('a', {ctrl: true});
+        sendInput('updated');
         expect(onChange).not.toHaveBeenCalled();
 
         act(() => {
             jest.advanceTimersByTime(100);
         });
-        expect(onChange).toHaveBeenCalledWith('first\nupdated');
+        expect(onChange).toHaveBeenCalledWith('first\nupdatedsecond');
 
         act(() => {
-            lastTextInputProps.onSubmit('submitted');
+            sendInput('', {return: true});
         });
-        expect(onSubmit).toHaveBeenCalledWith('first\nsubmitted');
+        expect(onSubmit).toHaveBeenCalledWith('first\nupdatedsecond');
     });
 
     it('applies external value changes while idle', async () => {
@@ -82,13 +79,13 @@ describe('MultiLineTextInput', () => {
         act(() => {
             view = TestRenderer.create(<MultiLineTextInput value="one" onChange={onChange}/>);
         });
-        expect(lastTextInputProps.value).toBe('one');
+        expect(textFromTree(view.toJSON())).toContain('one');
 
         act(() => {
             view.update(<MultiLineTextInput value={'alpha\nbeta'} onChange={onChange}/>);
         });
         expect(textFromTree(view.toJSON())).toContain('alpha');
-        expect(lastTextInputProps.value).toBe('beta');
+        expect(textFromTree(view.toJSON())).toContain('beta');
     });
 
     it('handles single-line edits, pending external changes, and submits without a handler', async () => {
@@ -99,13 +96,13 @@ describe('MultiLineTextInput', () => {
         act(() => {
             view = TestRenderer.create(<MultiLineTextInput value="" onChange={onChange}/>);
         });
-        expect(lastTextInputProps.value).toBe('');
+        expect(textFromTree(view.toJSON())).toContain('█');
 
         act(() => {
-            lastTextInputProps.onChange('typed');
+            sendInput('typed');
             view.update(<MultiLineTextInput value="external" onChange={onChange}/>);
         });
-        expect(lastTextInputProps.value).toBe('typed');
+        expect(textFromTree(view.toJSON())).toContain('typed');
         expect(onChange).not.toHaveBeenCalled();
 
         act(() => {
@@ -119,8 +116,47 @@ describe('MultiLineTextInput', () => {
 
         expect(() => {
             act(() => {
-                lastTextInputProps.onSubmit('ignored');
+                sendInput('', {return: true});
             });
         }).not.toThrow();
+    });
+
+    it('supports readline-style editing on the active command line', async () => {
+        const {MultiLineTextInput} = await load();
+        const onChange = jest.fn();
+        let view!: ReactTestRenderer;
+
+        act(() => {
+            view = TestRenderer.create(<MultiLineTextInput value="run scan" onChange={onChange}/>);
+        });
+
+        sendInput('a', {ctrl: true});
+        sendInput('quick ');
+        act(() => {
+            jest.advanceTimersByTime(100);
+        });
+        expect(onChange).toHaveBeenLastCalledWith('quick run scan');
+
+        act(() => {
+            view.update(<MultiLineTextInput value="quick run scan" onChange={onChange}/>);
+        });
+        sendInput('e', {ctrl: true});
+        sendInput(' now');
+        act(() => {
+            jest.advanceTimersByTime(100);
+        });
+        expect(onChange).toHaveBeenLastCalledWith('quick run scan now');
+
+        act(() => {
+            view.update(<MultiLineTextInput value="quick run scan now" onChange={onChange}/>);
+        });
+        sendInput('b', {ctrl: true});
+        sendInput('k', {ctrl: true});
+        act(() => {
+            jest.advanceTimersByTime(100);
+        });
+        expect(onChange).toHaveBeenLastCalledWith('quick run scan no');
+
+        expect(textFromTree(view.toJSON())).toContain('quick run scan');
     });
 });

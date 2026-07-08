@@ -9,7 +9,7 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import TextInput from 'ink-text-input';
+import { ExtendedTextInput } from './ExtendedTextInput.js';
 
 interface MultiLineTextInputProps {
   value: string;
@@ -117,7 +117,7 @@ export const MultiLineTextInput: React.FC<MultiLineTextInputProps> = ({
           {line}
         </Text>
       ))}
-      <TextInput
+      <ExtendedTextInput
         key={inputKey}
         value={currentLine}
         onChange={handleCurrentLineChange}
@@ -125,6 +125,7 @@ export const MultiLineTextInput: React.FC<MultiLineTextInputProps> = ({
         placeholder={placeholder}
         focus={focus}
         showCursor={showCursor}
+        textColor={textColor}
       />
     </Box>
   );

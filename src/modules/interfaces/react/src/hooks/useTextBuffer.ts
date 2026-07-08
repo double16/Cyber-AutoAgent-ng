@@ -15,6 +15,9 @@ type TextBufferAction =
   | { type: 'insert'; payload: string }
   | { type: 'delete_before' }
   | { type: 'delete_after' }
+  | { type: 'delete_to_start' }
+  | { type: 'delete_to_end' }
+  | { type: 'delete_word_before' }
   | { type: 'move_left' }
   | { type: 'move_right' }
   | { type: 'move_start' }
@@ -56,6 +59,38 @@ function textBufferReducer(state: TextBufferState, action: TextBufferAction): Te
       return {
         text: before + after,
         cursorPosition: state.cursorPosition,
+      };
+    }
+
+    case 'delete_to_start': {
+      if (state.cursorPosition === 0) return state;
+
+      return {
+        text: state.text.slice(state.cursorPosition),
+        cursorPosition: 0,
+      };
+    }
+
+    case 'delete_to_end': {
+      if (state.cursorPosition >= state.text.length) return state;
+
+      return {
+        text: state.text.slice(0, state.cursorPosition),
+        cursorPosition: state.cursorPosition,
+      };
+    }
+
+    case 'delete_word_before': {
+      if (state.cursorPosition === 0) return state;
+
+      const beforeCursor = state.text.slice(0, state.cursorPosition);
+      const afterCursor = state.text.slice(state.cursorPosition);
+      const deleteFrom = beforeCursor.replace(/\s+$/, '').search(/\S+$/);
+      const nextCursorPosition = deleteFrom === -1 ? 0 : deleteFrom;
+
+      return {
+        text: state.text.slice(0, nextCursorPosition) + afterCursor,
+        cursorPosition: nextCursorPosition,
       };
     }
 
@@ -144,6 +179,31 @@ export function useTextBuffer({ initialValue = '', onChange }: UseTextBufferOpti
     }
   }, [state.text, state.cursorPosition, onChange]);
 
+  const deleteToStart = useCallback(() => {
+    dispatch({ type: 'delete_to_start' });
+    if (onChange && state.cursorPosition > 0) {
+      onChange(state.text.slice(state.cursorPosition));
+    }
+  }, [state.text, state.cursorPosition, onChange]);
+
+  const deleteToEnd = useCallback(() => {
+    dispatch({ type: 'delete_to_end' });
+    if (onChange && state.cursorPosition < state.text.length) {
+      onChange(state.text.slice(0, state.cursorPosition));
+    }
+  }, [state.text, state.cursorPosition, onChange]);
+
+  const deleteWordBeforeCursor = useCallback(() => {
+    dispatch({ type: 'delete_word_before' });
+    if (onChange && state.cursorPosition > 0) {
+      const beforeCursor = state.text.slice(0, state.cursorPosition);
+      const afterCursor = state.text.slice(state.cursorPosition);
+      const deleteFrom = beforeCursor.replace(/\s+$/, '').search(/\S+$/);
+      const nextCursorPosition = deleteFrom === -1 ? 0 : deleteFrom;
+      onChange(state.text.slice(0, nextCursorPosition) + afterCursor);
+    }
+  }, [state.text, state.cursorPosition, onChange]);
+
   const moveLeft = useCallback(() => {
     dispatch({ type: 'move_left' });
   }, []);
@@ -180,6 +240,9 @@ export function useTextBuffer({ initialValue = '', onChange }: UseTextBufferOpti
     insert,
     deleteBeforeCursor,
     deleteAfterCursor,
+    deleteToStart,
+    deleteToEnd,
+    deleteWordBeforeCursor,
     moveLeft,
     moveRight,
     moveToStart,

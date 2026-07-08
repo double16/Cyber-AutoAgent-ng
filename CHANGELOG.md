@@ -2,6 +2,7 @@
 
 ### Features
 
+- Add readline-style editing shortcuts to the React terminal command entry.
 - Move React thinking/spinner status into a persistent footer line above the existing metrics footer.
 - Add recording-aware terminal mode with `--recording` override and automatic parent-process detection for `asciinema`.
 - Maintain an `outputs/<target>/latest` pointer to the current operation directory.
