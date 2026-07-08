@@ -5,6 +5,7 @@ import os
 # Add src to path for imports
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -13,14 +14,17 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from modules.agents.cyber_autoagent import (
+    AgentRuntimeResources,
     check_existing_memories,
     create_agent,
 )
+import modules.agents.cyber_autoagent as cyber_agent_module
 from modules.config.manager import (
     get_config_manager,
     get_default_model_configs,
     get_ollama_host,
 )
+from modules.config import AgentConfig
 
 
 class TestModelConfigs:
@@ -333,7 +337,7 @@ class TestCreateAgent:
     @patch("modules.agents.cyber_autoagent.Agent")
     @patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
     @patch("modules.agents.cyber_autoagent.get_system_prompt")
-    @patch("modules.tools.memory.initialize_memory_system")
+    @patch("modules.agents.cyber_autoagent.initialize_memory_system")
     def test_create_agent_remote_success(
         self,
         mock_init_memory,
@@ -359,7 +363,7 @@ class TestCreateAgent:
         config = AgentConfig(
             target="test.com", objective="test objective", provider="bedrock"
         )
-        agent, handler = create_agent(
+        agent = create_agent(
             target="test.com", objective="test objective", config=config
         )
 
@@ -369,7 +373,6 @@ class TestCreateAgent:
         mock_agent_class.assert_called_once()
 
         assert agent == mock_agent
-        assert handler == mock_handler
 
     @patch("modules.config.ConfigManager.validate_requirements")
     @patch("modules.config.models.factory.create_ollama_model")
@@ -404,7 +407,7 @@ class TestCreateAgent:
         config = AgentConfig(
             target="test.com", objective="test objective", provider="ollama"
         )
-        agent, handler = create_agent(
+        agent = create_agent(
             target="test.com", objective="test objective", config=config
         )
 
@@ -414,7 +417,6 @@ class TestCreateAgent:
         mock_agent_class.assert_called_once()
 
         assert agent == mock_agent
-        assert handler == mock_handler
 
     @patch("modules.config.ConfigManager.validate_requirements")
     def test_create_agent_validation_failure(self, mock_validate):
@@ -564,6 +566,128 @@ class TestCheckExistingMemories:
             result = check_existing_memories("test.com", "ollama")
             assert result is False
             mock_logger.debug.assert_called_once()
+
+
+def test_create_agent_reuses_runtime_resources(monkeypatch):
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.init_kwargs = kwargs
+            self.tool_registry = Mock()
+
+    config = AgentConfig(target="example.com", objective="test", provider="ollama", model_id="llama")
+    callback_handler = Mock()
+    conversation_manager = object()
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_TEST",
+        server_config=SimpleNamespace(),
+        config_manager=SimpleNamespace(),
+        callback_handler=callback_handler,
+        tools_list=["tool"],
+        tool_executor=object(),
+        system_prompt_payload="system payload",
+        system_prompt="system text",
+        hooks=[],
+        conversation_manager=conversation_manager,
+        sdk_context_manager=None,
+        trace_attributes={"operation.id": "OP_TEST"},
+        prompt_token_limit=123,
+    )
+
+    monkeypatch.setattr(cyber_agent_module, "create_agent_runtime_resources", Mock(side_effect=AssertionError))
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=True)))
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
+
+    agent = create_agent("example.com", "test", runtime_resources=runtime)
+
+    kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
+    assert kwargs["conversation_manager"] is conversation_manager
+    assert kwargs["callback_handler"] is callback_handler
+    assert kwargs["trace_attributes"] == {"operation.id": "OP_TEST"}
+    assert agent._prompt_token_limit == 123
+    assert agent.system_prompt == "system text"
+    assert runtime.callback_handler is callback_handler
+
+
+def test_create_agent_stateful_model_uses_runtime_handler_without_conversation_manager(monkeypatch):
+    class FakeAgent:
+        def __init__(self):
+            self.tool_registry = Mock()
+
+    config = AgentConfig(target="example.com", objective="test", provider="litellm", model_id="stateful")
+    callback_handler = Mock()
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_STATEFUL",
+        server_config=SimpleNamespace(),
+        config_manager=SimpleNamespace(),
+        callback_handler=callback_handler,
+        tools_list=[],
+        tool_executor=object(),
+        system_prompt_payload="system payload",
+        system_prompt="system text",
+        hooks=[],
+        conversation_manager=object(),
+        sdk_context_manager="auto",
+        trace_attributes={"operation.id": "OP_STATEFUL"},
+        prompt_token_limit=0,
+    )
+
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=True)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(side_effect=RuntimeError("caps unavailable")))
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
+
+    agent = create_agent("example.com", "test", runtime_resources=runtime)
+
+    kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
+    assert "conversation_manager" not in kwargs
+    assert "context_manager" not in kwargs
+    assert kwargs["callback_handler"] is callback_handler
+    assert agent._allow_reasoning_content is False
+
+
+def test_create_agent_runtime_resources_applies_sdk_context_manager(monkeypatch):
+    class FakeAgent:
+        def __init__(self):
+            self.tool_registry = Mock()
+
+        def __setattr__(self, name, value):
+            if name == "system_prompt":
+                raise RuntimeError("read only")
+            super().__setattr__(name, value)
+
+    config = AgentConfig(target="example.com", objective="test", provider="ollama", model_id="llama")
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_CONTEXT",
+        server_config=SimpleNamespace(),
+        config_manager=SimpleNamespace(),
+        callback_handler=Mock(),
+        tools_list=[],
+        tool_executor=object(),
+        system_prompt_payload="system payload",
+        system_prompt="system text",
+        hooks=[],
+        conversation_manager=object(),
+        sdk_context_manager="auto",
+        trace_attributes={"operation.id": "OP_CONTEXT"},
+        prompt_token_limit=0,
+    )
+
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=False)))
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
+
+    agent = create_agent("example.com", "test", runtime_resources=runtime)
+
+    kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
+    assert kwargs["conversation_manager"] is runtime.conversation_manager
+    assert kwargs["context_manager"] == "auto"
+    assert agent._allow_reasoning_content is False
 
 
 if __name__ == "__main__":
