@@ -20,7 +20,9 @@ jest.unstable_mockModule('../../../src/components/Header.js', () => ({
 }));
 
 jest.unstable_mockModule('../../../src/components/Footer.js', () => ({
-    Footer: ({operationName, connectionStatus}: any) => <footer>footer:{operationName}:{connectionStatus}</footer>,
+    Footer: ({operationName, connectionStatus, thinkingStatus}: any) => (
+        <footer>footer:{operationName}:{connectionStatus}:{thinkingStatus?.active ? `${thinkingStatus.context}:${thinkingStatus.taskTitle || ''}` : 'idle'}</footer>
+    ),
 }));
 
 jest.unstable_mockModule('../../../src/components/UnifiedInputPrompt.js', () => ({
@@ -30,12 +32,27 @@ jest.unstable_mockModule('../../../src/components/UnifiedInputPrompt.js', () => 
 }));
 
 jest.unstable_mockModule('../../../src/components/Terminal.js', () => ({
-    Terminal: ({onEvent, onMetricsUpdate, animationsEnabled}: any) => (
-        <button onClick={() => {
-            onEvent({type: 'output'});
-            onEvent({type: 'operation_complete'});
-            onMetricsUpdate({tokens: 10});
-        }}>terminal:{String(animationsEnabled)}</button>
+    Terminal: ({onEvent, onMetricsUpdate, onThinkingUpdate, animationsEnabled}: any) => (
+        <>
+            <button onClick={() => {
+                onEvent({type: 'task_started', title: 'Enumerate target'});
+                onThinkingUpdate({active: true, context: 'tool_execution'});
+            }}>terminal:start:{String(animationsEnabled)}</button>
+            <button onClick={() => {
+                onEvent({type: 'output', content: 'stream has begun'});
+                onThinkingUpdate({active: true, context: 'tool_execution'});
+                onEvent({type: 'task_started', title: 'Late task title'});
+            }}>terminal:late-task</button>
+            <button onClick={() => {
+                onEvent({type: 'task_done', title: 'Late task title'});
+            }}>terminal:task-done</button>
+            <button onClick={() => {
+                onEvent({type: 'output'});
+                onEvent({type: 'operation_complete'});
+                onThinkingUpdate({active: false});
+                onMetricsUpdate({tokens: 10});
+            }}>terminal:complete</button>
+        </>
     ),
 }));
 
@@ -107,6 +124,7 @@ describe('MainAppView', () => {
         let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(<MainAppView {...props as any}/>);
+            await new Promise(resolve => setTimeout(resolve, 0));
             await Promise.resolve();
         });
         const text = textFromTree(view.toJSON());
@@ -155,13 +173,16 @@ describe('MainAppView', () => {
             view.update(<MainAppView {...{...props, activeModal: ModalType.NONE} as any}/>);
             await Promise.resolve();
         });
+        await act(async () => {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        });
         expect(pauseMonitoring).toHaveBeenCalled();
 
         act(() => {
-            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal'))!.props.onClick();
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:complete'))!.props.onClick();
         });
         expect(updateMetrics).toHaveBeenCalledWith({tokens: 10});
-        expect(textFromTree(view.toJSON())).toContain('footer::offline');
+        expect(textFromTree(view.toJSON())).toContain('footer::offline:idle');
 
         await act(async () => {
             view.update(<MainAppView {...createProps({actions: {updateMetrics}}) as any}/>);
@@ -169,5 +190,100 @@ describe('MainAppView', () => {
         });
         expect(resumeMonitoring).toHaveBeenCalled();
         expect(checkHealth).toHaveBeenCalled();
+    });
+
+    it('merges task_started title into active footer thinking status', async () => {
+        const {MainAppView} = await load();
+        const props = createProps({
+            appState: {
+                activeOperation: {id: 'op-2', status: 'running', model: 'claude', description: 'Running test'},
+                executionService: {name: 'service'},
+                isDockerServiceAvailable: true,
+            },
+        });
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(<MainAppView {...props as any}/>);
+            await Promise.resolve();
+        });
+        await act(async () => {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        });
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:start'))!.props.onClick();
+        });
+
+        expect(textFromTree(view.toJSON())).toContain('footer:Running test:connected:tool_execution:Enumerate target');
+    });
+
+    it('updates footer task title even after stream content has begun', async () => {
+        const {MainAppView} = await load();
+        const props = createProps({
+            appState: {
+                activeOperation: {id: 'op-late-task', status: 'running', model: 'claude', description: 'Running test'},
+                executionService: {name: 'service'},
+                isDockerServiceAvailable: true,
+            },
+        });
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(<MainAppView {...props as any}/>);
+            await Promise.resolve();
+        });
+        await act(async () => {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        });
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:late-task'))!.props.onClick();
+        });
+
+        expect(textFromTree(view.toJSON())).toContain('footer::connected:tool_execution:Late task title');
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:task-done'))!.props.onClick();
+        });
+
+        expect(textFromTree(view.toJSON())).toContain('footer::connected:tool_execution:');
+        expect(textFromTree(view.toJSON())).not.toContain('Late task title');
+    });
+
+    it('clears deferred stream mount timer on unmount', async () => {
+        jest.useFakeTimers();
+        const {MainAppView} = await load();
+        const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+        const clearTimeoutSpy = jest.spyOn(global, 'clearTimeout');
+        const props = createProps({
+            appState: {
+                activeOperation: {id: 'op-3', status: 'running', model: 'claude', description: 'Running test'},
+                executionService: {name: 'service'},
+            },
+        });
+
+        let view!: ReactTestRenderer;
+        try {
+            await act(async () => {
+                view = TestRenderer.create(<MainAppView {...props as any}/>);
+                await Promise.resolve();
+            });
+
+            expect(jest.getTimerCount()).toBeGreaterThan(0);
+            const deferTimerIndex = setTimeoutSpy.mock.calls.findIndex(call => call[1] === 0);
+            expect(deferTimerIndex).toBeGreaterThanOrEqual(0);
+            const deferTimer = setTimeoutSpy.mock.results[deferTimerIndex]?.value;
+
+            act(() => {
+                view.unmount();
+            });
+
+            expect(clearTimeoutSpy).toHaveBeenCalledWith(deferTimer);
+        } finally {
+            setTimeoutSpy.mockRestore();
+            clearTimeoutSpy.mockRestore();
+            jest.useRealTimers();
+        }
     });
 });

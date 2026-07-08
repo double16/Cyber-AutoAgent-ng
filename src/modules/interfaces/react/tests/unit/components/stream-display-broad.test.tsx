@@ -1,6 +1,9 @@
 import React from 'react';
 import { TextEncoder, TextDecoder } from 'util';
 import {describe, expect, it, jest} from '@jest/globals';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 
 if (typeof global.TextEncoder === 'undefined') {
   global.TextEncoder = TextEncoder;
@@ -30,32 +33,23 @@ const load = async () => {
 };
 
 describe('StreamDisplay broad event rendering', () => {
-  it('keeps compact startup elapsed time static in recording mode', async () => {
-    jest.useFakeTimers();
-    jest.setSystemTime(new Date('2026-07-06T12:00:00Z'));
-    process.env.CYBER_RECORDING_MODE = 'true';
-    try {
-      const { EventLine, render } = await load();
-      const startTime = Date.now() - 7_000;
-      const view = render(
-        <EventLine
-          event={{ type: 'thinking', context: 'startup', compact: true, startTime, message: 'Initializing' } as any}
-          animationsEnabled
-        />
-      );
+  it('treats thinking events as non-rendering stream controls', async () => {
+    const { EventLine, render } = await load();
+    const startup = render(
+      <EventLine
+        event={{ type: 'thinking', context: 'startup', startTime: Date.now(), message: 'Initializing' } as any}
+        animationsEnabled
+      />
+    ).lastFrame();
+    const normal = render(
+      <EventLine
+        event={{ type: 'thinking', context: 'reasoning', message: 'Working' } as any}
+        animationsEnabled
+      />
+    ).lastFrame();
 
-      const beforeTick = view.lastFrame() || '';
-      expect(beforeTick).toContain('⌛');
-      const beforeElapsed = beforeTick.match(/\[[0-9]+s\]/)?.[0];
-      expect(beforeElapsed).toBeTruthy();
-
-      jest.advanceTimersByTime(4_000);
-      const afterTick = view.lastFrame() || '';
-      expect(afterTick).toContain(beforeElapsed || '');
-    } finally {
-      delete process.env.CYBER_RECORDING_MODE;
-      jest.useRealTimers();
-    }
+    expect(startup || '').toBe('');
+    expect(normal || '').toBe('');
   });
 
   it('renders SDK, lifecycle, reasoning, termination, and metadata event variants', async () => {
@@ -213,8 +207,12 @@ describe('StreamDisplay broad event rendering', () => {
     ];
 
     expect(computeDisplayGroups(events).length).toBeGreaterThan(0);
-    expect(render(<StreamDisplay events={events} animationsEnabled={false} />).lastFrame()).toContain('Operation initialization complete');
-    expect(render(<StaticStreamDisplay events={events} terminalWidth={100} availableHeight={40} />).lastFrame()).toContain('whoami');
+    const streamFrame = render(<StreamDisplay events={events} animationsEnabled={false} />).lastFrame();
+    expect(streamFrame).toContain('Operation initialization complete');
+    expect(streamFrame).toContain('ok');
+    const staticFrame = render(<StaticStreamDisplay events={events} terminalWidth={100} availableHeight={40} />).lastFrame();
+    expect(staticFrame).toContain('whoami');
+    expect(staticFrame).toContain('ok');
 
     const longOutput = render(
       <EventLine
@@ -246,6 +244,36 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('line-539');
   });
 
+  it('updates completed stream content after an initial tool output', async () => {
+    const { StaticStreamDisplay, render } = await load();
+    const firstEvents: any[] = [
+      { type: 'progress_update', step: 3, id: 'progress-3' },
+      { type: 'tool_start', tool_name: 'shell', tool_id: 'tool-which', tool_input: { command: 'which feroxbuster' }, id: 'tool-which' },
+      { type: 'output', content: '/usr/local/bin/feroxbuster', metadata: { fromToolBuffer: true, tool: 'shell' }, id: 'which-output' },
+    ];
+    const nextEvents: any[] = [
+      ...firstEvents,
+      { type: 'reasoning', content: 'Need to enumerate directories.', id: 'reasoning-next' },
+      { type: 'progress_update', step: 4, id: 'progress-4' },
+      {
+        type: 'tool_start',
+        tool_name: 'shell',
+        tool_id: 'tool-ferox',
+        tool_input: { command: 'feroxbuster -u http://host.docker.internal:32782' },
+        id: 'tool-ferox',
+      },
+    ];
+
+    const view = render(<StaticStreamDisplay events={firstEvents} terminalWidth={100} availableHeight={40} />);
+    expect(view.lastFrame()).toContain('/usr/local/bin/feroxbuster');
+
+    view.rerender(<StaticStreamDisplay events={nextEvents} terminalWidth={100} availableHeight={40} />);
+    const updated = view.lastFrame();
+    expect(updated).toContain('/usr/local/bin/feroxbuster');
+    expect(updated).toContain('Need to enumerate directories.');
+    expect(updated).toContain('feroxbuster -u http://host.docker.internal:32782');
+  });
+
   it('resolves report path candidates across absolute, relative, inferred, and unsafe inputs', async () => {
     const { mapContainerReportPath, getReportPathCandidates } = await load();
 
@@ -274,5 +302,31 @@ describe('StreamDisplay broad event rendering', () => {
     expect(absolute[0]).toBe('/var/reports/final.md');
 
     expect(getReportPathCandidates({}, null, null, null)).toEqual([]);
+  });
+
+  it('reads bounded report previews from disk without loading entire large reports', async () => {
+    const { readReportPreviewFile } = await load();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cyber-report-preview-'));
+    try {
+      const smallPath = path.join(tmpDir, 'small.md');
+      await fs.writeFile(smallPath, '# Short report\nbody', 'utf-8');
+      await expect(readReportPreviewFile(smallPath, 1024)).resolves.toBe('# Short report\nbody');
+
+      const largePath = path.join(tmpDir, 'large.md');
+      const head = 'A'.repeat(3000);
+      const middle = 'M'.repeat(6000);
+      const tail = 'Z'.repeat(3000);
+      await fs.writeFile(largePath, `${head}${middle}${tail}`, 'utf-8');
+
+      const preview = await readReportPreviewFile(largePath, 2048);
+
+      expect(preview.length).toBeLessThan(2400);
+      expect(preview).toContain('AAA');
+      expect(preview).toContain('ZZZ');
+      expect(preview).toContain('report file preview truncated');
+      expect(preview).not.toContain(middle);
+    } finally {
+      await fs.rm(tmpDir, {recursive: true, force: true});
+    }
   });
 });

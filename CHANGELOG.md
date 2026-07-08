@@ -2,6 +2,8 @@
 
 ### Features
 
+- Add readline-style editing shortcuts to the React terminal command entry.
+- Move React thinking/spinner status into a persistent footer line above the existing metrics footer.
 - Add recording-aware terminal mode with `--recording` override and automatic parent-process detection for `asciinema`.
 - Maintain an `outputs/<target>/latest` pointer to the current operation directory.
 - Show indexed progress for each final report agent call in both the React terminal UI and headless output.
@@ -13,6 +15,8 @@
 
 ### Fixes
 
+- Skip public OSINT recon tools for non-public hostnames in `specialized_recon_orchestrator`.
+- Bound React inline final-report file reads to a preview so very large reports cannot spike heap on operation completion or exit.
 - Avoid LiteLLM async logging queue cross-event-loop errors when model calls run from thread-pool event loops.
 - Reserve estimated final-report token and cost budget during assessment so constrained runs stop early enough to generate reports.
 - Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.

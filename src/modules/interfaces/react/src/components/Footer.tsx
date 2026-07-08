@@ -4,6 +4,8 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { themeManager } from '../themes/theme-manager.js';
 import { estimateEtaSeconds } from '../utils/duration.js';
 import { formatDuration } from '../utils/toolFormatters.js';
+import { ThinkingIndicator } from './ThinkingIndicator.js';
+import type { ThinkingStatus } from '../types/thinking.js';
 
 interface FooterProps {
   model?: string;
@@ -25,6 +27,8 @@ interface FooterProps {
   isOperationRunning: boolean;
   isInputPaused: boolean;
   operationName?: string;
+  thinkingStatus?: ThinkingStatus;
+  animationsEnabled?: boolean;
 }
 
 export const Footer: React.FC<FooterProps> = React.memo(({
@@ -37,6 +41,8 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   isOperationRunning,
   isInputPaused,
   operationName,
+  thinkingStatus,
+  animationsEnabled = true,
   errorCount = 0,
 }) => {
   const theme = themeManager.getCurrentTheme();
@@ -94,10 +100,24 @@ export const Footer: React.FC<FooterProps> = React.memo(({
     line = `${trimmedLeft}${spacer}${right}`.slice(0, textCols);
   }
 
+  const activeThinking = thinkingStatus?.active === true;
+
   return (
-    <Box>
-      <Text color={connIcon.color}>{connIcon.icon}</Text>
-      <Text color={theme.muted}>{line ? ` ${line}` : ''}</Text>
+    <Box flexDirection="column">
+      {activeThinking && (
+        <ThinkingIndicator
+          context={thinkingStatus.context}
+          message={thinkingStatus.message}
+          startTime={thinkingStatus.startTime}
+          taskTitle={thinkingStatus.taskTitle}
+          enabled={animationsEnabled}
+          maxWidth={cols}
+        />
+      )}
+      <Box>
+        <Text color={connIcon.color}>{connIcon.icon}</Text>
+        <Text color={theme.muted}>{line ? ` ${line}` : ''}</Text>
+      </Box>
     </Box>
   );
 });

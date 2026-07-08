@@ -121,4 +121,71 @@ describe('useTextBuffer', () => {
 
         hook.unmount();
     });
+
+    it('deletes to line boundaries and removes the previous word', () => {
+        const onChange = jest.fn();
+        const hook = renderHook(() => useTextBuffer({initialValue: 'scan target now', onChange}));
+
+        act(() => {
+            hook.current.moveLeft();
+        });
+        act(() => {
+            hook.current.moveLeft();
+        });
+        act(() => {
+            hook.current.moveLeft();
+        });
+        act(() => {
+            hook.current.deleteToEnd();
+        });
+        expect(hook.current.text).toBe('scan target ');
+        expect(hook.current.cursorPosition).toBe(12);
+        expect(onChange).toHaveBeenLastCalledWith('scan target ');
+
+        act(() => {
+            hook.current.deleteWordBeforeCursor();
+        });
+        expect(hook.current.text).toBe('scan ');
+        expect(hook.current.cursorPosition).toBe(5);
+        expect(onChange).toHaveBeenLastCalledWith('scan ');
+
+        act(() => {
+            hook.current.deleteToStart();
+        });
+        expect(hook.current.text).toBe('');
+        expect(hook.current.cursorPosition).toBe(0);
+        expect(onChange).toHaveBeenLastCalledWith('');
+
+        hook.unmount();
+    });
+
+    it('keeps readline delete operations within bounds without spurious changes', () => {
+        const onChange = jest.fn();
+        const hook = renderHook(() => useTextBuffer({initialValue: 'abc', onChange}));
+
+        act(() => {
+            hook.current.moveToStart();
+        });
+        act(() => {
+            hook.current.deleteToStart();
+        });
+        act(() => {
+            hook.current.deleteWordBeforeCursor();
+        });
+        expect(hook.current.text).toBe('abc');
+        expect(hook.current.cursorPosition).toBe(0);
+        expect(onChange).not.toHaveBeenCalled();
+
+        act(() => {
+            hook.current.moveToEnd();
+        });
+        act(() => {
+            hook.current.deleteToEnd();
+        });
+        expect(hook.current.text).toBe('abc');
+        expect(hook.current.cursorPosition).toBe(3);
+        expect(onChange).not.toHaveBeenCalled();
+
+        hook.unmount();
+    });
 });

@@ -2,16 +2,17 @@
 """Specialized Reconnaissance Orchestrator - Coordinates advanced subdomain and web recon tools"""
 
 import argparse
+import ipaddress
 import json
 import os
 import re
 import subprocess
 import tempfile
-import urllib3
-import ipaddress
-from urllib.parse import urlparse, parse_qs, urljoin, urlunparse
-import requests
 from typing import Any, Dict, List, Callable, Optional
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
+
+import requests
+import urllib3
 
 from strands import tool
 
@@ -23,40 +24,133 @@ HIDDEN_SERVICES_LIMIT = 50
 HIGH_VALUE_TARGET_LIMIT = 25
 ENDPOINTS_LIMIT = 100
 PARAMETER_LIMIT = 300
+NON_PUBLIC_TLDS = {
+    "corp",
+    "example",
+    "home",
+    "internal",
+    "intranet",
+    "invalid",
+    "lan",
+    "local",
+    "localhost",
+    "test",
+    "htb",
+}
+
+
+def _normalize_target_host(target: str) -> str:
+    """Normalize URL/domain inputs to a lowercase hostname without userinfo, path, port, or trailing dot."""
+    raw_target = (target or "").strip()
+    if not raw_target:
+        return ""
+
+    raw_host = raw_target.split("/", 1)[0].split("@")[-1].strip("[]")
+    try:
+        ipaddress.ip_address(raw_host)
+        return raw_host.lower().rstrip(".")
+    except ValueError:
+        pass
+
+    if raw_target.startswith(("http://", "https://")):
+        parsed = urlparse(raw_target)
+    else:
+        parsed = urlparse(f"//{raw_target.split('/', 1)[0]}")
+
+    host = parsed.hostname or raw_target.split("/", 1)[0].split("@")[-1].rsplit(":", 1)[0]
+    return host.strip().lower().rstrip(".")
+
+
+def _format_host_with_port(host: str, port: int | None) -> str:
+    normalized_host = (host or "").strip().lower().rstrip(".")
+    if not normalized_host:
+        return ""
+    if port is None:
+        return normalized_host
+    try:
+        ip = ipaddress.ip_address(normalized_host)
+        if ip.version == 6:
+            return f"[{normalized_host}]:{port}"
+    except ValueError:
+        pass
+    return f"{normalized_host}:{port}"
+
+
+def _safe_url_port(parsed: Any) -> int | None:
+    try:
+        return parsed.port
+    except ValueError:
+        return None
+
+
+def _normalize_target_endpoint(target: str) -> str:
+    """Normalize URL/domain inputs for connection-oriented tools, preserving explicit ports."""
+    raw_target = (target or "").strip()
+    if not raw_target:
+        return ""
+
+    raw_without_path = raw_target.split("/", 1)[0].split("@")[-1]
+    raw_ip = raw_without_path.strip("[]")
+    try:
+        ipaddress.ip_address(raw_ip)
+        return _format_host_with_port(raw_ip, None)
+    except ValueError:
+        pass
+
+    if raw_target.startswith(("http://", "https://")):
+        parsed = urlparse(raw_target)
+    else:
+        parsed = urlparse(f"//{raw_target.split('/', 1)[0]}")
+
+    host = parsed.hostname or _normalize_target_host(raw_target)
+    return _format_host_with_port(host, _safe_url_port(parsed))
+
+
+def _is_public_hostname(target: str) -> bool:
+    """Return True only for hostnames that are suitable for public OSINT/archive tools."""
+    host = _normalize_target_host(target)
+    if not host:
+        return False
+
+    try:
+        ip = ipaddress.ip_address(host)
+        return bool(ip.is_global)
+    except ValueError:
+        pass
+
+    if "." not in host:
+        return False
+    if any(ch.isspace() for ch in host):
+        return False
+    if host.startswith("-") or host.endswith("-"):
+        return False
+
+    labels = host.split(".")
+    if any(not label or label.startswith("-") or label.endswith("-") for label in labels):
+        return False
+
+    tld = labels[-1]
+    if tld in NON_PUBLIC_TLDS:
+        return False
+
+    return True
 
 
 # Helper: should subdomain enumeration run for this target?
 def _should_run_subdomain_enum(target: str) -> bool:
     """Return True only when target looks like a real DNS domain worth enumerating."""
-    t = (target or "").strip().lower().rstrip(".")
+    t = _normalize_target_host(target)
     if not t:
         return False
 
-    # Skip IP addresses
+    # Skip IP addresses: subdomain enumeration is only useful for DNS names.
     try:
         ipaddress.ip_address(t)
         return False
-    except Exception:
+    except ValueError:
         pass
 
-    # Skip localhost-ish and .local (mDNS)
-    if t.endswith(".local"):
-        return False
-
-    # Must contain a dot and have a non-empty TLD
-    if "." not in t:
-        return False
-    tld = t.rsplit(".", 1)[-1]
-    if not tld or tld == t:
-        return False
-
-    # Reject obvious invalid labels
-    if t.startswith("-") or t.endswith("-"):
-        return False
-    if any(ch.isspace() for ch in t):
-        return False
-
-    return True
+    return _is_public_hostname(t)
 
 
 def _coerce_str(arg: bytes | str | None) -> str:
@@ -109,14 +203,7 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
     if not target:
         raise ValueError("target is required")
 
-    # Normalize target: accept domain, URL, or host/path
-    if target.startswith(("http://", "https://")):
-        target = urlparse(target).netloc
-    else:
-        # Handle inputs like example.com/path (no scheme)
-        target = target.split("/", 1)[0]
-
-    target = target.strip().lower()
+    target = _normalize_target_endpoint(target)
     if not target:
         raise ValueError("target is required")
 
@@ -199,14 +286,15 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
             else:
                 _err(
                     "subdomain_enum",
-                    "skipped: target is not a routable domain (ip/no-tld/.local)",
+                    "skipped: target is not a public DNS name suitable for OSINT enumeration",
                     tool="subdomain_enum",
                 )
 
         # Phase 3: Live host detection and technology fingerprinting
         if recon_type in ["fingerprint", "comprehensive"]:
             try:
-                live_analysis = _analyze_live_hosts(results["subdomains"] or [target], errors=results["errors"])
+                hosts_for_live_analysis = list(dict.fromkeys((results["subdomains"] or []) + [target]))
+                live_analysis = _analyze_live_hosts(hosts_for_live_analysis, errors=results["errors"])
                 results["live_hosts"] = live_analysis["hosts"]
                 results["technologies"] = live_analysis["technologies"]
                 # Update meta coverage after Phase 3 if only web recon runs
@@ -566,6 +654,16 @@ def _setup_specialized_tools(errors: List[Dict[str, Any]] | None = None) -> Dict
 
 def _advanced_subdomain_enum(target: str, errors: List[Dict[str, Any]] | None = None) -> List[str]:
     """Advanced subdomain enumeration using multiple specialized tools"""
+    target = _normalize_target_host(target)
+    if not _should_run_subdomain_enum(target):
+        _append_tool_error(
+            errors,
+            "subdomain_enum",
+            "public_osint",
+            "skipped: target is not a public DNS name suitable for OSINT enumeration",
+        )
+        return []
+
     all_subdomains = set()
 
     # Method 1: subfinder (if available)

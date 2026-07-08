@@ -19,6 +19,7 @@ export class RingBuffer<T> {
     for (const it of items) this.push(it);
   }
   clear() {
+    this.buf.fill(undefined as any);
     this.head = 0;
     this.size = 0;
   }

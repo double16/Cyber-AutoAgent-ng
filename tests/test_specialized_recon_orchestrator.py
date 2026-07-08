@@ -110,6 +110,104 @@ def test_target_normalization_domain_and_url_inputs(fake_subprocess, fake_reques
     out3 = _as_json(sro.specialized_recon_orchestrator("Example.com/another/path", recon_type="fingerprint"))
     assert out3["target"] == "example.com"
 
+    out4 = _as_json(sro.specialized_recon_orchestrator("https://Example.com:8443/some/path", recon_type="fingerprint"))
+    assert out4["target"] == "example.com:8443"
+
+
+def test_public_hostname_detection_rejects_non_public_hosts():
+    public_hosts = [
+        "example.com",
+        "https://app.example.com:8443/path",
+        "sub.domain.co.uk",
+    ]
+    non_public_hosts = [
+        "localhost",
+        "intranet",
+        "app.local",
+        "portal.internal",
+        "service.corp",
+        "test.example",
+        "192.168.1.10",
+        "10.0.0.1:8080",
+        "127.0.0.1",
+        "fd00::1",
+    ]
+
+    assert all(sro._is_public_hostname(host) for host in public_hosts)
+    assert not any(sro._is_public_hostname(host) for host in non_public_hosts)
+    assert not any(sro._should_run_subdomain_enum(host) for host in non_public_hosts)
+    assert sro._normalize_target_host("fd00::1") == "fd00::1"
+    assert sro._normalize_target_endpoint("10.0.0.1:8080") == "10.0.0.1:8080"
+    assert sro._normalize_target_endpoint("https://portal.internal:8443/login") == "portal.internal:8443"
+    assert sro._normalize_target_endpoint("[fd00::1]:8443") == "[fd00::1]:8443"
+
+
+def test_orchestrator_skips_public_osint_for_non_public_hostname(monkeypatch):
+    monkeypatch.setattr(sro, "_setup_specialized_tools",
+                        lambda errors=None: {"success": True, "tools": [], "failed": []})
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("public OSINT enumeration should not run for non-public hosts")
+
+    captured_hosts = {}
+
+    def analyze_live_hosts(hosts, errors=None):
+        captured_hosts["hosts"] = hosts
+        return {"hosts": ["http://portal.internal"], "technologies": []}
+
+    monkeypatch.setattr(sro, "_advanced_subdomain_enum", fail_if_called)
+    monkeypatch.setattr(sro, "_analyze_live_hosts", analyze_live_hosts)
+    monkeypatch.setattr(sro, "_deep_web_intelligence", lambda live_hosts, errors=None: {
+        "endpoints": [],
+        "js_files": [],
+        "parameters": [],
+    })
+    monkeypatch.setattr(sro, "_analyze_attack_surface", lambda results: results.get("intelligence", {}))
+    monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
+    monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
+
+    out = _as_json(sro.specialized_recon_orchestrator("https://portal.internal:8443/login", "comprehensive"))
+
+    assert out["target"] == "portal.internal:8443"
+    assert captured_hosts["hosts"] == ["portal.internal:8443"]
+    assert any(
+        error.get("phase") == "subdomain_enum"
+        and "not a public DNS name" in error.get("error", "")
+        for error in out["errors"]
+    )
+
+
+def test_orchestrator_preserves_port_for_connection_tools_after_subdomain_enum(monkeypatch):
+    monkeypatch.setattr(sro, "_setup_specialized_tools",
+                        lambda errors=None: {"success": True, "tools": [], "failed": []})
+
+    captured = {}
+
+    def subdomain_enum(target, errors=None):
+        captured["subdomain_target"] = target
+        return ["api.example.com"]
+
+    def analyze_live_hosts(hosts, errors=None):
+        captured["live_hosts"] = hosts
+        return {"hosts": [], "technologies": []}
+
+    monkeypatch.setattr(sro, "_advanced_subdomain_enum", subdomain_enum)
+    monkeypatch.setattr(sro, "_analyze_live_hosts", analyze_live_hosts)
+    monkeypatch.setattr(sro, "_deep_web_intelligence", lambda live_hosts, errors=None: {
+        "endpoints": [],
+        "js_files": [],
+        "parameters": [],
+    })
+    monkeypatch.setattr(sro, "_analyze_attack_surface", lambda results: results.get("intelligence", {}))
+    monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
+    monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
+
+    out = _as_json(sro.specialized_recon_orchestrator("https://Example.com:8443/some/path", "comprehensive"))
+
+    assert out["target"] == "example.com:8443"
+    assert captured["subdomain_target"] == "example.com:8443"
+    assert captured["live_hosts"] == ["api.example.com", "example.com:8443"]
+
 
 def test_analyze_attack_surface_endpoint_field_selection_and_summary_counts():
     results = {
@@ -511,6 +609,62 @@ def test_advanced_subdomain_enum_records_tool_errors(fake_subprocess, fake_reque
     assert "a.example.com" in subs
     assert any(e.get("phase") == "subdomain_enum" and e.get("tool") == "subfinder" for e in errors)
     assert any(e.get("phase") == "subdomain_enum" and e.get("tool") == "waybackurls" for e in errors)
+
+
+def test_advanced_subdomain_enum_strips_port_for_public_osint_tools(fake_subprocess, fake_requests):
+    def pred_subfinder(cmd):
+        return cmd and cmd[0] == "subfinder"
+
+    def resp_subfinder(cmd):
+        assert cmd[2] == "example.com"
+        return _CP(returncode=0, stdout="a.example.com\n", stderr="")
+
+    def pred_assetfinder(cmd):
+        return cmd and cmd[0] == "assetfinder"
+
+    def resp_assetfinder(cmd):
+        assert cmd[-1] == "example.com"
+        return _CP(returncode=0, stdout="", stderr="")
+
+    def pred_wayback(cmd):
+        return cmd and cmd[0] == "waybackurls"
+
+    def resp_wayback(cmd):
+        assert cmd == ["waybackurls", "example.com"]
+        return _CP(returncode=0, stdout="https://a.example.com/path\n", stderr="")
+
+    fake_subprocess["handlers"] = [
+        (pred_subfinder, resp_subfinder),
+        (pred_assetfinder, resp_assetfinder),
+        (pred_wayback, resp_wayback),
+    ]
+    fake_requests["get_handler"] = lambda url, kwargs: _Resp(ok=True, text="[]", json_obj=[])
+
+    subs = sro._advanced_subdomain_enum("example.com:8443", errors=[])
+
+    assert "a.example.com" in subs
+
+
+def test_advanced_subdomain_enum_skips_public_site_tools_for_non_public_hosts(fake_subprocess, fake_requests):
+    def fail_if_public_tool_runs(cmd):
+        return cmd and cmd[0] in {"subfinder", "assetfinder", "waybackurls"}
+
+    def fail_response(cmd):
+        raise AssertionError(f"public OSINT tool should not run: {cmd[0]}")
+
+    fake_subprocess["handlers"] = [(fail_if_public_tool_runs, fail_response)]
+
+    errors: List[Dict[str, Any]] = []
+    subs = sro._advanced_subdomain_enum("portal.internal", errors=errors)
+
+    assert subs == []
+    assert fake_requests["get_calls"] == []
+    assert any(
+        e.get("phase") == "subdomain_enum"
+        and e.get("tool") == "public_osint"
+        and "not a public DNS name" in e.get("error", "")
+        for e in errors
+    )
 
 
 def test_advanced_subdomain_enum_crtsh_json_parse_error_recorded(fake_subprocess, fake_requests):

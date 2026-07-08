@@ -31,8 +31,10 @@ import threading
 import time
 import traceback
 import warnings
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import requests
 from botocore.exceptions import (
@@ -53,6 +55,7 @@ from modules.agents.agent_conversation_builder import rebuild_agent_conversation
 from modules.agents.cyber_autoagent import (
     AgentConfig,
     create_agent,
+    create_agent_runtime_resources,
     _ensure_prompt_within_budget,
 )
 from modules.config.models.factory import get_model_timeout, configure_model_rate_limits
@@ -260,6 +263,331 @@ def signal_handler(signum, frame):  # pylint: disable=unused-argument
 
     # Raise KeyboardInterrupt to interrupt current operation
     raise KeyboardInterrupt("User interrupted operation")
+
+
+@dataclass
+class AgentRunResult:
+    """Terminal state from one agent run loop."""
+
+    reason: str
+    message: str = ""
+
+
+RECOVERABLE_AGENT_ERRORS = (
+    RequestsReadTimeout,
+    RequestsConnectionError,
+    BotoReadTimeoutError,
+    BotoEndpointConnectionError,
+    BotoConnectTimeoutError,
+    litellm.RateLimitError,
+    litellm.ServiceUnavailableError,
+)
+
+
+def is_recoverable_agent_error(error: Exception) -> bool:
+    """Return True when the agent can be retried after a provider/network interruption."""
+    error_str = str(error).lower()
+    return isinstance(error, RECOVERABLE_AGENT_ERRORS) or any(
+        marker in error_str
+        for marker in [
+            "read timed out",
+            "readtimeouterror",
+            "network connection",
+            "ratelimiterror",
+            "serviceunavailableerror",
+        ]
+    )
+
+
+def process_agent_metrics(callback_handler: Any, result: Any) -> None:
+    """Forward Strands result usage metrics to the operation callback handler."""
+    if not callback_handler or not hasattr(result, "metrics") or not result.metrics:
+        return
+    if not hasattr(result.metrics, "accumulated_usage") or not result.metrics.accumulated_usage:
+        return
+
+    class MetricsObject:
+        def __init__(self, accumulated_usage):
+            self.accumulated_usage = accumulated_usage
+
+    callback_handler.process_metrics(MetricsObject(result.metrics.accumulated_usage))
+
+
+def run_agent_until_terminal_state(
+    *,
+    agent: Any,
+    callback_handler: Any,
+    current_message: str,
+    initial_prompt: str,
+    budget_cfg: BudgetConfig,
+    operation_start: float,
+    max_duration: int | None,
+    logger: Any,
+    recoverable_retries: int = 2,
+) -> AgentRunResult:
+    """Run one agent until it reaches a normal terminal state or raises a fatal failure."""
+    initial_reasoning_retry = 2
+    actionless_attempt_count = 0
+    recoverable_attempt_count = 0
+
+    while not interrupted:
+        last_tool_call_count = sum(callback_handler.tool_counts.values(), start=0)
+        try:
+            if "<reflection_snapshot>" not in current_message and not current_message.startswith(initial_prompt):
+                progress_percent = int(getattr(callback_handler, "get_budget_progress", lambda: 0)())
+                reflection_snapshot = get_reflection_snapshot(
+                    progress_percent=progress_percent,
+                    budget=budget_cfg,
+                    plan_current_phase=None,
+                )
+                current_message = current_message + "\n\n" + (
+                    f"<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
+                )
+
+            print_status(
+                f"Agent processing: {current_message[:100]}{' ...' if len(current_message) > 100 else ''}",
+                "THINKING",
+            )
+            logger.debug("Agent processing: %s", current_message)
+
+            try:
+                iter(getattr(agent, "messages", []))
+            except TypeError:
+                agent.messages = []
+            strip_reflection_snapshot_messages(agent)
+            _ensure_prompt_within_budget(agent)
+
+            result = agent(current_message)
+            recoverable_attempt_count = 0
+
+            logger.debug("Agent result: %r", result)
+            process_agent_metrics(callback_handler, result)
+
+            tool_total_count = sum(callback_handler.tool_counts.values())
+            if tool_total_count > last_tool_call_count:
+                actionless_attempt_count = 0
+            else:
+                actionless_attempt_count += 1
+                logger.debug(
+                    "Agent returned without new tool calls, actionless_count=%d, tool_total_count=%d",
+                    actionless_attempt_count,
+                    tool_total_count,
+                )
+
+            if callback_handler and callback_handler.should_stop():
+                if callback_handler.stop_tool_used:
+                    print_status("Stop tool used - terminating", "SUCCESS")
+                    return AgentRunResult("stop_tool", "Stop tool used")
+                if callback_handler.has_reached_limit():
+                    print_status("Budget limit reached - terminating", "SUCCESS")
+                    raise BudgetLimitReached("Budget limit reached")
+                return AgentRunResult("callback_stop", "Callback requested stop")
+
+            if sum(callback_handler.tool_counts.values()) == 0:
+                if getattr(callback_handler, "_emitted_any_reasoning", False):
+                    logger.debug("Initial reasoning observed with no tools yet; continuing one more cycle")
+                elif initial_reasoning_retry <= 0:
+                    print_status("No actions taken - completing", "SUCCESS")
+                    return AgentRunResult("no_actions", "No actions taken")
+                initial_reasoning_retry -= 1
+            elif actionless_attempt_count > 2:
+                termination_reason = f"No actions taken after {actionless_attempt_count} attempts"
+                print_status(termination_reason, "WARNING")
+                if callback_handler:
+                    callback_handler.emit_termination("stalled", termination_reason)
+                return AgentRunResult("stalled", termination_reason)
+
+            elapsed = time.time() - operation_start
+            if max_duration is not None and elapsed >= float(max_duration) * 60.0:
+                logger.info("Duration budget reached (elapsed=%ss)", int(elapsed))
+                raise BudgetLimitReached("Duration budget reached")
+
+            current_message = ""
+
+            if actionless_attempt_count > 0:
+                if actionless_attempt_count == 1:
+                    logger.warning(
+                        "Attempting to redirect model to emit valid tool calls because no tool calls were detected "
+                        "in last execution loop."
+                    )
+
+                    while len(agent.messages) > 3:
+                        tool_block_count = 0
+                        for block in agent.messages[-1].get("content", []):
+                            if not isinstance(block, dict):
+                                continue
+                            if "toolUse" in block or "toolResult" in block:
+                                tool_block_count += 1
+                        if tool_block_count == 0:
+                            agent.messages.pop()
+                        else:
+                            break
+
+                    current_message += (
+                        "**MANDATORY ACTION**: Take your time to decide which tool to call next. "
+                        "A tool MUST be called next to make progress."
+                    )
+                else:
+                    active_plan = get_memory_client(silent=True).get_active_plan()
+                    if active_plan and active_plan.assessment_complete:
+                        return AgentRunResult("assessment_complete", "Assessment complete")
+
+                    active_task = get_active_task() or ""
+                    memories = mem0_list()
+
+                    logger.warning(
+                        "Attempting to rebuild context because no tool calls were detected in last execution loop."
+                    )
+
+                    current_message = rebuild_agent_conversation(
+                        agent=agent,
+                        active_plan=active_plan,
+                        active_task=active_task,
+                        initial_prompt=initial_prompt,
+                        memories=memories,
+                    )
+
+        except StopIteration as error:
+            logger.debug("Agent cycle completed: %s", str(error))
+            if callback_handler and callback_handler.has_reached_limit():
+                print_status("Step limit reached", "SUCCESS")
+                raise BudgetLimitReached("Step limit reached")
+
+        except Exception as error:
+            error_str = str(error).lower()
+            if isinstance(error, MaxTokensReachedException) or "maxtokensreached" in error_str or "max_tokens" in error_str:
+                raise
+            if isinstance(error, BudgetLimitReached) or "budget limit" in error_str:
+                raise BudgetLimitReached(str(error))
+            if "event loop cycle stop requested" in error_str:
+                reason_match = re.search(r"Reason: (.+?)(?:\\n|$)", str(error))
+                reason = reason_match.group(1) if reason_match else "Objective achieved"
+                print_status(f"Agent terminated: {reason}", "SUCCESS")
+                return AgentRunResult("event_loop_stop", reason)
+            if is_recoverable_agent_error(error):
+                recoverable_attempt_count += 1
+                logger.debug("Recoverable provider/network exception", exc_info=error)
+                if recoverable_attempt_count <= recoverable_retries:
+                    print_status(
+                        f"Network/provider timeout - retrying ({recoverable_attempt_count}/{recoverable_retries})",
+                        "WARNING",
+                    )
+                    time.sleep(min(2 ** recoverable_attempt_count, 10))
+                    continue
+
+                print_status("Network/provider timeout - generating final report", "WARNING")
+                if callback_handler:
+                    callback_handler.emit_termination(
+                        "network_timeout",
+                        "Provider/network timeout detected. Switching to final report.",
+                    )
+                return AgentRunResult("network_timeout", "Provider/network timeout detected")
+            raise
+
+    return AgentRunResult("interrupted", "")
+
+
+def finalize_report_and_evaluation(
+    *,
+    agent: Any | None,
+    callback_handler: Any,
+    target: str,
+    objective: str,
+    module: str,
+    logger: Any,
+) -> None:
+    """Generate final report and evaluation artifacts once."""
+    if not callback_handler:
+        logger.warning("No callback_handler available for evaluation trigger")
+        return
+    try:
+        callback_handler.ensure_report_generated(agent, target, objective, module)
+        logger.info("Triggering evaluation on completion")
+        callback_handler.trigger_evaluation_on_completion()
+
+        default_evaluation = os.getenv("ENABLE_OBSERVABILITY", "false")
+        if os.getenv("ENABLE_AUTO_EVALUATION", default_evaluation).lower() == "true":
+            model_timeout = get_model_timeout(agent.model, 300) if agent is not None else 300
+            callback_handler.wait_for_evaluation_completion(timeout=max(300, model_timeout))
+    except Exception as error:
+        logger.warning("Error in final report/evaluation: %s", error)
+
+
+def close_log_outputs() -> None:
+    """Close intercepted log streams when present."""
+    if hasattr(sys.stdout, "close") and hasattr(sys.stdout, "log"):
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "close") and hasattr(sys.stderr, "log"):
+        try:
+            sys.stderr.close()
+        except Exception:
+            pass
+
+
+def cleanup_operation_resources(
+    *,
+    agent: Any | None,
+    callback_handler: Any,
+    args: Any,
+    operation_id: str,
+    operation_start: float,
+    telemetry: Any,
+    logger: Any,
+) -> None:
+    """Close operation resources and persist final report/evaluation state."""
+    browser.close_browser()
+
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(channel_close_all())
+    loop.run_until_complete(close_oast_providers())
+    loop.close()
+
+    if interrupted:
+        ui_mode = os.environ.get("CYBER_UI_MODE", "cli").lower()
+        if ui_mode == "react":
+            close_log_outputs()
+            return
+        print_status("Exiting immediately due to interrupt", "WARNING")
+        close_log_outputs()
+        os._exit(1)
+
+    should_finalize = agent is not None or bool(getattr(args, "report", False))
+
+    if should_finalize:
+        finalize_report_and_evaluation(
+            agent=agent,
+            callback_handler=callback_handler,
+            target=args.target,
+            objective=args.objective,
+            module=args.module,
+            logger=logger,
+        )
+
+    if agent is not None:
+        agent.cleanup()
+
+    should_cleanup = not args.keep_memory and not args.memory_path
+
+    if should_cleanup:
+        try:
+            target_name = sanitize_target_name(args.target)
+            logger.debug("Calling clean_operation_memory with target_name=%s", target_name)
+            clean_operation_memory(operation_id, target_name)
+            logger.info("Memory cleaned up for operation %s", operation_id)
+        except Exception as cleanup_error:
+            logger.warning("Error cleaning up memory: %s", cleanup_error)
+    else:
+        logger.debug("Skipping cleanup - memory will be preserved")
+
+    end_time = time.time()
+    total_time = end_time - operation_start
+    logger.info("Operation %s ended after %.2fs", operation_id, total_time)
+
+    flush_traces(telemetry=telemetry)
+    close_log_outputs()
 
 
 def main():
@@ -807,263 +1135,66 @@ def main():
             bug_bounty_headers=bug_bounty_headers,
             mcp_connections=mcp_connections,
         )
-        agent, callback_handler = create_agent(
+        runtime_resources = create_agent_runtime_resources(
             target=args.target,
             objective=args.objective,
             config=config,
         )
+        callback_handler = runtime_resources.callback_handler
 
-        if active_plan:
-            current_message = ""
-            agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `get_plan()`)\n{active_plan}"}])]
-            if memories:
-                agent.messages.append(Message(role="user",
-                                              content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
-            if 'status="active"' in active_task:
-                agent.messages.append(Message(role="user", content=[{"text": active_task}]))
+        if not bool(args.report):
+            agent = create_agent(
+                target=args.target,
+                objective=args.objective,
+                config=config,
+                runtime_resources=runtime_resources,
+            )
 
-        # Execute autonomous operation
-        initial_reasoning_retry = 2
-        # the count of consecutive action-less results
-        actionless_attempt_count = 0
-
-        # SDK-aligned execution loop with continuation support
-        while not interrupted and not args.report:
-            last_tool_call_count = sum(callback_handler.tool_counts.values(), start=0)
-            try:
-                # add reflection snapshot
-                if "<reflection_snapshot>" not in current_message and not current_message.startswith(initial_prompt):
-                    progress_percent = int(getattr(callback_handler, "get_budget_progress", lambda: 0)())
-                    reflection_snapshot = get_reflection_snapshot(
-                        progress_percent=progress_percent,
-                        budget=budget_cfg,
-                        plan_current_phase=None,
-                    )
-                    current_message = current_message + "\n\n" + f"<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
-
-                print_status(
-                    f"Agent processing: {current_message[:100]}{' ...' if len(current_message) > 100 else ''}",
-                    "THINKING",
-                )
-                logger.debug(f"Agent processing: {current_message}")
-
-                # trim context
-                strip_reflection_snapshot_messages(agent)
-                _ensure_prompt_within_budget(agent)
-
-                # Execute agent with the current message. This is a long, blocking call.
-                result = agent(current_message)
-
-                logger.debug(f"Agent result: {repr(result)}")
-
-                # Pass the metrics from the result to the callback handler
-                if (
-                    callback_handler
-                    and hasattr(result, "metrics")
-                    and result.metrics
-                ):
-                    if hasattr(result.metrics, "accumulated_usage"):
-                        if result.metrics.accumulated_usage:
-                            # Create an object that matches what _process_metrics expects
-                            # It expects event_loop_metrics.accumulated_usage to be accessible
-                            class MetricsObject:
-                                def __init__(self, accumulated_usage):
-                                    self.accumulated_usage = accumulated_usage
-
-                            metrics_obj = MetricsObject(
-                                result.metrics.accumulated_usage
-                            )
-                            callback_handler.process_metrics(metrics_obj)
-
-                # Detect lack of tool progress
-                tool_total_count = sum(callback_handler.tool_counts.values())
-                if tool_total_count > last_tool_call_count:
-                    actionless_attempt_count = 0
-                else:
-                    actionless_attempt_count += 1
-                    logger.debug(
-                        "Agent returned without new tool calls, actionless_count=%d, tool_total_count=%d",
-                        actionless_attempt_count,
-                        tool_total_count,
-                    )
-
-                # Check if we should continue
-                if callback_handler and callback_handler.should_stop():
-                    if callback_handler.stop_tool_used:
-                        print_status("Stop tool used - terminating", "SUCCESS")
-                        # Generate report immediately when stop tool is used
-                        logger.info(
-                            "Stop tool detected - generating report before termination"
-                        )
-                        callback_handler.ensure_report_generated(
-                            agent, args.target, args.objective, args.module
-                        )
-                    elif callback_handler.has_reached_limit():
-                        print_status("Budget limit reached - terminating", "SUCCESS")
-                    break
-
-                # Allow at least one assistant turn to emit reasoning before concluding no action
-                if sum(callback_handler.tool_counts.values()) == 0:
-                    # If we've seen any reasoning emitted, give the agent one more cycle
-                    # This prevents premature termination when the first turn is pure reasoning
-                    if getattr(callback_handler, "_emitted_any_reasoning", False):
-                        logger.debug(
-                            "Initial reasoning observed with no tools yet; continuing one more cycle"
-                        )
-                    elif initial_reasoning_retry <= 0:
-                        print_status("No actions taken - completing", "SUCCESS")
-                        break
-                    initial_reasoning_retry -= 1
-                # If agent hasn't done anything substantial for a while, break to avoid infinite loop
-                elif actionless_attempt_count > 2:
-                    termination_reason = f"No actions taken after {actionless_attempt_count} attempts"
-                    print_status(termination_reason, "WARNING")
-                    if callback_handler:
-                        callback_handler.emit_termination("stalled", termination_reason)
-                    break
-
-                # Generate continuation prompt - time-budget aware safety check in case callback_handler is None
-                try:
-                    elapsed = time.time() - operation_start
-                    if args.max_duration is not None and elapsed >= float(args.max_duration) * 60.0:
-                        logger.info("Duration budget reached (elapsed=%ss)", int(elapsed))
-                        break
-                except Exception:
-                    pass
-
+            if active_plan:
                 current_message = ""
+                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `get_plan()`)\n{active_plan}"}])]
+                if memories:
+                    agent.messages.append(Message(role="user",
+                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
+                if 'status="active"' in active_task:
+                    agent.messages.append(Message(role="user", content=[{"text": active_task}]))
 
-                if actionless_attempt_count > 0:
-                    if actionless_attempt_count == 1:
-                        logger.warning(
-                            "Attempting to redirect model to emit valid tool calls because no tool calls were detected in last execution loop.")
-
-                        # remove trailing assistant messages, they may encourage the agent to consider the operation complete
-                        while len(agent.messages) > 3:
-                            tool_block_count = 0
-                            for block in agent.messages[-1].get("content", []):
-                                if not isinstance(block, dict):
-                                    continue
-                                if "toolUse" in block or "toolResult" in block:
-                                    tool_block_count += 1
-                            if tool_block_count == 0:
-                                agent.messages.pop()
-                            else:
-                                break
-
-                        current_message += "**MANDATORY ACTION**: Take your time to decide which tool to call next. A tool MUST be called next to make progress."
-                    else:
-                        active_plan = get_memory_client(silent=True).get_active_plan()
-                        if active_plan and active_plan.assessment_complete:
-                            # plan is complete, legit exit
-                            break
-
-                        active_task = get_active_task() or ""
-                        memories = mem0_list()
-
-                        logger.warning(
-                            "Attempting to rebuild context because no tool calls were detected in last execution loop.")
-
-                        current_message = rebuild_agent_conversation(
-                            agent=agent,
-                            active_plan=active_plan,
-                            active_task=active_task,
-                            initial_prompt=initial_prompt,
-                            memories=memories,
-                        )
-
-            except BudgetLimitReached:
-                # Handle budget limit reached gracefully without context errors
-                print_status(
-                    "Budget limit reached",
-                    "SUCCESS",
+            try:
+                run_result = run_agent_until_terminal_state(
+                    agent=agent,
+                    callback_handler=callback_handler,
+                    current_message=current_message,
+                    initial_prompt=initial_prompt,
+                    budget_cfg=budget_cfg,
+                    operation_start=operation_start,
+                    max_duration=args.max_duration,
+                    logger=logger,
                 )
+                if run_result.reason == "stop_tool":
+                    logger.info("Stop tool detected - generating report before termination")
+                    callback_handler.ensure_report_generated(agent, args.target, args.objective, args.module)
+            except BudgetLimitReached:
+                print_status("Budget limit reached", "SUCCESS")
                 logger.debug("Budget limit reached - terminating gracefully")
-                break
-
-            except StopIteration as error:
-                # Strands agent completed normally; continue if budget remains.
-                logger.debug("Agent cycle completed: %s", str(error))
-                if (
-                    callback_handler
-                    and callback_handler.has_reached_limit()
-                ):
-                    print_status("Step limit reached", "SUCCESS")
-                    break
-                # Continue to next cycle.
-
-            except Exception as error:
-                # Handle other termination scenarios
-                error_str = str(error).lower()
-                # TODO: when MaxTokensReachedException, do one attempt at rebuilding conversation
-                if isinstance(error, MaxTokensReachedException) or "maxtokensreached" in error_str or "max_tokens" in error_str:
-                    print_status(
-                        "Token limit reached - generating final report", "WARNING"
-                    )
-                    logger.debug("Termination exception", exc_info=error)
-                    try:
-                        if callback_handler:
-                            callback_handler.emit_termination(
-                                "max_tokens",
-                                "Model token limit reached. Switching to final report."
-                            )
-                            callback_handler.ensure_report_generated(
-                                agent, args.target, args.objective, args.module
-                            )
-                    except Exception as max_tokens_finish_error:
-                        logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
-                    break
-
+            except MaxTokensReachedException as error:
+                print_status("Token limit reached - generating final report", "WARNING")
                 logger.debug("Termination exception", exc_info=error)
-                if "event loop cycle stop requested" in error_str:
-                    # Extract the reason from the error message
-                    reason_match = re.search(r"Reason: (.+?)(?:\\n|$)", str(error))
-                    reason = (
-                        reason_match.group(1)
-                        if reason_match
-                        else "Objective achieved"
-                    )
-                    print_status(f"Agent terminated: {reason}", "SUCCESS")
-                elif "budget limit" in error_str:
-                    print_status("Budget limit reached", "SUCCESS")
-                elif (
-                        any(isinstance(error, error_class) for error_class in
-                            [RequestsReadTimeout,
-                             RequestsConnectionError,
-                             BotoReadTimeoutError,
-                             BotoEndpointConnectionError,
-                             BotoConnectTimeoutError,
-                             litellm.RateLimitError,
-                             litellm.ServiceUnavailableError, ]) or
-                        any(n in error_str for n in
-                            ["read timed out", "readtimeouterror", "network connection", "ratelimiterror",
-                             "serviceunavailableerror"])
-                ):
-                    logger.debug("Network/provider timeout exception", exc_info=error)
-                    print_status(
-                        "Network/provider timeout - generating final report", "WARNING"
-                    )
-                    try:
-                        if callback_handler:
-                            callback_handler.emit_termination(
-                                "network_timeout",
-                                "Provider/network timeout detected. Switching to final report."
-                            )
-                            callback_handler.ensure_report_generated(
-                                agent, args.target, args.objective, args.module
-                            )
-                    except Exception as network_finish_error:
-                        logger.error("Failed to complete for network timeout", exc_info=network_finish_error)
-                else:
-                    logger.exception("Unexpected agent error occurred", exc_info=error)
-                    termination_reason = str(error)
-                    print_status(f"Agent error: {termination_reason}", "ERROR")
+                try:
                     if callback_handler:
                         callback_handler.emit_termination(
-                            "error",
-                            termination_reason
+                            "max_tokens",
+                            "Model token limit reached. Switching to final report.",
                         )
-                break
+                        callback_handler.ensure_report_generated(agent, args.target, args.objective, args.module)
+                except Exception as max_tokens_finish_error:
+                    logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
+            except Exception as error:
+                logger.exception("Unexpected agent error occurred", exc_info=error)
+                termination_reason = str(error)
+                print_status(f"Agent error: {termination_reason}", "ERROR")
+                if callback_handler:
+                    callback_handler.emit_termination("error", termination_reason)
+                raise
 
         execution_time = time.time() - operation_start
         logger.info("Operation completed in %.2f seconds", execution_time)
@@ -1218,95 +1349,15 @@ def main():
         sys.exit(1)
 
     finally:
-        browser.close_browser()
-
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(channel_close_all())
-        loop.run_until_complete(close_oast_providers())
-        loop.close()
-
-        # Ensure log files are properly closed before exit
-        # FIXME: this looks duplicative of the above cleanup_logging()
-        def close_log_outputs():
-            if hasattr(sys.stdout, "close") and hasattr(sys.stdout, "log"):
-                try:
-                    sys.stdout.close()
-                except Exception:
-                    pass
-            if hasattr(sys.stderr, "close") and hasattr(sys.stderr, "log"):
-                try:
-                    sys.stderr.close()
-                except Exception:
-                    pass
-
-        # Skip cleanup if interrupted
-        if interrupted:
-            ui_mode = os.environ.get("CYBER_UI_MODE", "cli").lower()
-            if ui_mode == "react":
-                # In React UI mode, we've already emitted a structured termination event above.
-                # Just close log outputs and return without forcing an abrupt process exit so the
-                # event can reach the frontend cleanly.
-                close_log_outputs()
-                return
-            else:
-                print_status("Exiting immediately due to interrupt", "WARNING")
-                close_log_outputs()
-                os._exit(1)
-
-        if "agent" in locals():
-            # Ensure final report is generated - single trigger point
-            if callback_handler:
-                try:
-                    callback_handler.ensure_report_generated(
-                        agent, args.target, args.objective, args.module
-                    )
-
-                    # Trigger evaluation after report generation
-                    logger.info("Triggering evaluation on completion")
-                    callback_handler.trigger_evaluation_on_completion()
-
-                    # Wait for evaluation to complete if running (uses same defaults as observability)
-                    default_evaluation = os.getenv("ENABLE_OBSERVABILITY", "false")
-                    if (
-                        os.getenv("ENABLE_AUTO_EVALUATION", default_evaluation).lower()
-                        == "true"
-                    ):
-                        callback_handler.wait_for_evaluation_completion(
-                            timeout=max(300, get_model_timeout(agent.model, 300)))
-
-                except Exception as error:
-                    logger.warning("Error in final report/evaluation: %s", error)
-            else:
-                logger.warning("No callback_handler available for evaluation trigger")
-
-            agent.cleanup()
-
-        # Clean up resources
-        should_cleanup = not args.keep_memory and not args.memory_path
-
-        if should_cleanup:
-            try:
-                # Extract target name for unified output structure cleanup
-                target_name = sanitize_target_name(args.target)
-                logger.debug(
-                    "Calling clean_operation_memory with target_name=%s", target_name
-                )
-                clean_operation_memory(operation_id, target_name)
-                logger.info("Memory cleaned up for operation %s", operation_id)
-            except Exception as cleanup_error:
-                logger.warning("Error cleaning up memory: %s", cleanup_error)
-        else:
-            logger.debug("Skipping cleanup - memory will be preserved")
-
-        # Log operation end
-        end_time = time.time()
-        total_time = end_time - operation_start
-        logger.info("Operation %s ended after %.2fs", operation_id, total_time)
-
-        flush_traces(telemetry=telemetry)
-
-        # Final cleanup of log outputs before exit
-        close_log_outputs()
+        cleanup_operation_resources(
+            agent=agent if "agent" in locals() else None,
+            callback_handler=callback_handler,
+            args=args,
+            operation_id=operation_id,
+            operation_start=operation_start,
+            telemetry=telemetry,
+            logger=logger,
+        )
 
 
 def ensure_workspace_marker_files():

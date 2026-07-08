@@ -38,7 +38,7 @@ class TestCLIArguments:
             with (
                 patch("cyberautoagent.setup_logging"),
                 patch("cyberautoagent.auto_setup", return_value=[]),
-                patch("cyberautoagent.create_agent", return_value=(Mock(), Mock())),
+                patch("cyberautoagent.create_agent", return_value=Mock()),
                 patch("cyberautoagent.get_initial_prompt"),
                 patch("cyberautoagent.print_banner"),
                 patch("cyberautoagent.print_section"),
@@ -208,6 +208,7 @@ class TestMainFunction:
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -234,6 +235,7 @@ class TestMainFunction:
         mock_print_banner,
         mock_get_prompt,
         mock_create_agent,
+        mock_create_agent_runtime_resources,
         mock_auto_setup,
         mock_setup_logging,
     ):
@@ -254,7 +256,8 @@ class TestMainFunction:
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = ["nmap", "nikto"]
         mock_get_prompt.return_value = "test prompt"
 
@@ -270,6 +273,7 @@ class TestMainFunction:
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -296,6 +300,7 @@ class TestMainFunction:
         mock_print_banner,
         mock_get_prompt,
         mock_create_agent,
+        mock_create_agent_runtime_resources,
         mock_auto_setup,
         mock_setup_logging,
     ):
@@ -316,7 +321,8 @@ class TestMainFunction:
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = []
         mock_get_prompt.return_value = "test prompt"
 
@@ -331,6 +337,7 @@ class TestMainFunction:
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -359,6 +366,7 @@ class TestMainFunction:
             mock_print_banner,
             mock_get_prompt,
             mock_create_agent,
+            mock_create_agent_runtime_resources,
             mock_auto_setup,
             mock_setup_logging,
     ):
@@ -379,7 +387,8 @@ class TestMainFunction:
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = []
         mock_get_prompt.return_value = "test prompt"
 
@@ -394,6 +403,7 @@ class TestMainFunction:
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -422,6 +432,7 @@ class TestMainFunction:
             mock_print_banner,
             mock_get_prompt,
             mock_create_agent,
+            mock_create_agent_runtime_resources,
             mock_auto_setup,
             mock_setup_logging,
     ):
@@ -442,7 +453,8 @@ class TestMainFunction:
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = []
         mock_get_prompt.return_value = "test prompt"
 
@@ -457,16 +469,25 @@ class TestMainFunction:
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.print_status")
     @patch(
         "sys.argv",
         ["cyberautoagent.py", "--target", "test.com", "--objective", "test objective", "--max-duration", "60"],
     )
-    def test_main_create_agent_failure(self, mock_print_status, mock_create_agent, mock_auto_setup, mock_setup_logging):
+    def test_main_create_agent_failure(
+        self,
+        mock_print_status,
+        mock_create_agent,
+        mock_create_agent_runtime_resources,
+        mock_auto_setup,
+        mock_setup_logging,
+    ):
         """Test main function when create_agent fails"""
 
         mock_create_agent.side_effect = Exception("Agent creation failed")
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=Mock())
         mock_auto_setup.return_value = []
 
         with pytest.raises(SystemExit) as exc_info:
@@ -476,6 +497,7 @@ class TestMainFunction:
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -505,6 +527,7 @@ class TestMainFunction:
             mock_print_banner,
             mock_get_prompt,
             mock_create_agent,
+            mock_create_agent_runtime_resources,
             mock_auto_setup,
             mock_setup_logging,
     ):
@@ -525,7 +548,8 @@ class TestMainFunction:
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = []
         mock_get_prompt.return_value = "test prompt"
 
@@ -737,7 +761,8 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
     monkeypatch.setattr(cyberautoagent.atexit, "register", Mock())
     monkeypatch.setattr(cyberautoagent, "configure_model_rate_limits", Mock())
     monkeypatch.setattr(cyberautoagent, "auto_setup", Mock(return_value=["shell"]))
-    monkeypatch.setattr(cyberautoagent, "create_agent", Mock(return_value=(fake_agent, callback)))
+    monkeypatch.setattr(cyberautoagent, "create_agent_runtime_resources", Mock(return_value=SimpleNamespace(callback_handler=callback)))
+    monkeypatch.setattr(cyberautoagent, "create_agent", Mock(return_value=fake_agent))
     monkeypatch.setattr(cyberautoagent, "print_status", Mock())
     monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
     monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
@@ -785,7 +810,8 @@ def _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback):
     monkeypatch.setattr(cyberautoagent.atexit, "register", Mock())
     monkeypatch.setattr(cyberautoagent, "configure_model_rate_limits", Mock())
     monkeypatch.setattr(cyberautoagent, "auto_setup", Mock(return_value=["shell"]))
-    monkeypatch.setattr(cyberautoagent, "create_agent", Mock(return_value=(fake_agent, callback)))
+    monkeypatch.setattr(cyberautoagent, "create_agent_runtime_resources", Mock(return_value=SimpleNamespace(callback_handler=callback)))
+    monkeypatch.setattr(cyberautoagent, "create_agent", Mock(return_value=fake_agent))
     monkeypatch.setattr(cyberautoagent, "print_status", Mock())
     monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
     monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
@@ -834,6 +860,268 @@ class CliCallback:
         return []
 
 
+class CallableCliAgent:
+    def __init__(self):
+        self.messages = []
+        self.model = SimpleNamespace()
+        self.cleanup = Mock()
+
+    def __call__(self, _message):
+        return SimpleNamespace(metrics=SimpleNamespace(accumulated_usage={"inputTokens": 1}))
+
+
+def _run_agent_helper(agent, callback, logger=None, **kwargs):
+    return cyberautoagent.run_agent_until_terminal_state(
+        agent=agent,
+        callback_handler=callback,
+        current_message=kwargs.pop("current_message", "initial"),
+        initial_prompt=kwargs.pop("initial_prompt", "initial"),
+        budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+        operation_start=kwargs.pop("operation_start", cyberautoagent.time.time()),
+        max_duration=kwargs.pop("max_duration", 60),
+        logger=logger or SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock()),
+        **kwargs,
+    )
+
+
+def test_run_agent_until_terminal_state_retries_recoverable_error(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    callback.has_reached_limit = Mock(return_value=False)
+    callback.process_metrics = Mock()
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class RetryAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = 0
+
+        def __call__(self, _message):
+            self.calls += 1
+            if self.calls == 1:
+                raise cyberautoagent.RequestsReadTimeout("read timed out")
+            callback.should_stop.return_value = True
+            return SimpleNamespace(metrics=SimpleNamespace(accumulated_usage={"inputTokens": 1}))
+
+    agent = RetryAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent.time, "sleep", Mock())
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = cyberautoagent.run_agent_until_terminal_state(
+        agent=agent,
+        callback_handler=callback,
+        current_message="initial",
+        initial_prompt="initial",
+        budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+        operation_start=cyberautoagent.time.time(),
+        max_duration=60,
+        logger=logger,
+    )
+
+    assert result.reason == "callback_stop"
+    assert agent.calls == 2
+    callback.process_metrics.assert_called_once()
+
+
+def test_run_agent_until_terminal_state_stop_tool(monkeypatch):
+    callback = CliCallback()
+    callback.stop_tool_used = True
+    callback.should_stop = Mock(return_value=True)
+    agent = CallableCliAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(agent, callback)
+
+    assert result.reason == "stop_tool"
+
+
+def test_run_agent_until_terminal_state_callback_budget_limit(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=True)
+    callback.has_reached_limit = Mock(return_value=True)
+    agent = CallableCliAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    with pytest.raises(cyberautoagent.BudgetLimitReached):
+        _run_agent_helper(agent, callback)
+
+
+def test_run_agent_until_terminal_state_no_actions(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+
+    class QuietAgent:
+        messages = []
+
+        def __call__(self, _message):
+            return SimpleNamespace(metrics=None)
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(QuietAgent(), callback)
+
+    assert result.reason == "no_actions"
+
+
+def test_run_agent_until_terminal_state_duration_budget(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    callback._emitted_any_reasoning = True
+    agent = CallableCliAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    with pytest.raises(cyberautoagent.BudgetLimitReached):
+        _run_agent_helper(agent, callback, operation_start=cyberautoagent.time.time() - 120, max_duration=1)
+
+
+def test_run_agent_until_terminal_state_recoverable_error_exhausted(monkeypatch):
+    callback = CliCallback()
+
+    class TimeoutAgent:
+        messages = []
+
+        def __call__(self, _message):
+            raise cyberautoagent.RequestsReadTimeout("read timed out")
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(TimeoutAgent(), callback, recoverable_retries=0)
+
+    assert result.reason == "network_timeout"
+    callback.emit_termination.assert_called_once()
+
+
+def test_run_agent_until_terminal_state_event_loop_stop(monkeypatch):
+    callback = CliCallback()
+
+    class EventStopAgent:
+        messages = []
+
+        def __call__(self, _message):
+            raise RuntimeError("event loop cycle stop requested\nReason: done")
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(EventStopAgent(), callback)
+
+    assert result.reason == "event_loop_stop"
+
+
+def test_run_agent_until_terminal_state_propagates_max_tokens(monkeypatch):
+    callback = CliCallback()
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class TokenAgent:
+        messages = []
+
+        def __call__(self, _message):
+            raise MaxTokensReachedException("max_tokens")
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    with pytest.raises(MaxTokensReachedException):
+        cyberautoagent.run_agent_until_terminal_state(
+            agent=TokenAgent(),
+            callback_handler=callback,
+            current_message="initial",
+            initial_prompt="initial",
+            budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+            operation_start=cyberautoagent.time.time(),
+            max_duration=60,
+            logger=logger,
+        )
+
+
+def test_finalize_report_and_evaluation_runs_once(monkeypatch):
+    callback = CliCallback()
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+    agent = SimpleNamespace(model=SimpleNamespace())
+    monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
+    monkeypatch.setattr(cyberautoagent, "get_model_timeout", Mock(return_value=450))
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=agent,
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    callback.ensure_report_generated.assert_called_once_with(agent, "example.com", "test", "web")
+    callback.trigger_evaluation_on_completion.assert_called_once()
+    callback.wait_for_evaluation_completion.assert_called_once_with(timeout=450)
+
+
+def test_finalize_report_and_evaluation_allows_missing_agent_for_report_mode(monkeypatch):
+    callback = CliCallback()
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+    monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=None,
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    callback.ensure_report_generated.assert_called_once_with(None, "example.com", "test", "web")
+    callback.wait_for_evaluation_completion.assert_called_once_with(timeout=300)
+
+
+def test_finalize_report_and_evaluation_handles_missing_handler_and_errors():
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=SimpleNamespace(model=SimpleNamespace()),
+        callback_handler=None,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+    logger.warning.assert_called_with("No callback_handler available for evaluation trigger")
+
+    callback = CliCallback()
+    callback.ensure_report_generated.side_effect = RuntimeError("report failed")
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=SimpleNamespace(model=SimpleNamespace()),
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    assert logger.warning.call_args.args[0] == "Error in final report/evaluation: %s"
+
+
 def test_cli_service_mode_idle_interrupt_returns(monkeypatch):
     monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--service-mode"])
     monkeypatch.setattr(cyberautoagent.signal, "signal", Mock())
@@ -866,12 +1154,13 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
 
     assert os.environ["CYBER_OPERATION_ID"] == "OP_20260102_000000"
     assert json.loads(os.environ["CYBER_BUG_BOUNTY_HEADERS"]) == {"X-Test": "1"}
-    fake_agent.cleanup.assert_called_once()
+    callback.ensure_report_generated.assert_called_once_with(None, "example.com", "report", "web")
+    fake_agent.cleanup.assert_not_called()
 
 
 def test_cli_main_service_mode_with_params_auto_runs(monkeypatch, tmp_path):
     callback = CliCallback()
-    fake_agent = SimpleNamespace(messages=[], model=SimpleNamespace(), cleanup=Mock())
+    fake_agent = CallableCliAgent()
     _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
     monkeypatch.setattr(
         cyberautoagent.sys,
@@ -886,7 +1175,7 @@ def test_cli_main_service_mode_with_params_auto_runs(monkeypatch, tmp_path):
 
 def test_cli_main_passes_token_and_cost_budgets_to_agent_config(monkeypatch, tmp_path):
     callback = CliCallback()
-    fake_agent = SimpleNamespace(messages=[], model=SimpleNamespace(), cleanup=Mock())
+    fake_agent = CallableCliAgent()
     _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
     monkeypatch.setattr(
         cyberautoagent.sys,

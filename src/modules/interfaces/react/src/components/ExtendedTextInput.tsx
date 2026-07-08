@@ -22,6 +22,7 @@ interface ExtendedTextInputProps {
   showCursor?: boolean;
   cursorChar?: string;
   disabled?: boolean;
+  textColor?: string;
 }
 
 /**
@@ -37,7 +38,8 @@ export const ExtendedTextInput: React.FC<ExtendedTextInputProps> = ({
   focus = true,
   showCursor = true,
   cursorChar = '█',
-  disabled = false
+  disabled = false,
+  textColor
 }) => {
   // Use reducer-based text buffer for atomic operations
   const buffer = useTextBuffer({
@@ -76,33 +78,52 @@ export const ExtendedTextInput: React.FC<ExtendedTextInputProps> = ({
         return;
       }
 
-      // Home - move to beginning
-      if (key.ctrl && input === 'a') {
+      // Readline-style cursor movement.
+      if ((key.ctrl && input === 'a') || key.home) {
         buffer.moveToStart();
         return;
       }
 
-      // End - move to end
-      if (key.ctrl && input === 'e') {
+      if ((key.ctrl && input === 'e') || key.end) {
         buffer.moveToEnd();
         return;
       }
 
+      if (key.ctrl && input === 'b') {
+        buffer.moveLeft();
+        return;
+      }
+
+      if (key.ctrl && input === 'f') {
+        buffer.moveRight();
+        return;
+      }
+
       // Backspace - delete before cursor
-      if (key.backspace) {
+      if (key.backspace || (key.ctrl && input === 'h')) {
         buffer.deleteBeforeCursor();
         return;
       }
 
       // Delete key - delete at cursor
-      if (key.delete) {
+      if (key.delete || (key.ctrl && input === 'd')) {
         buffer.deleteAfterCursor();
         return;
       }
 
-      // Clear line
+      // Readline-style line editing. Ctrl+C and Ctrl+L are handled at the App level.
       if (key.ctrl && input === 'u') {
-        buffer.clear();
+        buffer.deleteToStart();
+        return;
+      }
+
+      if (key.ctrl && input === 'k') {
+        buffer.deleteToEnd();
+        return;
+      }
+
+      if (key.ctrl && input === 'w') {
+        buffer.deleteWordBeforeCursor();
         return;
       }
 
@@ -128,7 +149,7 @@ export const ExtendedTextInput: React.FC<ExtendedTextInputProps> = ({
     const safeValue = String(buffer.text || '');
 
     if (!showCursor || !focus || disabled) {
-      return <Text>{safeValue}</Text>;
+      return <Text color={textColor}>{safeValue}</Text>;
     }
 
     // Split text at cursor position and insert cursor character
@@ -139,10 +160,10 @@ export const ExtendedTextInput: React.FC<ExtendedTextInputProps> = ({
     // Render with cursor at position
     if (buffer.cursorPosition >= safeValue.length) {
       // Cursor at end
-      return <Text>{safeValue}{cursorChar}</Text>;
+      return <Text color={textColor}>{safeValue}{cursorChar}</Text>;
     } else {
       // Cursor in middle - show inverse character
-      return <Text>{beforeCursor}<Text inverse>{atCursor}</Text>{afterCursor}</Text>;
+      return <Text color={textColor}>{beforeCursor}<Text inverse>{atCursor}</Text>{afterCursor}</Text>;
     }
   } catch (error) {
     // Fallback render without logging

@@ -1862,8 +1862,8 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self._task_event_emitted_by_tooluse = set()
 
             if tool_use_id and tool_use_id not in self._task_event_emitted_by_tooluse:
-                # task_started: on get_active_task or task_done tool results
-                if tool_name in {"get_active_task", "task_done"}:
+                # task_started: on several tool outputs
+                if tool_name in {"get_active_task", "task_done", "create_tasks", "store_plan", "stop"}:
                     payload = self._extract_active_task_payload(output_text)
                     if isinstance(payload, dict):
                         # task_done first

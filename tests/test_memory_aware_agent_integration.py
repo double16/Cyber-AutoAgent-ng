@@ -84,7 +84,7 @@ class TestMemoryAwareAgentIntegration:
             op_id="OP_20240101_120000",
             provider="bedrock",
         )
-        agent, handler = create_agent(target="test.com", objective="test objective", config=config)
+        agent = create_agent(target="test.com", objective="test objective", config=config)
 
         # Verify memory system was initialized
         mock_initialize_memory.assert_called_once()
@@ -94,7 +94,6 @@ class TestMemoryAwareAgentIntegration:
 
         # Verify agent was created with memory-aware system prompt
         assert agent is not None
-        assert handler is not None
 
         # Check that the system prompt contains memory context
         system_prompt = agent.system_prompt
@@ -147,7 +146,7 @@ class TestMemoryAwareAgentIntegration:
             op_id="OP_20240101_120000",
             provider="bedrock",
         )
-        agent, handler = create_agent(target="test.com", objective="test objective", config=config)
+        agent = create_agent(target="test.com", objective="test objective", config=config)
 
         # Verify memory system was initialized
         mock_initialize_memory.assert_called_once()
@@ -155,7 +154,6 @@ class TestMemoryAwareAgentIntegration:
 
         # Verify agent was created with fresh start system prompt
         assert agent is not None
-        assert handler is not None
 
         # Check that the system prompt contains fresh start context
         system_prompt = agent.system_prompt
@@ -222,14 +220,13 @@ class TestMemoryAwareAgentIntegration:
                 provider="bedrock",
                 memory_path="/test/memory/path",
             )
-            agent, handler = create_agent(target="test.com", objective="test objective", config=config)
+            agent = create_agent(target="test.com", objective="test objective", config=config)
 
         # Verify memory system was initialized with path
         mock_initialize_memory.assert_called_once()
 
         # Verify agent was created with memory path context
         assert agent is not None
-        assert handler is not None
 
         # Check that the system prompt contains memory path context
         system_prompt = agent.system_prompt
@@ -284,11 +281,10 @@ class TestMemoryAwareAgentIntegration:
             op_id="OP_20240101_120000",
             provider="bedrock",
         )
-        agent, handler = create_agent(target="test.com", objective="test objective", config=config)
+        agent = create_agent(target="test.com", objective="test objective", config=config)
 
         # Verify agent was still created successfully
         assert agent is not None
-        assert handler is not None
 
         # Check that the system prompt contains fallback memory context
         system_prompt = agent.system_prompt
@@ -349,11 +345,10 @@ class TestMemoryAwareAgentIntegration:
             op_id="OP_20240101_120000",
             provider="ollama",
         )
-        agent, handler = create_agent(target="test.com", objective="test objective", config=config)
+        agent = create_agent(target="test.com", objective="test objective", config=config)
 
         # Verify agent was created successfully
         assert agent is not None
-        assert handler is not None
 
         # Check that the system prompt contains both memory context and local server config
         system_prompt = agent.system_prompt

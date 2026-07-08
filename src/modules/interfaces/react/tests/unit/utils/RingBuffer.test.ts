@@ -34,4 +34,15 @@ describe('RingBuffer', () => {
         buffer.push('d');
         expect(buffer.toArray()).toEqual(['d']);
     });
+
+    it('releases retained item references when cleared', () => {
+        const buffer = new RingBuffer<{ payload: string }>(2);
+        const first = {payload: 'a'.repeat(1000)};
+        const second = {payload: 'b'.repeat(1000)};
+
+        buffer.pushMany([first, second]);
+        buffer.clear();
+
+        expect((buffer as unknown as { buf: unknown[] }).buf).toEqual([undefined, undefined]);
+    });
 });

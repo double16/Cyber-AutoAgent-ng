@@ -7,10 +7,11 @@ import os
 import sys
 import warnings
 import importlib.util
+from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from strands import Agent
 from strands.hooks import HookProvider
@@ -118,12 +119,32 @@ logger = get_logger("Agents.CyberAutoAgent")
 get_system_prompt = prompts.get_system_prompt
 
 
-def create_agent(
+@dataclass
+class AgentRuntimeResources:
+    """Shared operation resources reused by agents created within one work loop."""
+
+    config: AgentConfig
+    operation_id: str
+    server_config: Any
+    config_manager: Any
+    callback_handler: AgentEventHandler
+    tools_list: List[Any]
+    tool_executor: ConcurrentToolExecutor
+    system_prompt_payload: Any
+    system_prompt: str
+    hooks: List[HookProvider]
+    conversation_manager: MappingConversationManager
+    sdk_context_manager: Optional[str]
+    trace_attributes: Dict[str, Any]
+    prompt_token_limit: int
+
+
+def create_agent_runtime_resources(
     target: str,
     objective: str,
     config: Optional[AgentConfig] = None,
-) -> Tuple[Agent, AgentEventHandler]:
-    """Create autonomous agent"""
+) -> AgentRuntimeResources:
+    """Initialize shared operation resources used by one or more agents."""
 
     # Enable comprehensive SDK logging for debugging
     configure_sdk_logging(enable_debug=True)
@@ -796,10 +817,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         )
         hooks.append(prompt_rebuild_hook)
 
-    model = create_strands_model(config.provider, config.model_id, "primary")
-
-    agent_logger.debug("Creating autonomous agent")
-
     # Update conversation window size and limits from SDK config
     try:
         if config_manager.getenv("CYBER_CONVERSATION_WINDOW"):
@@ -862,79 +879,56 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         len(hooks), len(subagent_hooks)
     )
 
-    agent_kwargs = {
-        "model": model,
-        "name": f"Cyber-AutoAgent {config.op_id or operation_id}",
-        "tools": tools_list,
-        "tool_executor": tool_executor,
-        "system_prompt": system_prompt_payload,
-        "callback_handler": callback_handler,
-        "hooks": hooks if hooks else None,  # Add hooks if available
-        "load_tools_from_directory": True,
-        "trace_attributes": {
-            # Core identification - session_id is the key for Langfuse trace naming
-            "langfuse.session.id": operation_id,
-            "langfuse.user.id": f"cyber-agent-{config.target}",
-            # Human-readable name that Langfuse will pick up
-            "name": f"Security Assessment - {config.target} - {operation_id}",
-            # Tags for filtering and categorization
-            "langfuse.tags": [
-                "Cyber-AutoAgent",
-                config.provider.upper(),
-                operation_id,
-            ],
-            "langfuse.environment": config_manager.getenv(
-                "DEPLOYMENT_ENV", "production"
-            ),
-            "langfuse.agent.type": "main_orchestrator",
-            "langfuse.capabilities.swarm": True,
-            # Standard OTEL attributes
-            "session.id": operation_id,
-            "user.id": f"cyber-agent-{config.target}",
-            # Agent identification
-            "agent.name": "Cyber-AutoAgent",
-            "agent.version": __version__,
-            "gen_ai.agent.name": "Cyber-AutoAgent",
-            "gen_ai.system": "Cyber-AutoAgent",
-            # Operation metadata
-            "operation.id": operation_id,
-            "operation.type": "security_assessment",
-            "operation.start_time": datetime.now().isoformat(),
-            "operation.budget.max_duration_minutes": config.budget.max_duration_minutes,
-            "operation.budget.max_tokens": config.budget.max_tokens,
-            "operation.budget.max_cost": config.budget.max_cost,
-            # Target and objective
-            "target.host": config.target,
-            "objective.description": config.objective,
-            # Model configuration
-            "model.provider": config.provider,
-            "model.id": config.model_id,
-            "model.region": config.region_name
-            if config.provider in ["bedrock", "litellm"]
-            else "local",
-            "gen_ai.request.model": config.model_id,
-            # Tool configuration
-            "tools.available": len(trace_attributes_tool_names),
-            "tools.names": trace_attributes_tool_names,
-            "tools.parallel_limit": 8,
-            # Memory configuration
-            "memory.enabled": True,
-            "memory.path": config.memory_path if config.memory_path else "ephemeral",
-        },
+    trace_attributes = {
+        # Core identification - session_id is the key for Langfuse trace naming
+        "langfuse.session.id": operation_id,
+        "langfuse.user.id": f"cyber-agent-{config.target}",
+        # Human-readable name that Langfuse will pick up
+        "name": f"Security Assessment - {config.target} - {operation_id}",
+        # Tags for filtering and categorization
+        "langfuse.tags": [
+            "Cyber-AutoAgent",
+            config.provider.upper(),
+            operation_id,
+        ],
+        "langfuse.environment": config_manager.getenv(
+            "DEPLOYMENT_ENV", "production"
+        ),
+        "langfuse.agent.type": "main_orchestrator",
+        "langfuse.capabilities.swarm": True,
+        # Standard OTEL attributes
+        "session.id": operation_id,
+        "user.id": f"cyber-agent-{config.target}",
+        # Agent identification
+        "agent.name": "Cyber-AutoAgent",
+        "agent.version": __version__,
+        "gen_ai.agent.name": "Cyber-AutoAgent",
+        "gen_ai.system": "Cyber-AutoAgent",
+        # Operation metadata
+        "operation.id": operation_id,
+        "operation.type": "security_assessment",
+        "operation.start_time": datetime.now().isoformat(),
+        "operation.budget.max_duration_minutes": config.budget.max_duration_minutes,
+        "operation.budget.max_tokens": config.budget.max_tokens,
+        "operation.budget.max_cost": config.budget.max_cost,
+        # Target and objective
+        "target.host": config.target,
+        "objective.description": config.objective,
+        # Model configuration
+        "model.provider": config.provider,
+        "model.id": config.model_id,
+        "model.region": config.region_name
+        if config.provider in ["bedrock", "litellm"]
+        else "local",
+        "gen_ai.request.model": config.model_id,
+        # Tool configuration
+        "tools.available": len(trace_attributes_tool_names),
+        "tools.names": trace_attributes_tool_names,
+        "tools.parallel_limit": 8,
+        # Memory configuration
+        "memory.enabled": True,
+        "memory.path": config.memory_path if config.memory_path else "ephemeral",
     }
-    if model_uses_server_side_state(model):
-        agent_logger.info(
-            "Skipping local conversation manager for stateful model '%s'; "
-            "conversation state is managed server-side.",
-            config.model_id,
-        )
-    else:
-        # Use proactive sliding + summarization fallback for stateless models.
-        agent_kwargs["conversation_manager"] = conversation_manager
-        if sdk_context_manager:
-            # Let Strands add its context offloader/plugin support while our
-            # project-specific conversation manager remains authoritative.
-            agent_kwargs["context_manager"] = sdk_context_manager
 
     def create_subagent_callback_handler(
             name: str,
@@ -964,7 +958,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         callback_handler_factory=create_subagent_callback_handler,
         conversation_manager = conversation_manager,
         context_manager = sdk_context_manager,
-        base_trace_attributes = agent_kwargs["trace_attributes"],
+        base_trace_attributes = trace_attributes,
     )
     init_agent_factory(agent_factory_config)
 
@@ -976,6 +970,64 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     os.environ["STRANDS_NON_INTERACTIVE"] = "true"
     os.environ["STRANDS_HTTP_ALLOW_INSECURE_SSL"] = "true"
 
+    return AgentRuntimeResources(
+        config=config,
+        operation_id=operation_id,
+        server_config=server_config,
+        config_manager=config_manager,
+        callback_handler=callback_handler,
+        tools_list=tools_list,
+        tool_executor=tool_executor,
+        system_prompt_payload=system_prompt_payload,
+        system_prompt=system_prompt,
+        hooks=hooks,
+        conversation_manager=conversation_manager,
+        sdk_context_manager=sdk_context_manager,
+        trace_attributes=trace_attributes,
+        prompt_token_limit=prompt_token_limit,
+    )
+
+
+def create_agent(
+    target: str,
+    objective: str,
+    config: Optional[AgentConfig] = None,
+    runtime_resources: Optional[AgentRuntimeResources] = None,
+) -> Agent:
+    """Create autonomous agent from shared runtime resources."""
+    runtime = runtime_resources or create_agent_runtime_resources(target, objective, config)
+    config = runtime.config
+
+    agent_logger = logging.getLogger("CyberAutoAgent")
+    agent_logger.debug("Creating autonomous agent")
+
+    model = create_strands_model(config.provider, config.model_id, "primary")
+
+    agent_kwargs = {
+        "model": model,
+        "name": f"Cyber-AutoAgent {config.op_id or runtime.operation_id}",
+        "tools": runtime.tools_list,
+        "tool_executor": runtime.tool_executor,
+        "system_prompt": runtime.system_prompt_payload,
+        "callback_handler": runtime.callback_handler,
+        "hooks": runtime.hooks if runtime.hooks else None,
+        "load_tools_from_directory": True,
+        "trace_attributes": runtime.trace_attributes,
+    }
+    if model_uses_server_side_state(model):
+        agent_logger.info(
+            "Skipping local conversation manager for stateful model '%s'; "
+            "conversation state is managed server-side.",
+            config.model_id,
+        )
+    else:
+        # Use proactive sliding + summarization fallback for stateless models.
+        agent_kwargs["conversation_manager"] = runtime.conversation_manager
+        if runtime.sdk_context_manager:
+            # Let Strands add its context offloader/plugin support while our
+            # project-specific conversation manager remains authoritative.
+            agent_kwargs["context_manager"] = runtime.sdk_context_manager
+
     # Create agent (telemetry is handled globally by Strands SDK)
     agent = create_agent_with_stateful_retry(agent_kwargs, config.model_id, Agent)
     # Allow reasoning deltas only when the provider/model supports them
@@ -984,14 +1036,14 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         setattr(agent, "_allow_reasoning_content", bool(caps.supports_reasoning))
     except Exception:
         setattr(agent, "_allow_reasoning_content", False)
-    if prompt_token_limit:
-        setattr(agent, "_prompt_token_limit", prompt_token_limit)
+    if runtime.prompt_token_limit:
+        setattr(agent, "_prompt_token_limit", runtime.prompt_token_limit)
     # Ensure legacy-compatible system prompt is directly accessible for tests
     try:
-        setattr(agent, "system_prompt", system_prompt)
+        setattr(agent, "system_prompt", runtime.system_prompt)
     except Exception:
         pass
     agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))
 
     agent_logger.debug("Agent initialized successfully")
-    return agent, callback_handler
+    return agent

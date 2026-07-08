@@ -71,10 +71,9 @@ def test_agent_creation_litellm(
     from modules.agents.cyber_autoagent import create_agent, AgentConfig
 
     config = AgentConfig(target="t", objective="o", provider="litellm", op_id="OP_TEST")
-    agent, handler = create_agent(target="t", objective="o", config=config)
+    agent = create_agent(target="t", objective="o", config=config)
 
     assert agent is not None
-    assert handler is not None
     mock_create_litellm.assert_called_once()
 
 

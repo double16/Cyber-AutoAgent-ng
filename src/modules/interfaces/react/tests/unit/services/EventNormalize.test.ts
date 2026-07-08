@@ -248,6 +248,14 @@ describe('normalizeEvent source coverage', () => {
             status: 'success',
         }));
 
+        expect(normalizeEvent({
+            type: 'tool_output',
+            output: {stdout: 'ok', stderr: 'warn'},
+        })).toEqual(expect.objectContaining({
+            output: expect.objectContaining({text: 'ok\nwarn'}),
+            status: 'success',
+        }));
+
         const promptChange = normalizeEvent({
             type: 'prompt_change',
             overlay: '{"payload":{"text":"ok"}}',
