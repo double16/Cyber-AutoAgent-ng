@@ -62,7 +62,8 @@ RUN /tmp/apt_proxy_clean.sh && \
 # Environment
 ENV GOPATH="/home/cyberagent/go"
 ENV GOCACHE="/home/cyberagent/go/.cache"
-ENV PATH="/app/.venv/bin:/home/cyberagent/go/bin:$PATH"
+# Starting with /usr/local ensures custom tools are first
+ENV PATH="/usr/local/sbin:/usr/local/bin:/app/.venv/bin:/home/cyberagent/go/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH="/home/cyberagent/.cache/ms-playwright"
 ENV PYTHONPATH="/usr/lib/python3/dist-packages:/app/src"
 
