@@ -5,8 +5,6 @@
 
 import React from 'react';
 import { Box, Static, Text } from 'ink';
-import Spinner from 'ink-spinner';
-import { ThinkingIndicator } from './ThinkingIndicator.js';
 import { StreamEvent } from '../types/events.js';
 import { formatToolInput } from '../utils/toolFormatters.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
@@ -21,60 +19,6 @@ import type { Config } from '../contexts/ConfigContext.js';
 
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
 let cachedProjectRoot: string | null | undefined;
-
-// Tracks the most recently-started task title so it can be shown in the ThinkingIndicator.
-let activeTaskTitle: string | null = null;
-
-const CompactStartupThinking: React.FC<{
-  enabled?: boolean;
-  message?: string | null;
-  startTime?: number;
-}> = ({ enabled = true, message, startTime }) => {
-  const theme = themeManager.getCurrentTheme();
-  const isRecordingMode = process.env.CYBER_RECORDING_MODE === 'true';
-  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
-
-  React.useEffect(() => {
-    if (!startTime || !enabled) {
-      setElapsedSeconds(0);
-      return;
-    }
-
-    if (isRecordingMode) {
-      setElapsedSeconds(0);
-      return;
-    }
-
-    const updateElapsed = () => {
-      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startTime) / 1000)));
-    };
-
-    updateElapsed();
-
-    const interval = setInterval(updateElapsed, 1000);
-    return () => clearInterval(interval);
-  }, [startTime, enabled, isRecordingMode]);
-
-  return (
-    <Box>
-      {enabled ? (
-        <Text color={theme.primary}>
-          {isRecordingMode ? '⌛' : <Spinner type="dots" />}
-        </Text>
-      ) : (
-        <Text color={theme.muted}>[BUSY]</Text>
-      )}
-      <Text color={theme.muted}> </Text>
-      <Text color={theme.foreground}>{message || 'Initializing'}</Text>
-      {startTime && (
-        <>
-          <Text color={theme.muted}> </Text>
-          <Text color={theme.muted}>[{elapsedSeconds}s]</Text>
-        </>
-      )}
-    </Box>
-  );
-};
 
 const resolveProjectRoot = (): string | null => {
   if (cachedProjectRoot !== undefined) {
@@ -685,37 +629,15 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       );
       
     case 'task_started': {
-      const title = event.title;
-      if (typeof title === 'string' && title.trim().length > 0) {
-        activeTaskTitle = title.trim();
-      }
       return null;
     }
 
     case 'task_done': {
-      activeTaskTitle = null;
       return null;
     }
 
     case 'thinking':
-      if (event.context === 'startup' && event.compact) {
-        return (
-          <CompactStartupThinking
-            enabled={animationsEnabled}
-            message={event.message ?? null}
-            startTime={event.startTime}
-          />
-        );
-      }
-      return (
-        <ThinkingIndicator
-          context={event.context}
-          startTime={event.startTime}
-          enabled={animationsEnabled}
-          message={event.message ?? null}
-          taskTitle={activeTaskTitle ?? null}
-        />
-      );
+      return null;
 
     case 'thinking_end':
       // Don't render anything - this just signals to stop showing thinking indicator
@@ -1862,16 +1784,29 @@ const method = latestInput.method || 'GET';
     
     case 'tool_output': {
       // Standardized tool output from backend protocol
-      if (!('tool' in event) || !('output' in event)) {
+      if (!('output' in event)) {
         return null;
       }
       
-      const toolName = event.tool as string;
+      const toolName = String((event as any).tool || (event as any).tool_name || (event as any).toolName || 'tool');
       const toolStatus = (event.status as string) || 'success';
       const output = event.output as any;
       
       // Extract text content
-      const outputText = output?.text || '';
+      const outputText = (() => {
+        if (typeof output === 'string') return output;
+        if (output == null) return '';
+        if (typeof output.text === 'string') return output.text;
+        const stdout = typeof output.stdout === 'string' ? output.stdout : '';
+        const stderr = typeof output.stderr === 'string' ? output.stderr : '';
+        if (stdout || stderr) return [stdout, stderr].filter(Boolean).join('\n');
+        if (Array.isArray(output)) return output.map(item => String(item)).join('\n');
+        try {
+          return JSON.stringify(output, null, 2);
+        } catch {
+          return String(output);
+        }
+      })();
       
       if (!outputText.trim()) {
         return null;
@@ -2442,13 +2377,6 @@ export const StaticStreamDisplay: React.FC<{
 }> = React.memo(({ events, terminalWidth, availableHeight }) => {
   const eventKeyMapRef = React.useRef<WeakMap<object, string>>(new WeakMap());
   const eventSeqRef = React.useRef(0);
-  const renderedKeysRef = React.useRef<Set<string>>(new Set());
-  const renderedKeyOrderRef = React.useRef<string[]>([]);
-  const maxSeenKeys = React.useMemo(() => {
-    const env = Number(process.env.CYBER_MAX_STATIC_SEEN_KEYS);
-    if (Number.isFinite(env) && env > 500) return Math.floor(env);
-    return 5000;
-  }, []);
   const stableEventKey = React.useCallback((event: DisplayStreamEvent): string => {
     const any = event as any;
     const explicit = any?.id ?? any?.toolId ?? any?.tool_id;
@@ -2563,7 +2491,7 @@ export const StaticStreamDisplay: React.FC<{
             ? `reasoning (${agentName})`
           : 'reasoning';
         
-        const key = `rg-${stableEventKey(group.events[0])}`;
+        const key = `rg-${group.startIdx}-${stableEventKey(group.events[0])}`;
         out.push({
           key,
           render: () => (
@@ -2577,7 +2505,7 @@ export const StaticStreamDisplay: React.FC<{
         });
       } else {
         group.events.forEach((event, i) => {
-          const key = `ev-${stableEventKey(event)}`;
+          const key = `ev-${group.startIdx}-${i}-${stableEventKey(event)}`;
           out.push({
             key,
             render: () => (
@@ -2601,25 +2529,8 @@ export const StaticStreamDisplay: React.FC<{
     return out;
   }, [groups, operationContext, reportDetails.path, reportDetails.content, projectRoot, stableEventKey]);
 
-  const newItems = React.useMemo(() => {
-    const out: Item[] = [];
-    for (const item of items) {
-      if (renderedKeysRef.current.has(item.key)) {
-        continue;
-      }
-      renderedKeysRef.current.add(item.key);
-      renderedKeyOrderRef.current.push(item.key);
-      out.push(item);
-    }
-    while (renderedKeyOrderRef.current.length > maxSeenKeys) {
-      const oldest = renderedKeyOrderRef.current.shift();
-      if (oldest) renderedKeysRef.current.delete(oldest);
-    }
-    return out;
-  }, [items, maxSeenKeys]);
-
   return (
-    <Static items={newItems}>
+    <Static key={items[0]?.key ?? 'empty'} items={items}>
       {(item: Item) => item.render()}
     </Static>
   );

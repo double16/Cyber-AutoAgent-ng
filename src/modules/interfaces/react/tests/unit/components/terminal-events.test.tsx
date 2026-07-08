@@ -25,8 +25,13 @@ jest.unstable_mockModule('../../../src/hooks/useTerminalSize.js', () => ({
 }));
 
 const load = async () => {
-    const {Terminal, buildTrimmedReportContent} = await import('../../../src/components/Terminal.js');
-    return {Terminal, buildTrimmedReportContent};
+    const {
+        Terminal,
+        buildTrimmedReportContent,
+        estimateDisplayEventBytes,
+        trimDisplayEventForMemory,
+    } = await import('../../../src/components/Terminal.js');
+    return {Terminal, buildTrimmedReportContent, estimateDisplayEventBytes, trimDisplayEventForMemory};
 };
 
 const textFromTree = (node: any): string => {
@@ -64,6 +69,35 @@ describe('Terminal event processing', () => {
         expect(trimmed).toContain('line-0');
         expect(trimmed).toContain('... (content continues)');
         expect(trimmed).toContain('line-149');
+    });
+
+    it('trims single-line report content by character budget', async () => {
+        const {buildTrimmedReportContent} = await load();
+        const trimmed = buildTrimmedReportContent('x'.repeat(50000));
+
+        expect(trimmed.length).toBeLessThan(50000);
+        expect(trimmed).toContain('content trimmed due to memory budget');
+    });
+
+    it('estimates and trims large nested event payloads', async () => {
+        const {estimateDisplayEventBytes, trimDisplayEventForMemory} = await load();
+        const event = {
+            type: 'tool_start',
+            tool_input: {
+                command: 'scan',
+                payload: 'x'.repeat(20000),
+            },
+            metadata: {
+                output: 'y'.repeat(20000),
+            },
+        } as any;
+
+        expect(estimateDisplayEventBytes(event)).toBeGreaterThan(30000);
+
+        const trimmed = trimDisplayEventForMemory(event) as any;
+        expect(trimmed.tool_input.omitted).toBe(true);
+        expect(trimmed.metadata.omitted).toBe(true);
+        expect(estimateDisplayEventBytes(trimmed)).toBeLessThan(estimateDisplayEventBytes(event));
     });
 
     it('subscribes to execution events, emits metrics, renders processed events, and cleans up', async () => {
@@ -171,6 +205,7 @@ describe('Terminal event processing', () => {
     it('shows an initial thinking spinner before backend events arrive', async () => {
         const {Terminal} = await load();
         const service = new MockExecutionService();
+        const onThinkingUpdate = jest.fn();
 
         let view!: ReactTestRenderer;
         await act(async () => {
@@ -179,6 +214,7 @@ describe('Terminal event processing', () => {
                     executionService={service as any}
                     sessionId="run-initial-spinner"
                     terminalWidth={90}
+                    onThinkingUpdate={onThinkingUpdate}
                     animationsEnabled
                 />
             );
@@ -189,9 +225,11 @@ describe('Terminal event processing', () => {
         });
 
         const text = textFromTree(view.toJSON());
-        expect(text).toContain('spinner:dots');
-        expect(text).toContain('Initializing');
-        expect(text).not.toMatch(/^\n+/);
+        expect(text).not.toContain('spinner:dots');
+        expect(onThinkingUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            active: true,
+            context: 'startup',
+        }));
 
         act(() => {
             view.unmount();
@@ -201,6 +239,7 @@ describe('Terminal event processing', () => {
     it('keeps the thinking spinner visible after metrics and progress updates', async () => {
         const {Terminal} = await load();
         const service = new MockExecutionService();
+        const onThinkingUpdate = jest.fn();
 
         let view!: ReactTestRenderer;
         await act(async () => {
@@ -209,6 +248,7 @@ describe('Terminal event processing', () => {
                     executionService={service as any}
                     sessionId="run-spinner"
                     terminalWidth={90}
+                    onThinkingUpdate={onThinkingUpdate}
                     animationsEnabled
                 />
             );
@@ -223,8 +263,90 @@ describe('Terminal event processing', () => {
         });
 
         const text = textFromTree(view.toJSON());
-        expect(text).toContain('spinner:dots');
-        expect(text).toContain('\nspinner:dots');
+        expect(text).not.toContain('spinner:dots');
+        expect(onThinkingUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            active: true,
+            context: 'waiting',
+        }));
+        expect(onThinkingUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            active: true,
+            context: 'tool_preparation',
+        }));
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
+    it('clears completion cleanup timers when unmounted before delayed pruning runs', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+        const clearTimeoutSpy = jest.spyOn(global, 'clearTimeout');
+
+        let view!: ReactTestRenderer;
+        try {
+            await act(async () => {
+                view = TestRenderer.create(
+                    <Terminal
+                        executionService={service as any}
+                        sessionId="run-complete-cleanup"
+                        terminalWidth={90}
+                        animationsEnabled
+                    />
+                );
+            });
+
+            await act(async () => {
+                service.emit('event', {type: 'operation_complete', metrics: {tokens: 1}});
+                await Promise.resolve();
+            });
+            const completionTimerIndex = setTimeoutSpy.mock.calls.findIndex(call => call[1] === 1000);
+            expect(completionTimerIndex).toBeGreaterThanOrEqual(0);
+            const completionTimer = setTimeoutSpy.mock.results[completionTimerIndex]?.value;
+
+            act(() => {
+                view.unmount();
+            });
+
+            expect(clearTimeoutSpy).toHaveBeenCalledWith(completionTimer);
+        } finally {
+            setTimeoutSpy.mockRestore();
+            clearTimeoutSpy.mockRestore();
+        }
+    });
+
+    it('renders tool boundaries without waiting for the completed-stream timer', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-immediate-tool"
+                    terminalWidth={90}
+                    animationsEnabled={false}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'operation_init', operation_id: 'op-immediate', target: 'example.com'});
+            service.emit('event', {type: 'progress_update', step: 1, progressPercent: 5});
+            service.emit('event', {
+                type: 'tool_start',
+                tool_id: 'tool-immediate',
+                tool_name: 'shell',
+                tool_input: {command: 'curl http://example.com/ping'},
+            });
+            await Promise.resolve();
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('[PROGRESS 5%]');
+        expect(text).toContain('curl http://example.com/ping');
 
         act(() => {
             view.unmount();
@@ -272,7 +394,7 @@ describe('Terminal event processing', () => {
         });
     });
 
-    it('keeps task title context in the thinking spinner', async () => {
+    it('keeps prior tool results visible after model and later tool transitions', async () => {
         const {Terminal} = await load();
         const service = new MockExecutionService();
 
@@ -281,23 +403,114 @@ describe('Terminal event processing', () => {
             view = TestRenderer.create(
                 <Terminal
                     executionService={service as any}
+                    sessionId="run-tool-output-commit"
+                    terminalWidth={90}
+                    animationsEnabled={false}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'operation_init', operation_id: 'op-tools', target: 'example.com'});
+            service.emit('event', {type: 'progress_update', step: 1});
+            service.emit('event', {type: 'tool_start', tool_id: 'tool-1', tool_name: 'shell'});
+            service.emit('event', {
+                type: 'output',
+                content: 'first tool result',
+                metadata: {fromToolBuffer: true, tool: 'shell'},
+            });
+            service.emit('event', {type: 'model_invocation_start'});
+            service.emit('event', {type: 'reasoning', content: 'thinking about the next tool'});
+            service.emit('event', {type: 'tool_start', tool_id: 'tool-2', tool_name: 'shell'});
+            service.emit('event', {
+                type: 'output',
+                content: 'second tool result',
+                metadata: {fromToolBuffer: true, tool: 'shell'},
+            });
+            service.emit('event', {type: 'tool_end', toolId: 'tool-2', toolName: 'shell'});
+            jest.advanceTimersByTime(100);
+            await Promise.resolve();
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('first tool result');
+        expect(text).toContain('second tool result');
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
+    it('renders standardized tool_output stdout through the terminal stream', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-tool-output-stdout"
+                    terminalWidth={90}
+                    animationsEnabled={false}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'operation_init', operation_id: 'op-stdout', target: 'example.com'});
+            service.emit('event', {type: 'tool_output', tool_name: 'shell', status: 'success', output: {stdout: 'visible stdout'}});
+            jest.advanceTimersByTime(100);
+            await Promise.resolve();
+        });
+
+        expect(textFromTree(view.toJSON())).toContain('visible stdout');
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
+    it('routes backend thinking events to footer status', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const onThinkingUpdate = jest.fn();
+        const startTime = Date.now() - 5000;
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
                     sessionId="run-task-spinner"
                     terminalWidth={90}
+                    onThinkingUpdate={onThinkingUpdate}
                     animationsEnabled
                 />
             );
         });
 
         await act(async () => {
-            service.emit('event', {type: 'task_started', title: 'Enumerate target'});
-            service.emit('event', {type: 'progress_update', step: 1, progressPercent: 5});
+            service.emit('event', {
+                type: 'thinking',
+                context: 'startup',
+                message: 'Booting',
+                startTime,
+            });
+            service.emit('event', {type: 'thinking_end'});
             jest.advanceTimersByTime(50);
             await Promise.resolve();
         });
 
         const text = textFromTree(view.toJSON());
-        expect(text).toContain('spinner:dots');
-        expect(text).toContain('Enumerate target');
+        expect(text).not.toContain('spinner:dots');
+        expect(onThinkingUpdate).toHaveBeenCalledWith({
+            active: true,
+            context: 'startup',
+            message: 'Booting',
+            startTime,
+        });
+        expect(onThinkingUpdate).toHaveBeenCalledWith({active: false});
 
         act(() => {
             view.unmount();

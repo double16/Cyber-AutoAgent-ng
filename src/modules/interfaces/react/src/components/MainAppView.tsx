@@ -19,6 +19,7 @@ import { ModalRegistry } from './ModalRegistry.js';
 import { ApplicationState } from '../hooks/useApplicationState.js';
 import { OperationHistoryEntry } from '../hooks/useOperationManager.js';
 import { ModalType } from '../hooks/useModalManager.js';
+import type { ThinkingStatus } from '../types/thinking.js';
 
 interface MainAppViewProps {
   appState: ApplicationState;
@@ -77,7 +78,17 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
   const { stdout } = useStdout();
   const [deferStreamMount, setDeferStreamMount] = useState(false);
   const prevShowStreamRef = useRef<boolean>(false);
+  const deferStreamMountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hasStreamBegun, setHasStreamBegun] = useState(false);
+  const [thinkingStatus, setThinkingStatus] = useState<ThinkingStatus>({ active: false });
+  const [currentTaskTitle, setCurrentTaskTitle] = useState<string | null>(null);
+
+  const clearDeferStreamMountTimer = useCallback(() => {
+    if (deferStreamMountTimerRef.current) {
+      clearTimeout(deferStreamMountTimerRef.current);
+      deferStreamMountTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     const prev = prevShowStreamRef.current;
@@ -87,7 +98,11 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
       // causing the viewport to jump to the top and the footer to disappear briefly.
       // Instead, only defer the stream mount so the header paints first on this tick.
       setDeferStreamMount(true);
-      setTimeout(() => setDeferStreamMount(false), 0);
+      clearDeferStreamMountTimer();
+      deferStreamMountTimerRef.current = setTimeout(() => {
+        deferStreamMountTimerRef.current = null;
+        setDeferStreamMount(false);
+      }, 0);
       // A new stream is starting; allow header for this run
       setHasAnyOperationEnded(false);
     }
@@ -97,10 +112,16 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
       // We keep scrollback so users can review the previous operation's output
       // while returning to the main screen. If duplicate headers are a concern,
       // we can address them by adjusting header rendering, not by clearing.
+      clearDeferStreamMountTimer();
+      setDeferStreamMount(false);
     }
 
     prevShowStreamRef.current = showOperationStream;
-  }, [showOperationStream, stdout]);
+  }, [showOperationStream, stdout, clearDeferStreamMountTimer]);
+
+  useEffect(() => () => {
+    clearDeferStreamMountTimer();
+  }, [clearDeferStreamMountTimer]);
 
   // Reset flag when operation changes
   useEffect(() => {
@@ -109,8 +130,14 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
 
   const hasStreamBegunRef = useRef(false);
   const handleStreamEvent = useCallback((event: any) => {
-    if (hasStreamBegunRef.current) return;
     const eventType = event?.type;
+    if (eventType === 'task_started') {
+      const title = typeof event?.title === 'string' ? event.title.trim() : '';
+      setCurrentTaskTitle(title || null);
+    } else if (eventType === 'task_done') {
+      setCurrentTaskTitle(null);
+    }
+    if (hasStreamBegunRef.current) return;
     // Mark as begun on first meaningful content
     if (eventType === 'reasoning' || eventType === 'model_stream_delta' || eventType === 'content_block_delta' || eventType === 'output' || eventType === 'command' || eventType === 'tool_start' || eventType === 'tool_invocation_start') {
       hasStreamBegunRef.current = true;
@@ -124,6 +151,8 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
     const type = event?.type;
     if (type === 'operation_complete' || type === 'stopped' || type === 'complete') {
       setHasAnyOperationEnded(true);
+      setThinkingStatus({ active: false });
+      setCurrentTaskTitle(null);
     }
   }, []);
 
@@ -142,6 +171,10 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
   const handleMetricsUpdate = useCallback((metrics: any) => {
     actionsRef.current.updateMetrics?.(metrics);
   }, []); // No dependencies - uses ref to prevent re-creation
+
+  const handleThinkingUpdate = useCallback((status: ThinkingStatus) => {
+    setThinkingStatus(status);
+  }, []);
 
   // Also reset header suppression when a brand-new activeOperation appears in running state
   useEffect(() => {
@@ -162,6 +195,20 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
       });
     }
   }, [appState.activeOperation?.id, appState.activeOperation?.status]);
+
+  useEffect(() => {
+    setThinkingStatus({ active: false });
+    setCurrentTaskTitle(null);
+  }, [appState.activeOperation?.id]);
+
+  useEffect(() => {
+    if (!showOperationStream || activeModal !== ModalType.NONE) {
+      setThinkingStatus({ active: false });
+      if (!showOperationStream) {
+        setCurrentTaskTitle(null);
+      }
+    }
+  }, [activeModal, showOperationStream]);
 
   // Minimal cosmetic autoscroll toggle (UI only for now)
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
@@ -273,6 +320,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
               collapsed={activeModal !== ModalType.NONE}
               onEvent={handleEvent}
               onMetricsUpdate={handleMetricsUpdate}
+              onThinkingUpdate={handleThinkingUpdate}
               animationsEnabled={isAutoScrollEnabled && activeModal === ModalType.NONE}
               cleanupRef={terminalCleanupRef}
             />
@@ -310,6 +358,8 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
             isOperationRunning={appState.activeOperation ? appState.activeOperation.status === 'running' : false}
             isInputPaused={appState.userHandoffActive}
             operationName={!hasStreamBegun && appState.activeOperation ? (appState.activeOperation.description || 'Running assessment') : undefined}
+            thinkingStatus={thinkingStatus.active ? {...thinkingStatus, taskTitle: thinkingStatus.taskTitle ?? currentTaskTitle} : thinkingStatus}
+            animationsEnabled={isAutoScrollEnabled && activeModal === ModalType.NONE}
           />
         )}
       </Box>

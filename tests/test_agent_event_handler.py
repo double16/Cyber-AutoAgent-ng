@@ -288,6 +288,68 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert handler._stop_tool_used is True
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    ["get_active_task", "task_done", "create_tasks", "store_plan", "stop"],
+)
+def test_task_state_tool_results_emit_task_lifecycle_events(tool_name):
+    handler = make_handler()
+    tool_use_id = f"{tool_name}-1"
+    handler.tool_name_buffer[tool_use_id] = tool_name
+    task_payload = {
+        "closed": {"task_uid": "closed-1", "title": "Closed task", "status": "done"},
+        "task": {"task_uid": "active-1", "title": "Active task", "status": "active"},
+    }
+
+    handler._process_tool_result_from_message(
+        {
+            "toolUseId": tool_use_id,
+            "status": "success",
+            "content": [{"text": f"<active_task>{json.dumps(task_payload)}</active_task>"}],
+        }
+    )
+
+    task_done_events = [event for event in handler._events if event["type"] == "task_done"]
+    task_started_events = [event for event in handler._events if event["type"] == "task_started"]
+
+    assert task_done_events == [
+        {
+            "type": "task_done",
+            "task_uid": "closed-1",
+            "title": "Closed task",
+            "status": "done",
+        }
+    ]
+    assert task_started_events == [
+        {
+            "type": "task_started",
+            "task_uid": "active-1",
+            "title": "Active task",
+            "status": "active",
+        }
+    ]
+
+
+def test_non_task_state_tool_result_does_not_emit_task_lifecycle_events():
+    handler = make_handler()
+    handler.tool_name_buffer["shell-1"] = "shell"
+    task_payload = {
+        "closed": {"task_uid": "closed-1", "title": "Closed task", "status": "done"},
+        "task": {"task_uid": "active-1", "title": "Active task", "status": "active"},
+    }
+
+    handler._process_tool_result_from_message(
+        {
+            "toolUseId": "shell-1",
+            "status": "success",
+            "content": [{"text": f"<active_task>{json.dumps(task_payload)}</active_task>"}],
+        }
+    )
+
+    assert "task_done" not in event_types(handler)
+    assert "task_started" not in event_types(handler)
+
+
 def test_mem0_store_success_updates_report_estimate_without_memory_reads(monkeypatch):
     handler = make_handler()
     monkeypatch.setattr(rb, "token_calc", lambda chars, model_id=None: int(chars))

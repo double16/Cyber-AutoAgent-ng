@@ -30,32 +30,23 @@ const load = async () => {
 };
 
 describe('StreamDisplay broad event rendering', () => {
-  it('keeps compact startup elapsed time static in recording mode', async () => {
-    jest.useFakeTimers();
-    jest.setSystemTime(new Date('2026-07-06T12:00:00Z'));
-    process.env.CYBER_RECORDING_MODE = 'true';
-    try {
-      const { EventLine, render } = await load();
-      const startTime = Date.now() - 7_000;
-      const view = render(
-        <EventLine
-          event={{ type: 'thinking', context: 'startup', compact: true, startTime, message: 'Initializing' } as any}
-          animationsEnabled
-        />
-      );
+  it('treats thinking events as non-rendering stream controls', async () => {
+    const { EventLine, render } = await load();
+    const startup = render(
+      <EventLine
+        event={{ type: 'thinking', context: 'startup', startTime: Date.now(), message: 'Initializing' } as any}
+        animationsEnabled
+      />
+    ).lastFrame();
+    const normal = render(
+      <EventLine
+        event={{ type: 'thinking', context: 'reasoning', message: 'Working' } as any}
+        animationsEnabled
+      />
+    ).lastFrame();
 
-      const beforeTick = view.lastFrame() || '';
-      expect(beforeTick).toContain('⌛');
-      const beforeElapsed = beforeTick.match(/\[[0-9]+s\]/)?.[0];
-      expect(beforeElapsed).toBeTruthy();
-
-      jest.advanceTimersByTime(4_000);
-      const afterTick = view.lastFrame() || '';
-      expect(afterTick).toContain(beforeElapsed || '');
-    } finally {
-      delete process.env.CYBER_RECORDING_MODE;
-      jest.useRealTimers();
-    }
+    expect(startup || '').toBe('');
+    expect(normal || '').toBe('');
   });
 
   it('renders SDK, lifecycle, reasoning, termination, and metadata event variants', async () => {
@@ -213,8 +204,12 @@ describe('StreamDisplay broad event rendering', () => {
     ];
 
     expect(computeDisplayGroups(events).length).toBeGreaterThan(0);
-    expect(render(<StreamDisplay events={events} animationsEnabled={false} />).lastFrame()).toContain('Operation initialization complete');
-    expect(render(<StaticStreamDisplay events={events} terminalWidth={100} availableHeight={40} />).lastFrame()).toContain('whoami');
+    const streamFrame = render(<StreamDisplay events={events} animationsEnabled={false} />).lastFrame();
+    expect(streamFrame).toContain('Operation initialization complete');
+    expect(streamFrame).toContain('ok');
+    const staticFrame = render(<StaticStreamDisplay events={events} terminalWidth={100} availableHeight={40} />).lastFrame();
+    expect(staticFrame).toContain('whoami');
+    expect(staticFrame).toContain('ok');
 
     const longOutput = render(
       <EventLine
@@ -244,6 +239,36 @@ describe('StreamDisplay broad event rendering', () => {
 
     expect(output).toContain('line-0');
     expect(output).toContain('line-539');
+  });
+
+  it('updates completed stream content after an initial tool output', async () => {
+    const { StaticStreamDisplay, render } = await load();
+    const firstEvents: any[] = [
+      { type: 'progress_update', step: 3, id: 'progress-3' },
+      { type: 'tool_start', tool_name: 'shell', tool_id: 'tool-which', tool_input: { command: 'which feroxbuster' }, id: 'tool-which' },
+      { type: 'output', content: '/usr/local/bin/feroxbuster', metadata: { fromToolBuffer: true, tool: 'shell' }, id: 'which-output' },
+    ];
+    const nextEvents: any[] = [
+      ...firstEvents,
+      { type: 'reasoning', content: 'Need to enumerate directories.', id: 'reasoning-next' },
+      { type: 'progress_update', step: 4, id: 'progress-4' },
+      {
+        type: 'tool_start',
+        tool_name: 'shell',
+        tool_id: 'tool-ferox',
+        tool_input: { command: 'feroxbuster -u http://host.docker.internal:32782' },
+        id: 'tool-ferox',
+      },
+    ];
+
+    const view = render(<StaticStreamDisplay events={firstEvents} terminalWidth={100} availableHeight={40} />);
+    expect(view.lastFrame()).toContain('/usr/local/bin/feroxbuster');
+
+    view.rerender(<StaticStreamDisplay events={nextEvents} terminalWidth={100} availableHeight={40} />);
+    const updated = view.lastFrame();
+    expect(updated).toContain('/usr/local/bin/feroxbuster');
+    expect(updated).toContain('Need to enumerate directories.');
+    expect(updated).toContain('feroxbuster -u http://host.docker.internal:32782');
   });
 
   it('resolves report path candidates across absolute, relative, inferred, and unsafe inputs', async () => {

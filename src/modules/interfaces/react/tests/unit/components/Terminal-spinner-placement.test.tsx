@@ -27,18 +27,20 @@ function processEventsForSpinners(events: TestEvent[], animationsEnabled = true)
 
     const showThinking = (context: string) => {
         activeThinking = true;
-        results.push({type: 'thinking', context});
+        if (animationsEnabled) {
+            results.push({type: 'thinking', context});
+        }
     };
 
     for (const event of events) {
         switch (event.type) {
             case 'operation_init':
                 results.push(event);
-                if (animationsEnabled && !activeThinking) showThinking('startup');
+                if (!activeThinking) showThinking('startup');
                 break;
             case 'progress_update':
                 results.push(event);
-                if (animationsEnabled) showThinking('tool_preparation');
+                showThinking('tool_preparation');
                 break;
             case 'reasoning':
                 activeThinking = false;
@@ -46,7 +48,7 @@ function processEventsForSpinners(events: TestEvent[], animationsEnabled = true)
                 results.push(event);
                 break;
             case 'tool_start':
-                if (animationsEnabled) showThinking('tool_execution');
+                showThinking('tool_execution');
                 results.push(event);
                 break;
             case 'output':
@@ -58,11 +60,11 @@ function processEventsForSpinners(events: TestEvent[], animationsEnabled = true)
             case 'tool_invocation_end':
                 activeThinking = false;
                 results.push(event);
-                if (animationsEnabled && !activeReasoning) showThinking('waiting');
+                if (!activeReasoning) showThinking('waiting');
                 break;
             case 'rate_limit':
                 results.push(event);
-                if (animationsEnabled) showThinking('rate_limit');
+                showThinking('rate_limit');
                 break;
             case 'operation_complete':
                 activeThinking = false;

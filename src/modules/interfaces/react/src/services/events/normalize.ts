@@ -298,6 +298,15 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
       // Standardize shape: tool, status, output.text
       if (e.output && typeof e.output === 'string') {
         e.output = { text: e.output };
+      } else if (e.output && typeof e.output === 'object' && typeof e.output.text !== 'string') {
+        const stdout = typeof e.output.stdout === 'string' ? e.output.stdout : '';
+        const stderr = typeof e.output.stderr === 'string' ? e.output.stderr : '';
+        if (stdout || stderr) {
+          e.output = {
+            ...e.output,
+            text: [stdout, stderr].filter(Boolean).join('\n'),
+          };
+        }
       }
       if (!e.status) e.status = 'success';
       return e;

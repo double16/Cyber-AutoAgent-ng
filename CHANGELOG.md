@@ -2,6 +2,7 @@
 
 ### Features
 
+- Move React thinking/spinner status into a persistent footer line above the existing metrics footer.
 - Add recording-aware terminal mode with `--recording` override and automatic parent-process detection for `asciinema`.
 - Maintain an `outputs/<target>/latest` pointer to the current operation directory.
 - Show indexed progress for each final report agent call in both the React terminal UI and headless output.
