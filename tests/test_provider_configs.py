@@ -73,7 +73,7 @@ def test_split_litellm_model_id_handles_prefix_variant_and_models_alias():
     assert litellm_config.split_litellm_model_id(None) == ("", "", "")
 
 
-def test_loop_local_litellm_logging_worker_uses_distinct_workers_per_loop():
+def test_loop_local_litellm_logging_worker_uses_distinct_workers_per_lifecycle():
     created_workers = []
 
     class FakeWorker:
@@ -127,13 +127,59 @@ def test_loop_local_litellm_logging_worker_uses_distinct_workers_per_loop():
     asyncio.run(record_once())
 
     assert len(created_workers) == 2
-    assert created_workers[0].loop is not created_workers[1].loop
+    assert created_workers[0] is not created_workers[1]
     assert [worker.calls for worker in created_workers] == [1, 1]
     assert [worker.started for worker in created_workers] == [1, 1]
     assert [worker.enqueued for worker in created_workers] == [1, 1]
     assert [worker.cleared for worker in created_workers] == [2, 1]
     assert all(worker.timeout == 3.0 for worker in created_workers)
     assert all(worker.max_queue_size == 7 for worker in created_workers)
+
+
+def test_loop_local_litellm_logging_worker_retires_stopped_worker_before_reuse():
+    created_workers = []
+
+    class FakeWorker:
+        def __init__(self, timeout, max_queue_size):
+            self.stopped = 0
+            self.cleared = 0
+            created_workers.append(self)
+
+        def ensure_initialized_and_enqueue(self, async_coroutine):
+            async_coroutine.close()
+
+        async def stop(self):
+            self.stopped += 1
+
+        async def flush(self):
+            return None
+
+        async def clear_queue(self):
+            self.cleared += 1
+
+    proxy = litellm_config._LoopLocalLiteLLMLoggingWorker(
+        SimpleNamespace(timeout=3.0, max_queue_size=7),
+        FakeWorker,
+    )
+
+    async def record_once():
+        async def noop():
+            return None
+
+        proxy.ensure_initialized_and_enqueue(noop())
+        await proxy.clear_queue()
+        await proxy.stop()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(record_once())
+        loop.run_until_complete(record_once())
+    finally:
+        loop.close()
+
+    assert len(created_workers) == 2
+    assert [worker.cleared for worker in created_workers] == [2, 1]
+    assert [worker.stopped for worker in created_workers] == [2, 1]
 
 
 def test_loop_local_litellm_logging_worker_closes_coroutine_without_running_loop():

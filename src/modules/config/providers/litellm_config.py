@@ -41,8 +41,18 @@ class _LoopLocalLiteLLMLoggingWorker:
         self._original_worker = original_worker
         self._worker_cls = worker_cls
         self._workers: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+        self._retired_workers: weakref.WeakSet[Any] = weakref.WeakSet()
         self._lock = threading.RLock()
         self._caa_loop_local_proxy = True
+
+    def _all_workers(self) -> List[Any]:
+        with self._lock:
+            workers = list(self._retired_workers)
+            seen_worker_ids = {id(worker) for worker in workers}
+            for worker in self._workers.values():
+                if id(worker) not in seen_worker_ids:
+                    workers.append(worker)
+        return workers
 
     def _worker_for_current_loop(self) -> Any:
         loop = asyncio.get_running_loop()
@@ -73,20 +83,21 @@ class _LoopLocalLiteLLMLoggingWorker:
 
     async def stop(self) -> None:
         with self._lock:
-            workers = list(self._workers.values())
+            active_workers = list(self._workers.values())
+            workers = self._all_workers()
         for worker in workers:
             await worker.stop()
+        with self._lock:
+            for worker in active_workers:
+                self._retired_workers.add(worker)
+            self._workers.clear()
 
     async def flush(self) -> None:
-        with self._lock:
-            workers = list(self._workers.values())
-        for worker in workers:
+        for worker in self._all_workers():
             await worker.flush()
 
     async def clear_queue(self) -> None:
-        with self._lock:
-            workers = list(self._workers.values())
-        for worker in workers:
+        for worker in self._all_workers():
             await worker.clear_queue()
 
     def _flush_on_exit(self) -> None:
