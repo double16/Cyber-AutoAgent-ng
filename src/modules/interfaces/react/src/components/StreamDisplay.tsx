@@ -224,6 +224,49 @@ export const getReportPathCandidates = (
   return candidates;
 };
 
+const REPORT_FILE_PREVIEW_BYTES = Math.max(
+  16384,
+  DISPLAY_LIMITS.REPORT_CONTENT_MAX_TOTAL_CHARS || 30000
+);
+
+export const readReportPreviewFile = async (
+  filePath: string,
+  maxBytes = REPORT_FILE_PREVIEW_BYTES
+): Promise<string> => {
+  const byteBudget = Math.max(1024, Math.floor(maxBytes));
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const stats = await handle.stat();
+    const size = Number(stats.size) || 0;
+    if (size <= 0) {
+      return '';
+    }
+
+    if (size <= byteBudget) {
+      const buffer = Buffer.alloc(size);
+      const { bytesRead } = await handle.read(buffer, 0, size, 0);
+      return buffer.subarray(0, bytesRead).toString('utf-8');
+    }
+
+    const headBytes = Math.max(1, Math.floor(byteBudget * 0.7));
+    const tailBytes = Math.max(1, byteBudget - headBytes);
+    const head = Buffer.alloc(headBytes);
+    const tail = Buffer.alloc(tailBytes);
+    const { bytesRead: headRead } = await handle.read(head, 0, headBytes, 0);
+    const { bytesRead: tailRead } = await handle.read(tail, 0, tailBytes, Math.max(0, size - tailBytes));
+    const omitted = Math.max(0, size - headRead - tailRead);
+    return [
+      head.subarray(0, headRead).toString('utf-8'),
+      '',
+      `... (report file preview truncated; ${omitted} bytes omitted) ...`,
+      '',
+      tail.subarray(0, tailRead).toString('utf-8'),
+    ].join('\n');
+  } finally {
+    await handle.close();
+  }
+};
+
 // Inline viewer to load and render the generated markdown report from disk
 const InlineReportViewer: React.FC<{
   ctx: OperationContext;
@@ -283,8 +326,7 @@ const InlineReportViewer: React.FC<{
             if (!fsSync.existsSync(candidate)) {
               continue;
             }
-            const data = await fs.readFile(candidate, 'utf-8');
-            loaded = data;
+            loaded = await readReportPreviewFile(candidate);
             usedPath = candidate;
             break;
           } catch {}
@@ -315,7 +357,7 @@ const InlineReportViewer: React.FC<{
           return;
         }
 
-        // File read succeeded; prefer full file content over inline fallback.
+        // File read succeeded; prefer bounded file preview over inline fallback.
         if (cancelled) {
           return;
         }

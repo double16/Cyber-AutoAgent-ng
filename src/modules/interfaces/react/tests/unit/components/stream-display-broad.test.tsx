@@ -1,6 +1,9 @@
 import React from 'react';
 import { TextEncoder, TextDecoder } from 'util';
 import {describe, expect, it, jest} from '@jest/globals';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 
 if (typeof global.TextEncoder === 'undefined') {
   global.TextEncoder = TextEncoder;
@@ -299,5 +302,31 @@ describe('StreamDisplay broad event rendering', () => {
     expect(absolute[0]).toBe('/var/reports/final.md');
 
     expect(getReportPathCandidates({}, null, null, null)).toEqual([]);
+  });
+
+  it('reads bounded report previews from disk without loading entire large reports', async () => {
+    const { readReportPreviewFile } = await load();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cyber-report-preview-'));
+    try {
+      const smallPath = path.join(tmpDir, 'small.md');
+      await fs.writeFile(smallPath, '# Short report\nbody', 'utf-8');
+      await expect(readReportPreviewFile(smallPath, 1024)).resolves.toBe('# Short report\nbody');
+
+      const largePath = path.join(tmpDir, 'large.md');
+      const head = 'A'.repeat(3000);
+      const middle = 'M'.repeat(6000);
+      const tail = 'Z'.repeat(3000);
+      await fs.writeFile(largePath, `${head}${middle}${tail}`, 'utf-8');
+
+      const preview = await readReportPreviewFile(largePath, 2048);
+
+      expect(preview.length).toBeLessThan(2400);
+      expect(preview).toContain('AAA');
+      expect(preview).toContain('ZZZ');
+      expect(preview).toContain('report file preview truncated');
+      expect(preview).not.toContain(middle);
+    } finally {
+      await fs.rm(tmpDir, {recursive: true, force: true});
+    }
   });
 });

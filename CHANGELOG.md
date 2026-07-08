@@ -15,6 +15,7 @@
 
 ### Fixes
 
+- Bound React inline final-report file reads to a preview so very large reports cannot spike heap on operation completion or exit.
 - Avoid LiteLLM async logging queue cross-event-loop errors when model calls run from thread-pool event loops.
 - Reserve estimated final-report token and cost budget during assessment so constrained runs stop early enough to generate reports.
 - Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.
