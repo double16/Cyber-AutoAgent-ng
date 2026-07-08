@@ -13,6 +13,7 @@
 
 ### Fixes
 
+- Avoid LiteLLM async logging queue cross-event-loop errors when model calls run from thread-pool event loops.
 - Reserve estimated final-report token and cost budget during assessment so constrained runs stop early enough to generate reports.
 - Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.
 - Update the React footer connection indicator from deployment detection and color the status icon.

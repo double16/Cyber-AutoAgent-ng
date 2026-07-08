@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from modules.config.models import factory as mod
+from modules.config.types import SDKConfig
 
 
 class FakeModel:
@@ -17,6 +18,7 @@ class FakeModel:
 
 class FakeConfigManager:
     def __init__(self):
+        self.sdk_config = SDKConfig()
         self.standard = {
             "model_id": "model-x",
             "region_name": "us-east-1",
@@ -72,6 +74,9 @@ class FakeConfigManager:
             swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm", temperature=0.6, max_tokens=700)),
         )
 
+    def get_sdk_config(self, _provider):
+        return self.sdk_config
+
     def is_thinking_model(self, _provider, model_id):
         return model_id == "thinking"
 
@@ -119,10 +124,12 @@ def test_create_bedrock_model_standard_and_thinking(monkeypatch, config_manager)
     standard = mod.create_bedrock_model("standard", "us-east-1", role="primary", effort="medium")
     assert standard.model_id == "standard"
     assert standard.kwargs["additional_request_fields"]["output_config"]["effort"] == "medium"
+    assert standard.kwargs["streaming"] is False
     assert standard._output_tokens == 600
 
     thinking = mod.create_bedrock_model("thinking", "us-east-1", role="primary")
     assert thinking.kwargs["max_tokens"] == 999
+    assert thinking.kwargs["streaming"] is False
     assert "existing" in thinking.kwargs["additional_request_fields"]["anthropic_beta"]
 
 
@@ -138,6 +145,7 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     monkeypatch.setattr(patches, "patch_ollama_model_json_toolcalls", Mock())
     ollama_model = mod.create_ollama_model("llama3", role="primary")
     assert ollama_model.kwargs["additional_args"]["think"] == "medium"
+    assert ollama_model.kwargs["stream"] is False
     assert ollama_model._output_tokens == 512
 
     fake_litellm = SimpleNamespace(get_max_tokens=Mock(return_value=500), context_window_fallbacks=None)
@@ -148,6 +156,7 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     assert litellm_model.kwargs["client_args"]["aws_region_name"] == "us-east-1"
     assert litellm_model.kwargs["client_args"]["aws_profile_name"] == "profile"
     assert litellm_model.kwargs["params"]["max_tokens"] == 500
+    assert litellm_model.kwargs["stream"] is False
     assert "thinking" in litellm_model.kwargs["client_args"]
 
     monkeypatch.setattr(gemini_mod, "GeminiModel", FakeModel)
@@ -158,6 +167,31 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     config_manager.env.pop("GEMINI_API_KEY")
     with pytest.raises(ValueError):
         mod.create_gemini_model("gemini/gemini-pro", "us-east-1")
+
+
+def test_create_models_propagate_enabled_sdk_streaming(monkeypatch, config_manager):
+    import modules.config.models as models_pkg
+    import modules.config.models.ollama as ollama_mod
+    import modules.agents.patches as patches
+    import strands.models
+    import strands.models.litellm as litellm_mod
+
+    config_manager.sdk_config = SDKConfig(enable_streaming=True)
+    monkeypatch.setattr(strands.models, "BedrockModel", FakeModel)
+    monkeypatch.setattr(ollama_mod, "OllamaModel", FakeModel)
+    monkeypatch.setattr(models_pkg, "get_capabilities", lambda *_args: fake_capabilities())
+    monkeypatch.setattr(patches, "patch_ollama_model_json_toolcalls", Mock())
+    fake_litellm = SimpleNamespace(get_max_tokens=Mock(return_value=500), context_window_fallbacks=None)
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+    monkeypatch.setattr(litellm_mod, "LiteLLMModel", FakeModel)
+
+    bedrock_model = mod.create_bedrock_model("standard", "us-east-1", role="primary")
+    ollama_model = mod.create_ollama_model("llama3", role="primary")
+    litellm_model = mod.create_litellm_model("bedrock/model", "us-east-1", role="primary")
+
+    assert bedrock_model.kwargs["streaming"] is True
+    assert ollama_model.kwargs["stream"] is True
+    assert litellm_model.kwargs["stream"] is True
 
 
 def test_create_strands_dispatch_all_providers_and_rate_limits(monkeypatch, config_manager):
