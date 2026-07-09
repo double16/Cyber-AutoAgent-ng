@@ -80,6 +80,17 @@ npm run build
 npm start
 ```
 
+## Interactive Commands
+
+```bash
+target https://testphp.vulnweb.com
+execute focus on OWASP Top 10
+continue OP_20260320_101501
+report OP_20260320_101501
+```
+
+`continue` and `report` can omit the operation ID to use the latest previous operation for the configured target.
+
 ## Configuration
 
 Configuration persists to `~/.cyber-autoagent/config.json`:

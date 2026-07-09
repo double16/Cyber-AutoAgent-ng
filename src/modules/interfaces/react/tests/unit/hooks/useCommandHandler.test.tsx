@@ -1,6 +1,6 @@
 import React from 'react';
 import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
-import {jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {useCommandHandler} from '../../../src/hooks/useCommandHandler.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -362,6 +362,70 @@ describe('useCommandHandler', () => {
             target: 'example.com',
         }));
         expect(props.openSafetyWarning).toHaveBeenCalled();
+
+        hook.unmount();
+    });
+
+    it('routes continue and report flow commands to the safety warning when ready', async () => {
+        const {props} = createProps();
+        props.assessmentFlowManager.isReadyForAssessmentExecution.mockReturnValue(true);
+        props.assessmentFlowManager.processUserInput
+            .mockReturnValueOnce({
+                success: true,
+                message: 'Continue operation requested OP_OLD',
+                readyToExecute: true,
+            })
+            .mockReturnValueOnce({
+                success: true,
+                message: 'Report regeneration requested OP_OLD',
+                readyToExecute: true,
+            });
+        const hook = renderHook(() => useCommandHandler(props as any));
+
+        await act(async () => {
+            await hook.current.handleGuidedFlowInput('continue OP_OLD');
+            await hook.current.handleGuidedFlowInput('report OP_OLD');
+        });
+
+        expect(props.assessmentFlowManager.processUserInput).toHaveBeenCalledWith('continue OP_OLD');
+        expect(props.assessmentFlowManager.processUserInput).toHaveBeenCalledWith('report OP_OLD');
+        expect(props.openSafetyWarning).toHaveBeenCalledTimes(2);
+        expect(props.openSafetyWarning).toHaveBeenCalledWith({
+            module: 'web',
+            target: 'example.com',
+            objective: 'test objective',
+        });
+
+        hook.unmount();
+    });
+
+    it('shows validation errors for continue and report flow commands that are not ready', async () => {
+        const {props} = createProps();
+        props.assessmentFlowManager.processUserInput
+            .mockReturnValueOnce({
+                success: false,
+                error: 'Usage: target <target_specification>, then continue [operation_id]',
+            })
+            .mockReturnValueOnce({
+                success: false,
+                error: 'Usage: target <target_specification>, then report [operation_id]',
+            });
+        const hook = renderHook(() => useCommandHandler(props as any));
+
+        await act(async () => {
+            await hook.current.handleGuidedFlowInput('continue');
+            await hook.current.handleGuidedFlowInput('report');
+        });
+
+        expect(props.addOperationHistoryEntry).toHaveBeenCalledWith(
+            'error',
+            'Usage: target <target_specification>, then continue [operation_id]'
+        );
+        expect(props.addOperationHistoryEntry).toHaveBeenCalledWith(
+            'error',
+            'Usage: target <target_specification>, then report [operation_id]'
+        );
+        expect(props.openSafetyWarning).not.toHaveBeenCalled();
 
         hook.unmount();
     });
