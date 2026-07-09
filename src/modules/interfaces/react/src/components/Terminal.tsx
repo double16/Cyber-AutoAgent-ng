@@ -518,6 +518,10 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       event.type === 'output'
     ))
   );
+  const isFinalReportProgressEvent = (event: DisplayStreamEvent): boolean => (
+    event.type === 'progress_update' &&
+    (((event as any).operation_stage === 'final_report') || (event as any).step === 'FINAL REPORT')
+  );
 
   // Unified helpers for delayed thinking spinner scheduling/cancellation
   const cancelDelayedThinking = () => {
@@ -1775,7 +1779,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             !(e.type === 'output' && Boolean((e as any).metadata?.finalReportCluster)) &&
             e.type !== 'separator' &&
             e.type !== 'divider' &&
-            !(e.type === 'progress_update' && (e as any).operation_stage === 'final_report')
+            !isFinalReportProgressEvent(e)
           );
           if (newCompletedEvents.length > 0) {
             completedBufRef.current.pushMany(newCompletedEvents);

@@ -669,7 +669,9 @@ describe('Terminal event processing', () => {
 
         const text = textFromTree(view.toJSON());
         expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({type: 'operation_init'}));
+        expect(text).toContain('[AGENT: WEB TESTER');
         expect(text).toContain('SECURITY ASSESSMENT REPORT');
+        expect((text.match(/\[FINAL REPORT\]/g) || []).length).toBe(1);
         expect(text).toContain('[FINAL REPORT 1/2] Executive summary');
         expect(text).toContain('[FINAL REPORT 2/2] Assessment methodology');
         expect((text.match(/\[FINAL REPORT 1\/2\] Executive summary/g) || []).length).toBe(1);
