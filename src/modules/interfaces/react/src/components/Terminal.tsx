@@ -474,6 +474,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       context,
       message: message ?? (typeof (extra as any).message === 'string' ? (extra as any).message : undefined),
       startTime: typeof (extra as any).startTime === 'number' ? (extra as any).startTime : Date.now(),
+      taskTitle: typeof (extra as any).taskTitle === 'string' ? (extra as any).taskTitle : undefined,
     });
   }
 
@@ -917,7 +918,18 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
         // Show thinking spinner while waiting for tool selection after progress update
         // Always reset and show spinner regardless of previous thinking state
-        if (!isReportProgress) {
+        if (isReportProgress) {
+          const reportStepLabel = typeof event.report_step_label === 'string'
+            ? event.report_step_label.trim()
+            : '';
+          activateThinking(
+            'waiting',
+            'Generating report',
+            reportStepLabel ? { taskTitle: reportStepLabel } : {},
+            true
+          );
+          seenThinkingThisPhaseRef.current = true;
+        } else {
           activateThinking('tool_preparation', undefined, {}, true);
           seenThinkingThisPhaseRef.current = true;
 
