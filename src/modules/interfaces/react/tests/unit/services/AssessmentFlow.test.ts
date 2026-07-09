@@ -1,4 +1,5 @@
 import {AssessmentFlow} from '../../../src/services/AssessmentFlow.js';
+import {describe, expect, it} from '@jest/globals';
 
 describe('AssessmentFlow', () => {
     it('starts at target stage with the default web module', () => {
@@ -89,6 +90,129 @@ describe('AssessmentFlow', () => {
             message: 'Custom objective configured: final objective',
         }));
         expect(flow.getValidatedAssessmentParameters()?.objective).toBe('final objective');
+    });
+
+    it('sets continue and report execution modes from ready state', () => {
+        const flow = new AssessmentFlow();
+
+        flow.processUserInput('target example.com');
+        flow.processUserInput('initial objective');
+
+        expect(flow.processUserInput('continue')).toEqual(expect.objectContaining({
+            success: true,
+            message: 'Continue operation requested',
+            readyToExecute: true,
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual({
+            module: 'web',
+            target: 'example.com',
+            objective: 'initial objective',
+            continueOperation: true,
+        });
+
+        expect(flow.processUserInput('continue OP_20260320_101501')).toEqual(expect.objectContaining({
+            success: true,
+            message: 'Continue operation requested OP_20260320_101501',
+            readyToExecute: true,
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual(expect.objectContaining({
+            continueOperation: 'OP_20260320_101501',
+        }));
+
+        expect(flow.processUserInput('report')).toEqual(expect.objectContaining({
+            success: true,
+            message: 'Report regeneration requested',
+            readyToExecute: true,
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual({
+            module: 'web',
+            target: 'example.com',
+            objective: 'initial objective',
+            reportOnly: true,
+        });
+
+        expect(flow.processUserInput('report OP_20260320_101501')).toEqual(expect.objectContaining({
+            success: true,
+            message: 'Report regeneration requested OP_20260320_101501',
+            readyToExecute: true,
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual(expect.objectContaining({
+            reportOnly: 'OP_20260320_101501',
+        }));
+    });
+
+    it('uses default objective for continue and report from objective stage', () => {
+        const flow = new AssessmentFlow();
+
+        flow.processUserInput('target example.com');
+        expect(flow.processUserInput('continue OP_OLD')).toEqual(expect.objectContaining({
+            success: true,
+            readyToExecute: true,
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual({
+            module: 'web',
+            target: 'example.com',
+            objective: 'web security assessment and reconnaissance',
+            continueOperation: 'OP_OLD',
+        });
+
+        flow.resetToTargetConfiguration();
+        flow.processUserInput('target example.com');
+        expect(flow.processUserInput('report OP_OLD')).toEqual(expect.objectContaining({
+            success: true,
+            readyToExecute: true,
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual({
+            module: 'web',
+            target: 'example.com',
+            objective: 'web security assessment and reconnaissance',
+            reportOnly: 'OP_OLD',
+        });
+    });
+
+    it('clears continue and report modes when execution intent changes', () => {
+        const flow = new AssessmentFlow();
+
+        flow.processUserInput('target example.com');
+        flow.processUserInput('initial objective');
+        flow.processUserInput('continue OP_OLD');
+        flow.processUserInput('execute final objective');
+        expect(flow.getValidatedAssessmentParameters()).toEqual({
+            module: 'web',
+            target: 'example.com',
+            objective: 'final objective',
+        });
+
+        flow.processUserInput('report OP_OLD');
+        flow.processUserInput('objective updated objective');
+        expect(flow.getValidatedAssessmentParameters()).toEqual({
+            module: 'web',
+            target: 'example.com',
+            objective: 'updated objective',
+        });
+    });
+
+    it('rejects continue and report without a target or with too many operation IDs', () => {
+        const flow = new AssessmentFlow();
+
+        expect(flow.processUserInput('continue')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: target <target_specification>, then continue [operation_id]',
+        }));
+        expect(flow.processUserInput('report')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: target <target_specification>, then report [operation_id]',
+        }));
+
+        flow.processUserInput('target example.com');
+        expect(flow.processUserInput('continue OP_ONE OP_TWO')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: continue [operation_id]',
+        }));
+        expect(flow.processUserInput('report OP_ONE OP_TWO')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: report [operation_id]',
+        }));
     });
 
     it('validates target command shape and non-empty target', () => {

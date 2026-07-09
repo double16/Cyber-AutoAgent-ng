@@ -206,12 +206,12 @@ describe('input and selection components', () => {
         const recordingView = render(<ThinkingIndicator startTime={Date.now() - 5_000} message="Recording"/>);
         const beforeTick = recordingView.lastFrame() || '';
         expect(beforeTick).toContain('⌛');
-        expect(beforeTick).toContain('[0s]');
+        expect(beforeTick).not.toContain('[0s]');
         act(() => {
             jest.advanceTimersByTime(3_000);
         });
         const afterTick = recordingView.lastFrame() || '';
-        expect(afterTick).toContain('[0s]');
+        expect(afterTick).not.toContain('s]');
         delete process.env.CYBER_RECORDING_MODE;
 
         let inline!: ReactTestRenderer;

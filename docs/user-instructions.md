@@ -166,6 +166,10 @@ Advanced users can directly edit `~/.cyber-autoagent/config.json`:
 target: https://testphp.vulnweb.com
 objective: Identify SQL injection vulnerabilities
 execute              # Start assessment
+continue             # Continue the latest previous operation for the target
+continue OP_20260320_101501
+report               # Re-generate the latest previous report for the target
+report OP_20260320_101501
 ```
 
 ### Command Line Mode

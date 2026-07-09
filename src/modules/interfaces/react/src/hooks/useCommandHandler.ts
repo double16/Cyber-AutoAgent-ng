@@ -265,6 +265,8 @@ export function useCommandHandler({
 ASSESSMENT COMMANDS:
   target <url>          - Set assessment target
   execute [objective]   - Start assessment with optional focus
+  continue [operation]  - Continue a previous operation
+  report [operation]    - Re-generate a report for a previous operation
   reset                 - Clear current configuration
 
 SLASH COMMANDS:
@@ -282,6 +284,8 @@ KEYBORD SHORTCUTS:
 EXAMPLES:
   target https://testphp.vulnweb.com
   execute focus on OWASP Top 10
+  continue OP_20260320_101501
+  report OP_20260320_101501
 
 For detailed instructions, use: /docs`;
         addOperationHistoryEntry('info', helpMessage);

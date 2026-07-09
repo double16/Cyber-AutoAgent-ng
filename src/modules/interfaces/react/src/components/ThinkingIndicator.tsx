@@ -132,7 +132,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
     return `${minutes}m ${secs}s`;
   };
 
-  const statusSuffix = startTime ? ` [${formatElapsed(elapsedSeconds)}]` : '';
+  const statusSuffix = (startTime && !isRecordingMode) ? ` [${formatElapsed(elapsedSeconds)}]` : '';
   const displayMessage = (taskTitle ? `${taskTitle} - ` : '') + (message || getContextMessage(context, phraseIndex));
   const spinnerWidth = enabled ? 1 : '[BUSY]'.length;
   const textWidth = maxWidth ? Math.max(0, maxWidth - spinnerWidth - 1) : undefined;

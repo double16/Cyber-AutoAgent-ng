@@ -517,6 +517,74 @@ describe('Terminal event processing', () => {
         });
     });
 
+    it('uses final report progress labels as thinking task titles', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const onThinkingUpdate = jest.fn();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-report-thinking-title"
+                    terminalWidth={90}
+                    onThinkingUpdate={onThinkingUpdate}
+                    animationsEnabled
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {
+                type: 'progress_update',
+                step: 'REPORT_AGENT',
+                operation_stage: 'final_report',
+                report_step_index: 1,
+                report_step_total: 2,
+                report_step_label: 'Executive summary',
+            });
+            service.emit('event', {
+                type: 'progress_update',
+                step: 'REPORT_AGENT',
+                operation_stage: 'final_report',
+                report_step_index: 2,
+                report_step_total: 2,
+            });
+            jest.advanceTimersByTime(18_500);
+            await Promise.resolve();
+        });
+
+        expect(onThinkingUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            active: true,
+            context: 'waiting',
+            message: 'Generating report',
+            taskTitle: 'Executive summary',
+        }));
+        expect(onThinkingUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            active: true,
+            context: 'waiting',
+            message: 'Generating report',
+        }));
+
+        const unlabeledCall = onThinkingUpdate.mock.calls
+            .map(call => call[0])
+            .find(status => (
+                status.active === true &&
+                status.message === 'Generating report' &&
+                status.taskTitle === undefined
+            ));
+        expect(unlabeledCall).toEqual(expect.objectContaining({
+            active: true,
+            context: 'waiting',
+            message: 'Generating report',
+        }));
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
     it('processes uncommon event transitions without duplicating or crashing', async () => {
         const {Terminal} = await load();
         const service = new MockExecutionService();
@@ -601,7 +669,9 @@ describe('Terminal event processing', () => {
 
         const text = textFromTree(view.toJSON());
         expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({type: 'operation_init'}));
+        expect(text).toContain('[AGENT: WEB TESTER');
         expect(text).toContain('SECURITY ASSESSMENT REPORT');
+        expect((text.match(/\[FINAL REPORT\]/g) || []).length).toBe(1);
         expect(text).toContain('[FINAL REPORT 1/2] Executive summary');
         expect(text).toContain('[FINAL REPORT 2/2] Assessment methodology');
         expect((text.match(/\[FINAL REPORT 1\/2\] Executive summary/g) || []).length).toBe(1);

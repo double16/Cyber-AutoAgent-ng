@@ -474,6 +474,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       context,
       message: message ?? (typeof (extra as any).message === 'string' ? (extra as any).message : undefined),
       startTime: typeof (extra as any).startTime === 'number' ? (extra as any).startTime : Date.now(),
+      taskTitle: typeof (extra as any).taskTitle === 'string' ? (extra as any).taskTitle : undefined,
     });
   }
 
@@ -516,6 +517,10 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       event.type === 'tool_output' ||
       event.type === 'output'
     ))
+  );
+  const isFinalReportProgressEvent = (event: DisplayStreamEvent): boolean => (
+    event.type === 'progress_update' &&
+    (((event as any).operation_stage === 'final_report') || (event as any).step === 'FINAL REPORT')
   );
 
   // Unified helpers for delayed thinking spinner scheduling/cancellation
@@ -917,7 +922,18 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
         // Show thinking spinner while waiting for tool selection after progress update
         // Always reset and show spinner regardless of previous thinking state
-        if (!isReportProgress) {
+        if (isReportProgress) {
+          const reportStepLabel = typeof event.report_step_label === 'string'
+            ? event.report_step_label.trim()
+            : '';
+          activateThinking(
+            'waiting',
+            'Generating report',
+            reportStepLabel ? { taskTitle: reportStepLabel } : {},
+            true
+          );
+          seenThinkingThisPhaseRef.current = true;
+        } else {
           activateThinking('tool_preparation', undefined, {}, true);
           seenThinkingThisPhaseRef.current = true;
 
@@ -1763,7 +1779,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             !(e.type === 'output' && Boolean((e as any).metadata?.finalReportCluster)) &&
             e.type !== 'separator' &&
             e.type !== 'divider' &&
-            !(e.type === 'progress_update' && (e as any).operation_stage === 'final_report')
+            !isFinalReportProgressEvent(e)
           );
           if (newCompletedEvents.length > 0) {
             completedBufRef.current.pushMany(newCompletedEvents);

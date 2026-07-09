@@ -363,7 +363,15 @@ export function useOperationManager({
         config.deploymentMode === 'single-container' ? 'Single Container' :
         config.deploymentMode === 'full-stack' ? 'Full Stack' : 'Auto';
       
-      addOperationHistoryEntry('info', `Starting ${assessmentParams.module} assessment on ${assessmentParams.target}`);
+      const operationSuffix = (value: string | boolean | undefined) =>
+        typeof value === 'string' && value ? ` ${value}` : '';
+      const operationStartMessage = assessmentParams.reportOnly
+        ? `Regenerating report${operationSuffix(assessmentParams.reportOnly)} for ${assessmentParams.target}`
+        : assessmentParams.continueOperation
+          ? `Continuing operation${operationSuffix(assessmentParams.continueOperation)} for ${assessmentParams.target}`
+          : `Starting ${assessmentParams.module} assessment on ${assessmentParams.target}`;
+
+      addOperationHistoryEntry('info', operationStartMessage);
       // Defer showing Operation ID until backend provides authoritative ID via operation_init
       addOperationHistoryEntry('info', 'Initializing operation…');
       addOperationHistoryEntry('info', `Execution Mode: ${deploymentModeDisplay}`);

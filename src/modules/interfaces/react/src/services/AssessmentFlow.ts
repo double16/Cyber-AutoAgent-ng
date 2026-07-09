@@ -59,6 +59,9 @@ export class AssessmentFlow {
     objective: null // Auto-generated based on module
   };
 
+  private continueOperation?: string | boolean;
+  private reportOnly?: string | boolean;
+
   /**
    * Dynamically maintained set of supported modules.
    * Defaults to ['web'] but should be updated by the UI with actual discovered modules.
@@ -142,11 +145,18 @@ export class AssessmentFlow {
       return null;
     }
     
-    return {
+    const params: AssessmentParams = {
       module: this.assessmentState.module!,
       target: this.assessmentState.target!,
       objective: this.assessmentState.objective || undefined
     };
+    if (this.continueOperation !== undefined) {
+      params.continueOperation = this.continueOperation;
+    }
+    if (this.reportOnly !== undefined) {
+      params.reportOnly = this.reportOnly;
+    }
+    return params;
   }
 
   /**
@@ -169,6 +179,7 @@ export class AssessmentFlow {
    * Useful for starting a completely new assessment configuration.
    */
   resetCompleteWorkflow(): void {
+    this.clearExecutionMode();
     this.assessmentState = {
       stage: 'target',
       module: this.defaultModule || 'web',
@@ -185,9 +196,68 @@ export class AssessmentFlow {
    * the same security domain without reselecting the module.
    */
   resetToTargetConfiguration(): void {
+    this.clearExecutionMode();
     this.assessmentState.stage = 'target';
     this.assessmentState.target = null;
     this.assessmentState.objective = null;
+  }
+
+  private clearExecutionMode(): void {
+    this.continueOperation = undefined;
+    this.reportOnly = undefined;
+  }
+
+  private processExecutionModeInput(userInput: string): FlowResult | null {
+    const match = userInput.match(/^(continue|report)(?:\s+(.+))?$/i);
+    if (!match) {
+      return null;
+    }
+
+    const mode = match[1].toLowerCase();
+    const rawOperationId = (match[2] || '').trim();
+    const operationIdParts = rawOperationId ? rawOperationId.split(/\s+/) : [];
+
+    if (operationIdParts.length > 1) {
+      return {
+        success: false,
+        message: `Invalid ${mode} command`,
+        error: `Usage: ${mode} [operation_id]`,
+        nextPrompt: `Provide at most one operation ID, e.g. ${mode} OP_20260320_101501`
+      };
+    }
+
+    if (!this.assessmentState.target) {
+      return {
+        success: false,
+        message: 'Please define your assessment target before using this command',
+        error: `Usage: target <target_specification>, then ${mode} [operation_id]`,
+        nextPrompt: 'Examples: target example.com, target 192.168.1.1, target https://api.example.com'
+      };
+    }
+
+    if (!this.assessmentState.objective) {
+      this.assessmentState.objective = this.generateDefaultObjective(this.assessmentState.module!);
+    }
+    this.assessmentState.stage = 'ready';
+
+    const operationValue: string | boolean = operationIdParts[0] || true;
+    if (mode === 'continue') {
+      this.continueOperation = operationValue;
+      this.reportOnly = undefined;
+    } else {
+      this.reportOnly = operationValue;
+      this.continueOperation = undefined;
+    }
+
+    const operationLabel = typeof operationValue === 'string' ? ` ${operationValue}` : '';
+    const action = mode === 'continue' ? 'Continue operation' : 'Report regeneration';
+
+    return {
+      success: true,
+      message: `${action} requested${operationLabel}`,
+      nextPrompt: 'Ready to execute - Press Enter to start operation',
+      readyToExecute: true
+    };
   }
 
   /**
@@ -217,6 +287,11 @@ export class AssessmentFlow {
     if (sanitizedInput.startsWith('module ')) {
       return this.processModuleSelectionInput(sanitizedInput);
     }
+
+    const executionModeResult = this.processExecutionModeInput(sanitizedInput);
+    if (executionModeResult) {
+      return executionModeResult;
+    }
     
     switch (this.assessmentState.stage) {
       case 'module':
@@ -232,6 +307,7 @@ export class AssessmentFlow {
         const lower = sanitizedInput.toLowerCase();
         // Allow overriding objective at the final stage using "execute <objective>"
         if (lower.startsWith('execute ')) {
+          this.clearExecutionMode();
           const objective = sanitizedInput.substring(8).trim();
           this.assessmentState.objective = objective || this.generateDefaultObjective(this.assessmentState.module!);
           return {
@@ -243,6 +319,7 @@ export class AssessmentFlow {
         }
         // Also allow updating the objective without immediate execution
         if (lower.startsWith('objective ')) {
+          this.clearExecutionMode();
           const objective = sanitizedInput.substring('objective '.length).trim();
           this.assessmentState.objective = objective || this.generateDefaultObjective(this.assessmentState.module!);
           return {
@@ -295,6 +372,7 @@ export class AssessmentFlow {
     // Update state and advance workflow regardless; backend will perform final validation
     this.assessmentState.module = requestedModuleName;
     this.assessmentState.stage = 'target';
+    this.clearExecutionMode();
 
     return {
       success: true,
@@ -338,6 +416,7 @@ export class AssessmentFlow {
     // Update state and advance workflow to objective
     this.assessmentState.target = targetSpecification;
     this.assessmentState.stage = 'objective';
+    this.clearExecutionMode();
     
     return {
       success: true,
@@ -358,6 +437,7 @@ export class AssessmentFlow {
     if (!userInput || userInput.trim() === '') {
       this.assessmentState.objective = this.generateDefaultObjective(this.assessmentState.module!);
       this.assessmentState.stage = 'ready';
+      this.clearExecutionMode();
       return {
         success: true,
         message: `Using default ${this.assessmentState.module} assessment objective`,
@@ -369,6 +449,7 @@ export class AssessmentFlow {
     if (userInput.toLowerCase().trim() === 'execute') {
       this.assessmentState.objective = this.generateDefaultObjective(this.assessmentState.module!);
       this.assessmentState.stage = 'ready';
+      this.clearExecutionMode();
       
       return {
         success: true,
@@ -383,6 +464,7 @@ export class AssessmentFlow {
       const objective = userInput.substring(8).trim(); // Remove 'execute ' prefix
       this.assessmentState.objective = objective || this.generateDefaultObjective(this.assessmentState.module!);
       this.assessmentState.stage = 'ready';
+      this.clearExecutionMode();
       
       return {
         success: true,
@@ -395,6 +477,7 @@ export class AssessmentFlow {
     // Set custom assessment objective (user typed something else)
     this.assessmentState.objective = userInput;
     this.assessmentState.stage = 'ready';
+    this.clearExecutionMode();
     
     return {
       success: true,
