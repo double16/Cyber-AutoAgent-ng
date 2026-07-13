@@ -29,11 +29,11 @@ def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, Dict[str, Any]]:
     """
     result = {}
     cyber_tools = _get_cyber_tools()
-    for tool in cyber_tools:
-        if tool not in available:
+    for tool_name in cyber_tools:
+        if tool_name not in available:
             continue
-        tool_cfg = cyber_tools.get(tool) or {}
-        real_command = tool_cfg.get("command", tool)
+        tool_cfg = cyber_tools.get(tool_name) or {}
+        real_command = tool_cfg.get("command", tool_name)
 
         pref_raw = tool_cfg.get("preference") or "fallback"
         pref_raw = str(pref_raw).strip().lower()
@@ -43,20 +43,42 @@ def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, Dict[str, Any]]:
         if isinstance(caps, str):
             caps = [caps]
         for cap in caps:
-            if not cap in result:
+            if cap not in result:
                 result[cap] = {}
             cap_dict = result.get(cap)
-            if not pref in cap_dict:
+            if pref not in cap_dict:
                 cap_dict[pref] = []
             pref_list = cap_dict.get(pref)
             pref_list.append(real_command)
-    # if only fallback is specified, make it preferred
-    for cap, cap_dict in result.items():
-        if len(cap_dict) == 1 and "preferred" not in cap_dict:
-            old_pref = next(iter(cap_dict.keys()))
-            cap_dict["preferred"] = cap_dict[old_pref]
-            cap_dict.pop(old_pref)
     return result
+
+
+def get_shell_command_specs(available: List[str]) -> List[Dict[str, Any]]:
+    """Return compact metadata for installed command-line programs."""
+
+    cyber_tools = _get_cyber_tools()
+    specs = []
+    seen_commands = set()
+    for tool_name in available:
+        tool_cfg = cyber_tools.get(tool_name) or {}
+        command = str(tool_cfg.get("command") or tool_name).strip()
+        if not command or command in seen_commands:
+            continue
+        capabilities = tool_cfg.get("caps") or []
+        if isinstance(capabilities, str):
+            capabilities = [capabilities]
+        preference = str(tool_cfg.get("preference") or "fallback").strip().lower()
+        preference = "preferred" if preference.startswith("p") else "fallback"
+        specs.append(
+            {
+                "command": command,
+                "description": str(tool_cfg.get("description") or ""),
+                "capabilities": [str(capability) for capability in capabilities],
+                "shell_preference": preference,
+            }
+        )
+        seen_commands.add(command)
+    return specs
 
 
 @lru_cache(maxsize=200)
@@ -108,7 +130,9 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
         - User asks “what tool can do X?”.
 
         How:
-        - Search by keywords; prefer tools marked `preferred`; pick one best match and use it.
+        - Search by keywords and prefer native agent tools over command-line programs for overlapping capabilities.
+        - Use a command-line program only for a required additional capability or a concrete native-tool limitation.
+        - `shell_preference` ranks command-line programs only against other command-line programs.
 
         Args:
             keywords:
@@ -123,7 +147,10 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
         catalog = ""
         all_tools = agent.tool_registry.get_all_tools_config()
         specific_tool = len(keywords) == 1 and (keywords[0] in all_tools or keywords[0] in shell_commands)
+        shell_found = False
         for tool_name, tool_spec in all_tools.items():
+            if tool_name == "shell":
+                shell_found = True
             if specific_tool and tool_name != keywords[0]:
                 continue
             if keywords:
@@ -144,11 +171,12 @@ name: {tool_name}
 """
 
         found_cyber_tools = []
-        if shell_commands and (not specific_tool or keywords[0] in shell_commands):
-            catalog += f"""
+        if shell_found and shell_commands and (not specific_tool or keywords[0] in shell_commands):
+            catalog += """
 # COMMAND LINE PROGRAMS
 
-Use the **shell** tool to invoke the following command line programs in a bash shell.
+These are supplemental command-line programs invoked through **shell**. Prefer a native agent tool when it provides
+the required capability. Use a command only for additional capability or after a concrete native-tool limitation.
 """
             cyber_tools = _get_cyber_tools()
             for shell_command in shell_commands:
@@ -166,8 +194,9 @@ Use the **shell** tool to invoke the following command line programs in a bash s
                     caps = [caps]
                 if keywords and not specific_tool:
                     desc_l = str(description).lower()
+                    caps_l = [str(cap).lower() for cap in caps]
                     if not any(
-                            [w in shell_command.lower() or w in real_command.lower() or w in desc_l or w in caps for w in keywords]):
+                            [w in shell_command.lower() or w in real_command.lower() or w in desc_l or w in caps_l for w in keywords]):
                         continue
                 found_cyber_tools.append(real_command)
 
@@ -175,7 +204,7 @@ Use the **shell** tool to invoke the following command line programs in a bash s
 {separator}
 command: {real_command}
 capabilities: {", ".join(caps)}
-preference: {preference}
+shell_preference: {preference}
 
 {description}
 
@@ -188,6 +217,9 @@ preference: {preference}
 
         prologue = """
 # TOOL CATALOG
+
+**Selection policy**: Native agent tools take precedence over command-line programs with overlapping capabilities.
+Command shell_preference values compare command-line programs only, never commands against native tools.
 
 """
         if len(found_tools) + len(found_cyber_tools) > 1:

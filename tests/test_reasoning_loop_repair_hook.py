@@ -196,7 +196,6 @@ def test_before_model_call_inject_replaces_last_assistant_with_reduced_text_and_
     # Patch text reduction helpers to be deterministic and cheap.
     monkeypatch.setattr(arh, "collapse_first_repeated_sequence", lambda s: s)
     monkeypatch.setattr(arh, "reduce_lines_lossy", lambda *_args, **_kwargs: _ReducedText("REDUCED"))
-    monkeypatch.setattr(arh, "get_reflection_snapshot", lambda **_kwargs: "REFLECTION_SNAPSHOT")
 
     cb = FakeCallbackHandler(budget_progress=20)
 
@@ -223,9 +222,6 @@ def test_before_model_call_inject_replaces_last_assistant_with_reduced_text_and_
 
     # A system message with continue instructions should be appended.
     assert agent.messages[-1]["role"] == "system"
-    sys_text = agent.messages[-1]["content"][0]["text"]
-    assert "<reflection_snapshot>" in sys_text
-    assert "REFLECTION_SNAPSHOT" in sys_text
 
 
 def test_before_model_call_inject_appends_reduced_if_last_not_assistant(monkeypatch):
@@ -233,7 +229,6 @@ def test_before_model_call_inject_appends_reduced_if_last_not_assistant(monkeypa
 
     monkeypatch.setattr(arh, "collapse_first_repeated_sequence", lambda s: s)
     monkeypatch.setattr(arh, "reduce_lines_lossy", lambda *_args, **_kwargs: _ReducedText("REDUCED"))
-    monkeypatch.setattr(arh, "get_reflection_snapshot", lambda **_kwargs: "REFLECTION_SNAPSHOT")
 
     cb = FakeCallbackHandler(budget_progress=30)
 

@@ -7,12 +7,7 @@ from modules.tools.memory import (
     mem0_store,
     mem0_retrieve,
     mem0_list,
-    store_plan,
-    get_plan,
     create_tasks,
-    list_uncompleted_tasks,
-    task_done,
-    get_active_task,
 )
 from modules.tools.browser import (
     initialize_browser,
@@ -36,7 +31,6 @@ from modules.tools.channels import (
     channel_close,
     channel_close_all,
 )
-from modules.tools.prompt_optimizer import prompt_optimizer
 from modules.tools.oast import (
     oast_health,
     oast_endpoints,
@@ -45,19 +39,12 @@ from modules.tools.oast import (
     oast_clear_http_responses,
     close_oast_providers,
 )
-from modules.tools import stop
 
 __all__ = [
-    "stop",
     "mem0_store",
     "mem0_retrieve",
     "mem0_list",
-    "store_plan",
-    "get_plan",
     "create_tasks",
-    "list_uncompleted_tasks",
-    "task_done",
-    "get_active_task",
     "initialize_memory_system",
     "get_memory_client",
     "Mem0ServiceClient",
@@ -69,7 +56,6 @@ __all__ = [
     "browser_perform_action",
     "browser_get_cookies",
     "browser_evaluate_js",
-    "prompt_optimizer",
     "discover_mcp_tools",
     "channel_create_forward",
     "channel_create_reverse",

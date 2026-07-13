@@ -205,3 +205,46 @@ async def test_sample_creation_and_topic_generation_fallbacks():
     multi = await parser._create_multi_turn_sample(multi_trace)
     assert multi.reference_topics == ["Assess auth"]
     assert len(multi.user_input) >= 3
+
+
+@pytest.mark.asyncio
+async def test_topic_generation_reports_progress_before_llm_call(monkeypatch):
+    calls = []
+
+    async def generate(_self, **_kwargs):
+        calls.append("generate")
+        return SimpleNamespace(topics=["authentication", "authorization"])
+
+    monkeypatch.setattr("ragas.prompt.PydanticPrompt.generate", generate)
+    parser = TraceParser(
+        llm=SimpleNamespace(generate=object()),
+        progress_callback=lambda kind: calls.append(kind),
+    )
+
+    topics = await parser._generate_reference_topics_from_trace(
+        ParsedTrace("t", "Trace", "Assess auth", [], [])
+    )
+
+    assert topics == ["authentication", "authorization"]
+    assert calls == ["reference_topics", "generate"]
+
+
+@pytest.mark.asyncio
+async def test_topic_generation_ignores_progress_callback_failure(monkeypatch):
+    async def generate(_self, **_kwargs):
+        return SimpleNamespace(topics=["network security"])
+
+    def fail_progress(_kind):
+        raise RuntimeError("event stream disconnected")
+
+    monkeypatch.setattr("ragas.prompt.PydanticPrompt.generate", generate)
+    parser = TraceParser(
+        llm=SimpleNamespace(generate=object()),
+        progress_callback=fail_progress,
+    )
+
+    topics = await parser._generate_reference_topics_from_trace(
+        ParsedTrace("t", "Trace", "Assess network", [], [])
+    )
+
+    assert topics == ["network security"]

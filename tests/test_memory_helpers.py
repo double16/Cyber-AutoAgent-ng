@@ -1,6 +1,7 @@
 import json
 
 from modules.tools import memory as mod
+from tests.helpers import memory_tasks
 
 
 def test_normalize_evidence_and_identifier_defaults(monkeypatch):
@@ -16,7 +17,9 @@ def test_normalize_evidence_and_identifier_defaults(monkeypatch):
     assert mod._agent_id("agent") == "agent"
     assert mod._agent_id() is None
     assert mod._operation_id() == "op1"
-    assert mod._sanitize_toon_value("a,b\nc") == "a;b c"
+    assert mod.sanitize_toon_value("a,b\nc") == "a;b c"
+    assert mod.sanitize_toon_value("  a,\n\tb   c  ") == "a; b c"
+    assert mod.sanitize_toon_value("\n\t\r") == ""
 
 
 def test_active_task_message_for_none_active_and_closed_task():
@@ -29,7 +32,7 @@ def test_active_task_message_for_none_active_and_closed_task():
         evidence=["proof"],
     )
 
-    message = mod.active_task_message(active_task=None, closed_task=closed, current_phase=2)
+    message = memory_tasks.active_task_message(mod, active_task=None, closed_task=closed, current_phase=2)
 
     assert '<active_task phase="2" status="none">' in message
     payload = json.loads(message.split("\n", 1)[1].split("\n</active_task>", 1)[0])
@@ -47,7 +50,7 @@ def test_active_task_message_for_active_task_and_confidence():
         status_reason="next",
     )
 
-    message = mod.active_task_message(active_task=active, activated=False)
+    message = memory_tasks.active_task_message(mod, active_task=active, activated=False)
 
     assert '<active_task phase="3" status="active">' in message
     assert '"activated": false' in message

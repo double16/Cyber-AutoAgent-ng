@@ -3,7 +3,10 @@ from unittest.mock import Mock
 
 import pytest
 
+import modules.tools as tools_module
+from modules.handlers.utils import get_tool_spec
 from modules.tools import memory as mod
+from tests.helpers import memory_tasks
 
 
 class FakePlanStore:
@@ -30,6 +33,7 @@ class FakeMem0:
         self.add_calls = []
         self.search_calls = []
         self.get_all_calls = []
+        self.get_calls = []
 
     def add(self, **kwargs):
         self.add_calls.append(kwargs)
@@ -51,6 +55,14 @@ class FakeMem0:
                 None,
             ]
         }
+
+    def get(self, memory_id):
+        self.get_calls.append(memory_id)
+        if memory_id == "m1":
+            return {"id": "m1", "memory": "direct memory", "metadata": {"active": True}}
+        if memory_id == "inactive":
+            return {"id": "inactive", "memory": "hidden", "metadata": {"active": False}}
+        return None
 
 
 @pytest.fixture
@@ -88,6 +100,60 @@ def test_memory_dataclasses_validation_and_formatting():
     assert task.to_dict()["evidence"][0] == '{"url": "/admin"}'
     with pytest.raises(ValueError):
         mod.Task.from_obj("bad")
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [None, "", "current", [], {}, float("inf")],
+)
+def test_task_create_normalizes_unparsable_phase_to_zero(phase):
+    task = mod.TaskCreate(title="Check", objective="Check target", phase=phase)
+
+    assert task.phase == 0
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [(2, 2), ("2", 2), (0, 0), (-1, -1)],
+)
+def test_task_create_preserves_parseable_integer_phase(phase, expected):
+    task = mod.TaskCreate.from_obj({"title": "Check", "objective": "Check target", "phase": phase})
+
+    assert task.phase == expected
+
+
+def test_task_create_defaults_missing_phase_to_zero():
+    task = mod.TaskCreate.from_obj({"title": "Check", "objective": "Check target"})
+
+    assert task.phase == 0
+
+
+def test_create_tasks_tool_schema_allows_missing_or_untyped_phase():
+    tool_spec = get_tool_spec(mod.create_tasks)
+    task_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskCreate"]
+
+    assert task_schema["required"] == ["title", "objective"]
+    assert task_schema["properties"]["phase"]["default"] == 0
+    assert "type" not in task_schema["properties"]["phase"]
+
+
+def test_create_tasks_rejects_task_without_required_title():
+    with pytest.raises(ValueError, match="title"):
+        mod.create_tasks([{"objective": "Enumerate reachable endpoints"}])
+
+
+def test_removed_plan_task_tools_are_not_exported_from_tools_module():
+    removed = {"store_plan", "task_done", "list_uncompleted_tasks", "get_active_task"}
+
+    for name in removed:
+        assert not hasattr(tools_module, name)
+        assert name not in tools_module.__all__
+        assert not hasattr(mod, name)
+
+    assert not hasattr(tools_module, "get_plan")
+    assert "get_plan" not in tools_module.__all__
+
+    assert hasattr(tools_module, "create_tasks")
     with pytest.raises(ValueError):
         mod.Task(task_uid="", title="x", objective="y", phase=1, status="pending")
 
@@ -114,11 +180,12 @@ def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_p
     proof.write_text("proof")
 
     assert mod._normalize_evidence({"a": 1}) == ['{"a": 1}']
-    assert mod._sanitize_toon_value("a,b\nc") == "a;b c"
+    assert mod.sanitize_toon_value("a,b\nc") == "a;b c"
+    assert mod.sanitize_toon_value("\ta,  b\r\n c") == "a; b c"
     assert mod._normalize_id("https://x.test/users/123?id=456").count(":id") == 1
     assert "/admin/:id" in mod._extract_sensitive_patterns("see /admin/123 and ./file.txt")
     assert mod._has_valid_proof_pack({"proof_pack": {"artifacts": [str(proof)]}}) is True
-    assert mod.active_task_message(None, current_phase=2).startswith("<active_task")
+    assert memory_tasks.active_task_message(mod, None, current_phase=2).startswith("<active_task")
     assert mod.memory_create_time({"metadata": {"created_at": "1"}}) == "1"
     monkeypatch.setenv("MEMORY_ISOLATION", "shared")
     assert mod.memory_is_cross_operation() is True
@@ -147,7 +214,7 @@ def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_p
         total_phases=1,
         phases=[mod.PlanPhase(id=1, title="Done", status="done")],
     )
-    assert "All phases complete" in mod.store_plan(plan)
+    assert "All phases complete" in memory_tasks.store_plan(mod, plan)
     assert "plan_overview[1]" in mod.get_plan()
 
     created = mod.create_tasks(
@@ -157,12 +224,55 @@ def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_p
         ]
     )
     assert "Tasks created." in created
-    assert "task[" in mod.list_uncompleted_tasks()
-    assert "active_task" in mod.get_active_task()
-    assert "closed" in mod.task_done("done")
+    assert "task[" in memory_tasks.list_uncompleted_tasks(mod)
+    assert "closed" in memory_tasks.mark_task_done(mod, "done")
 
     assert "- active" in mod.mem0_list()
     assert "- finding one" in mod.mem0_retrieve("finding", {"category": "finding"})
+
+
+def test_create_tasks_preserves_valid_phases_and_defaults_invalid_values_to_active(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=3,
+        total_phases=4,
+        phases=[
+            mod.PlanPhase(id=1, title="One", status="done"),
+            mod.PlanPhase(id=2, title="Two", status="done"),
+            mod.PlanPhase(id=3, title="Three", status="active"),
+            mod.PlanPhase(id=4, title="Four", status="pending"),
+        ],
+    )
+
+    result = mod.create_tasks(
+        [
+            {"title": "Missing", "objective": "Missing phase"},
+            {"title": "Invalid", "objective": "Invalid phase", "phase": {"bad": True}},
+            {"title": "Earlier", "objective": "Earlier phase", "phase": "2"},
+            {"title": "Future", "objective": "Future phase", "phase": "4"},
+            {"title": "Unknown", "objective": "Unknown phase", "phase": "99"},
+        ]
+    )
+
+    assert result == "Tasks created."
+    phases_by_title = {task.title: task.phase for task in store.tasks}
+    assert phases_by_title == {
+        "Missing": 3,
+        "Invalid": 3,
+        "Earlier": 3,
+        "Future": 4,
+        "Unknown": 3,
+    }
+
+
+def test_create_tasks_uses_phase_one_when_plan_lookup_fails(fake_memory_client):
+    _client, store = fake_memory_client
+
+    result = mod.create_tasks([{"title": "No plan", "objective": "Use fallback", "phase": "not-a-phase"}])
+
+    assert result == "Tasks created."
+    assert store.tasks[0].phase == 1
 
 
 def test_mem0_service_client_methods_and_fallbacks(fake_memory_client, monkeypatch):
@@ -177,6 +287,12 @@ def test_mem0_service_client_methods_and_fallbacks(fake_memory_client, monkeypat
 
     listed = client.list_memories(user_id="u1", limit=3, run_id="op1")
     assert [entry["memory"] for entry in listed] == ["active", "plain text", ""]
+
+    memory = client.get_memory_by_id("m1", user_id="u1")
+    assert memory == {"id": "m1", "memory": "direct memory", "metadata": {"active": True}}
+    assert client.mem0.get_calls == ["m1"]
+    assert client.get_memory_by_id("inactive", user_id="u1") is None
+    assert client.get_memory_by_id("", user_id="u1") is None
 
     found = client.search(query="finding", filters={"category": "finding"}, limit=5, user_id="u1", run_id="op1")
     assert found[0]["memory"] == "finding one"

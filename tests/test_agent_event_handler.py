@@ -17,6 +17,7 @@ def make_handler():
     events = []
     handler._events = events
     handler.emit_ui_event = lambda event: events.append(event)
+    handler.emitter = MagicMock()
     handler._state_lock = threading.RLock()
     handler._emit_lock = threading.RLock()
     handler.operation_id = "OP_TEST"
@@ -54,11 +55,13 @@ def make_handler():
     handler._reasoning_action_header_emitted = False
     handler._any_action_header_emitted = False
     handler._reasoning_emitted_since_last_action_header = False
-    handler._stop_tool_used = False
     handler._budget_limit_reached = False
     handler._budget_limit_reason = None
     handler._report_generated = False
     handler._report_generation_active = False
+    handler._evaluation_report_path = None
+    handler._completed_report_path = None
+    handler._assessment_completion_emitted = False
     handler._termination_emitted = False
     handler._termination_reason = None
     handler._python_preview_emitted = set()
@@ -180,7 +183,7 @@ def test_reasoning_termination_metrics_and_basic_helpers():
     handler._handle_reasoning("I should inspect the headers.")
     handler._handle_reasoning("I should inspect the headers.")
     handler._emit_accumulated_reasoning(force=True)
-    handler.emit_termination("stop_tool", "done")
+    handler.emit_termination("complete", "done")
     handler.emit_termination("ignored", "ignored")
     handler.process_metrics(
         SimpleNamespace(
@@ -258,7 +261,7 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
         "closed": {"task_uid": "old", "title": "Old task", "status": "done"},
         "task": {"task_uid": "new", "title": "New task", "status": "active"},
     }
-    handler.tool_name_buffer["task"] = "get_active_task"
+    handler.tool_name_buffer["task"] = "create_tasks"
     handler._process_tool_result_from_message(
         {
             "toolUseId": "task",
@@ -273,26 +276,19 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
         {"toolUseId": "mem", "status": "success", "content": [{"text": "stored"}]}
     )
 
-    handler.tool_name_buffer["stop"] = "stop"
-    handler.tool_input_buffer["stop"] = {"reason": "operator requested stop"}
-    handler._process_tool_result_from_message(
-        {"toolUseId": "stop", "status": "success", "content": [{"text": "stopped"}]}
-    )
-
     types = event_types(handler)
     assert "error" in types
-    assert "task_done" in types
-    assert "task_started" in types
+    assert "task_done" not in types
+    assert "task_started" not in types
     assert handler.memory_ops == 1
     assert handler.evidence_count == 1
-    assert handler._stop_tool_used is True
 
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["get_active_task", "task_done", "create_tasks", "store_plan", "stop"],
+    ["create_tasks"],
 )
-def test_task_state_tool_results_emit_task_lifecycle_events(tool_name):
+def test_task_state_tool_results_do_not_emit_task_lifecycle_events(tool_name):
     handler = make_handler()
     tool_use_id = f"{tool_name}-1"
     handler.tool_name_buffer[tool_use_id] = tool_name
@@ -312,22 +308,8 @@ def test_task_state_tool_results_emit_task_lifecycle_events(tool_name):
     task_done_events = [event for event in handler._events if event["type"] == "task_done"]
     task_started_events = [event for event in handler._events if event["type"] == "task_started"]
 
-    assert task_done_events == [
-        {
-            "type": "task_done",
-            "task_uid": "closed-1",
-            "title": "Closed task",
-            "status": "done",
-        }
-    ]
-    assert task_started_events == [
-        {
-            "type": "task_started",
-            "task_uid": "active-1",
-            "title": "Active task",
-            "status": "active",
-        }
-    ]
+    assert task_done_events == []
+    assert task_started_events == []
 
 
 def test_non_task_state_tool_result_does_not_emit_task_lifecycle_events():
@@ -416,6 +398,37 @@ def test_constructor_adds_generic_agent_metadata_and_alias(monkeypatch):
     assert handler.agent_type == "validation_specialist"
     assert handler.parent_agent_run_id == "main-1"
     assert any(event["type"] == "operation_init" and event["agent_name"] == "validation_specialist" for event in events)
+
+
+def test_callback_events_use_agent_attached_metadata(monkeypatch):
+    events = []
+    monkeypatch.setattr(rb, "get_models_client", lambda: SimpleNamespace())
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
+    emitter = SimpleNamespace(emit=lambda event: events.append(event))
+    handler = AgentEventHandler(
+        operation_id="OP_AGENT_META",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        agent_name="operation",
+        agent_type="operation_controller",
+        init_context={"budget": {"maxDurationMinutes": 60}},
+    )
+    agent = SimpleNamespace(
+        _cyber_agent_type="task_executor",
+        _cyber_agent_name="Cyber-AutoAgent task_executor",
+        _cyber_agent_run_id="task_executor-1",
+        _cyber_parent_agent_run_id="operation-1",
+    )
+
+    handler(agent=agent, complete=True)
+
+    complete_event = [event for event in events if event["type"] == "operation_complete"][-1]
+    assert complete_event["agent_type"] == "task_executor"
+    assert complete_event["agent_name"] == "Cyber-AutoAgent task_executor"
+    assert complete_event["agent_run_id"] == "task_executor-1"
+    assert complete_event["parent_agent_run_id"] == "operation-1"
+    assert handler.agent_type == "operation_controller"
 
 
 def test_generic_tool_announcement_and_result_paths(monkeypatch):
@@ -970,7 +983,12 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     )
     assert generated_calls
     assert generated_calls[0]["config_params"]["provider"] == "litellm"
+    assert "assessment_complete" not in event_types(handler)
+    handler.emitter = SimpleNamespace()
+    handler.emit_assessment_complete()
     assert any(event["type"] == "assessment_complete" and event["report_path"] is None for event in handler._events)
+    handler.emit_assessment_complete()
+    assert event_types(handler).count("assessment_complete") == 1
 
     handler = make_handler()
     handler.operation_id = "OP_REPORT"
@@ -995,8 +1013,14 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
 
     types = event_types(handler)
     assert "report_content" in types
-    assert "assessment_complete" in types
+    assert "assessment_complete" not in types
     assert output_dir.joinpath("security_assessment_report.md").exists()
+    handler.emit_assessment_complete()
+    assert any(
+        event["type"] == "assessment_complete"
+        and event["report_path"] == str(output_dir / "security_assessment_report.md")
+        for event in handler._events
+    )
 
 
 def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
@@ -1012,15 +1036,23 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     assert "evaluation_complete" not in event_types(handler)
 
     handler = make_handler()
+    monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "false")
+    manager = Mock(side_effect=AssertionError("evaluation manager must not be created"))
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", manager)
+    handler.trigger_evaluation_on_completion()
+    manager.assert_not_called()
+
+    handler = make_handler()
     handler.emitter = SimpleNamespace(emit=lambda _event: None)
     monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
     monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
-    monkeypatch.setenv("VERBOSE", "true")
 
     class FakeEvaluationManager:
-        def __init__(self, operation_id, emitter):
+        def __init__(self, operation_id, emitter, report_path=None):
             self.operation_id = operation_id
             self.emitter = emitter
+            self.report_path = report_path
 
         def register_trace(self, **kwargs):
             self.trace = kwargs
@@ -1031,7 +1063,6 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FakeEvaluationManager)
     handler.trigger_evaluation_on_completion()
     assert "evaluation_complete" in event_types(handler)
-    handler.wait_for_evaluation_completion(timeout=1)
     # Budget-based stop check: simulate duration exceeded
     handler.budget_max_duration = 1
     handler.start_time = time.time() - 61

@@ -97,5 +97,12 @@ export interface StreamEvent {
   context?: string;
   startTime?: number;
   delay?: number;
+  operation_stage?: string;
+  evaluation_step_index?: number;
+  evaluation_step_total?: number;
+  evaluation_step_kind?: string;
+  evaluation_scope?: string;
+  evaluation_metric?: string;
+  evaluation_step_label?: string;
   [key: string]: any;
 }

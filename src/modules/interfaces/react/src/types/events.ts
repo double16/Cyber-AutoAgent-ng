@@ -447,14 +447,14 @@ export interface ReportContentEvent {
  * Termination Reason Event Interface
  * 
  * Event emitted when an operation terminates, indicating the reason
- * (e.g., budget limit reached, stop tool invoked, network timeout, token limit)
+ * (e.g., workflow completion, budget limit reached, network timeout, token limit)
  */
 export interface TerminationReasonEvent {
   type: 'termination_reason';
   // Known reasons from backend + forward-compatible string type
   reason:
+    | 'complete'
     | 'budget_limit'
-    | 'stop_tool'
     | 'network_timeout'
     | 'network_error'
     | 'timeout'

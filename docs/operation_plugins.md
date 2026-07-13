@@ -30,12 +30,13 @@ graph TD
 ```
 operation_plugins/
 └── <module_name>/
-    ├── module.yaml           # Metadata and configuration
-    ├── execution_prompt.md   # Domain-specific system prompt
-    ├── report_prompt.md      # Report generation guidance
-    └── tools/               # Module-specific tools
+    ├── module.yaml            # Metadata and configuration
+    ├── execution_prompt.md    # Domain-specific system prompt
+    ├── termination_policy.md  # Domain-specific operation termination policy
+    ├── report_prompt.md       # Report generation guidance
+    └── tools/                 # Module-specific tools
         ├── __init__.py
-        └── custom_tool.py   # @tool decorated functions
+        └── custom_tool.py     # @tool decorated functions
 ```
 
 ## Component Functions
@@ -99,7 +100,11 @@ configuration:
 ```
 
 ### execution_prompt.md
-Specialized instructions injected into agent system prompt during operation. Defines domain expertise, methodology, and tool usage patterns specific to the module's security domain.
+Specialized instructions injected into the agent system prompt during operation. Defines domain expertise, methodology, and tool usage patterns specific to the module's security domain.
+
+### termination_policy.md
+
+Instructions to determine when an operation is complete.
 
 ### report_prompt.md
 Report generation template specifying structure, visual elements, and domain-specific analysis sections for final assessment reports.
@@ -217,8 +222,7 @@ The following built-in tools are always included and do not require to be in the
 - editor
 - load_tool
 - mem0_*
-- stop
-- prompt_optimizer (if prompt optimization is enabled)
+- create_tasks when the workflow role permits task creation
 
 ## Report Generation
 
@@ -311,7 +315,12 @@ In the example above, the module `web` is checked, then `some_other_module`.
 
 The following are inherited:
 - `execution_prompt.md`
+- `termination_policy.md`
 - `report_prompt.md`
+- `report_agent_appendix_system_prompt.md`
+- `report_agent_executive_system_prompt.md`
+- `report_agent_finding_system_prompt.md`
+- `report_agent_observation_system_prompt.md`
 - `tools`  # The tools property is NOT inherited. If missing, all built-in and custom tools are included.
 - tools/   # The tools directory is inherited from all modules. If two custom tools have the same name, the first in the extend list is used.
 

@@ -10,8 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from modules.config.types import BudgetConfig
-from modules.prompts import get_system_prompt, load_prompt_template
-from modules.prompts.factory import get_reflection_snapshot
+from modules.prompts import get_system_prompt, load_prompt_template, get_task_capture_prompt
 
 real_load_prompt_template = load_prompt_template
 
@@ -29,63 +28,8 @@ class TestGetSystemPrompt:
             budget=_budget(),
         )
 
-        assert "test.com" in prompt
         assert "test objective" not in prompt
         assert "OP_20240101_120000" in prompt
-        assert "CRITICAL FIRST ACTION" in prompt
-
-    def test_get_system_prompt_with_memory_path(self):
-        prompt = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            operation_id="OP_20240101_120000",
-            budget=_budget(),
-            has_memory_path=True,
-        )
-
-        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
-        assert "mem0_list(" in prompt
-        assert "Memory Intake Pass" in prompt
-
-    def test_get_system_prompt_with_existing_memories(self):
-        prompt = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            operation_id="OP_20240101_120000",
-            budget=_budget(),
-            has_existing_memories=True,
-        )
-
-        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
-        assert "mem0_list(" in prompt
-        assert "Memory Intake Pass" in prompt
-
-    def test_get_system_prompt_with_both_memory_flags(self):
-        prompt = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            operation_id="OP_20240101_120000",
-            budget=_budget(),
-            has_memory_path=True,
-            has_existing_memories=True,
-        )
-
-        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
-        assert "mem0_list(" in prompt
-        assert "Memory Intake Pass" in prompt
-
-    def test_get_system_prompt_no_memory_flags(self):
-        prompt = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            operation_id="OP_20240101_120000",
-            budget=_budget(),
-            has_memory_path=False,
-            has_existing_memories=False,
-        )
-
-        assert "CRITICAL FIRST ACTION" in prompt
-        assert "Create a strategic plan via" in prompt
 
     @patch("modules.prompts.factory.load_prompt_template")
     def test_get_system_prompt_with_tools_context(self, mock_load_prompt_template):
@@ -128,8 +72,6 @@ class TestGetSystemPrompt:
 
         assert "/custom/artifacts" in prompt
         assert "/custom/tools_path" in prompt
-        assert "test.com" in prompt
-        assert "CRITICAL FIRST ACTION" in prompt
 
     def test_get_system_prompt_with_overlay_block(self, tmp_path):
         output_config = {"base_dir": str(tmp_path), "target_name": "test_target"}
@@ -200,79 +142,20 @@ class TestGetSystemPrompt:
             provider="bedrock",
         )
 
-        assert "test.com" in prompt_local
-        assert "test.com" in prompt_remote
         assert "test objective" not in prompt_local
         assert "test objective" not in prompt_remote
 
+    def test_get_task_capture_basic(self):
+        prompt = get_task_capture_prompt()
 
-class TestMemoryInstructions:
-    def test_memory_instruction_priority(self):
-        prompt = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            operation_id="OP_20240101_120000",
-            budget=_budget(),
-            has_memory_path=True,
-            has_existing_memories=False,
-        )
+        assert "Task Capture Pass" in prompt
 
-        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
+    def test_tools_guide_prefers_native_tools_over_shell_commands(self):
+        prompt = load_prompt_template("tools_guide.md")
 
-    def test_memory_instruction_existing_only(self):
-        prompt = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            operation_id="OP_20240101_120000",
-            budget=_budget(),
-            has_memory_path=False,
-            has_existing_memories=True,
-        )
-
-        assert "CRITICAL FIRST ACTIONS**\n  1. Load all memories" in prompt
-
-    def test_memory_instruction_fresh_operation(self):
-        prompt = get_system_prompt(
-            target="test.com",
-            objective="test objective",
-            operation_id="OP_20240101_120000",
-            budget=_budget(),
-            has_memory_path=False,
-            has_existing_memories=False,
-        )
-
-        assert "CRITICAL FIRST ACTION" in prompt
-        assert "Create a strategic plan" in prompt
-
-
-class TestReflectionSnapshot:
-    @pytest.mark.parametrize("progress", [0, 10])
-    def test_before_first_checkpoint(self, progress):
-        snapshot = get_reflection_snapshot(progress, _budget(), None)
-        assert f"Budget Used: {progress}%" in snapshot
-        assert "duration cap 60m" in snapshot
-        assert "token cap 100000" in snapshot
-        assert "cost cap 10.0" in snapshot
-        assert "Next Checkpoint: 20% budget use" in snapshot
-        assert "\nCurrent Phase:" not in snapshot
-
-    @pytest.mark.parametrize("progress, checkpoint, action", [
-        (20, 20, "Evaluate: What capabilities gained? Phase 1 criteria met?"),
-        (40, 40, "Confidence trend rising/flat/falling? Flat = pivot NOW."),
-        (60, 60, "If stuck (no findings), deploy swarm with different approach classes."),
-        (80, 80, "Focus ONLY on highest-confidence path. No new exploration."),
-    ])
-    def test_checkpoints(self, progress, checkpoint, action):
-        snapshot = get_reflection_snapshot(progress, _budget(), None)
-        assert f"Budget Used: {progress}%" in snapshot
-        assert f"**CHECKPOINT {checkpoint}% REACHED**" in snapshot
-        assert action in snapshot
-
-    def test_current_phase_and_urgency(self):
-        snapshot = get_reflection_snapshot(95, _budget(), 4)
-        assert "Budget Used: 95%" in snapshot
-        assert "Current Phase: 4" in snapshot
-        assert "FINAL: Budget >90%" in snapshot
+        assert "Native agent tools > command-line programs > custom tools" in prompt
+        assert "shell_preference" in prompt
+        assert "Medium confidence (50-80%) → Parallel shell" not in prompt
 
 
 if __name__ == "__main__":

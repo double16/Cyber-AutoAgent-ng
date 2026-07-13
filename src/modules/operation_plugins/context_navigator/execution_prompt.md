@@ -73,7 +73,6 @@ mem0_store(
 )
 ```
 
-<!-- PROTECTED -->
 **Context Patterns**:
 1. **System Role Indicators**:
    - Web server: Apache/nginx processes, port 80/443, /var/www or C:\inetpub
@@ -96,7 +95,6 @@ mem0_store(
    - SIEM: Splunk forwarder, log shipping configs
    - Firewall: iptables rules, Windows Firewall profiles, network ACLs
    - Auth: LDAP configs, Kerberos, certificate stores, MFA enforcement
-<!-- /PROTECTED -->
 </context_navigation>
 
 <operational_constraints>
@@ -123,22 +121,3 @@ Before considering discovery complete:
 - [ ] Security controls identified
 - [ ] Business context understood
 </operational_constraints>
-
-<termination_policy>
-**stop() allowed when**:
-1. Environment comprehensively mapped + context documented
-2. Budget ≥95%
-3. All discovery layers completed (or blocked by permissions)
-
-**Before stop(), MANDATORY**:
-1. "System role: [identified purpose]"
-2. "Critical assets: [list high-value targets]"
-3. "Security posture: [controls identified]"
-4. "Data landscape: [sensitive data locations]"
-5. "Recommendations: [next steps for follow-on operations]"
-
-**stop() FORBIDDEN**:
-- Context incomplete + budget <95%
-- Major gaps in understanding (e.g., network topology unknown)
-- Critical assets not identified
-</termination_policy>

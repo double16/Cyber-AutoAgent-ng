@@ -134,51 +134,6 @@ function normalizeToolInput(toolName: string, input: any): any {
     return cloneInput;
   }
 
-  if (name === 'prompt_optimizer') {
-    const cloneInput: any = { ...toolInput };
-    const normalized: any = {};
-    const action = cloneInput.action ?? cloneInput.Action;
-    normalized.action = action ? String(action) : 'apply';
-
-    if (cloneInput.trigger) normalized.trigger = String(cloneInput.trigger);
-    if (cloneInput.reviewer) normalized.reviewer = String(cloneInput.reviewer);
-    if (cloneInput.note) normalized.note = clampString(String(cloneInput.note), 400);
-    if (cloneInput.context) normalized.context = clampString(String(cloneInput.context), 400);
-    if (cloneInput.prompt) normalized.prompt = clampString(String(cloneInput.prompt), 400);
-    if (cloneInput.budget_progress != null) normalized.budget_progress = Number(cloneInput.budget_progress);
-    if (cloneInput.expires_after_progress != null) {
-      normalized.expires_after_progress = Number(cloneInput.expires_after_progress);
-    }
-    const overlayRaw = cloneInput.overlay;
-    let overlayObj: any = overlayRaw;
-    if (typeof overlayRaw === 'string') {
-      try { overlayObj = JSON.parse(overlayRaw); } catch { overlayObj = undefined; }
-    }
-    if (overlayObj && typeof overlayObj === 'object') {
-      const payload = overlayObj.payload && typeof overlayObj.payload === 'object' ? overlayObj.payload : overlayObj;
-      const directives = payload.directives;
-      if (Array.isArray(directives) && directives.length > 0) {
-        const cleaned = directives
-          .map((item: any) => String(item).trim())
-          .filter((item: string) => Boolean(item));
-        if (cleaned.length > 0) {
-          const slice = cleaned.slice(0, 4);
-          const preview = slice.join(', ');
-          normalized.directives = cleaned.length > 4
-            ? `${preview}, ... (+${cleaned.length - 4} more)`
-            : preview;
-        }
-      }
-      if (payload.trajectory) normalized.trajectory = sanitizeAllStrings(payload.trajectory);
-      if (payload.metadata && typeof payload.metadata === 'object') {
-        normalized.metadata = sanitizeAllStrings(payload.metadata);
-      }
-    }
-
-    return normalized;
-  }
-
-
   // editor/python_repl/etc.: leave as-is except shallow clone done above
   return toolInput;
 }

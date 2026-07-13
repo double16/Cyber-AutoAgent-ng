@@ -8,7 +8,6 @@ from strands.hooks.events import BeforeModelCallEvent, AfterModelCallEvent
 from strands.types.exceptions import MaxTokensReachedException
 
 from modules.config.system.logger import get_logger
-from modules.prompts.factory import get_reflection_snapshot
 from modules.utils.text_reducer import reduce_lines_lossy, collapse_first_repeated_sequence
 
 from modules.agents.patches import _JSON_FENCE_RE, _JSON_BARE_RE, patch_ollama_model_json_toolcalls
@@ -55,21 +54,28 @@ class AgentRepairHook(HookProvider):
             agent = event.agent
             callback_handler = getattr(agent, "callback_handler", None)
 
-            # Ollama fails to parse tool_calls due to malformed JSON emitted by the model.
+            # Ollama fails to parse tool_calls due to malformed JSON/XML emitted by the model.
             if event.exception is not None:
+                if hasattr(event.exception, "status_code"):
+                    status_code = getattr(event.exception, "status_code")
+                else:
+                    status_code = -1
+
                 error_str = str(event.exception)
                 error_str_l = error_str.lower()
                 if (
                     "error parsing tool call" in error_str_l
                     or "invalid character" in error_str_l
                     or "parse tool call" in error_str_l
+                    or "xml syntax error" in error_str_l
+                    or status_code == 500
                 ):
                     state = self._state_bag(event)
                     if not state.get(_TOOL_CALLS_RETRY_STATE_KEY):
                         state[_TOOL_CALLS_RETRY_STATE_KEY] = True
                         event.retry = True
                         logger.warning(
-                            "Detected tool-call JSON parse error in step %s; retrying once with stricter tool_call JSON instruction (%s)",
+                            "Detected tool-call parse error in step %s; retrying once with stricter tool_call instruction (%s)",
                             str(callback_handler.action_count) if callback_handler else "?",
                             error_str[:200].replace("\n", " "),
                         )
@@ -140,7 +146,7 @@ class AgentRepairHook(HookProvider):
             # successful model call, reset counter
             setattr(agent, "_max_tokens_retry_count", 0)
 
-            # Try to obtain assistant text in the most common ways.
+            # Try to get assistant text in the most common ways.
             # Adjust these accessors if your event exposes different fields.
             for block in event.stop_response.message.get("content", []):
                 if "text" in block:
@@ -223,32 +229,16 @@ class AgentRepairHook(HookProvider):
                         agent.messages[-1] = reduced_message
                     else:
                         agent.messages.append(reduced_message)
-                if callback_handler:
-                    budget_progress = getattr(callback_handler, "get_budget_progress", lambda: 0)()
-                    if isinstance(budget_progress, dict):
-                        progress_percent = int(budget_progress.get("progress_percent", 0) or 0)
-                    else:
-                        progress_percent = int(budget_progress or 0)
-                    reflection_snapshot = get_reflection_snapshot(
-                        progress_percent=progress_percent,
-                        budget=None,
-                        plan_current_phase=None,
-                    )
-                else:
-                    reflection_snapshot = ""
                 messages.append({
                     "role": "system",
                     "content": [{"type": "text", "text": (
-                        f"""You are continuing from a prior run that entered a repetitive reasoning loop.
+                        """You are continuing from a prior run that entered a repetitive reasoning loop.
 
 ## CONSTRAINTS
 - Do NOT restate repeated points from the reduced notes.
 - Output must be structured, actionable, and short.
 - Avoid meta commentary about "looping" beyond what's required to recover.
-
-<reflection_snapshot>
-{reflection_snapshot}
-</reflection_snapshot>"""
+"""
                     )}]
                 })
                 try:

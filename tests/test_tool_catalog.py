@@ -77,8 +77,7 @@ def test_get_cyber_tools_by_caps_filters_by_available_and_groups_by_cap_and_pref
 
     res = tc.get_cyber_tools_by_caps(available=["httpx", "katana"])
     assert res["web_recon"]["preferred"] == ["httpx"]
-    # fallback-only bucket should be normalized to preferred
-    assert res["web_crawling"]["preferred"] == ["katana"]
+    assert res["web_crawling"]["fallback"] == ["katana"]
 
 
 def test_get_cyber_tools_by_caps_coerces_caps_string_and_normalizes_preference(monkeypatch, tmp_path):
@@ -108,6 +107,68 @@ def test_get_cyber_tools_by_caps_uses_command_override(monkeypatch, tmp_path):
 
     res = tc.get_cyber_tools_by_caps(available=["theharvester"])
     assert res["osint"]["preferred"] == ["theHarvester"]
+
+
+def test_get_shell_command_specs_returns_compact_installed_command_metadata(monkeypatch, tmp_path):
+    cyber_tools = {
+        "theharvester": {
+            "command": "theHarvester",
+            "description": "Collect public sources",
+            "caps": "osint",
+            "preference": " Preferred ",
+        },
+        "fallback": {
+            "description": "Fallback scanner",
+            "caps": ["scan", "validation"],
+        },
+    }
+    _write_env(tmp_path, cyber_tools)
+    _patch_environment_file(monkeypatch, tmp_path)
+
+    specs = tc.get_shell_command_specs(["theharvester", "fallback", "missing"])
+
+    assert specs == [
+        {
+            "command": "theHarvester",
+            "description": "Collect public sources",
+            "capabilities": ["osint"],
+            "shell_preference": "preferred",
+        },
+        {
+            "command": "fallback",
+            "description": "Fallback scanner",
+            "capabilities": ["scan", "validation"],
+            "shell_preference": "fallback",
+        },
+        {
+            "command": "missing",
+            "description": "",
+            "capabilities": [],
+            "shell_preference": "fallback",
+        },
+    ]
+
+
+def test_get_shell_command_specs_deduplicates_command_overrides_and_skips_empty_names(monkeypatch, tmp_path):
+    _write_env(
+        tmp_path,
+        {
+            "first": {"command": "shared"},
+            "second": {"command": "shared"},
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+
+    specs = tc.get_shell_command_specs(["first", "second", ""])
+
+    assert [spec["command"] for spec in specs] == ["shared"]
+
+
+def test_curl_is_configured_as_native_http_request_fallback():
+    curl = tc._get_cyber_tools()["curl"]
+
+    assert curl["preference"] == "fallback"
+    assert "HTTP client for" in curl["description"]
 
 
 def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeypatch):
@@ -215,7 +276,7 @@ def test_tool_catalog_wrapper_includes_shell_commands_and_handles_missing_cyber_
     # Avoid calling real subprocess help
     monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: f"HELP({cmd})")
 
-    tools_config = {}
+    tools_config = {"shell": {"description": "Run shell commands"}}
     agent = _FakeAgent(tools_config)
 
     # Include a command not present in cyber_tools to ensure no crash (e.g., grep/cat)
@@ -227,11 +288,37 @@ def test_tool_catalog_wrapper_includes_shell_commands_and_handles_missing_cyber_
     # httpx entry includes configured fields
     assert "command: httpx" in text
     assert "capabilities: web_recon, http_client" in text
-    assert "preference: preferred" in text
+    assert "shell_preference: preferred" in text
+    assert "Native agent tools take precedence" in text
+    assert "supplemental command-line programs" in text
     assert "HELP(httpx)" in text
 
     # grep entry does not exist in cyber_tools but should still render without crashing
     assert "command: grep" in text
+
+
+def test_tool_catalog_wrapper_hides_shell_commands_when_shell_tool_missing(monkeypatch, tmp_path):
+    _patch_strands_tool_decorator(monkeypatch)
+    _write_env(
+        tmp_path,
+        cyber_tools={
+            "httpx": {
+                "description": "HTTP probing",
+                "caps": ["web_recon"],
+                "preference": "preferred",
+            }
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: f"HELP({cmd})")
+
+    agent = _FakeAgent({})
+    tool_catalog = tc.tool_catalog_wrapper(agent, shell_commands=["httpx"])
+
+    text = tool_catalog()
+    assert "# COMMAND LINE PROGRAMS" not in text
+    assert "command: httpx" not in text
+    assert "**NO RESULTS**\nkeywords: " in text
 
 
 def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch, tmp_path):
@@ -241,7 +328,7 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch,
 
     monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: "")
 
-    agent = _FakeAgent({})
+    agent = _FakeAgent({"shell": {"description": "Run shell commands"}})
     tool_catalog = tc.tool_catalog_wrapper(agent, shell_commands=["httpx", "nmap"])
 
     text = tool_catalog("httpx")

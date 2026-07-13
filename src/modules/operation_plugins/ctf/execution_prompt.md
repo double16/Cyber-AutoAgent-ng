@@ -15,7 +15,7 @@ CTF: Capability-driven exploitation, evidence-validated, flag-gated completion
   - Artifact path contains the flag value or command output that clearly shows it
   - Steps to reproduce: preconditions + exact command/request + expected vs actual
 - Scope: remote attacker perspective only (network-accessible surfaces only)
-- Stop rule: stop() allowed ONLY when required flag(s) are captured and evidenced as above
+- Completion rule: workflow completion is valid ONLY when required flag(s) are captured and evidenced as above
 - Forbidden outputs: do not create report files (*.md, *REPORT*, *SUMMARY*). Store findings/flags in memory with artifact paths instead
 </victory_conditions>
 
@@ -88,42 +88,10 @@ Example: Creds extracted → test login (1 step) BEFORE cracking/enumeration (20
 </cognitive_loop>
 
 <ctf_adaptation>
-**Minimal Action (coverage-first)**: Choose actions that maximize information-per-step WITHOUT pruning scope. Avoid redundant re-tests; preserve candidates as tasks.
-
-**Challenge Fingerprinting** (checkpoint self-calibration):
-- **Pruning Prohibition (STRICT)**: Do NOT reduce candidate lists due to likelihood. Only skip if out-of-scope, unreachable with evidence, or exact duplicate.
-- At 20% budget: "Actual steps vs expected? If >150%: escalate complexity class. If <50%: simplify approach."
-- At 40% budget: "Progress toward flag? [capability achieved | stuck | pivoting]. Confidence trend: [rising | flat | falling]."
-- At 60% budget: "Reality check: Steps used ___. Capabilities tried: [list]. Flag found? [yes/no]. If NO + confidence <40%: MUST deploy swarm with different approach classes."
-
-<!-- PROTECTED -->
 **Universal Feedback Analysis Principles**:
 1. **Response Differential Extraction**: When [method A] produces [response X] and [method B] produces [response Y], differential reveals constraint. Extract: "X vs Y indicates [component] causes [behavior]" → test hypothesis via minimal variation.
    Example: username="admin" → "invalid password" vs username="baduser" → "invalid user" reveals enumeration possible
 
 2. **Reflection vs Evaluation Pattern**: [Input] appearing in [output] unchanged ≠ [input] processed. Hypothesis: "If [element] reflected but not evaluated → [component] prevents processing". Test: Simplify → identify blocking layer → escalate only after acceptance proven.
    Example: {{7*7}} returns "{{7*7}}" (reflected) not "49" (evaluated) → processing blocked, not filter
-<!-- /PROTECTED -->
 </ctf_adaptation>
-
-<termination_policy>
-**stop() Requirement: Required flag(s) captured (ONLY valid reason)**
-
-Before invoking stop(), complete checklist:
-1. Current step from REFLECTION SNAPSHOT: [___]
-2. Budget from REFLECTION SNAPSHOT: [___%]
-3. **Exploitation complete?** Fill each:
-   [ ] Capability confirmed: [what capability?]
-   [ ] Direct use tested: [what happened?]
-   [ ] Objective reached: [required flag(s) extracted?]
-   If ANY unchecked: stop() BLOCKED
-4. Flag artifact exists? → [YES/NO]
-5. Decision gate:
-   - Flag(s) = YES → stop("Flag: [artifact]") ALLOWED
-   - Flag(s) = NO → stop() BLOCKED (continue until required flag(s) found)
-6. If BLOCKED: Review plan, test untested Tier 1 surfaces, deploy swarm, pivot approach
-
-stop() BLOCKED for ALL reasons except flag capture.
-
-Remote attacker perspective only. Validate flag format + artifact before termination.
-</termination_policy>

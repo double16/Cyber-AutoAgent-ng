@@ -57,7 +57,7 @@ def test_mem0_store_content_cleaning(mock_memory_client, mock_user_op_ids):
     args, kwargs = mock_memory_client.store_memory.call_args
     assert args[0] == cleaned_content
     assert args[1] == "test_user"
-    assert args[2] == None
+    assert args[2] is None
 
 
 def test_mem0_store_metadata_cleaning(mock_memory_client, mock_user_op_ids):

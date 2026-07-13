@@ -7,7 +7,7 @@ import os
 import sys
 import warnings
 import importlib.util
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from math import ceil
 from pathlib import Path
@@ -20,6 +20,10 @@ from strands.tools.executors import ConcurrentToolExecutor
 # These tools have the @tool decorator, the function is to be imported
 from strands_tools.editor import editor
 from strands_tools.load_tool import load_tool
+from modules.tools.swarm import swarm
+from modules.tools.web_search import web_search
+
+from modules.prompts import get_task_capture_prompt
 from modules.tools.shell import shell
 from strands_tools.sleep import sleep
 from strands_tools.tavily import tavily_search
@@ -30,8 +34,6 @@ from strands_tools import (
     python_repl,
     environment,
 )
-from modules.tools import stop
-
 from modules import prompts, __version__
 from modules.agents.factory import (
     AgentFactoryConfig,
@@ -64,8 +66,13 @@ from modules.handlers.react import AgentEventHandler
 from modules.handlers.agent_repair_hook import AgentRepairHook
 from modules.handlers.tool_router import ToolRouterHook
 from modules.config.models.capabilities import get_capabilities
-from modules.handlers.utils import print_status, sanitize_target_name, get_tool_name
-from modules.tools import swarm, web_search
+from modules.handlers.utils import (
+    get_tool_name,
+    print_status,
+    sanitize_target_name,
+    tool_append_description,
+    tool_rename,
+)
 
 from modules.tools.mcp import (
     discover_mcp_tools,
@@ -76,12 +83,7 @@ from modules.tools.memory import (
     mem0_store,
     mem0_retrieve,
     mem0_list,
-    store_plan,
-    get_plan,
     create_tasks,
-    list_uncompleted_tasks,
-    task_done,
-    get_active_task,
 )
 from modules.tools.browser import (
     initialize_browser,
@@ -93,7 +95,6 @@ from modules.tools.browser import (
     browser_evaluate_js,
     browser_get_cookies,
 )
-from modules.tools.prompt_optimizer import prompt_optimizer
 from modules.tools.channels import (
     channel_create_forward,
     channel_create_reverse,
@@ -109,7 +110,7 @@ from modules.tools.oast import (
     oast_register_http_response,
     oast_clear_http_responses,
 )
-from modules.tools.tool_catalog import tool_catalog_wrapper, get_cyber_tools_by_caps
+from modules.tools.tool_catalog import tool_catalog_wrapper
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -132,11 +133,44 @@ class AgentRuntimeResources:
     tool_executor: ConcurrentToolExecutor
     system_prompt_payload: Any
     system_prompt: str
+    task_capture_prompt: str
     hooks: List[HookProvider]
     conversation_manager: MappingConversationManager
     sdk_context_manager: Optional[str]
     trace_attributes: Dict[str, Any]
     prompt_token_limit: int
+    core_tools_list: List[Any] = field(default_factory=list)
+    optional_tools_list: List[Any] = field(default_factory=list)
+    termination_policy: str = ""
+
+
+def _tool_names(tools: List[Any]) -> set[str]:
+    return {get_tool_name(tool) for tool in tools}
+
+
+def build_role_tools(
+    runtime: AgentRuntimeResources,
+    *,
+    selected_optional_tool_names: Optional[List[str]] = None,
+    include_create_tasks: bool = False,
+) -> List[Any]:
+    """Build a restricted tool list for a short-lived workflow agent."""
+
+    selected_optional_tool_names = selected_optional_tool_names or []
+    selected_optional_names = set(selected_optional_tool_names)
+    tools = []
+    core_tools = runtime.core_tools_list or runtime.tools_list
+    for tool_item in core_tools:
+        tool_name = get_tool_name(tool_item)
+        if tool_name == "create_tasks" and not include_create_tasks:
+            continue
+        tools.append(tool_item)
+
+    for tool_item in runtime.optional_tools_list:
+        if get_tool_name(tool_item) in selected_optional_names:
+            tools.append(tool_item)
+
+    return tools
 
 
 def create_agent_runtime_resources(
@@ -189,10 +223,6 @@ def create_agent_runtime_resources(
         operation_id = f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     else:
         operation_id = config.op_id
-
-    enable_prompt_optimization = (
-            os.getenv("CYBER_ENABLE_PROMPT_OPTIMIZATION", "false").lower() == "true"
-    )
 
     # Configure memory system using centralized configuration
     memory_config = config_manager.get_mem0_service_config(config.provider)
@@ -274,8 +304,7 @@ def create_agent_runtime_resources(
     )
     logger.info("Prompt token limit (input tokens): %d", prompt_token_limit)
 
-    # Tool router to prevent unknown-tool failures by routing to shell before execution
-    # Allow configurable truncation of large tool outputs via env var
+    # Allow configurable truncation and externalization of large tool outputs via env var
     computed_max_results_chars = min(ceil(prompt_token_limit // 10), 30000) if prompt_token_limit else 30000
     try:
         max_result_chars = int(os.getenv("CYBER_TOOL_MAX_RESULT_CHARS", str(computed_max_results_chars)))
@@ -330,7 +359,6 @@ def create_agent_runtime_resources(
     tool_count = 0
 
     # Load module-specific tools and prepare for injection
-    module_tools_context = ""
     loaded_module_tools = []
 
     try:
@@ -419,13 +447,6 @@ def create_agent_runtime_resources(
                         )
 
             tool_count += len(tool_names)
-            module_tools_context = f"""
-### MODULE-SPECIFIC TOOLS
-Preferred over command line.
-
-{"Ready to use:" if loaded_module_tools else "Load when needed:"}
-{chr(10).join(f"  - {example}" for example in tool_examples)}
-"""
         else:
             print_status(
                 f"No module-specific tools found for '{config.module}'", "INFO"
@@ -433,48 +454,11 @@ Preferred over command line.
     except Exception as e:
         logger.warning("Error discovering module tools for '%s': %s", config.module, e)
 
-    tools_context = ""
-    if config.available_tools:
-        tool_count += len(config.available_tools)
-        tools_by_caps = get_cyber_tools_by_caps(config.available_tools)
-        tools_context = """
-### COMMAND LINE PROGRAMS
-
-- Use the **shell** tool for command line programs.
-- Capabilities → Preferred tools → Fallbacks
-- These programs are known to be installed.
-"""
-        for cap, cap_prefs in tools_by_caps.items():
-            tools_context += f"\n- **{cap}**\n"
-            pref_list = list(cap_prefs.keys())
-            pref_list.sort(key=lambda x: (not x.startswith("p"), x))
-            for pref in pref_list:
-                pref_tools = cap_prefs[pref]
-                tools_context += f"  - {pref}: {', '.join(map(lambda x: f'`{x}`', pref_tools))}\n"
-
     # Load MCP tools and prepare for injection
     mcp_tools = discover_mcp_tools(config)
-    if mcp_tools:
-        tool_count += len(mcp_tools)
-        mcp_tools_context = f"""
-### MCP TOOLS
 
-Available {config.module} MCP tools:
-{chr(10).join(f"- {mcp_tool.tool_name}" for mcp_tool in mcp_tools)}
-
-Prefer MCP tools over command line tools that offer similar capabilities.
-"""
-    else:
-        mcp_tools_context = ""
-
-    # Combine environmental and module tools context
-    # Prefer to include both environment-detected tools and module-specific tools
+    # Build additional environment context
     full_tools_context = ""
-    for tools_ctx in [tools_context, module_tools_context, mcp_tools_context]:
-        if tools_ctx:
-            if full_tools_context:
-                full_tools_context += "\n\n"
-            full_tools_context += str(tools_ctx)
     if config.bug_bounty_headers:
         marker_headers = "\n".join(
             f"- {name}: {value}" for name, value in sorted(config.bug_bounty_headers.items())
@@ -482,20 +466,11 @@ Prefer MCP tools over command line tools that offer similar capabilities.
         marker_context = f"""
 ## BUG BOUNTY TRAFFIC MARKERS
 
-Authorized bug bounty traffic must include these HTTP headers:
+For all tools that make HTTP requests, include these bug bounty traffic HTTP headers:
 {marker_headers}
 
-Before using browser traffic, call `browser_set_headers` with these headers. For `http_request`, command-line tools, and MCP tools that make HTTP requests, include the same headers in the tool input, command flags, or prompt.
 """
         full_tools_context = f"{full_tools_context}\n\n{marker_context}" if full_tools_context else marker_context
-
-    if full_tools_context:
-        full_tools_context = """
-## TOOLS
-
-Prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
-
-""" + full_tools_context
 
     if config.bug_bounty_headers:
         try:
@@ -508,6 +483,30 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             )
         except Exception as e:
             agent_logger.warning("Unable to pre-apply bug bounty browser headers: %s", e)
+
+    http_request_instructions = """
+- Purpose: Deterministic HTTP(S) requests for web page and API testing (including GraphQL/REST)
+- Validation: Save request/response transcript + negative/control case as artifacts, grep/sed to extract relevant data, store only file path in findings
+- Preference: preferred over `curl` for capability: http_client
+- Managed endpoint keys are observations unless abuse/sensitive exposure demonstrated with artifacts
+"""
+    tool_append_description(http_request, http_request_instructions)
+
+    python_repl_instructions = """
+- Usage: Rapid PoC prototyping, batch multiple tests. NO TIMEOUT (avoid >600s operations)
+- File writes: MUST use absolute paths from OPERATION ARTIFACTS DIRECTORY (relative paths write to project root)
+- Promotion trigger: POC works + logic needed >2 times → MUST promote via editor+load_tool to OPERATION TOOLS DIRECTORY
+- Results: Store all outputs as artifacts with descriptive names
+
+**editor + load_tool** (meta-tooling)
+- Purpose: Promote working POCs to reusable tools | Novel exploits when existing tools insufficient
+- Trigger: POC tested + works + pattern repeats >2 times → promote to tool (cost: create once vs rewrite each time)
+- Workflow: editor(path in OPERATION TOOLS DIRECTORY, @tool decorator) → load_tool(name) → invoke
+- Structure: @tool decorator, docstring, type hints | Location: tools/ subdirectory, NOT artifacts/
+- Debug first: Error in tool? Fix via editor → load_tool → test. Create new only if incompatible.
+- NOT for: Reports, documents, one-time scripts (use artifacts/ for those)
+"""
+    tool_append_description(python_repl, python_repl_instructions)
 
     # Always use original tools - event emission is handled by callback
     # The following are builtin_tools that can be selected by the module
@@ -533,15 +532,26 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         oast_clear_http_responses,
     ]
 
+    web_search_instructions = """
+**Purpose**
+  - external intel, OSINT, NVD/CVE, Exploit‑DB, vendor advisories, Shodan/Censys, VirusTotal; save request/response artifacts and cite them in Proof Packs.
+  - NOT for: Do not run published proof-of-concepts, use for learning how to write own exploit
+"""
     if os.getenv("TAVILY_API_KEY"):
+        # rename to web_search so instructions can be consistent
+        tool_rename(tavily_search, "web_search")
+        tool_append_description(tavily_search, web_search_instructions)
         builtin_tools_list.append(tavily_search)
     else:
+        tool_append_description(web_search, web_search_instructions)
         builtin_tools_list.append(web_search)
+
 
     logger.info(f"Built-in tools available for allow listing by module: {[get_tool_name(tool) for tool in builtin_tools_list]}")
 
-    # these tools are necessary and always present
-    tools_list = [
+    # Core tools are available to workflow workers unless a role narrows them further.
+    # Plan/task mutation remains owned by Python workflow code; create_tasks is included only for roles that need it.
+    core_tools_list = [
         swarm,
         shell,
         editor,
@@ -549,34 +559,29 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         mem0_store,
         mem0_retrieve,
         mem0_list,
-        store_plan,
-        get_plan,
         create_tasks,
-        list_uncompleted_tasks,
-        task_done,
-        get_active_task,
-        stop,
         sleep,
         python_repl,
         environment,  # environment is referenced by other strands tools
     ]
 
-    if enable_prompt_optimization:
-        tools_list.append(prompt_optimizer)
+    optional_tools_list = []
 
     if "module_tool_allowlist" in locals() and module_tool_allowlist is not None:
         for builtin_tool in builtin_tools_list:
             tool_name = get_tool_name(builtin_tool)
             if any(fnmatch.fnmatch(tool_name, tool_allowed) for tool_allowed in module_tool_allowlist):
-                tools_list.append(builtin_tool)
+                optional_tools_list.append(builtin_tool)
     else:
-        tools_list.extend(builtin_tools_list)
+        optional_tools_list.extend(builtin_tools_list)
 
+    tools_list = list(core_tools_list)
     tool_count += len(tools_list)
     # The tools below have already been counted. We cannot use `tool_count = len(tools_list)` because there may be unloaded tools
 
     # Inject module-specific tools if available
     if "loaded_module_tools" in locals() and loaded_module_tools:
+        optional_tools_list.extend(loaded_module_tools)
         tools_list.extend(loaded_module_tools)
         agent_logger.info(
             "Injected %d module tools into agent", len(loaded_module_tools)
@@ -584,6 +589,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
     # Inject MCP tools if available
     if "mcp_tools" in locals() and mcp_tools:
+        optional_tools_list.extend(mcp_tools)
         tools_list.extend(mcp_tools)
         agent_logger.info(
             "Injected %d MCP tools into agent", len(mcp_tools)
@@ -604,12 +610,15 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
     # Load module-specific execution prompt
     module_execution_prompt = None
+    module_termination_policy = ""
     try:
         module_loader = prompts.get_module_loader()
-        # Pass operation root to enable loading optimized execution prompt
         operation_root_path = paths.get("root") if paths else None
         module_execution_prompt = module_loader.load_module_execution_prompt(
             config.module, operation_root=operation_root_path
+        )
+        module_termination_policy = module_loader.load_module_termination_policy(
+            config.module
         )
         if module_execution_prompt:
             print_status(
@@ -626,10 +635,15 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             getattr(module_loader, "last_loaded_execution_prompt_source", None)
             or "default (none found)"
         )
+        termination_src = (
+            getattr(module_loader, "last_loaded_termination_policy_source", None)
+            or "default (none found)"
+        )
         agent_logger.info(
-            "CYBERAUTOAGENT: module='%s', execution_prompt_source='%s'",
+            "CYBERAUTOAGENT: module='%s', execution_prompt_source='%s', termination_policy_source='%s'",
             config.module,
             exec_src,
+            termination_src,
         )
     except Exception as e:
         logger.warning(
@@ -721,7 +735,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         model_id=config.model_id,
         specialist_model_id=server_config.swarm.llm.model_id,
         agent_name=f"Cyber-AutoAgent {config.op_id or operation_id}",
-        agent_type="main_orchestrator",
+        agent_type="operation_controller",
         init_context={
             "objective": config.objective,
             "target": config.target,
@@ -789,7 +803,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
 
     tool_router_hook = ToolRouterHook(
-        shell,
         max_result_chars=max_result_chars,
         artifacts_dir=paths.get("artifacts"),
         artifact_threshold=artifact_threshold,
@@ -799,23 +812,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     hooks: List[HookProvider] = list(filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
     subagent_hooks: List[HookProvider] = list(
         filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
-
-    if enable_prompt_optimization:
-        # Create prompt rebuild hook for intelligent prompt updates
-        from modules.handlers.prompt_rebuild_hook import PromptRebuildHook
-        prompt_rebuild_hook = PromptRebuildHook(
-            callback_handler=callback_handler,
-            has_memory_path=bool(config.memory_path),
-            memory_instance=memory_client,
-            config=config,
-            target=config.target,
-            objective=config.objective,
-            operation_id=operation_id,
-            budget=config.budget,
-            module=config.module,
-            tools_context=full_tools_context if full_tools_context else None,
-        )
-        hooks.append(prompt_rebuild_hook)
 
     # Update conversation window size and limits from SDK config
     try:
@@ -894,7 +890,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         "langfuse.environment": config_manager.getenv(
             "DEPLOYMENT_ENV", "production"
         ),
-        "langfuse.agent.type": "main_orchestrator",
+        "langfuse.agent.type": "operation_controller",
         "langfuse.capabilities.swarm": True,
         # Standard OTEL attributes
         "session.id": operation_id,
@@ -977,14 +973,18 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         config_manager=config_manager,
         callback_handler=callback_handler,
         tools_list=tools_list,
+        core_tools_list=core_tools_list,
+        optional_tools_list=optional_tools_list,
         tool_executor=tool_executor,
         system_prompt_payload=system_prompt_payload,
         system_prompt=system_prompt,
+        task_capture_prompt=get_task_capture_prompt(),
         hooks=hooks,
         conversation_manager=conversation_manager,
         sdk_context_manager=sdk_context_manager,
         trace_attributes=trace_attributes,
         prompt_token_limit=prompt_token_limit,
+        termination_policy=module_termination_policy.strip(),
     )
 
 
@@ -993,6 +993,12 @@ def create_agent(
     objective: str,
     config: Optional[AgentConfig] = None,
     runtime_resources: Optional[AgentRuntimeResources] = None,
+    *,
+    system_prompt: Optional[Any] = None,
+    tools: Optional[List[Any]] = None,
+    name: Optional[str] = None,
+    agent_type: Optional[str] = None,
+    include_tool_catalog: bool = True,
 ) -> Agent:
     """Create autonomous agent from shared runtime resources."""
     runtime = runtime_resources or create_agent_runtime_resources(target, objective, config)
@@ -1003,16 +1009,55 @@ def create_agent(
 
     model = create_strands_model(config.provider, config.model_id, "primary")
 
+    trace_attributes = dict(runtime.trace_attributes)
+    if agent_type:
+        trace_attributes.update({
+            "langfuse.agent.type": agent_type,
+            "agent.role": agent_type,
+            "agent.name": name or "Cyber-AutoAgent",
+            "gen_ai.agent.name": name or "Cyber-AutoAgent",
+        })
+
+    if system_prompt:
+        trace_attributes.update({
+            "system_prompt": system_prompt,
+        })
+
+    callback_handler = runtime.callback_handler
+    if agent_type and isinstance(runtime.callback_handler, AgentEventHandler):
+        try:
+            specialist_model_id = runtime.server_config.swarm.llm.model_id
+        except Exception:
+            specialist_model_id = config.model_id
+        try:
+            ui_mode = runtime.config_manager.getenv("CYBER_UI_MODE", "cli").lower()
+        except Exception:
+            ui_mode = os.getenv("CYBER_UI_MODE", "cli").lower()
+        callback_handler = AgentEventHandler(
+            operation_id=runtime.operation_id,
+            provider_id=config.provider,
+            model_id=config.model_id,
+            specialist_model_id=specialist_model_id,
+            emitter=runtime.callback_handler.emitter,
+            init_context={"ui_mode": ui_mode},
+            coordinator=runtime.callback_handler.coordinator,
+            agent_name=name or f"Cyber-AutoAgent {agent_type}",
+            agent_type=agent_type,
+            parent_agent_run_id=runtime.callback_handler.agent_run_id,
+            emit_operation_init=False,
+            start_metrics_thread=False,
+        )
+
     agent_kwargs = {
         "model": model,
-        "name": f"Cyber-AutoAgent {config.op_id or runtime.operation_id}",
-        "tools": runtime.tools_list,
+        "name": name or f"Cyber-AutoAgent {config.op_id or runtime.operation_id}",
+        "tools": tools if tools is not None else build_role_tools(runtime),
         "tool_executor": runtime.tool_executor,
-        "system_prompt": runtime.system_prompt_payload,
-        "callback_handler": runtime.callback_handler,
+        "system_prompt": system_prompt if system_prompt is not None else runtime.system_prompt_payload,
+        "callback_handler": callback_handler,
         "hooks": runtime.hooks if runtime.hooks else None,
-        "load_tools_from_directory": True,
-        "trace_attributes": runtime.trace_attributes,
+        "load_tools_from_directory": tools is None,
+        "trace_attributes": trace_attributes,
     }
     if model_uses_server_side_state(model):
         agent_logger.info(
@@ -1038,12 +1083,24 @@ def create_agent(
         setattr(agent, "_allow_reasoning_content", False)
     if runtime.prompt_token_limit:
         setattr(agent, "_prompt_token_limit", runtime.prompt_token_limit)
+    try:
+        setattr(agent, "_cyber_agent_name", agent_kwargs["name"])
+        setattr(agent, "_cyber_agent_type", agent_type or getattr(callback_handler, "agent_type", "agent"))
+        setattr(agent, "_cyber_callback_handler", callback_handler)
+        if getattr(callback_handler, "agent_run_id", None):
+            setattr(agent, "_cyber_agent_run_id", callback_handler.agent_run_id)
+        if getattr(callback_handler, "parent_agent_run_id", None):
+            setattr(agent, "_cyber_parent_agent_run_id", callback_handler.parent_agent_run_id)
+    except Exception:
+        pass
     # Ensure legacy-compatible system prompt is directly accessible for tests
     try:
         setattr(agent, "system_prompt", runtime.system_prompt)
     except Exception:
         pass
-    agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))
+
+    if include_tool_catalog and agent_kwargs["tools"]:
+        agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))
 
     agent_logger.debug("Agent initialized successfully")
     return agent

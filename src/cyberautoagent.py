@@ -24,7 +24,6 @@ import atexit
 import base64
 import importlib
 import os
-import re
 import signal
 import sys
 import threading
@@ -34,7 +33,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import requests
 from botocore.exceptions import (
@@ -46,24 +45,24 @@ from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ReadTimeout as RequestsReadTimeout
 from strands.telemetry.config import StrandsTelemetry
-from strands.types.content import Message
 from strands.types.exceptions import MaxTokensReachedException
 
 import litellm
 
-from modules.agents.agent_conversation_builder import rebuild_agent_conversation
 from modules.agents.cyber_autoagent import (
     AgentConfig,
     create_agent,
     create_agent_runtime_resources,
     _ensure_prompt_within_budget,
 )
+from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+from modules.agents.run_policy import AgentRunPolicy
 from modules.config.models.factory import get_model_timeout, configure_model_rate_limits
 from modules.config.system.environment import auto_setup, clean_operation_memory, setup_logging
 from modules.config.manager import get_config_manager
 from modules.config.types import get_default_base_dir, BudgetConfig, DEFAULT_MAX_DURATION
 from modules.handlers.base import BudgetLimitReached, is_docker
-from modules.handlers.conversation_budget import strip_reflection_snapshot_messages
+from modules.handlers.react import AgentEventHandler
 from modules.handlers.utils import (
     Colors,
     get_output_path,
@@ -75,8 +74,7 @@ from modules.handlers.utils import (
     dumpstacks,
     update_latest_output_pointer,
 )
-from modules.prompts.factory import get_reflection_snapshot
-from modules.tools import browser, channel_close_all, get_active_task, get_plan, mem0_list, get_memory_client
+from modules.tools import browser, channel_close_all
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
 
@@ -313,6 +311,59 @@ def process_agent_metrics(callback_handler: Any, result: Any) -> None:
     callback_handler.process_metrics(MetricsObject(result.metrics.accumulated_usage))
 
 
+def extract_last_assistant_text(messages: Any) -> str:
+    """Return text from the most recent assistant message without tool calls."""
+
+    try:
+        reversed_messages = reversed(list(messages or []))
+    except TypeError:
+        return ""
+    for message in reversed_messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content", []) or []
+        if not isinstance(content, list):
+            continue
+        has_tool_use = any(isinstance(block, dict) and ("toolUse" in block or "tool_use" in block) for block in content)
+        if has_tool_use:
+            continue
+        parts = [block.get("text", "") for block in content if isinstance(block, dict) and isinstance(block.get("text"), str)]
+        text = "\n".join(part for part in parts if part).strip()
+        if text:
+            return text
+    return ""
+
+
+def _required_tools_satisfied(callback_handler: Any, run_policy: AgentRunPolicy) -> bool:
+    """Return true when the callback has observed enough required tool calls."""
+
+    tool_counts = getattr(callback_handler, "tool_counts", {}) or {}
+    tool_total_count = sum(
+        count
+        for name, count in tool_counts.items()
+        if name not in run_policy.ignored_terminal_tool_names
+    )
+    if tool_total_count < run_policy.min_tool_calls:
+        return False
+    return all(int(tool_counts.get(name, 0) or 0) > 0 for name in run_policy.required_tool_names)
+
+
+def _run_policy_allows_terminal_text(
+    callback_handler: Any,
+    run_policy: AgentRunPolicy,
+    actionless_attempt_count: int,
+) -> bool:
+    """Return true when an actionless turn is a valid final response under policy."""
+
+    if not run_policy.terminal_after_required_tools:
+        return False
+    if not run_policy.allow_text_final_after_tools:
+        return False
+    if actionless_attempt_count <= run_policy.max_actionless_after_tools:
+        return False
+    return _required_tools_satisfied(callback_handler, run_policy)
+
+
 def run_agent_until_terminal_state(
     *,
     agent: Any,
@@ -324,26 +375,18 @@ def run_agent_until_terminal_state(
     max_duration: int | None,
     logger: Any,
     recoverable_retries: int = 2,
+    run_policy: Optional[AgentRunPolicy] = None,
 ) -> AgentRunResult:
     """Run one agent until it reaches a normal terminal state or raises a fatal failure."""
+    run_policy = run_policy or AgentRunPolicy()
     initial_reasoning_retry = 2
     actionless_attempt_count = 0
     recoverable_attempt_count = 0
+    agent_callback_handler = getattr(agent, "_cyber_callback_handler", None) or callback_handler
 
     while not interrupted:
-        last_tool_call_count = sum(callback_handler.tool_counts.values(), start=0)
+        last_tool_call_count = sum(agent_callback_handler.tool_counts.values(), start=0)
         try:
-            if "<reflection_snapshot>" not in current_message and not current_message.startswith(initial_prompt):
-                progress_percent = int(getattr(callback_handler, "get_budget_progress", lambda: 0)())
-                reflection_snapshot = get_reflection_snapshot(
-                    progress_percent=progress_percent,
-                    budget=budget_cfg,
-                    plan_current_phase=None,
-                )
-                current_message = current_message + "\n\n" + (
-                    f"<reflection_snapshot>\n{reflection_snapshot}\n</reflection_snapshot>"
-                )
-
             print_status(
                 f"Agent processing: {current_message[:100]}{' ...' if len(current_message) > 100 else ''}",
                 "THINKING",
@@ -354,16 +397,15 @@ def run_agent_until_terminal_state(
                 iter(getattr(agent, "messages", []))
             except TypeError:
                 agent.messages = []
-            strip_reflection_snapshot_messages(agent)
             _ensure_prompt_within_budget(agent)
 
             result = agent(current_message)
             recoverable_attempt_count = 0
 
             logger.debug("Agent result: %r", result)
-            process_agent_metrics(callback_handler, result)
+            process_agent_metrics(agent_callback_handler, result)
 
-            tool_total_count = sum(callback_handler.tool_counts.values())
+            tool_total_count = sum(agent_callback_handler.tool_counts.values())
             if tool_total_count > last_tool_call_count:
                 actionless_attempt_count = 0
             else:
@@ -374,17 +416,17 @@ def run_agent_until_terminal_state(
                     tool_total_count,
                 )
 
-            if callback_handler and callback_handler.should_stop():
-                if callback_handler.stop_tool_used:
-                    print_status("Stop tool used - terminating", "SUCCESS")
-                    return AgentRunResult("stop_tool", "Stop tool used")
-                if callback_handler.has_reached_limit():
+            if _run_policy_allows_terminal_text(agent_callback_handler, run_policy, actionless_attempt_count):
+                return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+
+            if agent_callback_handler and agent_callback_handler.should_stop():
+                if agent_callback_handler.has_reached_limit():
                     print_status("Budget limit reached - terminating", "SUCCESS")
                     raise BudgetLimitReached("Budget limit reached")
                 return AgentRunResult("callback_stop", "Callback requested stop")
 
-            if sum(callback_handler.tool_counts.values()) == 0:
-                if getattr(callback_handler, "_emitted_any_reasoning", False):
+            if sum(agent_callback_handler.tool_counts.values()) == 0:
+                if getattr(agent_callback_handler, "_emitted_any_reasoning", False):
                     logger.debug("Initial reasoning observed with no tools yet; continuing one more cycle")
                 elif initial_reasoning_retry <= 0:
                     print_status("No actions taken - completing", "SUCCESS")
@@ -393,8 +435,8 @@ def run_agent_until_terminal_state(
             elif actionless_attempt_count > 2:
                 termination_reason = f"No actions taken after {actionless_attempt_count} attempts"
                 print_status(termination_reason, "WARNING")
-                if callback_handler:
-                    callback_handler.emit_termination("stalled", termination_reason)
+                if agent_callback_handler:
+                    agent_callback_handler.emit_termination("stalled", termination_reason)
                 return AgentRunResult("stalled", termination_reason)
 
             elapsed = time.time() - operation_start
@@ -428,28 +470,18 @@ def run_agent_until_terminal_state(
                         "A tool MUST be called next to make progress."
                     )
                 else:
-                    active_plan = get_memory_client(silent=True).get_active_plan()
-                    if active_plan and active_plan.assessment_complete:
-                        return AgentRunResult("assessment_complete", "Assessment complete")
-
-                    active_task = get_active_task() or ""
-                    memories = mem0_list()
-
                     logger.warning(
-                        "Attempting to rebuild context because no tool calls were detected in last execution loop."
+                        "Attempting to redirect model again because no tool calls were detected in last execution loop."
                     )
-
-                    current_message = rebuild_agent_conversation(
-                        agent=agent,
-                        active_plan=active_plan,
-                        active_task=active_task,
-                        initial_prompt=initial_prompt,
-                        memories=memories,
+                    current_message += (
+                        "**MANDATORY ACTION**: Continue only the assigned workflow role and make progress now. "
+                        "Call an available tool if tool progress is required; otherwise provide the final answer "
+                        "for this role."
                     )
 
         except StopIteration as error:
             logger.debug("Agent cycle completed: %s", str(error))
-            if callback_handler and callback_handler.has_reached_limit():
+            if agent_callback_handler and agent_callback_handler.has_reached_limit():
                 print_status("Step limit reached", "SUCCESS")
                 raise BudgetLimitReached("Step limit reached")
 
@@ -459,11 +491,6 @@ def run_agent_until_terminal_state(
                 raise
             if isinstance(error, BudgetLimitReached) or "budget limit" in error_str:
                 raise BudgetLimitReached(str(error))
-            if "event loop cycle stop requested" in error_str:
-                reason_match = re.search(r"Reason: (.+?)(?:\\n|$)", str(error))
-                reason = reason_match.group(1) if reason_match else "Objective achieved"
-                print_status(f"Agent terminated: {reason}", "SUCCESS")
-                return AgentRunResult("event_loop_stop", reason)
             if is_recoverable_agent_error(error):
                 recoverable_attempt_count += 1
                 logger.debug("Recoverable provider/network exception", exc_info=error)
@@ -476,8 +503,8 @@ def run_agent_until_terminal_state(
                     continue
 
                 print_status("Network/provider timeout - generating final report", "WARNING")
-                if callback_handler:
-                    callback_handler.emit_termination(
+                if agent_callback_handler:
+                    agent_callback_handler.emit_termination(
                         "network_timeout",
                         "Provider/network timeout detected. Switching to final report.",
                     )
@@ -504,13 +531,13 @@ def finalize_report_and_evaluation(
         callback_handler.ensure_report_generated(agent, target, objective, module)
         logger.info("Triggering evaluation on completion")
         callback_handler.trigger_evaluation_on_completion()
-
-        default_evaluation = os.getenv("ENABLE_OBSERVABILITY", "false")
-        if os.getenv("ENABLE_AUTO_EVALUATION", default_evaluation).lower() == "true":
-            model_timeout = get_model_timeout(agent.model, 300) if agent is not None else 300
-            callback_handler.wait_for_evaluation_completion(timeout=max(300, model_timeout))
     except Exception as error:
         logger.warning("Error in final report/evaluation: %s", error)
+    finally:
+        try:
+            callback_handler.emit_assessment_complete()
+        except Exception as error:
+            logger.warning("Unable to emit assessment completion: %s", error)
 
 
 def close_log_outputs() -> None:
@@ -554,7 +581,7 @@ def cleanup_operation_resources(
         close_log_outputs()
         os._exit(1)
 
-    should_finalize = agent is not None or bool(getattr(args, "report", False))
+    should_finalize = callback_handler is not None
 
     if should_finalize:
         finalize_report_and_evaluation(
@@ -1085,25 +1112,17 @@ def main():
 
     # Initialize timing
     operation_start = time.time()
-    callback_handler = None
+    callback_handler: Optional[AgentEventHandler] = None
+    agent = None
 
     print(f"\n{Colors.DIM}{'─' * 80}{Colors.RESET}\n")
 
     try:
         # Initial user message to start the agent
         initial_prompt = f"Conduct security assessment of {args.target} for: {args.objective}"
-        current_message = initial_prompt
 
         # Expose at module level for tests patching cyberautoagent.get_initial_prompt
         globals()["get_initial_prompt"] = lambda: initial_prompt
-
-        active_plan = get_plan() or ""
-        if "plan_overview[1]" not in active_plan:
-            active_plan = None
-        active_task = get_active_task() or ""
-        memories = mem0_list()
-        if memories.startswith("Error:"):
-            memories = ""
 
         print_status("Cyber-AutoAgent online and starting", "SUCCESS")
 
@@ -1143,36 +1162,50 @@ def main():
         callback_handler = runtime_resources.callback_handler
 
         if not bool(args.report):
-            agent = create_agent(
-                target=args.target,
-                objective=args.objective,
-                config=config,
-                runtime_resources=runtime_resources,
-            )
-
-            if active_plan:
-                current_message = ""
-                agent.messages[:] = [Message(role="user", content=[{"text": f"\n\n## PLAN SNAPSHOT (from `get_plan()`)\n{active_plan}"}])]
-                if memories:
-                    agent.messages.append(Message(role="user",
-                                                  content=[{"text": f"\n\n## MEMORY SNAPSHOT (work progress from `mem0_list()`)\n{memories}"}]))
-                if 'status="active"' in active_task:
-                    agent.messages.append(Message(role="user", content=[{"text": active_task}]))
-
-            try:
-                run_result = run_agent_until_terminal_state(
+            def workflow_work_runner(
+                role: str,
+                prompt: str,
+                tools: list[Any],
+                system_prompt: str,
+                run_policy: Optional[AgentRunPolicy] = None,
+            ) -> str:
+                agent = create_agent(
+                    target=args.target,
+                    objective=args.objective,
+                    config=config,
+                    runtime_resources=runtime_resources,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    name=f"Cyber-AutoAgent {operation_id} {role}",
+                    agent_type=role,
+                    include_tool_catalog=role != "task_creator",
+                )
+                result = run_agent_until_terminal_state(
                     agent=agent,
                     callback_handler=callback_handler,
-                    current_message=current_message,
+                    current_message=prompt,
                     initial_prompt=initial_prompt,
                     budget_cfg=budget_cfg,
                     operation_start=operation_start,
                     max_duration=args.max_duration,
                     logger=logger,
+                    run_policy=run_policy,
                 )
-                if run_result.reason == "stop_tool":
-                    logger.info("Stop tool detected - generating report before termination")
-                    callback_handler.ensure_report_generated(agent, args.target, args.objective, args.module)
+                assistant_text = extract_last_assistant_text(getattr(agent, "messages", []))
+                if assistant_text:
+                    return assistant_text
+                if run_policy and result.reason == run_policy.terminal_reason:
+                    return ""
+                return result.message or result.reason
+
+            workflow = MultiAgentWorkflowController(
+                runtime=runtime_resources,
+                budget=budget_cfg,
+                work_runner=workflow_work_runner,
+            )
+
+            try:
+                workflow.run()
             except BudgetLimitReached:
                 print_status("Budget limit reached", "SUCCESS")
                 logger.debug("Budget limit reached - terminating gracefully")
@@ -1185,7 +1218,7 @@ def main():
                             "max_tokens",
                             "Model token limit reached. Switching to final report.",
                         )
-                        callback_handler.ensure_report_generated(agent, args.target, args.objective, args.module)
+                        callback_handler.ensure_report_generated(None, args.target, args.objective, args.module)
                 except Exception as max_tokens_finish_error:
                     logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
             except Exception as error:
@@ -1195,7 +1228,6 @@ def main():
                 if callback_handler:
                     callback_handler.emit_termination("error", termination_reason)
                 raise
-
         execution_time = time.time() - operation_start
         logger.info("Operation completed in %.2f seconds", execution_time)
 
@@ -1219,7 +1251,7 @@ def main():
                 )
 
                 # Determine status based on completion
-                if callback_handler.stop_tool_used:
+                if callback_handler.termination_reason == "complete":
                     status_text = f"{Colors.GREEN}Objective Achieved{Colors.RESET}"
                 elif callback_handler.has_reached_limit():
                     status_text = f"{Colors.YELLOW}Step Limit Reached{Colors.RESET}"
@@ -1253,22 +1285,6 @@ def main():
                     print(f"\n{Colors.BOLD}Capabilities Created:{Colors.RESET}")
                     for tool in summary["capability_expansion"]:
                         print(f"  • {Colors.GREEN}{tool}{Colors.RESET}")
-
-            # Display evidence summary in terminal mode
-            if (
-                callback_handler
-                and os.environ.get("CYBER_UI_MODE", "cli").lower() != "react"
-            ):
-                evidence_summary = callback_handler.get_evidence_summary()
-                if isinstance(evidence_summary, list) and evidence_summary:
-                    print(f"\n{Colors.BOLD}Key Evidence:{Colors.RESET}")
-                    if isinstance(evidence_summary[0], dict):
-                        for ev in evidence_summary[:5]:
-                            cat = ev.get("category", "unknown")
-                            content = ev.get("content", "")[:60]
-                            print(f"  • [{cat}] {content}...")
-                        if len(evidence_summary) > 5:
-                            print(f"  • ... and {len(evidence_summary) - 5} more items")
 
             # Show where evidence and memories are stored
             # Determine memory location based on backend and unified output structure

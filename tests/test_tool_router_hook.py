@@ -2,7 +2,7 @@
 """Tests for ToolRouterHook.
 
 This module tests:
-1. BeforeToolCallEvent: Unknown tool routing to shell
+1. Hook registration: output handling only, with no unknown-tool fallback
 2. AfterToolCallEvent: Large result truncation with SDK contract compliance
 3. Thread safety: Artifact count atomicity
 4. Schema validation: ToolResult structure validation
@@ -11,11 +11,10 @@ import asyncio
 import copy
 import threading
 import types
-from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
+from strands.hooks import AfterToolCallEvent
 
 from modules.handlers.tool_router import ToolRouterHook
 
@@ -82,55 +81,20 @@ def create_tool_result(text: str, tool_use_id: str = "test_id") -> dict:
 
 
 # ============================================================================
-# Original Tests: BeforeToolCallEvent
+# Hook Registration Tests
 # ============================================================================
 
 
-def test_tool_router_maps_unknown_tool_to_shell():
-    """Test that unknown tools are mapped to shell."""
-    async def _test():
-        # Prepare hook with a sentinel shell tool
-        sentinel_shell = object()
-        hook = ToolRouterHook(shell_tool=sentinel_shell)  # type: ignore[attr-defined]
+def test_tool_router_registers_only_after_tool_output_handling():
+    """Unknown tool calls must remain unresolved instead of falling back to shell."""
+    hook = ToolRouterHook()
+    registry = types.SimpleNamespace(add_callback=lambda event_type, callback: registrations.append((event_type, callback)))
+    registrations = []
 
-        # Minimal event carrying an unknown tool name
-        event = types.SimpleNamespace()
-        event.selected_tool = None
-        event.tool_use = {
-            "name": "nmap",
-            "input": {"options": "-sC -sV", "target": "http://example.com:8080"},
-        }
+    hook.register_hooks(registry)
 
-        # Invoke async hook
-        await hook._on_before_tool_async(event)  # type: ignore[attr-defined]
-
-        # Verify that shell was selected and command composed
-        assert event.selected_tool is sentinel_shell
-        cmd = event.tool_use.get("input", {}).get("command", "")
-        assert isinstance(cmd, str) and cmd.startswith("nmap")
-        assert "-sC" in cmd and "-sV" in cmd and "http://example.com:8080" in cmd
-
-    asyncio.run(_test())
-
-
-def test_tool_router_keeps_registered_tools_unchanged():
-    """Test that registered tools are not modified."""
-    async def _test():
-        sentinel_shell = object()
-        hook = ToolRouterHook(shell_tool=sentinel_shell)  # type: ignore[attr-defined]
-
-        event = types.SimpleNamespace()
-        event.selected_tool = object()  # Simulate already-resolved tool
-        event.tool_use = {"name": "shell", "input": {"command": "echo hi"}}
-
-        await hook._on_before_tool_async(event)  # should no-op
-
-        # selected_tool remains unchanged (not replaced with sentinel)
-        assert event.selected_tool is not sentinel_shell
-        # input remains as-is
-        assert event.tool_use["input"]["command"] == "echo hi"
-
-    asyncio.run(_test())
+    assert registrations == [(AfterToolCallEvent, hook._truncate_large_results_async)]
+    assert not hasattr(hook, "_on_before_tool_async")
 
 
 # ============================================================================
@@ -161,7 +125,6 @@ class TestAfterToolCallEventSDKContract:
         """
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=100,
                 artifacts_dir=tmp_path,
                 artifact_threshold=50,
@@ -170,10 +133,6 @@ class TestAfterToolCallEventSDKContract:
             # Create large content that triggers truncation
             large_text = "X" * 200
             original_result = create_tool_result(large_text)
-
-            # Track the original content block
-            original_content_block = original_result["content"][0]
-            original_text_before = original_content_block["text"]
 
             event = MockAfterToolCallEvent(original_result)
 
@@ -201,7 +160,6 @@ class TestAfterToolCallEventSDKContract:
         """
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=100,
                 artifacts_dir=tmp_path,
                 artifact_threshold=50,
@@ -244,7 +202,6 @@ class TestAfterToolCallEventSDKContract:
         """
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=100,
                 artifacts_dir=tmp_path,
                 artifact_threshold=50,
@@ -277,7 +234,6 @@ class TestAfterToolCallEventSDKContract:
         """Verify small results pass through unchanged."""
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=1000,
                 artifact_threshold=500,
             )
@@ -319,7 +275,6 @@ class TestToolRouterThreadSafety:
         Multiple threads can read same value and increment to same result.
         """
         hook = ToolRouterHook(
-            shell_tool=object(),
             max_result_chars=100,
             artifacts_dir=tmp_path,
             artifact_threshold=50,
@@ -370,7 +325,6 @@ class TestToolRouterThreadSafety:
     def test_concurrent_cleanup_safety(self, tmp_path):
         """Test that concurrent cleanup doesn't cause errors."""
         hook = ToolRouterHook(
-            shell_tool=object(),
             max_result_chars=100,
             artifacts_dir=tmp_path,
             artifact_threshold=50,
@@ -410,7 +364,7 @@ class TestToolResultSchemaValidation:
     def test_handles_missing_status_field(self):
         """Verify graceful handling when status field is missing."""
         async def _test():
-            hook = ToolRouterHook(shell_tool=object(), max_result_chars=100)
+            hook = ToolRouterHook(max_result_chars=100)
 
             # Malformed result missing 'status'
             malformed_result = {
@@ -434,7 +388,7 @@ class TestToolResultSchemaValidation:
     def test_handles_missing_tooluseid_field(self):
         """Verify graceful handling when toolUseId field is missing."""
         async def _test():
-            hook = ToolRouterHook(shell_tool=object(), max_result_chars=100)
+            hook = ToolRouterHook(max_result_chars=100)
 
             # Malformed result missing 'toolUseId'
             malformed_result = {
@@ -457,7 +411,7 @@ class TestToolResultSchemaValidation:
     def test_handles_non_list_content(self):
         """Verify graceful handling when content is not a list."""
         async def _test():
-            hook = ToolRouterHook(shell_tool=object(), max_result_chars=100)
+            hook = ToolRouterHook(max_result_chars=100)
 
             # Malformed result with string content
             malformed_result = {
@@ -481,7 +435,7 @@ class TestToolResultSchemaValidation:
     def test_handles_none_result(self):
         """Verify graceful handling of None result."""
         async def _test():
-            hook = ToolRouterHook(shell_tool=object(), max_result_chars=100)
+            hook = ToolRouterHook(max_result_chars=100)
 
             event = types.SimpleNamespace(
                 result=None,
@@ -506,7 +460,6 @@ class TestArtifactExternalization:
         """Verify large outputs are saved to artifact files."""
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=100,
                 artifacts_dir=tmp_path,
                 artifact_threshold=50,
@@ -532,7 +485,6 @@ class TestArtifactExternalization:
         """Verify truncated result includes reference to artifact."""
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=100,
                 artifacts_dir=tmp_path,
                 artifact_threshold=50,
@@ -560,7 +512,6 @@ class TestArtifactExternalization:
         """Verify large outputs are saved to artifact files."""
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=10000,
                 artifacts_dir=tmp_path,
                 artifact_threshold=10000,
@@ -593,7 +544,6 @@ class TestArtifactExternalization:
         """Verify large outputs are saved to artifact files."""
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=10000,
                 artifacts_dir=tmp_path,
                 artifact_threshold=10000,
@@ -642,28 +592,17 @@ class TestArtifactExternalization:
 
 
 class TestToolRouterIntegration:
-    """Integration tests for complete tool routing pipeline."""
+    """Integration tests for the complete output processing pipeline."""
 
     def test_full_pipeline_with_large_output(self, tmp_path):
-        """Test complete pipeline: route tool -> execute -> truncate result."""
+        """Test complete output truncation and externalization pipeline."""
         async def _test():
-            sentinel_shell = MagicMock()
             hook = ToolRouterHook(
-                shell_tool=sentinel_shell,
                 max_result_chars=500,
                 artifacts_dir=tmp_path,
                 artifact_threshold=200,
             )
 
-            # 1. Before: Route unknown tool
-            before_event = types.SimpleNamespace(
-                selected_tool=None,
-                tool_use={"name": "nmap", "input": {"target": "example.com"}},
-            )
-            await hook._on_before_tool_async(before_event)
-            assert before_event.selected_tool is sentinel_shell
-
-            # 2. After: Truncate large result
             large_output = "Nmap scan results:\n" + "PORT   STATE SERVICE\n" * 100
             after_result = create_tool_result(large_output)
             after_event = MockAfterToolCallEvent(after_result, {"name": "shell"})
@@ -689,7 +628,6 @@ class TestToolRouterIntegration:
         """
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=10000,
                 artifacts_dir=None,
                 artifact_threshold=10000,
@@ -725,7 +663,6 @@ class TestToolRouterIntegration:
         """Verify document blocks don't crash when artifacts_dir is None."""
         async def _test():
             hook = ToolRouterHook(
-                shell_tool=object(),
                 max_result_chars=10000,
                 artifacts_dir=None,
                 artifact_threshold=10000,

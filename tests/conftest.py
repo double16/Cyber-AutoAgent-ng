@@ -25,6 +25,8 @@ os.environ["DEV_CLIENT_OFFLINE"] = "true"
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+os.environ["ENABLE_LANGFUSE_PROMPTS"] = "false"
+
 # Ensure provider override envs do not leak into tests expecting defaults
 for _var in (
     "CYBER_AGENT_PROVIDER",

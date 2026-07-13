@@ -11,18 +11,19 @@ from .factory import (
     ModulePromptLoader,
     format_evidence_for_report,
     format_tools_summary,
-    get_memory_context_guidance,
     get_module_loader,
     get_report_executive_system_prompt,
     get_report_finding_system_prompt,
     get_report_appendix_system_prompt,
     get_report_generation_prompt,
     get_system_prompt,
+    get_task_capture_prompt,
     load_prompt_template,
 )
 
 __all__ = [
     "get_system_prompt",
+    "get_task_capture_prompt",
     "get_report_generation_prompt",
     "get_report_executive_system_prompt",
     "get_report_finding_system_prompt",
@@ -32,5 +33,4 @@ __all__ = [
     "get_module_loader",
     "ModulePromptLoader",
     "load_prompt_template",
-    "get_memory_context_guidance",
 ]

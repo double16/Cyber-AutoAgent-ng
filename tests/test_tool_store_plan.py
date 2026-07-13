@@ -2,7 +2,9 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 from strands import ToolContext
-from modules.tools.memory import store_plan, OperationPlan, Task
+from modules.tools import memory
+from modules.tools.memory import OperationPlan, Task
+from tests.helpers.memory_tasks import store_plan
 
 
 def test_store_plan_with_operation_plan_object():
@@ -16,7 +18,7 @@ def test_store_plan_with_operation_plan_object():
         mopid.return_value = "OP_TEST"
         mock_client.get_active_plan.return_value = None
         mock_client.store_plan.return_value = {"status": "success", "plan": plan_obj.to_toon()}
-        result = store_plan(plan_obj)
+        result = store_plan(memory, plan_obj)
         mock_client.store_plan.assert_called_once_with(plan=plan_obj, user_id="user", operation_id="OP_TEST")
         assert "plan_overview[1]" in result
 
@@ -30,7 +32,7 @@ def test_store_plan_with_dict():
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = None
         mock_client.store_plan.return_value = {"status": "success", "plan": OperationPlan.from_obj(plan_dict).to_toon()}
-        result = store_plan(plan_dict)
+        result = store_plan(memory, plan_dict)
         args, kwargs = mock_client.store_plan.call_args
         assert isinstance(kwargs["plan"], OperationPlan)
         assert "plan_overview[1]" in result
@@ -46,7 +48,7 @@ def test_store_plan_with_json_string():
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = None
         mock_client.store_plan.return_value = {"status": "success"}
-        store_plan(plan_json)
+        store_plan(memory, plan_json)
         assert mock_client.store_plan.called
 
     plan_json_extra = plan_json + "}"
@@ -56,7 +58,7 @@ def test_store_plan_with_json_string():
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = None
         mock_client.store_plan.return_value = {"status": "success"}
-        store_plan(plan_json_extra)
+        store_plan(memory, plan_json_extra)
         assert mock_client.store_plan.called
 
 
@@ -69,9 +71,9 @@ def test_store_plan_invalid_input():
         mock_client.store_plan.return_value = {"status": "success"}
 
         with pytest.raises(ValueError, match="store_plan content must be object/dict or JSON string"):
-            store_plan(123)
+            store_plan(memory, 123)
         with pytest.raises(ValueError, match="Got string that is not valid JSON"):
-            store_plan("not a json")
+            store_plan(memory, "not a json")
 
 
 def test_store_plan_phase_change_validation_refusal():
@@ -93,7 +95,7 @@ def test_store_plan_phase_change_validation_refusal():
     mock_agent.callback_handler.get_budget_progress.return_value = 89
     mock_tool_context.agent = mock_agent
     with patch("modules.tools.memory._ensure_memory_client") as mc, patch(
-            "modules.tools.memory._user_id") as mui, patch("modules.tools.memory.active_task_message") as mock_msg:
+            "modules.tools.memory._user_id") as mui, patch("tests.helpers.memory_tasks.active_task_message") as mock_msg:
         mock_client = MagicMock()
         mc.return_value = mock_client
         mui.return_value = "user"
@@ -102,7 +104,7 @@ def test_store_plan_phase_change_validation_refusal():
         mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
         mock_msg.return_value = "msg"
         with pytest.raises(ValueError, match="Cannot advance phase due to activate tasks remaining"):
-            store_plan(new_plan, tool_context=mock_tool_context)
+            store_plan(memory, new_plan, tool_context=mock_tool_context)
 
 
 def test_store_plan_phase_change_allowed_no_tasks():
@@ -129,7 +131,7 @@ def test_store_plan_phase_change_allowed_no_tasks():
         mock_client.get_active_plan.return_value = prev_plan
         mock_client.get_or_activate_next_task_in_phase.return_value = (None, False)
         mock_client.store_plan.return_value = {"status": "success", "plan": new_plan.to_toon()}
-        result = store_plan(new_plan, tool_context=mock_tool_context)
+        result = store_plan(memory, new_plan, tool_context=mock_tool_context)
         assert "plan_overview[1]" in result
         assert "Test,2,2" in result
 
@@ -153,7 +155,7 @@ def test_store_plan_phase_change_refused_with_active_task_at_high_budget_progres
     mock_tool_context.agent = mock_agent
     mock_agent.callback_handler.get_budget_progress.return_value = 89
     with patch("modules.tools.memory._ensure_memory_client") as mc, patch(
-            "modules.tools.memory._user_id") as mui, patch("modules.tools.memory.active_task_message") as mock_msg:
+            "modules.tools.memory._user_id") as mui, patch("tests.helpers.memory_tasks.active_task_message") as mock_msg:
         mock_client = MagicMock()
         mc.return_value = mock_client
         mui.return_value = "user"
@@ -162,7 +164,7 @@ def test_store_plan_phase_change_refused_with_active_task_at_high_budget_progres
         mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
         mock_msg.return_value = "msg"
         with pytest.raises(ValueError, match="Cannot advance phase due to activate tasks remaining"):
-            store_plan(new_plan, tool_context=mock_tool_context)
+            store_plan(memory, new_plan, tool_context=mock_tool_context)
 
 
 def test_store_plan_assessment_complete_reminder():
@@ -189,13 +191,13 @@ def test_store_plan_assessment_complete_reminder():
                 return {
                     "status": "success",
                     "plan": plan.to_toon(),
-                    "_reminder": "All phases complete. Call stop('Assessment complete: X phases done, Y findings')"
+                    "_reminder": "All phases complete. Python workflow will evaluate completion and generate the report."
                 }
             return {"status": "success", "plan": plan.to_toon()}
 
         mock_client.store_plan.side_effect = side_effect
 
-        result = store_plan(plan_obj)
+        result = store_plan(memory, plan_obj)
 
         assert "plan_overview[1]" in result
         assert "All phases complete" in result

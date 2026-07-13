@@ -276,30 +276,11 @@ function mem0_formatter(tool_name) {
      }
 }
 
-function plan_formatter(input) {
-  let content = input.plan || '';
-
-  // Normalize content for display
-  const normalizedContent = typeof content === 'string'
-      ? content
-      : isObject(content)
-          ? (() => { try { return JSON.stringify(content); } catch { return toSafeString(content); } })()
-          : toSafeString(content);
-
-  // Try to extract TOON plan preview
-  const planPreview = getToonPlanPreview(normalizedContent);
-  const preview = planPreview ?? truncate(normalizedContent, 60);
-
-  return `plan: ${preview}`;
-}
-
 export const toolFormatters: Record<string, ToolFormatter> = {
   mem0_store: mem0_formatter("mem0_store"),
   mem0_get: mem0_formatter("mem0_get"),
   mem0_retrieve: mem0_formatter("mem0_retrieve"),
   mem0_list: mem0_formatter("mem0_list"),
-  store_plan: plan_formatter,
-  get_plan: plan_formatter,
 
   validation_specialist: (input) => {
     if (!input || typeof input !== 'object') {

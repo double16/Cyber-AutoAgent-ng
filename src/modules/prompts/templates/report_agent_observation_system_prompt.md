@@ -12,7 +12,7 @@ For the provided observation:
 1. **Title**: Clear, descriptive title of the discovery or signal.
 2. **Confidence**: Percentage with brief justification.
 3. **Evidence**: Actual request/response or command output first.
-   - For web/API claims, cite at least one `http_request` transcript artifact path (do not embed full content).
+   - For web/API claims, cite at least one HTTP transcript artifact path (do not embed full content).
 4. **Steps to Reproduce**: Concise sequence of steps to demonstrate the observation.
 </observation_structure>
 

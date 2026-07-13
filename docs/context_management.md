@@ -107,13 +107,12 @@ Intercepts tool execution events to manage output sizes before conversation inte
 | Attribute                | Value                                       |
 |--------------------------|---------------------------------------------|
 | **Location**             | `modules/handlers/tool_router.py`           |
-| **SDK Events**           | `BeforeToolCallEvent`, `AfterToolCallEvent` |
+| **SDK Events**           | `AfterToolCallEvent`                        |
 | **Truncation Threshold** | 30,000 characters                           |
 | **Artifact Threshold**   | 10,000 characters                           |
 | **Artifact Retention**   | 100 most recent per session                 |
 
 **Responsibilities**:
-- Route unregistered tool invocations to shell executor
 - Truncate oversized tool outputs with size metadata
 - Externalize large outputs to timestamped artifact files
 - Inject inline preview (4KB head) for immediate LLM context

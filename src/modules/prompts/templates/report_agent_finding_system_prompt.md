@@ -14,7 +14,7 @@ For the provided finding:
 2. **Severity**: Single word severity level from finding data.
 3. **Confidence**: Percentage with brief justification.
 4. **Evidence**: Actual request/response or command output first.
-   - For verified web/API claims, cite at least one `http_request` transcript artifact path (do not embed full content).
+   - For verified web/API claims, cite at least one HTTP transcript artifact path (do not embed full content).
 5. **MITRE ATT&CK**: Mapping of tactics and techniques (only from supported evidence).
 6. **CWE**: Common Weakness Enumeration reference (only from supported evidence).
 7. **Impact**: 1–2 sentences on business risk and technical impact.

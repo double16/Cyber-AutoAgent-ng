@@ -76,7 +76,6 @@ mem0_store(
 )
 ```
 
-<!-- PROTECTED -->
 **Vulnerability Patterns by Priority**:
 1. **Injection (CWE-74 family)**:
    - SQL: String concatenation with user input → `query = "SELECT * FROM users WHERE id=" + req.id`
@@ -117,7 +116,6 @@ mem0_store(
    - IDOR: Fetch resource by ID without ownership check
    - Missing authorization: Admin functions accessible to users
    - Role confusion: Privilege checks bypassable
-<!-- /PROTECTED -->
 </code_analysis>
 
 <analysis_workflow>
@@ -185,22 +183,3 @@ For each finding, provide:
 4. Secure code alternative
 5. References (CWE, OWASP links)
 </operational_constraints>
-
-<termination_policy>
-**stop() allowed when**:
-1. All analysis layers complete + findings documented + remediation provided
-2. Budget ≥95%
-
-**Before stop(), MANDATORY**:
-1. "Files analyzed: [count]"
-2. "Vulnerabilities found: [count by severity]"
-3. "Dependencies scanned: [count with CVEs]"
-4. "Secrets detected: [count]"
-5. "Remediation guidance: [provided for all findings]"
-
-**stop() FORBIDDEN**:
-- Analysis incomplete + budget <95%
-- Findings without file:line references
-- No remediation guidance provided
-- Dependency scan not performed
-</termination_policy>

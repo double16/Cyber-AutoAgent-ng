@@ -95,7 +95,31 @@ docker run --rm \
 
 ## Evaluation Metrics
 
-The system automatically evaluates 6 core metrics after each operation to assess cybersecurity agent performance:
+When enabled, the system performs at most two Ragas evaluations per operation:
+
+1. An operation evaluation combining task-executor, swarm-agent, and validation-specialist traces while excluding
+   planning, prompt-building, task-creation, and evaluator roles.
+2. A report evaluation of the assembled `security_assessment_report.md` artifact, when the report exists.
+
+The operation evaluation uses all 6 core metrics. The report evaluation uses only evidence quality, goal accuracy, and
+topic adherence because tool selection and execution methodology do not apply to a completed report artifact. Scores
+are written to dedicated Langfuse traces using `operation/` and `report/` prefixes instead of being attached to the
+last role-agent call.
+
+The existing `ENABLE_OBSERVABILITY` and `ENABLE_AUTO_EVALUATION` variables remain authoritative. If either required
+gate is disabled, trace discovery, evaluator initialization, Ragas model calls, and score uploads are skipped.
+
+While evaluation is enabled and running, each scheduled Ragas metric emits an indexed `progress_update` event before
+the metric call. The event uses `operation_stage: "ragas_evaluation"` and includes `evaluation_step_index`,
+`evaluation_step_total`, `evaluation_scope`, `evaluation_metric`, and `evaluation_step_label`. The total spans the
+bounded operation and optional report metric sets; progress reporting does not add model calls. No evaluation progress
+events are emitted when the existing evaluation gates disable evaluation.
+
+Multi-turn evaluation also emits an unindexed preparation event immediately before reference-topic generation. It uses
+`step: "RAGAS_PREPARATION"` and `evaluation_step_kind: "reference_topics"`, along with the current scope and a display
+label. Preparation events do not change the metric `evaluation_step_index` or `evaluation_step_total` values.
+
+### Core Metrics
 
 ### Core Metrics Overview
 

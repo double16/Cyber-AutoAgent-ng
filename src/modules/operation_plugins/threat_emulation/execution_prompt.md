@@ -11,7 +11,7 @@
 **Phase 1: DISCOVERY** (Objective Parsing → TTP Mapping)
 - Parse objective: What APT/campaign to emulate? What TTPs mentioned? What's the scope?
 - If threat intel provided in objective: Extract initial access, persistence, lateral movement, exfiltration methods
-- If only APT name: Research known TTPs (mem0_retrieve, http_request to threat intel sources)
+- If only APT name: Research known TTPs (mem0_retrieve, web search to threat intel sources)
 - Map to MITRE ATT&CK techniques: Identify T#### IDs for each TTP
 - Gate: "Can I sequence a kill chain from available intel?" If NO: gather more context | If YES: Phase 2
 
@@ -68,7 +68,6 @@ mem0_store(
 )
 ```
 
-<!-- PROTECTED -->
 **Kill Chain Execution Patterns**:
 1. **Initial Access**: Phishing sim → download marker file | Valid accounts → use emu_ creds | Exploit → benign PoC marker
 2. **Persistence**: Registry run key → marker entry | Scheduled task → benign script | Service → marker service name
@@ -79,7 +78,6 @@ mem0_store(
 7. **Lateral Movement**: PSExec → marker file on target | WMI → marker process on remote system
 8. **Collection**: Stage data → marker archive creation | Screenshot → save to marker directory
 9. **Exfiltration**: DNS tunnel sim → marker domain queries | Upload → marker file to safe endpoint
-<!-- /PROTECTED -->
 </ttp_execution>
 
 <operational_constraints>
@@ -90,29 +88,10 @@ mem0_store(
 4. Time-boxed execution - automatic cleanup at operation end
 5. Scope adherence - respect target boundaries absolutely
 
-**Cleanup Verification** (before stop):
+**Cleanup Verification** (before claiming completion):
 - Remove all marker files created
 - Delete test accounts/services/tasks
 - Clear marker registry keys
 - Document cleanup status in final memory entry
 - Verify no residual artifacts remain
 </operational_constraints>
-
-<termination_policy>
-**stop() allowed when**:
-1. Campaign objective achieved + detection opportunities documented
-2. Budget ≥95%
-3. Cleanup verified
-
-**Before stop(), MANDATORY**:
-1. "TTPs executed: [count] across [N] kill chain phases"
-2. "IoCs generated: [list]"
-3. "Detection opportunities: [count]"
-4. "Cleanup status: [verified/partial/required]"
-5. If cleanup incomplete: Document what remains + blue team recommendations
-
-**stop() FORBIDDEN**:
-- Objective incomplete + budget <95%
-- Cleanup not verified
-- No detection opportunities documented
-</termination_policy>

@@ -32,7 +32,7 @@ def _coerce_str(arg: bytes | str | None) -> str:
 @tool
 def auth_chain_analyzer(target_url: str, auth_type: str = "auto") -> str:
     """
-    Map auth flows + identify/validate auth bypass surfaces for a target. Returns JSON ONLY.
+    Map auth flows + identify/validate auth bypass surfaces for a target. Supported: JWT, OAuth, SAML, cookies, sessions.
 
     CALL WHEN
     - Auth blocks progress (30x→login/SSO, 401/403 on key pages/APIs), or you need auth-flow mapping.

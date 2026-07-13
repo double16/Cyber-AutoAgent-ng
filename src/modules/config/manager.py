@@ -571,7 +571,7 @@ class ConfigManager:
         - artifacts: outputs/<target>/<operation_id>/artifacts/
         - tools: outputs/<target>/<operation_id>/tools/ (for editor+load_tool meta-tooling)
 
-        Safe to call multiple times. Also copies master execution_prompt.md for optimization.
+        Safe to call multiple times.
 
         Returns:
             Dict[str, str]: Absolute paths to {'root', 'artifacts', 'tools'}
@@ -591,66 +591,9 @@ class ConfigManager:
             os.makedirs(artifacts, exist_ok=True)
             os.makedirs(tools, exist_ok=True)
 
-            # Copy master execution prompt to operation folder for optimization
-            self._copy_execution_prompt(root, module)
-
         except Exception as e:
             logger.debug("ensure_operation_output_dirs: could not create dirs: %s", e)
         return {"root": root, "artifacts": artifacts, "tools": tools}
-
-    def _copy_execution_prompt(self, operation_root: str, module: str) -> None:
-        """Copy master execution prompt to operation folder if not already present.
-
-        Args:
-            operation_root: Root directory of the operation
-            module: Module name (e.g., 'web', 'ctf')
-        """
-        from pathlib import Path
-
-        optimized_path = Path(operation_root) / "execution_prompt_optimized.txt"
-
-        # If optimized prompt already exists and has meaningful content, keep it
-        if optimized_path.exists():
-            file_size = optimized_path.stat().st_size
-            if file_size > 100:  # Anything over 100 bytes is likely real content
-                logger.debug(
-                    "Execution prompt already exists at %s (size: %d bytes)",
-                    optimized_path,
-                    file_size,
-                )
-                return
-
-        # Use the existing ModulePromptLoader to get correct paths
-        from modules.prompts import get_module_loader
-
-        module_loader = get_module_loader()
-
-        # Try to find the execution prompt file using the loader's plugins directory
-        candidate_content = module_loader.load_module_execution_prompt(module)
-
-        # If module-specific prompt not found and not already trying web, fall back
-        if (candidate_content is None or len(candidate_content) < 100) and module != "web":
-            logger.warning(
-                "Module %s execution prompt not found, falling back to web", module
-            )
-            candidate_content = module_loader.load_module_execution_prompt("web")
-
-        if candidate_content is None or len(candidate_content) < 100:
-            logger.error("No execution prompt found for module %s", module)
-            # Create a minimal prompt instead of failing silently
-            optimized_path.write_text(
-                f"# {module.upper()} Module Execution Prompt\n# No master prompt found - using minimal template\n"
-            )
-            return
-
-        try:
-            optimized_path.write_text(candidate_content)
-            logger.info(
-                "Copied master execution prompt to %s",
-                optimized_path,
-            )
-        except Exception as e:
-            logger.error("Failed to copy execution prompt: %s", e)
 
     def get_unified_memory_path(
         self, server: str, target_name: str, **overrides

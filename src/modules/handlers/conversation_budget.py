@@ -21,7 +21,7 @@ from strands.agent.conversation_manager import (
 )
 from strands.types.content import Message
 from strands.types.exceptions import ContextWindowOverflowException
-from strands.hooks import BeforeModelCallEvent, AfterModelCallEvent, HookProvider  # type: ignore
+from strands.hooks import BeforeModelCallEvent, AfterModelCallEvent, HookProvider, HookRegistry  # type: ignore
 from strands.tools.registry import ToolRegistry
 
 from modules.config.models.dev_client import get_models_client
@@ -615,7 +615,7 @@ class SlidingWindowConversationManagerWithPreservation(SlidingWindowConversation
         self.preserve_first_messages = preserve_first_messages
 
     def reduce_context(self, agent: "Agent", e: Exception | None = None, **kwargs: Any) -> None:
-        # Preserve the first message, any configured N messages AND the latest active_task marker + related evidence messages + latest plan
+        # Preserve the first message, any configured N messages, and the latest serialized plan snapshot.
         before_messages = list(agent.messages)
         before_reduce_count = len(before_messages)
 
@@ -807,7 +807,7 @@ class MappingConversationManager(SummarizingConversationManager):
             return
 
         # Build set of indices to remove, ensuring we remove complete tool pairs
-        protected_indices = _protected_indices_for_active_state(messages)
+        protected_indices = _protected_indices_for_plan_state(messages)
         indices_to_remove: set[int] = set()
         removed_count = 0
 
@@ -1744,27 +1744,6 @@ def _strip_reasoning_content(agent: Agent, force: bool = False, preserve_recent_
         )
 
 
-def strip_reflection_snapshot_messages(agent: Agent) -> None:
-    # Remove messages that start with "<reflection_snapshot>"
-    def _predicate(message) -> bool:
-        if not isinstance(message.get("content"), list):
-            return True
-        content = message.get("content")
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if "<reflection_snapshot>" in block.get("text", ""):
-                return False
-        return True
-
-    messages = getattr(agent, "messages", [])
-    messages[:] = [
-        message
-        for message in messages
-        if _predicate(message)
-    ]
-
-
 def _iter_message_texts(message: Dict[str, Any], block_limit: Set[str] = None) -> List[str]:
     """Return all text fragments from a message (normal text + toolResult text)."""
     out: List[str] = []
@@ -1809,44 +1788,11 @@ def _iter_message_texts(message: Dict[str, Any], block_limit: Set[str] = None) -
     return out
 
 
-_RE_ACTIVE_TASK = re.compile(r"<active_task[^>]*>(.*?)</active_task>", flags=re.S)
-
-def _find_active_task_payload_in_text(text: str) -> Optional[Dict[str, Any]]:
-    """Extract JSON payload from the last <active_task...>...</active_task> block in text."""
-    try:
-        if not isinstance(text, str) or "<active_task" not in text:
-            return None
-        matches = _RE_ACTIVE_TASK.findall(text)
-        if not matches:
-            return None
-        payload_str = (matches[-1] or "").strip()
-        if not payload_str:
-            return None
-        return json.loads(payload_str)
-    except Exception:
-        return None
-
-
-def _get_latest_active_task(messages: List[Dict[str, Any]]) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
-    """Return (index, payload) for the most recent <active_task...> marker in messages."""
-    for i in range(len(messages) - 1, -1, -1):
-        texts = _iter_message_texts(messages[i])
-        if not texts:
-            continue
-        joined = "\n".join(texts)
-        payload = _find_active_task_payload_in_text(joined)
-        if isinstance(payload, dict):
-            return i, payload
-    return None, None
-
-
-_PLAN_TOOL_NAMES = {"get_plan", "store_plan"}
-
-
 def _is_plan_tool_result_message(message: Dict[str, Any]) -> bool:
-    """True if the message contains a toolResult for get_plan or store_plan.
+    """True if the message contains a toolResult with a serialized plan.
 
-    We match on toolResult.toolUseId (Strands) and also allow toolResult._toolUseId when present.
+    Python-owned workflow no longer exposes plan read/write tools to agents, so
+    preserved plan snapshots are identified by their serialized TOON marker.
     """
     content = message.get("content")
     if not isinstance(content, list):
@@ -1857,9 +1803,6 @@ def _is_plan_tool_result_message(message: Dict[str, Any]) -> bool:
         tr = block.get("toolResult")
         if not isinstance(tr, dict):
             continue
-        tool_name = tr.get("name") or tr.get("_toolUseId") or tr.get("toolUseId")
-        if isinstance(tool_name, str) and tool_name in _PLAN_TOOL_NAMES:
-            return True
         try:
             if "plan_overview[" in json.dumps(tr.get("content", "")):
                 return True
@@ -1877,47 +1820,6 @@ def _get_latest_plan_tool_result(messages: List[Dict[str, Any]]) -> Optional[int
     return None
 
 
-def _evidence_match_tokens(evidence: List[str]) -> List[str]:
-    """Derive match tokens (full path + basename) from evidence entries.
-
-    Supports suffixes like:
-      - :56
-      - :57-78
-      - :L10-L20
-      - #anchor
-    """
-    tokens: List[str] = []
-    for raw in (evidence or []):
-        s = raw.strip().strip("[]")
-        if not s:
-            continue
-
-        # Strip suffixes
-        s = re.sub(r":L\d+(?:-L\d+)?$", "", s)   # :L10-L20
-        s = re.sub(r":\d+(?:-\d+)?$", "", s)     # :56 or :57-78
-        s = re.sub(r"#.*$", "", s)               # #anchor
-        s = s.strip()
-        if not s:
-            continue
-
-        tokens.append(s)
-        base = os.path.basename(s)
-        if base and base != s:
-            tokens.append(base)
-
-    # De-dupe, avoid tiny tokens
-    seen: set[str] = set()
-    out: List[str] = []
-    for t in tokens:
-        if not t or len(t) < 4:
-            continue
-        if t in seen:
-            continue
-        seen.add(t)
-        out.append(t)
-    return out
-
-
 def _message_has_tool_use(message: Dict[str, Any]) -> bool:
     content = message.get("content")
     if not isinstance(content, list):
@@ -1932,37 +1834,14 @@ def _message_has_tool_result(message: Dict[str, Any]) -> bool:
     return any(isinstance(b, dict) and "toolResult" in b for b in content)
 
 
-def _protected_indices_for_active_state(messages: List[Dict[str, Any]]) -> set[int]:
-    """Indices to preserve: latest plan tool result message, latest active_task marker + evidence-referencing messages + tool pairs."""
+def _protected_indices_for_plan_state(messages: List[Dict[str, Any]]) -> set[int]:
+    """Indices to preserve: latest serialized plan tool result message and its adjacent tool pair."""
     protected: set[int] = set()
 
     # Preserve the most recent plan toolResult message
     plan_idx = _get_latest_plan_tool_result(messages)
     if plan_idx is not None:
         protected.add(plan_idx)
-
-    idx, payload = _get_latest_active_task(messages)
-    if idx is None or not isinstance(payload, dict):
-        return protected
-
-    protected.add(idx)
-
-    evidence_val: List[str] = []
-    if isinstance(payload.get("task"), dict):
-        evidence_val = payload["task"].get("evidence", [])
-
-    tokens = _evidence_match_tokens(evidence_val)
-    if tokens:
-        match_indices: List[int] = []
-        for i, msg in enumerate(messages):
-            joined = "\n".join(_iter_message_texts(msg))
-            if joined and any(tok in joined for tok in tokens):
-                match_indices.append(i)
-
-        # Cap to avoid preserving too much
-        if len(match_indices) > 25:
-            match_indices = match_indices[-25:]
-        protected.update(match_indices)
 
     # Preserve tool pairs adjacent to protected indices
     for i in list(protected):
@@ -2017,7 +1896,7 @@ def _restore_preserved_messages(
     """Restore preserved first messages and protected state messages after reduction.
 
     Always preserves the very first message in full, plus any additionally configured
-    leading messages and the latest protected active-task / plan related messages.
+    leading messages and the latest protected serialized plan snapshot.
     """
     if not isinstance(messages, list) or not isinstance(before_messages, list) or not before_messages:
         return 0
@@ -2025,7 +1904,7 @@ def _restore_preserved_messages(
     preserve_n = max(1, int(preserve_first_messages or 0))
     preserve = before_messages[:preserve_n]
 
-    protected_indices = _protected_indices_for_active_state(before_messages)
+    protected_indices = _protected_indices_for_plan_state(before_messages)
     protected_msgs = [
         before_messages[i]
         for i in sorted(protected_indices)
@@ -2067,28 +1946,16 @@ def _restore_preserved_messages(
 
 
 def _dedupe_state_markers(agent: Agent) -> None:
-    """Remove all <reflection_snapshot> messages and keep only the most recent <active_task ...> and plan tool result message."""
+    """Keep only the most recent serialized plan tool result."""
 
     messages = getattr(agent, "messages", [])
     if not isinstance(messages, list) or not messages:
         return
 
-    protected_indices = _protected_indices_for_active_state(messages)
+    protected_indices = _protected_indices_for_plan_state(messages)
     indices_to_remove: set[int] = set()
 
     def _dedupe_candidate(message: Dict[str, Any]) -> bool:
-        texts = _iter_message_texts(message)
-        joined = "\n".join(texts)
-
-        # Remove reflection_snapshot markers regardless of where they appear
-        if "<reflection_snapshot>" in joined:
-            return True
-
-        if "<active_task" in joined:
-            payload = _find_active_task_payload_in_text(joined)
-            if payload is not None:
-                return True
-
         if _is_plan_tool_result_message(message):
             return True
 
@@ -2534,6 +2401,5 @@ __all__ = [
     "_strip_reasoning_content",
     "clear_shared_conversation_manager",
     "get_shared_conversation_manager",
-    "strip_reflection_snapshot_messages",
     "_dedupe_state_markers",
 ]

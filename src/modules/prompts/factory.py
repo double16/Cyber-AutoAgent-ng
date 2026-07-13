@@ -17,7 +17,6 @@ from functools import lru_cache
 import yaml
 from datetime import datetime
 from pathlib import Path
-from textwrap import dedent
 from typing import Any, Dict, List, Optional, Tuple
 from urllib import parse as _urlparse
 from urllib import request as _urlreq
@@ -37,8 +36,10 @@ _LF_SEEDED_LOCK = threading.Lock()
 
 # Mapping local template filenames -> remote Langfuse prompt names
 LF_SYSTEM_PROMPT_NAME = "cyber/system/system_prompt"
+LF_TASK_CAPTURE_PROMPT_NAME = "cyber/system/task_capture"
 _LF_TEMPLATE_TO_NAME = {
     "system_prompt.md": LF_SYSTEM_PROMPT_NAME,
+    "task_capture.md": LF_TASK_CAPTURE_PROMPT_NAME,
     "tools_guide.md": "cyber/system/tools_guide",
     "report_generation_prompt.md": "cyber/report/report_generation_prompt",
     "report_agent_appendix_system_prompt.md": "cyber/report/report_agent_appendix_system_prompt",
@@ -397,41 +398,6 @@ def _extract_domain_lens(module_prompt: str) -> Dict[str, str]:
     return domain_lens
 
 
-def get_memory_context_guidance(
-    *,
-    has_memory_path: bool,
-    has_existing_memories: bool,
-    memory_overview: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Return memory context guidance text used in system prompts."""
-    # Determine memory count if available
-    total_count = 0
-    if isinstance(memory_overview, dict):
-        if memory_overview.get("has_memories"):
-            try:
-                total_count = int(memory_overview.get("total_count") or 0)
-            except Exception:
-                total_count = 0
-
-    if not has_memory_path and not has_existing_memories:
-        # Fresh operation guidance
-        return """**CRITICAL FIRST ACTION**: Create a strategic plan via `store_plan()`.
-"""
-    else:
-        # Continuing assessment guidance
-        count_str = str(total_count) if total_count else "0"
-        return f"""Continuing assessment with {count_str} existing memories.
-**CRITICAL FIRST ACTIONS**
-  1. Load all memories: `mem0_list()`.
-  2. Load the plan: `get_plan()`. If none, create it immediately via `store_plan()` before other tools.
-  3. Perform a Memory Intake Pass:
-    - Summarize what’s already known (key facts + evidence paths).
-    - Identify unknown / next questions.
-    - Mark duplicates and do not recreate tasks/work already completed.
-    - Create tasks based on prior discoveries.
-"""
-
-
 def _format_overlay_directives(payload: Any) -> List[str]:
     directives: List[str] = []
     if isinstance(payload, dict):
@@ -534,9 +500,7 @@ def get_system_prompt(
 ) -> str:
     """Build the system prompt using the master template."""
 
-    reflection_snapshot = get_reflection_snapshot(progress_percent, budget, plan_current_phase)
-
-    # 2. Extract and format operation directories from output_config
+    # Extract and format operation directories from output_config
     operation_paths_block = ""
     if isinstance(output_config, dict):
         artifacts_path = output_config.get("artifacts_path", "")
@@ -553,34 +517,24 @@ def get_system_prompt(
         if path_lines:
             operation_paths_block = "\n".join(path_lines)
 
-    # 3. Generate Memory Context
-    memory_context_text = get_memory_context_guidance(
-        has_memory_path=has_memory_path,
-        has_existing_memories=has_existing_memories,
-        memory_overview=memory_overview,
-    )
-    if plan_snapshot:
-        memory_context_text += f"\n\n## PLAN SNAPSHOT\n{plan_snapshot.to_toon()}"
-
-    # 4. Load Tools Guide
+    # Load Tools Guide
     tools_guide_text = ""
     try:
         tools_guide_text = load_prompt_template("tools_guide.md")
     except Exception:
         tools_guide_text = ""
 
-    # 5. Load System Template
+    # Load System Template
     system_template = load_prompt_template("system_prompt.md")
     if not system_template:
         # Fallback if template missing
         return f"# CRITICAL ERROR\nSystem prompt template missing.\nTarget: {target}\nObjective: {objective}"
 
-    # 6. Inject Variables
+    # Inject Variables
+    # Be REALLY careful where {{ target }} is placed, the agent may mistake that for a hostname, etc.
     prompt = system_template.replace("{{ target }}", str(target))
     prompt = prompt.replace("{{ objective }}", str(objective))
     prompt = prompt.replace("{{ operation_id }}", str(operation_id))
-    prompt = prompt.replace("{{ memory_context }}", memory_context_text)
-    prompt = prompt.replace("{{ reflection_snapshot }}", reflection_snapshot)  # reflection_snapshot is done with each step, not necessary in the system prompt
     prompt = prompt.replace("{{ tools_guide }}", tools_guide_text)
     prompt = prompt.replace("{{ operation_paths }}", operation_paths_block)
 
@@ -602,58 +556,12 @@ def get_system_prompt(
     return prompt
 
 
-def get_reflection_snapshot(
-    progress_percent: int,
-    budget: Optional[BudgetConfig],
-    plan_current_phase: int | None,
-) -> str:
-    reflection_snapshot = ""
-    try:
-        _budget_pct = max(0, int(progress_percent))
-        budget_parts = []
-        if budget:
-            budget_parts.append(f"duration cap {budget.max_duration_minutes}m")
-            if budget.max_tokens is not None:
-                budget_parts.append(f"token cap {budget.max_tokens}")
-            if budget.max_cost is not None:
-                budget_parts.append(f"cost cap {budget.max_cost}")
-        budget_text = ", ".join(budget_parts) if budget_parts else "not configured"
-        lines = [f"Budget Used: {_budget_pct}% ({budget_text})"]
-
-        # Checkpoint-specific actionable guidance
-        reached_checkpoints = [pct for pct in [20, 40, 60, 80] if _budget_pct >= pct]
-        if reached_checkpoints:
-            checkpoint_pct = reached_checkpoints[-1]
-            lines.append(f"**CHECKPOINT {checkpoint_pct}% REACHED**")
-
-            if checkpoint_pct == 20:
-                lines.append("ACTION: Call `get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?")
-            elif checkpoint_pct == 40:
-                lines.append("ACTION: Call `get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW.")
-            elif checkpoint_pct == 60:
-                lines.append(
-                    "ACTION: Call `get_plan`. If stuck (no findings), deploy swarm with different approach classes.")
-            elif checkpoint_pct == 80:
-                lines.append("ACTION: Call `get_plan`. Focus ONLY on highest-confidence path. No new exploration.")
-        else:
-            next_checkpoint = next((pct for pct in [20, 40, 60, 80] if pct > _budget_pct), 100)
-            lines.append(f"Next Checkpoint: {next_checkpoint}% budget use")
-
-        if plan_current_phase is not None:
-            lines.append(f"Current Phase: {plan_current_phase}")
-
-        # Budget-based urgency
-        if _budget_pct >= 90:
-            lines.append("FINAL: Budget >90%. Verify objective complete before stop(). Check termination_policy.")
-        elif _budget_pct >= 80:
-            lines.append("CRITICAL: Budget >80%. Focus on single highest-confidence path only.")
-        elif _budget_pct >= 60:
-            lines.append("WARNING: Budget >60%. If no findings yet, deploy specialists/swarm NOW.")
-
-        reflection_snapshot = "\n".join(lines)
-    except Exception:
-        reflection_snapshot = "Budget: Unknown"
-    return reflection_snapshot
+def get_task_capture_prompt() -> str:
+    """Prompt for task worker agents to create new tasks."""
+    template = load_prompt_template("task_capture.md")
+    if template:
+        return template
+    return "Reflect on new tasks and call create_tasks()."
 
 
 def get_report_generation_prompt(
@@ -749,6 +657,7 @@ class ModulePromptLoader:
         self.plugin_dirs = plugin_dirs
         # Track sources for observability
         self.last_loaded_execution_prompt_source: Optional[str] = None
+        self.last_loaded_termination_policy_source: Optional[str] = None
         self.last_loaded_report_prompt_source: Optional[str] = None
 
 
@@ -951,30 +860,19 @@ class ModulePromptLoader:
         """Load a module-specific execution prompt if available.
 
         Order of resolution:
-        1) Operation-specific optimized version (if operation_root provided):
-           <operation_root>/execution_prompt_optimized.txt
-        2) Langfuse-managed module prompt (when enabled): cyber/module/<module>/<kind>_prompt
+        1) Langfuse-managed module prompt (when enabled): cyber/module/<module>/<kind>_prompt
            - If missing remotely, seed from local file if present
-        3) Local file under <module_dir>/<module>/<filename>
+        2) Local file under <module_dir>/<module>/<filename>
         Returns empty string if not found.
         """
         # Reset tracker
         self.last_loaded_execution_prompt_source = None
 
-        # Check for operation-specific optimized version FIRST
-        if operation_root:
-            try:
-                optimized_path = Path(operation_root) / "execution_prompt_optimized.txt"
-                if optimized_path.exists() and optimized_path.is_file():
-                    content = optimized_path.read_text(encoding="utf-8").strip()
-                    if content:
-                        self.last_loaded_execution_prompt_source = f"optimized:{optimized_path}"
-                        logger.debug("Loaded optimized execution prompt from %s", optimized_path)
-                        return content
-            except Exception as e:
-                logger.debug("Failed to load optimized execution prompt: %s", e)
-
         content, self.last_loaded_execution_prompt_source = self.load_module_prompt(module_name, "execution", "execution_prompt.md")
+        return content
+
+    def load_module_termination_policy(self, module_name: str) -> str:
+        content, self.last_loaded_termination_policy_source = self.load_module_prompt(module_name, "termination_policy", "termination_policy.md")
         return content
 
     def load_module_report_prompt(self, module_name: str) -> str:

@@ -175,6 +175,7 @@ The compose stack automatically provides:
 ## Features
 
 - **Autonomous Operation**: Conducts security assessments with minimal human intervention
+- **Python-Owned Workflow**: Coordinates short-lived role agents across durable plan phases and tasks
 - **Intelligent Tool Selection**: Automatically chooses appropriate security tools (nmap, sqlmap, nikto, etc.)
 - **Model Context Protocol (MCP)**: MCP support for local and remote, fine-grained tool selection
 - **Natural Language Reasoning**: Uses Strands framework with metacognitive architecture
@@ -182,7 +183,7 @@ The compose stack automatically provides:
 - **Meta-Tool Creation**: Dynamically creates custom exploitation tools when needed
 - **Adaptive Execution**: Metacognitive assessment guides strategy based on confidence levels
 - **Assessment Reporting**: Generates comprehensive reports with findings and remediation
-- **Swarm Intelligence**: Deploy parallel agents with shared memory for complex tasks
+- **Swarm Intelligence**: Deploy parallel agents as an execution capability for complex tasks
 - **Real-Time Monitoring**: React interface displays live agent reasoning and tool execution
 - **Observability**: Built-in Langfuse tracing and Ragas evaluation metrics
 
@@ -276,10 +277,10 @@ sequenceDiagram
 
 **Enhanced Execution Pattern:**
 - **Real-time Monitoring**: Every action traced for complete visibility
-- **Intelligent Analysis**: Agent continuously analyzes situation using metacognitive reasoning
+- **Intelligent Analysis**: Focused role agents analyze bounded objectives using metacognitive reasoning
 - **Dynamic Tool Selection**: Chooses appropriate tools based on confidence and findings
 - **Evidence Collection**: All discoveries stored in persistent memory with categorization
-- **Durable Tasks**: Durable tasks in long-term memory, enabling sustained multi-phase operations without losing threads.
+- **Durable Tasks**: Python-managed durable tasks in SQLite, enabling sustained multi-phase operations without losing threads.
 - **Automated Evaluation**: System scores tool selection, evidence quality, and methodology
 - **Report Generation**: Final analysis combines findings with performance metrics
 
@@ -323,16 +324,17 @@ flowchart TD
 
 **Metacognitive Process:**
 
-***Design Philosophy: Meta-Everything Architecture***
+***Design Philosophy: Python-Owned Workflow with Meta Capabilities***
 
-At the core of Cyber-AutoAgent is a "meta-everything" design philosophy that enables dynamic adaptation and scaling:
+At the core of Cyber-AutoAgent is a Python-owned workflow that creates focused agents for planning, prompt building, task execution, task creation, and evaluation. Meta capabilities remain available inside worker execution:
 
-- **Meta-Agent**: The swarm capability deploys dynamic agents as tools, each tailored for specific subtasks with their own reasoning loops
+- **Role Agents**: Short-lived agents work on defined planning, execution, and evaluation objectives
+- **Swarm Capability**: The swarm tool can deploy dynamic agents for complex subtasks
 - **Meta-Tooling**: Through the editor and load_tool capabilities, the agent can create, modify, and deploy new tools at runtime to address novel challenges
 - **Meta-Learning**: Continuous memory storage and retrieval enables cross-session learning, building expertise over time
 - **Meta-Cognition**: Self-reflection and confidence assessment drives strategic decisions about tool selection and approach
 
-This meta-architecture allows the system to transcend static tool limitations and evolve its capabilities during execution.
+This architecture keeps phase/task state deterministic in Python while preserving adaptive reasoning during execution.
 
 **Process Flow:**
 - **Assess Confidence**: Evaluate current knowledge and confidence level (High >80%, Medium 50-80%, Low <50%)
@@ -798,7 +800,8 @@ cyber-autoagent/
 │   ├── cyberautoagent.py      # Main entry point and CLI
 │   └── modules/               # Core modules (modular architecture)
 │       ├── agents/            # Agent implementations
-│       │   ├── cyber_autoagent.py  # Main Strands agent creation
+│       │   ├── cyber_autoagent.py  # Shared runtime resources and Strands agent creation
+│       │   ├── multi_agent_workflow.py # Python-owned workflow controller
 │       │   └── report_agent.py     # Dedicated report generation
 │       ├── config/            # Configuration management
 │       │   ├── manager.py     # Centralized configuration system
@@ -852,6 +855,7 @@ cyber-autoagent/
 |-----------------------------------------|-----------------------------------------------|
 | `src/cyberautoagent.py`                 | CLI entry point, observability setup          |
 | `src/modules/agents/cyber_autoagent.py` | Strands agent creation, model configuration   |
+| `src/modules/agents/multi_agent_workflow.py` | Python-owned phase/task workflow controller |
 | `src/modules/agents/report_agent.py`    | Report generation agent                       |
 | `src/modules/config/manager.py`         | Centralized configuration system              |
 | `src/modules/tools/memory.py`           | Unified Mem0 tool (FAISS/OpenSearch/Platform) |

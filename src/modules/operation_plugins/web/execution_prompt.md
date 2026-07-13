@@ -39,12 +39,6 @@ Pattern: Capability → Minimal weaponization → Impact proof → THEN return t
 
 **Velocity (coverage-first)**: Batch recon and task capture | Execute one task at a time with fast validation | Automate repetitive steps (python_repl) | Chain quickly for impact, then return to pending coverage tasks
 
-**Tool Selection (maximizes coverage throughput)**:
-- Recon: specialized_recon_orchestrator (subdomains, live hosts, tech fingerprints, endpoints)
-- Payload: advanced_payload_coordinator (XSS, params, SSTI, command injection, LDAP injection, CORS)
-- Auth & session analysis: auth_chain_analyzer (JWT, OAuth, SAML, cookies, sessions)
-
-<!-- PROTECTED -->
 **Attack Patterns**:
 1. **Access Control**: /api/v1 vs /api/v2 | /admin vs /admin/. | GET vs HEAD status diffs → boundary test
 2. **Payload State**: Reflected unchanged → bypass filter | Reflected encoded → bypass output | Not reflected → blind (timing, OOB)
@@ -55,11 +49,10 @@ Pattern: Capability → Minimal weaponization → Impact proof → THEN return t
 7. **Priv Escalation**: Unauth → User → Admin → Backend. Each tier = different attack class.
 8. **Error Oracle**: "Invalid user" vs "Invalid pass" → enum | "Not found" vs "Access denied" → file oracle | SQL error with table → schema
 9. **Known Vulnerabilities**: tech name + version → searchsploit | search NVD/CVE/exploitdb → PoC
-<!-- /PROTECTED -->
 
 **False Positive Awareness**:
 OBSERVATIONS ≠ VULNERABILITIES until behavior proven:
-- Supabase anon key: PUBLIC by design. Verify RLS bypass via http_request to /rest/v1/<table>?select=* with Authorization header. 2xx data + denied control = vuln. JWT decode alone = INFO.
+- Supabase anon key: PUBLIC by design. Verify RLS bypass to /rest/v1/<table>?select=* with Authorization header. 2xx data + denied control = vuln. JWT decode alone = INFO.
 - API keys in client JS: Expected for client-side SDKs. Test actual privilege escalation, NOT just presence.
 - CORS headers: Permissive headers alone insufficient. Demonstrate cross-origin data read with PoC HTML + network capture + negative control.
 - Version disclosure: INFO unless CVE exists for that version AND PoC validates exploitability.

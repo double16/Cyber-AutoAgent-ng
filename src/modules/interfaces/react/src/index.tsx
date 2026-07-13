@@ -419,7 +419,21 @@ const runAutoAssessment = async () => {
             }
         }
         else if (event.type === 'progress_update') {
-          if (event.operation_stage === 'final_report') {
+          if (event.operation_stage === 'ragas_evaluation') {
+            const evaluationIndex = Number(event.evaluation_step_index);
+            const evaluationTotal = Number(event.evaluation_step_total);
+            const evaluationLabel = typeof event.evaluation_step_label === 'string'
+              ? event.evaluation_step_label
+              : '';
+            const isPreparation = event.evaluation_step_kind === 'reference_topics';
+            const progressLabel = Number.isFinite(evaluationIndex) && Number.isFinite(evaluationTotal)
+              ? `${evaluationIndex}/${evaluationTotal}`
+              : (isPreparation ? 'preparation' : 'metric');
+            loggingService.info(
+              `➡️ Ragas evaluation ${progressLabel}${evaluationLabel ? `: ${evaluationLabel}` : ''}`
+            );
+          }
+          else if (event.operation_stage === 'final_report') {
             const reportIndex = Number(event.report_step_index);
             const reportTotal = Number(event.report_step_total);
             const reportLabel = typeof event.report_step_label === 'string' ? event.report_step_label : '';
