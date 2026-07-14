@@ -62,10 +62,8 @@ plan_phases[4]{id,title,status,criteria}:
   2,Auth,active,test login`;
 
         expect(getToonPlanPreview(toon)).toBe('Test portal (Phase 2/4 – Auth)');
-        expect(formatToolInput('store_plan', {plan: toon})).toContain('Test portal');
         expect(getToonPlanPreview('not a toon plan')).toBeNull();
         expect(getToonPlanPreview('plan_overview[1]{objective,current_phase,total_phases}:\nOnly objective')).toBeNull();
-        expect(formatToolInput('get_plan', {plan: {objective: 'object plan'}})).toContain('object plan');
     });
 
     it('formats shell input variants with flags and extras', () => {
@@ -87,7 +85,7 @@ plan_phases[4]{id,title,status,criteria}:
         expect(toolFormatters.shell({command: null})).toBe('Commands: (none)');
     });
 
-    it('formats browser, file, report, handoff, task, and stop tools', () => {
+    it('formats browser, file, report, handoff, and task tools', () => {
         expect(formatToolInput('http_request', {method: 'POST', url: 'https://example.com'}))
             .toBe('method: POST | url: https://example.com');
         expect(formatToolInput('browser_set_headers', {headers: {Authorization: 'Bearer x'}}))

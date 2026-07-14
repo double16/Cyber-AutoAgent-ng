@@ -438,10 +438,8 @@ Use the following data:
 
             # Add footer
             main_provider = config_manager.get_provider()
-            main_models = set([
-                config_manager.get_llm_config(main_provider).model_id,
-                config_manager.get_swarm_config(main_provider).llm.model_id
-            ])
+            main_models = {config_manager.get_llm_config(main_provider).model_id,
+                           config_manager.get_swarm_config(main_provider).llm.model_id}
 
             footer = f"""
 ----

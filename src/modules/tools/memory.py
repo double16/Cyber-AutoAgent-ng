@@ -51,19 +51,19 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Literal, Union
+from typing import Any, Dict, List, Optional, Tuple, Literal
 
 import boto3
 from mem0 import Memory as Mem0Memory
 from mem0 import MemoryClient
 from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
 from rapidfuzz import fuzz
-from strands import tool, ToolContext
+from strands import tool
 
 from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
-from modules.handlers.utils import filter_none_values
+from modules.handlers.utils import filter_none_values, sanitize_toon_value
 
 # Set up logging
 logger = get_logger("Tools.Memory")
@@ -77,8 +77,9 @@ _PLAN_STORE: Optional["PlanStore"] = None
 _FAISS_WRITE_LOCK = threading.Lock()
 
 
-PlanStatus = Literal["active", "pending", "done"]
+PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
 TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
+TERMINAL_PLAN_STATUSES = ("done", "partial_failure", "blocked")
 
 
 @dataclass(frozen=True)
@@ -142,18 +143,18 @@ class Task:
 
     @staticmethod
     def toon_format() -> str:
-        return f"task[1]{Task.csv_format()}"
+        return f"task[1]{{{Task.csv_format()}}}"
 
     @staticmethod
     def csv_format() -> str:
         return "title,objective,evidence,phase,status,status_reason"
 
     def to_toon(self, include_format=True) -> str:
-        title = _sanitize_toon_value(self.title)
-        objective = _sanitize_toon_value(self.objective)
-        evidence = "|".join(_sanitize_toon_value(e) for e in self.evidence)
-        status = _sanitize_toon_value(self.status)
-        status_reason = _sanitize_toon_value(self.status_reason)
+        title = sanitize_toon_value(self.title)
+        objective = sanitize_toon_value(self.objective)
+        evidence = "|".join(sanitize_toon_value(e) for e in self.evidence)
+        status = sanitize_toon_value(self.status)
+        status_reason = sanitize_toon_value(self.status_reason)
         lines = []
         if include_format:
             lines.append(f"{self.toon_format()}:")
@@ -178,8 +179,8 @@ class PlanPhase:
             raise ValueError("phase.id must be a positive int")
         if not isinstance(self.title, str) or not self.title.strip():
             raise ValueError("phase.title must be a non-empty string")
-        if self.status not in ("active", "pending", "done"):
-            raise ValueError("phase.status must be one of: active|pending|done")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
+            raise ValueError("phase.status must be one of: active|pending|done|partial_failure|blocked")
         if self.criteria is None:
             object.__setattr__(self, "criteria", "")  # type: ignore[misc]
         if not isinstance(self.criteria, str):
@@ -195,6 +196,24 @@ class PlanPhase:
             status=str(obj.get("status", "pending")),  # validated in __post_init__
             criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
         )
+
+    @staticmethod
+    def toon_format() -> str:
+        return f"plan_phases[1]{{{PlanPhase.csv_format()}}}"
+
+    @staticmethod
+    def csv_format() -> str:
+        return "id,title,status,criteria"
+
+    def to_toon(self, include_format=True) -> str:
+        title = sanitize_toon_value(self.title)
+        status = sanitize_toon_value(self.status)
+        criteria = sanitize_toon_value(self.criteria)
+        lines = []
+        if include_format:
+            lines.append(f"{self.toon_format()}:")
+        lines.append(f"  {self.id},{title},{status},{criteria}")
+        return "\n".join(lines).strip()
 
     def to_dict(self) -> Dict[str, Any]:
         return filter_none_values({
@@ -282,7 +301,7 @@ class OperationPlan:
         return "plan_overview[1]{objective,current_phase,total_phases}"
 
     def to_toon(self, include_format=True) -> str:
-        objective = _sanitize_toon_value(self.objective)
+        objective = sanitize_toon_value(self.objective)
         overview_lines = []
         if include_format:
             overview_lines.append(f"{self.toon_format()}:")
@@ -293,10 +312,10 @@ class OperationPlan:
                 "  "
                 + ",".join(
                     [
-                        _sanitize_toon_value(phase.id),
-                        _sanitize_toon_value(phase.title),
-                        _sanitize_toon_value(phase.status),
-                        _sanitize_toon_value(phase.criteria),
+                        sanitize_toon_value(phase.id),
+                        sanitize_toon_value(phase.title),
+                        sanitize_toon_value(phase.status),
+                        sanitize_toon_value(phase.criteria),
                     ]
                 )
             )
@@ -525,34 +544,6 @@ def _agent_id(agent_id: Optional[str] = None) -> Optional[str]:
 
 def _operation_id(operation_id: Optional[str] = None) -> str:
     return operation_id or (_MEMORY_CONFIG or {}).get("operation_id", os.getenv("CYBER_OPERATION_ID", "default_operation"))
-
-
-def _sanitize_toon_value(value: Any) -> str:
-    text = "" if value is None else str(value)
-    text = text.replace("\n", " ").replace("\r", " ").strip()
-    return text.replace(",", ";")
-
-
-def active_task_message(
-        active_task: Optional[Task] = None,
-        activated: bool = True,
-        closed_task: Optional[Task] = None,
-        current_phase: Optional[int] = None,
-) -> str:
-    if closed_task:
-        closed_info = {"closed": {"task_uid": closed_task.task_uid, "status": closed_task.status}}
-    else:
-        closed_info = {}
-
-    if active_task is None:
-        return f"""<active_task phase="{current_phase}" status="none">
-{json.dumps({"task": None, "activated": False} | closed_info)}
-</active_task>
-"""
-    return f"""<active_task phase="{active_task.phase}" status="{active_task.status}">
-{json.dumps({"task": active_task.to_dict()} | closed_info | {"activated": activated}, indent=2, sort_keys=True)}
-</active_task>
-"""
 
 
 def memory_create_time(m: Dict[str, Any]) -> str:
@@ -890,7 +881,7 @@ def mem0_store(
                     f"New: {new_patterns}, Existing: {existing_patterns}. Not treating as duplicate.")
 
     try:
-        results = client.store_memory(
+        client.store_memory(
             cleaned_content, user_id, agent_id, metadata
         )
     except Exception as store_error:
@@ -902,7 +893,7 @@ def mem0_store(
             try:
                 # Escape problematic characters and retry
                 escaped_content = json.dumps(cleaned_content)[1:-1]  # Remove outer quotes
-                results = client.store_memory(
+                client.store_memory(
                     escaped_content, user_id, agent_id, metadata
                 )
                 logger.info("Memory stored after content escaping")
@@ -919,91 +910,10 @@ def mem0_store(
         # Restore original logging level
         mem0_logger.setLevel(original_level)
 
+    # We don't return results because the LLM sometimes considers them as instructions and gets misdirected.
     return "Memory stored."
 
-    # Normalize to list with better error handling
-    # if results is None:
-    #     results_list = []
-    # elif isinstance(results, list):
-    #     results_list = results
-    # elif isinstance(results, dict):
-    #     results_list = results.get("results", [])
-    # else:
-    #     results_list = []
-    #
-    # results_list = [ filter_none_values(d) if isinstance(d, dict) else d for d in results_list ]
-    # return json.dumps(results_list, indent=2, sort_keys=True)
 
-
-@tool(context=True)
-def store_plan(
-    plan: Union[OperationPlan, str, Dict],
-    tool_context: ToolContext = None,
-) -> str:
-    """Store the current operation plan.
-
-    Args:
-        plan: {"objective":"...", "current_phase":X, "total_phases":N, "phases":[{"id":1, "title":"...", "status":"...", "criteria":"..."}, ...]}
-
-    Returns:
-        JSON/text response with operation result
-    """
-    client = _ensure_memory_client()
-    user_id = _user_id()
-    op_id = None if memory_is_cross_operation() else _operation_id()
-
-    if isinstance(plan, str):
-        plan = plan.strip()
-        try:
-            try:
-                plan_obj = OperationPlan.from_obj(json.loads(plan))
-            except ValueError as e1:
-                # commonly there is an extra }
-                if plan.endswith("}}"):
-                    plan_obj = OperationPlan.from_obj(json.loads(plan[0:-1]))
-                else:
-                    raise e1
-        except ValueError as e:
-            raise ValueError(
-                f"store_plan requires JSON object/dict with fields: objective, current_phase, total_phases, phases. "
-                f"Got string that is not valid JSON: {str(e)}"
-            )
-    elif isinstance(plan, dict):
-        plan_obj = OperationPlan.from_obj(plan)
-    elif isinstance(plan, OperationPlan):
-        plan_obj = plan
-    else:
-        plan_obj = None
-    if not plan_obj:
-        raise ValueError(
-            f"store_plan content must be object/dict or JSON string, got {type(plan).__name__}"
-        )
-
-    # detect phase change and refuse if there are remaining tasks, AND there is budget left
-    prev_plan = client.get_active_plan(user_id=user_id)
-
-    if not plan_obj.assessment_complete and prev_plan and \
-            plan_obj.current_phase != prev_plan.current_phase and \
-            tool_context and tool_context.agent and hasattr(tool_context.agent, "callback_handler"):
-        active_task, _ = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=prev_plan.current_phase)
-        budget_progress = getattr(tool_context.agent.callback_handler, "get_budget_progress", lambda: 0)()
-
-        if active_task and budget_progress < 90:
-            raise ValueError(
-                "Cannot advance phase due to activate tasks remaining.\n"
-                "**MANDATORY ACTION**: Continue by executing this active task:\n" + active_task_message(active_task)
-            )
-
-    results = client.store_plan(plan=plan_obj, user_id=user_id, operation_id=op_id)
-
-    result_str = results.get("plan", "")
-    if "_reminder" in results:
-        result_str += "\n" + results["_reminder"]
-
-    return result_str
-
-
-@tool
 def get_plan() -> str:
     """Get the most recent active plan.
     Returns the plan or null if none found.
@@ -1020,8 +930,8 @@ def get_plan() -> str:
 class TaskCreate:
     title: str
     objective: str
-    phase: Optional[int]
-    status: TaskStatus
+    phase: Any = 0
+    status: TaskStatus = "pending"
     evidence: Any = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -1032,6 +942,7 @@ class TaskCreate:
         if self.status not in ("active", "pending"):
             self.status = "pending"
             # raise ValueError("status must be one of: active|pending")
+        self.phase = _normalize_task_phase(self.phase)
         # Coerce evidence to List[str] to tolerate dict/list-of-dict inputs from models
         self.evidence = _normalize_evidence(self.evidence)
 
@@ -1045,20 +956,34 @@ class TaskCreate:
             title=str(obj.get("title", "")),
             objective=str(obj.get("objective", "")),
             evidence=obj.get("evidence", None),
-            phase=obj.get("phase"),
+            phase=obj.get("phase", 0),
             status=str(obj.get("status", "pending")),
         )
 
 
-def _get_plan_current_phase() -> int:
+def _normalize_task_phase(value: Any) -> int:
+    """Coerce a task phase, reserving zero for omitted or malformed values."""
+
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _get_active_plan() -> OperationPlan:
     client = _ensure_memory_client()
     user_id = _user_id()
 
     plan = client.get_active_plan(user_id=user_id, operation_id=_operation_id())
     if not plan:
         raise ValueError("no_active_plan")
+    return plan
 
-    return int(plan.current_phase)
+
+def _get_plan_current_phase() -> int:
+    return int(_get_active_plan().current_phase)
 
 
 _RE_URL_PATTERN = re.compile(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*')
@@ -1099,7 +1024,7 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
     """Create one or more tasks.
 
     Rules:
-    - If phase is omitted, uses the active plan's current_phase.
+    - Valid active or future plan phases are preserved.
     - If status="active", any other active task in the same operation is demoted to pending.
     - If you identified N candidates, create N tasks (do not merge).
 
@@ -1107,7 +1032,7 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
         A JSON array of task dict.
 
     Returns:
-        store result and active task (if any)
+        Simple task creation confirmation.
     """
 
     # validate input, TaskCreate has post init validation
@@ -1120,19 +1045,27 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
     op_id = _operation_id()
 
     try:
-        current_phase = _get_plan_current_phase()
+        plan = _get_active_plan()
+        current_phase = plan.current_phase
+        valid_phase_ids = {phase.id for phase in plan.phases}
     except Exception:
         current_phase = 1
+        valid_phase_ids = None
 
     existing_tasks = _get_plan_store().get_tasks(op_id)
 
-    all_results = []
     for new_task in tasks:
-        # Default phase to active plan's current phase when available
-        try:
-            eff_phase = max(current_phase, int(new_task.phase or current_phase))
-        except ValueError:
+        # Default omitted phases to the active phase. Preserve every explicit,
+        # valid plan phase, including future phases.
+        requested_phase = new_task.phase
+        if (
+            valid_phase_ids is None
+            or requested_phase not in valid_phase_ids
+            or requested_phase < current_phase
+        ):
             eff_phase = current_phase
+        else:
+            eff_phase = requested_phase
 
         title = str(new_task.title).strip()
         objective = str(new_task.objective).strip()
@@ -1154,11 +1087,6 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
                 break
 
         if duplicate_task:
-            all_results.append({
-                "task_uid": duplicate_task.task_uid,
-                "event": "DUPLICATE",
-                # "title": duplicate_task.title,  # do not include title, the agent may be redirected
-            })
             continue
 
         task_uid = str(uuid.uuid4())
@@ -1172,93 +1100,10 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
         )
 
         client.store_task(task=task, user_id=user_id)
-        all_results.append({
-            "task_uid": task_uid,
-            "event": "ADD",
-            # "title": title,  # do not include title, the agent may be redirected
-        })
         existing_tasks.append(task)
 
     # Keep the output simple, giving too much info may be interpreted as instructions.
-    results_str = f"Tasks created.\n"
-
-    if all_results:
-        active_task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
-        if active_task and activated:
-            results_str += active_task_message(active_task=active_task, activated=True, current_phase=current_phase)
-
-    return results_str
-
-
-@tool
-def task_done(
-        status: Literal["done", "partial_failure", "blocked"],
-        task_uid: Optional[str] = None,
-        reason: Optional[str] = None,
-) -> str:
-    """Mark a task as done/partial_failure/blocked and activate the next pending task in the current plan phase.
-
-    Behavior:
-    - Phase is taken from the active plan's current_phase.
-    - If task_uid is omitted, the current active task for that phase is selected.
-    - After updating the task, the next pending task in the SAME phase becomes active.
-
-    Returns:
-        Returns the next active task. The closed task id is included under closed.task_uid.
-    """
-    client = _ensure_memory_client()
-    user_id = _user_id()
-    try:
-        current_phase = _get_plan_current_phase()
-    except ValueError:
-        return active_task_message()
-
-    if status not in ["done", "partial_failure", "blocked"]:
-        status = "done"
-
-    updated, next_active = client.advance_task_in_phase(
-        user_id=user_id,
-        phase=current_phase,
-        new_status=status,
-        new_status_reason=reason,
-        task_uid=task_uid,
-    )
-
-    return active_task_message(next_active, next_active is not None, updated, current_phase=current_phase)
-
-
-@tool
-def get_active_task() -> str:
-    """Get the task to execute for the active plan's current_phase. Call task_done when:
-    - task objective is achieved, status=done
-    - objective is not able to be achieved within budget, status=partial_failure
-    - objective can not be achieved, status=blocked
-
-    Returns:
-        The active task.
-    """
-    client = _ensure_memory_client()
-    user_id = _user_id()
-    try:
-        current_phase = _get_plan_current_phase()
-
-        task, activated = client.get_or_activate_next_task_in_phase(user_id=user_id, phase=current_phase)
-        return active_task_message(task, activated, current_phase=current_phase)
-    except ValueError:
-        # no active plan
-        return active_task_message(None, False)
-
-
-@tool
-def list_uncompleted_tasks() -> str:
-    """List all uncompleted tasks for the current plan phase."""
-    client = _ensure_memory_client()
-    user_id = _user_id()
-    try:
-        current_phase = _get_plan_current_phase()
-        return Task.list_to_toon(client.list_tasks(user_id=user_id, phase=current_phase, status=["pending", "active"]))
-    except ValueError:
-        return "No active plan."
+    return "Tasks created."
 
 
 def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:
@@ -2025,6 +1870,61 @@ class Mem0ServiceClient:
             logger.error("Error in mem0.get_all: %s", e)
             raise
 
+    def get_memory_by_id(
+        self,
+        memory_id: str,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Get a single memory by its Mem0 ID.
+
+        Mem0 backends have used slightly different ``get`` signatures, so this
+        method tries the direct ID form first and then keyword variants. The
+        returned value is normalized to the same dictionary shape used by list
+        and search helpers.
+        """
+
+        memory_id = str(memory_id or "").strip()
+        if not memory_id:
+            return None
+        if not hasattr(self.mem0, "get"):
+            raise AttributeError("Mem0 backend does not support get")
+
+        base_kwargs: Dict[str, Any] = {}
+        user_id = _user_id(user_id)
+        if user_id:
+            base_kwargs["user_id"] = user_id
+        if agent_id:
+            base_kwargs["agent_id"] = agent_id
+
+        attempts = [
+            lambda: self.mem0.get(memory_id),
+            lambda: self.mem0.get(memory_id=memory_id, **base_kwargs),
+            lambda: self.mem0.get(id=memory_id, **base_kwargs),
+        ]
+        result: Any = None
+        last_type_error: Optional[TypeError] = None
+        for attempt in attempts:
+            try:
+                result = attempt()
+                break
+            except TypeError as error:
+                last_type_error = error
+        else:
+            if last_type_error:
+                raise last_type_error
+
+        entries = self._normalise_results_list(result)
+        if entries:
+            return entries[0]
+        if isinstance(result, dict):
+            entries = self._remove_inactive([self._coerce_entry(result)])
+            if entries:
+                return entries[0]
+        if isinstance(result, str):
+            return self._coerce_entry(result)
+        return None
+
     def search_memories(
             self,
             query: str,
@@ -2237,12 +2137,12 @@ class Mem0ServiceClient:
         Returns:
             Status result
         """
-        # Check if all phases complete and add reminder
-        all_done = all(p.status == "done" for p in plan.phases)
-        add_stop_reminder = False
+        # Check if all phases complete and add workflow reminder
+        all_done = all(p.status in TERMINAL_PLAN_STATUSES for p in plan.phases)
+        add_completion_reminder = False
         if all_done and not plan.assessment_complete:
             plan.assessment_complete = True
-            add_stop_reminder = True
+            add_completion_reminder = True
             logger.info("All phases complete - set assessment_complete=true")
 
         op_id = _operation_id(operation_id)
@@ -2257,7 +2157,7 @@ class Mem0ServiceClient:
                 if prev_plan.assessment_complete and new_total > int(prev_plan.total_phases):
                     result["_reminder"] = (
                         f"Adding phases ({prev_plan.total_phases} → {new_total}) after assessment_complete=true. "
-                        "Consider stopping and generating report instead."
+                        "Consider allowing workflow completion and report generation instead."
                     )
         except Exception as e:
             logger.debug(f"Could not check previous plan for extension: {e}")
@@ -2268,9 +2168,9 @@ class Mem0ServiceClient:
         result["plan"] = plan.to_toon()
         result["operation_id"] = op_id
 
-        if add_stop_reminder:
+        if add_completion_reminder:
             result["_reminder"] = (
-                "All phases complete. Call stop('Assessment complete: X phases done, Y findings')"
+                "All phases complete. Python workflow will evaluate completion and generate the report."
             )
 
         return result

@@ -130,50 +130,6 @@ describe('Specialist tool formatters', () => {
       expect(formatted).toContain('SQLi');
     });
 
-    it('shows TOON plan preview for store_plan', async () => {
-      const mod: any = await import('../../../src/utils/toolFormatters.js');
-      const { toolFormatters } = mod;
-
-      const plan = `plan_overview[1]{objective,current_phase,total_phases}:
-  Complete security assessment,1,3
-plan_phases[3]{id,title,status,criteria}:
-  1,Recon,active,map attack surface
-  2,Testing,pending,validate findings
-  3,Report,pending,document results`;
-
-      const input = {
-        plan: plan
-      };
-
-      const formatted = toolFormatters.store_plan(input);
-
-      expect(formatted).toContain('plan:');
-      expect(formatted).toContain('Complete security assessment');
-      expect(formatted).toContain('Phase 1/3');
-    });
-
-    it('extracts TOON plan from nested JSON response', async () => {
-      const mod: any = await import('../../../src/utils/toolFormatters.js');
-      const { toolFormatters } = mod;
-
-      // Simulate the actual response format from logs
-      const nestedResponse = JSON.stringify({
-        status: 'success',
-        plan: 'plan_overview[1]{objective,current_phase,total_phases}:\n  Assess ripio.com for bug bounty,1,4\nplan_phases[4]{id,title,status,criteria}:\n  1,Discovery,active,Map attack surface\n  2,Testing,pending,Validate findings\n  3,Exploit,pending,Confirm vulnerabilities\n  4,Report,pending,Document results',
-      });
-
-      const input = {
-        plan: nestedResponse
-      };
-
-      const formatted = toolFormatters.store_plan(input);
-
-      // Should successfully extract nested JSON and parse TOON format
-      expect(formatted).toContain('plan:');
-      // The TOON parser extracts the structured plan, should see PLAN marker
-      expect(formatted).toContain('plan_overview[');
-    });
-
     it('handles nested JSON with memory field', async () => {
       const mod: any = await import('../../../src/utils/toolFormatters.js');
       const { toolFormatters } = mod;

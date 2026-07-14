@@ -270,9 +270,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   const MAX_OPERATION_SUMMARY_EVENTS = Number(process.env.CYBER_MAX_OPERATION_SUMMARY_EVENTS || 20);
   const [completedEvents, setCompletedEvents] = useState<DisplayStreamEvent[]>([]);
   const [activeEvents, setActiveEvents] = useState<DisplayStreamEvent[]>([]);
-  // Dedicated buffer for FINAL REPORT and its inline preview, rendered via a
-  // dynamic StreamDisplay so it can react to late-arriving report events.
-  const [finalReportEvents, setFinalReportEvents] = useState<DisplayStreamEvent[] | null>(null);
+  // Dedicated completion-phase buffer for FINAL REPORT, evaluation progress,
+  // and the inline preview. Keeping these events together preserves arrival order.
+  const [completionPhaseEvents, setCompletionPhaseEvents] = useState<DisplayStreamEvent[] | null>(null);
   const [staticSessionKey, setStaticSessionKey] = useState(0);
 
   // Ring buffers to bound memory regardless of session length
@@ -285,8 +285,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     }
   ));
   const activeBufRef = useRef(new RingBuffer<DisplayStreamEvent>(Math.min(200, Math.floor(MAX_EVENTS / 5))));
-  const appendFinalReportEvent = useCallback((event: DisplayStreamEvent) => {
-    setFinalReportEvents(prev => {
+  const appendCompletionPhaseEvent = useCallback((event: DisplayStreamEvent) => {
+    setCompletionPhaseEvents(prev => {
       const next = [...(prev ?? []), event];
       return trimEventArrayByByteBudget(next, MAX_FINAL_REPORT_EVENTS, MAX_FINAL_REPORT_EVENT_BYTES);
     });
@@ -426,7 +426,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   const completionCleanupTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Track whether we're currently within the FINAL REPORT phase so we can
   // accumulate a dynamic event cluster for inline preview rendering.
-  const finalReportActiveRef = useRef<boolean>(false);
+  const completionPhaseActiveRef = useRef<boolean>(false);
   // Timer to detect idle gaps after tool-buffer output when no explicit tool_end is emitted
   const postToolIdleTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Timer to bridge the gap AFTER reasoning completes and BEFORE next step/tool begins
@@ -518,9 +518,14 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       event.type === 'output'
     ))
   );
-  const isFinalReportProgressEvent = (event: DisplayStreamEvent): boolean => (
-    event.type === 'progress_update' &&
-    (((event as any).operation_stage === 'final_report') || (event as any).step === 'FINAL REPORT')
+  const isCompletionPhaseEvent = (event: DisplayStreamEvent): boolean => (
+    (event.type === 'progress_update' && (
+      (event as any).operation_stage === 'final_report' ||
+      (event as any).operation_stage === 'ragas_evaluation' ||
+      (event as any).step === 'FINAL REPORT'
+    )) ||
+    String((event as any).type) === 'evaluation_complete' ||
+    String((event as any).type) === 'assessment_complete'
   );
 
   // Unified helpers for delayed thinking spinner scheduling/cancellation
@@ -610,9 +615,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     seenThinkingThisPhaseRef.current = false;
     suppressTerminationBannerRef.current = false;
     lastReasoningTextRef.current = null;
-    finalReportActiveRef.current = false;
+    completionPhaseActiveRef.current = false;
     hasSeenOperationActivityRef.current = false;
-    setFinalReportEvents(null);
+    setCompletionPhaseEvents(null);
     perToolOutputSeenRef.current.clear();
     globalOutputSeenRef.current.clear();
     globalOutputSeenOrderRef.current = [];
@@ -706,7 +711,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           perToolOutputSeenRef.current.clear();
           globalOutputSeenRef.current.clear();
           globalOutputSeenOrderRef.current = [];
-          setFinalReportEvents(prev => (
+          setCompletionPhaseEvents(prev => (
             prev
               ? trimEventArrayByByteBudget(prev.slice(-20), 20, Math.floor(MAX_FINAL_REPORT_EVENT_BYTES / 2))
               : prev
@@ -869,6 +874,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         cancelDelayedThinking();
         cancelPostReasoningIdleTimer();
         const isReportProgress = event.operation_stage === 'final_report';
+        const isEvaluationProgress = event.operation_stage === 'ragas_evaluation';
         // End any active reasoning session
         setActiveReasoning(false);
         // Reset last reasoning dedupe on new step
@@ -897,7 +903,13 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           report_step_index: event.report_step_index,
           report_step_total: event.report_step_total,
           report_step_kind: event.report_step_kind,
-          report_step_label: event.report_step_label
+          report_step_label: event.report_step_label,
+          evaluation_step_index: event.evaluation_step_index,
+          evaluation_step_total: event.evaluation_step_total,
+          evaluation_step_kind: event.evaluation_step_kind,
+          evaluation_scope: event.evaluation_scope,
+          evaluation_metric: event.evaluation_metric,
+          evaluation_step_label: event.evaluation_step_label
         } as DisplayStreamEvent;
 
         results.push(headerEvent);
@@ -905,15 +917,18 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Mark entry into FINAL REPORT phase and start a dynamic cluster that
         // will be rendered via StreamDisplay with an InlineReportViewer.
         if (event.step === 'FINAL REPORT') {
-          finalReportActiveRef.current = true;
-          setFinalReportEvents(prev => {
+          completionPhaseActiveRef.current = true;
+          setCompletionPhaseEvents(prev => {
             const base = prev && prev.length > 0 ? prev.filter(e => e.type !== 'progress_update' || (e as any).step !== 'FINAL REPORT') : [];
             const next = [...base, headerEvent];
             return trimEventArrayByByteBudget(next, MAX_FINAL_REPORT_EVENTS, MAX_FINAL_REPORT_EVENT_BYTES);
           });
         } else if (isReportProgress) {
-          finalReportActiveRef.current = true;
-          appendFinalReportEvent(headerEvent);
+          completionPhaseActiveRef.current = true;
+          appendCompletionPhaseEvent(headerEvent);
+        } else if (isEvaluationProgress) {
+          completionPhaseActiveRef.current = true;
+          appendCompletionPhaseEvent(headerEvent);
         }
 
         // Mark that we've seen the first header
@@ -930,6 +945,17 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             'waiting',
             'Generating report',
             reportStepLabel ? { taskTitle: reportStepLabel } : {},
+            true
+          );
+          seenThinkingThisPhaseRef.current = true;
+        } else if (isEvaluationProgress) {
+          const evaluationStepLabel = typeof event.evaluation_step_label === 'string'
+            ? event.evaluation_step_label.trim()
+            : '';
+          activateThinking(
+            'waiting',
+            'Evaluating assessment',
+            evaluationStepLabel ? { taskTitle: evaluationStepLabel } : {},
             true
           );
           seenThinkingThisPhaseRef.current = true;
@@ -1373,7 +1399,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             // Preserve metadata so the renderer can identify tool-buffer outputs
             metadata: {
               ...(event.metadata || {}),
-              ...(finalReportActiveRef.current ? { finalReportCluster: true } : {}),
+              ...(completionPhaseActiveRef.current ? { finalReportCluster: true } : {}),
             },
           } as DisplayStreamEvent;
           results.push(outEvt);
@@ -1381,8 +1407,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // If we're in the FINAL REPORT phase, include this output (typically the
           // ASCII summary banner) in the dynamic final report cluster so it
           // appears directly beneath the inline preview.
-          if (finalReportActiveRef.current) {
-            appendFinalReportEvent(outEvt);
+          if (completionPhaseActiveRef.current) {
+            appendCompletionPhaseEvent(outEvt);
           }
 
           // If this is a report preview block, immediately flush any buffered operation summary below it
@@ -1520,11 +1546,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (targetRef.current) rcEvent.target = targetRef.current;
         const displayRcEvent = rcEvent as DisplayStreamEvent;
         results.push(displayRcEvent);
-        // If we're inside the FINAL REPORT phase, add this to the dynamic
-        // finalReportEvents cluster so StreamDisplay can compute reportDetails
+        // If we're inside the completion phase, add this to the dynamic
+        // cluster so StreamDisplay can compute reportDetails
         // (path + inline content) for InlineReportViewer.
-        if (finalReportActiveRef.current) {
-          appendFinalReportEvent(displayRcEvent);
+        if (completionPhaseActiveRef.current) {
+          appendCompletionPhaseEvent(displayRcEvent);
         }
         // Synthesize a paths section immediately below the report
         try {
@@ -1547,8 +1573,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
           results.push(pathsEvent);
 
-          if (finalReportActiveRef.current) {
-            appendFinalReportEvent(pathsEvent);
+          if (completionPhaseActiveRef.current) {
+            appendCompletionPhaseEvent(pathsEvent);
           }
         } catch {}
         // Then flush any buffered operation summary (paths) so they appear beneath the report as well
@@ -1558,14 +1584,24 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         }
         break;
 
+      case 'evaluation_complete': {
+        const evaluationEvent = event as DisplayStreamEvent;
+        results.push(evaluationEvent);
+        if (completionPhaseActiveRef.current) {
+          appendCompletionPhaseEvent(evaluationEvent);
+        }
+        deactivateThinking();
+        break;
+      }
+
       case 'assessment_complete': {
         const acEvent = event as DisplayStreamEvent;
         results.push(acEvent);
-        if (finalReportActiveRef.current) {
-          appendFinalReportEvent(acEvent);
-          // FINAL REPORT phase is complete once assessment_complete arrives
-          finalReportActiveRef.current = false;
+        if (completionPhaseActiveRef.current) {
+          appendCompletionPhaseEvent(acEvent);
+          completionPhaseActiveRef.current = false;
         }
+        deactivateThinking();
         break;
       }
 
@@ -1751,7 +1787,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (regularEvents.length > 0) {
           // Before anything else, if a new progress update arrived, flush current aggregated output into completed
           const progressUpdates = regularEvents.filter(e =>
-            e.type === 'progress_update' && (e as any).operation_stage !== 'final_report'
+            e.type === 'progress_update' &&
+            (e as any).operation_stage !== 'final_report' &&
+            (e as any).operation_stage !== 'ragas_evaluation'
           );
           if (progressUpdates.length > 0) {
             const aggEv = buildAggDisplayEvent();
@@ -1779,7 +1817,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             !(e.type === 'output' && Boolean((e as any).metadata?.finalReportCluster)) &&
             e.type !== 'separator' &&
             e.type !== 'divider' &&
-            !isFinalReportProgressEvent(e)
+            !isCompletionPhaseEvent(e)
           );
           if (newCompletedEvents.length > 0) {
             completedBufRef.current.pushMany(newCompletedEvents);
@@ -1853,7 +1891,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     return null;
   }
 
-  const hasFinalReportCluster = finalReportEvents != null && finalReportEvents.length > 0;
+  const hasCompletionPhaseCluster = completionPhaseEvents != null && completionPhaseEvents.length > 0;
 
   return (
     <Box flexDirection="column" flexGrow={1}>
@@ -1867,11 +1905,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         />
       )}
 
-      {/* FINAL REPORT cluster: rendered via dynamic StreamDisplay so InlineReportViewer
-          can react to late-arriving report_content / assessment_complete events. */}
-      {hasFinalReportCluster && finalReportEvents && (
+      {/* Completion-phase cluster: rendered dynamically so report and evaluation
+          events remain append-only while InlineReportViewer receives late content. */}
+      {hasCompletionPhaseCluster && completionPhaseEvents && (
         <StreamDisplay
-          events={finalReportEvents}
+          events={completionPhaseEvents}
           animationsEnabled={animationsEnabled}
           terminalWidth={terminalWidth}
           availableHeight={availableHeight}
@@ -1880,7 +1918,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
       {/* Active events with content (reasoning, output, etc.) - suppressed once FINAL
           REPORT cluster takes over the dynamic tail. */}
-      {!hasFinalReportCluster && activeEvents.length > 0 && (
+      {!hasCompletionPhaseCluster && activeEvents.length > 0 && (
         <StreamDisplay
           events={activeEvents}
           animationsEnabled={animationsEnabled}

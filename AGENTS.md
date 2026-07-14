@@ -1,6 +1,6 @@
 ## Critical rules the agent must follow before doing anything
 - Read `README.md` before acting.
-- Update `CHANGELOG.md` for user-facing changes. Categorize using `## Features` and `## Fixes`.
+- Update `CHANGELOG.md` for user-facing changes. Categorize using `### Features` and `### Fixes`.
 
 ## Testing and contribution
 - Always write unit tests and check that they pass for new and changed business logic.
@@ -13,6 +13,13 @@
 - Do not bump major versions of core dependencies without a dedicated PR and discussion.
 - Do not rename files without a valid technical reason.
 
+## Documentation
+- Keep documentation up-to-date and accurate.
+- Use clear language.
+- Follow a consistent style and format for documentation.
+- Use examples and diagrams to illustrate concepts.
+- Environment variables used for configuration must be documented in a table along-side similar variables.
+
 ## Python Best Practices
 - Use the `uv` tool for python ecosystem, i.e `uv run ...`
 - Follow PEP 8 with a 120-character line limit
@@ -21,6 +28,7 @@
 - Sort imports with `isort`
 - Use f-strings for string formatting
 - If a class member is set in __init__, do not use getattr(), use direct reference.
+- For multi-line strings, use triple quotes and limit each line to 100 characters.
 
 ## JavaScript Best Practices
 - Follow ESLint and Prettier configurations

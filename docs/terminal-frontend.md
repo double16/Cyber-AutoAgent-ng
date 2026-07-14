@@ -53,11 +53,22 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 ```
 
 **Event Types:**
+
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Execution results
+- `output`: User-visible text, including controller-owned plan creation and update snapshots
 - `reasoning`: Agent decision context
 - `metrics_update`: Token, cost, duration, and budget progress
-- `progress_update`: Progress updates
+- `progress_update`: Progress updates, including indexed final-report and Ragas metric stages and unindexed Ragas
+  preparation stages
+- `evaluation_complete`: Successful completion of configured assessment evaluation
+- `assessment_complete`: Terminal lifecycle event emitted after report generation and any evaluation attempt
+
+When automatic evaluation is enabled, terminal event ordering is report events, Ragas evaluation progress,
+`evaluation_complete` when scores are produced, and finally `assessment_complete`. If evaluation is disabled, skipped,
+or fails, `assessment_complete` is still emitted after that decision so execution services can close without hanging.
+The React terminal keeps report and evaluation events in one append-only completion stream and shows an
+`Evaluating assessment` spinner with the current preparation or metric label until evaluation finishes.
 
 ### Event Processing
 

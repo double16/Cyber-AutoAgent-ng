@@ -70,7 +70,10 @@ export class EventAggregator {
       case 'progress_update':
         // End any active reasoning session
         this.activeReasoningSession = false;
-        if ((event as any).operation_stage === 'final_report') {
+        if (
+          (event as any).operation_stage === 'final_report' ||
+          (event as any).operation_stage === 'ragas_evaluation'
+        ) {
           results.push({
             type: 'progress_update',
             step: event.step,
@@ -82,6 +85,12 @@ export class EventAggregator {
             report_step_total: (event as any).report_step_total,
             report_step_kind: (event as any).report_step_kind,
             report_step_label: (event as any).report_step_label,
+            evaluation_step_index: (event as any).evaluation_step_index,
+            evaluation_step_total: (event as any).evaluation_step_total,
+            evaluation_step_kind: (event as any).evaluation_step_kind,
+            evaluation_scope: (event as any).evaluation_scope,
+            evaluation_metric: (event as any).evaluation_metric,
+            evaluation_step_label: (event as any).evaluation_step_label,
           } as DisplayStreamEvent);
           break;
         }

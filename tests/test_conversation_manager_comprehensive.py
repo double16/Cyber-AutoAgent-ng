@@ -743,43 +743,39 @@ class TestToolPairBoundaryConditions:
 
     MESSAGE_WITH_STATE_FOR_DEDUPE = [
         create_user_message("Initial"),  # preserve first
-        create_tool_use_message("store_plan", {
+        create_tool_use_message("workflow_plan_snapshot", {
             "plan": "{\"objective\":\"Find and validate as many vulnerabilities as possible\",\"current_phase\":1,\"total_phases\":1,\"phases\":[{\"id\":1,\"title\":\"Discovery\",\"status\":\"active\",\"criteria\":\"Identify all accessible endpoints, technologies, and authentication mechanisms.\"}]}"},
-                                "store_plan_1"),
-        create_tool_result_message("store_plan_1",
+                                "workflow_plan_snapshot_1"),
+        create_tool_result_message("workflow_plan_snapshot_1",
                                    "{\n  \"status\": \"success\": \"plan\": \"plan_overview[1]{objective,current_phase,total_phases}:\\n  Find and validate as many vulnerabilities as possible\\nplan_phases[4]{id,title,status,criteria}:\\n  1,Discovery,active,Identify all accessible endpoints; technologies; and authentication mechanisms.\" }"),
         create_user_message("x"),
-        create_tool_use_message("get_active_task", {}, "get_active_task_1"),
-        create_tool_result_message("get_active_task_1",
-                                   "<active_task version=\"1\">{\"task\":{\"task_uid\":\"OLD\"}}</active_task>"),
+        create_tool_use_message("create_tasks", {}, "create_tasks_1"),
+        create_tool_result_message("create_tasks_1", "Tasks created."),
         create_user_message("y"),
-        create_tool_use_message("get_active_task", {}, "get_active_task_2"),
-        create_tool_result_message("get_active_task_2",
-                                   "<active_task version=\"1\">{\"task\":{\"task_uid\":\"OLD\"}}</active_task>"),
+        create_tool_use_message("create_tasks", {}, "create_tasks_2"),
+        create_tool_result_message("create_tasks_2", "Tasks created."),
         create_user_message("y"),
-        create_tool_use_message("task_done", {}, "task_done_1"),
-        create_tool_result_message("task_done_1",
-                                   "<active_task version=\"1\">{\"task\":{\"task_uid\":\"OLD\"}}</active_task>"),
+        create_tool_use_message("create_tasks", {}, "create_tasks_closed_1"),
+        create_tool_result_message("create_tasks_closed_1", "Tasks created."),
         create_user_message("y"),
         create_user_message("y"),
         create_user_message("y"),
-        create_tool_use_message("store_plan", {
+        create_tool_use_message("workflow_plan_snapshot", {
             "plan": "{\"objective\":\"Find and validate as many vulnerabilities as possible\",\"current_phase\":1,\"total_phases\":4,\"phases\":[{\"id\":1,\"title\":\"Discovery\",\"status\":\"active\",\"criteria\":\"Identify all accessible endpoints, technologies, and authentication mechanisms.\"},{\"id\":2,\"title\":\"Hypothesis\",\"status\":\"pending\",\"criteria\":\"Formulate testable hypotheses for potential vulnerabilities based on discovered assets.\"},{\"id\":3,\"title\":\"Validation\",\"status\":\"pending\",\"criteria\":\"Validate hypotheses using targeted tools and confirm exploitability.\"},{\"id\":4,\"title\":\"Chaining\",\"status\":\"pending\",\"criteria\":\"Chain confirmed vulnerabilities to maximize impact and extract sensitive data.\"}]}"},
-                                "store_plan_2"),
-        create_tool_result_message("store_plan_2",
+                                "workflow_plan_snapshot_2"),
+        create_tool_result_message("workflow_plan_snapshot_2",
                                    "{\n  \"status\": \"success\", \"plan\": \"plan_overview[1]{objective,current_phase,total_phases}:\\n  Find and validate as many vulnerabilities as possible\\nplan_phases[4]{id,title,status,criteria}:\\n  1,Discovery,active,Identify all accessible endpoints; technologies; and authentication mechanisms.\\n  2,Hypothesis,pending,Formulate testable hypotheses for potential vulnerabilities based on discovered assets.\\n  3,Validation,pending,Validate hypotheses using targeted tools and confirm exploitability.\\n  4,Chaining,pending,Chain confirmed vulnerabilities to maximize impact and extract sensitive data.\" }"),
         create_user_message("z"),
         create_assistant_message("prune_me_1"),
         create_assistant_message("prune_me_2"),
-        create_tool_use_message("get_active_task", {}, "get_active_task_3"),
-        create_tool_result_message("get_active_task_3",
-                                   "<active_task version=\"1\">{\"task\":{\"task_uid\":\"NEW\"}}</active_task>"),
+        create_tool_use_message("create_tasks", {}, "create_tasks_3"),
+        create_tool_result_message("create_tasks_3", "Tasks created."),
         create_assistant_message("prune_me_3"),
         create_assistant_message("prune_me_4"),
     ]
 
-    def test_active_state_preserved_with_high_prune_count(self):
-        """Ensure active state is preserved with a higher forced prune count."""
+    def test_plan_state_preserved_with_high_prune_count(self):
+        """Ensure the latest serialized plan snapshot is preserved with a higher forced prune count."""
         manager = MappingConversationManager(
             window_size=6,
             preserve_first_messages=1,
@@ -790,39 +786,43 @@ class TestToolPairBoundaryConditions:
 
         manager._force_prune_oldest(agent, 9999999)
 
-        # We should have pruned everything but active state
-        assert len(agent.messages) == 7
+        assert len(agent.messages) == 5
         assert agent.messages[0]["content"][0]["text"] == "Initial"
-        assert agent.messages[1]["content"][0]["toolUse"]["name"] == "store_plan"
+        assert agent.messages[1]["content"][0]["toolUse"]["name"] == "workflow_plan_snapshot"
         assert "\\\"total_phases\\\":4" in json.dumps(agent.messages[1]["content"][0]["toolUse"]["input"])
         assert "4,Chaining" in agent.messages[2]["content"][0]["toolResult"]["content"][0]["text"]
-        assert agent.messages[3]["content"][0]["toolUse"]["name"] == "get_active_task"
-        assert "\"task_uid\":\"NEW\"" in agent.messages[4]["content"][0]["toolResult"]["content"][0]["text"]
+        assert agent.messages[3]["content"][0]["text"] == "prune_me_3"
+        assert agent.messages[4]["content"][0]["text"] == "prune_me_4"
 
-    def test_active_state_preserved_with_dedupe(self):
-        """Ensure active state is preserved with dedupe."""
+    def test_plan_state_preserved_with_dedupe(self):
+        """Ensure only the latest serialized plan snapshot is preserved with dedupe."""
         agent = MockAgent(messages=copy.deepcopy(self.MESSAGE_WITH_STATE_FOR_DEDUPE))
         _dedupe_state_markers(agent)
-        assert len(agent.messages) == 16
+        assert len(agent.messages) == len(self.MESSAGE_WITH_STATE_FOR_DEDUPE) - 2
         assert agent.messages[0]["content"][0]["text"] == "Initial"
-        assert agent.messages[7]["content"][0]["toolUse"]["name"] == "store_plan"
-        assert "\\\"total_phases\\\":4" in json.dumps(agent.messages[7]["content"][0]["toolUse"]["input"])
-        assert "4,Chaining" in agent.messages[8]["content"][0]["toolResult"]["content"][0]["text"]
-        assert agent.messages[12]["content"][0]["toolUse"]["name"] == "get_active_task"
-        assert "\"task_uid\":\"NEW\"" in agent.messages[13]["content"][0]["toolResult"]["content"][0]["text"]
-
-    def test_active_state_preserved_with_dedupe_task_in_text(self):
-        """Ensure active state is preserved with dedupe."""
-        agent = MockAgent(messages=copy.deepcopy(self.MESSAGE_WITH_STATE_FOR_DEDUPE + [
-            create_user_message("<active_task version=\"1\">{\"task\":{\"task_uid\":\"NEW_IN_TEXT\"}}</active_task>")
-        ]))
-        _dedupe_state_markers(agent)
-        assert len(agent.messages) == 15
-        assert agent.messages[0]["content"][0]["text"] == "Initial"
-        assert agent.messages[7]["content"][0]["toolUse"]["name"] == "store_plan"
-        assert "\\\"total_phases\\\":4" in json.dumps(agent.messages[7]["content"][0]["toolUse"]["input"])
-        assert "4,Chaining" in agent.messages[8]["content"][0]["toolResult"]["content"][0]["text"]
-        assert "\"task_uid\":\"NEW_IN_TEXT\"" in agent.messages[14]["content"][0]["text"]
+        latest_plan_use = next(
+            block
+            for message in agent.messages
+            for block in message.get("content", [])
+            if isinstance(block, dict)
+            and block.get("toolUse", {}).get("toolUseId") == "workflow_plan_snapshot_2"
+        )
+        latest_plan_result = next(
+            block
+            for message in agent.messages
+            for block in message.get("content", [])
+            if isinstance(block, dict)
+            and block.get("toolResult", {}).get("toolUseId") == "workflow_plan_snapshot_2"
+        )
+        assert latest_plan_use["toolUse"]["name"] == "workflow_plan_snapshot"
+        assert "\\\"total_phases\\\":4" in json.dumps(latest_plan_use["toolUse"]["input"])
+        assert "4,Chaining" in latest_plan_result["toolResult"]["content"][0]["text"]
+        assert not any(
+            block.get("toolUse", {}).get("toolUseId") == "workflow_plan_snapshot_1"
+            for message in agent.messages
+            for block in message.get("content", [])
+            if isinstance(block, dict)
+        )
 
 # =============================================================================
 # Test Class: Configuration Validation

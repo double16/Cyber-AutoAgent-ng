@@ -166,7 +166,7 @@ def _coerce_str(arg: bytes | str | None) -> str:
 @tool
 def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive") -> str:
     """
-    Run focused recon for a target and return agent-ready JSON.
+    Orchestrates automated web recon for a target. It scans for subdomains, live hosts/tech stack, crawled endpoints, JS files, URL/form parameters, and hidden/high-value services.
 
     Input:
     - Accepts URL or domain; normalizes to domain or IP address.

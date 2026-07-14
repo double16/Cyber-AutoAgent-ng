@@ -68,12 +68,6 @@ By 80% budget you MUST have:
 
 **Velocity**: Batch mapping + task capture | Verify with minimal, read-only requests | Automate repetitive mapping (python_repl) | Return to pending coverage tasks after each verification
 
-**Tool Selection (maximizes coverage throughput)**:
-- Recon/Mapping: specialized_recon_orchestrator (subdomains, live hosts, tech fingerprints, endpoints)
-- Parameter & surface review: advanced_payload_coordinator (DISCOVERY + SAFE INPUT TESTS ONLY)
-- Auth & session analysis: auth_chain_analyzer (JWT, OAuth, SAML, cookies, sessions)
-
-<!-- PROTECTED -->
 **Verification Patterns (Non-Exploitative)**:
 1. **Access Control Boundaries**: unauth vs auth vs role A vs role B | tenant A vs tenant B | confirm 401/403 behavior and consistent enforcement across routes
 2. **Input Handling Signals**: reflection/encoding/normalization differences | server-side validation errors | type confusion | parse ambiguities (JSON vs form) without harmful payloads
@@ -84,7 +78,6 @@ By 80% budget you MUST have:
 7. **Consistency Checks**: same policy across /api versions, methods, and content-types (GET/POST/JSON)
 8. **Dependency & Config Posture**: version disclosure + known risk indicators (flag for remediation; do not exploit)
 9. **Known Vulnerabilities**: tech name + version → searchsploit | search NVD/CVE/exploitdb
-<!-- /PROTECTED -->
 
 **False Positive Awareness**:
 OBSERVATIONS ≠ VULNERABILITIES until behavior verified:

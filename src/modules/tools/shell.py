@@ -19,7 +19,12 @@ def shell(
 ) -> Dict[str, Any]:
     """Non-interactive shell for real-time command execution and interaction. Features:
 
-    1. Command Formats:
+    1. Selection Rules:
+      • Purpose-built tool when scanning/enumerating many targets or endpoints.
+      • `curl` only for single requests, reproductions, or crafted edge-cases.
+      • `grep/sed/awk/jq` only for small transformations after purpose-built tools produce raw output.
+
+    2. Command Formats:
        • Single Command (string):
          command: "ls -la"
 
@@ -33,17 +38,23 @@ def shell(
            "work_dir": "/specific/path"
          }]
 
-    2. Execution Modes:
+    3. Execution Modes:
        • Sequential (default): Commands run in order
        • Parallel: Multiple commands execute simultaneously
        • Error Handling: Stop on error or continue with ignore_errors
 
-    3. Best Practices:
-       • Use arrays for multiple commands
+    4. Best Practices:
+       • Use command string for a single command, arrays for multiple commands
        • Set appropriate timeouts
        • Specify work_dir when needed
        • Enable ignore_errors for resilient scripts
        • Use parallel execution for independent commands
+       • Default timeout: 300s, heavy operations ≥600s.
+       • On timeout → reduce scope, break into smaller operations
+       • Large outputs (>10KB expected):
+         • Pipe to file: `sqlmap ... 2>&1 | tee <artifacts_path>/sqlmap_output.txt`
+         • Extract relevant: `grep -E "password|hash|Database:" <artifacts_path>/sqlmap_output.txt`
+       • Install missing tools: `apt install tool` or `pip install package` (no sudo needed in container)
 
     Example Usage:
     1. Simple command:

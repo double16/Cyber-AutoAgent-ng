@@ -61,6 +61,7 @@ parser.add_argument(
 src/modules/operation_plugins/  (CYBER_PLUGIN_PATH, ~/.cyber-autoagent/modules/)
 ├── web/
 │   ├── execution_prompt.md                        # Domain-specific system prompt
+|   ├── termination_policy.md                      # Domain-specific operation termination policy
 │   ├── report_prompt.md                           # General report generation guidance
 │   ├── report_agent_executive_system_prompt.md    # Executive summary guidance
 │   ├── report_agent_finding_system_prompt.md      # Finding report guidance
@@ -110,17 +111,11 @@ sequenceDiagram
     participant A as Agent Creation
     participant L as ModulePromptLoader
     participant F as Filesystem
-    participant P as Operation Directory
 
     A->>L: get_module_loader()
     A->>L: load_module_execution_prompt('web', operation_root)
-    L->>P: Check operation_root/execution_prompt_optimized.txt
-    alt Optimized Prompt Exists
-        P-->>L: Optimized prompt content
-    else No Optimized Prompt
-        L->>F: Read modules/web/execution_prompt.md
-        F-->>L: Template prompt content
-    end
+    L->>F: Read modules/web/execution_prompt.md
+    F-->>L: Template prompt content
     L-->>A: Module execution prompt
 
     A->>L: discover_module_tools('web')
@@ -129,7 +124,7 @@ sequenceDiagram
     L-->>A: ['quick_recon.py']
 ```
 
-The loader checks for operation-specific optimized prompts first (created by the prompt optimizer), falling back to the module template if not found.
+The current workflow does not rewrite prompts on disk during an operation. Role-agent prompt adaptation happens in Python from plan state, task history, memory, and selected tools.
 
 ## System Prompt Integration
 

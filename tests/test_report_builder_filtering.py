@@ -6,7 +6,6 @@ Tests for report_builder operation_id filtering logic.
 - Memories with different operation_id are EXCLUDED
 - Memories WITHOUT operation_id (untagged) are included for backward compatibility
 """
-import json
 import os
 import re
 from unittest.mock import patch
@@ -154,7 +153,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
             objective="test",
             module="web",
             steps_executed=197,
-            tools_used=["shell", "shell", "python_repl", "shell", "python_repl", "stop"],
+            tools_used=["shell", "shell", "python_repl", "shell", "python_repl"],
         )
 
         assert out.get("operation_id") == op_id
@@ -206,7 +205,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert len(list(filter(lambda e: e["severity"] == "LOW", raw_evidence))) == 4
         assert len(list(filter(lambda e: e["severity"] == "INFO", raw_evidence))) == 5
 
-        assert out.get("tools_summary") == "- shell: 3 uses\n- python_repl: 2 uses\n- stop: 1 use"
+        assert out.get("tools_summary") == "- shell: 3 uses\n- python_repl: 2 uses"
         assert "OWASP Top 10 2021" in out.get("analysis_framework")
         assert out.get("module") == "web"
         assert out.get("evidence_count") == 15

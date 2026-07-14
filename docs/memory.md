@@ -1,6 +1,6 @@
 # Memory System
 
-Cyber-AutoAgent implements persistent memory using Mem0 with automatic reflection, strategic planning, and evidence categorization. The system uses a hybrid storage approach: a local SQLite database for structured plans and tasks, and a vector backend (Mem0 Platform, OpenSearch, or FAISS) for semantic memories.
+Cyber-AutoAgent implements persistent memory using Mem0 with automatic reflection and evidence categorization. The system uses a hybrid storage approach: a local SQLite database for structured plans and tasks, and a vector backend (Mem0 Platform, OpenSearch, or FAISS) for semantic memories.
 
 ## Key Features
 
@@ -17,24 +17,23 @@ The memory system employs a hybrid architecture to balance structured task track
 
 ```mermaid
 graph TD
-    A[Agent] --> B[mem0_* Tools]
-    B --> C{Data Type}
+    A[Python Workflow Controller] --> B[SQLite Plan/Task Helpers]
+    C[Worker Agents] --> D[mem0_* Tools]
+    B --> E[SQLite Plan Store]
+    D --> F{Vector Backend Selection}
 
-    C -->|Plans & Tasks| D[SQLite Plan Store]
-    C -->|Semantic Memories| E{Vector Backend Selection}
+    F -->|MEM0_API_KEY set| G[Mem0 Platform]
+    F -->|OPENSEARCH_HOST set| H[OpenSearch + AWS]
+    F -->|Default| I[FAISS Local]
 
-    E -->|MEM0_API_KEY set| F[Mem0 Platform]
-    E -->|OPENSEARCH_HOST set| G[OpenSearch + AWS]
-    E -->|Default| H[FAISS Local]
-
-    D --> I[plan_store.db]
-    F --> J[Cloud Vector Store]
-    G --> K[OpenSearch + Bedrock]
-    H --> L[mem0.faiss]
+    E --> J[plan_store.db]
+    G --> K[Cloud Vector Store]
+    H --> L[OpenSearch + Bedrock]
+    I --> M[mem0.faiss]
 
     style B fill:#e3f2fd,stroke:#333,stroke-width:2px
-    style D fill:#fff9c4,stroke:#333,stroke-width:2px
-    style H fill:#e8f5e8,stroke:#333,stroke-width:2px
+    style E fill:#fff9c4,stroke:#333,stroke-width:2px
+    style I fill:#e8f5e8,stroke:#333,stroke-width:2px
 ```
 
 ## Backend Selection
@@ -139,44 +138,32 @@ Q: Did you EXPLOIT something or extract sensitive data?
 
 ## Advanced Features
 
-### Budget Checkpoints
+### Budget-Aware Phase Evaluation
 
-Plan evaluation triggers at budget checkpoints:
+Plan evaluation is triggered by the Python workflow controller. Budget progress is a soft cap distributed across phases:
 
-**Checkpoint Actions:**
-- At 20%, 40%, 60%, 80% budget: `get_plan` → evaluate → update if needed
-- High severity findings may trigger immediate plan reassessment
-- Phase transitions tracked via plan status updates
-
-```python
-# Budget checkpoint workflow
-plan = get_plan()
-# Evaluate: Is current phase criteria met?
-# If yes: Update phase status to "done", advance current_phase
-# Store updated plan
+```text
+soft_cap = phase_id / total_phases * 100
 ```
+
+When a phase reaches its soft cap and only pending work remains, the controller runs a `phase_evaluator` agent before activating more work. The evaluator returns `continue`, `done`, `partial_failure`, or `blocked`; Python stores the result and advances the plan when appropriate.
 
 ### Strategic Plan Management
 
-Hierarchical planning with phase tracking:
+Hierarchical planning with phase tracking is stored in SQLite by Python workflow helpers:
 
 ```python
-# Plan storage (required format)
-store_plan(
-    plan={
-        "objective": "Compromise web application",
-        "current_phase": 1,
-        "total_phases": 3,
-        "phases": [
-            {"id": 1, "title": "Reconnaissance", "status": "in_progress", "criteria": "Map attack surface"},
-            {"id": 2, "title": "Exploitation", "status": "pending", "criteria": "Exploit vulnerabilities"},
-            {"id": 3, "title": "Post-Exploitation", "status": "pending", "criteria": "Lateral movement"}
-        ]
-    }
-)
-
-# Plan retrieval
-current_plan = get_plan()
+plan = {
+    "objective": "Compromise web application",
+    "current_phase": 1,
+    "total_phases": 3,
+    "phases": [
+        {"id": 1, "title": "Reconnaissance", "status": "active", "criteria": "Map attack surface"},
+        {"id": 2, "title": "Exploitation", "status": "pending", "criteria": "Exploit vulnerabilities"},
+        {"id": 3, "title": "Post-Exploitation", "status": "pending", "criteria": "Document impact"}
+    ],
+    "assessment_complete": false
+}
 ```
 
 **Required Plan Fields:**
@@ -184,25 +171,23 @@ current_plan = get_plan()
 - `current_phase`: Active phase number
 - `total_phases`: Total number of phases
 - `phases`: List of phase objects with `id`, `title`, `status`, `criteria`
+- `assessment_complete`: Whether all phases are terminal
+
+**Phase Status Values:**
+- `active`
+- `pending`
+- `done`
+- `partial_failure`
+- `blocked`
 
 ### Reflection via Plan Updates
 
-Tactical pivots are managed through plan updates:
+Tactical pivots are managed by evaluator decisions and Python plan updates:
 
 ```python
-# Update plan with new strategy after reflection
-store_plan(
-    plan={
-        "objective": "Compromise web application",
-        "current_phase": 2,
-        "total_phases": 3,
-        "phases": [
-            {"id": 1, "title": "Reconnaissance", "status": "done", "criteria": "Attack surface mapped"},
-            {"id": 2, "title": "API Testing", "status": "in_progress", "criteria": "Pivoting from web to API"},
-            {"id": 3, "title": "Exploitation", "status": "pending", "criteria": "Achieve access"}
-        ]
-    }
-)
+phase_decision = {"status": "partial_failure", "reason": "Soft budget reached; remaining work deferred"}
+# Python records phase status, activates the next pending phase, and leaves pending tasks durable.
+```
 
 ## Storage Structure
 
@@ -250,38 +235,20 @@ mem0_list()
 ```
 
 ### Advanced Operations
+
+Agents should use semantic memory tools for observations, findings, and evidence:
+
 ```python
-# Store strategic plan (dict format required)
-store_plan(
-    plan={
-        "objective": "Compromise web application",
-        "current_phase": 1,
-        "total_phases": 3,
-        "phases": [
-            {"id": 1, "title": "Recon", "status": "in_progress", "criteria": "Map attack surface"},
-            {"id": 2, "title": "Exploit", "status": "pending", "criteria": "Find and exploit vulns"},
-            {"id": 3, "title": "Persist", "status": "pending", "criteria": "Maintain access"}
-        ]
-    }
+mem0_store(
+    content="[WHAT] SQL injection hypothesis [WHERE] /login [EVIDENCE] /outputs/.../request.txt",
+    metadata={"category": "observation", "confidence": "65%"}
 )
 
-# Get current plan
-current_plan = get_plan()
-
-# Update plan after tactical pivot
-store_plan(
-    plan={
-        "objective": "Compromise web application",
-        "current_phase": 2,
-        "total_phases": 3,
-        "phases": [
-            {"id": 1, "title": "Recon", "status": "done", "criteria": "Attack surface mapped"},
-            {"id": 2, "title": "API Testing", "status": "in_progress", "criteria": "Web fortified, pivot to API"},
-            {"id": 3, "title": "Exploit", "status": "pending", "criteria": "Achieve access"}
-        ]
-    }
-)
+mem0_retrieve(query="authentication findings")
+mem0_list()
 ```
+
+The Python workflow controller uses direct memory service calls for plans and tasks. Normal worker agents should not call plan/task mutation tools directly, except `create_tasks` when their role prompt permits task creation.
 
 ### Memory Query Patterns
 ```python
@@ -386,16 +353,19 @@ The memory system automatically validates and corrects inconsistent status field
 ### Plan Management
 
 **Lifecycle:**
-1. Initialize plan at operation start
-2. Update phase status during execution
-3. Adapt strategy through reflection
+1. Python loads the current plan or runs `plan_creator` when none exists.
+2. Python ensures exactly one active phase.
+3. Python activates existing active tasks first, then pending tasks when budget policy allows.
+4. Evaluator agents return task/phase decisions.
+5. Python records `done`, `partial_failure`, or `blocked` and advances the plan.
 
 ### Plan-Based Strategy Updates
 
 **Operational Flow:**
-- Check plan status at budget checkpoints (20%, 40%, 60%, 80%)
-- Update phase status when criteria met
-- Store updated plan with `store_plan` action
+- Check phase progress against the soft phase budget target.
+- Run `phase_evaluator` when no tasks remain or soft budget suggests moving on.
+- Store updated phase status in SQLite through Python helpers.
+- Leave pending work durable when the controller advances to preserve budget for later phases.
 
 ### Query Optimization
 

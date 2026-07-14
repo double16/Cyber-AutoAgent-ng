@@ -174,6 +174,20 @@ def test_module_prompt_loader_tools_allowlist_not_inherited(tmp_path, monkeypatc
     assert tools_remaining == ["missing_tool"]
 
 
+def test_module_prompt_loader_load_module_termination_policy(tmp_path, monkeypatch):
+    # Create a termination_policy.md for module
+    module_dir = tmp_path / "operation_plugins" / "web"
+    module_dir.mkdir(parents=True)
+    (module_dir / "module.yaml").write_text("name: web\n")
+    (module_dir / "termination_policy.md").write_text("Termination Policy\n")
+
+    loader = ModulePromptLoader()
+    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
+
+    content = loader.load_module_termination_policy("web")
+    assert "Termination Policy" in content
+
+
 def test_module_prompt_loader_load_module_report_prompt(tmp_path, monkeypatch):
     # Create a report_prompt.md for module
     module_dir = tmp_path / "operation_plugins" / "web"
@@ -328,17 +342,14 @@ def test_module_prompt_loader_report_prompt_inheritance_cycle_safe(tmp_path, mon
     assert content.strip() == "B REPORT"
 
 
-def test_module_prompt_loader_prioritizes_operation_optimized_prompt(
+def test_module_prompt_loader_ignores_operation_prompt_files(
     tmp_path, monkeypatch
 ):
-    """Test that operation-specific optimized prompt takes priority."""
-    # Create operation folder with optimized prompt
+    """Operation roots no longer override module execution prompts."""
     operation_root = tmp_path / "outputs" / "target" / "OP_TEST"
     operation_root.mkdir(parents=True)
-    optimized_path = operation_root / "execution_prompt_optimized.txt"
-    optimized_path.write_text("Optimized execution prompt for this operation")
+    (operation_root / "execution_prompt.md").write_text("Stale operation prompt")
 
-    # Create master prompt
     plugins_dir = tmp_path / "operation_plugins" / "web"
     plugins_dir.mkdir(parents=True)
     (plugins_dir / "module.yaml").write_text("name: web\n")
@@ -348,19 +359,17 @@ def test_module_prompt_loader_prioritizes_operation_optimized_prompt(
     loader = ModulePromptLoader()
     monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
 
-    # Load with operation_root - should get optimized version
     content = loader.load_module_execution_prompt(
         "web", operation_root=str(operation_root)
     )
-    assert content == "Optimized execution prompt for this operation"
-    assert loader.last_loaded_execution_prompt_source == f"optimized:{optimized_path}"
+    assert content == "Master execution prompt"
+    assert loader.last_loaded_execution_prompt_source == f"web:{master_path}"
 
 
-def test_module_prompt_loader_falls_back_to_master_when_no_optimized(
+def test_module_prompt_loader_uses_master_with_operation_root(
     tmp_path, monkeypatch
 ):
-    """Test fallback to master when optimized prompt doesn't exist."""
-    # Create operation folder WITHOUT optimized prompt
+    """Test fallback to master when an operation root is provided."""
     operation_root = tmp_path / "outputs" / "target" / "OP_TEST"
     operation_root.mkdir(parents=True)
 
@@ -397,32 +406,6 @@ def test_module_prompt_loader_handles_invalid_operation_root(tmp_path, monkeypat
     # Load with non-existent operation_root - should fall back to master
     content = loader.load_module_execution_prompt(
         "web", operation_root="/nonexistent/path"
-    )
-    assert content == "Master execution prompt"
-    assert loader.last_loaded_execution_prompt_source == f"web:{master_path}"
-
-
-def test_module_prompt_loader_handles_empty_optimized_file(tmp_path, monkeypatch):
-    """Test handling of empty optimized prompt file."""
-    # Create operation folder with EMPTY optimized prompt
-    operation_root = tmp_path / "outputs" / "target" / "OP_TEST"
-    operation_root.mkdir(parents=True)
-    optimized_path = operation_root / "execution_prompt_optimized.txt"
-    optimized_path.write_text("")  # Empty file
-
-    # Create master prompt
-    plugins_dir = tmp_path / "operation_plugins" / "web"
-    plugins_dir.mkdir(parents=True)
-    (plugins_dir / "module.yaml").write_text("name: web\n")
-    master_path = plugins_dir / "execution_prompt.md"
-    master_path.write_text("Master execution prompt")
-
-    loader = ModulePromptLoader()
-    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
-
-    # Load with operation_root - should fall back to master since optimized is empty
-    content = loader.load_module_execution_prompt(
-        "web", operation_root=str(operation_root)
     )
     assert content == "Master execution prompt"
     assert loader.last_loaded_execution_prompt_source == f"web:{master_path}"

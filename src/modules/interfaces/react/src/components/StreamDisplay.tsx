@@ -609,7 +609,16 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       const agentSubStep = (event as any)['agent_sub_step'];
       const operationStage = (event as any)['operation_stage'];
       
-      if (operationStage === 'final_report') {
+      if (operationStage === 'ragas_evaluation') {
+        const evaluationIndex = Number((event as any)['evaluation_step_index']);
+        const evaluationTotal = Number((event as any)['evaluation_step_total']);
+        const evaluationKind = String((event as any)['evaluation_step_kind'] || '');
+        const evaluationLabel = String((event as any)['evaluation_step_label'] || '').trim();
+        const progressLabel = Number.isFinite(evaluationIndex) && Number.isFinite(evaluationTotal)
+          ? `${evaluationIndex}/${evaluationTotal}`
+          : (evaluationKind === 'reference_topics' ? 'PREPARING' : 'METRIC');
+        stepDisplay = `[RAGAS EVALUATION ${progressLabel}]${evaluationLabel ? ` ${evaluationLabel}` : ''}`;
+      } else if (operationStage === 'final_report') {
         const reportIndex = Number((event as any)['report_step_index']);
         const reportTotal = Number((event as any)['report_step_total']);
         const reportLabel = String((event as any)['report_step_label'] || '').trim();
@@ -700,8 +709,8 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       // Display a simple termination notification (no emojis)
       let reasonLabel = 'TERMINATED';
       switch (reason) {
-        case 'stop_tool':
-          reasonLabel = 'STOP TOOL';
+        case 'complete':
+          reasonLabel = 'OPERATION COMPLETE';
           break;
         case 'budget_limit':
           reasonLabel = 'BUDGET LIMIT';
@@ -731,6 +740,15 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         typeof msg === 'string'
           ? (msg.replace(/\s*Switching to final report\.?/gi, '').trim() || 'Provider/network timeout detected.')
           : msg;
+      if (reason === 'complete') {
+        return (
+          <Box flexDirection="column" marginTop={1} marginBottom={1}>
+            <Box borderStyle="round" borderColor="green" paddingX={1}>
+              <Text color="green" bold>{reasonLabel}: {sanitizedMessage || 'Assessment workflow completed.'}</Text>
+            </Box>
+          </Box>
+        );
+      }
       const likelyNetworkIssue = ['network_timeout', 'network_error', 'timeout'].includes(normalizedReason);
       const providerLabel = (() => {
         const providerId = effectiveConfig?.modelProvider;
@@ -1276,19 +1294,6 @@ const method = latestInput.method || 'GET';
           );
         }
           
-        case 'stop': {
-          // Show clean stop tool header with reason
-          const stopReason = (latestInput && (latestInput.reason || latestInput.message)) || 'Manual stop requested';
-          return (
-            <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: stop{agentContext}</Text>
-              <Box marginLeft={2}>
-                <Text dimColor>└─ reason: {stopReason}</Text>
-              </Box>
-            </Box>
-          );
-        }
-
         default: {
           // Enhanced tool display with agent context and structured parameters
           
@@ -1893,12 +1898,12 @@ const method = latestInput.method || 'GET';
     }
       
     case 'metadata': {
-      // Render metadata events normally, with special-case compact display for stop_tool
+      // Render metadata events normally.
       if (!event.content || typeof event.content !== 'object') return null;
       const entries = Object.entries(event.content);
       if (entries.length === 0) return null;
 
-      // Suppress duplicate stop-notification metadata; stop reason is shown in the tool header
+      // Suppress duplicate completion-notification metadata; completion reason is shown separately.
       if (entries.length === 1 && entries[0][0] === 'stopping') {
         return null;
       }

@@ -588,6 +588,7 @@ def test_create_agent_reuses_runtime_resources(monkeypatch):
         tool_executor=object(),
         system_prompt_payload="system payload",
         system_prompt="system text",
+        task_capture_prompt="task capture",
         hooks=[],
         conversation_manager=conversation_manager,
         sdk_context_manager=None,
@@ -612,6 +613,127 @@ def test_create_agent_reuses_runtime_resources(monkeypatch):
     assert runtime.callback_handler is callback_handler
 
 
+def test_create_agent_uses_role_specific_event_handler(monkeypatch):
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.init_kwargs = kwargs
+            self.tool_registry = Mock()
+
+    config = AgentConfig(target="example.com", objective="test", provider="ollama", model_id="llama")
+    events = []
+    root_handler = cyber_agent_module.AgentEventHandler(
+        operation_id="OP_ROLE",
+        provider_id="ollama",
+        model_id="llama",
+        emitter=SimpleNamespace(emit=lambda event: events.append(event)),
+        agent_name="Cyber-AutoAgent OP_ROLE",
+        agent_type="operation_controller",
+        init_context={"budget": {"maxDurationMinutes": 60}},
+        start_metrics_thread=False,
+    )
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_ROLE",
+        server_config=SimpleNamespace(swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm-model"))),
+        config_manager=SimpleNamespace(getenv=lambda _name, default=None: default),
+        callback_handler=root_handler,
+        tools_list=[],
+        tool_executor=object(),
+        system_prompt_payload="system payload",
+        system_prompt="system text",
+        task_capture_prompt="task capture",
+        hooks=[],
+        conversation_manager=object(),
+        sdk_context_manager=None,
+        trace_attributes={"operation.id": "OP_ROLE"},
+        prompt_token_limit=0,
+    )
+
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=False)))
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
+
+    agent = create_agent(
+        "example.com",
+        "test",
+        runtime_resources=runtime,
+        name="Cyber-AutoAgent task_executor",
+        agent_type="task_executor",
+    )
+
+    kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
+    callback_handler = kwargs["callback_handler"]
+    assert callback_handler is not root_handler
+    assert callback_handler.agent_type == "task_executor"
+    assert callback_handler.agent_name == "Cyber-AutoAgent task_executor"
+    assert callback_handler.parent_agent_run_id == root_handler.agent_run_id
+    assert callback_handler.coordinator is root_handler.coordinator
+    assert kwargs["trace_attributes"]["agent.role"] == "task_executor"
+    assert kwargs["trace_attributes"]["langfuse.agent.type"] == "task_executor"
+    assert agent._cyber_agent_type == "task_executor"
+    assert agent._cyber_agent_name == "Cyber-AutoAgent task_executor"
+    assert agent._cyber_callback_handler is callback_handler
+
+
+def test_create_agent_can_disable_tool_catalog_for_restricted_role(monkeypatch):
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.init_kwargs = kwargs
+            self.tool_registry = Mock()
+
+    config = AgentConfig(target="example.com", objective="test", provider="ollama", model_id="llama")
+    root_handler = cyber_agent_module.AgentEventHandler(
+        operation_id="OP_TASK_CREATOR",
+        provider_id="ollama",
+        model_id="llama",
+        emitter=SimpleNamespace(emit=lambda _event: None),
+        agent_name="Cyber-AutoAgent OP_TASK_CREATOR",
+        agent_type="operation_controller",
+        start_metrics_thread=False,
+    )
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_TASK_CREATOR",
+        server_config=SimpleNamespace(swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm-model"))),
+        config_manager=SimpleNamespace(getenv=lambda _name, default=None: default),
+        callback_handler=root_handler,
+        tools_list=[],
+        tool_executor=object(),
+        system_prompt_payload="system payload",
+        system_prompt="system text",
+        task_capture_prompt="task capture",
+        hooks=[],
+        conversation_manager=object(),
+        sdk_context_manager=None,
+        trace_attributes={"operation.id": "OP_TASK_CREATOR"},
+        prompt_token_limit=0,
+    )
+    create_tasks_tool = Mock(__name__="create_tasks")
+
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=False)))
+    tool_catalog_wrapper = Mock(return_value="catalog")
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", tool_catalog_wrapper)
+
+    agent = create_agent(
+        "example.com",
+        "test",
+        runtime_resources=runtime,
+        tools=[create_tasks_tool],
+        name="Cyber-AutoAgent task_creator",
+        agent_type="task_creator",
+        include_tool_catalog=False,
+    )
+
+    kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
+    assert kwargs["tools"] == [create_tasks_tool]
+    assert kwargs["load_tools_from_directory"] is False
+    agent.tool_registry.register_tool.assert_not_called()
+    tool_catalog_wrapper.assert_not_called()
+
+
 def test_create_agent_stateful_model_uses_runtime_handler_without_conversation_manager(monkeypatch):
     class FakeAgent:
         def __init__(self):
@@ -629,6 +751,7 @@ def test_create_agent_stateful_model_uses_runtime_handler_without_conversation_m
         tool_executor=object(),
         system_prompt_payload="system payload",
         system_prompt="system text",
+        task_capture_prompt="task capture",
         hooks=[],
         conversation_manager=object(),
         sdk_context_manager="auto",
@@ -671,6 +794,7 @@ def test_create_agent_runtime_resources_applies_sdk_context_manager(monkeypatch)
         tool_executor=object(),
         system_prompt_payload="system payload",
         system_prompt="system text",
+        task_capture_prompt="task capture",
         hooks=[],
         conversation_manager=object(),
         sdk_context_manager="auto",

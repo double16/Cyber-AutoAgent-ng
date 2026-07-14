@@ -10,7 +10,7 @@ data quality for accurate metric computation.
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
 
@@ -123,12 +123,18 @@ class TraceParser:
     Handles multiple trace formats and ensures data quality for metrics.
     """
 
-    def __init__(self, llm=None, langfuse_client=None):
+    def __init__(
+        self,
+        llm=None,
+        langfuse_client=None,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ):
         """Initialize the trace parser.
 
         Args:
             llm: Optional LLM instance for generating reference topics
             langfuse_client: Langfuse client for fetching observations
+            progress_callback: Optional best-effort evaluation progress callback
         """
         self.security_tools = {
             "shell",
@@ -137,19 +143,14 @@ class TraceParser:
             "mem0_get",
             "mem0_retrieve",
             "mem0_list",
-            "store_plan",
-            "get_plan",
             "create_tasks",
-            "list_uncompleted_tasks",
-            "task_done",
-            "get_active_task",
             "editor",
             "load_tool",
             "swarm",
-            "stop",
         }
         self.llm = llm
         self.langfuse = langfuse_client
+        self.progress_callback = progress_callback
 
     def parse_trace(self, trace: Any) -> Optional[ParsedTrace]:
         """
@@ -627,6 +628,7 @@ class TraceParser:
         success = status_msg != "error" if status_msg else True
 
         # Check if this is a valid tool
+        # FIXME: The allowlist won't cover everything, need to improve this logic.
         if tool_name and (
             any(tool in tool_name for tool in self.security_tools)
             or "build_report" in tool_name
@@ -1028,6 +1030,14 @@ Return a JSON list of topic strings that represent the key areas this assessment
 
                 # Generate topics
                 topic_prompt = TopicGenerationPrompt()
+                if self.progress_callback:
+                    try:
+                        self.progress_callback("reference_topics")
+                    except Exception as error:
+                        logger.debug(
+                            "Unable to report reference-topic generation progress: %s",
+                            error,
+                        )
                 response = await topic_prompt.generate(
                     data=input_data, llm=self.llm, callbacks=None
                 )

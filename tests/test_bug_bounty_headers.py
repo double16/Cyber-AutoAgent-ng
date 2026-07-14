@@ -52,4 +52,3 @@ def test_bug_bounty_headers_are_applied_and_added_to_prompt(
     assert "BUG BOUNTY TRAFFIC MARKERS" in tools_context
     assert "X-HackerOne-Research: researcher" in tools_context
     assert "User-Agent: researcher@wearehackerone.com" in tools_context
-    assert "MCP tools" in tools_context

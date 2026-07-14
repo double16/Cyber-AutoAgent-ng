@@ -3,15 +3,98 @@
 
 import os
 import tempfile
+from types import SimpleNamespace
 
 from modules.handlers.utils import (
     create_output_directory,
     filter_none_values,
+    get_tool_description,
+    get_tool_name,
+    get_tool_spec,
     get_output_path,
     sanitize_target_name,
+    tool_append_description,
+    tool_rename,
     update_latest_output_pointer,
     validate_output_path,
 )
+
+
+def test_get_tool_spec_supports_tool_spec_and_tool_spec_constant():
+    lower = SimpleNamespace(tool_spec={"name": "lower"})
+
+    class Upper:
+        TOOL_SPEC = {"name": "upper"}
+
+    assert get_tool_spec(lower) == {"name": "lower"}
+    assert get_tool_spec(Upper()) == {"name": "upper"}
+    assert get_tool_spec(SimpleNamespace()) is None
+
+
+def test_get_tool_name_prefers_tool_spec_name_and_falls_back():
+    assert get_tool_name(SimpleNamespace(tool_spec={"name": "spec_name"}, __name__="ignored")) == "spec_name"
+    assert get_tool_name(SimpleNamespace(tool_spec={}, tool_name="tool_name")) == "tool_name"
+
+    def fallback_function():
+        return None
+
+    assert get_tool_name(fallback_function) == "fallback_function"
+    assert get_tool_name(SimpleNamespace()) == "SimpleNamespace"
+
+
+def test_get_tool_description_prefers_tool_spec_and_falls_back():
+    assert get_tool_description(SimpleNamespace(tool_spec={"description": "Spec description."})) == "Spec description."
+    assert get_tool_description(SimpleNamespace(tool_spec={}, description="Attribute description.")) == "Attribute description."
+
+    def documented_function():
+        """Function description."""
+
+    assert get_tool_description(documented_function).strip() == "Function description."
+
+    class DocumentedTool:
+        """Class description."""
+
+    instance = DocumentedTool()
+    instance.__doc__ = None
+    assert get_tool_description(instance).strip() == "Class description."
+
+
+def test_tool_rename_updates_tool_name_and_tool_spec():
+    tool = SimpleNamespace(tool_name="old", tool_spec={"name": "old", "description": "desc"})
+
+    tool_rename(tool, "new")
+
+    assert tool.tool_name == "new"
+    assert tool.tool_spec["name"] == "new"
+    assert tool.tool_spec["description"] == "desc"
+
+
+def test_tool_rename_updates_tool_spec_only_when_tool_name_missing():
+    tool = SimpleNamespace(tool_spec={"name": "old"})
+
+    tool_rename(tool, "new")
+
+    assert not hasattr(tool, "tool_name")
+    assert tool.tool_spec["name"] == "new"
+
+
+def test_tool_append_description_appends_to_existing_description():
+    tool = SimpleNamespace(tool_spec={"name": "demo", "description": "Base description."})
+
+    tool_append_description(tool, "Extra guidance.")
+
+    assert tool.tool_spec["description"] == "Base description.\n\nExtra guidance."
+
+
+def test_tool_append_description_handles_missing_description_and_missing_spec():
+    tool = SimpleNamespace(tool_spec={"name": "demo"})
+    no_spec_tool = SimpleNamespace()
+
+    tool_append_description(tool, "Only guidance.")
+    tool_append_description(no_spec_tool, "Ignored guidance.")
+
+    assert tool.tool_spec["description"] == "\n\nOnly guidance."
+    assert not hasattr(no_spec_tool, "tool_spec")
 
 
 class TestGetOutputPath:

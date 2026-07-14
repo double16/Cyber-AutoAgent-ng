@@ -74,6 +74,55 @@ describe('EventAggregator', () => {
         ]);
     });
 
+    it('emits Ragas evaluation progress updates immediately', () => {
+        const aggregator = new EventAggregator();
+
+        expect(aggregator.processEvent({
+            type: 'progress_update',
+            step: 'RAGAS_METRIC',
+            operation_stage: 'ragas_evaluation',
+            evaluation_step_index: 2,
+            evaluation_step_total: 5,
+            evaluation_scope: 'operation',
+            evaluation_metric: 'evidence_quality',
+            evaluation_step_label: 'Operation: Evidence Quality',
+            operation: 'OP_TEST',
+        })).toEqual([
+            expect.objectContaining({
+                type: 'progress_update',
+                operation_stage: 'ragas_evaluation',
+                evaluation_step_index: 2,
+                evaluation_step_total: 5,
+                evaluation_scope: 'operation',
+                evaluation_metric: 'evidence_quality',
+                evaluation_step_label: 'Operation: Evidence Quality',
+            }),
+        ]);
+    });
+
+    it('preserves unindexed Ragas preparation progress', () => {
+        const aggregator = new EventAggregator();
+
+        expect(aggregator.processEvent({
+            type: 'progress_update',
+            step: 'RAGAS_PREPARATION',
+            operation_stage: 'ragas_evaluation',
+            evaluation_step_kind: 'reference_topics',
+            evaluation_scope: 'operation',
+            evaluation_step_label: 'Operation: Generate Reference Topics',
+            operation: 'OP_TEST',
+        })).toEqual([
+            expect.objectContaining({
+                type: 'progress_update',
+                step: 'RAGAS_PREPARATION',
+                operation_stage: 'ragas_evaluation',
+                evaluation_step_kind: 'reference_topics',
+                evaluation_scope: 'operation',
+                evaluation_step_label: 'Operation: Generate Reference Topics',
+            }),
+        ]);
+    });
+
     it('keeps reasoning attached before pending progress updates and ends active thinking', () => {
         const aggregator = new EventAggregator();
 

@@ -2,6 +2,7 @@
 
 ### Features
 
+- Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation.
 - Add interactive React terminal `continue` and `report` commands for previous operations.
 - Add readline-style editing shortcuts to the React terminal command entry.
 - Move React thinking/spinner status into a persistent footer line above the existing metrics footer.
@@ -16,6 +17,8 @@
 
 ### Fixes
 
+- Reject unregistered agent tool calls instead of automatically executing them as shell commands.
+- Stop active XBOW benchmark containers when the benchmark runner is interrupted with Ctrl-C.
 - Show final report progress labels as the React terminal thinking task title while reporting.
 - Skip public OSINT recon tools for non-public hostnames in `specialized_recon_orchestrator`.
 - Bound React inline final-report file reads to a preview so very large reports cannot spike heap on operation completion or exit.

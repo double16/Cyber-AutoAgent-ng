@@ -127,6 +127,8 @@ def swarm(
     Call when:
     - You need parallel testing across DIFFERENT capability classes (e.g., auth vs injection vs logic), or
     - You are stuck after multiple pivots and need hypothesis-diverse exploration.
+    - 60%+ budget with no capability achieved + reflection confirms need for hypothesis-diverse exploration
+    - 75%+ budget as last resort
 
     Do NOT call for:
     - Single-thread work, minor payload variations, or tasks one tool can complete.

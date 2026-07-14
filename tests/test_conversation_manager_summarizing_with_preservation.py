@@ -10,7 +10,7 @@ def test_reduce_context_summarizing_restores_first_and_protected_messages(monkey
             self.name = "test-agent"
 
     messages = [
-        # Must always be preserved: original user objective/prompt
+        # Must always be preserved: original operation objective/prompt
         {
             "role": "user",
             "content": [{"text": "Scan target example.com and find auth issues"}],
@@ -20,34 +20,30 @@ def test_reduce_context_summarizing_restores_first_and_protected_messages(monkey
             "role": "assistant",
             "content": [{"text": "intermediate assistant message"}],
         },
-        # Latest plan tool result, should be protected
+        # Latest serialized plan snapshot, should be protected
         {
             "role": "user",
             "content": [
                 {
                     "toolResult": {
-                        "toolUseId": "get_plan",
+                        "toolUseId": "workflow_plan_snapshot",
                         "status": "success",
-                        "content": [{"text": '{"phase":"recon"}'}],
+                        "content": [
+                            {
+                                "text": (
+                                    "plan_overview[1]{objective,current_phase,total_phases}:\n"
+                                    "  assess,1,3"
+                                )
+                            }
+                        ],
                     }
                 }
             ],
         },
-        # Evidence-bearing message
+        # Evidence-bearing message; no special marker preserves this by itself.
         {
             "role": "assistant",
             "content": [{"text": "Observed file /tmp/findings.txt with possible login paths"}],
-        },
-        # active_task marker referencing the evidence above, should be protected
-        {
-            "role": "assistant",
-            "content": [
-                {
-                    "text": (
-                        '<active_task>{"task":{"evidence":["/tmp/findings.txt"]}}</active_task>'
-                    )
-                }
-            ],
         },
         # More noise
         {
@@ -107,18 +103,12 @@ def test_reduce_context_summarizing_restores_first_and_protected_messages(monkey
     assert agent.messages[0]["role"] == "user"
     assert "Scan target example.com and find auth issues" in rendered[0]
 
-    # active_task marker must be restored
-    assert any("<active_task>" in text for text in rendered)
-
-    # Evidence-referencing message must be restored
-    assert any("/tmp/findings.txt" in text for text in rendered)
-
-    # Latest plan tool result must be restored
+    # Latest serialized plan snapshot must be restored
     assert any(
         any(
             isinstance(block, dict)
             and "toolResult" in block
-            and block["toolResult"].get("toolUseId") == "get_plan"
+            and "plan_overview[" in str(block["toolResult"].get("content", ""))
             for block in msg.get("content", [])
         )
         for msg in agent.messages

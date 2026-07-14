@@ -376,9 +376,9 @@ cyber_tools:
     caps: [tunneling]
     canary: "nc -h"
   curl:
-    description: "HTTP client for web requests"
-    preference: preferred
-    caps: [http_client]
+    description: "HTTP client for URL requests"
+    preference: fallback
+    caps: [http_client, ftp_client]
     canary: "curl -h"
   tcpdump:
     description: "Network packet capture"

@@ -14,6 +14,7 @@ This module is designed for maximum modularity and extensibility, allowing devel
 src/modules/prompts/
 ├── templates/
 │   ├── system_prompt.md
+│   ├── task_capture.md
 │   ├── tools_guide.md
 │   ├── report_agent_executive_system_prompt.md
 │   ├── report_agent_finding_system_prompt.md
@@ -39,6 +40,7 @@ This is the heart of the module. It contains the primary logic for prompt constr
 This directory stores the Markdown and text templates that form the building blocks of all prompts. Externalizing these templates allows for easy modification of the agent's behavior and report structure without touching Python code.
 
 - **`system_prompt.md`**: Defines the agent's core persona, high-level objectives, and rules of engagement.
+- **`task_capture.md`**: Defines the worker agent rules for creating new tasks.
 - **`tools_guide.md`**: Provides the agent with a general manual on how to use its built-in tools and capabilities effectively.
 - **`report_template.md`**: A structural template for the final Markdown report. It contains placeholders (e.g., `{target}`, `{findings_table}`) that are filled in by `factory.py`.
 - **`report_agent_system_prompt.md`**: A specialized system prompt that instructs an AI on how to act as a professional security analyst to write the final report based on the provided data.
@@ -54,6 +56,7 @@ The agent's capabilities are extended through **Operation Modules**, which are s
 3.  **Loading**: When a module is selected for an operation, the loader reads its files:
     - **`module.yaml`**: Contains metadata like the module's `name` and `description`.
     - **`execution_prompt.md`**: Provides specific instructions, rules, and context for the agent. This content is injected directly into the main system prompt, guiding the agent's behavior for the specific task.
+    - **`termination_policy.md`**: Provides specific instructions and rules for determining when the operation is complete.
     - **`report_prompt.md`**: Injected verbatim into the base report template via the `{module_report}` placeholder. This allows each plugin to steer report tone/sections without any intermediate parsing.
     - **`/tools` sub-directory**: Any Python files in this directory are loaded as custom, single-use tools available only when that module is active.
 

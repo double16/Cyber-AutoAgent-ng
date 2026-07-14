@@ -3,13 +3,12 @@
 Evaluation Manager for Cyber-AutoAgent
 ======================================
 
-Manages evaluation of multiple traces within an operation, ensuring both main agent
-and report generation traces are properly evaluated.
+Coordinates bounded multi-agent evaluation for one operation.
 
 This module provides:
-- Tracking of multiple trace IDs per operation
-- Coordinated evaluation of all traces
-- Proper trace type identification for metrics selection
+- Tracking of operation trace registrations
+- One combined execution evaluation per operation
+- One assembled-report evaluation when a report exists
 """
 
 import asyncio
@@ -48,14 +47,15 @@ class TraceInfo:
 
 class EvaluationManager:
     """
-    Manages evaluation of multiple traces within an operation.
-
-    This class ensures that all traces associated with an operation are properly
-    evaluated, including the main agent trace and any secondary traces like
-    report generation.
+    Manages bounded evaluation for traces belonging to one operation.
     """
 
-    def __init__(self, operation_id: str, emitter: Optional[EventEmitter] = None):
+    def __init__(
+        self,
+        operation_id: str,
+        emitter: Optional[EventEmitter] = None,
+        report_path: Optional[str] = None,
+    ):
         """
         Initialize the evaluation manager.
 
@@ -63,6 +63,7 @@ class EvaluationManager:
             operation_id: The operation ID to manage evaluations for
         """
         self.operation_id = operation_id
+        self.report_path = report_path
         self.traces: Dict[str, TraceInfo] = {}
         self.evaluator: Optional[CyberAgentEvaluator] = None
         self._lock = threading.Lock()
@@ -139,7 +140,10 @@ class EvaluationManager:
         """
         # Initialize evaluator if not already done
         if not self.evaluator:
-            self.evaluator = CyberAgentEvaluator(emitter=self._emitter)
+            self.evaluator = CyberAgentEvaluator(
+                emitter=self._emitter,
+                report_path=self.report_path,
+            )
 
         results = {}
         unevaluated = self.get_unevaluated_traces()
@@ -156,68 +160,41 @@ class EvaluationManager:
             self.operation_id,
         )
 
-        # Evaluate each trace
-        for trace_info in unevaluated:
-            try:
-                logger.info(
-                    "Evaluating %s trace: %s",
-                    trace_info.trace_type.value,
-                    trace_info.name,
-                )
+        # The evaluator performs one bounded operation aggregate and, when present,
+        # one assembled-report evaluation. Invoke it once per operation, not once
+        # for every registered role trace.
+        try:
+            scores = await self.evaluator.evaluate_trace(
+                trace_id=self.operation_id,
+                _max_retries=5,
+            )
+            numeric_scores = {}
+            for key, value in (scores or {}).items():
+                if isinstance(value, tuple) and value:
+                    value = value[0]
+                if isinstance(value, (int, float)):
+                    numeric_scores[key] = float(value)
 
-                # Use session_id for evaluation (Langfuse uses this for lookup)
-                scores = await self.evaluator.evaluate_trace(
-                    trace_id=trace_info.session_id,
-                    _max_retries=5,
-                )
-
-                if scores:
-                    # Normalize to floats for storage in manager (rubric metrics may be (value, metadata))
-                    numeric_scores = {}
-                    try:
-                        for k, v in (scores or {}).items():
-                            if isinstance(v, tuple) and len(v) >= 1:
-                                v = v[0]
-                            if isinstance(v, (int, float)):
-                                numeric_scores[k] = float(v)
-                    except Exception:
-                        numeric_scores = {
-                            k: (float(v[0]) if isinstance(v, tuple) else float(v))
-                            for k, v in scores.items()
-                            if isinstance(v, (int, float))
-                            or (isinstance(v, tuple) and len(v) >= 1)
-                        }
-
-                    with self._lock:
-                        self.traces[trace_info.trace_id].evaluated = True
-                        self.traces[
-                            trace_info.trace_id
-                        ].evaluation_scores = numeric_scores
-
-                    results[trace_info.trace_id] = numeric_scores
-                    logger.info(
-                        "Successfully evaluated trace %s: %d metrics",
-                        trace_info.trace_id,
-                        len(numeric_scores),
-                    )
-                else:
-                    logger.warning(
-                        "No scores returned for trace %s",
-                        trace_info.trace_id,
-                    )
-
-            except Exception as e:
-                logger.error(
-                    "Error evaluating trace %s: %s",
-                    trace_info.trace_id,
-                    str(e),
-                    exc_info=True,
-                )
+            if numeric_scores:
+                with self._lock:
+                    for trace_info in unevaluated:
+                        trace_info.evaluated = True
+                        trace_info.evaluation_scores = numeric_scores
+                results[self.operation_id] = numeric_scores
+            else:
+                logger.warning("No scores returned for operation %s", self.operation_id)
+        except Exception as error:
+            logger.error(
+                "Error evaluating operation %s: %s",
+                self.operation_id,
+                error,
+                exc_info=True,
+            )
 
         logger.info(
             "Completed evaluation of operation %s: %d/%d traces evaluated successfully",
             self.operation_id,
-            len(results),
+            len(unevaluated) if results else 0,
             len(unevaluated),
         )
 

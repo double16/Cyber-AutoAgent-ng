@@ -84,11 +84,27 @@ describe('StreamDisplay broad event rendering', () => {
         report_step_total: 5,
         report_step_label: 'Finding: SQL injection'
       },
+      {
+        type: 'progress_update',
+        step: 'RAGAS_METRIC',
+        operation_stage: 'ragas_evaluation',
+        evaluation_step_index: 2,
+        evaluation_step_total: 5,
+        evaluation_step_label: 'Operation: Evidence Quality'
+      },
+      {
+        type: 'progress_update',
+        step: 'RAGAS_PREPARATION',
+        operation_stage: 'ragas_evaluation',
+        evaluation_step_kind: 'reference_topics',
+        evaluation_step_label: 'Report: Generate Reference Topics'
+      },
       { type: 'task_started', title: 'Enumerate target' },
       { type: 'thinking', context: 'reasoning', startTime: Date.now(), message: 'working' },
       { type: 'task_done', title: 'Enumerate target' },
       { type: 'thinking_end' },
       { type: 'delayed_thinking_start' },
+      { type: 'termination_reason', reason: 'complete', message: 'Assessment complete: 3 phases evaluated' },
       { type: 'termination_reason', reason: 'network_timeout', message: 'Network timeout. Switching to final report.' },
       { type: 'termination_reason', reason: 'max_tokens', message: 'Too many tokens' },
       { type: 'termination_reason', reason: 'rate_limited', message: 'Rate limited' },
@@ -113,6 +129,10 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('[PROGRESS 40% | 4 tools]');
     expect(output).toContain('[FINAL REPORT]');
     expect(output).toContain('[FINAL REPORT 2/5] Finding: SQL injection');
+    expect(output).toContain('[RAGAS EVALUATION 2/5] Operation: Evidence Quality');
+    expect(output).toContain('[RAGAS EVALUATION PREPARING] Report: Generate Reference Topics');
+    expect(output).toContain('OPERATION COMPLETE');
+    expect(output).toContain('Assessment complete: 3 phases evaluated');
     expect(output).toContain('NETWORK TIMEOUT');
     expect(output).toContain('TOKEN LIMIT');
     expect(output).toContain('I should inspect');

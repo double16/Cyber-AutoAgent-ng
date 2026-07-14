@@ -3,6 +3,8 @@ import os
 
 import pytest
 
+from tests.helpers import memory_tasks
+
 
 def _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-create-tasks"):
     faiss_path = tmp_path / "mem0_faiss"
@@ -49,6 +51,10 @@ def _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="t
     )
 
 
+def _activate_next_task_message(memory, phase):
+    return memory_tasks.activate_next_task_message(memory, phase)
+
+
 @pytest.mark.ollama
 def test_create_tasks_filesystem(tmp_path, monkeypatch):
     from modules.tools import memory
@@ -70,7 +76,7 @@ def test_create_tasks_filesystem(tmp_path, monkeypatch):
             ],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         task_1_title = "Enumerate login endpoints"
         task_2_title = "Check GraphQL schema exposure"
@@ -97,15 +103,15 @@ def test_create_tasks_filesystem(tmp_path, monkeypatch):
 
         assert "tasks created" in raw.lower()
 
-        tasks = memory.list_uncompleted_tasks()
+        tasks = memory_tasks.list_uncompleted_tasks(memory)
         assert "task[2]" in tasks
         assert tasks.count(",1,") == 2
-        assert tasks.count(",pending") == 1
-        assert tasks.count(",active") == 1
+        assert tasks.count(",pending") == 2
+        assert tasks.count(",active") == 0
         assert task_1_title+"," in tasks
         assert task_2_title+"," in tasks
 
-        active_raw = memory.get_active_task()
+        active_raw = _activate_next_task_message(memory, 1)
         assert isinstance(active_raw, str)
         assert "<active_task" in active_raw
         assert 'phase="1"' in active_raw
@@ -127,7 +133,7 @@ def test_create_tasks_filesystem(tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_create_tasks_filesystem_invalid_phase(tmp_path, monkeypatch):
+def test_create_tasks_filesystem_defaults_nonexistent_phase_to_active(tmp_path, monkeypatch):
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-fs")
@@ -147,7 +153,7 @@ def test_create_tasks_filesystem_invalid_phase(tmp_path, monkeypatch):
             ],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         task_1_title = "Enumerate login endpoints"
         task_2_title = "Check GraphQL schema exposure"
@@ -169,8 +175,12 @@ def test_create_tasks_filesystem_invalid_phase(tmp_path, monkeypatch):
             ]
         )
 
-        tasks = memory.list_uncompleted_tasks()
-        assert "task[0]" in tasks, "tasks were created in current phase"
+        tasks = memory_tasks.list_uncompleted_tasks(memory)
+        assert "task[2]" in tasks
+        assert task_1_title in tasks
+        assert task_2_title in tasks
+        stored_tasks = memory._PLAN_STORE.get_tasks("test-op-fs")
+        assert {task.phase for task in stored_tasks} == {1}
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -204,7 +214,7 @@ def test_create_tasks_filesystem_future_phase(tmp_path, monkeypatch):
             ],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         task_1_title = "Enumerate login endpoints"
         task_2_title = "Check GraphQL schema exposure"
@@ -231,21 +241,21 @@ def test_create_tasks_filesystem_future_phase(tmp_path, monkeypatch):
 
         assert "tasks created" in raw.lower()
 
-        tasks = memory.list_uncompleted_tasks()
+        tasks = memory_tasks.list_uncompleted_tasks(memory)
         assert "task[0]" in tasks
 
-        active_raw = memory.get_active_task()
+        active_raw = _activate_next_task_message(memory, 1)
         assert "<active_task" in active_raw
         assert 'phase="1"' in active_raw
         assert 'status="none"' in active_raw
 
         plan["current_phase"] = 2
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
-        tasks = memory.list_uncompleted_tasks()
+        tasks = memory_tasks.list_uncompleted_tasks(memory)
         assert "task[2]" in tasks
 
-        active_raw = memory.get_active_task()
+        active_raw = _activate_next_task_message(memory, 2)
         assert "<active_task" in active_raw
         assert 'phase="2"' in active_raw
         assert 'status="active"' in active_raw
@@ -276,7 +286,7 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
             ],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         task_1_title = "Enumerate login endpoints"
         task_1_evidence = ["outputs/OP_20260302/auth_analyzer3459734.json"]
@@ -305,7 +315,7 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
         )
 
         assert "tasks created" in create_raw.lower()
-        assert "<active_task" in create_raw
+        assert "<active_task" not in create_raw
 
         create_dup1 = memory.create_tasks(
             [
@@ -320,7 +330,7 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
         )
 
         assert "tasks created" in create_dup1.lower()
-        assert "task[2]" in memory.list_uncompleted_tasks()
+        assert "task[2]" in memory_tasks.list_uncompleted_tasks(memory)
 
         create_dup2 = memory.create_tasks(
             [
@@ -342,7 +352,7 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
         )
 
         assert "tasks created" in create_dup2.lower()
-        assert "task[3]" in memory.list_uncompleted_tasks()
+        assert "task[3]" in memory_tasks.list_uncompleted_tasks(memory)
 
         create_new2 = memory.create_tasks(
             [
@@ -364,7 +374,7 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
         )
 
         assert "tasks created" in create_new2.lower()
-        assert "task[4]" in memory.list_uncompleted_tasks()
+        assert "task[4]" in memory_tasks.list_uncompleted_tasks(memory)
 
         # Fuzzy duplicate check
         create_fuzzy = memory.create_tasks(
@@ -380,7 +390,7 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
         )
 
         assert "tasks created" in create_fuzzy.lower()
-        assert "task[4]" in memory.list_uncompleted_tasks()
+        assert "task[4]" in memory_tasks.list_uncompleted_tasks(memory)
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -411,7 +421,7 @@ def test_store_plan_persistence(tmp_path, monkeypatch):
         }
 
         # Store plan
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         # Retrieve plan
         retrieved_plan = memory.get_plan()
@@ -426,7 +436,7 @@ def test_store_plan_persistence(tmp_path, monkeypatch):
 
         # Update plan
         plan["objective"] = "Updated Objective"
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         # Retrieve updated
         updated_plan = memory.get_plan()
@@ -457,21 +467,21 @@ def test_create_tasks_more_fuzzy(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         # 1. Original task
         memory.create_tasks([
             memory.TaskCreate(title="Scan for open ports", objective="Identify services on the target", phase=1,
                               status="pending")
         ])
-        assert "task[1]" in memory.list_uncompleted_tasks()
+        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory)
 
         # 2. Case variation
         memory.create_tasks([
             memory.TaskCreate(title="SCAN FOR OPEN PORTS", objective="identify services on the target", phase=1,
                               status="pending")
         ])
-        assert "task[1]" in memory.list_uncompleted_tasks()
+        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory)
 
         # 3. Minor typo/difference (within 90% threshold)
         # "Scan for open ports" (19 chars)
@@ -480,14 +490,14 @@ def test_create_tasks_more_fuzzy(tmp_path, monkeypatch):
             memory.TaskCreate(title="Scan for open port", objective="Identify service on the target", phase=1,
                               status="pending")
         ])
-        assert "task[1]" in memory.list_uncompleted_tasks()
+        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory)
 
         # 4. Significant difference
         memory.create_tasks([
             memory.TaskCreate(title="Exploit vulnerability", objective="Gain access to the system", phase=1,
                               status="pending")
         ])
-        assert "task[2]" in memory.list_uncompleted_tasks()
+        assert "task[2]" in memory_tasks.list_uncompleted_tasks(memory)
 
         # 5. Check SQLite task count for this operation
         op_id = "test-op-fuzzy-more"
@@ -531,7 +541,7 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
             ],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         task_1_title = "Enumerate login endpoints"
         task_2_title = "Check GraphQL schema exposure"
@@ -561,19 +571,19 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
         )
         assert len(_list_tasks()) == 3
 
-        active_raw = memory.get_active_task()
+        active_raw = _activate_next_task_message(memory, 1)
         assert isinstance(active_raw, str)
         assert "<active_task" in active_raw
         assert 'phase="1"' in active_raw
         assert 'status="active"' in active_raw
         assert len(_list_tasks()) == 3
 
-        active_raw2 = memory.task_done("done")
+        active_raw2 = memory_tasks.mark_task_done(memory, "done")
         assert isinstance(active_raw2, str)
         assert active_raw != active_raw2
         assert len(_list_tasks()) == 3
 
-        active_none = memory.task_done("blocked")
+        active_none = memory_tasks.mark_task_done(memory, "blocked")
         assert isinstance(active_none, str)
         assert "<active_task" in active_none
         assert 'phase="1"' in active_none
@@ -583,16 +593,16 @@ def test_mem0_task_lifecycle(tmp_path, monkeypatch):
         plan["current_phase"] = 2
         plan["phases"][0]["status"] = "done"
         plan["phases"][1]["status"] = "active"
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
-        active_raw3 = memory.get_active_task()
+        active_raw3 = _activate_next_task_message(memory, 2)
         assert isinstance(active_raw3, str)
         assert "<active_task" in active_raw3
         assert 'phase="2"' in active_raw3
         assert 'status="active"' in active_raw3
         assert len(_list_tasks()) == 3
 
-        active_none2 = memory.task_done("blocked")
+        active_none2 = memory_tasks.mark_task_done(memory, "blocked")
         assert isinstance(active_none2, str)
         assert "<active_task" in active_none2
         assert 'phase="2"' in active_none2
@@ -622,7 +632,7 @@ def test_create_tasks_sensitive_urls(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         # 1. Create a task with a URL
         url1 = "http://example.com/api/v1/user/details"
@@ -646,7 +656,7 @@ def test_create_tasks_sensitive_urls(tmp_path, monkeypatch):
             )
         ])
 
-        assert "task[2]" in memory.list_uncompleted_tasks(), f"Expected new task for different URL"
+        assert "task[2]" in memory_tasks.list_uncompleted_tasks(memory), "Expected new task for different URL"
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -668,7 +678,7 @@ def test_create_tasks_parameterized_urls(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         # 1. Create a task with a URL
         url1 = "https://example.com/api/v1/user?userId=1"
@@ -692,7 +702,7 @@ def test_create_tasks_parameterized_urls(tmp_path, monkeypatch):
             )
         ])
 
-        assert "task[1]" in memory.list_uncompleted_tasks(), f"Expected duplicate task for different parameter"
+        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory), "Expected duplicate task for different parameter"
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -714,7 +724,7 @@ def test_create_tasks_parameterized_url_paths(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         # 1. Create a task with a URL
         url1 = "http://example.com/api/v1/user/1"
@@ -738,7 +748,7 @@ def test_create_tasks_parameterized_url_paths(tmp_path, monkeypatch):
             )
         ])
 
-        assert "task[1]" in memory.list_uncompleted_tasks(), f"Expected duplicate task for different parameterized path"
+        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory), "Expected duplicate task for different parameterized path"
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -760,7 +770,7 @@ def test_create_tasks_parameterized_urls_batched(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         url1 = "https://example.com/api/v1/user?userId=1"
         url2 = "https://example.com/api/v1/user?userId=2"
@@ -779,7 +789,7 @@ def test_create_tasks_parameterized_urls_batched(tmp_path, monkeypatch):
             )
         ])
 
-        tasks = memory.list_uncompleted_tasks()
+        tasks = memory_tasks.list_uncompleted_tasks(memory)
         assert "task[1]" in tasks, "Expected ADD for first task, and DUPLICATE for different parameter"
         assert url1 in tasks, "Expected ADD for first task"
 
@@ -803,7 +813,7 @@ def test_create_tasks_sensitive_paths(tmp_path, monkeypatch):
             "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
             "assessment_complete": False,
         }
-        memory.store_plan(plan)
+        memory_tasks.store_plan(memory, plan)
 
         # 1. Create a task with a path
         path1 = "/etc/passwd"
@@ -827,7 +837,7 @@ def test_create_tasks_sensitive_paths(tmp_path, monkeypatch):
             )
         ])
 
-        tasks = memory.list_uncompleted_tasks()
+        tasks = memory_tasks.list_uncompleted_tasks(memory)
         assert "task[2]" in tasks, "Expected ADD for different path"
 
     finally:

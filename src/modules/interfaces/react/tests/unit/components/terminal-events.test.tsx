@@ -585,6 +585,65 @@ describe('Terminal event processing', () => {
         });
     });
 
+    it('uses Ragas progress labels as evaluation thinking task titles', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const onThinkingUpdate = jest.fn();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-ragas-thinking-title"
+                    terminalWidth={90}
+                    onThinkingUpdate={onThinkingUpdate}
+                    animationsEnabled
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {
+                type: 'progress_update',
+                step: 'RAGAS_PREPARATION',
+                operation_stage: 'ragas_evaluation',
+                evaluation_step_kind: 'reference_topics',
+                evaluation_step_label: 'Operation: Generate Reference Topics',
+            });
+            await Promise.resolve();
+        });
+
+        expect(onThinkingUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            active: true,
+            context: 'waiting',
+            message: 'Evaluating assessment',
+            taskTitle: 'Operation: Generate Reference Topics',
+        }));
+        const lastActiveStatus = onThinkingUpdate.mock.calls
+            .map(call => call[0])
+            .filter(status => status.active)
+            .at(-1);
+        expect(lastActiveStatus).toEqual(expect.objectContaining({
+            context: 'waiting',
+            message: 'Evaluating assessment',
+            taskTitle: 'Operation: Generate Reference Topics',
+        }));
+        expect(textFromTree(view.toJSON())).toContain(
+            '[RAGAS EVALUATION PREPARING] Operation: Generate Reference Topics'
+        );
+
+        await act(async () => {
+            service.emit('event', {type: 'evaluation_complete'});
+            await Promise.resolve();
+        });
+        expect(onThinkingUpdate).toHaveBeenLastCalledWith({active: false});
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
     it('processes uncommon event transitions without duplicating or crashing', async () => {
         const {Terminal} = await load();
         const service = new MockExecutionService();
@@ -659,6 +718,22 @@ describe('Terminal event processing', () => {
                 report_step_label: 'Assessment methodology',
             });
             service.emit('event', {type: 'report_content', content: '# SECURITY ASSESSMENT REPORT\nFinal body'});
+            service.emit('event', {
+                type: 'progress_update',
+                step: 'RAGAS_PREPARATION',
+                operation_stage: 'ragas_evaluation',
+                evaluation_step_kind: 'reference_topics',
+                evaluation_step_label: 'Operation: Generate Reference Topics',
+            });
+            service.emit('event', {
+                type: 'progress_update',
+                step: 'RAGAS_METRIC',
+                operation_stage: 'ragas_evaluation',
+                evaluation_step_index: 1,
+                evaluation_step_total: 5,
+                evaluation_step_kind: 'metric',
+                evaluation_step_label: 'Operation: Evidence Quality',
+            });
             service.emit('event', {type: 'assessment_complete', success: false});
             service.emit('event', {type: 'termination_reason', reason: 'user_stopped', message: 'Stopped'});
             service.emit('event', {type: 'output', content: 'Assessment stopped by user'});
@@ -674,8 +749,14 @@ describe('Terminal event processing', () => {
         expect((text.match(/\[FINAL REPORT\]/g) || []).length).toBe(1);
         expect(text).toContain('[FINAL REPORT 1/2] Executive summary');
         expect(text).toContain('[FINAL REPORT 2/2] Assessment methodology');
+        expect(text).toContain('[RAGAS EVALUATION PREPARING] Operation: Generate Reference Topics');
+        expect(text).toContain('[RAGAS EVALUATION 1/5] Operation: Evidence Quality');
         expect((text.match(/\[FINAL REPORT 1\/2\] Executive summary/g) || []).length).toBe(1);
         expect((text.match(/\[FINAL REPORT 2\/2\] Assessment methodology/g) || []).length).toBe(1);
+        expect((text.match(/\[RAGAS EVALUATION PREPARING\]/g) || []).length).toBe(1);
+        expect((text.match(/\[RAGAS EVALUATION 1\/5\]/g) || []).length).toBe(1);
+        expect(text.indexOf('[FINAL REPORT 2/2]')).toBeLessThan(text.indexOf('[RAGAS EVALUATION PREPARING]'));
+        expect(text.indexOf('[RAGAS EVALUATION PREPARING]')).toBeLessThan(text.indexOf('[RAGAS EVALUATION 1/5]'));
         expect(text).toContain('TERMINATED: Stopped');
 
         act(() => {

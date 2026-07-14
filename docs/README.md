@@ -7,10 +7,10 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 ### Core Architecture
 
 **[architecture.md](architecture.md)**
-- Single agent meta-everything architecture
+- Python-owned multi-agent workflow architecture
 - Strands framework integration
-- Tool hierarchy and selection
-- Metacognitive decision-making patterns
+- Role-agent lifecycle and restricted tool selection
+- Metacognitive reasoning patterns
 - Memory integration
 
 ### System Components
@@ -28,19 +28,14 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 - Tool discovery mechanisms
 - Report generation integration
 
-**[prompt_optimizer.md](prompt_optimizer.md)**
-- Dynamic prompt optimization
-- Meta-prompting approach
-- Automatic optimization triggers
-- XML tag preservation
-- Performance improvements
-
 **[task_tracking.md](task_tracking.md)**
 - Tasks are captured from new evidence
-- Execution is single-active-task, phase-gated
-- Completion is explicit with status + reason
+- Python owns phase/task activation and completion
+- Role agents execute short, defined objectives
+- Completion is evaluator-driven with status + reason
 - Context pruning preserves the active task and the evidence needed to continue
 - Pending work can persist across runs to enable long-lived coverage goals
+- Prompt adaptation happens inside the Python-owned role-agent workflow
 
 ### Interface and User Experience
 
@@ -83,7 +78,6 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 | Monitoring operations         | [observability-evaluation.md](observability-evaluation.md) |
 | Production deployment         | [deployment.md](deployment.md)                             |
 | Understanding UI architecture | [terminal-frontend.md](terminal-frontend.md)               |
-| Optimizing prompts            | [prompt_optimizer.md](prompt_optimizer.md)                 |
 
 ## Getting Started
 

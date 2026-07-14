@@ -469,12 +469,52 @@ def b64(b: bytes) -> str:
     return base64.b64encode(b).decode("ascii")
 
 
+def get_tool_spec(tool) -> Optional[Dict[str, Any]]:
+    if hasattr(tool, "tool_spec"):
+        return getattr(tool, "tool_spec")
+    if hasattr(tool, "TOOL_SPEC"):
+        return getattr(tool, "TOOL_SPEC")
+    return None
+
+
 def get_tool_name(tool) -> str:
+    tool_spec = get_tool_spec(tool)
+    if tool_spec and tool_spec.get("name"):
+        return str(tool_spec["name"])
     try:
         tool_name = tool.tool_name
     except AttributeError:
         tool_name = getattr(tool, "__name__", tool.__class__.__name__).split(".")[-1]
-    return tool_name
+    return str(tool_name)
+
+
+def get_tool_description(tool) -> str:
+    tool_spec = get_tool_spec(tool)
+    if tool_spec and tool_spec.get("description"):
+        return str(tool_spec["description"])
+    description = getattr(tool, "description", None)
+    if description:
+        return str(description)
+    description = getattr(tool, "__doc__", None)
+    if description:
+        return str(description)
+    description = getattr(tool.__class__, "__doc__", None)
+    return str(description or "")
+
+
+def tool_rename(tool, new_name: str):
+    if hasattr(tool, "tool_name"):
+        setattr(tool, "tool_name", new_name)
+    tool_spec = get_tool_spec(tool)
+    if tool_spec:
+        tool_spec["name"] = new_name
+
+
+def tool_append_description(tool, description: str):
+    tool_spec = get_tool_spec(tool)
+    if tool_spec:
+        tool_description = tool_spec.get("description", "")
+        tool_spec["description"] = tool_description + "\n\n" + description
 
 
 def duration_max(*values):
@@ -504,3 +544,9 @@ def filter_none_values(d: dict) -> dict:
         for key, value in d.items()
         if value is not None
     }
+
+
+def sanitize_toon_value(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.replace(",", ";")

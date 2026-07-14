@@ -51,12 +51,7 @@ _AGENT_USAGE_UUID_ATTR = "_caa_agent_event_usage_uuid"
 
 # Do not increment action count for planning tools
 _PLANNING_TOOL_NAMES = {
-    "store_plan",
-    "get_plan",
     "create_tasks",
-    "get_active_task",
-    "task_done",
-    "list_uncompleted_tasks",
 }
 
 
@@ -361,7 +356,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         init_context: Dict[str, Any] = None,
             coordinator: OperationEventCoordinator = None,
             agent_name: str = "Cyber-AutoAgent",
-            agent_type: str = "main_orchestrator",
+            agent_type: str = "operation_controller",
             agent_run_id: str = None,
             parent_agent_run_id: str = None,
             emit_operation_init: bool = True,
@@ -400,6 +395,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         self.agent_name = agent_name or "Cyber-AutoAgent"
         self.agent_type = agent_type or "agent"
         self.parent_agent_run_id = parent_agent_run_id
+        self._active_agent_metadata: Optional[Dict[str, str]] = None
         self.emit_operation_init = emit_operation_init
         self.start_metrics_thread = start_metrics_thread
         self.start_time = time.time()
@@ -532,11 +528,13 @@ class AgentEventHandler(PrintingCallbackHandler):
         self._reasoning_emitted_since_last_action_header = False
 
         # Operation state
-        self._stop_tool_used = False
         self._report_generated = False
         self._report_generation_active = False
+        self._evaluation_report_path: Optional[str] = None
+        self._completed_report_path: Optional[str] = None
+        self._assessment_completion_emitted = False
 
-        # Termination tracking (stop tool or budget limit)
+        # Termination tracking (workflow completion, user abort, or budget limit)
         self._termination_emitted = False
         self._termination_reason: Optional[str] = None
         # Track python_repl preview emission per tool id to suppress generic completion
@@ -613,7 +611,12 @@ class AgentEventHandler(PrintingCallbackHandler):
         # Transform SDK events to stream events. Strands can invoke callbacks
         # from multiple worker threads, so serialize mutable handler state.
         with self._state_lock:
-            self._transform_sdk_event(kwargs)
+            previous_metadata = self._active_agent_metadata
+            self._active_agent_metadata = self._metadata_from_agent(kwargs.get("agent"))
+            try:
+                self._transform_sdk_event(kwargs)
+            finally:
+                self._active_agent_metadata = previous_metadata
 
     @property
     def action_count(self) -> int:
@@ -634,12 +637,14 @@ class AgentEventHandler(PrintingCallbackHandler):
         """
         try:
             event = dict(event)
+            active_metadata = getattr(self, "_active_agent_metadata", None) or {}
             event.setdefault("operation_id", self.operation_id)
-            event.setdefault("agent_run_id", self.agent_run_id)
-            event.setdefault("agent_name", self.agent_name)
-            event.setdefault("agent_type", self.agent_type)
-            if self.parent_agent_run_id:
-                event.setdefault("parent_agent_run_id", self.parent_agent_run_id)
+            event.setdefault("agent_run_id", active_metadata.get("agent_run_id") or self.agent_run_id)
+            event.setdefault("agent_name", active_metadata.get("agent_name") or self.agent_name)
+            event.setdefault("agent_type", active_metadata.get("agent_type") or self.agent_type)
+            parent_agent_run_id = active_metadata.get("parent_agent_run_id") or self.parent_agent_run_id
+            if parent_agent_run_id:
+                event.setdefault("parent_agent_run_id", parent_agent_run_id)
             self.coordinator.emit(event)
         except BrokenPipeError:
             logger.debug("Frontend disconnected, skipping event %s", event.get("type"))
@@ -647,6 +652,27 @@ class AgentEventHandler(PrintingCallbackHandler):
             logger.error(
                 f"Failed to emit event {event.get('type')}: {e}", exc_info=True
             )
+
+    def _metadata_from_agent(self, agent: Any) -> Dict[str, str]:
+        """Return Cyber-AutoAgent event metadata attached to a Strands agent."""
+        if not agent:
+            return {}
+
+        metadata = {}
+        agent_type = getattr(agent, "_cyber_agent_type", None)
+        agent_name = getattr(agent, "_cyber_agent_name", None) or getattr(agent, "name", None)
+        agent_run_id = getattr(agent, "_cyber_agent_run_id", None)
+        parent_agent_run_id = getattr(agent, "_cyber_parent_agent_run_id", None)
+
+        if agent_type:
+            metadata["agent_type"] = str(agent_type)
+        if agent_name:
+            metadata["agent_name"] = str(agent_name)
+        if agent_run_id:
+            metadata["agent_run_id"] = str(agent_run_id)
+        if parent_agent_run_id:
+            metadata["parent_agent_run_id"] = str(parent_agent_run_id)
+        return metadata
 
     def emit_termination(self, reason: str, message: str) -> None:
         """Emit a single termination_reason event (idempotent) with a clear final action.
@@ -1078,31 +1104,6 @@ class AgentEventHandler(PrintingCallbackHandler):
     def _tool_use_id(self, tool_use: Dict[str, Any]) -> str:
         return tool_use.get("_toolUseId") or tool_use.get("id") or tool_use.get("toolUseId")
 
-    def _extract_active_task_payload(self, text: str) -> Optional[Dict[str, Any]]:
-        """Extract JSON payload inside the last <active_task...>...</active_task> block."""
-        try:
-            if not isinstance(text, str) or "<active_task" not in text:
-                return None
-            matches = re.findall(r"<active_task[^>]*>(.*?)</active_task>", text, flags=re.S)
-            if not matches:
-                return None
-            payload_str = (matches[-1] or "").strip()
-            if not payload_str:
-                return None
-            return json.loads(payload_str)
-        except Exception:
-            return None
-
-    def _extract_task_from_active_task_payload(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        try:
-            if not isinstance(payload, dict):
-                return None
-            if isinstance(payload.get("task"), dict):
-                return payload.get("task")
-            return None
-        except Exception:
-            return None
-
     def _handle_tool_announcement(self, tool_use: Dict[str, Any]) -> None:
         self._process_tool_announcement(tool_use)
 
@@ -1243,12 +1244,6 @@ class AgentEventHandler(PrintingCallbackHandler):
         tool_id = self._tool_use_id(tool_use)
         raw_input = tool_use.get("input", {})
         tool_input = self._parse_tool_input_from_stream(raw_input)
-
-        # Special handling for stop tool: flush reasoning
-        if tool_name == "stop":
-            # Flush any pending reasoning before termination, note that the stop tool may reject termination
-            if self.reasoning_buffer:
-                self._emit_accumulated_reasoning()
 
         # Only process new tools
         if tool_id and tool_id not in self.announced_tools:
@@ -1595,26 +1590,6 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         success = status != "error"
 
-        # For stop tool, emit termination after tool header (below where output would go)
-        try:
-            if tool_name == "stop" and success and not self._termination_emitted:
-                # Mark stop; SDK loop will end; we still show action header and tool header for clarity
-                self._stop_tool_used = True
-                # Use tool input reason if available
-                reason_msg = "Stop tool used - terminating"
-                try:
-                    if isinstance(tool_input, dict):
-                        reason_msg = (
-                            tool_input.get("reason")
-                            or tool_input.get("message")
-                            or reason_msg
-                        )
-                except Exception:
-                    pass
-                self.emit_termination("stop_tool", reason_msg)
-        except Exception:
-            pass
-
         # Update live metrics for memory operations and evidence collection
         try:
             if tool_name in {"mem0_store"} and success:
@@ -1854,56 +1829,6 @@ class AgentEventHandler(PrintingCallbackHandler):
             # Emit tool_end after output and invocation_end
             self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
             return
-
-        # Task lifecycle events
-        try:
-            # Avoid double-emitting per tool invocation
-            if not hasattr(self, "_task_event_emitted_by_tooluse"):
-                self._task_event_emitted_by_tooluse = set()
-
-            if tool_use_id and tool_use_id not in self._task_event_emitted_by_tooluse:
-                # task_started: on several tool outputs
-                if tool_name in {"get_active_task", "task_done", "create_tasks", "store_plan", "stop"}:
-                    payload = self._extract_active_task_payload(output_text)
-                    if isinstance(payload, dict):
-                        # task_done first
-                        if isinstance(payload, dict) and isinstance(payload.get("closed"), dict):
-                            closed_uid = payload["closed"].get("task_uid")
-                            closed_title = payload["closed"].get("title")
-                            closed_status = payload["closed"].get("status")
-                            if closed_uid:
-                                self.emit_ui_event(
-                                    {
-                                        "type": "task_done",
-                                        "task_uid": str(closed_uid),
-                                        "title": str(closed_title or ""),
-                                        "status": str(closed_status or ""),
-                                    }
-                                )
-
-                        task_obj = self._extract_task_from_active_task_payload(payload)
-                        if isinstance(task_obj, dict):
-                            # task_started
-                            task_uid = str(task_obj.get("task_uid") or "").strip()
-                            title = str(task_obj.get("title") or "").strip()
-                            status_val = str(task_obj.get("status") or "").strip()
-                            if task_uid:
-                                prev_uid = getattr(self, "_last_emitted_active_task_uid", None)
-                                if prev_uid != task_uid:
-                                    self._last_emitted_active_task_uid = task_uid
-                                    self.emit_ui_event(
-                                        {
-                                            "type": "task_started",
-                                            "task_uid": task_uid,
-                                            "title": title,
-                                            "status": status_val,
-                                        }
-                                    )
-
-                self._task_event_emitted_by_tooluse.add(tool_use_id)
-        except Exception:
-            # Never allow task event parsing to break tool result processing
-            pass
 
         # Check if we already processed this exact output
         output_key = f"{tool_use_id or ''}:{hash(output_text.strip())}"
@@ -2968,6 +2893,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             report_path = os.path.join(
                 output_dir, "security_assessment_report.md"
             )
+            self._evaluation_report_path = report_path
 
             self._report_generation_active = True
             try:
@@ -2994,22 +2920,19 @@ class AgentEventHandler(PrintingCallbackHandler):
 
             # Accept any non-empty report content
             if report_content:
+                self._completed_report_path = report_path
                 self.emit_ui_event({"type": "report_content", "content": report_content})
 
                 # Also emit file path information for reference
                 self.emit_ui_event(
                     {
                         "type": "output",
-                        "content": f"\n{'━' * 80}\n\nASSESSMENT COMPLETE\n\nREPORT ALSO SAVED TO:\n  • {report_path}\n\nMEMORY STORED IN:\n  • {output_dir}/memory/\n\nOPERATION LOGS:\n  • {os.path.join(output_dir, 'cyber_operations.log')}\n\n{'━' * 80}\n",
-                    }
-                )
-
-                # Emit a completion event for clean UI transition
-                self.emit_ui_event(
-                    {
-                        "type": "assessment_complete",
-                        "operation_id": self.operation_id,
-                        "report_path": report_path,
+                        "content": (
+                            f"\n{'━' * 80}\n\nREPORT GENERATED\n\nREPORT ALSO SAVED TO:\n"
+                            f"  • {report_path}\n\nMEMORY STORED IN:\n  • {output_dir}/memory/\n\n"
+                            f"OPERATION LOGS:\n  • {os.path.join(output_dir, 'cyber_operations.log')}\n\n"
+                            f"{'━' * 80}\n"
+                        ),
                     }
                 )
 
@@ -3028,13 +2951,6 @@ class AgentEventHandler(PrintingCallbackHandler):
                             "content": "◆ No memories or evidence were collected during this operation. Skipping report generation.",
                         }
                     )
-                    self.emit_ui_event(
-                        {
-                            "type": "assessment_complete",
-                            "operation_id": self.operation_id,
-                            "report_path": None,
-                        }
-                    )
                 except Exception:
                     pass
 
@@ -3044,46 +2960,56 @@ class AgentEventHandler(PrintingCallbackHandler):
                 {"type": "error", "content": f"Error generating report: {str(e)}"}
             )
 
+    def emit_assessment_complete(self) -> None:
+        """Emit the terminal assessment event once report and evaluation work has ended."""
+        if self._assessment_completion_emitted:
+            return
+
+        self._assessment_completion_emitted = True
+        self.emit_ui_event(
+            {
+                "type": "assessment_complete",
+                "operation_id": self.operation_id,
+                "report_path": self._completed_report_path,
+            }
+        )
+        if hasattr(self.emitter, "flush_immediate"):
+            self.emitter.flush_immediate()
+
     # Evaluation methods
     def trigger_evaluation_on_completion(self) -> None:
         """Trigger evaluation after operation completion."""
         from modules.evaluation.manager import EvaluationManager, TraceType
 
-        verbose_eval = os.getenv("VERBOSE", "false").lower() == "true"
-
-        if verbose_eval:
-            logger.debug(
-                "EVAL_DEBUG: trigger_evaluation_on_completion called for operation %s",
-                self.operation_id,
-            )
+        logger.debug(
+            "trigger_evaluation_on_completion called for operation %s",
+            self.operation_id,
+        )
 
         # Check if observability is enabled first - evaluation requires Langfuse infrastructure
         if os.getenv("ENABLE_OBSERVABILITY", "false").lower() != "true":
             logger.debug(
                 "Observability is disabled - skipping evaluation (requires Langfuse)"
             )
-            if verbose_eval:
-                logger.debug("EVAL_DEBUG: Skipping evaluation - observability disabled")
             return
 
         # Default evaluation to same setting as observability
         default_evaluation = os.getenv("ENABLE_OBSERVABILITY", "false")
         if os.getenv("ENABLE_AUTO_EVALUATION", default_evaluation).lower() != "true":
-            logger.debug("Auto-evaluation is disabled, skipping")
-            if verbose_eval:
-                logger.debug(
-                    "EVAL_DEBUG: Auto-evaluation disabled via ENABLE_AUTO_EVALUATION=false"
-                )
+            logger.debug("Auto-evaluation disabled via ENABLE_AUTO_EVALUATION!=true, skipping")
             return
 
         try:
-            if verbose_eval:
-                logger.debug(
-                    "EVAL_DEBUG: Starting evaluation process for operation %s",
-                    self.operation_id,
-                )
+            logger.debug(
+                "Starting evaluation process for operation %s",
+                self.operation_id,
+            )
 
-            eval_manager = EvaluationManager(operation_id=self.operation_id, emitter=self.emitter)
+            eval_manager = EvaluationManager(
+                operation_id=self.operation_id,
+                emitter=self.emitter,
+                report_path=getattr(self, "_evaluation_report_path", None),
+            )
 
             eval_manager.register_trace(
                 trace_id=self.operation_id,
@@ -3092,15 +3018,12 @@ class AgentEventHandler(PrintingCallbackHandler):
                 session_id=self.operation_id,
             )
 
-            if verbose_eval:
-                logger.debug("EVAL_DEBUG: Registered trace for evaluation")
+            logger.debug("Registered trace for evaluation")
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
             logger.info("Starting evaluation for operation %s", self.operation_id)
-            if verbose_eval:
-                logger.debug("EVAL_DEBUG: Starting async evaluation loop")
 
             results = loop.run_until_complete(eval_manager.evaluate_all_traces())
 
@@ -3109,8 +3032,6 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "Evaluation completed successfully: %d traces evaluated",
                     len(results),
                 )
-                if verbose_eval:
-                    logger.debug("EVAL_DEBUG: Evaluation results: %s", results)
                 self.emit_ui_event(
                     {
                         "type": "evaluation_complete",
@@ -3119,33 +3040,10 @@ class AgentEventHandler(PrintingCallbackHandler):
                     }
                 )
             else:
-                logger.warning("No evaluation results returned")
-                if verbose_eval:
-                    logger.debug(
-                        "EVAL_DEBUG: No evaluation results - check trace finding and metric evaluation"
-                    )
+                logger.warning("No evaluation results - check trace finding and metric evaluation")
 
         except Exception as e:
-            logger.warning("Evaluation failed but continuing operation: %s", str(e))
-            if verbose_eval:
-                logger.debug(
-                    "EVAL_DEBUG: Full evaluation exception details", exc_info=True
-                )
-            # Don't re-raise the exception - just log and continue
-
-    def wait_for_evaluation_completion(self, timeout: int = 300) -> None:
-        """Wait for evaluation to complete (no-op for compatibility)."""
-        logger.debug("Evaluation already completed or not running")
-
-    def get_evidence_summary(self) -> List[str]:
-        """Get a summary of key evidence collected.
-
-        Returns:
-            List of evidence summary strings
-        """
-        # For React bridge handler, return empty list as placeholder
-        # Real evidence would come from memory/findings analysis
-        return []
+            logger.warning("Evaluation failed but continuing operation: %s", str(e), exc_info=True)
 
     # Property methods for compatibility
     @property
@@ -3154,7 +3052,6 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         class MockState:
             report_generated = self._report_generated
-            stop_tool_used = self._stop_tool_used
             budget_limit_reached = bool(self._budget_limit_reached)
 
         return MockState()
@@ -3165,10 +3062,6 @@ class AgentEventHandler(PrintingCallbackHandler):
         Also emits a termination_reason event once when a stop condition is detected.
         """
         with self._state_lock:
-            # Always stop if explicit stop tool used
-            if self._stop_tool_used:
-                return True
-
             if self._report_generation_active:
                 return False
 
@@ -3228,11 +3121,6 @@ class AgentEventHandler(PrintingCallbackHandler):
     def has_reached_limit(self) -> bool:
         """Check if any budget limit reached."""
         return bool(self._budget_limit_reached)
-
-    @property
-    def stop_tool_used(self) -> bool:
-        """Check if stop tool was used."""
-        return self._stop_tool_used
 
     @property
     def termination_emitted(self) -> bool:
