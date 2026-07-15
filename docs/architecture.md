@@ -20,7 +20,8 @@ Long-lived autonomous conversations tend to accumulate stale assumptions, lose c
 
 The controller creates agents for specific jobs:
 
-- **plan_creator**: creates an initial high-level plan and infers operation-wide constraints when none exists
+- **plan_creator**: creates or revises an initial high-level plan and infers operation-wide constraints
+- **plan_critic**: reviews an initial plan and either approves it or returns actionable revision feedback
 - **task_creator**: creates concrete current- and future-phase tasks from a deterministic controller prompt
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
@@ -78,6 +79,11 @@ There is no agent-callable stop tool. When Python workflow evaluation determines
 
 Generated plan constraints are durable workflow guardrails. Task creation and prompt-building roles must honor them,
 and task/phase evaluators prevent successful completion when evidence shows a constraint violation.
+
+Initial plan generation uses a bounded actor/critic cycle before persistence. Critic approval immediately accepts the
+current draft; rejection sends feedback to `plan_creator` for revision. The
+`CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS` environment variable limits reviews and defaults to one. A rejection on
+the final configured review fails the workflow so an unapproved plan is never persisted or executed.
 
 There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task history, memory summaries, and selected optional tool candidates. Budget checkpoints are handled by Python control flow before pending task activation.
 

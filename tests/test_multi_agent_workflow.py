@@ -155,14 +155,15 @@ def _plan():
     )
 
 
-def _runtime(progress=0):
+def _runtime(progress=0, env_ints=None):
+    env_ints = env_ints or {}
     return SimpleNamespace(
         config=SimpleNamespace(target="target", objective="assess", available_tools=[]),
         operation_id="OP_TEST",
         system_prompt="base prompt",
         task_capture_prompt="task capture prompt",
         termination_policy="",
-        config_manager=SimpleNamespace(getenv_int=lambda _name, default=0: default),
+        config_manager=SimpleNamespace(getenv_int=lambda name, default=0: env_ints.get(name, default)),
         callback_handler=FakeCallbackHandler(progress=progress),
         core_tools_list=[
             _tool("shell"),
@@ -649,6 +650,211 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "Do not treat phase goals, tool preferences, or generic advice as constraints" in prompt
 
 
+def test_plan_refinement_defaults_to_one_and_negative_values_disable_it():
+    default_controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    disabled_controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS": -2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    assert default_controller.plan_refinement_iterations == 1
+    assert disabled_controller.plan_refinement_iterations == 0
+
+
+def test_zero_plan_refinement_iterations_runs_only_initial_actor():
+    calls = []
+    state = FakeState(None)
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        return '{"objective":"single pass","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending"}]}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    assert controller._ensure_plan().objective == "single pass"
+    assert calls == ["plan_creator"]
+
+
+def test_plan_critic_approval_skips_revision_and_persists_draft_once():
+    calls = []
+    state = FakeState(None)
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append((role, prompt, tools, system_prompt))
+        if role == "plan_creator":
+            return '{"objective":"draft","constraints":["Stay in scope"],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map scope"}]}'
+        if role == "plan_critic":
+            return '{"approved":true,"feedback":[]}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    plan = controller._ensure_plan()
+
+    assert [call[0] for call in calls] == ["plan_creator", "plan_critic"]
+    assert all(call[2] == [] for call in calls)
+    assert all(call[3] == "base prompt" for call in calls)
+    assert plan.objective == "draft"
+    assert len(controller.runtime.callback_handler.events) == 1
+    assert "Proposed plan draft" in calls[1][1]
+    assert '"title": "Recon"' in calls[1][1]
+
+
+def test_plan_critic_rejection_runs_revision_and_persists_only_revision():
+    calls = []
+    state = FakeState(None)
+    actor_responses = iter(
+        [
+            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map"}]}',
+            '{"objective":"revised","constraints":["Store evidence"],"current_phase":1,"phases":[{"id":1,"title":"Evidence-backed recon","status":"pending","criteria":"Artifact exists"}]}',
+        ]
+    )
+    critic_responses = iter(
+        [
+            '{"approved":false,"feedback":["Add durable evidence criteria"]}',
+            '{"approved":true,"feedback":[]}',
+        ]
+    )
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append((role, prompt))
+        if role == "plan_creator":
+            return next(actor_responses)
+        if role == "plan_critic":
+            return next(critic_responses)
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    plan = controller._ensure_plan()
+
+    assert [role for role, _prompt in calls] == ["plan_creator", "plan_critic", "plan_creator", "plan_critic"]
+    assert plan.objective == "revised"
+    assert plan.phases[0].title == "Evidence-backed recon"
+    assert len(controller.runtime.callback_handler.events) == 1
+    assert "Add durable evidence criteria" in calls[2][1]
+    assert "Apply feedback only when it is consistent" in calls[2][1]
+
+
+def test_plan_refinement_stops_after_later_approval():
+    calls = []
+    actor_responses = iter(
+        [
+            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending"}]}',
+            '{"objective":"revised","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Revised","status":"pending"}]}',
+        ]
+    )
+    critic_responses = iter(
+        [
+            '{"approved":false,"feedback":["Improve phase"]}',
+            '{"approved":true,"feedback":[]}',
+        ]
+    )
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append((role, prompt))
+        return next(actor_responses) if role == "plan_creator" else next(critic_responses)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS": 3}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=text_runner,
+    )
+
+    plan = controller._ensure_plan()
+
+    assert [role for role, _prompt in calls] == ["plan_creator", "plan_critic", "plan_creator", "plan_critic"]
+    assert plan.objective == "revised"
+    assert '"title": "Revised"' in calls[-1][1]
+
+
+def test_plan_refinement_fails_when_final_critic_rejects():
+    calls = []
+    actor_responses = iter(
+        [
+            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending"}]}',
+            '{"objective":"revision one","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Revision one","status":"pending"}]}',
+        ]
+    )
+    state = FakeState(None)
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        if role == "plan_creator":
+            return next(actor_responses)
+        return '{"approved":false,"feedback":["Revise again"]}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="Plan critic rejected the plan after 2 review"):
+        controller._ensure_plan()
+
+    assert calls == ["plan_creator", "plan_critic", "plan_creator", "plan_critic"]
+    assert state.plan is None
+    assert controller.runtime.callback_handler.events == []
+
+
+@pytest.mark.parametrize(
+    "critique",
+    [
+        '{"approved":"yes","feedback":[]}',
+        '{"approved":false,"feedback":[]}',
+        '{"approved":true,"feedback":"none"}',
+    ],
+)
+def test_invalid_plan_critic_contract_retries_without_persisting(critique):
+    calls = []
+    state = FakeState(None)
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        if role == "plan_creator":
+            return '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending"}]}'
+        return critique
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="plan_critic returned invalid JSON"):
+        controller._ensure_plan()
+
+    assert calls == ["plan_creator", "plan_critic", "plan_critic"]
+    assert state.plan is None
+    assert controller.runtime.callback_handler.events == []
+
+
 def test_controller_creates_plan_when_missing():
     calls = []
     state = FakeState(None)
@@ -657,6 +863,8 @@ def test_controller_creates_plan_when_missing():
         calls.append(role)
         if role == "plan_creator":
             return '{"objective":"assess","constraints":["Stay in scope"],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending"}]}'
+        if role == "plan_critic":
+            return '{"approved":true,"feedback":[]}'
         if role == "task_prompt_builder":
             return '{"prompt":"execute recon task","tools":[]}'
         if role == "task_evaluator":
@@ -684,6 +892,7 @@ def test_controller_creates_plan_when_missing():
 
     assert calls == [
         "plan_creator",
+        "plan_critic",
         "task_creator",
         "task_prompt_builder",
         "task_executor",

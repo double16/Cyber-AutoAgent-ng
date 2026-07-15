@@ -2,6 +2,7 @@
 
 ### Features
 
+- Add configurable actor/critic refinement for initial plan generation, persisting only critic-approved plans.
 - Infer durable operation constraints during plan generation and enforce them during task planning and evaluation.
 - Rename the React terminal `/plugins` command to `/modules`.
 - Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation.

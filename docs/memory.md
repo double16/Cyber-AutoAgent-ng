@@ -359,7 +359,7 @@ The memory system automatically validates and corrects inconsistent status field
 ### Plan Management
 
 **Lifecycle:**
-1. Python loads the current plan or runs `plan_creator` when none exists.
+1. Python loads the current plan or runs the configured `plan_creator`/`plan_critic` refinement cycle when none exists.
 2. Python ensures exactly one active phase.
 3. Python activates existing active tasks first, then pending tasks when budget policy allows.
 4. Evaluator agents return task/phase decisions.

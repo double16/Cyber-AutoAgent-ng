@@ -19,7 +19,8 @@ The workflow controller creates focused agents as needed:
 
 | Role | Purpose | Can mutate plan/task state? |
 |------|---------|-----------------------------|
-| `plan_creator` | Create an initial high-level plan when none exists | No; returns structured plan data for Python to store |
+| `plan_creator` | Create or revise an initial high-level plan | No; returns structured plan data for Python to store |
+| `plan_critic` | Approve a proposed plan or return actionable revision feedback | No |
 | `task_creator` | Create concrete tasks for current and future phases | May call `create_tasks` only |
 | `task_prompt_builder` | Build a task-specific execution prompt and select applicable memory/tools | No |
 | `task_executor` | Execute one active task objective | May call `create_tasks` for follow-up work |
@@ -108,7 +109,8 @@ Tasks are concrete units of work. They may reference evidence paths and memory c
 The controller runs this loop:
 
 1. Load the current plan.
-2. If no plan exists, run `plan_creator` and store the returned plan.
+2. If no plan exists, run `plan_creator`, then apply the configured critic/revision cycle before storing an approved
+   plan. A final critic rejection fails the workflow without persisting the draft.
 3. If a plan was previously marked complete at startup, reopen it by making phase 1 active and later phases pending.
 4. Ensure exactly one active phase, or mark the plan complete if all phases are terminal.
 5. If an active task exists for the active phase, run it first.

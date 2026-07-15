@@ -269,10 +269,12 @@ def test_select_execution_traces_uses_roles_and_legacy_fallback(monkeypatch):
         SimpleNamespace(id="1", metadata={"attributes": {"agent.role": "task_executor"}}),
         SimpleNamespace(id="2", metadata={"attributes": {"langfuse.agent.type": "swarm_agent"}}),
         SimpleNamespace(id="3", metadata={"attributes": {"agent.role": "phase_evaluator"}}),
+        SimpleNamespace(id="4", metadata={"attributes": {"agent.role": "plan_critic"}}),
     ]
 
     assert [trace.id for trace in ev._select_execution_traces(traces)] == ["1", "2"]
     assert ev._select_execution_traces([traces[2]]) == []
+    assert ev._select_execution_traces([traces[3]]) == []
     legacy = SimpleNamespace(id="legacy", metadata={})
     assert ev._select_execution_traces([legacy]) == [legacy]
 
