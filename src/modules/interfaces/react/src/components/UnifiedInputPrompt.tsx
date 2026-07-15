@@ -111,7 +111,7 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
           break;
         case 'module':
           suggestions.push(
-            { text: '/plugins', description: 'Browse available security modules', type: 'command' }
+            { text: '/modules', description: 'Browse available security modules', type: 'command' }
           );
           break;
         case 'target':
@@ -155,7 +155,7 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
         { text: '/help', description: 'Show all available commands', type: 'command' },
         { text: '/docs', description: 'Browse documentation interactively', type: 'command' },
         { text: '/config', description: 'View and edit configuration', type: 'command' },
-        { text: '/plugins', description: 'Select security assessment module', type: 'command' },
+        { text: '/modules', description: 'Select security assessment module', type: 'command' },
         { text: '/health', description: 'Check system and container status', type: 'command' },
         { text: '/setup', description: 'Deployment mode configuration', type: 'command' },
 
@@ -243,7 +243,7 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
     
     switch (flowState.step) {
       case 'module':
-        return '/plugins to select security plugin';
+        return '/modules to select a security module';
       case 'target':
         return 'target https://your-authorized-target.com';
       case 'objective':
@@ -255,7 +255,7 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
         if (currentModule) {
           return 'target <url> or type "execute" after setting target';
         }
-        return 'target <url> or /plugins or /help';
+        return 'target <url> or /modules or /help';
     }
   };
 

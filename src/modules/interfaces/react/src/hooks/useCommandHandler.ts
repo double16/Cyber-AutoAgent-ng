@@ -228,9 +228,8 @@ export function useCommandHandler({
     const aliases: Record<string, string> = {
       'c': 'config',
       'h': 'help',
-      'm': 'plugins',
-      'mod': 'plugins',
-      'p': 'plugins',
+      'm': 'modules',
+      'mod': 'modules',
       'clr': 'clear',
       'cls': 'clear',
       'q': 'exit',
@@ -272,7 +271,7 @@ ASSESSMENT COMMANDS:
 SLASH COMMANDS:
   /help                 - Show this help message
   /docs                 - Browse documentation interactively
-  /plugins              - Select security assessment module
+  /modules              - Select security assessment module
   /config               - View current configuration
   /health               - Check system and container status
   /setup                - Setup wizard (initial setup or switch deployments)
@@ -294,19 +293,19 @@ For detailed instructions, use: /docs`;
         // Perform detailed health check using HealthMonitor service
         await handleHealthCheck();
         break;
-      case 'plugins':
+      case 'modules':
         if (args.length > 0) {
           const moduleName = args[0];
           if (commandParser.getAvailableModules().includes(moduleName)) {
             assessmentFlowManager.processUserInput(`module ${moduleName}`);
-            addOperationHistoryEntry('info', `Plugin loaded: ${moduleName}`);
+            addOperationHistoryEntry('info', `Module loaded: ${moduleName}`);
           } else {
-            addOperationHistoryEntry('error', `Unknown plugin: ${moduleName}. Available plugins: ${commandParser.getAvailableModules().join(', ')}`);
+            addOperationHistoryEntry('error', `Unknown module: ${moduleName}. Available modules: ${commandParser.getAvailableModules().join(', ')}`);
           }
         } else {
           openModuleSelector((moduleName) => {
             assessmentFlowManager.processUserInput(`module ${moduleName}`);
-            addOperationHistoryEntry('info', `Plugin loaded: ${moduleName}`);
+            addOperationHistoryEntry('info', `Module loaded: ${moduleName}`);
           });
         }
         break;
