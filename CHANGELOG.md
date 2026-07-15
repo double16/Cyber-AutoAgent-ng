@@ -2,6 +2,7 @@
 
 ### Features
 
+- Rename the React terminal `/plugins` command to `/modules`.
 - Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation.
 - Add interactive React terminal `continue` and `report` commands for previous operations.
 - Add readline-style editing shortcuts to the React terminal command entry.

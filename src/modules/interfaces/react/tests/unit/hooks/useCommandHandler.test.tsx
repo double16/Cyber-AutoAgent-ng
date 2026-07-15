@@ -219,16 +219,17 @@ describe('useCommandHandler', () => {
         hook.unmount();
     });
 
-    it('handles plugin selection, docs, and unknown slash commands', async () => {
+    it('handles module selection, docs, and unknown slash commands', async () => {
         const {props} = createProps();
         const hook = renderHook(() => useCommandHandler(props as any));
 
         await act(async () => {
-            await hook.current.handleSlashCommand('plugins', ['web']);
-            await hook.current.handleSlashCommand('plugins', ['missing']);
-            await hook.current.handleSlashCommand('plugins', []);
+            await hook.current.handleSlashCommand('modules', ['web']);
+            await hook.current.handleSlashCommand('modules', ['missing']);
+            await hook.current.handleSlashCommand('modules', []);
             await hook.current.handleSlashCommand('docs', ['2']);
             await hook.current.handleSlashCommand('docs', ['9']);
+            await hook.current.handleSlashCommand('plugins', []);
             await hook.current.handleSlashCommand('wat', []);
         });
 
@@ -236,8 +237,9 @@ describe('useCommandHandler', () => {
         expect(props.assessmentFlowManager.processUserInput).toHaveBeenCalledWith('module api');
         expect(props.openModuleSelector).toHaveBeenCalled();
         expect(props.openDocumentation).toHaveBeenCalledWith(2);
-        expect(props.addOperationHistoryEntry).toHaveBeenCalledWith('error', expect.stringContaining('Unknown plugin'));
+        expect(props.addOperationHistoryEntry).toHaveBeenCalledWith('error', expect.stringContaining('Unknown module'));
         expect(props.addOperationHistoryEntry).toHaveBeenCalledWith('error', 'Invalid document number. Please use a number between 1 and 7.');
+        expect(props.addOperationHistoryEntry).toHaveBeenCalledWith('error', 'Unknown command: /plugins. Type /help for available commands.');
         expect(props.addOperationHistoryEntry).toHaveBeenCalledWith('error', 'Unknown command: /wat. Type /help for available commands.');
 
         hook.unmount();

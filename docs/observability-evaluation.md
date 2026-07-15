@@ -117,7 +117,21 @@ events are emitted when the existing evaluation gates disable evaluation.
 
 Multi-turn evaluation also emits an unindexed preparation event immediately before reference-topic generation. It uses
 `step: "RAGAS_PREPARATION"` and `evaluation_step_kind: "reference_topics"`, along with the current scope and a display
-label. Preparation events do not change the metric `evaluation_step_index` or `evaluation_step_total` values.
+label. Evaluation-data assembly, rubric judging, and policy calibration use the same event shape with
+`evaluation_step_kind` set to `evaluation_data`, `rubric_judge`, or `evaluation_policy`. Preparation events do not
+change the metric `evaluation_step_index` or `evaluation_step_total` values.
+
+Each announced metric or preparation stage emits one `evaluation_step_complete` event with a `completed`, `skipped`,
+or `failed` status. Skipped and failed events include a short user-safe message. After an attempted evaluation,
+`evaluation_complete` carries finalized policy-adjusted scores, their average, and an overall status. Evaluation
+internals never emit synthetic `tool_start` or `tool_end` events; those remain reserved for actual agent tools.
+After every evaluation model response with provider usage metadata, the evaluator publishes its cumulative usage into
+the operation-wide accounting. The existing `metrics_update` event then reports assessment, reporting, and evaluation
+tokens and cost as one running total; evaluation does not define a separate cost event. When an integration supplies
+LangChain `input_token_details`, `cache_read` and `cache_creation` are reported as `cacheReadTokens` and
+`cacheWriteTokens`. The event handler prices all evaluation usage with the same precedence as assessment and reporting:
+configured `CYBER_AGENT_PRICING_INPUT`, `CYBER_AGENT_PRICING_OUTPUT`, `CYBER_AGENT_PRICING_CACHE_READ`, and
+`CYBER_AGENT_PRICING_CACHE_WRITE` overrides first, then models.dev rates, then the configured zero-cost fallback.
 
 ### Core Metrics
 

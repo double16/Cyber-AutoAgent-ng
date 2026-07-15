@@ -524,6 +524,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       (event as any).operation_stage === 'ragas_evaluation' ||
       (event as any).step === 'FINAL REPORT'
     )) ||
+    String((event as any).type) === 'evaluation_step_complete' ||
     String((event as any).type) === 'evaluation_complete' ||
     String((event as any).type) === 'assessment_complete'
   );
@@ -1591,6 +1592,15 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           appendCompletionPhaseEvent(evaluationEvent);
         }
         deactivateThinking();
+        break;
+      }
+
+      case 'evaluation_step_complete': {
+        const evaluationStepEvent = event as DisplayStreamEvent;
+        results.push(evaluationStepEvent);
+        if (completionPhaseActiveRef.current) {
+          appendCompletionPhaseEvent(evaluationStepEvent);
+        }
         break;
       }
 

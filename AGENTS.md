@@ -36,3 +36,6 @@
 - Prefer const over let, avoid var
 - Use async/await for asynchronous operations
 - Use template literals for string concatenation
+
+## User Interface
+- When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.

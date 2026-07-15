@@ -16,6 +16,8 @@ import { enableConsoleSilence } from './utils/consoleSilencer.js';
 import { estimateEtaSeconds } from './utils/duration.js';
 import { formatDuration } from './utils/logger.js';
 import { formatDuration as formatToolDuration } from './utils/toolFormatters.js';
+import { formatAutoRunEvaluationEvent } from './utils/evaluationEventFormatting.js';
+import { installAutoRunInterruptFallback } from './utils/autoRunInterrupt.js';
 import { resolveRecordingMode } from './utils/recordingMode.js';
 
 // Check for --debug flag early (before meow parsing) to enable logging
@@ -201,6 +203,7 @@ const runAutoAssessment = async () => {
     let executionService: ExecutionService | null = null;
     let executionHandle: ExecutionHandle | null = null;
     let signalCleanup: (() => void) | null = null;
+    let interruptInputCleanup: (() => void) | null = null;
     let stoppingForSignal = false;
 
     try {
@@ -373,10 +376,15 @@ const runAutoAssessment = async () => {
       process.on('SIGINT', signalHandlers.SIGINT);
       process.on('SIGTERM', signalHandlers.SIGTERM);
       process.on('SIGHUP', signalHandlers.SIGHUP);
+      interruptInputCleanup = installAutoRunInterruptFallback(
+        () => void stopForSignal('SIGINT')
+      );
       signalCleanup = () => {
         process.off('SIGINT', signalHandlers.SIGINT);
         process.off('SIGTERM', signalHandlers.SIGTERM);
         process.off('SIGHUP', signalHandlers.SIGHUP);
+        interruptInputCleanup?.();
+        interruptInputCleanup = null;
       };
 
       // Setup the execution environment if needed
@@ -420,18 +428,8 @@ const runAutoAssessment = async () => {
         }
         else if (event.type === 'progress_update') {
           if (event.operation_stage === 'ragas_evaluation') {
-            const evaluationIndex = Number(event.evaluation_step_index);
-            const evaluationTotal = Number(event.evaluation_step_total);
-            const evaluationLabel = typeof event.evaluation_step_label === 'string'
-              ? event.evaluation_step_label
-              : '';
-            const isPreparation = event.evaluation_step_kind === 'reference_topics';
-            const progressLabel = Number.isFinite(evaluationIndex) && Number.isFinite(evaluationTotal)
-              ? `${evaluationIndex}/${evaluationTotal}`
-              : (isPreparation ? 'preparation' : 'metric');
-            loggingService.info(
-              `➡️ Ragas evaluation ${progressLabel}${evaluationLabel ? `: ${evaluationLabel}` : ''}`
-            );
+            const message = formatAutoRunEvaluationEvent(event);
+            if (message) loggingService.info(message);
           }
           else if (event.operation_stage === 'final_report') {
             const reportIndex = Number(event.report_step_index);
@@ -449,6 +447,10 @@ const runAutoAssessment = async () => {
               : '';
             loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}${etaText}`);
           }
+        }
+        else if (event.type === 'evaluation_step_complete' || event.type === 'evaluation_complete') {
+          const message = formatAutoRunEvaluationEvent(event);
+          if (message) loggingService.info(message);
         }
         else if (event.type === 'task_started') {
             lastTaskTitle = event.title;

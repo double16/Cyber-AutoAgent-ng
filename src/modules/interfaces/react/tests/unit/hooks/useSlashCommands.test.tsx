@@ -63,7 +63,7 @@ describe('useSlashCommands', () => {
             '/help',
             '/health',
             '/docs',
-            '/plugins',
+            '/modules',
             '/config',
             '/setup',
             '/region',
@@ -92,8 +92,11 @@ describe('useSlashCommands', () => {
         await expect(hook.current.executeSlashCommand('/docs 2')).rejects.toThrow(
             'Error executing /docs: Documentation command should be handled by useCommandHandler'
         );
-        await expect(hook.current.executeSlashCommand('/plugins web')).rejects.toThrow(
-            'Error executing /plugins: Plugins command should be handled by useCommandHandler'
+        await expect(hook.current.executeSlashCommand('/modules web')).rejects.toThrow(
+            'Error executing /modules: Modules command should be handled by useCommandHandler'
+        );
+        await expect(hook.current.executeSlashCommand('/plugins')).rejects.toThrow(
+            'Unknown command: /plugins. Type /help for available commands.'
         );
         await expect(hook.current.executeSlashCommand('/config')).rejects.toThrow(
             'Error executing /config: Config command should be handled by useCommandHandler'

@@ -51,6 +51,8 @@ const resolveProjectRoot = (): string | null => {
 // These events are used for UI state management and display formatting
 export type AdditionalStreamEvent = 
   | { type: 'progress_update'; step: number | string; progressPercent?: number; totalTools?: number; operation?: string; duration?: string; [key: string]: any }
+  | { type: 'evaluation_step_complete'; status: 'completed' | 'skipped' | 'failed'; evaluation_step_kind: string; [key: string]: any }
+  | { type: 'evaluation_complete'; status?: 'completed' | 'no_results' | 'failed'; scores?: Record<string, number>; [key: string]: any }
   | { type: 'reasoning'; content: string; [key: string]: any }
   | { type: 'thinking'; context?: 'reasoning' | 'tool_preparation' | 'tool_execution' | 'waiting' | 'startup' | 'rate_limit'; startTime?: number; urgent?: boolean; [key: string]: any }
   | { type: 'thinking_end'; [key: string]: any }
@@ -2042,6 +2044,59 @@ const method = latestInput.method || 'GET';
           ) : null}
         </Box>
       );
+
+    case 'evaluation_step_complete': {
+      const status = String((event as any).status || 'completed');
+      if (status === 'completed') return null;
+      const metric = String((event as any).evaluation_metric || '').replace(/_/g, ' ');
+      const kind = String((event as any).evaluation_step_kind || 'evaluation').replace(/_/g, ' ');
+      const scope = String((event as any).evaluation_scope || 'operation');
+      const label = metric ? `${scope}: ${metric}` : `${scope}: ${kind}`;
+      const message = String((event as any).message || 'Evaluation step did not complete');
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={status === 'failed' ? 'red' : 'yellow'} bold>
+            [RAGAS EVALUATION] {label} {status}
+          </Text>
+          <Box marginLeft={2}>
+            <Text dimColor>└─ {message}</Text>
+          </Box>
+        </Box>
+      );
+    }
+
+    case 'evaluation_complete': {
+      const status = String((event as any).status || ((event as any).success === false ? 'failed' : 'completed'));
+      const scores = ((event as any).scores && typeof (event as any).scores === 'object')
+        ? Object.entries((event as any).scores).filter(([, value]) => typeof value === 'number') as Array<[string, number]>
+        : [];
+      const average = typeof (event as any).average_score === 'number'
+        ? (event as any).average_score
+        : (scores.length > 0 ? scores.reduce((sum, [, value]) => sum + value, 0) / scores.length : null);
+      if (status !== 'completed') {
+        return (
+          <Box flexDirection="column" marginTop={1}>
+            <Text color={status === 'failed' ? 'red' : 'yellow'} bold>
+              EVALUATION {status === 'no_results' ? 'COMPLETED WITHOUT RESULTS' : 'FAILED'}
+            </Text>
+            {(event as any).message && <Text dimColor>  {(event as any).message}</Text>}
+          </Box>
+        );
+      }
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="green" bold>EVALUATION COMPLETE</Text>
+          <Text dimColor>
+            {'  '}Metrics: {scores.length}{average != null ? ` | Average: ${(average * 100).toFixed(1)}%` : ''}
+          </Text>
+          {scores.map(([name, value], index) => (
+            <Text key={name} dimColor>
+              {'  '}{index === scores.length - 1 ? '└─' : '├─'} {name.replace(/_/g, ' ')}: {(value * 100).toFixed(1)}%
+            </Text>
+          ))}
+        </Box>
+      );
+    }
 
     case 'specialist_start': {
       const specialist = event.specialist || 'validation';

@@ -4,7 +4,7 @@
  * Provides arrow key navigation and descriptions for each security module
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useModule } from '../contexts/ModuleContext.js';
 import { themeManager } from '../themes/theme-manager.js';
@@ -25,6 +25,7 @@ export const ModuleSelector: React.FC<ModuleSelectorProps> = React.memo(({ onClo
   const { availableModules, currentModule, switchModule } = useModule();
   const theme = themeManager.getCurrentTheme();
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const selectedIndexRef = useRef(0);
   
   // Build module options list - show raw module names (memoized for performance)
   const moduleOptions: ModuleOption[] = React.useMemo(() => 
@@ -39,10 +40,10 @@ export const ModuleSelector: React.FC<ModuleSelectorProps> = React.memo(({ onClo
   // Set initial selection to current module
   useEffect(() => {
     const currentIndex = moduleOptions.findIndex(m => m.isCurrent);
-    if (currentIndex >= 0) {
-      setSelectedIndex(currentIndex);
-    }
-  }, []);
+    const nextIndex = currentIndex >= 0 ? currentIndex : 0;
+    selectedIndexRef.current = nextIndex;
+    setSelectedIndex(nextIndex);
+  }, [moduleOptions]);
   
   // Handle keyboard input with stable callbacks
   const handleKeyInput = React.useCallback((input: string, key: any) => {
@@ -52,17 +53,21 @@ export const ModuleSelector: React.FC<ModuleSelectorProps> = React.memo(({ onClo
     }
     
     if (key.upArrow) {
-      setSelectedIndex(prev => Math.max(0, prev - 1));
+      const nextIndex = Math.max(0, selectedIndexRef.current - 1);
+      selectedIndexRef.current = nextIndex;
+      setSelectedIndex(nextIndex);
       return;
     }
     
     if (key.downArrow) {
-      setSelectedIndex(prev => Math.min(moduleOptions.length - 1, prev + 1));
+      const nextIndex = Math.min(moduleOptions.length - 1, selectedIndexRef.current + 1);
+      selectedIndexRef.current = nextIndex;
+      setSelectedIndex(nextIndex);
       return;
     }
     
     if (key.return) {
-      const selected = moduleOptions[selectedIndex];
+      const selected = moduleOptions[selectedIndexRef.current];
       if (selected && selected.id !== currentModule) {
         switchModule(selected.id).then(() => {
           if (onSelect) {
@@ -75,7 +80,7 @@ export const ModuleSelector: React.FC<ModuleSelectorProps> = React.memo(({ onClo
       }
       return;
     }
-  }, [moduleOptions, selectedIndex, currentModule, switchModule, onSelect, onClose]);
+  }, [moduleOptions, currentModule, switchModule, onSelect, onClose]);
   
   useInput(handleKeyInput);
   

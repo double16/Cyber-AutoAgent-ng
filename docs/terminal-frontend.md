@@ -58,17 +58,33 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 - `tool_output`: Execution results
 - `output`: User-visible text, including controller-owned plan creation and update snapshots
 - `reasoning`: Agent decision context
-- `metrics_update`: Token, cost, duration, and budget progress
+- `metrics_update`: Operation-wide token, cost, duration, and budget progress, including reporting and evaluation usage
 - `progress_update`: Progress updates, including indexed final-report and Ragas metric stages and unindexed Ragas
   preparation stages
-- `evaluation_complete`: Successful completion of configured assessment evaluation
+- `evaluation_step_complete`: Semantic completion status for a Ragas metric or preparation stage
+- `evaluation_complete`: Finalized assessment evaluation status and numeric scores
 - `assessment_complete`: Terminal lifecycle event emitted after report generation and any evaluation attempt
 
-When automatic evaluation is enabled, terminal event ordering is report events, Ragas evaluation progress,
-`evaluation_complete` when scores are produced, and finally `assessment_complete`. If evaluation is disabled, skipped,
-or fails, `assessment_complete` is still emitted after that decision so execution services can close without hanging.
+When automatic evaluation is enabled, terminal event ordering is report events, Ragas evaluation progress and step
+results, `evaluation_complete`, and finally `assessment_complete`. An attempted evaluation emits
+`evaluation_complete` with `status` set to `completed`, `no_results`, or `failed`; disabled evaluation emits no
+evaluation events. `assessment_complete` is always emitted after the evaluation decision so execution services can
+close without hanging. The periodic metrics thread remains active through final reporting and evaluation and stops when
+this terminal lifecycle event is emitted.
 The React terminal keeps report and evaluation events in one append-only completion stream and shows an
 `Evaluating assessment` spinner with the current preparation or metric label until evaluation finishes.
+
+Evaluation work is not represented as `tool_start` or `tool_end`: those event types are reserved for actual callable
+tools. Metric progress identifies the scope and metric, while preparation labels cover evaluation-data assembly,
+reference-topic generation, rubric judging, and policy calibration. Successful `evaluation_complete` events include
+`metrics_evaluated`, `average_score`, and the finalized `scores` mapping.
+
+Evaluation model calls contribute to the same cumulative `metrics_update` totals as assessment and reporting calls.
+Auto-run therefore keeps showing one cost value while evaluation progresses; there is no separate
+evaluation-cost event or subtotal. Token totals remain available in the structured event and interactive footer.
+Provider-reported evaluation cache reads and cache creation also contribute to the structured event's
+`cacheReadTokens`, `cacheWriteTokens`, and total cost. Evaluation uses the same `CYBER_AGENT_PRICING_*` environment
+overrides and models.dev fallback as assessment and reporting.
 
 ### Event Processing
 

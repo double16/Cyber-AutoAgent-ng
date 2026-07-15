@@ -259,4 +259,48 @@ describe('input and selection components', () => {
         sendInput('', {escape: true});
         expect(onClose).toHaveBeenCalledTimes(2);
     });
+
+    it('selects the navigated module when navigation and Enter are batched', async () => {
+        const {ModuleSelector} = await load();
+        const onClose = jest.fn();
+        const onSelect = jest.fn();
+
+        act(() => {
+            TestRenderer.create(<ModuleSelector onClose={onClose} onSelect={onSelect}/>);
+        });
+
+        act(() => {
+            (global as any).__inkInputHandler?.('', {downArrow: true});
+            (global as any).__inkInputHandler?.('', {return: true});
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(switchModule).toHaveBeenCalledWith('cloud');
+        expect(onSelect).toHaveBeenCalledWith('cloud');
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('selects the previous module when upward navigation and Enter are batched', async () => {
+        const {ModuleSelector} = await load();
+        const onClose = jest.fn();
+        const onSelect = jest.fn();
+
+        act(() => {
+            TestRenderer.create(<ModuleSelector onClose={onClose} onSelect={onSelect}/>);
+        });
+
+        act(() => {
+            (global as any).__inkInputHandler?.('', {upArrow: true});
+            (global as any).__inkInputHandler?.('', {return: true});
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(switchModule).toHaveBeenCalledWith('recon');
+        expect(onSelect).toHaveBeenCalledWith('recon');
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
 });

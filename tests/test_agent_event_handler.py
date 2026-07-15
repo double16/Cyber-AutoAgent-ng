@@ -179,6 +179,7 @@ def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
 
 def test_reasoning_termination_metrics_and_basic_helpers():
     handler = make_handler()
+    handler._stop_metrics_thread = Mock()
 
     handler._handle_reasoning("I should inspect the headers.")
     handler._handle_reasoning("I should inspect the headers.")
@@ -198,6 +199,7 @@ def test_reasoning_termination_metrics_and_basic_helpers():
     handler._emit_estimated_metrics(force=True)
     handler._handle_completion()
 
+    handler._stop_metrics_thread.assert_not_called()
     assert event_types(handler).count("termination_reason") == 1
     assert handler._format_duration(65) == "1m 5s"
     assert handler._extract_code_from_input({"code": "print(1)"}) == "print(1)"
@@ -745,6 +747,24 @@ def test_compute_cost_pricing_env_override_precedes_model_pricing():
     handler.models_client.get_pricing.assert_not_called()
 
 
+def test_compute_cost_uses_evaluation_model_override_for_models_dev_pricing():
+    handler = make_handler()
+    pricing = SimpleNamespace(input=3.0, output=6.0, cache_read=0.5, cache_write=4.0)
+    handler.models_client = SimpleNamespace(get_pricing=Mock(return_value=pricing))
+
+    cost = handler._compute_cost_from_metrics(
+        input_tokens=1_000,
+        output_tokens=500,
+        cache_read_tokens=800,
+        cache_write_tokens=200,
+        provider_override="litellm",
+        model_id_override="provider/evaluation-model",
+    )
+
+    assert cost == pytest.approx(0.0072)
+    handler.models_client.get_pricing.assert_called_once_with("provider/evaluation-model")
+
+
 def test_compute_cost_without_agent_skips_model_pricing_for_ollama():
     handler = make_handler()
     handler.model_id = "local-model"
@@ -985,10 +1005,13 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     assert generated_calls[0]["config_params"]["provider"] == "litellm"
     assert "assessment_complete" not in event_types(handler)
     handler.emitter = SimpleNamespace()
+    handler._stop_metrics_thread = Mock()
     handler.emit_assessment_complete()
     assert any(event["type"] == "assessment_complete" and event["report_path"] is None for event in handler._events)
+    handler._stop_metrics_thread.assert_called_once_with()
     handler.emit_assessment_complete()
     assert event_types(handler).count("assessment_complete") == 1
+    handler._stop_metrics_thread.assert_called_once_with()
 
     handler = make_handler()
     handler.operation_id = "OP_REPORT"
@@ -1023,6 +1046,17 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     )
 
 
+def test_assessment_complete_stops_metrics_when_event_emission_fails():
+    handler = make_handler()
+    handler.emit_ui_event = Mock(side_effect=RuntimeError("transport failed"))
+    handler._stop_metrics_thread = Mock()
+
+    with pytest.raises(RuntimeError, match="transport failed"):
+        handler.emit_assessment_complete()
+
+    handler._stop_metrics_thread.assert_called_once_with()
+
+
 def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     handler = make_handler()
     handler.memory_ops = 1
@@ -1045,24 +1079,71 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
 
     handler = make_handler()
     handler.emitter = SimpleNamespace(emit=lambda _event: None)
+    handler._pricing_override_configured = True
+    handler.models_client = SimpleNamespace(
+        get_pricing=Mock(side_effect=AssertionError("environment pricing must take precedence"))
+    )
     monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
     monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
 
     class FakeEvaluationManager:
-        def __init__(self, operation_id, emitter, report_path=None):
+        def __init__(self, operation_id, emitter, report_path=None, usage_callback=None):
             self.operation_id = operation_id
             self.emitter = emitter
             self.report_path = report_path
+            self.usage_callback = usage_callback
 
         def register_trace(self, **kwargs):
             self.trace = kwargs
 
         async def evaluate_all_traces(self):
-            return [{"score": 1}]
+            self.usage_callback(
+                {
+                    "modelId": "evaluation-model",
+                    "providerId": "litellm",
+                    "inputTokens": 10,
+                    "outputTokens": 5,
+                    "cacheReadTokens": 7,
+                    "cacheWriteTokens": 3,
+                }
+            )
+            return {"OP_TEST": {"operation/evidence_quality": 0.8, "operation/goal_accuracy": 0.6}}
 
     monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FakeEvaluationManager)
     handler.trigger_evaluation_on_completion()
     assert "evaluation_complete" in event_types(handler)
+    evaluation_event = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    assert evaluation_event["status"] == "completed"
+    assert evaluation_event["metrics_evaluated"] == 2
+    assert evaluation_event["average_score"] == pytest.approx(0.7)
+    evaluation_metrics = [event for event in handler._events if event["type"] == "metrics_update"][-1]
+    assert evaluation_metrics["metrics"]["inputTokens"] == 10
+    assert evaluation_metrics["metrics"]["outputTokens"] == 5
+    assert evaluation_metrics["metrics"]["cacheReadTokens"] == 7
+    assert evaluation_metrics["metrics"]["cacheWriteTokens"] == 3
+    assert evaluation_metrics["metrics"]["cost"] == pytest.approx(0.00002325)
+
+    class NoResultsEvaluationManager(FakeEvaluationManager):
+        async def evaluate_all_traces(self):
+            return {}
+
+    handler = make_handler()
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", NoResultsEvaluationManager)
+    handler.trigger_evaluation_on_completion()
+    no_results = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    assert no_results["status"] == "no_results"
+    assert no_results["success"] is False
+
+    class FailedEvaluationManager(FakeEvaluationManager):
+        async def evaluate_all_traces(self):
+            raise RuntimeError("provider unavailable")
+
+    handler = make_handler()
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FailedEvaluationManager)
+    handler.trigger_evaluation_on_completion()
+    failed = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    assert failed["status"] == "failed"
+    assert failed["message"] == "Evaluation failed; see logs for details"
     # Budget-based stop check: simulate duration exceeded
     handler.budget_max_duration = 1
     handler.start_time = time.time() - 61

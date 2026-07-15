@@ -611,6 +611,15 @@ describe('Terminal event processing', () => {
                 evaluation_step_kind: 'reference_topics',
                 evaluation_step_label: 'Operation: Generate Reference Topics',
             });
+            service.emit('event', {
+                type: 'evaluation_step_complete',
+                operation_id: 'OP_TEST',
+                operation_stage: 'ragas_evaluation',
+                evaluation_scope: 'operation',
+                evaluation_step_kind: 'rubric_judge',
+                status: 'skipped',
+                message: 'Insufficient evidence for rubric judging',
+            });
             await Promise.resolve();
         });
 
@@ -632,12 +641,21 @@ describe('Terminal event processing', () => {
         expect(textFromTree(view.toJSON())).toContain(
             '[RAGAS EVALUATION PREPARING] Operation: Generate Reference Topics'
         );
+        expect(textFromTree(view.toJSON())).toContain('operation: rubric judge skipped');
 
         await act(async () => {
-            service.emit('event', {type: 'evaluation_complete'});
+            service.emit('event', {
+                type: 'evaluation_complete',
+                status: 'completed',
+                success: true,
+                scores: {'operation/evidence_quality': 0.75},
+                average_score: 0.75,
+            });
             await Promise.resolve();
         });
         expect(onThinkingUpdate).toHaveBeenLastCalledWith({active: false});
+        expect(textFromTree(view.toJSON())).toContain('Average: 75.0%');
+        expect(textFromTree(view.toJSON())).not.toContain('tool: evaluation');
 
         act(() => {
             view.unmount();

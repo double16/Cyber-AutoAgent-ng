@@ -133,6 +133,22 @@ describe('UnifiedInputPrompt', () => {
         expect((global as any).CYBER_APP_STATE_ACTIONS.pushCommandHistory).toHaveBeenCalledWith(expect.stringContaining('line one'));
     });
 
+    it('suggests the modules command during module selection', async () => {
+        const {UnifiedInputPrompt} = await load();
+        moduleContext.currentModule = '';
+
+        let view!: ReactTestRenderer;
+        act(() => {
+            view = TestRenderer.create(
+                <UnifiedInputPrompt flowState={{step: 'module'}} onInput={jest.fn()}/>
+            );
+        });
+
+        const content = textFromTree(view.toJSON());
+        expect(content).toContain('/modules');
+        expect(content).not.toContain('/plugins');
+    });
+
     it('pushes submitted commands through explicit persistent history props', async () => {
         const {UnifiedInputPrompt} = await load();
         const onInput = jest.fn();
