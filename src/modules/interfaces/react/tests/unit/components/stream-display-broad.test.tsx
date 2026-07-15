@@ -179,6 +179,46 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('unknown_tool');
   });
 
+  it('renders semantic evaluation failures and finalized scores without tool headers', async () => {
+    const { EventLine, render } = await load();
+    const failed = render(<EventLine event={{
+      type: 'evaluation_step_complete',
+      evaluation_scope: 'operation',
+      evaluation_step_kind: 'metric',
+      evaluation_metric: 'goal_accuracy',
+      status: 'failed',
+      message: 'Metric evaluation failed',
+    } as any} animationsEnabled={false} />).lastFrame();
+    const complete = render(<EventLine event={{
+      type: 'evaluation_complete',
+      status: 'completed',
+      success: true,
+      scores: {'operation/evidence_quality': 0.8, 'operation/goal_accuracy': 0.6},
+      average_score: 0.7,
+    } as any} animationsEnabled={false} />).lastFrame();
+    const noResults = render(<EventLine event={{
+      type: 'evaluation_complete',
+      status: 'no_results',
+      success: false,
+      message: 'Evaluation produced no scores',
+    } as any} animationsEnabled={false} />).lastFrame();
+    const failure = render(<EventLine event={{
+      type: 'evaluation_complete',
+      status: 'failed',
+      success: false,
+      message: 'Evaluation failed; see logs for details',
+    } as any} animationsEnabled={false} />).lastFrame();
+
+    expect(failed).toContain('operation: goal accuracy failed');
+    expect(failed).toContain('Metric evaluation failed');
+    expect(complete).toContain('EVALUATION COMPLETE');
+    expect(complete).toContain('Average: 70.0%');
+    expect(complete).toContain('operation/evidence quality: 80.0%');
+    expect(noResults).toContain('EVALUATION COMPLETED WITHOUT RESULTS');
+    expect(failure).toContain('EVALUATION FAILED');
+    expect(`${failed}\n${complete}\n${noResults}\n${failure}`).not.toContain('tool: evaluation');
+  });
+
   it('renders agent names on tool_start headers', async () => {
     const {EventLine, render} = await load();
     const toolEvents: any[] = [

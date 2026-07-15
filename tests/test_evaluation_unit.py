@@ -16,6 +16,83 @@ class RecordingEmitter:
         self.events.append(event)
 
 
+def test_evaluation_usage_callback_accumulates_tokens_and_deduplicates_runs():
+    updates = []
+    callback = mod.EvaluationUsageCallback("provider/evaluator", "litellm", updates.append)
+    response = SimpleNamespace(
+        llm_output={
+            "token_usage": {
+                "prompt_tokens": 1_000,
+                "completion_tokens": 500,
+                "cache_read_input_tokens": 800,
+                "cache_creation_input_tokens": 200,
+            }
+        },
+        generations=[],
+    )
+
+    callback.on_llm_end(response, run_id="run-1")
+    callback.on_llm_end(response, run_id="run-1")
+    callback.on_llm_end(response, run_id="run-2")
+
+    assert updates == [
+        {
+            "modelId": "provider/evaluator",
+            "providerId": "litellm",
+            "inputTokens": 1_000,
+            "outputTokens": 500,
+            "cacheReadTokens": 800,
+            "cacheWriteTokens": 200,
+        },
+        {
+            "modelId": "provider/evaluator",
+            "providerId": "litellm",
+            "inputTokens": 2_000,
+            "outputTokens": 1_000,
+            "cacheReadTokens": 1_600,
+            "cacheWriteTokens": 400,
+        },
+    ]
+
+
+def test_evaluation_usage_callback_ignores_missing_usage():
+    callback_fn = Mock()
+    callback = mod.EvaluationUsageCallback("provider/evaluator", "litellm", callback_fn)
+
+    callback.on_llm_end(SimpleNamespace(llm_output={}, generations=[]), run_id="run-1")
+
+    callback_fn.assert_not_called()
+
+
+def test_evaluation_usage_callback_reads_message_metadata():
+    updates = []
+    message = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "input_token_details": {"cache_read": 5, "cache_creation": 2},
+        }
+    )
+    response = SimpleNamespace(
+        llm_output=None,
+        generations=[[SimpleNamespace(message=message)]],
+    )
+    callback = mod.EvaluationUsageCallback("unpriced-model", "gemini", updates.append)
+
+    callback.on_llm_end(response, run_id="run-1")
+
+    assert updates == [
+        {
+            "modelId": "unpriced-model",
+            "providerId": "gemini",
+            "inputTokens": 7,
+            "outputTokens": 3,
+            "cacheReadTokens": 5,
+            "cacheWriteTokens": 2,
+        }
+    ]
+
+
 class FakeConfigManager:
     def __init__(self, cfg=None):
         self.cfg = cfg or SimpleNamespace(
@@ -323,6 +400,8 @@ async def test_evaluate_all_metrics_single_turn_success_skip_and_error(monkeypat
             raise RuntimeError("fail")
 
     ev.all_metrics = [GoodMetric(), NoneMetric(), MultiOnly(), BadMetric()]
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._evaluation_step_total = 4
     sample = SingleTurnSample(user_input="target", response="done", retrieved_contexts=[])
 
     assert await ev._evaluate_all_metrics(sample) == {
@@ -331,7 +410,14 @@ async def test_evaluate_all_metrics_single_turn_success_skip_and_error(monkeypat
         "multi_only": 0.0,
         "bad": 0.0,
     }
-    assert any(event["type"] == "tool_start" for event in ev._emitter.events)
+    assert not any(event["type"] in {"tool_start", "tool_end"} for event in ev._emitter.events)
+    completed = [event for event in ev._emitter.events if event["type"] == "evaluation_step_complete"]
+    assert [(event["evaluation_metric"], event["status"]) for event in completed] == [
+        ("good", "completed"),
+        ("none", "failed"),
+        ("multi_only", "skipped"),
+        ("bad", "failed"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -407,6 +493,26 @@ def test_evaluation_preparation_progress_is_unindexed(monkeypatch):
     assert ev._evaluation_step_total == 5
 
 
+def test_evaluation_preparation_completion_is_semantic(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
+
+    ev._emit_evaluation_preparation_progress("rubric_judge")
+    ev._emit_evaluation_preparation_progress("rubric_judge", "failed")
+
+    assert ev._emitter.events[0]["evaluation_step_label"] == "Operation: Run Rubric Judge"
+    assert ev._emitter.events[1] == {
+        "type": "evaluation_step_complete",
+        "operation_id": "OP_TEST",
+        "operation_stage": "ragas_evaluation",
+        "evaluation_scope": "operation",
+        "evaluation_step_kind": "rubric_judge",
+        "status": "failed",
+        "message": "Rubric Judge failed",
+    }
+
+
 def test_evaluation_preparation_progress_is_best_effort_and_scheduled(monkeypatch):
     ev = evaluator(monkeypatch)
     ev._emit_evaluation_preparation_progress("reference_topics")
@@ -465,6 +571,8 @@ def test_metric_category_and_chat_helpers(monkeypatch):
 @pytest.mark.asyncio
 async def test_infer_policy_and_rubric_judge(monkeypatch):
     ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
     ev.trace_parser = SimpleNamespace(
         count_current_evidence_findings=lambda _parsed: 2,
         count_evidence_findings=lambda _calls: 2,
@@ -501,6 +609,54 @@ async def test_infer_policy_and_rubric_judge(monkeypatch):
     rubric = await ev._rubric_judge_scores(data)
     assert rubric["rubric/overall_quality"][0] == 0.65
     assert rubric["rubric/methodology"][1]["dimension"] == "methodology"
+    assert not any(event["type"] in {"tool_start", "tool_end"} for event in ev._emitter.events)
+    preparation_kinds = [
+        event["evaluation_step_kind"]
+        for event in ev._emitter.events
+        if event["type"] == "progress_update"
+    ]
+    assert preparation_kinds == ["evaluation_policy", "rubric_judge"]
+    completions = [
+        event for event in ev._emitter.events if event["type"] == "evaluation_step_complete"
+    ]
+    assert [(event["evaluation_step_kind"], event["status"]) for event in completions] == [
+        ("evaluation_policy", "completed"),
+        ("rubric_judge", "completed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_policy_and_rubric_failures_emit_semantic_status(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
+    ev._last_parsed_trace = SimpleNamespace(
+        tool_calls=[SimpleNamespace(success=True)],
+        metadata={},
+        objective="Assess",
+        target="target",
+    )
+    ev.trace_parser = SimpleNamespace(
+        count_current_evidence_findings=lambda _parsed: 1,
+        count_evidence_findings=lambda _calls: 1,
+    )
+    ev._chat_model = SimpleNamespace(invoke=Mock(return_value=SimpleNamespace(content="not-json")))
+    data = SimpleNamespace(user_input="objective", retrieved_contexts=[], reference_topics=[])
+
+    assert await ev._infer_evaluation_policy(data) == {}
+    assert ev._emitter.events[-1]["status"] == "failed"
+
+    ev._chat_model = SimpleNamespace(invoke=Mock(side_effect=RuntimeError("judge unavailable")))
+    assert await ev._rubric_judge_scores(data) == {}
+    assert ev._emitter.events[-1] == {
+        "type": "evaluation_step_complete",
+        "operation_id": "OP_TEST",
+        "operation_stage": "ragas_evaluation",
+        "evaluation_scope": "operation",
+        "evaluation_step_kind": "rubric_judge",
+        "status": "failed",
+        "message": "Rubric judge failed",
+    }
 
 
 def test_synthesize_context_summary_and_topics(monkeypatch):
@@ -544,6 +700,8 @@ async def test_create_evaluation_data_success_and_insufficient_evidence(monkeypa
         summary_max_chars=2000,
     )
     ev = evaluator(monkeypatch, cfg)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
     parsed = SimpleNamespace(
         trace_id="trace",
         messages=[{"role": "assistant", "content": "done"}],
@@ -574,6 +732,39 @@ async def test_create_evaluation_data_success_and_insufficient_evidence(monkeypa
     assert result.retrieved_contexts == ["context"]
     ev._synthesize_topics.assert_called()
     assert ev._last_eval_stats == {"memory_ops": 1, "evidence_count": 0, "tool_calls_count": 1}
+    statuses = [
+        event["status"]
+        for event in ev._emitter.events
+        if event["type"] == "evaluation_step_complete"
+        and event["evaluation_step_kind"] == "evaluation_data"
+    ]
+    assert statuses == ["skipped", "completed"]
+    assert not any(event["type"] in {"tool_start", "tool_end"} for event in ev._emitter.events)
+
+
+@pytest.mark.asyncio
+async def test_create_evaluation_data_reports_parse_and_sample_failures(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev.trace_parser = SimpleNamespace(parse_trace=Mock(return_value=None))
+
+    assert await ev._create_evaluation_data(SimpleNamespace(id="bad-trace")) is None
+    assert ev._emitter.events[-1]["status"] == "failed"
+
+    parsed = SimpleNamespace(trace_id="trace", messages=[], tool_calls=[], metadata={})
+
+    async def fail_sample(_parsed):
+        raise RuntimeError("sample failed")
+
+    ev.trace_parser = SimpleNamespace(
+        parse_trace=Mock(return_value=parsed),
+        count_memory_operations=Mock(return_value=0),
+        count_evidence_findings=Mock(return_value=0),
+        create_evaluation_sample=Mock(side_effect=fail_sample),
+    )
+    with pytest.raises(RuntimeError, match="sample failed"):
+        await ev._create_evaluation_data(SimpleNamespace(id="trace"))
+    assert ev._emitter.events[-1]["message"] == "Unable to prepare evaluation sample"
 
 
 async def _sample(sample):

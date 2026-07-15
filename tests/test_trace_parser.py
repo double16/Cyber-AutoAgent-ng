@@ -218,7 +218,7 @@ async def test_topic_generation_reports_progress_before_llm_call(monkeypatch):
     monkeypatch.setattr("ragas.prompt.PydanticPrompt.generate", generate)
     parser = TraceParser(
         llm=SimpleNamespace(generate=object()),
-        progress_callback=lambda kind: calls.append(kind),
+        progress_callback=lambda kind, status="started": calls.append(f"{kind}:{status}"),
     )
 
     topics = await parser._generate_reference_topics_from_trace(
@@ -226,7 +226,7 @@ async def test_topic_generation_reports_progress_before_llm_call(monkeypatch):
     )
 
     assert topics == ["authentication", "authorization"]
-    assert calls == ["reference_topics", "generate"]
+    assert calls == ["reference_topics:started", "generate", "reference_topics:completed"]
 
 
 @pytest.mark.asyncio

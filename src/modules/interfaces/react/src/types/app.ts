@@ -104,5 +104,9 @@ export interface StreamEvent {
   evaluation_scope?: string;
   evaluation_metric?: string;
   evaluation_step_label?: string;
+  status?: string;
+  scores?: Record<string, number>;
+  metrics_evaluated?: number;
+  average_score?: number | null;
   [key: string]: any;
 }

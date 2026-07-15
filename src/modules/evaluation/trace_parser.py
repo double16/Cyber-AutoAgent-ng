@@ -127,7 +127,7 @@ class TraceParser:
         self,
         llm=None,
         langfuse_client=None,
-        progress_callback: Optional[Callable[[str], None]] = None,
+        progress_callback: Optional[Callable[..., None]] = None,
     ):
         """Initialize the trace parser.
 
@@ -1041,6 +1041,14 @@ Return a JSON list of topic strings that represent the key areas this assessment
                 response = await topic_prompt.generate(
                     data=input_data, llm=self.llm, callbacks=None
                 )
+                if self.progress_callback:
+                    try:
+                        self.progress_callback("reference_topics", "completed")
+                    except Exception as error:
+                        logger.debug(
+                            "Unable to report reference-topic completion: %s",
+                            error,
+                        )
 
                 if response and hasattr(response, "topics") and response.topics:
                     logger.debug(
@@ -1060,6 +1068,14 @@ Return a JSON list of topic strings that represent the key areas this assessment
 
         except Exception as e:
             logger.error(f"Failed to generate topics with LLM: {e}")
+            if self.progress_callback:
+                try:
+                    self.progress_callback("reference_topics", "failed")
+                except Exception as error:
+                    logger.debug(
+                        "Unable to report reference-topic failure: %s",
+                        error,
+                    )
             # Use objective as topic if LLM fails
             return (
                 [parsed_trace.objective]

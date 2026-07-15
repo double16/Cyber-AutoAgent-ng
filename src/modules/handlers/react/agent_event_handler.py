@@ -913,6 +913,33 @@ class AgentEventHandler(PrintingCallbackHandler):
             "cost": float(usage.cost),
         }
 
+    def _record_evaluation_usage(self, usage: Dict[str, Any]) -> None:
+        """Publish cumulative evaluation usage into the operation metrics total."""
+        if self.coordinator is None:
+            return
+        input_tokens = int(usage.get("inputTokens", 0) or 0)
+        output_tokens = int(usage.get("outputTokens", 0) or 0)
+        cache_read_tokens = int(usage.get("cacheReadTokens", 0) or 0)
+        cache_write_tokens = int(usage.get("cacheWriteTokens", 0) or 0)
+        self.coordinator.update_usage(
+            f"evaluation:{self.operation_id}",
+            _AgentUsageEntry(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                cost=self._compute_cost_from_metrics(
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    provider_override=str(usage.get("providerId") or ""),
+                    model_id_override=str(usage.get("modelId") or ""),
+                ),
+            ),
+        )
+        self._emit_estimated_metrics(force=True)
+
     def _report_budget_estimate(self) -> ReportBudgetEstimate:
         coordinator = self.coordinator
         if coordinator is None:
@@ -2447,6 +2474,8 @@ class AgentEventHandler(PrintingCallbackHandler):
             cache_read_tokens: int,
             cache_write_tokens: int,
             agent: Any = None,
+            provider_override: Optional[str] = None,
+            model_id_override: Optional[str] = None,
     ) -> float:
         cost = self.pricing_input * (input_tokens / 1_000_000) \
                + self.pricing_output * (output_tokens / 1_000_000) \
@@ -2463,6 +2492,9 @@ class AgentEventHandler(PrintingCallbackHandler):
         if pricing_agent:
             provider = get_provider_from_agent(pricing_agent)
             model_id = get_model_id_from_agent(pricing_agent)
+        elif model_id_override:
+            provider = provider_override
+            model_id = model_id_override
         else:
             provider = self.provider_id
             model_id = self.model_id
@@ -2668,9 +2700,6 @@ class AgentEventHandler(PrintingCallbackHandler):
             )
         except Exception:
             pass
-
-        # Stop metrics thread on completion
-        self._stop_metrics_thread()
 
     def _is_valid_input(self, tool_input: Any) -> bool:
         """Check if tool input is valid."""
@@ -2966,6 +2995,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             return
 
         self._assessment_completion_emitted = True
+        self._stop_metrics_thread()
         self.emit_ui_event(
             {
                 "type": "assessment_complete",
@@ -3009,6 +3039,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 operation_id=self.operation_id,
                 emitter=self.emitter,
                 report_path=getattr(self, "_evaluation_report_path", None),
+                usage_callback=self._record_evaluation_usage,
             )
 
             eval_manager.register_trace(
@@ -3028,6 +3059,17 @@ class AgentEventHandler(PrintingCallbackHandler):
             results = loop.run_until_complete(eval_manager.evaluate_all_traces())
 
             if results:
+                scores: Dict[str, float] = {}
+                if isinstance(results, dict):
+                    for result_scores in results.values():
+                        if not isinstance(result_scores, dict):
+                            continue
+                        for name, value in result_scores.items():
+                            if isinstance(value, (int, float)):
+                                scores[str(name)] = float(value)
+                average_score = (
+                    sum(scores.values()) / len(scores) if scores else None
+                )
                 logger.info(
                     "Evaluation completed successfully: %d traces evaluated",
                     len(results),
@@ -3036,14 +3078,43 @@ class AgentEventHandler(PrintingCallbackHandler):
                     {
                         "type": "evaluation_complete",
                         "operation_id": self.operation_id,
+                        "success": True,
+                        "status": "completed",
                         "traces_evaluated": len(results),
+                        "metrics_evaluated": len(scores),
+                        "scores": scores,
+                        "average_score": average_score,
                     }
                 )
             else:
                 logger.warning("No evaluation results - check trace finding and metric evaluation")
+                self.emit_ui_event(
+                    {
+                        "type": "evaluation_complete",
+                        "operation_id": self.operation_id,
+                        "success": False,
+                        "status": "no_results",
+                        "traces_evaluated": 0,
+                        "metrics_evaluated": 0,
+                        "scores": {},
+                        "message": "Evaluation produced no scores",
+                    }
+                )
 
         except Exception as e:
             logger.warning("Evaluation failed but continuing operation: %s", str(e), exc_info=True)
+            self.emit_ui_event(
+                {
+                    "type": "evaluation_complete",
+                    "operation_id": self.operation_id,
+                    "success": False,
+                    "status": "failed",
+                    "traces_evaluated": 0,
+                    "metrics_evaluated": 0,
+                    "scores": {},
+                    "message": "Evaluation failed; see logs for details",
+                }
+            )
 
     # Property methods for compatibility
     @property

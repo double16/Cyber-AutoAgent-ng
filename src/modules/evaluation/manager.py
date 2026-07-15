@@ -15,7 +15,7 @@ import asyncio
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .evaluation import CyberAgentEvaluator
 from modules.config.system.logger import get_logger
@@ -55,6 +55,7 @@ class EvaluationManager:
         operation_id: str,
         emitter: Optional[EventEmitter] = None,
         report_path: Optional[str] = None,
+        usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         """
         Initialize the evaluation manager.
@@ -70,6 +71,7 @@ class EvaluationManager:
         self._evaluation_thread: Optional[threading.Thread] = None
         self._evaluation_complete = threading.Event()
         self._emitter = emitter or get_emitter(operation_id=operation_id)
+        self._usage_callback = usage_callback
 
     def register_trace(
         self,
@@ -143,6 +145,7 @@ class EvaluationManager:
             self.evaluator = CyberAgentEvaluator(
                 emitter=self._emitter,
                 report_path=self.report_path,
+                usage_callback=self._usage_callback,
             )
 
         results = {}
