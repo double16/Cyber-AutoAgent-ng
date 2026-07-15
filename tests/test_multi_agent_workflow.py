@@ -12,6 +12,7 @@ from modules.agents.multi_agent_workflow import (
     extract_result_text,
 )
 from modules.config.types import BudgetConfig
+from modules.handlers.base import BudgetLimitReached
 from modules.tools.memory import OperationPlan, PlanPhase, Task
 
 
@@ -144,6 +145,39 @@ class FakeState:
         return self.plan
 
 
+class AdvancingFakeState(FakeState):
+    def mark_phase(self, plan, phase_id, status):
+        phases = [
+            PlanPhase(
+                id=phase.id,
+                title=phase.title,
+                status=status if phase.id == phase_id else phase.status,
+                criteria=phase.criteria,
+            )
+            for phase in plan.phases
+        ]
+        next_phase = next((phase for phase in phases if phase.status == "pending"), None)
+        if next_phase:
+            phases = [
+                PlanPhase(
+                    id=phase.id,
+                    title=phase.title,
+                    status="active" if phase.id == next_phase.id else phase.status,
+                    criteria=phase.criteria,
+                )
+                for phase in phases
+            ]
+        self.plan = OperationPlan(
+            objective=plan.objective,
+            current_phase=next_phase.id if next_phase else phase_id,
+            total_phases=len(phases),
+            phases=phases,
+            constraints=plan.constraints,
+            assessment_complete=next_phase is None,
+        )
+        return self.plan
+
+
 def _plan():
     return OperationPlan(
         objective="assess",
@@ -156,7 +190,10 @@ def _plan():
 
 
 def _runtime(progress=0, env_ints=None):
-    env_ints = env_ints or {}
+    env_ints = {
+        "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 0,
+        **(env_ints or {}),
+    }
     return SimpleNamespace(
         config=SimpleNamespace(target="target", objective="assess", available_tools=[]),
         operation_id="OP_TEST",
@@ -302,7 +339,13 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy():
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
     assert captured["role"] == "task_executor"
-    assert captured["prompt"].startswith("execute active\n\n## Tool Selection Policy (Controller-owned)")
+    assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
+    assert "Execute only the assigned task objective" in captured["prompt"]
+    assert "create pending\ntasks with `create_tasks`" in captured["prompt"]
+    assert "Python owns task, phase, and operation state transitions" in captured["prompt"]
+    assert "## Tool Selection Policy (Controller-owned)" in captured["prompt"]
+    assert "Multiple methods with\noverlapping capabilities may be used" in captured["prompt"]
+    assert "neither mandates use nor makes another selected method exclusive" in captured["prompt"]
     assert "module_probe" in captured["tools"]
     assert "create_tasks" in captured["tools"]
     assert captured["system_prompt"] == "base prompt\n\ntask capture prompt"
@@ -383,7 +426,7 @@ def test_task_executor_continues_when_selected_memory_lookup_fails():
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert captured["prompt"].startswith("execute active\n\n## Tool Selection Policy (Controller-owned)")
+    assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
 
 
 def test_task_executor_appends_only_valid_selected_shell_commands(monkeypatch):
@@ -470,7 +513,7 @@ def test_task_executor_omits_shell_command_context_for_missing_or_invalid_select
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert captured["prompt"].startswith("execute active\n\n## Tool Selection Policy (Controller-owned)")
+    assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
 
 
 def test_task_evaluator_receives_task_worker_final_context():
@@ -554,7 +597,7 @@ def test_controller_emits_task_started_when_activating_pending_task():
     ]
 
 
-def test_controller_evaluates_phase_before_pending_task_when_soft_budget_reached():
+def test_controller_closes_phase_before_pending_task_when_hard_budget_cap_reached():
     calls = []
     state = FakeState(
         _plan(),
@@ -564,7 +607,9 @@ def test_controller_evaluates_phase_before_pending_task_when_soft_budget_reached
     def text_runner(role, prompt, tools, system_prompt):
         calls.append(role)
         assert role == "phase_evaluator"
-        return '{"status":"partial_failure","reason":"soft budget reached"}'
+        assert "mandatory 100.00% budget cap" in prompt
+        assert "continue|done" not in prompt
+        return '{"status":"partial_failure","reason":"hard budget cap reached"}'
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(progress=100),
@@ -582,6 +627,138 @@ def test_controller_evaluates_phase_before_pending_task_when_soft_budget_reached
     assert state.plan.phases[0].status == "partial_failure"
     assert state.tasks[0].status == "pending"
     assert controller.runtime.callback_handler.termination_events[0][0] == "complete"
+
+
+def test_phase_hard_cap_closes_active_task_without_running_worker_and_advances():
+    calls = []
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Recon", status="active"),
+            PlanPhase(id=2, title="Validate", status="pending"),
+            PlanPhase(id=3, title="Exploit", status="pending"),
+        ],
+    )
+    active_task = Task(task_uid="active", title="Active", objective="run", phase=1, status="active")
+    pending_task = Task(task_uid="pending", title="Pending", objective="wait", phase=1, status="pending")
+    state = AdvancingFakeState(plan, tasks=[active_task, pending_task])
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        assert role == "phase_evaluator"
+        assert '"done|partial_failure|blocked"' in prompt
+        return '{"status":"done","reason":"enough evidence"}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(progress=34),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda *args: pytest.fail("capped task work must not run"),
+        max_iterations=1,
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="Workflow iteration limit reached"):
+        controller.run()
+
+    assert calls == ["phase_evaluator"]
+    assert state.plan.phases[0].status == "done"
+    assert state.plan.phases[1].status == "active"
+    assert next(task for task in state.tasks if task.task_uid == "active").status == "partial_failure"
+    assert next(task for task in state.tasks if task.task_uid == "pending").status == "pending"
+    assert controller.runtime.callback_handler.events[0] == {
+        "type": "task_done",
+        "task_uid": "active",
+        "title": "Active",
+        "status": "partial_failure",
+    }
+    plan_event = controller.runtime.callback_handler.events[1]
+    assert "[done] 1. Recon" in plan_event["content"]
+    assert "[active] 2. Validate" in plan_event["content"]
+    assert plan_event["metadata"] == {
+        "source": "workflow",
+        "kind": "plan",
+        "action": "updated",
+        "current_phase": 2,
+        "total_phases": 3,
+        "assessment_complete": False,
+    }
+
+
+@pytest.mark.parametrize("response", ['{"status":"continue","reason":"keep going"}', "not json"])
+def test_phase_hard_cap_falls_back_to_partial_failure_for_nonterminal_evaluation(response):
+    state = FakeState(
+        _plan(),
+        tasks=[Task(task_uid="pending", title="Pending", objective="run", phase=1, status="pending")],
+    )
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        return response
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(progress=100, env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda *args: pytest.fail("capped task work must not run"),
+        max_iterations=1,
+    )
+
+    controller.run()
+
+    assert calls == ["phase_evaluator"]
+    assert state.plan.phases[0].status == "partial_failure"
+    assert state.tasks[0].status == "pending"
+
+
+def test_advisory_checkpoint_can_continue_below_phase_hard_cap():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Recon", status="active"),
+            PlanPhase(id=2, title="Validate", status="pending"),
+        ],
+    )
+    state = FakeState(
+        plan,
+        tasks=[Task(task_uid="pending", title="Pending", objective="run", phase=1, status="pending")],
+    )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(progress=20),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: '{"status":"continue","reason":"useful work remains"}',
+        work_runner=lambda *args: pytest.fail("task activation does not run a worker"),
+        max_iterations=1,
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="Workflow iteration limit reached"):
+        controller.run()
+
+    assert state.tasks[0].status == "active"
+    assert 20 in controller._crossed_checkpoints
+
+
+def test_global_budget_limit_still_preempts_phase_hard_cap_evaluation():
+    runtime = _runtime(progress=100)
+    runtime.callback_handler.has_reached_limit = lambda: True
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda *args: pytest.fail("evaluator must not run after global budget exhaustion"),
+        work_runner=lambda *args: pytest.fail("worker must not run after global budget exhaustion"),
+    )
+
+    with pytest.raises(BudgetLimitReached, match="Budget limit reached"):
+        controller.run()
 
 
 def test_controller_evaluates_phase_at_python_checkpoint_before_pending_task():
@@ -650,6 +827,53 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "Do not treat phase goals, tool preferences, or generic advice as constraints" in prompt
 
 
+def test_module_termination_policy_directs_plan_creation_and_review():
+    runtime = _runtime()
+    runtime.termination_policy = "Require an evidenced flag and verified cleanup."
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    plan_data = {
+        "objective": "assess",
+        "constraints": [],
+        "current_phase": 1,
+        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence"}],
+    }
+
+    prompts = [
+        controller._plan_creator_prompt(),
+        controller._plan_critic_prompt(plan_data),
+        controller._plan_revision_prompt(plan_data, ["Add completion evidence"]),
+    ]
+
+    for prompt in prompts:
+        assert "## Module Completion Policy" in prompt
+        assert "Require an evidenced flag and verified cleanup." in prompt
+        assert "measurable" in prompt
+
+
+def test_planning_prompts_omit_empty_module_termination_policy_section():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    plan_data = {
+        "objective": "assess",
+        "constraints": [],
+        "current_phase": 1,
+        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence"}],
+    }
+
+    assert "Module Completion Policy" not in controller._plan_creator_prompt()
+    assert "Module Completion Policy" not in controller._plan_critic_prompt(plan_data)
+    assert "Module Completion Policy" not in controller._plan_revision_prompt(plan_data, ["revise"])
+
+
 def test_plan_refinement_defaults_to_one_and_negative_values_disable_it():
     default_controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -666,6 +890,26 @@ def test_plan_refinement_defaults_to_one_and_negative_values_disable_it():
 
     assert default_controller.plan_refinement_iterations == 1
     assert disabled_controller.plan_refinement_iterations == 0
+
+
+def test_task_prompt_refinement_defaults_to_one_and_negative_values_disable_it():
+    default_runtime = _runtime()
+    default_runtime.config_manager = None
+    default_controller = MultiAgentWorkflowController(
+        runtime=default_runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    disabled_controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": -2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    assert default_controller.task_prompt_refinement_iterations == 1
+    assert disabled_controller.task_prompt_refinement_iterations == 0
 
 
 def test_zero_plan_refinement_iterations_runs_only_initial_actor():
@@ -1274,10 +1518,53 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "spec_shell,Execute shell commands." in prompt
     assert "optional_tools[2]{name,description}:" in prompt
     assert "spec_scan,Run a targeted scan." in prompt
-    assert "Prefer supplied native agent tools over shell commands" in prompt
-    assert "A shell_preference value ranks command-line programs only" in prompt
+    assert "Include every tool reasonably likely" in prompt
+    assert "Overlapping capabilities are allowed" in prompt
+    assert "Include every command reasonably applicable" in prompt
+    assert "does not suppress an applicable selection" in prompt
+    assert "capability required by the task that supplied native tools do not provide" not in prompt
     assert "mandatory execution guardrail" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
+
+
+def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
+    runtime = _runtime()
+    runtime.core_tools_list.append(_tool("http_request"))
+    runtime.config.available_tools = ["curl"]
+    monkeypatch.setattr(
+        workflow_mod,
+        "get_shell_command_specs",
+        lambda available: [
+            {
+                "command": "curl",
+                "description": "HTTP client for URL requests",
+                "capabilities": ["http_client"],
+                "shell_preference": "fallback",
+            }
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="active", title="Fetch", objective="GET the target", phase=1, status="active")
+    prompt_spec = {
+        "prompt": "Fetch the target and save evidence.",
+        "memory_ids": [],
+        "tools": [],
+        "shell_commands": ["curl"],
+    }
+
+    prompt = controller._task_prompt_critic_prompt(_plan(), _plan().phases[0], task, prompt_spec)
+
+    assert "http_request" in prompt
+    assert "curl" in prompt
+    assert "Tool overlap is permitted" in prompt
+    assert "include both a native\ntool and a shell command for the same capability" in prompt
+    assert "relevant and available" not in prompt
+    assert "Reject a selection only when it has no reasonable relationship to the task" in prompt
 
 
 def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
@@ -1500,6 +1787,167 @@ def test_prompt_builder_context_includes_task_history():
     assert "Worked" in prompt
     assert "Blocked" in prompt
     assert "requires credentials" in prompt
+
+
+def test_task_prompt_critic_approves_initial_draft():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append((role, prompt, tools, system_prompt))
+        if role == "task_prompt_builder":
+            return '{"prompt":"approved execution","memory_ids":[],"tools":[],"shell_commands":[]}'
+        if role == "task_prompt_critic":
+            return '{"approved":true,"feedback":[]}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=text_runner,
+    )
+
+    prompt_spec = controller._build_task_prompt(_plan(), _plan().phases[0], task)
+
+    assert prompt_spec["prompt"] == "approved execution"
+    assert [call[0] for call in calls] == ["task_prompt_builder", "task_prompt_critic"]
+    assert all(call[2] == [] for call in calls)
+    assert all(call[3] == "base prompt" for call in calls)
+    assert "Proposed task prompt draft" in calls[1][1]
+    assert "approved execution" in calls[1][1]
+
+
+def test_task_prompt_critic_rejection_runs_revision_until_approved():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    calls = []
+    builder_responses = iter(
+        [
+            '{"prompt":"draft","memory_ids":[],"tools":[],"shell_commands":[]}',
+            '{"prompt":"revised","memory_ids":[],"tools":["module_probe"],"shell_commands":[]}',
+        ]
+    )
+    critic_responses = iter(
+        [
+            '{"approved":false,"feedback":["Add the relevant validation tool"]}',
+            '{"approved":true,"feedback":[]}',
+        ]
+    )
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append((role, prompt))
+        if role == "task_prompt_builder":
+            return next(builder_responses)
+        if role == "task_prompt_critic":
+            return next(critic_responses)
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 3}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=text_runner,
+    )
+
+    prompt_spec = controller._build_task_prompt(_plan(), _plan().phases[0], task)
+
+    assert prompt_spec["prompt"] == "revised"
+    assert [role for role, _prompt in calls] == [
+        "task_prompt_builder",
+        "task_prompt_critic",
+        "task_prompt_builder",
+        "task_prompt_critic",
+    ]
+    assert "Add the relevant validation tool" in calls[2][1]
+    assert "Apply feedback only when it is consistent" in calls[2][1]
+
+
+def test_task_prompt_final_rejection_marks_task_partial_failure_without_execution():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        if role == "task_prompt_builder":
+            return '{"prompt":"unsafe draft","tools":[]}'
+        if role == "task_prompt_critic":
+            return '{"approved":false,"feedback":["Honor the task boundary"]}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda *args: pytest.fail("task executor must not run"),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert calls == ["task_prompt_builder", "task_prompt_critic"]
+    assert state.tasks[0].status == "partial_failure"
+    assert "Honor the task boundary" in state.tasks[0].status_reason
+    assert controller.runtime.callback_handler.events[-1] == {
+        "type": "task_done",
+        "task_uid": "active",
+        "title": "Active",
+        "status": "partial_failure",
+    }
+
+
+def test_invalid_task_prompt_critic_json_retries_then_marks_partial_failure():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        if role == "task_prompt_builder":
+            return '{"prompt":"draft","tools":[]}'
+        return '{"approved":"yes","feedback":[]}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(
+            env_ints={
+                "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1,
+                "CYBER_WORKFLOW_JSON_RETRIES": 1,
+            }
+        ),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda *args: pytest.fail("task executor must not run"),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert calls == ["task_prompt_builder", "task_prompt_critic", "task_prompt_critic"]
+    assert state.tasks[0].status == "partial_failure"
+    assert "task_prompt_critic returned invalid JSON" in state.tasks[0].status_reason
+
+
+def test_invalid_task_prompt_builder_json_marks_task_partial_failure():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(
+            env_ints={
+                "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1,
+                "CYBER_WORKFLOW_JSON_RETRIES": 0,
+            }
+        ),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "not json",
+        work_runner=lambda *args: pytest.fail("task executor must not run"),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert state.tasks[0].status == "partial_failure"
+    assert "task_prompt_builder returned invalid JSON" in state.tasks[0].status_reason
 
 
 def test_controller_rejects_invalid_evaluator_status():

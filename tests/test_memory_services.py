@@ -137,6 +137,21 @@ def test_create_tasks_tool_schema_allows_missing_or_untyped_phase():
     assert "type" not in task_schema["properties"]["phase"]
 
 
+def test_create_tasks_tool_description_contains_exact_required_shape():
+    tool_spec = get_tool_spec(mod.create_tasks)
+    description = tool_spec["description"]
+    normalized_description = " ".join(description.split())
+
+    expected_shape = (
+        '{"tasks": [{"title": "Short actionable title", '
+        '"objective": "Action, target, context, and completion condition", "phase": 1, '
+        '"status": "pending", "evidence": ["Expected artifact or completion signal"]}]}'
+    )
+    assert expected_shape in normalized_description
+    assert 'Every task requires non-empty "title" and "objective" strings.' in description
+    assert 'Never use unsupported "description" or "context" fields.' in description
+
+
 def test_create_tasks_rejects_task_without_required_title():
     with pytest.raises(ValueError, match="title"):
         mod.create_tasks([{"objective": "Enumerate reachable endpoints"}])

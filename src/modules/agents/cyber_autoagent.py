@@ -487,7 +487,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     http_request_instructions = """
 - Purpose: Deterministic HTTP(S) requests for web page and API testing (including GraphQL/REST)
 - Validation: Save request/response transcript + negative/control case as artifacts, grep/sed to extract relevant data, store only file path in findings
-- Preference: preferred over `curl` for capability: http_client
+- Interoperability: May be selected or used alongside `curl`; overlapping HTTP clients are permitted
 - Managed endpoint keys are observations unless abuse/sensitive exposure demonstrated with artifacts
 """
     tool_append_description(http_request, http_request_instructions)

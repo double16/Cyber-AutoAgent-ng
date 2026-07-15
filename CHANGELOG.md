@@ -2,6 +2,7 @@
 
 ### Features
 
+- Add configurable actor/critic refinement for task execution prompts and mark tasks `partial_failure` when an approved prompt cannot be built.
 - Add configurable actor/critic refinement for initial plan generation, persisting only critic-approved plans.
 - Infer durable operation constraints during plan generation and enforce them during task planning and evaluation.
 - Rename the React terminal `/plugins` command to `/modules`.
@@ -20,6 +21,13 @@
 
 ### Fixes
 
+- Put the exact `create_tasks` payload shape in its tool description to improve local-model argument compliance.
+- Allow task prompt builders to select overlapping native tools and shell commands without critic rejection.
+- Display structured termination reasons and messages in React terminal auto-run output.
+- Enforce proportional workflow phase budget targets as hard caps before task execution, activation, or creation.
+- Align operation-plugin execution and termination prompts with the Python-owned workflow, explicit module access
+  boundaries, evidence categories, and policy-directed plan creation.
+- Show the exact workflow invariant failure message in operation termination events.
 - Reject unregistered agent tool calls instead of automatically executing them as shell commands.
 - Stop active XBOW benchmark containers when the benchmark runner is interrupted with Ctrl-C.
 - Show final report progress labels as the React terminal thinking task title while reporting.

@@ -55,9 +55,9 @@ from modules.agents.cyber_autoagent import (
     create_agent_runtime_resources,
     _ensure_prompt_within_budget,
 )
-from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+from modules.agents.multi_agent_workflow import MultiAgentWorkflowController, WorkflowInvariantError
 from modules.agents.run_policy import AgentRunPolicy
-from modules.config.models.factory import get_model_timeout, configure_model_rate_limits
+from modules.config.models.factory import configure_model_rate_limits, get_model_timeout  # noqa: F401
 from modules.config.system.environment import auto_setup, clean_operation_memory, setup_logging
 from modules.config.manager import get_config_manager
 from modules.config.types import get_default_base_dir, BudgetConfig, DEFAULT_MAX_DURATION
@@ -1221,6 +1221,13 @@ def main():
                         callback_handler.ensure_report_generated(None, args.target, args.objective, args.module)
                 except Exception as max_tokens_finish_error:
                     logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
+            except WorkflowInvariantError as error:
+                logger.exception("Workflow invariant error occurred", exc_info=error)
+                termination_reason = str(error)
+                print_status(f"Agent error: {termination_reason}", "ERROR")
+                if callback_handler:
+                    callback_handler.emit_termination("error", termination_reason)
+                raise
             except Exception as error:
                 logger.exception("Unexpected agent error occurred", exc_info=error)
                 termination_reason = str(error)
@@ -1358,7 +1365,7 @@ def main():
         termination_reason = str(e)
         print_status(f"\nOperation failed: {termination_reason}", "ERROR")
         try:
-            if callback_handler:
+            if callback_handler and not isinstance(e, WorkflowInvariantError):
                 callback_handler.emit_termination("error", termination_reason)
         except Exception:
             pass

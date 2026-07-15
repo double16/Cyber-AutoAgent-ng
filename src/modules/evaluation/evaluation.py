@@ -77,6 +77,7 @@ NON_EXECUTION_AGENT_ROLES = {
     "plan_critic",
     "task_creator",
     "task_prompt_builder",
+    "task_prompt_critic",
     "task_evaluator",
     "phase_evaluator",
 }

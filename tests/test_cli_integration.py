@@ -1421,6 +1421,66 @@ def test_cli_main_handles_max_tokens_exception(monkeypatch, tmp_path):
     agent.cleanup.assert_not_called()
 
 
+@pytest.mark.parametrize("has_callback", [True, False])
+def test_cli_main_emits_workflow_invariant_message_as_termination_reason(monkeypatch, tmp_path, has_callback):
+    callback = CliCallback() if has_callback else None
+    agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, agent, callback)
+    message = "Workflow iteration limit reached"
+    config_manager.workflow.run.side_effect = cyberautoagent.WorkflowInvariantError(message)
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cyberautoagent.main()
+
+    assert exc_info.value.code == 1
+    if callback:
+        callback.emit_termination.assert_called_once_with("error", message)
+
+
+def test_cli_main_preserves_generic_workflow_error_termination(monkeypatch, tmp_path):
+    callback = CliCallback()
+    agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, agent, callback)
+    message = "Unexpected workflow failure"
+    config_manager.workflow.run.side_effect = RuntimeError(message)
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cyberautoagent.main()
+
+    assert exc_info.value.code == 1
+    callback.emit_termination.assert_called_with("error", message)
+
+
 def test_cli_main_runs_workflow_controller(monkeypatch, tmp_path):
     callback = CliCallback()
     callback.should_stop = Mock(return_value=False)

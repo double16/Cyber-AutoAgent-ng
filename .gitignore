@@ -270,3 +270,4 @@ THIS IS _NOT_ THE TARGET.txt
 /benchmark_harness/validation-benchmarks/
 /benchmark_harness/results.csv
 config.*
+external_plugins/*/

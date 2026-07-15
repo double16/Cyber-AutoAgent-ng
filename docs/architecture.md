@@ -25,9 +25,15 @@ The controller creates agents for specific jobs:
 - **task_creator**: creates concrete current- and future-phase tasks from a deterministic controller prompt
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
+- **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
 - **task_executor**: executes one active task objective
 - **task_evaluator**: returns task status: `done`, `partial_failure`, or `blocked`
 - **phase_evaluator**: returns phase status: `continue`, `done`, `partial_failure`, or `blocked`
+
+Module execution guidance supplies operation intent, explicit access boundaries, domain behavior, and evidence rules to
+planning and execution roles. The module termination policy is also supplied directly to plan creation, plan criticism,
+plan revision, and phase evaluation so required end states become measurable plan criteria. A controller-owned executor
+contract keeps individual workers scoped to one task regardless of module.
 
 The swarm tool remains available as an execution capability, but it is no longer the top-level orchestration model.
 
@@ -85,7 +91,14 @@ current draft; rejection sends feedback to `plan_creator` for revision. The
 `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS` environment variable limits reviews and defaults to one. A rejection on
 the final configured review fails the workflow so an unapproved plan is never persisted or executed.
 
-There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task history, memory summaries, and selected optional tool candidates. Budget checkpoints are handled by Python control flow before pending task activation.
+Task prompt generation uses the same bounded pattern. `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` defaults to
+two critic reviews and accepts `0` to disable critique. A final rejection or invalid structured response after JSON
+retries marks only the active task `partial_failure`, without invoking its executor or evaluator.
+
+There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt
+adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task
+history, memory summaries, and selected optional tool candidates. Python enforces proportional phase budget caps before
+task work and handles separate advisory checkpoints before pending task activation.
 
 ### Security Tool Access
 

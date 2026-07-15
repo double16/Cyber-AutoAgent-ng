@@ -23,6 +23,7 @@ The workflow controller creates focused agents as needed:
 | `plan_critic` | Approve a proposed plan or return actionable revision feedback | No |
 | `task_creator` | Create concrete tasks for current and future phases | May call `create_tasks` only |
 | `task_prompt_builder` | Build a task-specific execution prompt and select applicable memory/tools | No |
+| `task_prompt_critic` | Approve a proposed task prompt or return actionable revision feedback | No |
 | `task_executor` | Execute one active task objective | May call `create_tasks` for follow-up work |
 | `task_evaluator` | Decide whether the active task is `done`, `partial_failure`, or `blocked` | No; returns a structured decision |
 | `phase_evaluator` | Decide whether the active phase should continue or become terminal | No; returns a structured decision |
@@ -41,6 +42,10 @@ Valid future-phase IDs are preserved so useful follow-up work can be planned ear
 phase IDs default to the active phase, as do IDs for phases earlier than the active phase.
 
 Agents also do not have a stop tool. Operation completion is a Python workflow decision; the controller emits a `termination_reason` event with reason `complete`.
+
+The task executor's workflow boundary is controller-owned and shared by every module. Module prompts add distinct access,
+safety, domain-execution, and evidence policies without redefining task lifecycle behavior. Module termination policies
+are planning inputs as well as phase-evaluation criteria, ensuring that required outcomes shape the durable phase plan.
 
 ## State Model
 
@@ -120,12 +125,17 @@ The controller runs this loop:
 9. If the phase should continue but has no active/pending task, run task creation.
 10. If task creation produces no tasks for an empty phase, raise a workflow invariant error.
 11. For each active task:
-    - run `task_prompt_builder`
+    - run `task_prompt_builder`, then apply the configured critic/revision cycle
     - run `task_executor` with restricted tools
     - run `task_evaluator`
     - Python marks the task terminal
     - loop back to active phase/task selection
 12. When all phases are terminal, Python marks the plan complete and emits the completion `termination_reason` event for UI consumers.
+
+Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS`, which defaults to two
+critic reviews. Setting it to `0` uses the initial builder output without critique. A final rejection or invalid
+builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
+evaluator are not invoked for that task.
 
 After creating or durably changing a plan, the controller also emits a standard `output` event containing the
 objective, current phase, and status of every phase. These snapshots appear in interactive and headless output.
@@ -133,15 +143,20 @@ Unchanged plan reads do not emit an event, and display failures do not interrupt
 
 ## Budget Policy
 
-Budget progress is a **soft cap**, not a hard phase limit. The controller compares current budget progress to the active phase's proportional target:
+Budget progress is distributed across phases using mandatory proportional caps:
 
 ```text
-soft_cap = phase_id / total_phases * 100
+phase_cap = phase_id / total_phases * 100
 ```
 
-If a phase reaches its soft cap and only pending work remains, the controller asks `phase_evaluator` whether to continue or move on. Existing active tasks are still run first.
+When a phase reaches its cap, the controller performs no more task work for that phase. An active task is marked
+`partial_failure`, pending tasks remain pending, and `phase_evaluator` must return `done`, `partial_failure`, or
+`blocked` before Python advances the plan. If terminal evaluation fails, Python closes the phase as `partial_failure`
+so the cap cannot be bypassed.
 
-The controller also tracks budget checkpoints at 20%, 40%, 60%, 80%, and 90%. Crossing a checkpoint is handled in Python: before activating more pending work, the controller asks the phase evaluator whether continuing the current phase is still the best use of remaining budget. These checkpoints are not injected as prompt instructions.
+The controller also tracks advisory budget checkpoints at 20%, 40%, 60%, 80%, and 90%. Below the phase cap, crossing
+a checkpoint asks the phase evaluator whether continuing the current phase is still the best use of remaining budget.
+These checkpoints may return `continue` and are not injected as prompt instructions.
 
 This design prefers reaching all phases and leaving some tasks pending over spending too much budget on one phase.
 
@@ -170,12 +185,12 @@ Selection happens in two passes:
    in the prompt-builder's `tools` selection.
 
 When shell is available, the prompt-builder also receives a compact `shell_commands` TOON catalog containing installed
-command names, bounded descriptions, capabilities, and shell-only preferred/fallback metadata. Native agent tools take
-precedence when capabilities overlap. Selected commands are supplemental: the executor should use one only for a
-required capability absent from native tools or after a concrete native-tool limitation. In particular,
-`http_request` handles ordinary HTTP(S) requests; `curl` remains available as a fallback for transport or protocol
-requirements that `http_request` does not support. Selected commands do not restrict shell execution or replace
-runtime `tool_catalog` discovery.
+command names, bounded descriptions, capabilities, and shell-only preferred/fallback metadata. The builder may select
+every tool and command reasonably applicable to the task, including capabilities that overlap across native, optional,
+and shell methods. Overlap, apparent redundancy, and selection count are not critic rejection reasons; selection makes
+a capability available without requiring its use or excluding another method. `shell_preference` is advisory ranking
+among shell commands only. Selected commands do not restrict shell execution or replace runtime `tool_catalog`
+discovery.
 
 Prompt-builder agents also receive compact task history. Successful tasks become useful context for prioritizing similar paths, while `partial_failure` and `blocked` tasks provide dead-end context so workers can pivot without rewriting module prompts on disk.
 

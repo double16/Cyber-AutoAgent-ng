@@ -140,13 +140,16 @@ Q: Did you EXPLOIT something or extract sensitive data?
 
 ### Budget-Aware Phase Evaluation
 
-Plan evaluation is triggered by the Python workflow controller. Budget progress is a soft cap distributed across phases:
+Plan evaluation is triggered by the Python workflow controller. Budget progress is distributed across phases using
+mandatory caps:
 
 ```text
-soft_cap = phase_id / total_phases * 100
+phase_cap = phase_id / total_phases * 100
 ```
 
-When a phase reaches its soft cap and only pending work remains, the controller runs a `phase_evaluator` agent before activating more work. The evaluator returns `continue`, `done`, `partial_failure`, or `blocked`; Python stores the result and advances the plan when appropriate.
+When a phase reaches its cap, the controller stops its task work and runs `phase_evaluator` with terminal-only outcomes.
+Python stores `done`, `partial_failure`, or `blocked` and advances the plan. Separate 20%, 40%, 60%, 80%, and 90%
+checkpoints remain advisory below the phase cap and may return `continue`.
 
 ### Strategic Plan Management
 

@@ -21,7 +21,7 @@ def shell(
 
     1. Selection Rules:
       • Purpose-built tool when scanning/enumerating many targets or endpoints.
-      • `curl` only for single requests, reproductions, or crafted edge-cases.
+      • `curl` supports single requests, reproductions, crafted edge-cases, and independent HTTP validation.
       • `grep/sed/awk/jq` only for small transformations after purpose-built tools produce raw output.
 
     2. Command Formats:

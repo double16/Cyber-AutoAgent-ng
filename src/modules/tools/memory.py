@@ -1053,13 +1053,19 @@ def _extract_sensitive_patterns(text: str) -> List[str]:
 def create_tasks(tasks: List[TaskCreate]) -> str:
     """Create one or more tasks.
 
+    Required input shape:
+    {"tasks": [{"title": "Short actionable title",
+    "objective": "Action, target, context, and completion condition", "phase": 1,
+    "status": "pending", "evidence": ["Expected artifact or completion signal"]}]}
+
+    Every task requires non-empty "title" and "objective" strings. "phase", "status", and
+    "evidence" are optional.
+    Use status="pending" for new work. Never use unsupported "description" or "context" fields.
+
     Rules:
     - Valid active or future plan phases are preserved.
     - If status="active", any other active task in the same operation is demoted to pending.
     - If you identified N candidates, create N tasks (do not merge).
-
-    Args:
-        A JSON array of task dict.
 
     Returns:
         Simple task creation confirmation.

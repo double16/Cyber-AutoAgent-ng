@@ -18,6 +18,7 @@ import { formatDuration } from './utils/logger.js';
 import { formatDuration as formatToolDuration } from './utils/toolFormatters.js';
 import { formatAutoRunEvaluationEvent } from './utils/evaluationEventFormatting.js';
 import { installAutoRunInterruptFallback } from './utils/autoRunInterrupt.js';
+import { formatAutoRunTerminationEvent } from './utils/autoRunTerminationFormatting.js';
 import { resolveRecordingMode } from './utils/recordingMode.js';
 
 // Check for --debug flag early (before meow parsing) to enable logging
@@ -450,6 +451,10 @@ const runAutoAssessment = async () => {
         }
         else if (event.type === 'evaluation_step_complete' || event.type === 'evaluation_complete') {
           const message = formatAutoRunEvaluationEvent(event);
+          if (message) loggingService.info(message);
+        }
+        else if (event.type === 'termination_reason') {
+          const message = formatAutoRunTerminationEvent(event);
           if (message) loggingService.info(message);
         }
         else if (event.type === 'task_started') {

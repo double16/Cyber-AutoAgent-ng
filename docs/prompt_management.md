@@ -126,6 +126,21 @@ sequenceDiagram
 
 The current workflow does not rewrite prompts on disk during an operation. Role-agent prompt adaptation happens in Python from plan state, task history, memory, and selected tools.
 
+### Workflow Responsibilities
+
+Operation plugin prompts intentionally separate domain policy from workflow control:
+
+- `execution_prompt.md` defines operation intent, the module's explicit target-access model, domain execution rules,
+  evidence requirements, and prohibited actions. This guidance directs plan creation and applies to task execution.
+- `termination_policy.md` defines the evidence-backed module outcomes used by the plan creator, plan critic, plan
+  revision role, and phase evaluator. Planning roles translate these outcomes into ordered phases and measurable criteria.
+- The Python workflow supplies one shared task-executor contract. An executor works only its assigned task, stores
+  evidence, captures follow-up work as pending tasks, and does not own task, phase, or operation transitions.
+
+Access modes are stated by each module rather than inferred from tool availability. For example, web modules are
+network-only, code security is limited to the authorized repository, and context navigation is limited to the explicitly
+granted post-access channel.
+
 ## System Prompt Integration
 
 ### Base + Module Prompt Composition

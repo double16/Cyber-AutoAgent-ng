@@ -30,6 +30,9 @@ class TestGetSystemPrompt:
 
         assert "test objective" not in prompt
         assert "OP_20240101_120000" in prompt
+        assert "Follow the selected module's" in prompt
+        assert "Target infrastructure = remote endpoint" not in prompt
+        assert "Never\n  infer authorization from available tools" in prompt
 
     @patch("modules.prompts.factory.load_prompt_template")
     def test_get_system_prompt_with_tools_context(self, mock_load_prompt_template):
@@ -150,11 +153,13 @@ class TestGetSystemPrompt:
 
         assert "Task Capture Pass" in prompt
 
-    def test_tools_guide_prefers_native_tools_over_shell_commands(self):
+    def test_tools_guide_permits_overlapping_applicable_methods(self):
         prompt = load_prompt_template("tools_guide.md")
 
-        assert "Native agent tools > command-line programs > custom tools" in prompt
+        assert "Use any native tool, optional tool, or shell command applicable to the task" in prompt
+        assert "Overlap between native tools, optional tools" in prompt
         assert "shell_preference" in prompt
+        assert "required capability absent from native tools" not in prompt
         assert "Medium confidence (50-80%) → Parallel shell" not in prompt
 
 

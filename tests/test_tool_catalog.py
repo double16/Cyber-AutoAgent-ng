@@ -164,7 +164,7 @@ def test_get_shell_command_specs_deduplicates_command_overrides_and_skips_empty_
     assert [spec["command"] for spec in specs] == ["shared"]
 
 
-def test_curl_is_configured_as_native_http_request_fallback():
+def test_curl_is_configured_as_shell_command_fallback():
     curl = tc._get_cyber_tools()["curl"]
 
     assert curl["preference"] == "fallback"
