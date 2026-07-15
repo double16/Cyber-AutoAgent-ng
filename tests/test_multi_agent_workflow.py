@@ -107,6 +107,7 @@ class FakeState:
             current_phase=phase_id,
             total_phases=len(phases),
             phases=phases,
+            constraints=plan.constraints,
             assessment_complete=True,
         )
         return self.plan
@@ -124,6 +125,7 @@ class FakeState:
             current_phase=1,
             total_phases=len(phases),
             phases=phases,
+            constraints=plan.constraints,
             assessment_complete=False,
         )
         return self.plan
@@ -137,6 +139,7 @@ class FakeState:
             current_phase=1,
             total_phases=len(phases),
             phases=phases,
+            constraints=plan_data.get("constraints", []),
         )
         return self.plan
 
@@ -147,6 +150,7 @@ def _plan():
         current_phase=1,
         total_phases=1,
         phases=[PlanPhase(id=1, title="Recon", status="active")],
+        constraints=["Stay within the authorized target scope"],
         assessment_complete=False,
     )
 
@@ -629,6 +633,22 @@ def test_checkpoint_bands_are_consumed_once():
     assert controller._consume_crossed_checkpoint() is None
 
 
+def test_plan_creator_prompt_requests_inferred_operation_constraints():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    prompt = controller._plan_creator_prompt()
+
+    assert "Infer a concise list of unique, operation-wide constraints" in prompt
+    assert '"constraints": [string]' in prompt
+    assert "scope, safety, operational-boundary, evidence, and validation constraints" in prompt
+    assert "Do not treat phase goals, tool preferences, or generic advice as constraints" in prompt
+
+
 def test_controller_creates_plan_when_missing():
     calls = []
     state = FakeState(None)
@@ -636,7 +656,7 @@ def test_controller_creates_plan_when_missing():
     def text_runner(role, prompt, tools, system_prompt):
         calls.append(role)
         if role == "plan_creator":
-            return '{"objective":"assess","current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending"}]}'
+            return '{"objective":"assess","constraints":["Stay in scope"],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending"}]}'
         if role == "task_prompt_builder":
             return '{"prompt":"execute recon task","tools":[]}'
         if role == "task_evaluator":
@@ -683,6 +703,8 @@ def test_controller_creates_plan_when_missing():
         "Plan created\n"
         "Objective: assess\n"
         "Current phase: 1/1\n\n"
+        "Constraints:\n"
+        "- Stay in scope\n\n"
         "[active] 1. Recon"
     )
     assert "[done] 1. Recon" in plan_events[-1]["content"]
@@ -994,6 +1016,9 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
     assert "unsupported `context` or `description` fields" in prompt
     assert "Stop immediately" in prompt
     assert "future phases" in prompt
+    assert "without violating any plan constraint" in prompt
+    assert "plan_constraints[1]{constraint}:" in prompt
+    assert "Stay within the authorized target scope" in prompt
 
 
 def test_optional_tool_catalog_uses_tool_spec_name_and_description():
@@ -1042,6 +1067,8 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "spec_scan,Run a targeted scan." in prompt
     assert "Prefer supplied native agent tools over shell commands" in prompt
     assert "A shell_preference value ranks command-line programs only" in prompt
+    assert "mandatory execution guardrail" in prompt
+    assert "plan_constraints[1]{constraint}:" in prompt
 
 
 def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
@@ -1198,6 +1225,9 @@ def test_task_evaluator_does_not_receive_module_termination_policy():
     assert "sole evaluation target" in captured["prompt"]
     assert "## Evaluation target: active task" in captured["prompt"]
     assert "## Context only: operation objective" in captured["prompt"]
+    assert "## Acceptance guardrails: plan constraints" in captured["prompt"]
+    assert "an evidenced violation prevents done" in captured["prompt"].lower()
+    assert "Stay within the authorized target scope" in captured["prompt"]
     assert "## Plan" not in captured["prompt"]
     assert "Satisfying the phase or operation objective does not make this task done" in captured["prompt"]
 
@@ -1227,6 +1257,9 @@ def test_phase_evaluator_prompt_is_review_only():
     assert "Evaluate the active phase" not in prompt
     assert "do not perform phase work" in prompt
     assert "Python alone decides whether the operation is complete" in prompt
+    assert "Acceptance guardrails: plan constraints" in prompt
+    assert "an evidenced violation prevents done" in prompt
+    assert "Stay within the authorized target scope" in prompt
 
 
 def test_prompt_builder_context_includes_task_history():
@@ -1385,6 +1418,7 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
             PlanPhase(id=1, title="Recon", status="done"),
             PlanPhase(id=2, title="Validate", status="pending"),
         ],
+        constraints=["Use read-only validation"],
         assessment_complete=True,
     )
     task = Task(task_uid="t1", title="Task", objective="Do it", phase=2, status="pending", created_at="1")
@@ -1413,15 +1447,29 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
 
     reopened = store.reopen_plan(plan)
     assert reopened.assessment_complete is False
+    assert reopened.constraints == ["Use read-only validation"]
     assert [phase.status for phase in reopened.phases] == ["active", "pending"]
 
     activated_phase = store.activate_phase(reopened, 2)
     assert activated_phase.current_phase == 2
+    assert activated_phase.constraints == ["Use read-only validation"]
     assert [phase.status for phase in activated_phase.phases] == ["pending", "active"]
 
     phase_one_done = store.mark_phase(activated_phase, 1, "done")
     finished_phase = store.mark_phase(phase_one_done, 2, "blocked")
     assert finished_phase.assessment_complete is True
+    assert finished_phase.constraints == ["Use read-only validation"]
+
+    generated_plan = store.create_plan_from_dict(
+        {
+            "objective": "generated",
+            "constraints": "  Keep generated work in scope  ",
+            "current_phase": 1,
+            "phases": [{"id": 1, "title": "Generated", "status": "pending", "criteria": "Evidence exists"}],
+        }
+    )
+    assert generated_plan.constraints == ["Keep generated work in scope"]
+    assert generated_plan.phases[0].status == "active"
 
     store.store_task(task)
     assert store.list_tasks(phase=2, status=["pending"]) == [task]

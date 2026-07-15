@@ -230,6 +230,7 @@ class OperationPlan:
     current_phase: int
     total_phases: int
     phases: List[PlanPhase] = field(default_factory=list)
+    constraints: List[str] = field(default_factory=list)
     assessment_complete: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -246,6 +247,28 @@ class OperationPlan:
         for p in self.phases:
             if not isinstance(p, PlanPhase):
                 raise ValueError("phases must contain PlanPhase objects")
+        constraints: Any = self.constraints
+        if constraints is None:
+            constraints = []
+        elif isinstance(constraints, str):
+            constraints = [constraints]
+        elif isinstance(constraints, tuple):
+            constraints = list(constraints)
+        elif not isinstance(constraints, list):
+            raise ValueError("constraints must be a string, list, tuple, or null")
+
+        normalized_constraints = []
+        for constraint in constraints:
+            if constraint is None or isinstance(constraint, (dict, list, tuple, set)):
+                raise ValueError("constraints must contain values coercible to non-empty strings")
+            try:
+                normalized_constraint = str(constraint).strip()
+            except Exception as error:
+                raise ValueError("constraints must contain values coercible to non-empty strings") from error
+            if not normalized_constraint:
+                raise ValueError("constraints must contain values coercible to non-empty strings")
+            normalized_constraints.append(normalized_constraint)
+        self.constraints = normalized_constraints
 
         # enforce consistency
         if self.total_phases != len(self.phases):
@@ -274,12 +297,12 @@ class OperationPlan:
 
         phases = [PlanPhase.from_obj(p) for p in phases_raw]
         phases.sort(key=lambda p: p.id)
-
         return OperationPlan(
             objective=str(obj.get("objective", "")),
             current_phase=int(obj.get("current_phase", 1)),
             total_phases=len(phases),
             phases=phases,
+            constraints=obj.get("constraints", []),
             assessment_complete=bool(obj.get("assessment_complete", False)),
             created_at=obj.get("created_at"),
             updated_at=obj.get("updated_at"),
@@ -291,6 +314,7 @@ class OperationPlan:
             "current_phase": self.current_phase,
             "total_phases": self.total_phases,
             "phases": [p.to_dict() for p in self.phases],
+            "constraints": self.constraints,
             "assessment_complete": self.assessment_complete,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -300,12 +324,18 @@ class OperationPlan:
     def toon_format() -> str:
         return "plan_overview[1]{objective,current_phase,total_phases}"
 
+    def constraints_to_toon(self) -> str:
+        lines = [f"plan_constraints[{len(self.constraints)}]{{constraint}}:"]
+        lines.extend(f"  {sanitize_toon_value(constraint)}" for constraint in self.constraints)
+        return "\n".join(lines)
+
     def to_toon(self, include_format=True) -> str:
         objective = sanitize_toon_value(self.objective)
         overview_lines = []
         if include_format:
             overview_lines.append(f"{self.toon_format()}:")
         overview_lines.append(f" {objective},{self.current_phase},{self.total_phases}")
+        constraint_lines = self.constraints_to_toon().splitlines()
         phase_lines = [f"plan_phases[{len(self.phases)}]{{id,title,status,criteria}}:"]
         for phase in self.phases:
             phase_lines.append(
@@ -319,7 +349,7 @@ class OperationPlan:
                     ]
                 )
             )
-        return "\n".join([*overview_lines, *phase_lines]).strip()
+        return "\n".join([*overview_lines, *constraint_lines, *phase_lines]).strip()
 
 
 def _get_memory_base_path(config: Optional[Dict] = None) -> str:

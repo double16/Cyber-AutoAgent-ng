@@ -181,6 +181,7 @@ class WorkflowStateStore:
             current_phase=phases[0].id,
             total_phases=len(phases),
             phases=phases,
+            constraints=plan.constraints,
             assessment_complete=False,
             created_at=plan.created_at,
         ))
@@ -207,6 +208,7 @@ class WorkflowStateStore:
             current_phase=phase_id,
             total_phases=len(phases),
             phases=phases,
+            constraints=plan.constraints,
             assessment_complete=False,
             created_at=plan.created_at,
         ))
@@ -239,6 +241,7 @@ class WorkflowStateStore:
             current_phase=next_phase.id if next_phase else phase_id,
             total_phases=len(phases),
             phases=phases,
+            constraints=plan.constraints,
             assessment_complete=next_phase is None,
             created_at=plan.created_at,
         ))
@@ -285,6 +288,7 @@ class WorkflowStateStore:
             current_phase=int(plan_data.get("current_phase") or phases[0].id),
             total_phases=len(phases),
             phases=phases,
+            constraints=plan_data.get("constraints", []),
             assessment_complete=False,
         )
         return self.store_plan(plan)
@@ -345,6 +349,7 @@ class MultiAgentWorkflowController:
         """Return the durable, user-visible plan state without timestamps."""
         return (
             plan.objective,
+            tuple(plan.constraints),
             plan.current_phase,
             plan.total_phases,
             plan.assessment_complete,
@@ -370,6 +375,10 @@ class MultiAgentWorkflowController:
             f"Current phase: {plan.current_phase}/{plan.total_phases}",
             "",
         ]
+        if plan.constraints:
+            lines.append("Constraints:")
+            lines.extend(f"- {constraint}" for constraint in plan.constraints)
+            lines.append("")
         lines.extend(
             f"[{phase.status}] {phase.id}. {phase.title}"
             for phase in plan.phases
@@ -978,13 +987,17 @@ Original prompt:
         return f"""
 Build a high-level assessment plan tailored to the operation objective without including specific tools. A report phase is automatically performed without being included in the plan. Including it in the plan is unnecessary.
 
+Infer a concise list of unique, operation-wide constraints from your system and module instructions and the operation
+objective below. Include actionable scope, safety, operational-boundary, evidence, and validation constraints that
+govern execution. Do not treat phase goals, tool preferences, or generic advice as constraints.
+
 ### START OF OPERATION OBJECTIVE ###
 
 {self.runtime.config.objective}
 
 ### END OF OPERATION OBJECTIVE ###
 
-Return JSON exactly: {{\"objective\": string, \"current_phase\": 1, \"phases\": [{{\"id\": int, \"title\": string, \"status\": \"pending\", \"criteria\": string}}]}}.
+Return JSON exactly: {{\"objective\": string, \"constraints\": [string], \"current_phase\": 1, \"phases\": [{{\"id\": int, \"title\": string, \"status\": \"pending\", \"criteria\": string}}]}}.
 
 Now, create the plan and output only the plan:
 """
@@ -994,6 +1007,7 @@ Now, create the plan and output only the plan:
 
 The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
+- Treat every plan constraint as a mandatory execution guardrail.
 - Do not continue into later phase objectives, adjacent tasks, or newly discovered follow-up work.
 - If new follow-up work is discovered, create durable pending tasks for it using create_tasks.
 - Do not execute newly created follow-up tasks in this run.
@@ -1050,7 +1064,7 @@ after the call succeeds.
 Create short, independently executable tasks. Prioritize actionable work for active phase {phase.id}. You may also
 create pending tasks for future phases when current planning reveals useful follow-up work; assign each such task its
 actual future phase ID. Existing tasks should not be duplicated. Future-phase tasks alone do not satisfy an empty
-active phase.
+active phase. Every created task must be executable without violating any plan constraint.
 
 ## Operation Objective
 {self.runtime.config.objective}
@@ -1086,6 +1100,8 @@ existing memories.
 Return JSON only: {{"status":"done|partial_failure|blocked","reason": string}}.
 - Use done only when every material part of the task objective is supported by durable evidence.
 - Use partial_failure when useful progress was made but any material part remains unsupported.
+- Treat plan constraints as acceptance guardrails. An evidenced violation prevents done and requires partial_failure
+  unless the existing blocked definition applies; absence of a violation does not require separate affirmative proof.
 - Use blocked only when a concrete external dependency, authorization, capability, or prerequisite prevents completion;
   missing evidence alone is not a blocker.
 - Satisfying the phase or operation objective does not make this task done.
@@ -1096,6 +1112,9 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string}}.
 
 ## Context only: operation objective
 {plan.objective}
+
+## Acceptance guardrails: plan constraints
+{plan.constraints_to_toon()}
 
 ## Context only: active phase
 {phase.to_toon()}
@@ -1115,13 +1134,18 @@ criteria. Use editor only to read referenced artifacts and mem0_retrieve only to
 
 Return JSON only: {{"status":"continue|done|partial_failure|blocked","reason": string}}. Use done only when phase
 criteria are evidence-backed. Use partial_failure when the phase produced useful evidence but should not consume more
-budget now. Use blocked only for a concrete blocker. Python alone decides whether the operation is complete.
+budget now. Treat plan constraints as acceptance guardrails: an evidenced violation prevents done and requires
+partial_failure unless the existing blocked definition applies; absence of a violation does not require separate
+affirmative proof. Use blocked only for a concrete blocker. Python alone decides whether the operation is complete.
 
 ## Evaluation target: active phase
 {phase.to_toon()}
 
 ## Context only: operation objective
 {plan.objective}
+
+## Acceptance guardrails: plan constraints
+{plan.constraints_to_toon()}
 
 ## Tasks
 {Task.list_to_toon(self.state.list_tasks(phase=phase.id))}

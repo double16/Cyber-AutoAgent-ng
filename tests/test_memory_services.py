@@ -161,17 +161,95 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
     plan = mod.OperationPlan.from_obj(
         {
             "objective": "Assess target",
+            "constraints": ["Read-only checks", "Keep evidence in artifacts"],
             "current_phase": 1,
             "phases": [phase.to_dict(), {"id": 2, "title": "Exploit", "status": "pending"}],
         }
     )
     assert "plan_overview[1]" in plan.to_toon()
+    assert "plan_constraints[2]{constraint}:" in plan.to_toon()
+    assert "Read-only checks" in plan.to_toon()
+    assert plan.constraints_to_toon() == (
+        "plan_constraints[2]{constraint}:\n  Read-only checks\n  Keep evidence in artifacts"
+    )
+    assert plan.to_dict()["constraints"] == ["Read-only checks", "Keep evidence in artifacts"]
     assert plan.total_phases == 2
     assert mod.OperationPlan.from_obj(plan) is plan
+    legacy_plan = mod.OperationPlan.from_obj(
+        {
+            "objective": "Legacy",
+            "current_phase": 1,
+            "phases": [{"id": 1, "title": "Recon", "status": "active"}],
+        }
+    )
+    assert legacy_plan.constraints == []
+    assert "plan_constraints[0]{constraint}:" in legacy_plan.to_toon()
     with pytest.raises(ValueError):
         mod.PlanPhase(id=-1, title="bad", status="pending")
     with pytest.raises(ValueError):
         mod.OperationPlan(objective="x", current_phase=1, total_phases=1, phases=[])
+    scalar_plan = mod.OperationPlan.from_obj(
+        {
+            "objective": "Scalar",
+            "constraints": "  read-only  ",
+            "current_phase": 1,
+            "phases": [{"id": 1, "title": "Recon", "status": "active"}],
+        }
+    )
+    assert scalar_plan.constraints == ["read-only"]
+    tuple_plan = mod.OperationPlan(
+        objective="Tuple",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        constraints=("  first  ", 2),
+    )
+    assert tuple_plan.constraints == ["first", "2"]
+    null_plan = mod.OperationPlan(
+        objective="Null",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        constraints=None,
+    )
+    assert null_plan.constraints == []
+    with pytest.raises(ValueError, match="string, list, tuple, or null"):
+        mod.OperationPlan(
+            objective="Bad",
+            current_phase=1,
+            total_phases=1,
+            phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+            constraints={"constraint": "read-only"},
+        )
+    with pytest.raises(ValueError, match="coercible to non-empty strings"):
+        mod.OperationPlan(
+            objective="Bad",
+            current_phase=1,
+            total_phases=1,
+            phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+            constraints=[""],
+        )
+    with pytest.raises(ValueError, match="coercible to non-empty strings"):
+        mod.OperationPlan(
+            objective="Bad nested shape",
+            current_phase=1,
+            total_phases=1,
+            phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+            constraints=[["nested"]],
+        )
+
+    class UnstringifiableConstraint:
+        def __str__(self):
+            raise TypeError("cannot stringify")
+
+    with pytest.raises(ValueError, match="coercible to non-empty strings"):
+        mod.OperationPlan(
+            objective="Bad conversion",
+            current_phase=1,
+            total_phases=1,
+            phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+            constraints=[UnstringifiableConstraint()],
+        )
 
 
 def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_path):

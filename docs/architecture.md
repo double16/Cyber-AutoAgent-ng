@@ -20,7 +20,7 @@ Long-lived autonomous conversations tend to accumulate stale assumptions, lose c
 
 The controller creates agents for specific jobs:
 
-- **plan_creator**: creates an initial high-level plan when none exists
+- **plan_creator**: creates an initial high-level plan and infers operation-wide constraints when none exists
 - **task_creator**: creates concrete current- and future-phase tasks from a deterministic controller prompt
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
@@ -75,6 +75,9 @@ Agents operate through role-specific restricted tool lists.
 Plan/task state transitions are owned by Python workflow code. Agents can only add follow-up work with `create_tasks` when their role permits it. Active task context is injected into the role prompt by the workflow; agents do not fetch it with a tool.
 
 There is no agent-callable stop tool. When Python workflow evaluation determines the assessment is complete, the controller emits a `termination_reason` event with reason `complete`.
+
+Generated plan constraints are durable workflow guardrails. Task creation and prompt-building roles must honor them,
+and task/phase evaluators prevent successful completion when evidence shows a constraint violation.
 
 There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task history, memory summaries, and selected optional tool candidates. Budget checkpoints are handled by Python control flow before pending task activation.
 

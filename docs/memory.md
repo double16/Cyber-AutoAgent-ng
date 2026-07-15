@@ -155,6 +155,11 @@ Hierarchical planning with phase tracking is stored in SQLite by Python workflow
 ```python
 plan = {
     "objective": "Compromise web application",
+    "constraints": [
+        "Use only network-accessible target interfaces",
+        "Keep activity within the authorized target scope",
+        "Support findings with durable artifact evidence"
+    ],
     "current_phase": 1,
     "total_phases": 3,
     "phases": [
@@ -168,6 +173,7 @@ plan = {
 
 **Required Plan Fields:**
 - `objective`: Overall mission goal
+- `constraints`: Operation-wide guardrails inferred during plan generation from the objective and active prompts
 - `current_phase`: Active phase number
 - `total_phases`: Total number of phases
 - `phases`: List of phase objects with `id`, `title`, `status`, `criteria`

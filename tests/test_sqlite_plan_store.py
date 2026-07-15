@@ -5,7 +5,7 @@ from modules.tools.memory import PlanStore, OperationPlan, PlanPhase, Task
 
 def test_sqlite_plan_store_init(tmp_path):
     db_path = str(tmp_path / "test.db")
-    store = PlanStore(db_path)
+    PlanStore(db_path)
     assert os.path.exists(db_path)
 
     # Check if tables were created
@@ -30,6 +30,7 @@ def test_sqlite_plan_store_plan_operations(tmp_path):
         current_phase=1,
         total_phases=2,
         phases=phases,
+        constraints=["Use non-destructive checks", "Store artifact evidence"],
         assessment_complete=False
     )
 
@@ -41,6 +42,7 @@ def test_sqlite_plan_store_plan_operations(tmp_path):
     assert retrieved_plan is not None
     assert retrieved_plan.objective == plan.objective
     assert retrieved_plan.current_phase == plan.current_phase
+    assert retrieved_plan.constraints == plan.constraints
     assert len(retrieved_plan.phases) == 2
     assert retrieved_plan.phases[0].title == "Phase 1"
     assert retrieved_plan.created_at is not None
