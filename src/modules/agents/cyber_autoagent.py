@@ -65,7 +65,10 @@ from modules.handlers.conversation_budget import (
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.agent_repair_hook import AgentRepairHook
 from modules.handlers.tool_router import ToolRouterHook
-from modules.config.models.capabilities import get_capabilities
+from modules.config.models.capabilities import (
+    allows_reasoning_content_replay,
+    get_capabilities,
+)
 from modules.handlers.utils import (
     get_tool_name,
     print_status,
@@ -1078,7 +1081,15 @@ def create_agent(
     # Allow reasoning deltas only when the provider/model supports them
     try:
         caps = get_capabilities(config.provider, config.model_id or "")
-        setattr(agent, "_allow_reasoning_content", bool(caps.supports_reasoning))
+        setattr(
+            agent,
+            "_allow_reasoning_content",
+            allows_reasoning_content_replay(
+                config.provider,
+                config.model_id or "",
+                caps,
+            ),
+        )
     except Exception:
         setattr(agent, "_allow_reasoning_content", False)
     if runtime.prompt_token_limit:

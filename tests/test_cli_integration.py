@@ -651,7 +651,7 @@ def test_cli_helpers_signal_and_workspace_markers(monkeypatch, tmp_path):
 
 
 def test_cli_deployment_telemetry_and_signal_variants(monkeypatch):
-    logger = SimpleNamespace(info=Mock(), debug=Mock())
+    logger = SimpleNamespace(info=Mock(), debug=Mock(), warning=Mock())
 
     monkeypatch.setattr(cyberautoagent, "is_docker", lambda: True)
     monkeypatch.setattr(cyberautoagent.requests, "get", Mock(side_effect=RuntimeError("down")))
@@ -663,6 +663,7 @@ def test_cli_deployment_telemetry_and_signal_variants(monkeypatch):
     telemetry = SimpleNamespace(setup_otlp_exporter=Mock())
     monkeypatch.setattr(cyberautoagent, "StrandsTelemetry", lambda: telemetry)
     monkeypatch.setattr(cyberautoagent, "detect_deployment_mode", lambda: "compose")
+    monkeypatch.setattr(cyberautoagent, "is_langfuse_available", lambda: True)
     monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
     monkeypatch.setenv("CYBER_UI_MODE", "cli")
     assert cyberautoagent.setup_telemetry(logger) is telemetry
@@ -683,6 +684,41 @@ def test_cli_deployment_telemetry_and_signal_variants(monkeypatch):
 
     with pytest.raises(KeyboardInterrupt):
         cyberautoagent.signal_handler(999, None)
+
+
+def test_setup_telemetry_falls_back_when_langfuse_is_unavailable(monkeypatch):
+    logger = SimpleNamespace(info=Mock(), debug=Mock(), warning=Mock())
+    telemetry = SimpleNamespace(setup_otlp_exporter=Mock())
+    monkeypatch.setattr(cyberautoagent, "StrandsTelemetry", lambda: telemetry)
+    monkeypatch.setattr(cyberautoagent, "detect_deployment_mode", lambda: "compose")
+    monkeypatch.setattr(cyberautoagent, "is_langfuse_available", lambda: False)
+    monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("CYBER_UI_MODE", "cli")
+
+    assert cyberautoagent.setup_telemetry(logger) is telemetry
+
+    telemetry.setup_otlp_exporter.assert_not_called()
+    logger.warning.assert_called_once_with(
+        "Langfuse is unavailable; continuing with local telemetry only"
+    )
+
+
+def test_setup_telemetry_falls_back_when_exporter_setup_fails(monkeypatch):
+    logger = SimpleNamespace(info=Mock(), debug=Mock(), warning=Mock())
+    error = RuntimeError("missing exporter")
+    telemetry = SimpleNamespace(setup_otlp_exporter=Mock(side_effect=error))
+    monkeypatch.setattr(cyberautoagent, "StrandsTelemetry", lambda: telemetry)
+    monkeypatch.setattr(cyberautoagent, "detect_deployment_mode", lambda: "compose")
+    monkeypatch.setattr(cyberautoagent, "is_langfuse_available", lambda: True)
+    monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("CYBER_UI_MODE", "cli")
+
+    assert cyberautoagent.setup_telemetry(logger) is telemetry
+
+    logger.warning.assert_called_once_with(
+        "Unable to configure OTLP exporter; continuing with local telemetry only: %s",
+        error,
+    )
 
 
 def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
@@ -1543,6 +1579,7 @@ def test_cli_main_workflow_runner_creates_role_agent(monkeypatch, tmp_path):
     assert run_kwargs["callback_handler"] is callback
     assert run_kwargs["current_message"] == "do the task"
     assert run_kwargs["run_policy"].required_tool_names == frozenset({"shell"})
+    fake_agent.cleanup.assert_called_once()
 
 
 def test_cli_main_workflow_runner_prefers_agent_final_text_over_policy_message(monkeypatch, tmp_path):
@@ -1574,6 +1611,7 @@ def test_cli_main_workflow_runner_prefers_agent_final_text_over_policy_message(m
     config_manager.workflow.run.side_effect = run_workflow
 
     cyberautoagent.main()
+    fake_agent.cleanup.assert_called_once()
 
 
 def test_cli_main_workflow_runner_omits_policy_message_when_no_agent_final_text(monkeypatch, tmp_path):
@@ -1602,6 +1640,7 @@ def test_cli_main_workflow_runner_omits_policy_message_when_no_agent_final_text(
     config_manager.workflow.run.side_effect = run_workflow
 
     cyberautoagent.main()
+    fake_agent.cleanup.assert_called_once()
 
 
 if __name__ == "__main__":

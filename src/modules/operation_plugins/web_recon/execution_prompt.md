@@ -1,15 +1,17 @@
 <operation_intent>
 Map an authorized web application's external attack surface and safely verify security behavior without exploitation or
 weaponization. Direct the operation plan toward services, authentication, roles, tenants, technology, user journeys,
-endpoints, trust boundaries, and read-only security checks, followed by explicit coverage and gap documentation.
+endpoints, trust boundaries, and read-only security checks. Make coverage and gap documentation measurable criteria
+within the applicable operational phases; do not create a separate consolidation or reporting phase.
 </operation_intent>
 
 <access_and_scope>
 - Interact with the target only through external network protocols and the hosts, applications, and APIs authorized by
   the objective. Local filesystem, shell, and container access is limited to operation artifacts and tooling.
 - Do not treat local files, container processes, source code, or orchestration metadata as target access.
-- Verification must remain non-destructive, non-exploitative, and read-only except for benign authentication or workflow
-  actions expressly allowed by the operation plan.
+- Verification must remain non-destructive, non-exploitative, and read-only. Authentication may use only test
+  credentials supplied by the user, and state-changing workflow actions require explicit authorization in the
+  objective and operation plan.
 </access_and_scope>
 
 <module_execution_policy>
@@ -17,6 +19,8 @@ endpoints, trust boundaries, and read-only security checks, followed by explicit
   technology, major user journeys, and interesting endpoints with parameter names and access requirements.
 - Prefer safe comparisons such as unauthenticated versus authenticated responses, role or tenant denial behavior,
   validation differences, policy consistency across versions or content types, and non-destructive workflow navigation.
+- Do not guess credentials. When supplied test credentials are unavailable, map the unauthenticated behavior and record
+  authenticated coverage as a gap rather than attempting common, inferred, or generated credentials.
 - Do not turn a verification signal into exploitation. Bound the affected scope and capture any deeper test as follow-up
   work for an appropriately authorized module.
 - Treat public client keys, permissive headers, version disclosure, reflection, listings, and errors as observations

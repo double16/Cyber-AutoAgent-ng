@@ -254,7 +254,7 @@ class ModelCapabilitiesResolver:
                         if "thinking" in allowed_params:
                             allowed_params.remove("thinking")
 
-            except Exception as e:
+            except Exception:
                 logger.warning(
                     f"OllamaError: Error getting model info for {model}. Set Ollama API Base via `OLLAMA_HOST` environment variable."
                 )
@@ -305,6 +305,21 @@ _resolver = ModelCapabilitiesResolver()
 
 def get_capabilities(provider: str, model_id: str) -> Capabilities:
     return _resolver.capabilities(provider, model_id)
+
+
+def allows_reasoning_content_replay(
+    provider: str,
+    model_id: str,
+    capabilities: Optional[Capabilities] = None,
+) -> bool:
+    """Return whether prior reasoning blocks may be replayed to the model API."""
+
+    if (provider or "").lower() == "litellm":
+        # Strands' LiteLLMModel uses Chat Completions, which can return reasoning
+        # but cannot accept reasoningContent in later conversation turns.
+        return False
+    resolved = capabilities or get_capabilities(provider, model_id)
+    return bool(resolved.supports_reasoning)
 
 
 # --- Input limits (static registry) --------------------------------------------

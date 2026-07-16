@@ -44,7 +44,7 @@ class AgentRepairHook(HookProvider):
         """
         Runs after the model returns and before tools are processed.
         - If we detect XML-ish tool call markup, request a retry.
-        - If we detect reasoning loop exceeds max tokens, request a retry.
+        - If we detect a reasoning loop exceeds max tokens, request a retry.
         """
         global _JSON_TOOL_CALL_PATCH_ATTEMPT
         if event is None:

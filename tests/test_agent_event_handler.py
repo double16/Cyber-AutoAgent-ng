@@ -1036,6 +1036,9 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
 
     types = event_types(handler)
     assert "report_content" in types
+    report_index = types.index("report_content")
+    assert handler._events[report_index + 1]["type"] == "progress_update"
+    assert handler._events[report_index + 1]["progressPercent"] == handler.get_budget_progress()
     assert "assessment_complete" not in types
     assert output_dir.joinpath("security_assessment_report.md").exists()
     handler.emit_assessment_complete()
@@ -1087,11 +1090,19 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
 
     class FakeEvaluationManager:
-        def __init__(self, operation_id, emitter, report_path=None, usage_callback=None):
+        def __init__(
+            self,
+            operation_id,
+            emitter,
+            report_path=None,
+            usage_callback=None,
+            progress_callback=None,
+        ):
             self.operation_id = operation_id
             self.emitter = emitter
             self.report_path = report_path
             self.usage_callback = usage_callback
+            self.progress_callback = progress_callback
 
         def register_trace(self, **kwargs):
             self.trace = kwargs
@@ -1112,7 +1123,10 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FakeEvaluationManager)
     handler.trigger_evaluation_on_completion()
     assert "evaluation_complete" in event_types(handler)
-    evaluation_event = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    evaluation_index = event_types(handler).index("evaluation_complete")
+    evaluation_event = handler._events[evaluation_index]
+    assert handler._events[evaluation_index + 1]["type"] == "progress_update"
+    assert handler._events[evaluation_index + 1]["progressPercent"] == handler.get_budget_progress()
     assert evaluation_event["status"] == "completed"
     assert evaluation_event["metrics_evaluated"] == 2
     assert evaluation_event["average_score"] == pytest.approx(0.7)
@@ -1130,7 +1144,9 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     handler = make_handler()
     monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", NoResultsEvaluationManager)
     handler.trigger_evaluation_on_completion()
-    no_results = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    no_results_index = event_types(handler).index("evaluation_complete")
+    no_results = handler._events[no_results_index]
+    assert handler._events[no_results_index + 1]["type"] == "progress_update"
     assert no_results["status"] == "no_results"
     assert no_results["success"] is False
 
@@ -1141,7 +1157,9 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     handler = make_handler()
     monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FailedEvaluationManager)
     handler.trigger_evaluation_on_completion()
-    failed = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    failed_index = event_types(handler).index("evaluation_complete")
+    failed = handler._events[failed_index]
+    assert handler._events[failed_index + 1]["type"] == "progress_update"
     assert failed["status"] == "failed"
     assert failed["message"] == "Evaluation failed; see logs for details"
     # Budget-based stop check: simulate duration exceeded

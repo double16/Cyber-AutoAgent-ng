@@ -463,16 +463,19 @@ const runAutoAssessment = async () => {
         }
         else if (event.type === 'task_done') {
             const eventTitle = event.title || lastTaskTitle;
+            const reason = typeof event.status_reason === 'string' && event.status_reason.trim()
+              ? `: ${event.status_reason.trim()}`
+              : '';
             lastTaskTitle = "";
             switch (event.status) {
                 case 'partial_failure':
-                    loggingService.info(`⚠️ Task ${eventTitle ? `"${eventTitle}" ` : ''}failed`);
+                    loggingService.info(`⚠️ Task ${eventTitle ? `"${eventTitle}" ` : ''}failed${reason}`);
                     break;
                 case 'blocked':
-                    loggingService.info(`🧱 Task ${eventTitle ? `"${eventTitle}" ` : ''}blocked`);
+                    loggingService.info(`🧱 Task ${eventTitle ? `"${eventTitle}" ` : ''}blocked${reason}`);
                     break;
                 default:
-                    loggingService.info(`✓ Task ${eventTitle ? `"${eventTitle}" ` : ''}done`);
+                    loggingService.info(`✓ Task ${eventTitle ? `"${eventTitle}" ` : ''}done${reason}`);
                     break;
             }
         }

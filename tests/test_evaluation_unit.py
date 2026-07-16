@@ -121,6 +121,7 @@ def evaluator(monkeypatch, cfg=None):
     monkeypatch.setattr(mod, "get_config_manager", lambda: FakeConfigManager(cfg))
     ev = mod.CyberAgentEvaluator.__new__(mod.CyberAgentEvaluator)
     ev._emitter = RecordingEmitter()
+    ev._progress_callback = None
     ev.langfuse = SimpleNamespace(api=SimpleNamespace(trace=Mock()))
     ev._last_eval_summary_sha256 = ""
     ev._last_eval_stats = {}
@@ -515,6 +516,29 @@ def test_evaluation_preparation_completion_is_semantic(monkeypatch):
         "status": "failed",
         "message": "Rubric Judge failed",
     }
+
+
+def test_evaluation_step_completion_triggers_budget_progress_callback(monkeypatch):
+    ev = evaluator(monkeypatch)
+    callback = Mock()
+    ev._progress_callback = callback
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
+
+    ev._emit_evaluation_step_complete("rubric_judge", "completed")
+
+    callback.assert_called_once_with()
+
+
+def test_evaluation_step_completion_budget_progress_is_best_effort(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._progress_callback = Mock(side_effect=RuntimeError("disconnected"))
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
+
+    ev._emit_evaluation_step_complete("rubric_judge", "completed")
+
+    assert ev._emitter.events[0]["type"] == "evaluation_step_complete"
 
 
 def test_evaluation_preparation_progress_is_best_effort_and_scheduled(monkeypatch):

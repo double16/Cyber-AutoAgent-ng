@@ -74,4 +74,4 @@ VOLUME ["/app/outputs", "/app/tools", "/app/external_plugins", "/app/home_plugin
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD bash -c "exit 0"
 
-ENTRYPOINT ["python3", "/app/src/cyberautoagent.py", "--service-mode"]
+ENTRYPOINT ["tail", "-f", "/dev/null"]

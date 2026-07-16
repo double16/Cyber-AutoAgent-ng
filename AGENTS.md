@@ -37,5 +37,9 @@
 - Use async/await for asynchronous operations
 - Use template literals for string concatenation
 
+## LLM Prompt Best Practices
+- When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
+- When an LLM is to return structured data, prefer JSON.
+
 ## User Interface
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.

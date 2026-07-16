@@ -1,3 +1,5 @@
+import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +24,55 @@ def _tool(name):
 
     tool_func.__name__ = name
     return tool_func
+
+
+def test_default_text_runner_cleans_role_agent(monkeypatch):
+    cleanup_calls = []
+
+    class Agent:
+        def __call__(self, prompt):
+            assert prompt == "prompt"
+            return SimpleNamespace(message={"content": [{"text": "done"}]})
+
+        def cleanup(self):
+            cleanup_calls.append("cleanup")
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(
+            provider="litellm",
+            target="example.com",
+            objective="test",
+        ),
+        operation_id="OP_TEST",
+    )
+    monkeypatch.setattr(workflow_mod, "create_agent", lambda *args, **kwargs: Agent())
+
+    result = workflow_mod.default_text_runner(runtime)("planner", "prompt", [], "system")
+
+    assert result == "done"
+    assert cleanup_calls == ["cleanup"]
+
+
+def test_default_text_runner_preserves_agent_error_when_cleanup_fails(monkeypatch):
+    class Agent:
+        def __call__(self, prompt):
+            raise ValueError("agent failed")
+
+        def cleanup(self):
+            raise RuntimeError("cleanup failed")
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(
+            provider="ollama",
+            target="example.com",
+            objective="test",
+        ),
+        operation_id="OP_TEST",
+    )
+    monkeypatch.setattr(workflow_mod, "create_agent", lambda *args, **kwargs: Agent())
+
+    with pytest.raises(ValueError, match="agent failed"):
+        workflow_mod.default_text_runner(runtime)("planner", "prompt", [], "system")
 
 
 class FakeCallbackHandler:
@@ -94,6 +145,18 @@ class FakeState:
             phase=task.phase,
             status=status,
             status_reason=reason,
+            evidence=task.evidence,
+            created_at=task.created_at,
+        ))
+
+    def reassign_task_phase(self, task, phase_id):
+        return self.store_task(Task(
+            task_uid=task.task_uid,
+            title=task.title,
+            objective=task.objective,
+            phase=phase_id,
+            status=task.status,
+            status_reason=task.status_reason,
             evidence=task.evidence,
             created_at=task.created_at,
         ))
@@ -301,7 +364,13 @@ def test_controller_runs_existing_active_task_before_pending_task():
     assert next(task for task in state.tasks if task.task_uid == "active").status == "done"
     assert runtime.callback_handler.events[:2] == [
         {"type": "task_started", "task_uid": "active", "title": "Active", "status": "active"},
-        {"type": "task_done", "task_uid": "active", "title": "Active", "status": "done"},
+        {
+            "type": "task_done",
+            "task_uid": "active",
+            "title": "Active",
+            "status": "done",
+            "status_reason": "completed",
+        },
     ]
     assert runtime.callback_handler.termination_events == [("complete", "Assessment complete: 1 phase evaluated")]
 
@@ -429,14 +498,14 @@ def test_task_executor_continues_when_selected_memory_lookup_fails():
     assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
 
 
-def test_task_executor_appends_only_valid_selected_shell_commands(monkeypatch):
+def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
     runtime = _runtime()
     runtime.config.available_tools = ["httpx", "nmap"]
     state = FakeState(
         _plan(),
         tasks=[Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")],
     )
-    captured = {}
+    worker_called = False
     monkeypatch.setattr(
         workflow_mod,
         "get_shell_command_specs",
@@ -458,13 +527,14 @@ def test_task_executor_appends_only_valid_selected_shell_commands(monkeypatch):
 
     def text_runner(role, prompt, tools, system_prompt):
         if role == "task_prompt_builder":
-            return '{"prompt":"execute active","tools":[],"shell_commands":["httpx","unknown","httpx",7," "]}'
+            return '{"prompt":"execute active","tools":[],"shell_commands":["httpx","unknown","httpx"]}'
         if role == "task_evaluator":
             return '{"status":"done","reason":"completed"}'
         raise AssertionError(role)
 
     def work_runner(role, prompt, tools, system_prompt, run_policy):
-        captured["prompt"] = prompt
+        nonlocal worker_called
+        worker_called = True
 
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -476,11 +546,9 @@ def test_task_executor_appends_only_valid_selected_shell_commands(monkeypatch):
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert "## Supplemental Shell Commands" in captured["prompt"]
-    assert "shell_commands[1]{command,description,capabilities,shell_preference}:" in captured["prompt"]
-    assert "httpx,HTTP probe,web_recon,preferred" in captured["prompt"]
-    assert "unknown" not in captured["prompt"]
-    assert "nmap" not in captured["prompt"]
+    assert worker_called is False
+    assert state.tasks[0].status == "partial_failure"
+    assert "unavailable tool or command(s): unknown" in state.tasks[0].status_reason
 
 
 def test_task_executor_omits_shell_command_context_for_missing_or_invalid_selection():
@@ -514,6 +582,107 @@ def test_task_executor_omits_shell_command_context_for_missing_or_invalid_select
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
     assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
+
+
+@pytest.mark.parametrize(
+    ("preserve", "expected_phase"),
+    [(True, 2), (False, 1)],
+)
+def test_executor_follow_up_future_phase_requires_affirmative_classification(preserve, expected_phase):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Discovery", status="active", criteria="Map endpoints"),
+            PlanPhase(id=2, title="Validation", status="pending", criteria="Validate mapped controls"),
+        ],
+    )
+    future_task = Task(
+        task_uid="follow-up",
+        title="Validate control",
+        objective="Validate a mapped control with a negative control artifact",
+        phase=2,
+        status="pending",
+    )
+    state = FakeState(plan, tasks=[future_task])
+
+    def text_runner(role, prompt, tools, system_prompt):
+        assert role == "task_phase_classifier"
+        assert "Validate mapped controls" in prompt
+        return (
+            '{"decisions":[{"task_uid":"follow-up",'
+            f'"preserve_requested_phase":{str(preserve).lower()},'
+            '"reason":"criterion classification"}]}'
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    controller._validate_executor_follow_up_phases(plan, plan.phases[0], set())
+
+    assert state.tasks[0].phase == expected_phase
+    assert state.tasks[0].task_uid == "follow-up"
+
+
+def test_executor_follow_up_classifier_failure_reclassifies_to_active_phase():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Discovery", status="active", criteria="Map endpoints"),
+            PlanPhase(id=2, title="Validation", status="pending", criteria="Validate controls"),
+        ],
+    )
+    state = FakeState(
+        plan,
+        tasks=[Task(
+            task_uid="follow-up",
+            title="More discovery",
+            objective="Map another endpoint",
+            phase=2,
+            status="pending",
+        )],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "not-json",
+    )
+
+    controller._validate_executor_follow_up_phases(plan, plan.phases[0], set())
+
+    assert state.tasks[0].phase == 1
+
+
+def test_executor_follow_up_in_active_phase_skips_classifier():
+    plan = _plan()
+    state = FakeState(
+        plan,
+        tasks=[Task(
+            task_uid="follow-up",
+            title="More discovery",
+            objective="Map another endpoint",
+            phase=1,
+            status="pending",
+        )],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: pytest.fail(role),
+    )
+
+    controller._validate_executor_follow_up_phases(plan, plan.phases[0], set())
+
+    assert state.tasks[0].phase == 1
 
 
 def test_task_evaluator_receives_task_worker_final_context():
@@ -570,6 +739,31 @@ def test_task_evaluator_prompt_omits_empty_worker_context_and_truncates_long_con
     assert summary.endswith(" suffix")
     assert "## Task worker final context" in prompt
     assert summary in prompt
+
+
+def test_evaluator_prompts_treat_artifact_backed_negative_results_as_assessed():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="task",
+        title="Map route",
+        objective="Determine whether /missing exists",
+        phase=1,
+        status="pending",
+    )
+
+    task_prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
+    phase_prompt = controller._phase_evaluator_prompt(_plan(), _plan().phases[0])
+
+    for prompt in (task_prompt, phase_prompt):
+        assert "artifact-backed" in prompt
+        assert "404" in prompt
+        assert "confirmed absent or inaccessible" in prompt
+        assert "not assessed" in prompt
 
 
 def test_controller_emits_task_started_when_activating_pending_task():
@@ -673,6 +867,7 @@ def test_phase_hard_cap_closes_active_task_without_running_worker_and_advances()
         "task_uid": "active",
         "title": "Active",
         "status": "partial_failure",
+        "status_reason": next(task for task in state.tasks if task.task_uid == "active").status_reason,
     }
     plan_event = controller.runtime.callback_handler.events[1]
     assert "[done] 1. Recon" in plan_event["content"]
@@ -825,6 +1020,31 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert '"constraints": [string]' in prompt
     assert "scope, safety, operational-boundary, evidence, and validation constraints" in prompt
     assert "Do not treat phase goals, tool preferences, or generic advice as constraints" in prompt
+    assert "findings-consolidation" in prompt
+    assert "Use bounded criteria" in prompt
+
+
+def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    prompt = controller._plan_critic_prompt(
+        {
+            "objective": "assess",
+            "constraints": [],
+            "current_phase": 1,
+            "phases": [
+                {"id": 1, "title": "Wrap up evidence", "status": "pending", "criteria": "Summarize findings"}
+            ],
+        }
+    )
+
+    assert "findings-consolidation" in prompt
+    assert "equivalent post-processing phase, regardless of its title" in prompt
+    assert "bounded, measurable criteria" in prompt
 
 
 def test_module_termination_policy_directs_plan_creation_and_review():
@@ -1474,6 +1694,79 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
     assert "Stay within the authorized target scope" in prompt
 
 
+def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
+    plan = _plan()
+    phase = plan.phases[0]
+    task = Task(
+        task_uid="active",
+        title="Map target",
+        objective="Map the authorized target",
+        phase=phase.id,
+        status="active",
+    )
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    prompt_spec = {
+        "prompt": "Map the authorized target",
+        "memory_ids": [],
+        "tools": [],
+        "shell_commands": [],
+    }
+    phase_json = json.dumps(phase.to_dict(), indent=2, sort_keys=True)
+    task_json = json.dumps(task.to_dict(), indent=2, sort_keys=True)
+
+    prompts_and_objects = [
+        (
+            controller._task_phase_classifier_prompt(phase, [(task, phase)]),
+            [("## Active phase", phase_json)],
+        ),
+        (
+            controller._task_prompt_builder_prompt(plan, phase, task),
+            [("## Phase", phase_json), ("## Task", task_json)],
+        ),
+        (
+            controller._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
+            [("## Active phase", phase_json), ("## Assigned task", task_json)],
+        ),
+        (
+            controller._task_prompt_revision_prompt(plan, phase, task, prompt_spec, ["Add evidence"]),
+            [("## Active phase", phase_json), ("## Assigned task", task_json)],
+        ),
+        (
+            controller._task_creator_prompt(plan, phase),
+            [("## Active Phase", phase_json)],
+        ),
+        (
+            controller._task_evaluator_prompt(plan, phase, task),
+            [
+                ("## Evaluation target: active task", task_json),
+                ("## Context only: active phase", phase_json),
+            ],
+        ),
+        (
+            controller._phase_evaluator_prompt(plan, phase),
+            [("## Evaluation target: active phase", phase_json)],
+        ),
+    ]
+
+    for prompt, expected_objects in prompts_and_objects:
+        for heading, serialized_object in expected_objects:
+            assert f"{heading}\n{serialized_object}" in prompt
+
+    builder_prompt = prompts_and_objects[1][0]
+    creator_prompt = prompts_and_objects[4][0]
+    phase_evaluator_prompt = prompts_and_objects[6][0]
+    assert "## Plan\nplan_overview[1]" in builder_prompt
+    assert "plan_phases[1]{id,title,status,criteria}:" in builder_prompt
+    assert "## Existing Tasks Across All Phases\ntask[1]" in creator_prompt
+    assert "## Tasks\ntask[1]" in phase_evaluator_prompt
+
+
 def test_optional_tool_catalog_uses_tool_spec_name_and_description():
     tool = _tool("python_name")
     tool.tool_spec = {"name": "spec_name", "description": "Spec description."}
@@ -1518,9 +1811,12 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "spec_shell,Execute shell commands." in prompt
     assert "optional_tools[2]{name,description}:" in prompt
     assert "spec_scan,Run a targeted scan." in prompt
-    assert "Include every tool reasonably likely" in prompt
+    assert "`tools` JSON field contains optional-tool names only" in prompt
+    assert "Never return core-tool names in `tools`" in prompt
+    assert "Select any reasonably useful optional-tool working set" in prompt
     assert "Overlapping capabilities are allowed" in prompt
-    assert "Include every command reasonably applicable" in prompt
+    assert "Select any reasonably useful command working set" in prompt
+    assert "no single-tool, exclusivity, minimal-selection, or redundancy requirement" in prompt
     assert "does not suppress an applicable selection" in prompt
     assert "capability required by the task that supplied native tools do not provide" not in prompt
     assert "mandatory execution guardrail" in prompt
@@ -1562,9 +1858,85 @@ def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
     assert "http_request" in prompt
     assert "curl" in prompt
     assert "Tool overlap is permitted" in prompt
-    assert "include both a native\ntool and a shell command for the same capability" in prompt
+    assert "include both a native tool and a shell command for the same capability" in " ".join(prompt.split())
+    assert "Core tools are supplied automatically and must not appear in `tools`" in prompt
+    assert "There is no single-tool" in prompt
     assert "relevant and available" not in prompt
-    assert "Reject a selection only when it has no reasonable relationship to the task" in prompt
+    assert "Reject a selection only when it has no reasonable relationship to the task" in " ".join(prompt.split())
+
+
+def test_task_prompt_spec_accepts_tools_and_commands_in_either_selection_list(monkeypatch):
+    runtime = _runtime()
+    runtime.optional_tools_list.append(_tool("dual_probe"))
+    runtime.config.available_tools = ["curl", "whatweb", "katana", "feroxbuster", "dual_probe"]
+    monkeypatch.setattr(
+        workflow_mod,
+        "get_shell_command_specs",
+        lambda available: [
+            {"command": command, "description": "Security command", "capabilities": []}
+            for command in available
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Fetch", objective="Fetch target", phase=1, status="pending")
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Fetch with any applicable clients",
+            "memory_ids": [],
+            "tools": ["mcp_scan", "whatweb", "katana", "feroxbuster", "dual_probe", "whatweb"],
+            "shell_commands": ["curl", "module_probe", "dual_probe", "curl"],
+        },
+        task,
+    )
+
+    assert normalized["tools"] == ["mcp_scan", "dual_probe", "module_probe"]
+    assert normalized["shell_commands"] == ["curl", "dual_probe", "whatweb", "katana", "feroxbuster"]
+
+
+def test_task_prompt_spec_reclassifies_optional_tools_when_shell_is_unavailable():
+    runtime = _runtime()
+    runtime.core_tools_list = [_tool("editor")]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Scan", objective="Scan target", phase=1, status="pending")
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Scan with available capabilities",
+            "tools": [],
+            "shell_commands": ["mcp_scan", "unavailable-command"],
+        },
+        task,
+    )
+
+    assert normalized["tools"] == ["mcp_scan"]
+    assert normalized["shell_commands"] == []
+
+
+def test_task_prompt_spec_rejects_runtime_supplied_core_tools():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Store", objective="Store evidence", phase=1, status="pending")
+
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="core-only.*mem0_store"):
+        controller._normalize_task_prompt_spec(
+            {"prompt": "Store evidence", "tools": ["mem0_store"], "shell_commands": []},
+            task,
+        )
 
 
 def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
@@ -1893,6 +2265,7 @@ def test_task_prompt_final_rejection_marks_task_partial_failure_without_executio
         "task_uid": "active",
         "title": "Active",
         "status": "partial_failure",
+        "status_reason": state.tasks[0].status_reason,
     }
 
 
@@ -2101,16 +2474,18 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
     monkeypatch.setattr(workflow_mod, "get_memory_client", lambda silent=True: Client())
     store = WorkflowStateStore("OP_TEST")
     stored["plan"] = plan
+    stored["task"] = task
 
     reopened = store.reopen_plan(plan)
     assert reopened.assessment_complete is False
     assert reopened.constraints == ["Use read-only validation"]
-    assert [phase.status for phase in reopened.phases] == ["active", "pending"]
+    assert reopened.current_phase == 2
+    assert [phase.status for phase in reopened.phases] == ["done", "active"]
 
     activated_phase = store.activate_phase(reopened, 2)
     assert activated_phase.current_phase == 2
     assert activated_phase.constraints == ["Use read-only validation"]
-    assert [phase.status for phase in activated_phase.phases] == ["pending", "active"]
+    assert [phase.status for phase in activated_phase.phases] == ["done", "active"]
 
     phase_one_done = store.mark_phase(activated_phase, 1, "done")
     finished_phase = store.mark_phase(phase_one_done, 2, "blocked")
@@ -2128,7 +2503,6 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
     assert generated_plan.constraints == ["Keep generated work in scope"]
     assert generated_plan.phases[0].status == "active"
 
-    store.store_task(task)
     assert store.list_tasks(phase=2, status=["pending"]) == [task]
     active_task = store.activate_task(task)
     assert active_task.status == "active"
@@ -2140,6 +2514,37 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
         store.mark_phase(activated_phase, 2, "active")
     with pytest.raises(ValueError, match="task status"):
         store.mark_task(task, "pending")
+
+
+def test_state_store_does_not_reopen_completed_plan_without_actionable_work(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Recon", status="done"),
+            PlanPhase(id=2, title="Validate", status="partial_failure"),
+        ],
+        assessment_complete=True,
+    )
+
+    class Client:
+        def get_active_plan(self, operation_id=None):
+            return plan
+
+        def store_plan(self, plan, operation_id=None):
+            pytest.fail("completed plan should not be rewritten")
+
+        def list_tasks(self, phase=None, status=None):
+            return []
+
+    monkeypatch.setattr(workflow_mod, "get_memory_client", lambda silent=True: Client())
+
+    reopened = WorkflowStateStore("OP_TEST").reopen_plan(plan)
+
+    assert reopened is plan
+    assert reopened.assessment_complete is True
+    assert [phase.status for phase in reopened.phases] == ["done", "partial_failure"]
 
 
 def test_memory_summary_returns_compact_memories_and_handles_errors():

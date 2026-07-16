@@ -101,7 +101,7 @@ describe('StreamDisplay broad event rendering', () => {
       },
       { type: 'task_started', title: 'Enumerate target' },
       { type: 'thinking', context: 'reasoning', startTime: Date.now(), message: 'working' },
-      { type: 'task_done', title: 'Enumerate target' },
+      { type: 'task_done', title: 'Enumerate target', status: 'blocked', status_reason: 'Needs credentials' },
       { type: 'thinking_end' },
       { type: 'delayed_thinking_start' },
       { type: 'termination_reason', reason: 'complete', message: 'Assessment complete: 3 phases evaluated' },
@@ -131,6 +131,7 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('[FINAL REPORT 2/5] Finding: SQL injection');
     expect(output).toContain('[RAGAS EVALUATION 2/5] Operation: Evidence Quality');
     expect(output).toContain('[RAGAS EVALUATION PREPARING] Report: Generate Reference Topics');
+    expect(output).toContain('TASK BLOCKED Enumerate target: Needs credentials');
     expect(output).toContain('OPERATION COMPLETE');
     expect(output).toContain('Assessment complete: 3 phases evaluated');
     expect(output).toContain('NETWORK TIMEOUT');

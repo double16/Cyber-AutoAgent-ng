@@ -38,6 +38,10 @@ logger = get_logger("Handlers.ReportGenerator")
 MAX_REPORT_FINDINGS = int(os.getenv("CYBER_REPORT_MAX_FINDINGS", "200"))
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 _PAGE_BREAK = """\n<div class="page-break" style="page-break-before: always;"></div>\n\n"""
+_ARTIFACT_REFERENCE = re.compile(
+    r"(?:^|[\s\"'\[(])(?:/[^\s\"'\])]+|(?:artifacts?|outputs?)/[^\s\"'\])]+)",
+    re.IGNORECASE,
+)
 
 
 def _report_item_title(item: Dict[str, Any], default: str) -> str:
@@ -51,6 +55,71 @@ def _report_item_title(item: Dict[str, Any], default: str) -> str:
         or default
     )
     return safe_truncate(str(title).strip() or default, 80)
+
+
+def _has_explicit_artifact(value: Any) -> bool:
+    """Return whether an artifact metadata field contains a concrete reference."""
+
+    if isinstance(value, str):
+        return bool(_ARTIFACT_REFERENCE.search(value))
+    if isinstance(value, dict):
+        return any(_has_explicit_artifact(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_explicit_artifact(item) for item in value)
+    return False
+
+
+def _has_artifact_reference(value: Any) -> bool:
+    """Return whether free-form evidence text contains an artifact-like path."""
+
+    if isinstance(value, str):
+        return bool(_ARTIFACT_REFERENCE.search(value))
+    if isinstance(value, dict):
+        return any(_has_artifact_reference(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_artifact_reference(item) for item in value)
+    return False
+
+
+def _normalize_report_category(
+    category: Any,
+    metadata: Dict[str, Any],
+    content: str,
+    parsed: Dict[str, str],
+) -> str:
+    """Enforce finding evidence requirements without mutating stored memory."""
+
+    normalized = str(category or "").strip().lower()
+    if normalized != "finding":
+        return "observation" if normalized in {"signal", "observation", "discovery"} else normalized
+
+    validation_status = str(
+        metadata.get("validation_status") or metadata.get("status") or ""
+    ).strip().lower()
+    proof_pack = metadata.get("proof_pack") or {}
+    durable_evidence = (
+        _has_explicit_artifact(metadata.get("artifacts"))
+        or _has_explicit_artifact(proof_pack.get("artifacts") if isinstance(proof_pack, dict) else None)
+        or _has_artifact_reference(parsed.get("evidence", ""))
+    )
+    negative_control_fields = (
+        metadata.get("negative_control"),
+        metadata.get("negative_control_artifact"),
+        metadata.get("negative_control_artifacts"),
+        proof_pack.get("negative_control") if isinstance(proof_pack, dict) else None,
+        proof_pack.get("negative_control_artifacts") if isinstance(proof_pack, dict) else None,
+    )
+    artifact_backed_control = any(
+        _has_explicit_artifact(value) for value in negative_control_fields
+    )
+    if not artifact_backed_control:
+        lowered_content = content.lower()
+        names_control = "negative control" in lowered_content or "control case" in lowered_content
+        artifact_backed_control = names_control and _has_artifact_reference(content)
+
+    if validation_status == "verified" and durable_evidence and artifact_backed_control:
+        return "finding"
+    return "observation"
 
 
 def _emit_report_progress(
@@ -227,7 +296,7 @@ def generate_security_report(
         report_findings = [
             (i, finding)
             for i, finding in enumerate(raw_findings)
-            if finding.get("severity") in ["CRITICAL", "HIGH"] or finding.get("category") == "finding"
+            if finding.get("category") == "finding"
         ]
         report_observations = [
             (i, finding)
@@ -266,8 +335,15 @@ Use the following data:
             "executive",
             "Executive summary",
         )
-        exec_result = exec_agent(exec_prompt)
-        exec_content = _extract_text_from_result(exec_result)
+        exec_content = None
+        try:
+            exec_result = exec_agent(exec_prompt)
+            exec_content = _extract_text_from_result(exec_result)
+        finally:
+            try:
+                exec_agent.cleanup()
+            except Exception as error:
+                logger.warning("Unable to clean up report executive summary agent: %s", error)
 
         if exec_content:
             # Add anchor for Table of Contents
@@ -290,17 +366,17 @@ Use the following data:
             f.write(findings_header)
         report_parts_files.append(findings_header_file)
 
+        finding_agent = ReportGenerator.create_report_agent(
+            provider=provider,
+            model_id=model_id,
+            operation_id=operation_id,
+            target=target,
+            callback_handler=report_metrics_callback,
+            system_prompt=get_report_finding_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_finding_system_prompt
+        )
         for i, finding in report_findings:
             logger.info(f"Generating report for finding {i+1}: {finding.get('content')}")
-            finding_agent = ReportGenerator.create_report_agent(
-                provider=provider,
-                model_id=model_id,
-                operation_id=operation_id,
-                target=target,
-                callback_handler=report_metrics_callback,
-                system_prompt=get_report_finding_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_finding_system_prompt
-            )
-            
+
             finding_prompt = f"""
 Generate a detailed report for the following finding.
 Target: {target}
@@ -318,13 +394,18 @@ Finding Data:
             )
             finding_result = finding_agent(finding_prompt)
             finding_text = _extract_text_from_result(finding_result)
-            
+
             if finding_text:
                 finding_filename = f"finding_{i+1}_{sanitize_target_name(finding.get('title', 'finding')[:50])}.md"
                 finding_path = os.path.join(output_path, finding_filename)
                 with open(finding_path, "w") as f:
                     f.write(_PAGE_BREAK + finding_text + "\n\n")
                 report_parts_files.append(finding_path)
+
+        try:
+            finding_agent.cleanup()
+        except Exception as error:
+            logger.warning("Unable to clean up report finding agent: %s", error)
 
         # Part 3: Observations and Discoveries
         logger.info("Generating Observations and Discoveries...")
@@ -334,17 +415,17 @@ Finding Data:
         # Pre-create observation parts list to only add header if there are observations
         observation_parts_files = []
 
+        obs_agent = ReportGenerator.create_report_agent(
+            provider=provider,
+            model_id=model_id,
+            operation_id=operation_id,
+            target=target,
+            callback_handler=report_metrics_callback,
+            system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_observation_system_prompt
+        )
         for i, finding in report_observations:
             has_observations = True
             logger.info(f"Generating report for observation {i+1}: {finding.get('content')}")
-            obs_agent = ReportGenerator.create_report_agent(
-                provider=provider,
-                model_id=model_id,
-                operation_id=operation_id,
-                target=target,
-                callback_handler=report_metrics_callback,
-                system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_observation_system_prompt
-            )
 
             obs_prompt = f"""
 Generate a brief report for the following observation/discovery.
@@ -370,6 +451,11 @@ Observation Data:
                 with open(obs_path, "w") as f:
                     f.write(_PAGE_BREAK + obs_text + "\n\n")
                 observation_parts_files.append(obs_path)
+
+        try:
+            obs_agent.cleanup()
+        except Exception as error:
+            logger.warning("Unable to clean up report observation agent: %s", error)
 
         if has_observations:
             observations_header_file = os.path.join(output_path, "report_observations_header.md")
@@ -407,9 +493,14 @@ Use the following data:
             "methodology",
             "Assessment methodology",
         )
-        appendix_result = appendix_agent(appendix_prompt)
-        appendix_content = _extract_text_from_result(appendix_result)
-        
+
+        appendix_content = None
+        try:
+            appendix_result = appendix_agent(appendix_prompt)
+            appendix_content = _extract_text_from_result(appendix_result)
+        except Exception as error:
+            logger.warning("Unable to clean up report appendix agent: %s", error)
+
         if appendix_content:
             # Add anchor for Table of Contents
             appendix_content = _PAGE_BREAK + "<a name=\"assessment-methodology\"></a>\n" + appendix_content
@@ -833,24 +924,27 @@ def build_report_sections(
                 "metadata": metadata,  # Include metadata for traceability
             }
 
-            # Findings via metadata
-            category = metadata.get("category")
+            parsed_evidence = _parse_structured_evidence(memory_content)
+
+            # Normalize report categories without modifying the stored memory.
+            stored_category = metadata.get("category")
+            category = _normalize_report_category(
+                stored_category,
+                metadata,
+                memory_content,
+                parsed_evidence,
+            )
             if category in ["finding", "signal", "observation", "discovery"]:
-                # Downgrade findings that aren't verified (not sure I'm ready for this downgrade rule yet)
-                # if category == "finding":
-                #     is_verified = str(metadata.get("validation_status", "")).strip().lower() == "verified"
-                #     if not is_verified:
-                #         logger.info(
-                #             "Downgrading finding '%s' (id: %s) to observation: verified=%s",
-                #             metadata.get("vulnerability") or memory_content[:30],
-                #             memory_item.get("id"),
-                #             is_verified,
-                #         )
-                #         category = "observation"
+                if stored_category == "finding" and category == "observation":
+                    logger.info(
+                        "Downgrading report item '%s' (id: %s) to observation: finding evidence requirements unmet",
+                        metadata.get("vulnerability") or memory_content[:30],
+                        memory_item.get("id"),
+                    )
 
                 evidence_included += 1
                 item = base_evidence.copy()
-                sev = metadata.get("severity", "MEDIUM" if category == "finding" else "INFO")
+                sev = metadata.get("severity", "MEDIUM") if category == "finding" else "INFO"
                 conf = str(metadata.get("confidence", ""))
                 item.update(
                     {
@@ -865,7 +959,6 @@ def build_report_sections(
                 )
 
                 # Parse structured markers from the content so downstream sections have clean fields
-                parsed_evidence = _parse_structured_evidence(memory_content)
                 if parsed_evidence and isinstance(parsed_evidence, dict):
                     item["parsed"] = parsed_evidence
 

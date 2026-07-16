@@ -4,6 +4,7 @@ import logging
 import sys
 
 from modules.config.system import environment as mod
+from modules.config.system import logger as logger_mod
 
 
 def test_tee_output_writes_terminal_and_clean_log(tmp_path):
@@ -117,6 +118,11 @@ def test_setup_logging_redirects_streams_and_registers_cleanup(monkeypatch, tmp_
         assert initialized == [{"log_file": str(log_file), "verbose": True}]
         assert logger.name == "CyberAutoAgent"
         assert logger.level == logging.DEBUG
+        assert all(
+            handler.level == logging.INFO
+            for handler in logger.handlers
+            if isinstance(handler, logging.FileHandler)
+        )
     finally:
         registered[0]()
         logger.handlers.clear()
@@ -126,3 +132,21 @@ def test_setup_logging_redirects_streams_and_registers_cleanup(monkeypatch, tmp_
     assert "CYBER-AUTOAGENT SESSION STARTED" in log_file.read_text()
     sys.stdout = original_stdout
     sys.stderr = original_stderr
+
+
+def test_provider_payload_logging_requires_explicit_unsafe_flag(monkeypatch):
+    monkeypatch.delenv("CYBER_UNSAFE_DIAGNOSTIC_LOGGING", raising=False)
+    logger_mod.configure_provider_diagnostic_logging(enable_debug=True)
+
+    assert logging.getLogger("openai._base_client").getEffectiveLevel() == logging.WARNING
+    assert logging.getLogger("httpx").getEffectiveLevel() == logging.WARNING
+    assert logging.getLogger("strands.models.litellm").getEffectiveLevel() == logging.WARNING
+
+    monkeypatch.setenv("CYBER_UNSAFE_DIAGNOSTIC_LOGGING", "true")
+    logger_mod.configure_provider_diagnostic_logging(enable_debug=True)
+
+    assert logging.getLogger("openai._base_client").getEffectiveLevel() == logging.DEBUG
+    assert logging.getLogger("httpx").getEffectiveLevel() == logging.DEBUG
+    assert logging.getLogger("strands.models.litellm").getEffectiveLevel() == logging.DEBUG
+
+    logger_mod.configure_provider_diagnostic_logging(enable_debug=False)

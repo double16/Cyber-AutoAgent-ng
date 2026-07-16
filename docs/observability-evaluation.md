@@ -184,6 +184,9 @@ export LANGFUSE_ENCRYPTION_KEY=$(openssl rand -hex 32)
 export LANGFUSE_ADMIN_PASSWORD=$(openssl rand -base64 32)
 ```
 
+When remote observability is enabled but the Langfuse health check or OTLP exporter setup fails, the assessment
+continues with local Strands token and cost telemetry. A warning identifies the unavailable remote exporter.
+
 **Model Support:**
 - AWS Bedrock: `-e SERVER=remote` (default)
 - Ollama: `-e SERVER=local -e OLLAMA_HOST=http://localhost:11434`

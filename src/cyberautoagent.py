@@ -90,6 +90,20 @@ def get_initial_prompt():  # noqa: D401
     return ""
 
 
+def is_langfuse_available() -> bool:
+    """Return whether the configured Langfuse health endpoint is reachable."""
+
+    try:
+        if is_docker():
+            langfuse_host = os.getenv("LANGFUSE_HOST", "http://langfuse-web:3000")
+        else:
+            langfuse_host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+        response = requests.get(f"{langfuse_host}/api/public/health", timeout=2)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
 def detect_deployment_mode():
     """
     Detect deployment mode for appropriate observability defaults.
@@ -97,20 +111,6 @@ def detect_deployment_mode():
     Returns:
         str: 'cli' (Python CLI), 'container' (single container), or 'compose' (full stack)
     """
-
-    def is_langfuse_available():
-        """Check if Langfuse service is available."""
-        try:
-            if is_docker():
-                langfuse_host = os.getenv("LANGFUSE_HOST", "http://langfuse-web:3000")
-            else:
-                langfuse_host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
-            response = requests.get(
-                f"{langfuse_host}/api/public/health", timeout=2
-            )
-            return response.status_code == 200
-        except Exception:
-            return False
 
     if is_docker():
         if is_langfuse_available():
@@ -178,13 +178,23 @@ def setup_telemetry(logger):
 
     if observability_enabled:
         logger.info("Remote observability enabled - configuring Langfuse export")
-
-        # Configure Langfuse connection parameters first
-        setup_langfuse_connection(logger, deployment_mode)
-
-        # Then setup OTLP exporter which will use the environment variables
-        telemetry.setup_otlp_exporter()
-        logger.info("OTLP exporter configured - traces will be exported to Langfuse")
+        if not is_langfuse_available():
+            logger.warning(
+                "Langfuse is unavailable; continuing with local telemetry only"
+            )
+        else:
+            try:
+                setup_langfuse_connection(logger, deployment_mode)
+                telemetry.setup_otlp_exporter()
+            except Exception as error:
+                logger.warning(
+                    "Unable to configure OTLP exporter; continuing with local telemetry only: %s",
+                    error,
+                )
+            else:
+                logger.info(
+                    "OTLP exporter configured - traces will be exported to Langfuse"
+                )
     else:
         logger.info("Remote observability disabled - metrics available locally only")
         logger.debug("Token counting and cost tracking enabled via local telemetry")
@@ -1180,23 +1190,31 @@ def main():
                     agent_type=role,
                     include_tool_catalog=role != "task_creator",
                 )
-                result = run_agent_until_terminal_state(
-                    agent=agent,
-                    callback_handler=callback_handler,
-                    current_message=prompt,
-                    initial_prompt=initial_prompt,
-                    budget_cfg=budget_cfg,
-                    operation_start=operation_start,
-                    max_duration=args.max_duration,
-                    logger=logger,
-                    run_policy=run_policy,
-                )
-                assistant_text = extract_last_assistant_text(getattr(agent, "messages", []))
-                if assistant_text:
-                    return assistant_text
-                if run_policy and result.reason == run_policy.terminal_reason:
-                    return ""
-                return result.message or result.reason
+                try:
+                    result = run_agent_until_terminal_state(
+                        agent=agent,
+                        callback_handler=callback_handler,
+                        current_message=prompt,
+                        initial_prompt=initial_prompt,
+                        budget_cfg=budget_cfg,
+                        operation_start=operation_start,
+                        max_duration=args.max_duration,
+                        logger=logger,
+                        run_policy=run_policy,
+                    )
+                    assistant_text = extract_last_assistant_text(
+                        getattr(agent, "messages", [])
+                    )
+                    if assistant_text:
+                        return assistant_text
+                    if run_policy and result.reason == run_policy.terminal_reason:
+                        return ""
+                    return result.message or result.reason
+                finally:
+                    try:
+                        agent.cleanup()
+                    except Exception as error:
+                        logger.warning("Unable to clean up role agent %s: %s", role, error)
 
             workflow = MultiAgentWorkflowController(
                 runtime=runtime_resources,

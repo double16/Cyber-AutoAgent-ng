@@ -42,10 +42,11 @@ async def _fake_scores(trace_id, _max_retries):
 @pytest.mark.asyncio
 async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeypatch):
     class FakeEvaluator:
-        def __init__(self, emitter, report_path=None, usage_callback=None):
+        def __init__(self, emitter, report_path=None, usage_callback=None, progress_callback=None):
             self.emitter = emitter
             self.report_path = report_path
             self.usage_callback = usage_callback
+            self.progress_callback = progress_callback
 
         async def evaluate_trace(self, trace_id, _max_retries):
             return await _fake_scores(trace_id, _max_retries)

@@ -79,9 +79,15 @@ def test_threat_emulation_access_and_cleanup_are_explicit():
 def test_web_recon_preserves_non_exploitation_and_three_endpoint_policy():
     prompt = (PLUGIN_ROOT / "web_recon" / "execution_prompt.md").read_text(encoding="utf-8")
     policy = (PLUGIN_ROOT / "web_recon" / "termination_policy.md").read_text(encoding="utf-8")
+    normalized_prompt = " ".join(prompt.split())
+    normalized_policy = " ".join(policy.split())
 
     assert "non-exploitative" in prompt
     assert "Do not weaponize weaknesses" in prompt
+    assert "test credentials supplied by the user" in normalized_prompt
+    assert "Do not guess credentials" in prompt
+    assert "do not create a separate consolidation or reporting phase" in normalized_prompt
+    assert "not a request for a separate consolidation" in normalized_policy
     assert "at least three endpoints" in policy
 
 

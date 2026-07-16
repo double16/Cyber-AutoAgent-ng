@@ -83,7 +83,7 @@ export type AdditionalStreamEvent =
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
   | { type: 'task_started'; task_uid?: string; title?: string; status?: string; [key: string]: any }
-  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; [key: string]: any }
+  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; [key: string]: any }
   | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; message?: string; [key: string]: any };
 
 // Combined event type supporting both SDK-aligned and additional events
@@ -686,7 +686,22 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
     }
 
     case 'task_done': {
-      return null;
+      const title = String((event as any).title || '').trim();
+      const status = String((event as any).status || 'done').trim().toLowerCase();
+      const statusReason = String((event as any).status_reason || '').trim();
+      const label = status === 'partial_failure'
+        ? 'TASK PARTIAL FAILURE'
+        : status === 'blocked'
+          ? 'TASK BLOCKED'
+          : 'TASK DONE';
+      const suffix = title ? ` ${title}` : '';
+      const detail = statusReason ? `: ${statusReason}` : '';
+      const color = status === 'blocked' || status === 'partial_failure' ? 'yellow' : 'green';
+      return (
+        <Box marginLeft={2}>
+          <Text color={color}>{`${label}${suffix}${detail}`}</Text>
+        </Box>
+      );
     }
 
     case 'thinking':

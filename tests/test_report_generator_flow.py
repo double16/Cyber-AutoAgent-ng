@@ -1,7 +1,13 @@
 import pytest
-import os
 from unittest.mock import patch, MagicMock
-from modules.handlers.report_generator import generate_security_report, _extract_text_from_result, build_report_sections
+from modules.handlers.report_generator import (
+    _extract_text_from_result,
+    _has_artifact_reference,
+    _has_explicit_artifact,
+    _normalize_report_category,
+    build_report_sections,
+    generate_security_report,
+)
 from modules.tools.memory import clear_memory_client
 
 
@@ -68,17 +74,40 @@ def test_extract_text_from_result_empty():
     assert _extract_text_from_result(mock_result) == ""
 
 
+def test_report_category_helpers_cover_structured_and_free_form_artifacts():
+    assert _has_explicit_artifact({"artifacts": ["/tmp/control.txt"]}) is True
+    assert _has_explicit_artifact(["", None]) is False
+    assert _has_explicit_artifact(7) is False
+    assert _has_artifact_reference({"evidence": ["saved at artifacts/control.txt"]}) is True
+    assert _has_artifact_reference(["no path", None]) is False
+    assert _has_artifact_reference(7) is False
+
+    assert _normalize_report_category("signal", {}, "", {}) == "observation"
+    assert _normalize_report_category("plan", {}, "", {}) == "plan"
+    assert _normalize_report_category(
+        "finding",
+        {"validation_status": "verified", "artifacts": ["/tmp/proof.txt"]},
+        "Negative control saved at /tmp/control.txt",
+        {},
+    ) == "finding"
+    assert _normalize_report_category(
+        "finding",
+        {"status": "verified", "proof_pack": "legacy"},
+        "Control case without an artifact",
+        {"evidence": "/tmp/proof.txt"},
+    ) == "observation"
+
+
 @pytest.fixture(autouse=True)
 def memory_client_clear():
     clear_memory_client()
 
 
 @patch("modules.handlers.report_generator.get_memory_client")
-@pytest.mark.skip(reason="Not sure we want to downgrade findings in this way")
-def test_report_builder_downgrade_logic(mock_get_client, tmp_path):
+def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     op_id = "OP_DOWNGRADE_TEST"
     output_dir = tmp_path / "outputs"
-    os.environ["CYBER_AGENT_OUTPUT_DIR"] = str(output_dir)
+    monkeypatch.setenv("CYBER_AGENT_OUTPUT_DIR", str(output_dir))
 
     # Mock list_memories to return findings with various validation statuses
     mock_client = mock_get_client.return_value
@@ -91,7 +120,8 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path):
                 "operation_id": op_id,
                 "severity": "CRITICAL",
                 "validation_status": "verified",
-                "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]}
+                "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]},
+                "negative_control_artifacts": [str(tmp_path / "negative-control.txt")],
             },
         },
         {
@@ -115,11 +145,31 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path):
                 "validation_status": "hypothesis"
             },
         },
+        {
+            "id": "4",
+            "memory": "[FINDING] Verified claim without a control [EVIDENCE] /tmp/proof.txt",
+            "metadata": {
+                "category": "finding",
+                "operation_id": op_id,
+                "severity": "HIGH",
+                "validation_status": "verified",
+                "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]},
+            },
+        },
+        {
+            "id": "5",
+            "memory": "[OBSERVATION] Endpoint /api/items returned 404",
+            "metadata": {
+                "category": "observation",
+                "operation_id": op_id,
+                "severity": "HIGH",
+            },
+        },
     ]
 
     # Create the proof file
-    proof_file = tmp_path / "proof.txt"
-    proof_file.write_text("proof")
+    (tmp_path / "proof.txt").write_text("proof")
+    (tmp_path / "negative-control.txt").write_text("control")
 
     # Run build_report_sections
     sections = build_report_sections(op_id, "example.com", "Test Objective")
@@ -137,6 +187,14 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path):
     # Check item 3: Should be downgraded to observation (hypothesis)
     item4 = next(e for e in evidence if e["id"] == "3")
     assert item4["category"] == "observation", "Item 3 should be downgraded to observation (hypothesis)"
+
+    missing_control = next(e for e in evidence if e["id"] == "4")
+    assert missing_control["category"] == "observation"
+    assert missing_control["severity"] == "INFO"
+
+    endpoint_observation = next(e for e in evidence if e["id"] == "5")
+    assert endpoint_observation["category"] == "observation"
+    assert endpoint_observation["severity"] == "INFO"
 
 @patch("modules.handlers.report_generator.ReportGenerator")
 @patch("modules.handlers.report_generator.get_output_path")
@@ -363,7 +421,7 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
             {
                 "id": "o1",
                 "title": "Some Observation",
-                "severity": "INFO",
+                "severity": "HIGH",
                 "category": "observation",
                 "content": "Observation content"
             }
@@ -393,6 +451,7 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
     assert "Observation detail" in content
     assert (output_dir / "report_observations_header.md").exists()
     assert (output_dir / "observation_1_Some_Observation.md").exists()
+    assert not list(output_dir.glob("finding_*Some_Observation.md"))
 
 if __name__ == "__main__":
     pytest.main([__file__])

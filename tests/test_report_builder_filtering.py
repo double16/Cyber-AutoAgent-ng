@@ -60,7 +60,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 "id": "100",
                 "memory": "[VULNERABILITY] A [WHERE] /a [IMPACT] /a/impact [EVIDENCE] /a/evidence [STEPS] /a/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "CRITICAL", "confidence": "90",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/a/control"]},
             },
             {
                 "id": "200",
@@ -72,19 +72,19 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 "id": "201",
                 "memory": "[VULNERABILITY] C [WHERE] /c [IMPACT] /c/impact [EVIDENCE] /c/evidence [STEPS] /c/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "HIGH", "confidence": "90",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/c/control"]},
             },
             {
                 "id": "300",
                 "memory": "[VULNERABILITY] D [WHERE] /d [IMPACT] /d/impact [EVIDENCE] /d/evidence [STEPS] /d/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "90",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/d/control"]},
             },
             {
                 "id": "301",
                 "memory": "[VULNERABILITY] E [WHERE] /e [IMPACT] /e/impact [EVIDENCE] /e/evidence [STEPS] /e/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "80",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/e/control"]},
             },
             {
                 "id": "302",
@@ -96,13 +96,13 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 "id": "400",
                 "memory": "[VULNERABILITY] G [WHERE] /g [IMPACT] /g/impact [EVIDENCE] /g/evidence [STEPS] /g/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "90",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/g/control"]},
             },
             {
                 "id": "401",
                 "memory": "[VULNERABILITY] H [WHERE] /h [IMPACT] /h/impact [EVIDENCE] /h/evidence [STEPS] /h/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "70",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/h/control"]},
             },
             {
                 "id": "402",
@@ -161,12 +161,12 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert out.get("objective") == "test"
         assert out.get("date")
         assert out.get("steps_executed") == 197
-        assert out.get("severity_counts", {}) == {"critical": 1, "high": 2, "medium": 3, "low": 4, "info": 5}
+        assert out.get("severity_counts", {}) == {"critical": 1, "high": 1, "medium": 2, "low": 2, "info": 9}
         assert out.get("critical_count") == 1
-        assert out.get("high_count") == 2
-        assert out.get("medium_count") == 3
-        assert out.get("low_count") == 4
-        assert out.get("info_count") == 5
+        assert out.get("high_count") == 1
+        assert out.get("medium_count") == 2
+        assert out.get("low_count") == 2
+        assert out.get("info_count") == 9
         assert "Comprehensive web application security assessment" in out.get("overview")
         assert out.get("operation_plan", "{}") == plan.to_dict()
 
@@ -179,15 +179,15 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
 
         findings_table = out.get("findings_table")
         assert "CRITICAL | 1 |" in findings_table
-        assert "HIGH | 2 |" in findings_table
-        assert "MEDIUM | 3 |" in findings_table
-        assert "LOW | 4 |" in findings_table
+        assert "HIGH | 1 |" in findings_table
+        assert "MEDIUM | 2 |" in findings_table
+        assert "LOW | 2 |" in findings_table
         assert "INFO |" not in findings_table
 
         summary_table = out.get("summary_table")
-        assert summary_table.count("| MEDIUM |") == 3
-        assert summary_table.count("| LOW |") == 4
-        assert summary_table.count("| INFO |") == 5
+        assert summary_table.count("| MEDIUM |") == 2
+        assert summary_table.count("| LOW |") == 2
+        assert summary_table.count("| INFO |") == 9
         assert "|  |  |  |" not in summary_table
 
         assert "OWASP Top 10 vulnerabilities" in out.get("analysis")
@@ -200,10 +200,10 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert all(["id" in e for e in raw_evidence])
         assert all(["severity" in e for e in raw_evidence])
         assert len(list(filter(lambda e: e["severity"] == "CRITICAL", raw_evidence))) == 1
-        assert len(list(filter(lambda e: e["severity"] == "HIGH", raw_evidence))) == 2
-        assert len(list(filter(lambda e: e["severity"] == "MEDIUM", raw_evidence))) == 3
-        assert len(list(filter(lambda e: e["severity"] == "LOW", raw_evidence))) == 4
-        assert len(list(filter(lambda e: e["severity"] == "INFO", raw_evidence))) == 5
+        assert len(list(filter(lambda e: e["severity"] == "HIGH", raw_evidence))) == 1
+        assert len(list(filter(lambda e: e["severity"] == "MEDIUM", raw_evidence))) == 2
+        assert len(list(filter(lambda e: e["severity"] == "LOW", raw_evidence))) == 2
+        assert len(list(filter(lambda e: e["severity"] == "INFO", raw_evidence))) == 9
 
         assert out.get("tools_summary") == "- shell: 3 uses\n- python_repl: 2 uses"
         assert "OWASP Top 10 2021" in out.get("analysis_framework")
@@ -261,7 +261,7 @@ def test_report_builder_filters_by_operation_id(mock_client_cls):
         "/c" in e.get("content", "") for e in out.get("raw_evidence", []) or []
     ), "Should include untagged evidence for backward compatibility"
 
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 2, "low": 0, "info": 0}
+    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 2}
     assert out.get("module") == "custom_module"
 
 
@@ -306,7 +306,7 @@ def test_report_builder_cross_operation(mock_client_cls):
         "/c" in e.get("content", "") for e in out.get("raw_evidence", []) or []
     ), "Should include untagged evidence for backward compatibility"
 
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 3, "low": 0, "info": 0}
+    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 3}
 
 
 @patch("modules.tools.memory.Mem0ServiceClient")
@@ -330,7 +330,7 @@ def test_report_builder_includes_untagged_evidence(mock_client_cls):
         "/legacy" in e.get("content", "") for e in out.get("raw_evidence", []) or []
     ), "Should include untagged evidence"
 
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 1, "low": 0, "info": 0}
+    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 1}
 
 
 @patch("modules.tools.memory.Mem0ServiceClient")

@@ -7,6 +7,7 @@ from modules.config.models.factory import (
     create_strands_model,
 )
 from modules.config.models.capabilities import (
+    allows_reasoning_content_replay,
     get_capabilities,
     get_model_input_limit,
     get_model_output_limit,
@@ -22,6 +23,7 @@ __all__ = [
     "create_litellm_model",
     "create_strands_model",
     # Capabilities
+    "allows_reasoning_content_replay",
     "get_capabilities",
     "get_model_input_limit",
     "get_model_output_limit",

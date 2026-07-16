@@ -1,5 +1,5 @@
 import logging
-import time
+
 from opentelemetry import trace
 
 logger = logging.getLogger("CyberAutoAgent")
@@ -20,9 +20,10 @@ def flush_traces(telemetry):
             logger.debug("Flushing OpenTelemetry traces...")
             # Force flush with timeout to ensure traces are sent
             # This is critical for capturing all tool calls and swarm operations
-            tracer_provider.force_flush(timeout_millis=10000)  # 10 second timeout
-            # Short delay to ensure network transmission completes
-            time.sleep(2)
-            logger.debug("Traces flushed successfully")
+            flushed = tracer_provider.force_flush(timeout_millis=10000)  # 10 second timeout
+            if flushed is False:
+                logger.warning("OpenTelemetry trace flush timed out or failed")
+            else:
+                logger.debug("Traces flushed successfully")
     except Exception as e:
         logger.warning("Error flushing traces: %s", e)

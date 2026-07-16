@@ -5,8 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "cyber-react": "./dist/index.js",
-    "cyber-native": "./dist/index-native.js"
+    "cyber-react": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",

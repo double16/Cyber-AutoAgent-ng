@@ -2,6 +2,8 @@
 
 ### Features
 
+- Validate executor-created future-phase follow-ups against named plan criteria and resume continued operations from
+  their earliest actionable incomplete phase.
 - Add configurable actor/critic refinement for task execution prompts and mark tasks `partial_failure` when an approved prompt cannot be built.
 - Add configurable actor/critic refinement for initial plan generation, persisting only critic-approved plans.
 - Infer durable operation constraints during plan generation and enforce them during task planning and evaluation.

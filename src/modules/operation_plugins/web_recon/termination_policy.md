@@ -2,6 +2,9 @@
 
 Classify the phase against its own criteria and the following operation-level outcomes:
 
+Distribute these outcomes across the applicable operational phases. They are completion criteria, not a request for a
+separate consolidation, summary, or reporting phase.
+
 - Authorized services and entry points, authentication and session behavior, observed roles and tenant boundaries,
   technology, major user journeys, and prioritized endpoints are mapped with artifact evidence.
 - The evidence documents at least three endpoints with parameter names and access requirements, or proves that the

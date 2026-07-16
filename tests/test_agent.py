@@ -773,6 +773,44 @@ def test_create_agent_stateful_model_uses_runtime_handler_without_conversation_m
     assert agent._allow_reasoning_content is False
 
 
+def test_create_agent_disables_reasoning_replay_for_litellm_chat_completions(monkeypatch):
+    class FakeAgent:
+        def __init__(self):
+            self.tool_registry = Mock()
+
+    config = AgentConfig(target="example.com", objective="test", provider="litellm", model_id="openai/gpt-5")
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_LITELLM_REASONING",
+        server_config=SimpleNamespace(),
+        config_manager=SimpleNamespace(),
+        callback_handler=Mock(),
+        tools_list=[],
+        tool_executor=object(),
+        system_prompt_payload="system payload",
+        system_prompt="system text",
+        task_capture_prompt="task capture",
+        hooks=[],
+        conversation_manager=object(),
+        sdk_context_manager=None,
+        trace_attributes={"operation.id": "OP_LITELLM_REASONING"},
+        prompt_token_limit=0,
+    )
+
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(
+        cyber_agent_module,
+        "get_capabilities",
+        Mock(return_value=SimpleNamespace(supports_reasoning=True)),
+    )
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
+
+    agent = create_agent("example.com", "test", runtime_resources=runtime)
+
+    assert agent._allow_reasoning_content is False
+
+
 def test_create_agent_runtime_resources_applies_sdk_context_manager(monkeypatch):
     class FakeAgent:
         def __init__(self):

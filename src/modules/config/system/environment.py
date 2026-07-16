@@ -16,7 +16,12 @@ import yaml
 
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import print_status
-from modules.config.system.logger import get_logger, initialize_logger_factory
+from modules.config.system.logger import (
+    configure_provider_diagnostic_logging,
+    get_logger,
+    initialize_logger_factory,
+    unsafe_diagnostic_logging_enabled,
+)
 
 
 def clean_operation_memory(operation_id: str, target_name: str = None):
@@ -326,9 +331,15 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # File handler - log INFO and above to file
+    operation_file_level = (
+        logging.DEBUG
+        if verbose and unsafe_diagnostic_logging_enabled()
+        else logging.INFO
+    )
+
+    # Operation logs keep structured events plus INFO-and-above Python records.
     file_handler = logging.FileHandler(log_file, mode="a")
-    file_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    file_handler.setLevel(operation_file_level)
     file_handler.setFormatter(formatter)
 
     # Console handler - only show warnings and above unless verbose
@@ -350,11 +361,12 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
         logging.CRITICAL
     )  # Only show critical errors, not our expected StopIteration
 
-    # Capture all other loggers at INFO level to file
+    # Capture all other loggers at INFO level to file. Verbose mode may still
+    # enable component diagnostics elsewhere, but does not expand operation logs.
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     root_file_handler = logging.FileHandler(log_file, mode="a")
-    root_file_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    root_file_handler.setLevel(operation_file_level)
     root_file_handler.setFormatter(formatter)
     root_logger.addHandler(root_file_handler)
 
@@ -362,5 +374,6 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
     logging.getLogger("boto3").setLevel(logging.WARNING)
     logging.getLogger("botocore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    configure_provider_diagnostic_logging(enable_debug=verbose)
 
     return cyber_logger

@@ -707,15 +707,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 except Exception:
                     pass
 
-                self.emit_ui_event(
-                    {
-                        "type": "progress_update",
-                        "step": "TERMINATED",
-                        "progressPercent": self.get_budget_progress(),
-                        "operation": self.operation_id,
-                        "duration": self._format_duration(self._operation_elapsed_seconds()),
-                    }
-                )
+                self.emit_budget_progress_update(step="TERMINATED")
 
                 # Emit termination details
                 self.emit_ui_event(
@@ -732,6 +724,24 @@ class AgentEventHandler(PrintingCallbackHandler):
                 )
         except Exception as e:
             logger.debug("Failed to emit termination event: %s", e)
+
+    def emit_budget_progress_update(
+        self,
+        *,
+        step: Any = None,
+        total_tools: Optional[int] = None,
+    ) -> None:
+        """Emit a generic budget progress snapshot for the current operation state."""
+        event = {
+            "type": "progress_update",
+            "step": self.action_count if step is None else step,
+            "progressPercent": self.get_budget_progress(),
+            "operation": self.operation_id,
+            "duration": self._format_duration(self._operation_elapsed_seconds()),
+        }
+        if total_tools is not None:
+            event["totalTools"] = total_tools
+        self.emit_ui_event(event)
 
     def _transform_sdk_event(self, kwargs: Dict[str, Any]) -> None:
         """Adapt SDK callbacks to UI events.
@@ -2280,17 +2290,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             pass
 
         try:
-            progress_percent = self.get_budget_progress()
-            self.emit_ui_event(
-                {
-                    "type": "progress_update",
-                    "step": self.action_count,
-                    "progressPercent": progress_percent,
-                    "operation": self.operation_id,
-                    "duration": self._format_duration(self._operation_elapsed_seconds()),
-                    "totalTools": len(self.tools_used),
-                }
-            )
+            self.emit_budget_progress_update(step=self.action_count, total_tools=len(self.tools_used))
 
             # This new action requires a reasoning emission (unless a pre-header flush already sufficed)
             if not flushed_here:
@@ -2951,6 +2951,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             if report_content:
                 self._completed_report_path = report_path
                 self.emit_ui_event({"type": "report_content", "content": report_content})
+                self.emit_budget_progress_update()
 
                 # Also emit file path information for reference
                 self.emit_ui_event(
@@ -3040,6 +3041,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 emitter=self.emitter,
                 report_path=getattr(self, "_evaluation_report_path", None),
                 usage_callback=self._record_evaluation_usage,
+                progress_callback=self.emit_budget_progress_update,
             )
 
             eval_manager.register_trace(
@@ -3086,6 +3088,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "average_score": average_score,
                     }
                 )
+                self.emit_budget_progress_update()
             else:
                 logger.warning("No evaluation results - check trace finding and metric evaluation")
                 self.emit_ui_event(
@@ -3100,6 +3103,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "message": "Evaluation produced no scores",
                     }
                 )
+                self.emit_budget_progress_update()
 
         except Exception as e:
             logger.warning("Evaluation failed but continuing operation: %s", str(e), exc_info=True)
@@ -3115,6 +3119,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "message": "Evaluation failed; see logs for details",
                 }
             )
+            self.emit_budget_progress_update()
 
     # Property methods for compatibility
     @property
