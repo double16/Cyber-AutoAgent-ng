@@ -202,6 +202,64 @@ def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeyp
     assert calls[2] == "foo -h"
 
 
+def test_get_shell_command_help_context_returns_full_help_for_available_command(monkeypatch, tmp_path):
+    _write_env(
+        tmp_path,
+        {
+            "feroxbuster": {
+                "description": "Directory brute forcing",
+                "caps": ["web_content_discovery"],
+                "preference": "preferred",
+                "help": ["feroxbuster --help"],
+            }
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        tc,
+        "_get_shell_command_help",
+        lambda cmd, help_commands: "Usage: feroxbuster\n  -w, --wordlist <FILE>\n  -u, --url <URL>",
+    )
+
+    context = tc.get_shell_command_help_context("feroxbuster", ["feroxbuster"])
+
+    assert "command: feroxbuster" in context
+    assert "capabilities: web_content_discovery" in context
+    assert "shell_preference: preferred" in context
+    assert "Directory brute forcing" in context
+    assert "-w, --wordlist <FILE>" in context
+
+
+def test_get_shell_command_help_context_uses_command_override_and_omits_missing_or_diagnostic(
+    monkeypatch,
+    tmp_path,
+):
+    _write_env(
+        tmp_path,
+        {
+            "theharvester": {
+                "command": "theHarvester",
+                "description": "OSINT",
+                "help": ["theHarvester --help"],
+            }
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: "Usage: theHarvester --help")
+
+    assert "command: theHarvester" in tc.get_shell_command_help_context("theHarvester", ["theharvester"])
+    assert tc.get_shell_command_help_context("missing", ["theharvester"]) == ""
+    assert tc.get_shell_command_help_context("find", ["find"]) == ""
+
+
+def test_get_shell_command_help_context_omits_command_when_help_is_unavailable(monkeypatch, tmp_path):
+    _write_env(tmp_path, {"httpx": {"description": "HTTP probing"}})
+    _patch_environment_file(monkeypatch, tmp_path)
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: "")
+
+    assert tc.get_shell_command_help_context("httpx", ["httpx"]) == ""
+
+
 def test_tool_catalog_wrapper_lists_agent_tools_and_schemas(monkeypatch, tmp_path):
     _patch_strands_tool_decorator(monkeypatch)
     _patch_environment_file(monkeypatch, tmp_path)

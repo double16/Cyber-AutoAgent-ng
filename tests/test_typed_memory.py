@@ -60,12 +60,15 @@ def test_typed_memory_cleaning_and_duplicates(memory_client, operation_ids):
     memory_client.store_memory.assert_not_called()
 
 
-def test_store_finding_creates_one_linked_same_phase_task(memory_client, operation_ids):
+def test_store_finding_creates_one_linked_same_phase_task(memory_client, operation_ids, tmp_path: Path):
+    artifact = tmp_path / "admin-response.txt"
+    artifact.write_text("HTTP 200 admin data", encoding="utf-8")
     plan_store = MagicMock()
     plan_store.get_finding_by_fingerprint.return_value = None
     with (
         patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
         patch("src.modules.tools.memory._get_plan_current_phase", return_value=3),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
     ):
         result = json.loads(
@@ -78,6 +81,7 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
                 "Unauthenticated request is denied",
                 "Admin data was returned",
                 ["Send an unauthenticated request", "Compare the response"],
+                [str(artifact)],
             )
         )
 
@@ -88,18 +92,34 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     assert task.kind == "finding_validation"
     assert task.reference_id == result["finding_uid"]
     assert task.status == "pending"
+    assert task.target_scope == "all"
 
 
-def test_store_finding_is_idempotent(memory_client, operation_ids):
+def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Path):
+    artifact = tmp_path / "response.txt"
+    artifact.write_text("Access", encoding="utf-8")
     plan_store = MagicMock()
     plan_store.get_finding_by_fingerprint.return_value = {
         "finding_uid": "finding-1",
         "verification_task_uid": "task-1",
         "resolution": None,
     }
-    with patch("src.modules.tools.memory._get_plan_store", return_value=plan_store):
+    with (
+        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
         result = json.loads(
-            store_finding("X", "Claim", "LOW", "/x", "test", "No access", "Access", ["Request /x"])
+            store_finding(
+                "X",
+                "Claim",
+                "LOW",
+                "/x",
+                "test",
+                "No access",
+                "Access",
+                ["Request /x"],
+                [str(artifact)],
+            )
         )
 
     assert result == {
@@ -108,6 +128,30 @@ def test_store_finding_is_idempotent(memory_client, operation_ids):
         "verification_task_uid": "task-1",
     }
     memory_client.store_task.assert_not_called()
+
+
+def test_store_finding_rejects_missing_artifact(memory_client, operation_ids, tmp_path: Path):
+    with patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match="Artifact does not exist"):
+            store_finding("X", "Claim", "LOW", "/x", "test", "No access", "Access", ["Request /x"], ["missing.txt"])
+
+
+def test_store_finding_rejects_assumed_observed_result(memory_client, operation_ids, tmp_path: Path):
+    artifact = tmp_path / "response.txt"
+    artifact.write_text("Access", encoding="utf-8")
+    with patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match="concrete observed evidence"):
+            store_finding(
+                "X",
+                "Claim",
+                "LOW",
+                "/x",
+                "test",
+                "No access",
+                "Likely access based on route name",
+                ["Request /x"],
+                [str(artifact)],
+            )
 
 
 def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, operation_ids):

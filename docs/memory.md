@@ -10,6 +10,8 @@ Cyber-AutoAgent implements persistent memory using Mem0 with automatic reflectio
 - **Thread-Safe Writes**: SQLite and FAISS backends use locking for safe concurrent writes
 - **Category Validation**: Invalid categories are auto-corrected to prevent empty reports
 - **Status Validation**: Contradictory status fields are automatically reconciled
+- **Target Scoping**: Plans store executable target literals separately from the logical `--target` output label, and
+  tasks carry `all` or `subset` target scopes.
 
 ## Architecture
 
@@ -111,6 +113,35 @@ store_finding(
     artifacts=["artifacts/login-test.txt", "artifacts/login-control.txt"],
 )
 ```
+
+`store_finding` requires at least one existing artifact path and an `observed_result` that describes concrete observed
+behavior. Assumptions, hypothetical findings, or unread output should be stored as observations or follow-up tasks
+instead of findings.
+
+## Target Registry and Task Scope
+
+The CLI `--target` value is always treated as the logical operation label used for output naming. The workflow builds an
+executable target registry from exact target literals in the objective first, including URLs, IP addresses, CIDR ranges,
+FQDNs, host:port values, and resolvable filesystem paths. If the objective contains no executable targets, the logical
+`--target` value is used as the fallback executable target.
+
+Tasks can cover all executable targets or a subset:
+
+```json
+{
+  "tasks": [
+    {
+      "title": "Enumerate login routes",
+      "objective": "Enumerate login routes on http://dvwa.local",
+      "target_scope": "subset",
+      "target_ids": ["target-1"]
+    }
+  ]
+}
+```
+
+`target_ids` must match the registry exactly. Placeholder or unknown IDs are rejected. Finding-verification tasks inherit
+the exact finding target when it matches the registry, and final reports include a deterministic Target Coverage section.
 
 ### Category Taxonomy
 

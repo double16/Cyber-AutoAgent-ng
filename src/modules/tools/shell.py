@@ -118,6 +118,10 @@ def shell(
     1. Selection Rules:
       • Purpose-built tool when scanning/enumerating many targets or endpoints.
       • `curl` supports single requests, reproductions, crafted edge-cases, and independent HTTP validation.
+        For presence or accessibility checks, capture status explicitly, for example:
+        `curl -sS -o /dev/null -w "%{http_code} %{url_effective}\n" <url>` or
+        `curl -sS -D - -o /dev/null <url>`. Avoid bare `curl -s <url>` as evidence because it may emit no useful
+        output.
       • `grep/sed/awk/jq` only for small transformations after purpose-built tools produce raw output.
 
     2. Command Formats:

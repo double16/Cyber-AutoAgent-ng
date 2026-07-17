@@ -19,6 +19,7 @@ class AgentRunPolicy:
     terminal_after_required_tools: bool = False
     allow_text_final_after_tools: bool = True
     max_actionless_after_tools: int = 0
+    max_tool_calls: int = 0
     ignored_terminal_tool_names: FrozenSet[str] = field(default_factory=frozenset)
     terminal_reason: str = "agent_completed_required_tools"
     terminal_message: str = "Agent completed required tool calls"
@@ -30,6 +31,7 @@ class AgentRunPolicy:
         terminal_after_required_tools: bool = False,
         allow_text_final_after_tools: bool = True,
         max_actionless_after_tools: int = 0,
+        max_tool_calls: int = 0,
         ignored_terminal_tool_names: Iterable[str] = frozenset(),
         terminal_reason: str = "agent_completed_required_tools",
         terminal_message: str = "Agent completed required tool calls",
@@ -39,6 +41,7 @@ class AgentRunPolicy:
         object.__setattr__(self, "terminal_after_required_tools", terminal_after_required_tools)
         object.__setattr__(self, "allow_text_final_after_tools", allow_text_final_after_tools)
         object.__setattr__(self, "max_actionless_after_tools", max_actionless_after_tools)
+        object.__setattr__(self, "max_tool_calls", max_tool_calls)
         object.__setattr__(self, "ignored_terminal_tool_names", frozenset(ignored_terminal_tool_names))
         object.__setattr__(self, "terminal_reason", terminal_reason)
         object.__setattr__(self, "terminal_message", terminal_message)

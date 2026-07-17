@@ -650,6 +650,31 @@ def test_cli_helpers_signal_and_workspace_markers(monkeypatch, tmp_path):
         cyberautoagent.signal_handler(signal.SIGINT, None)
 
 
+def test_recovery_guidance_with_failed_command_help_uses_catalog_context(monkeypatch):
+    recovery_hook = SimpleNamespace(
+        unresolved=True,
+        failed_executable="feroxbuster",
+        recovery_guidance=Mock(return_value="guidance with help"),
+    )
+    catalog_context = Mock(return_value="command: feroxbuster\nUsage: feroxbuster --help")
+    monkeypatch.setattr(cyberautoagent, "get_shell_command_help_context", catalog_context)
+
+    guidance = cyberautoagent._recovery_guidance_with_failed_command_help(recovery_hook, ["feroxbuster"])
+
+    catalog_context.assert_called_once_with("feroxbuster", ["feroxbuster"])
+    recovery_hook.recovery_guidance.assert_called_once_with("command: feroxbuster\nUsage: feroxbuster --help")
+    assert guidance == "guidance with help"
+
+
+def test_recovery_guidance_with_failed_command_help_omits_resolved_hook(monkeypatch):
+    recovery_hook = SimpleNamespace(unresolved=False, failed_executable="feroxbuster")
+    catalog_context = Mock()
+    monkeypatch.setattr(cyberautoagent, "get_shell_command_help_context", catalog_context)
+
+    assert cyberautoagent._recovery_guidance_with_failed_command_help(recovery_hook, ["feroxbuster"]) == ""
+    catalog_context.assert_not_called()
+
+
 def test_cli_deployment_telemetry_and_signal_variants(monkeypatch):
     logger = SimpleNamespace(info=Mock(), debug=Mock(), warning=Mock())
 
@@ -1074,6 +1099,45 @@ def test_run_agent_until_terminal_state_policy_stops_after_required_tool(monkeyp
     assert role_callback.tool_counts == {"required_tool": 1}
     assert all("MANDATORY ACTION" not in message for message in agent.calls)
     assert not logger.warning.called
+
+
+def test_run_agent_until_terminal_state_policy_stops_at_max_tool_calls(monkeypatch):
+    root_callback = CliCallback()
+    root_callback.should_stop = Mock(return_value=False)
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class MaxToolAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            role_callback.tool_counts["shell"] = len(self.calls)
+            return SimpleNamespace(metrics=None)
+
+    agent = MaxToolAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        logger=logger,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            max_tool_calls=1,
+            terminal_reason="max_tools",
+            terminal_message="Stopped after max tools",
+        ),
+    )
+
+    assert result.reason == "max_tools"
+    assert result.message == "Stopped after max tools"
+    assert agent.calls == ["initial"]
 
 
 def test_run_agent_policy_can_stop_immediately_after_required_tool(monkeypatch):

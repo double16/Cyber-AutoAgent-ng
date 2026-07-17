@@ -8,6 +8,8 @@ within the applicable operational phases; do not create a separate consolidation
 <access_and_scope>
 - Interact with the target only through external network protocols and the hosts, applications, and APIs authorized by
   the objective. Local filesystem, shell, and container access is limited to operation artifacts and tooling.
+- When the objective or assigned task authorizes a URL with a scheme and explicit port, keep that exact scheme, host,
+  and port boundary. Do not reinterpret it as authorization to enumerate other ports on the same host.
 - Do not treat local files, container processes, source code, or orchestration metadata as target access.
 - Verification must remain non-destructive, non-exploitative, and read-only. Authentication may use only test
   credentials supplied by the user, and state-changing workflow actions require explicit authorization in the
@@ -32,6 +34,8 @@ within the applicable operational phases; do not create a separate consolidation
 <evidence_policy>
 - Store services, auth posture, roles, technology, journeys, endpoints, negative controls, coverage gaps, and mapping
   results as separate `store_observation` calls with artifact paths.
+- For URL presence, accessibility, or header checks, preserve explicit response status evidence. Bare silent requests
+  with no captured status are not sufficient evidence of absence.
 - Submit security weakness candidates with `store_finding`, including expected and actual behavior, affected
   scope, negative control, reproduction steps, and artifacts. Default uncertain impact to an observation.
 - Never store response bodies containing sensitive data in memory; reference redacted artifacts instead.

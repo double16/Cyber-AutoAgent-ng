@@ -184,6 +184,42 @@ def _emit_report_progress(
         logger.debug("Unable to emit report progress event", exc_info=True)
 
 
+def _format_target_coverage(plan: Any, tasks: List[Any], evidence: List[Dict[str, Any]]) -> str:
+    targets = list(getattr(plan, "targets", []) or [])
+    if not targets:
+        return "No executable target registry was recorded for this operation."
+
+    lines = ["| Target ID | Type | Value | Tasks | Verified Findings | Pending/Failed Validation |"]
+    lines.append("|---|---|---|---:|---:|---:|")
+    for target in targets:
+        target_id = target.target_id
+        scoped_tasks = [
+            task for task in tasks
+            if getattr(task, "target_scope", "all") == "all" or target_id in getattr(task, "target_ids", [])
+        ]
+        verified = [
+            item for item in evidence
+            if item.get("category") == "finding"
+            and (
+                (item.get("metadata", {}) or {}).get("target") == target.value
+                or target.value in str(item.get("content", ""))
+            )
+        ]
+        validation_failures = [
+            item for item in evidence
+            if item.get("category") == "validation_failure"
+            and (
+                (item.get("metadata", {}) or {}).get("target") == target.value
+                or target.value in str(item.get("content", ""))
+            )
+        ]
+        lines.append(
+            f"| {target_id} | {target.type} | `{target.value}` | {len(scoped_tasks)} | "
+            f"{len(verified)} | {len(validation_failures)} |"
+        )
+    return "\n".join(lines)
+
+
 class _ReportMetricsCallback:
     """Record report-agent metrics without streaming report-agent internals to the UI."""
 
@@ -359,8 +395,11 @@ Target: {target}
 Objective: {objective}
 Module: {module_str}
 
+Only verified findings may be counted as confirmed risk. If there are zero verified findings, do not label the target
+as "low risk"; state that no findings were verified and list validation failures separately.
+
 Use the following data:
-{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'validation_failure_count']})}
+{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'validation_failure_count', 'target_coverage']})}
 """
         report_step_index += 1
         _emit_report_progress(
@@ -550,6 +589,17 @@ Observation Data:
             report_parts_files.append(observations_header_file)
             report_parts_files.extend(observation_parts_files)
 
+        target_coverage_file = os.path.join(output_path, "report_target_coverage.md")
+        with open(target_coverage_file, "w") as f:
+            f.write(
+                _PAGE_BREAK
+                + "<a name=\"target-coverage\"></a>\n"
+                + "## Target Coverage\n\n"
+                + str(sections.get("target_coverage") or "No target coverage data was recorded.")
+                + "\n\n"
+            )
+        report_parts_files.append(target_coverage_file)
+
         # Part 5: Assessment Methodology
         logger.info("Generating Assessment Methodology...")
         appendix_agent = ReportGenerator.create_report_agent(
@@ -607,6 +657,7 @@ Use the following data:
             final_f.write("- [Findings Requiring Validation](#findings-requiring-validation)\n")
             if has_observations:
                 final_f.write("- [Observations and Discoveries](#observations-and-discoveries)\n")
+            final_f.write("- [Target Coverage](#target-coverage)\n")
             final_f.write("- [Assessment Methodology](#assessment-methodology)\n\n")
 
             for part_file in report_parts_files:
@@ -973,7 +1024,8 @@ def build_report_sections(
             logger.info(f"Filtering evidence for current operation_id: {operation_id}")
 
         operation_plan = memory_client.get_active_plan()
-        operation_tasks = [task.to_toon(include_format=False) for task in memory_client.list_tasks()]
+        task_records = memory_client.list_tasks()
+        operation_tasks = [task.to_toon(include_format=False) for task in task_records]
 
         # Process evidence entries - FILTER BY OPERATION_ID
         evidence_skipped = 0
@@ -1235,6 +1287,7 @@ def build_report_sections(
             }
 
         # Build complete sections dictionary
+        target_coverage = _format_target_coverage(operation_plan, task_records, evidence)
         sections = {
             "operation_id": operation_id,
             "target": target,
@@ -1256,6 +1309,7 @@ def build_report_sections(
             "evidence_text": evidence_text,
             "findings_table": findings_table,
             "summary_table": summary_table,
+            "target_coverage": target_coverage,
             "analysis": report_content.get("analysis", ""),
             "immediate_recommendations": report_content.get("immediate", ""),
             "short_term_recommendations": report_content.get("short_term", ""),

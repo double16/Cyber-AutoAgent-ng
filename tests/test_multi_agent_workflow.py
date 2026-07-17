@@ -16,7 +16,7 @@ from modules.agents.multi_agent_workflow import (
 )
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
-from modules.tools.memory import OperationPlan, PlanPhase, Task
+from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task
 
 
 def _tool(name):
@@ -313,6 +313,37 @@ def _runtime(progress=0, env_ints=None):
 def test_plan_phase_accepts_partial_failure_and_blocked_statuses():
     assert PlanPhase(id=1, title="Phase", status="partial_failure").status == "partial_failure"
     assert PlanPhase(id=2, title="Phase", status="blocked").status == "blocked"
+
+
+def test_pending_finding_validation_is_prioritized_and_events_include_scope():
+    plan = _plan()
+    standard = Task("task-1", "Standard", "Do standard work", 1, "pending", created_at="1")
+    validation = Task(
+        "task-2",
+        "Verify finding: Admin",
+        "Verify finding",
+        1,
+        "pending",
+        created_at="2",
+        kind="finding_validation",
+        reference_id="finding-1",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    state = FakeState(plan, [standard, validation])
+    runtime = _runtime()
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    assert controller._get_pending_task(1) == validation
+
+    controller._emit_task_started(validation)
+    event = runtime.callback_handler.events[-1]
+    assert event["target_scope"] == "subset"
+    assert event["target_ids"] == ["target-1"]
 
     with pytest.raises(ValueError, match="phase.status"):
         PlanPhase(id=3, title="Phase", status="complete")
@@ -1116,7 +1147,9 @@ def test_evaluator_prompts_treat_artifact_backed_negative_results_as_assessed():
 
     for prompt in (task_prompt, phase_prompt):
         assert "artifact-backed" in prompt
+        assert "captured" in prompt
         assert "404" in prompt
+        assert "Bare `curl -s`" in prompt
         assert "confirmed absent or inaccessible" in prompt
         assert "not assessed" in prompt
 
@@ -1174,7 +1207,7 @@ def test_controller_closes_phase_before_pending_task_when_hard_budget_cap_reache
     assert calls == ["phase_evaluator"]
     assert state.plan.assessment_complete is True
     assert state.plan.phases[0].status == "partial_failure"
-    assert state.tasks[0].status == "pending"
+    assert state.tasks[0].status == "partial_failure"
     assert controller.runtime.callback_handler.termination_events[0][0] == "complete"
 
 
@@ -1216,7 +1249,7 @@ def test_phase_hard_cap_closes_active_task_without_running_worker_and_advances()
     assert state.plan.phases[0].status == "done"
     assert state.plan.phases[1].status == "active"
     assert next(task for task in state.tasks if task.task_uid == "active").status == "partial_failure"
-    assert next(task for task in state.tasks if task.task_uid == "pending").status == "pending"
+    assert next(task for task in state.tasks if task.task_uid == "pending").status == "partial_failure"
     assert controller.runtime.callback_handler.events[0] == {
         "type": "task_done",
         "task_uid": "active",
@@ -1224,7 +1257,9 @@ def test_phase_hard_cap_closes_active_task_without_running_worker_and_advances()
         "status": "partial_failure",
         "status_reason": next(task for task in state.tasks if task.task_uid == "active").status_reason,
     }
-    plan_event = controller.runtime.callback_handler.events[1]
+    assert controller.runtime.callback_handler.events[1]["task_uid"] == "pending"
+    assert controller.runtime.callback_handler.events[1]["status"] == "partial_failure"
+    plan_event = controller.runtime.callback_handler.events[2]
     assert "[done] 1. Recon" in plan_event["content"]
     assert "[active] 2. Validate" in plan_event["content"]
     assert plan_event["metadata"] == {
@@ -1262,7 +1297,7 @@ def test_phase_hard_cap_falls_back_to_partial_failure_for_nonterminal_evaluation
 
     assert calls == ["phase_evaluator"]
     assert state.plan.phases[0].status == "partial_failure"
-    assert state.tasks[0].status == "pending"
+    assert state.tasks[0].status == "partial_failure"
 
 
 def test_advisory_checkpoint_can_continue_below_phase_hard_cap():
@@ -1311,7 +1346,7 @@ def test_global_budget_limit_still_preempts_phase_hard_cap_evaluation():
         controller.run()
 
 
-def test_controller_evaluates_phase_at_python_checkpoint_before_pending_task():
+def test_controller_defers_phase_evaluation_at_python_checkpoint_when_tasks_are_pending():
     calls = []
     plan = OperationPlan(
         objective="assess",
@@ -1342,9 +1377,10 @@ def test_controller_evaluates_phase_at_python_checkpoint_before_pending_task():
         max_iterations=1,
     )
 
-    controller.run()
+    should_evaluate = controller._should_evaluate_phase(plan.phases[0])
 
-    assert calls == ["phase_evaluator"]
+    assert should_evaluate is False
+    assert calls == []
     assert state.tasks[0].status == "pending"
     assert 20 in controller._crossed_checkpoints
 
@@ -1449,7 +1485,7 @@ def test_planning_prompts_omit_empty_module_termination_policy_section():
     assert "Module Completion Policy" not in controller._plan_revision_prompt(plan_data, ["revise"])
 
 
-def test_plan_refinement_defaults_to_one_and_negative_values_disable_it():
+def test_plan_refinement_defaults_to_two_and_negative_values_disable_it():
     default_controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -1463,7 +1499,7 @@ def test_plan_refinement_defaults_to_one_and_negative_values_disable_it():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert default_controller.plan_refinement_iterations == 1
+    assert default_controller.plan_refinement_iterations == 2
     assert disabled_controller.plan_refinement_iterations == 0
 
 
@@ -2177,6 +2213,105 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "capability required by the task that supplied native tools do not provide" not in prompt
     assert "mandatory execution guardrail" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
+    assert 'curl -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" <url>' in prompt
+    assert "curl -sS -D - -o /dev/null <url>" in prompt
+    assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
+
+
+def test_task_target_scope_text_preserves_explicit_url_service_boundaries():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        constraints=["Stay within scope"],
+        targets=[
+            OperationTarget(target_id="target-1", type="network", value="custom-scheme://service.example:4280"),
+            OperationTarget(target_id="target-2", type="network", value="service.example"),
+        ],
+    )
+    task = Task(
+        task_uid="active",
+        title="Map service",
+        objective="Map the assigned service",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+
+    scope_text = MultiAgentWorkflowController._task_target_scope_text(plan, task)
+
+    assert "target-1 [network]: custom-scheme://service.example:4280" in scope_text
+    assert "target-2" not in scope_text
+    assert "explicit URL service target" in scope_text
+    assert "scheme=custom-scheme" in scope_text
+    assert "host=service.example" in scope_text
+    assert "port=4280" in scope_text
+    assert "Do not convert it into a host-only target" in scope_text
+    assert "broad host or port enumeration violates scope" in scope_text
+
+
+def test_task_prompts_reject_host_wide_scans_for_explicit_url_service_targets():
+    plan = OperationPlan(
+        objective="assess custom-scheme://service.example:4280",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        constraints=["Stay within the explicit service target"],
+        targets=[OperationTarget(target_id="target-1", type="network", value="custom-scheme://service.example:4280")],
+    )
+    phase = plan.phases[0]
+    task = Task(
+        task_uid="active",
+        title="Map service",
+        objective="Map the assigned service",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    prompt_spec = {
+        "prompt": "Map the service but do not broaden target scope.",
+        "memory_ids": [],
+        "tools": [],
+        "shell_commands": ["nmap"],
+    }
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    builder_prompt = controller._task_prompt_builder_prompt(plan, phase, task)
+    critic_prompt = controller._task_prompt_critic_prompt(plan, phase, task, prompt_spec)
+    revision_prompt = controller._task_prompt_revision_prompt(plan, phase, task, prompt_spec, ["Remove broad scan"])
+    creator_contract = controller._task_creator_contract(plan, phase)
+    executor_contract = controller._task_executor_contract()
+    tool_policy = controller._tool_selection_policy()
+    normalized = " ".join(
+        "\n".join(
+            [
+                builder_prompt,
+                critic_prompt,
+                revision_prompt,
+                creator_contract,
+                executor_contract,
+                tool_policy,
+            ]
+        ).split()
+    )
+
+    assert "explicit `scheme://host:port` URL" in normalized
+    assert "preserve that exact scheme, host, and port boundary" in normalized
+    assert "host-only" in normalized
+    assert "all open ports" in normalized
+    assert "omitted-port" in normalized
+    assert "`-p-`" in normalized
+    assert "`1-65535`" in normalized
+    assert "scheme-appropriate service tooling" in normalized
+    assert "separate executable host or network target authorizes that scope" in normalized
 
 
 def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
@@ -2349,6 +2484,26 @@ def test_shell_command_catalog_is_empty_without_shell_tool(monkeypatch):
     assert controller._shell_command_catalog() == (
         "shell_commands[0]{command,description,capabilities,shell_preference}:\n"
     )
+
+
+def test_failed_shell_command_help_context_uses_runtime_available_tools(monkeypatch):
+    runtime = _runtime()
+    runtime.config.available_tools = ["feroxbuster"]
+    calls = []
+    monkeypatch.setattr(
+        workflow_mod,
+        "get_shell_command_help_context",
+        lambda command, available: calls.append((command, available)) or "FULL HELP",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    assert controller._failed_shell_command_help_context("feroxbuster") == "FULL HELP"
+    assert calls == [("feroxbuster", ["feroxbuster"])]
 
 
 def test_tool_catalog_renders_empty_lists_and_rejects_unknown_structure_names():

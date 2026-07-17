@@ -4,13 +4,14 @@ import pytest
 
 from modules.handlers.report_generator import (
     _extract_text_from_result,
+    _format_target_coverage,
     _ground_report_item,
     _has_artifact_reference,
     _normalize_report_category,
     build_report_sections,
     generate_security_report,
 )
-from modules.tools.memory import clear_memory_client
+from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task, clear_memory_client
 
 
 def test_extract_text_from_result():
@@ -110,6 +111,32 @@ def test_report_category_helpers_cover_structured_and_free_form_artifacts():
         "Control case without an artifact",
         {"evidence": "/tmp/proof.txt"},
     ) == "validation_failure"
+
+
+def test_format_target_coverage_counts_scoped_tasks_and_report_items():
+    plan = OperationPlan(
+        objective="Assess targets",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[
+            OperationTarget(target_id="target-1", value="http://one.test", type="network"),
+            OperationTarget(target_id="target-2", value="http://two.test", type="network"),
+        ],
+    )
+    tasks = [
+        Task("task-1", "One", "Check one", 1, "done", target_scope="subset", target_ids=["target-1"]),
+        Task("task-2", "All", "Check all", 1, "done"),
+    ]
+    evidence = [
+        {"category": "finding", "metadata": {"target": "http://one.test"}, "content": "confirmed"},
+        {"category": "validation_failure", "metadata": {"target": "http://two.test"}, "content": "pending"},
+    ]
+
+    coverage = _format_target_coverage(plan, tasks, evidence)
+
+    assert "| target-1 | network | `http://one.test` | 2 | 1 | 0 |" in coverage
+    assert "| target-2 | network | `http://two.test` | 1 | 0 | 1 |" in coverage
 
 
 @pytest.fixture(autouse=True)
@@ -282,6 +309,7 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     assert (output_dir / "report_findings_header.md").exists()
     # finding_1_High_Finding.md
     assert (output_dir / "finding_1_High_Finding.md").exists()
+    assert (output_dir / "report_target_coverage.md").exists()
     assert (output_dir / "report_methodology.md").exists()
 
 @patch("modules.handlers.report_generator.build_report_sections")

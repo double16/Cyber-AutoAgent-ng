@@ -7,6 +7,10 @@
 - Add read-only, operation-scoped artifact access for evaluators and report agents.
 - Add configurable task execution actor/critic cycles that retain the task-executor conversation and stop early on
   evaluator approval.
+- Add executable target registries and per-task target scopes so logical `--target` names can coexist with concrete
+  URLs, hosts, CIDRs, and filesystem paths from the objective.
+- Add deterministic final-report target coverage showing task, verified-finding, and validation-failure counts by
+  executable target.
 - Validate executor-created future-phase follow-ups against named plan criteria and resume continued operations from
   their earliest actionable incomplete phase.
 - Add configurable actor/critic refinement for task execution prompts and mark tasks `partial_failure` when an approved prompt cannot be built.
@@ -28,10 +32,21 @@
 
 ### Fixes
 
+- Show WorkflowInvariantError termination messages in the React terminal termination panel.
+- Include full failed-command help in shell recovery prompts so executors can correct invalid options without
+  rediscovering syntax.
+- Treat curl responses with captured status codes as interpretable negative evidence while keeping silent no-status
+  requests from proving endpoint absence.
+- Preserve explicit URL scheme and port scope in workflow and web-module prompts so service-specific targets are not
+  treated as host-wide or all-port scan authorization.
 - Stop task creators and executors immediately after their required tool sequence, and repair small-model
   `tool_use(tool_name=..., parameters=...)` wrappers only when the nested tool is registered.
 - Stop task executors from treating correctable tool failures as successful evidence, allow one bounded correction in
   the retained conversation, and block evidence/task writes until the failure is resolved.
+- Keep pending finding-validation tasks ahead of standard work and prevent advisory phase checkpoints from closing
+  phases while tasks remain unresolved.
+- Require `store_finding` submissions to include existing artifact evidence and concrete observed behavior before
+  creating verification tasks.
 - Make shell command batches fail when any command fails and remove the ambiguous `ignore_errors` option.
 - Avoid thread-unsafe PTY forks when the non-interactive shell executes multiple commands in parallel on macOS.
 - Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.

@@ -23,6 +23,13 @@ import { resolveRecordingMode } from './utils/recordingMode.js';
 import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
 import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
 
+const formatTaskScope = (event: any): string => {
+  const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
+  const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
+  if (!scope || scope === 'all') return '';
+  return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
+
 // Check for --debug flag early (before meow parsing) to enable logging
 if (process.argv.includes('--debug') || process.argv.includes('-d')) {
   process.env.CYBER_DEBUG = 'true';
@@ -459,7 +466,7 @@ const runAutoAssessment = async () => {
         }
         else if (event.type === 'task_started') {
             lastTaskTitle = event.title;
-            loggingService.info(`🚀 Starting task ${event.title ? `"${event.title}"` : ''}`);
+            loggingService.info(`🚀 Starting task ${event.title ? `"${event.title}"` : ''}${formatTaskScope(event)}`);
         }
         else if (event.type === 'task_done') {
             const eventTitle = event.title || lastTaskTitle;

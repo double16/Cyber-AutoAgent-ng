@@ -11,6 +11,8 @@ from strands import tool, Agent
 from modules.config.system import environment, get_logger
 
 logger = get_logger("Tools.Catalog")
+_DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
+_SEPARATOR = "=" * 80
 
 
 @lru_cache()
@@ -81,7 +83,7 @@ def get_shell_command_specs(available: List[str]) -> List[Dict[str, Any]]:
     return specs
 
 
-@lru_cache(maxsize=200)
+@lru_cache(maxsize=1000)
 def _get_shell_command_help(command: str, help_commands_json: str) -> str:
     """
     Get the command help text by attempting `--help` or `-h`.
@@ -107,6 +109,56 @@ def _get_shell_command_help(command: str, help_commands_json: str) -> str:
                 return result_str
     except Exception as e:
         logger.warning(f"Getting help text for {command}", exc_info=e)
+    return ""
+
+
+def _shell_command_config(shell_command: str) -> tuple[str, Dict[str, Any], List[str]]:
+    cyber_tools = _get_cyber_tools()
+    tool_cfg = cyber_tools.get(shell_command) or {}
+    real_command = str(tool_cfg.get("command") or shell_command).strip()
+    help_commands = tool_cfg.get("help", [])
+    if not isinstance(help_commands, list):
+        help_commands = [help_commands]
+    return real_command, tool_cfg, [str(item) for item in help_commands if str(item).strip()]
+
+
+def _render_shell_command_help(shell_command: str, *, require_help: bool) -> str:
+    real_command, tool_cfg, help_commands = _shell_command_config(shell_command)
+    if not real_command:
+        return ""
+    description = str(tool_cfg.get("description", ""))
+    preference = str(tool_cfg.get("preference", ""))
+    caps = tool_cfg.get("caps") or []
+    if isinstance(caps, str):
+        caps = [caps]
+    help_text = _get_shell_command_help(real_command, json.dumps(help_commands))
+    if require_help and not help_text.strip():
+        return ""
+    return f"""
+{_SEPARATOR}
+command: {real_command}
+capabilities: {", ".join(str(capability) for capability in caps)}
+shell_preference: {preference}
+
+{description}
+
+{help_text}
+
+{_SEPARATOR}
+"""
+
+
+def get_shell_command_help_context(command: str, available: List[str]) -> str:
+    """Return full tool-catalog command help for one available shell executable."""
+
+    command = str(command or "").strip()
+    if not command or command in _DIAGNOSTIC_EXECUTABLES:
+        return ""
+    for shell_command in available:
+        shell_command_text = str(shell_command or "").strip()
+        real_command, _, _ = _shell_command_config(shell_command_text)
+        if command in {shell_command_text, real_command}:
+            return _render_shell_command_help(shell_command_text, require_help=True)
     return ""
 
 
@@ -140,7 +192,6 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
                 - 2–6 terms: capability + task (e.g., `idor validate`, `jwt decode`, `web_crawling`, `xss_testing`).
                 - 1 term: tool/command name.
         """
-        separator = "=" * 80
         parts = re.split(r"[\s,;]+", (keywords or ""))
         keywords = [w.strip().lower() for w in parts if w.strip()]
         found_tools = []
@@ -162,12 +213,12 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
             if len(tool_desc) > 200:
                 tool_desc = tool_desc[:200] + " ..."
             catalog += f"""
-{separator}
+{_SEPARATOR}
 name: {tool_name}
 
 {tool_desc}
 
-{separator}
+{_SEPARATOR}
 """
 
         found_cyber_tools = []
@@ -177,40 +228,30 @@ name: {tool_name}
 
 These are command-line programs invoked through the **shell** tool.
 """
-            cyber_tools = _get_cyber_tools()
             for shell_command in shell_commands:
                 if specific_tool and shell_command != keywords[0]:
                     continue
-                tool_cfg = (cyber_tools.get(shell_command) or {})
-                real_command = tool_cfg.get("command", shell_command)
-                help_commands = tool_cfg.get("help", [])
-                if not isinstance(help_commands, list):
-                    help_commands = [help_commands]
-                description = tool_cfg.get("description", "")
-                preference = tool_cfg.get("preference", "")
+                real_command, tool_cfg, _ = _shell_command_config(shell_command)
+                description = str(tool_cfg.get("description", ""))
                 caps = tool_cfg.get("caps") or []
                 if isinstance(caps, str):
                     caps = [caps]
                 if keywords and not specific_tool:
-                    desc_l = str(description).lower()
+                    desc_l = description.lower()
                     caps_l = [str(cap).lower() for cap in caps]
                     if not any(
-                            [w in shell_command.lower() or w in real_command.lower() or w in desc_l or w in caps_l for w in keywords]):
+                        [
+                            w in shell_command.lower()
+                            or w in real_command.lower()
+                            or w in desc_l
+                            or w in caps_l
+                            for w in keywords
+                        ]
+                    ):
                         continue
                 found_cyber_tools.append(real_command)
 
-                catalog += f"""
-{separator}
-command: {real_command}
-capabilities: {", ".join(caps)}
-shell_preference: {preference}
-
-{description}
-
-{_get_shell_command_help(real_command, json.dumps(help_commands))}
-
-{separator}
-"""
+                catalog += _render_shell_command_help(shell_command, require_help=False)
         if len(found_tools) + len(found_cyber_tools) == 0:
             return f"**NO RESULTS**\nkeywords: {' '.join(keywords)}"
 

@@ -128,6 +128,42 @@ def test_task_create_defaults_missing_phase_to_zero():
     assert task.phase == 0
 
 
+def test_resolve_operation_targets_prefers_objective_literals_over_logical_target():
+    targets = mod.resolve_operation_targets(
+        "dvwa",
+        "Assess http://dvwa.local/login.php and 192.168.56.0/24",
+    )
+
+    assert [target.value for target in targets] == ["http://dvwa.local/login.php", "192.168.56.0/24"]
+    assert [target.type for target in targets] == ["network", "network_range"]
+    assert all(target.source == "objective" for target in targets)
+
+
+def test_resolve_operation_targets_falls_back_to_logical_bare_target():
+    targets = mod.resolve_operation_targets("easypicking.htb", "Security assessment")
+
+    assert len(targets) == 1
+    assert targets[0].value == "easypicking.htb"
+    assert targets[0].source == "logical_target_fallback"
+
+
+def test_task_create_validates_subset_scope():
+    task = mod.TaskCreate.from_obj(
+        {
+            "title": "Check host",
+            "objective": "Check target",
+            "target_scope": "subset",
+            "target_ids": ["target-1"],
+        }
+    )
+
+    assert task.target_scope == "subset"
+    assert task.target_ids == ["target-1"]
+
+    with pytest.raises(ValueError, match="target_ids required"):
+        mod.TaskCreate.from_obj({"title": "Check host", "objective": "Check target", "target_scope": "subset"})
+
+
 def test_create_tasks_tool_schema_allows_missing_or_untyped_phase():
     tool_spec = get_tool_spec(mod.create_tasks)
     task_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskCreate"]
@@ -155,6 +191,35 @@ def test_create_tasks_tool_description_contains_exact_required_shape():
 def test_create_tasks_rejects_task_without_required_title():
     with pytest.raises(ValueError, match="title"):
         mod.create_tasks([{"objective": "Enumerate reachable endpoints"}])
+
+
+def test_create_tasks_rejects_unknown_target_ids(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[
+            mod.OperationTarget(
+                target_id="target-1",
+                value="http://target.test",
+                type="network",
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="unknown operation target IDs"):
+        mod.create_tasks(
+            [
+                {
+                    "title": "Check other target",
+                    "objective": "Check http://other.test",
+                    "target_scope": "subset",
+                    "target_ids": ["target-99"],
+                }
+            ]
+        )
 
 
 def test_removed_plan_task_tools_are_not_exported_from_tools_module():

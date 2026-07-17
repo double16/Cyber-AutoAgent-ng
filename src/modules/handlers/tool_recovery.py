@@ -26,6 +26,8 @@ _CORRECTABLE_ERROR_PATTERNS = tuple(
         r"validation error",
     )
 )
+_HTTP_STATUS_LINE_PATTERN = re.compile(r"\bHTTP/\d(?:\.\d)?\s+([1-5]\d{2})\b", re.IGNORECASE)
+_CURL_WRITE_OUT_STATUS_PATTERN = re.compile(r"(?m)^\s*(?:http_code=|status=)?([1-5]\d{2})(?:\s|$)")
 
 _MUTATING_TOOLS = {
     "create_tasks",
@@ -34,6 +36,7 @@ _MUTATING_TOOLS = {
     "store_knowledge",
     "store_observation",
 }
+_READ_ONLY_TOOLS = {"mem0_retrieve", "read_artifact"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 _SENSITIVE_KEYS = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 
@@ -98,6 +101,46 @@ def _shell_executable(tool_input: Dict[str, Any]) -> str:
     if parts and parts[0] in {"env", "sudo"}:
         parts.pop(0)
     return parts[0].rsplit("/", 1)[-1] if parts else ""
+
+
+def _shell_command_text(tool_input: Any) -> str:
+    if not isinstance(tool_input, dict):
+        return ""
+    command = tool_input.get("command", "")
+    if isinstance(command, list):
+        commands = []
+        for item in command:
+            commands.append(str(item.get("command", "")) if isinstance(item, dict) else str(item))
+        return "\n".join(commands)
+    return str(command)
+
+
+def _uses_curl_write_out(tool_input: Any) -> bool:
+    command = _shell_command_text(tool_input)
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    return "-w" in parts or "--write-out" in parts or "--write-out=" in command
+
+
+def _captured_http_status(output: str, *, allow_write_out_status: bool = False) -> Optional[str]:
+    status_line = _HTTP_STATUS_LINE_PATTERN.search(output)
+    if status_line:
+        return status_line.group(1)
+    if allow_write_out_status:
+        write_out = _CURL_WRITE_OUT_STATUS_PATTERN.search(output)
+        if write_out:
+            return write_out.group(1)
+    return None
+
+
+def _is_interpretable_curl_http_result(tool_name: str, tool_input: Any, output: str) -> bool:
+    if tool_name != "shell" or not isinstance(tool_input, dict):
+        return False
+    if _shell_executable(tool_input) != "curl":
+        return False
+    return _captured_http_status(output, allow_write_out_status=_uses_curl_write_out(tool_input)) is not None
 
 
 @dataclass(frozen=True)
@@ -195,6 +238,9 @@ class TaskFailureRecoveryHook(HookProvider):
             event.cancel_tool = "The task's single correction allowance has been exhausted."
             self._recovery_roles[tool_id] = "blocked"
             return
+        if self._is_read_only(tool_name):
+            self._recovery_roles[tool_id] = "read_only"
+            return
         if self._is_correction(tool_name, tool_input):
             if self._correction_attempted:
                 event.cancel_tool = "Only one corrected invocation is allowed for this task."
@@ -207,8 +253,12 @@ class TaskFailureRecoveryHook(HookProvider):
             event.cancel_tool = "Only one diagnostic invocation is allowed before the corrected invocation."
             self._recovery_roles[tool_id] = "blocked"
             return
-        self._diagnostic_used = True
-        self._recovery_roles[tool_id] = "diagnostic"
+        if self._is_diagnostic(tool_name, tool_input):
+            self._diagnostic_used = True
+            self._recovery_roles[tool_id] = "diagnostic"
+            return
+        event.cancel_tool = "Recovery may only use read-only inspection, one diagnostic, and one corrected call."
+        self._recovery_roles[tool_id] = "blocked"
 
     def _is_correction(self, tool_name: str, tool_input: Any) -> bool:
         if tool_name != self.failed_tool_name:
@@ -218,6 +268,16 @@ class TaskFailureRecoveryHook(HookProvider):
         executable = _shell_executable(tool_input)
         return bool(executable and executable == self.failed_executable and executable not in _DIAGNOSTIC_EXECUTABLES)
 
+    @staticmethod
+    def _is_read_only(tool_name: str) -> bool:
+        return tool_name in _READ_ONLY_TOOLS
+
+    @staticmethod
+    def _is_diagnostic(tool_name: str, tool_input: Any) -> bool:
+        if tool_name != "shell" or not isinstance(tool_input, dict):
+            return False
+        return _shell_executable(tool_input) in _DIAGNOSTIC_EXECUTABLES
+
     def _after_tool(self, event: AfterToolCallEvent) -> None:
         tool_use = event.tool_use
         tool_name = str(tool_use.get("name", "unknown"))
@@ -225,6 +285,10 @@ class TaskFailureRecoveryHook(HookProvider):
         tool_input = tool_use.get("input", {})
         output = _result_text(event.result)
         success = _result_success(event.result, event.exception)
+        if not success and _is_interpretable_curl_http_result(tool_name, tool_input, output):
+            success = True
+            status_code = _captured_http_status(output, allow_write_out_status=_uses_curl_write_out(tool_input))
+            output = f"{output}\nInterpretable curl response status captured: {status_code}"
         role = self._recovery_roles.pop(tool_id, "normal")
         correctable = not success and is_correctable_tool_failure(tool_name, output)
         self.journal.append(
@@ -244,7 +308,7 @@ class TaskFailureRecoveryHook(HookProvider):
             else:
                 self.exhausted = True
             return
-        if role in {"blocked", "diagnostic"}:
+        if role in {"blocked", "diagnostic", "read_only"}:
             return
         if correctable:
             self.unresolved = True
@@ -257,12 +321,17 @@ class TaskFailureRecoveryHook(HookProvider):
             self._diagnostic_used = False
             self._correction_attempted = False
 
-    def recovery_guidance(self) -> str:
-        return (
+    def recovery_guidance(self, tool_catalog_context: str = "") -> str:
+        guidance = (
             "A correctable tool invocation failed. Do not claim output from it or create tasks/store evidence until "
-            "it is resolved. You may make at most one diagnostic/preflight call and one corrected invocation. "
+            "it is resolved. You may make read-only inspection calls, at most one diagnostic/preflight call, and one "
+            "corrected invocation of the failed tool. "
             f"Failed tool: {self.failed_tool_name}. Error: {self.failed_output}"
         )
+        tool_catalog_context = str(tool_catalog_context or "").strip()
+        if not tool_catalog_context:
+            return guidance
+        return guidance + "\n\n## Failed Command Help\n" + tool_catalog_context
 
 
 def outcomes_to_toon(outcomes: Iterable[ToolOutcome]) -> str:

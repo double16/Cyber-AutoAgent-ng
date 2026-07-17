@@ -92,6 +92,13 @@ export type DisplayStreamEvent = StreamEvent | AdditionalStreamEvent;
 // Re-export StreamEvent type for backward compatibility
 export type { StreamEvent };
 
+const formatTaskScope = (event: any): string => {
+  const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
+  const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
+  if (!scope || scope === 'all') return '';
+  return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
+
 interface StreamDisplayProps {
   events: DisplayStreamEvent[];
   // Configuration for SDK features
@@ -690,7 +697,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       const title = String((event as any).title || 'Finding').replace(/^Verify finding:\s*/i, '').trim();
       return (
         <Box marginLeft={2}>
-          <Text color="yellow">{`VERIFYING FINDING ${title}`}</Text>
+          <Text color="yellow">{`VERIFYING FINDING ${title}${formatTaskScope(event)}`}</Text>
         </Box>
       );
     }
@@ -773,6 +780,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         case 'model_error':
           reasonLabel = 'MODEL ERROR';
           break;
+        case 'error':
+          reasonLabel = 'TERMINATION ERROR';
+          break;
         default:
           reasonLabel = 'TERMINATED';
       }
@@ -786,6 +796,15 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
           <Box flexDirection="column" marginTop={1} marginBottom={1}>
             <Box borderStyle="round" borderColor="green" paddingX={1}>
               <Text color="green" bold>{reasonLabel}: {sanitizedMessage || 'Assessment workflow completed.'}</Text>
+            </Box>
+          </Box>
+        );
+      }
+      if (reason === 'error') {
+        return (
+          <Box flexDirection="column" marginTop={1} marginBottom={1}>
+            <Box borderStyle="round" borderColor="red" paddingX={1}>
+              <Text color="red" bold>{reasonLabel}: {sanitizedMessage || 'Operation terminated due to an error.'}</Text>
             </Box>
           </Box>
         );

@@ -140,6 +140,58 @@ def test_correctable_classifier_does_not_retry_ordinary_negative_result():
     assert is_correctable_tool_failure("shell", "scan completed; zero results") is False
 
 
+def test_curl_header_status_is_interpretable_even_when_shell_status_is_error():
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal)
+    tool_input = {"command": "curl --fail -sS -D - -o /dev/null http://target/robots.txt"}
+
+    hook._after_tool(
+        _after(
+            "curl-404",
+            "shell",
+            tool_input,
+            status="error",
+            text="HTTP/1.1 404 Not Found\ncontent-length: 0",
+        )
+    )
+
+    outcome = journal.entries()[0]
+    assert outcome.success is True
+    assert outcome.correctable is False
+    assert "Interpretable curl response status captured: 404" in outcome.output_summary
+    assert hook.unresolved is False
+
+
+def test_curl_write_out_status_is_interpretable_even_when_shell_status_is_error():
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal)
+    tool_input = {
+        "command": 'curl --fail -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" http://target/robots.txt'
+    }
+
+    hook._after_tool(_after("curl-404", "shell", tool_input, status="error", text="404 http://target/robots.txt"))
+
+    outcome = journal.entries()[0]
+    assert outcome.success is True
+    assert outcome.correctable is False
+    assert "Interpretable curl response status captured: 404" in outcome.output_summary
+    assert hook.unresolved is False
+
+
+def test_silent_curl_without_captured_status_is_not_reclassified_as_evidence():
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal)
+    tool_input = {"command": "curl -s http://target/robots.txt"}
+
+    hook._after_tool(_after("curl-silent", "shell", tool_input, status="error", text=""))
+
+    outcome = journal.entries()[0]
+    assert outcome.success is False
+    assert outcome.correctable is False
+    assert outcome.output_summary == ""
+    assert hook.unresolved is False
+
+
 def test_outcome_helpers_cover_schema_variants_and_journal_slices():
     assert _result_text(RuntimeError("boom")) == "boom"
     assert _result_text("plain") == "plain"
@@ -185,3 +237,44 @@ def test_recovery_rejects_extra_diagnostic_and_second_correction():
     hook._before_tool(second_correction)
     assert second_correction.cancel_tool
     assert "Failed tool: shell" in hook.recovery_guidance()
+
+
+def test_recovery_guidance_includes_optional_failed_command_help():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    failed_input = {"command": "feroxbuster --bad http://target"}
+    hook._after_tool(
+        _after("failed", "shell", failed_input, status="error", text="invalid argument --bad")
+    )
+
+    guidance = hook.recovery_guidance(
+        "command: feroxbuster\nUsage: feroxbuster\n  -w, --wordlist <FILE>"
+    )
+
+    assert "Failed tool: shell" in guidance
+    assert "## Failed Command Help" in guidance
+    assert "-w, --wordlist <FILE>" in guidance
+
+
+def test_recovery_allows_read_only_without_consuming_diagnostic_and_blocks_unrelated_shell():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
+    hook._after_tool(
+        _after("failed", "shell", failed_input, status="error", text="no such file or directory")
+    )
+
+    read_artifact = _before("read", "read_artifact", {"path": "artifacts/error.txt"})
+    hook._before_tool(read_artifact)
+    assert read_artifact.cancel_tool is False
+    hook._after_tool(_after("read", "read_artifact", read_artifact.tool_use["input"], status="success", text="log"))
+
+    retrieve = _before("retrieve", "mem0_retrieve", {"query": "wordlists"})
+    hook._before_tool(retrieve)
+    assert retrieve.cancel_tool is False
+
+    unrelated = _before("unrelated", "shell", {"command": "curl http://target/"})
+    hook._before_tool(unrelated)
+    assert unrelated.cancel_tool
+
+    diagnostic = _before("diagnostic", "shell", {"command": "which feroxbuster"})
+    hook._before_tool(diagnostic)
+    assert diagnostic.cancel_tool is False

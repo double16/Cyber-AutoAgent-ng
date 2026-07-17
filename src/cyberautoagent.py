@@ -96,6 +96,7 @@ from modules.handlers.utils import (
 from modules.tools import browser, channel_close_all
 from modules.tools.memory import get_memory_client
 from modules.tools.oast import close_oast_providers
+from modules.tools.tool_catalog import get_shell_command_help_context
 from modules.utils.telemetry import flush_traces
 
 load_dotenv()
@@ -108,6 +109,17 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 def get_initial_prompt():  # noqa: D401
     """Placeholder function; patched in tests and set at runtime."""
     return ""
+
+
+def _recovery_guidance_with_failed_command_help(recovery_hook: Any, available_tools: list[str]) -> str:
+    if not recovery_hook or not recovery_hook.unresolved:
+        return ""
+    return recovery_hook.recovery_guidance(
+        get_shell_command_help_context(
+            recovery_hook.failed_executable,
+            available_tools,
+        )
+    )
 
 
 def is_langfuse_available() -> bool:
@@ -464,6 +476,15 @@ def run_agent_until_terminal_state(
                     tool_total_count,
                 )
 
+            run_tool_deltas = _tool_count_deltas(agent_callback_handler, run_tool_count_baseline)
+            run_tool_total = sum(
+                count
+                for name, count in run_tool_deltas.items()
+                if name not in run_policy.ignored_terminal_tool_names
+            )
+            if run_policy.max_tool_calls and run_tool_total >= run_policy.max_tool_calls:
+                return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+
             if _run_policy_allows_terminal_text(
                 agent_callback_handler,
                 run_policy,
@@ -478,7 +499,7 @@ def run_agent_until_terminal_state(
                     raise BudgetLimitReached("Budget limit reached")
                 return AgentRunResult("callback_stop", "Callback requested stop")
 
-            if sum(_tool_count_deltas(agent_callback_handler, run_tool_count_baseline).values()) == 0:
+            if sum(run_tool_deltas.values()) == 0:
                 if getattr(agent_callback_handler, "_emitted_any_reasoning", False):
                     logger.debug("Initial reasoning observed with no tools yet; continuing one more cycle")
                 elif initial_reasoning_retry <= 0:
@@ -1312,10 +1333,9 @@ def main():
                             outcomes=outcomes,
                             recovery_required=bool(recovery_hook and recovery_hook.unresolved),
                             recovery_exhausted=bool(recovery_hook and recovery_hook.exhausted),
-                            recovery_guidance=(
-                                recovery_hook.recovery_guidance()
-                                if recovery_hook and recovery_hook.unresolved
-                                else ""
+                            recovery_guidance=_recovery_guidance_with_failed_command_help(
+                                recovery_hook,
+                                config.available_tools or [],
                             ),
                         )
 

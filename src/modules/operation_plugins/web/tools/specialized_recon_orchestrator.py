@@ -164,12 +164,17 @@ def _coerce_str(arg: bytes | str | None) -> str:
 
 
 @tool
-def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive") -> str:
+def specialized_recon_orchestrator(
+        target: str,
+        recon_type: str = "comprehensive",
+        output_file: Optional[str] = None,
+) -> str:
     """
     Orchestrates automated web recon for a target. It scans for subdomains, live hosts/tech stack, crawled endpoints, JS files, URL/form parameters, and hidden/high-value services.
 
     Input:
     - Accepts URL or domain; normalizes to domain or IP address.
+    - output_file: path to write results to disk.
 
     Reuse vs run:
     - Reuse existing `recon_result_v1` for same target if sufficient.
@@ -352,7 +357,12 @@ def specialized_recon_orchestrator(target: str, recon_type: str = "comprehensive
     except Exception as e:
         _err("orchestration", str(e))
 
-    return json.dumps(results, indent=2)
+    result_str = json.dumps(results, indent=2)
+    if output_file:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(result_str)
+    return result_str
 
 
 def _generate_recon_tasks(results: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1436,9 +1446,10 @@ def main() -> int:
         choices=["subdomain", "fingerprint", "comprehensive"],
         help="Type of recon to run (default: comprehensive)",
     )
+    parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
 
     args = parser.parse_args()
-    print(specialized_recon_orchestrator(args.target, recon_type=args.recon_type))
+    print(specialized_recon_orchestrator(args.target, recon_type=args.recon_type, output_file=args.output_file))
     return 0
 
 

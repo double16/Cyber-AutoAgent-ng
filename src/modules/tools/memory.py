@@ -43,6 +43,7 @@ Key Features:
 """
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -79,7 +80,71 @@ _FAISS_WRITE_LOCK = threading.Lock()
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
 TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
+TargetType = Literal["network", "network_range", "filesystem"]
+TargetScope = Literal["all", "subset"]
 TERMINAL_PLAN_STATUSES = ("done", "partial_failure", "blocked")
+
+
+@dataclass(frozen=True)
+class OperationTarget:
+    """One executable target literal authorized for this operation."""
+
+    target_id: str
+    value: str
+    type: TargetType
+    source: str = "objective"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target_id, str) or not self.target_id.strip():
+            raise ValueError("target_id must be a non-empty string")
+        if not isinstance(self.value, str) or not self.value.strip():
+            raise ValueError("target value must be a non-empty string")
+        if self.type not in ("network", "network_range", "filesystem"):
+            raise ValueError("target type must be one of: network|network_range|filesystem")
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("target source must be a non-empty string")
+
+    @staticmethod
+    def from_obj(obj: Any) -> "OperationTarget":
+        if isinstance(obj, OperationTarget):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("operation target must be an object/dict")
+        return OperationTarget(
+            target_id=str(obj.get("target_id", "")),
+            value=str(obj.get("value", "")),
+            type=str(obj.get("type", "network")),
+            source=str(obj.get("source", "objective") or "objective"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "target_id": self.target_id,
+            "value": self.value,
+            "type": self.type,
+            "source": self.source,
+        }
+
+    @staticmethod
+    def csv_format() -> str:
+        return "target_id,value,type,source"
+
+    def to_toon(self, include_format=True) -> str:
+        lines = []
+        if include_format:
+            lines.append(f"operation_targets[1]{{{OperationTarget.csv_format()}}}:")
+        lines.append(
+            "  "
+            + ",".join(
+                [
+                    sanitize_toon_value(self.target_id),
+                    sanitize_toon_value(self.value),
+                    sanitize_toon_value(self.type),
+                    sanitize_toon_value(self.source),
+                ]
+            )
+        )
+        return "\n".join(lines).strip()
 
 
 @dataclass(frozen=True)
@@ -101,6 +166,8 @@ class Task:
     updated_at: Optional[str] = None
     kind: str = "standard"
     reference_id: Optional[str] = None
+    target_scope: TargetScope = "all"
+    target_ids: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -113,6 +180,18 @@ class Task:
             raise ValueError("phase must be a positive int")
         if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
             raise ValueError("status must be one of: active|pending|done|partial_failure|blocked")
+        if self.target_scope not in ("all", "subset"):
+            raise ValueError("target_scope must be all or subset")
+        if not isinstance(self.target_ids, list):
+            raise ValueError("target_ids must be a list")
+        normalized_ids = []
+        for target_id in self.target_ids:
+            target_id_text = str(target_id).strip()
+            if target_id_text:
+                normalized_ids.append(target_id_text)
+        object.__setattr__(self, "target_ids", normalized_ids)
+        if self.target_scope == "subset" and not self.target_ids:
+            raise ValueError("target_ids required when target_scope is subset")
 
     @staticmethod
     def from_obj(obj: Any) -> "Task":
@@ -130,6 +209,8 @@ class Task:
             updated_at=obj.get("updated_at"),
             kind=str(obj.get("kind", "standard") or "standard"),
             reference_id=obj.get("reference_id"),
+            target_scope=str(obj.get("target_scope", "all") or "all"),
+            target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -145,6 +226,8 @@ class Task:
             "updated_at": self.updated_at,
             "kind": self.kind,
             "reference_id": self.reference_id,
+            "target_scope": self.target_scope,
+            "target_ids": self.target_ids,
         })
 
     @staticmethod
@@ -153,7 +236,7 @@ class Task:
 
     @staticmethod
     def csv_format() -> str:
-        return "title,objective,evidence,phase,status,status_reason,kind,reference_id"
+        return "title,objective,evidence,phase,status,status_reason,kind,reference_id,target_scope,target_ids"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -163,11 +246,13 @@ class Task:
         status_reason = sanitize_toon_value(self.status_reason)
         kind = sanitize_toon_value(self.kind)
         reference_id = sanitize_toon_value(self.reference_id)
+        target_ids = "|".join(sanitize_toon_value(target_id) for target_id in self.target_ids)
         lines = []
         if include_format:
             lines.append(f"{self.toon_format()}:")
         lines.append(
-            f"  {title},{objective},{evidence},{self.phase},{status},{status_reason},{kind},{reference_id}"
+            f"  {title},{objective},{evidence},{self.phase},{status},{status_reason},{kind},"
+            f"{reference_id},{self.target_scope},{target_ids}"
         )
         return "\n".join(lines).strip()
 
@@ -241,6 +326,7 @@ class OperationPlan:
     total_phases: int
     phases: List[PlanPhase] = field(default_factory=list)
     constraints: List[str] = field(default_factory=list)
+    targets: List[OperationTarget] = field(default_factory=list)
     assessment_complete: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -257,6 +343,8 @@ class OperationPlan:
         for p in self.phases:
             if not isinstance(p, PlanPhase):
                 raise ValueError("phases must contain PlanPhase objects")
+        targets = [OperationTarget.from_obj(target) for target in self.targets]
+        self.targets = targets
         constraints: Any = self.constraints
         if constraints is None:
             constraints = []
@@ -313,6 +401,7 @@ class OperationPlan:
             total_phases=len(phases),
             phases=phases,
             constraints=obj.get("constraints", []),
+            targets=obj.get("targets", []),
             assessment_complete=bool(obj.get("assessment_complete", False)),
             created_at=obj.get("created_at"),
             updated_at=obj.get("updated_at"),
@@ -325,6 +414,7 @@ class OperationPlan:
             "total_phases": self.total_phases,
             "phases": [p.to_dict() for p in self.phases],
             "constraints": self.constraints,
+            "targets": [target.to_dict() for target in self.targets],
             "assessment_complete": self.assessment_complete,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -346,6 +436,9 @@ class OperationPlan:
             overview_lines.append(f"{self.toon_format()}:")
         overview_lines.append(f" {objective},{self.current_phase},{self.total_phases}")
         constraint_lines = self.constraints_to_toon().splitlines()
+        target_lines = [f"operation_targets[{len(self.targets)}]{{{OperationTarget.csv_format()}}}:"]
+        for target in self.targets:
+            target_lines.append(target.to_toon(include_format=False))
         phase_lines = [f"plan_phases[{len(self.phases)}]{{id,title,status,criteria}}:"]
         for phase in self.phases:
             phase_lines.append(
@@ -359,7 +452,7 @@ class OperationPlan:
                     ]
                 )
             )
-        return "\n".join([*overview_lines, *constraint_lines, *phase_lines]).strip()
+        return "\n".join([*overview_lines, *constraint_lines, *target_lines, *phase_lines]).strip()
 
 
 def _get_memory_base_path(config: Optional[Dict] = None) -> str:
@@ -444,6 +537,10 @@ class PlanStore:
                     conn.execute("ALTER TABLE tasks ADD COLUMN kind TEXT DEFAULT 'standard'")
                 if "reference_id" not in task_columns:
                     conn.execute("ALTER TABLE tasks ADD COLUMN reference_id TEXT")
+                if "target_scope" not in task_columns:
+                    conn.execute("ALTER TABLE tasks ADD COLUMN target_scope TEXT DEFAULT 'all'")
+                if "target_ids" not in task_columns:
+                    conn.execute("ALTER TABLE tasks ADD COLUMN target_ids TEXT DEFAULT '[]'")
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS finding_records (
                         finding_uid TEXT PRIMARY KEY,
@@ -511,8 +608,11 @@ class PlanStore:
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
-                    INSERT INTO tasks (task_uid, operation_id, title, objective, phase, status, status_reason, evidence, created_at, updated_at, kind, reference_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO tasks (
+                        task_uid, operation_id, title, objective, phase, status, status_reason, evidence,
+                        created_at, updated_at, kind, reference_id, target_scope, target_ids
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
@@ -522,6 +622,8 @@ class PlanStore:
                         evidence=excluded.evidence,
                         kind=excluded.kind,
                         reference_id=excluded.reference_id,
+                        target_scope=excluded.target_scope,
+                        target_ids=excluded.target_ids,
                         updated_at=excluded.updated_at
                 """, (
                     task.task_uid,
@@ -536,6 +638,8 @@ class PlanStore:
                     task_dict["updated_at"],
                     task.kind,
                     task.reference_id,
+                    task.target_scope,
+                    json.dumps(task.target_ids),
                 ))
 
     def get_tasks(self, operation_id: str) -> List[Task]:
@@ -545,7 +649,8 @@ class PlanStore:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute(
                     "SELECT title, objective, phase, status, status_reason, evidence, task_uid, "
-                    "created_at, updated_at, kind, reference_id FROM tasks WHERE operation_id = ?",
+                    "created_at, updated_at, kind, reference_id, target_scope, target_ids "
+                    "FROM tasks WHERE operation_id = ?",
                     (operation_id,),
                 )
                 for row in cursor:
@@ -562,6 +667,8 @@ class PlanStore:
                             updated_at=row[8],
                             kind=row[9] or "standard",
                             reference_id=row[10],
+                            target_scope=row[11] or "all",
+                            target_ids=json.loads(row[12] or "[]"),
                         )
                     )
         return tasks
@@ -691,6 +798,118 @@ def _normalize_evidence(val: Any) -> List[str]:
 
     s = _to_s(val)
     return [s] if s else []
+
+
+def _normalize_target_ids(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[,|\s]+", value)
+    elif isinstance(value, list):
+        parts = value
+    else:
+        parts = [value]
+    return [str(part).strip() for part in parts if str(part).strip()]
+
+
+_RE_CIDR_TARGET = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b")
+_RE_IP_TARGET = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_RE_HOST_PORT_TARGET = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}:\d{1,5}\b")
+_RE_FQDN_TARGET = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
+_RE_QUOTED_PATH_TARGET = re.compile(r'["\']((?:/|\./|\.\./)[^"\']+)["\']')
+_RE_BARE_TARGET_CONTEXT = re.compile(
+    r"\b(?:target|host|endpoint|system|against|assess|scan|test|verify)\s+([a-zA-Z0-9][a-zA-Z0-9_.-]+)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_target_literal(value: str, *, allow_bare_hostname: bool = False) -> Optional[TargetType]:
+    stripped = value.strip().strip(".,;:)")
+    if not stripped:
+        return None
+    if os.path.exists(os.path.expanduser(stripped)):
+        return "filesystem"
+    try:
+        ipaddress.ip_network(stripped, strict=False)
+        return "network_range" if "/" in stripped else "network"
+    except ValueError:
+        pass
+    if _RE_URL_PATTERN.fullmatch(stripped) or _RE_HOST_PORT_TARGET.fullmatch(stripped) or _RE_FQDN_TARGET.fullmatch(stripped):
+        return "network"
+    if allow_bare_hostname and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", stripped):
+        return "filesystem" if os.path.exists(os.path.expanduser(stripped)) else "network"
+    return None
+
+
+def _canonical_target_value(value: str, target_type: TargetType) -> str:
+    stripped = value.strip().strip(".,;:)")
+    if target_type == "filesystem":
+        return os.path.realpath(os.path.expanduser(stripped))
+    return stripped
+
+
+def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source: str) -> List[Tuple[str, str]]:
+    candidates: List[Tuple[str, str]] = []
+    for pattern in (_RE_URL_PATTERN, _RE_CIDR_TARGET, _RE_IP_TARGET, _RE_HOST_PORT_TARGET, _RE_FQDN_TARGET):
+        candidates.extend((match.group(0), source) for match in pattern.finditer(text or ""))
+    candidates.extend((match.group(0), source) for match in _RE_PATH_PATTERN.finditer(text or ""))
+    candidates.extend((match.group(1), source) for match in _RE_QUOTED_PATH_TARGET.finditer(text or ""))
+    if allow_bare_hostname:
+        candidates.extend((match.group(1), source) for match in _RE_BARE_TARGET_CONTEXT.finditer(text or ""))
+    return candidates
+
+
+def resolve_operation_targets(logical_target: str, objective: str = "") -> List[OperationTarget]:
+    """Resolve executable targets while keeping the CLI target as logical naming.
+
+    Objective literals win. If the objective has no executable target literals, the logical target is used as a
+    fallback and may be a bare hostname or path.
+    """
+
+    raw_candidates = _target_candidates_from_text(objective or "", allow_bare_hostname=True, source="objective")
+    has_objective_targets = any(_classify_target_literal(value, allow_bare_hostname=True) for value, _ in raw_candidates)
+    if not has_objective_targets:
+        raw_candidates = _target_candidates_from_text(
+            logical_target or "",
+            allow_bare_hostname=True,
+            source="logical_target_fallback",
+        )
+        if not raw_candidates and str(logical_target or "").strip():
+            raw_candidates = [(str(logical_target), "logical_target_fallback")]
+
+    targets: List[OperationTarget] = []
+    seen: set[str] = set()
+    for value, source in raw_candidates:
+        target_type = _classify_target_literal(
+            value,
+            allow_bare_hostname=source == "logical_target_fallback" or source == "objective",
+        )
+        if not target_type:
+            continue
+        canonical = _canonical_target_value(value, target_type)
+        if canonical.lower() in {"http", "https"}:
+            continue
+        if target_type == "network" and any(
+            target.type == "network_range" and target.value.startswith(f"{canonical}/") for target in targets
+        ):
+            continue
+        if target_type == "network" and any(
+            target.type == "network" and canonical in target.value and canonical != target.value for target in targets
+        ):
+            continue
+        key = f"{target_type}:{canonical.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(
+            OperationTarget(
+                target_id=f"target-{len(targets) + 1}",
+                value=canonical,
+                type=target_type,
+                source=source,
+            )
+        )
+    return targets
 
 
 def _user_id(user_id: Optional[str] = None) -> str:
@@ -926,15 +1145,22 @@ def store_finding(
         raise ValueError("severity must be one of CRITICAL, HIGH, MEDIUM, LOW, INFO")
     if not candidate["reproduction_steps"]:
         raise ValueError("reproduction_steps requires at least one step")
-
-    artifact_issues: List[str] = []
-    try:
-        candidate["artifacts"] = _validated_artifact_paths(artifacts)
-    except ValueError as error:
-        candidate["artifacts"] = []
-        artifact_issues.append(str(error))
-    if artifact_issues:
-        candidate["validation_issues"] = artifact_issues
+    weak_evidence_terms = {
+        "assume",
+        "assumed",
+        "hypothetical",
+        "likely",
+        "maybe",
+        "suspected",
+        "unread",
+        "untested",
+        "not tested",
+        "not observed",
+    }
+    observed_lower = candidate["observed_result"].lower()
+    if any(term in observed_lower for term in weak_evidence_terms):
+        raise ValueError("observed_result must describe concrete observed evidence, not assumptions")
+    candidate["artifacts"] = _validated_artifact_paths(artifacts, require_one=True)
 
     fingerprint = _finding_fingerprint(
         candidate["title"], candidate["claim"], candidate["target"], candidate["technique"]
@@ -964,6 +1190,8 @@ def store_finding(
     _store_memory_entry(content, "finding_candidate", candidate)
 
     current_phase = _get_plan_current_phase()
+    target_ids = _target_ids_for_literal(candidate["target"])
+    target_scope: TargetScope = "subset" if target_ids else "all"
     task = Task(
         task_uid=task_uid,
         title=f"Verify finding: {candidate['title']}",
@@ -977,6 +1205,8 @@ def store_finding(
         status="pending",
         kind="finding_validation",
         reference_id=finding_uid,
+        target_scope=target_scope,
+        target_ids=target_ids,
     )
     store.store_finding_candidate(op_id, finding_uid, fingerprint, candidate, task_uid)
     _ensure_memory_client().store_task(task=task, user_id=_user_id())
@@ -1102,6 +1332,8 @@ class TaskCreate:
     phase: Any = 0
     status: TaskStatus = "pending"
     evidence: Any = field(default_factory=list)
+    target_scope: TargetScope = "all"
+    target_ids: Any = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.title.strip():
@@ -1114,6 +1346,12 @@ class TaskCreate:
         self.phase = _normalize_task_phase(self.phase)
         # Coerce evidence to List[str] to tolerate dict/list-of-dict inputs from models
         self.evidence = _normalize_evidence(self.evidence)
+        self.target_scope = str(self.target_scope or "all").strip().lower()
+        if self.target_scope not in ("all", "subset"):
+            raise ValueError("target_scope must be all or subset")
+        self.target_ids = _normalize_target_ids(self.target_ids)
+        if self.target_scope == "subset" and not self.target_ids:
+            raise ValueError("target_ids required when target_scope is subset")
 
     @staticmethod
     def from_obj(obj: Any) -> "TaskCreate":
@@ -1127,6 +1365,8 @@ class TaskCreate:
             evidence=obj.get("evidence", None),
             phase=obj.get("phase", 0),
             status=str(obj.get("status", "pending")),
+            target_scope=str(obj.get("target_scope", "all") or "all"),
+            target_ids=obj.get("target_ids", []),
         )
 
 
@@ -1153,6 +1393,51 @@ def _get_active_plan() -> OperationPlan:
 
 def _get_plan_current_phase() -> int:
     return int(_get_active_plan().current_phase)
+
+
+def _target_ids_for_literal(target_value: str) -> List[str]:
+    try:
+        plan = _get_active_plan()
+    except ValueError:
+        return []
+    normalized = str(target_value or "").strip().strip(".,;:)")
+    matches = []
+    for target in plan.targets:
+        if target.value == normalized or target.value.rstrip("/") == normalized.rstrip("/"):
+            matches.append(target.target_id)
+    return matches
+
+
+def _validate_task_target_scope(
+    *,
+    target_scope: TargetScope,
+    target_ids: List[str],
+    plan: Optional[OperationPlan],
+    title: str,
+    objective: str,
+) -> Tuple[TargetScope, List[str]]:
+    if plan is None or not plan.targets:
+        return "all", []
+    valid_ids = {target.target_id for target in plan.targets}
+    if any(target_id.lower() in {"target", "target-id", "placeholder", "none"} for target_id in target_ids):
+        raise ValueError("target_ids must reference concrete operation target IDs")
+    invalid_ids = [target_id for target_id in target_ids if target_id not in valid_ids]
+    if invalid_ids:
+        raise ValueError(f"target_ids contain unknown operation target IDs: {', '.join(invalid_ids)}")
+    if target_scope == "subset":
+        return "subset", target_ids
+
+    combined = f"{title}\n{objective}"
+    matched_ids = [
+        target.target_id
+        for target in plan.targets
+        if target.value and target.value in combined
+    ]
+    if len(matched_ids) == 1:
+        return "subset", matched_ids
+    if target_ids:
+        return "subset", target_ids
+    return "all", []
 
 
 _RE_URL_PATTERN = re.compile(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*')
@@ -1224,6 +1509,7 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
         current_phase = plan.current_phase
         valid_phase_ids = {phase.id for phase in plan.phases}
     except Exception:
+        plan = None
         current_phase = 1
         valid_phase_ids = None
 
@@ -1244,6 +1530,13 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
 
         title = str(new_task.title).strip()
         objective = str(new_task.objective).strip()
+        target_scope, target_ids = _validate_task_target_scope(
+            target_scope=new_task.target_scope,
+            target_ids=new_task.target_ids,
+            plan=plan,
+            title=title,
+            objective=objective,
+        )
 
         # look for duplicate
         duplicate_task = None
@@ -1272,6 +1565,8 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
             evidence=new_task.evidence,
             phase=eff_phase,
             status=new_task.status,
+            target_scope=target_scope,
+            target_ids=target_ids,
         )
 
         client.store_task(task=task, user_id=user_id)

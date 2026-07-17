@@ -127,6 +127,7 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'termination_reason', reason: 'max_tokens', message: 'Too many tokens' },
       { type: 'termination_reason', reason: 'rate_limited', message: 'Rate limited' },
       { type: 'termination_reason', reason: 'model_error', message: 'Model failed' },
+      { type: 'termination_reason', reason: 'error', message: 'Workflow iteration limit reached' },
       { type: 'termination_reason', reason: 'swarm_iteration_limit', message: 'swarm iteration limit' },
       { type: 'reasoning', content: 'I should inspect headers and forms' },
       { type: 'command', content: 'python scan.py' },
@@ -157,6 +158,8 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Assessment complete: 3 phases evaluated');
     expect(output).toContain('NETWORK TIMEOUT');
     expect(output).toContain('TOKEN LIMIT');
+    expect(output).toContain('TERMINATION ERROR');
+    expect(output).toContain('Workflow iteration limit reached');
     expect(output).toContain('I should inspect');
     expect(output).toContain('python scan.py');
     expect(output).toContain('failed hard');

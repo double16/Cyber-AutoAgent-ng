@@ -13,6 +13,7 @@ Returns:
 
 import argparse
 import json
+import os
 import sys
 import time
 import random
@@ -136,6 +137,7 @@ def idor_specialist(
         evasion: bool = False,
         request_type: Optional[Literal["query", "json", "graphql"]] = None,
         auth_type: Optional[Literal["basic", "oauth", "jwt"]] = None,
+        output_file: Optional[str] = None,
         tool_context: Optional[ToolContext] = None,
 ) -> str:
     """
@@ -163,6 +165,7 @@ def idor_specialist(
     - evasion: Enable evasion techniques (e.g., jitter, UA rotation) (optional)
     - request_type: "query", "json", or "graphql" (optional)
     - auth_type: "basic", "oauth", or "jwt" (optional)
+    - output_file: path to write results to disk (optional)
 
     Returns:
     - JSON. Key fields:
@@ -337,7 +340,12 @@ def idor_specialist(
             print(f"[-] Error during IDOR scan: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
-    return json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True)
+    result_str = json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True)
+    if output_file:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(result_str)
+    return result_str
 
 
 # ----------------------------
@@ -1262,6 +1270,7 @@ def main() -> int:
                         help="Request type")
     parser.add_argument("--auth-type", choices=["basic", "oauth", "jwt"], default=None,
                         help="Authentication type")
+    parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
 
     args = parser.parse_args()
 
@@ -1315,6 +1324,7 @@ def main() -> int:
             evasion=args.evasion,
             request_type=args.request_type,
             auth_type=args.auth_type,
+            output_file=args.output_file,
         )
     )
     return 0

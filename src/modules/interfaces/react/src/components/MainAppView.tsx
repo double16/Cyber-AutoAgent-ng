@@ -44,6 +44,13 @@ interface MainAppViewProps {
   terminalCleanupRef?: React.MutableRefObject<(() => void) | null>;
 }
 
+const formatTaskScope = (event: any): string => {
+  const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
+  const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
+  if (!scope || scope === 'all') return '';
+  return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
+
 export const MainAppView: React.FC<MainAppViewProps> = ({
   appState,
   actions,
@@ -133,7 +140,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
     const eventType = event?.type;
     if (eventType === 'task_started') {
       const title = typeof event?.title === 'string' ? event.title.trim() : '';
-      setCurrentTaskTitle(title || null);
+      setCurrentTaskTitle(title ? `${title}${formatTaskScope(event)}` : null);
     } else if (eventType === 'task_done') {
       setCurrentTaskTitle(null);
     }

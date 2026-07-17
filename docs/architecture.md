@@ -88,7 +88,7 @@ and task/phase evaluators prevent successful completion when evidence shows a co
 
 Initial plan generation uses a bounded actor/critic cycle before persistence. Critic approval immediately accepts the
 current draft; rejection sends feedback to `plan_creator` for revision. The
-`CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS` environment variable limits reviews and defaults to one. A rejection on
+`CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS` environment variable limits reviews and defaults to two. A rejection on
 the final configured review fails the workflow so an unapproved plan is never persisted or executed.
 
 Task prompt generation uses the same bounded pattern. `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` defaults to

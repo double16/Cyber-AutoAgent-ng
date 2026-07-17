@@ -109,6 +109,7 @@ def advanced_payload_coordinator(
         http_method: str = "GET",
         cookies: Optional[Dict[str, str]] = None,
         headers: Optional[Dict[str, str]] = None,
+        output_file: Optional[str] = None,
         tool_context: Optional[ToolContext] = None,
 ) -> str:
     """
@@ -126,6 +127,7 @@ def advanced_payload_coordinator(
     - parameters: comma-separated names to test. If omitted/empty, tool will attempt discovery.
     - http_method: start with "GET" unless you know the endpoint is body-driven; tool may retry with POST.
     - cookies/headers: include auth/session + any required custom headers.
+    - output_file: path to write results to disk.
 
     Returns:
     - JSON. Key fields:
@@ -346,7 +348,12 @@ def advanced_payload_coordinator(
         results["errors"].append(str(e))
 
     # Return a compact, agent-friendly JSON payload (no human prose)
-    return json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True)
+    result_str = json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True)
+    if output_file:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(result_str)
+    return result_str
 
 
 def setup_payload_tools(tools_limit: Set[str] = None) -> Dict[str, Any]:
@@ -1813,6 +1820,11 @@ def main() -> int:
         default=None,
         help="Cookie to include (repeatable). Format: 'name=value'",
     )
+    parser.add_argument(
+        "--output-file", "-o",
+        default=None,
+        help="Path to write results to disk",
+    )
 
     args = parser.parse_args()
 
@@ -1863,6 +1875,7 @@ def main() -> int:
             http_method=args.http_method,
             headers=headers,
             cookies=cookies,
+            output_file=args.output_file,
         )
     )
     return 0

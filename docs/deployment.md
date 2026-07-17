@@ -319,7 +319,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_CONTEXT_LIMIT`                              | Limit detected prompt tokens                               | No (auto-detected)             |
 | `CYBER_PROMPT_LIMIT_FORCE`                         | Force prompt token limit                                   | No (auto-detected)             |
 | `CYBER_SDK_CONTEXT_MANAGER`                        | Strands context facade (`auto`, `agentic`, `false`)        | No (default: `false`)          |
-| `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `1`)              |
+| `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `2`)              |
 | `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `2`)              |
 | `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum executor/evaluator passes per task                 | No (default: `2`, minimum `1`) |
 | `AWS_ACCESS_KEY_ID`                                | AWS credentials for Bedrock                                | For Bedrock provider           |

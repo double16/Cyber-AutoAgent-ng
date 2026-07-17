@@ -91,6 +91,19 @@ def test_web_recon_preserves_non_exploitation_and_three_endpoint_policy():
     assert "at least three endpoints" in policy
 
 
+@pytest.mark.parametrize("module", ("web", "web_recon"))
+def test_web_modules_preserve_explicit_url_scheme_and_port_scope(module):
+    prompt = (PLUGIN_ROOT / module / "execution_prompt.md").read_text(encoding="utf-8")
+    normalized = " ".join(prompt.split())
+
+    assert "URL with a scheme and explicit port" in normalized
+    assert "exact scheme, host, and port boundary" in normalized
+    assert "enumerate other ports on the same host" in normalized
+    assert "preserve explicit response status evidence" in normalized
+    assert "Bare silent requests with no captured status are not sufficient evidence of absence" in normalized
+    assert "HTTP" not in normalized
+
+
 def test_ctf_policy_requires_artifact_backed_flag_without_worker_termination():
     prompt = (PLUGIN_ROOT / "ctf" / "execution_prompt.md").read_text(encoding="utf-8")
     policy = (PLUGIN_ROOT / "ctf" / "termination_policy.md").read_text(encoding="utf-8")
