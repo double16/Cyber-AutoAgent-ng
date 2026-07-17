@@ -1,6 +1,9 @@
-import pytest
-from unittest.mock import MagicMock, patch
 import shlex
+import subprocess
+from unittest.mock import patch
+
+import pytest
+
 from src.modules.tools.shell import shell
 
 
@@ -209,11 +212,65 @@ def test_shell_command_joining_heuristic_edge_cases(mock_shell_original, mock_os
 
 
 def test_shell_pass_arguments(mock_shell_original):
-    shell("ls", parallel=True, ignore_errors=True, work_dir="/tmp")
+    shell("ls", parallel=True, work_dir="/tmp")
     mock_shell_original.assert_called_once_with(
         command="ls",
         parallel=True,
-        ignore_errors=True,
+        ignore_errors=False,
         timeout=None,
         work_dir="/tmp",
+    )
+
+
+def test_shell_rejects_removed_ignore_errors_argument():
+    with pytest.raises(TypeError, match="ignore_errors"):
+        shell("false", ignore_errors=True)
+
+
+def test_shell_parallel_non_interactive_avoids_pty(mock_shell_original, monkeypatch):
+    monkeypatch.setenv("STRANDS_NON_INTERACTIVE", "true")
+
+    result = shell(["printf one", "printf two"], parallel=True)
+
+    mock_shell_original.assert_not_called()
+    assert result["status"] == "success"
+    assert "Total commands: 2" in result["content"][0]["text"]
+    assert "Output: one" in result["content"][1]["text"]
+    assert "Output: two" in result["content"][2]["text"]
+
+
+def test_shell_parallel_non_interactive_reports_failures(mock_shell_original, monkeypatch):
+    monkeypatch.setenv("STRANDS_NON_INTERACTIVE", "true")
+
+    result = shell(["printf ok", "exit 7"], parallel=True)
+
+    mock_shell_original.assert_not_called()
+    assert result["status"] == "error"
+    assert "Exit Code: 7" in result["content"][2]["text"]
+
+
+def test_shell_parallel_non_interactive_reports_timeout(mock_shell_original, monkeypatch):
+    monkeypatch.setenv("STRANDS_NON_INTERACTIVE", "true")
+    timeout = subprocess.TimeoutExpired("slow", 30, output="partial")
+    with patch("src.modules.tools.shell.subprocess.run", side_effect=timeout):
+        result = shell(["slow one", "slow two"], parallel=True, timeout=30)
+
+    mock_shell_original.assert_not_called()
+    assert result["status"] == "error"
+    assert "Exit Code: 124" in result["content"][1]["text"]
+    assert "timed out after 30 seconds" in result["content"][1]["text"]
+
+
+def test_shell_parallel_interactive_keeps_dependency_consent_path(mock_shell_original, monkeypatch):
+    monkeypatch.delenv("STRANDS_NON_INTERACTIVE", raising=False)
+    commands = ["printf one", "printf two"]
+
+    shell(commands, parallel=True)
+
+    mock_shell_original.assert_called_once_with(
+        command=commands,
+        parallel=True,
+        ignore_errors=False,
+        timeout=None,
+        work_dir=None,
     )

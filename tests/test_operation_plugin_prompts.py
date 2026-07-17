@@ -20,8 +20,8 @@ def test_execution_prompt_has_module_policy_sections_without_workflow_ownership(
 
     for section in PROMPT_SECTIONS:
         assert section in prompt
-    assert "category=\"finding\"" in prompt
-    assert "category=\"observation\"" in prompt
+    assert "store_finding" in prompt
+    assert "store_observation" in prompt
     assert "Budget >" not in prompt
     assert "If YES: stop" not in prompt
     assert "Phase 1:" not in prompt

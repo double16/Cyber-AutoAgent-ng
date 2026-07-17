@@ -153,6 +153,65 @@ def test_agent_repair_hook_json_patch_and_state_paths(monkeypatch):
     assert hook._state_bag(SimpleNamespace()) == {}
 
 
+def test_agent_repair_hook_unwraps_registered_generic_tool_use():
+    hook = AgentRepairHook()
+    shell_tool = object()
+    event = SimpleNamespace(
+        agent=SimpleNamespace(tool_registry=SimpleNamespace(registry={"shell": shell_tool})),
+        selected_tool=None,
+        tool_use={
+            "name": "tool_use",
+            "toolUseId": "wrapper-1",
+            "input": {"tool_name": "shell", "parameters": {"command": "id"}},
+        },
+        cancel_tool=False,
+    )
+
+    hook.before_tool_call_repair(event)
+
+    assert event.selected_tool is shell_tool
+    assert event.tool_use == {
+        "name": "shell",
+        "toolUseId": "wrapper-1",
+        "input": {"command": "id"},
+    }
+    assert event.cancel_tool is False
+
+
+def test_agent_repair_hook_rejects_unregistered_generic_tool_use():
+    hook = AgentRepairHook()
+    event = SimpleNamespace(
+        agent=SimpleNamespace(tool_registry=SimpleNamespace(registry={"create_tasks": object()})),
+        selected_tool=None,
+        tool_use={
+            "name": "tool_use",
+            "toolUseId": "wrapper-1",
+            "input": {"tool_name": "dirb", "parameters": {"target": "http://target"}},
+        },
+        cancel_tool=False,
+    )
+
+    hook.before_tool_call_repair(event)
+
+    assert event.selected_tool is None
+    assert "create_tasks" in event.cancel_tool
+
+
+def test_agent_repair_hook_ignores_direct_tool_calls_and_rejects_invalid_wrapper_input():
+    hook = AgentRepairHook()
+    direct = SimpleNamespace(tool_use={"name": "shell"}, cancel_tool=False)
+    hook.before_tool_call_repair(direct)
+    assert direct.cancel_tool is False
+
+    invalid = SimpleNamespace(
+        agent=SimpleNamespace(tool_registry=SimpleNamespace(registry={})),
+        tool_use={"name": "tool_use", "input": "shell"},
+        cancel_tool=False,
+    )
+    hook.before_tool_call_repair(invalid)
+    assert invalid.cancel_tool
+
+
 def test_agent_repair_hook_max_tokens_stop_response_replaces_last_message(monkeypatch):
     hook = AgentRepairHook()
     agent = SimpleNamespace(

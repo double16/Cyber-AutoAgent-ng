@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Agent creation and management for Cyber-AutoAgent."""
 import fnmatch
+import importlib.util
 import json
 import logging
 import os
 import sys
 import warnings
-import importlib.util
 from dataclasses import dataclass, field
 from datetime import datetime
 from math import ceil
@@ -17,24 +17,20 @@ from strands import Agent
 from strands.hooks import HookProvider
 from strands.tools.executors import ConcurrentToolExecutor
 
+# These tools are modules, not functions, the following imports MUST import the module
+from strands_tools import (
+    environment,
+    http_request,
+    python_repl,
+)
+
 # These tools have the @tool decorator, the function is to be imported
 from strands_tools.editor import editor
 from strands_tools.load_tool import load_tool
-from modules.tools.swarm import swarm
-from modules.tools.web_search import web_search
-
-from modules.prompts import get_task_capture_prompt
-from modules.tools.shell import shell
 from strands_tools.sleep import sleep
 from strands_tools.tavily import tavily_search
 
-# These tools are modules, not functions, the following imports MUST import the module
-from strands_tools import (
-    http_request,
-    python_repl,
-    environment,
-)
-from modules import prompts, __version__
+from modules import __version__, prompts
 from modules.agents.factory import (
     AgentFactoryConfig,
     create_agent_with_stateful_retry,
@@ -49,26 +45,28 @@ from modules.config import (
     configure_sdk_logging,
     get_config_manager,
 )
-from modules.config.system.logger import get_logger
-from modules.config.models.factory import (
-    _resolve_prompt_token_limit, create_strands_model,
-)
-from modules.handlers.conversation_budget import (
-    MappingConversationManager,
-    PromptBudgetHook,
-    LargeToolResultMapper,
-    register_conversation_manager,
-    _ensure_prompt_within_budget,
-    PRESERVE_LAST_DEFAULT,
-    PRESERVE_FIRST_DEFAULT,
-)
-from modules.handlers.react import AgentEventHandler
-from modules.handlers.agent_repair_hook import AgentRepairHook
-from modules.handlers.tool_router import ToolRouterHook
 from modules.config.models.capabilities import (
     allows_reasoning_content_replay,
     get_capabilities,
 )
+from modules.config.models.factory import (
+    _resolve_prompt_token_limit,
+    create_strands_model,
+)
+from modules.config.system.logger import get_logger
+from modules.handlers.agent_repair_hook import AgentRepairHook
+from modules.handlers.conversation_budget import (
+    PRESERVE_FIRST_DEFAULT,
+    PRESERVE_LAST_DEFAULT,
+    LargeToolResultMapper,
+    MappingConversationManager,
+    PromptBudgetHook,
+    _ensure_prompt_within_budget,
+    register_conversation_manager,
+)
+from modules.handlers.react import AgentEventHandler
+from modules.handlers.tool_recovery import TaskFailureRecoveryHook
+from modules.handlers.tool_router import ToolRouterHook
 from modules.handlers.utils import (
     get_tool_name,
     print_status,
@@ -76,44 +74,51 @@ from modules.handlers.utils import (
     tool_append_description,
     tool_rename,
 )
-
+from modules.prompts import get_task_capture_prompt
+from modules.tools.artifact import read_artifact
+from modules.tools.browser import (
+    browser_evaluate_js,
+    browser_get_cookies,
+    browser_get_page_html,
+    browser_goto_url,
+    browser_observe_page,
+    browser_perform_action,
+    browser_set_headers,
+    initialize_browser,
+)
+from modules.tools.channels import (
+    channel_close,
+    channel_create_forward,
+    channel_create_reverse,
+    channel_poll,
+    channel_send,
+    channel_status,
+)
 from modules.tools.mcp import (
     discover_mcp_tools,
 )
 from modules.tools.memory import (
+    create_tasks,
     get_memory_client,
     initialize_memory_system,
-    mem0_store,
-    mem0_retrieve,
     mem0_list,
-    create_tasks,
-)
-from modules.tools.browser import (
-    initialize_browser,
-    browser_goto_url,
-    browser_observe_page,
-    browser_get_page_html,
-    browser_set_headers,
-    browser_perform_action,
-    browser_evaluate_js,
-    browser_get_cookies,
-)
-from modules.tools.channels import (
-    channel_create_forward,
-    channel_create_reverse,
-    channel_send,
-    channel_poll,
-    channel_status,
-    channel_close,
+    mem0_retrieve,
+    record_finding_validation,
+    store_finding,
+    store_knowledge,
+    store_observation,
 )
 from modules.tools.oast import (
-    oast_health,
+    oast_clear_http_responses,
     oast_endpoints,
+    oast_health,
     oast_poll,
     oast_register_http_response,
-    oast_clear_http_responses,
 )
+from modules.tools.shell import shell
+from modules.tools.swarm import swarm
 from modules.tools.tool_catalog import tool_catalog_wrapper
+from modules.tools.web_search import web_search
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -559,9 +564,13 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         shell,
         editor,
         load_tool,
-        mem0_store,
+        store_observation,
+        store_knowledge,
+        store_finding,
+        record_finding_validation,
         mem0_retrieve,
         mem0_list,
+        read_artifact,
         create_tasks,
         sleep,
         python_repl,
@@ -1051,6 +1060,12 @@ def create_agent(
             start_metrics_thread=False,
         )
 
+    agent_hooks = list(runtime.hooks) if runtime.hooks else []
+    failure_recovery_hook = None
+    if agent_type == "task_executor" and isinstance(callback_handler, AgentEventHandler):
+        failure_recovery_hook = TaskFailureRecoveryHook(callback_handler.tool_outcome_journal)
+        agent_hooks.append(failure_recovery_hook)
+
     agent_kwargs = {
         "model": model,
         "name": name or f"Cyber-AutoAgent {config.op_id or runtime.operation_id}",
@@ -1058,7 +1073,7 @@ def create_agent(
         "tool_executor": runtime.tool_executor,
         "system_prompt": system_prompt if system_prompt is not None else runtime.system_prompt_payload,
         "callback_handler": callback_handler,
-        "hooks": runtime.hooks if runtime.hooks else None,
+        "hooks": agent_hooks or None,
         "load_tools_from_directory": tools is None,
         "trace_attributes": trace_attributes,
     }
@@ -1098,6 +1113,8 @@ def create_agent(
         setattr(agent, "_cyber_agent_name", agent_kwargs["name"])
         setattr(agent, "_cyber_agent_type", agent_type or getattr(callback_handler, "agent_type", "agent"))
         setattr(agent, "_cyber_callback_handler", callback_handler)
+        if failure_recovery_hook is not None:
+            setattr(agent, "_cyber_failure_recovery_hook", failure_recovery_hook)
         if getattr(callback_handler, "agent_run_id", None):
             setattr(agent, "_cyber_agent_run_id", callback_handler.agent_run_id)
         if getattr(callback_handler, "parent_agent_run_id", None):

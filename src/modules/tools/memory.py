@@ -42,8 +42,8 @@ Key Features:
    • Vector Store (FAISS, OpenSearch, Mem0 Platform)
 """
 
+import hashlib
 import json
-import logging
 import os
 import re
 import sqlite3
@@ -51,7 +51,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import boto3
 from mem0 import Memory as Mem0Memory
@@ -99,6 +99,8 @@ class Task:
     evidence: List[str] = field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    kind: str = "standard"
+    reference_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -126,6 +128,8 @@ class Task:
             status_reason=str(obj.get("status_reason", "")),
             created_at=obj.get("created_at"),
             updated_at=obj.get("updated_at"),
+            kind=str(obj.get("kind", "standard") or "standard"),
+            reference_id=obj.get("reference_id"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -139,6 +143,8 @@ class Task:
             "status_reason": self.status_reason,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "kind": self.kind,
+            "reference_id": self.reference_id,
         })
 
     @staticmethod
@@ -147,7 +153,7 @@ class Task:
 
     @staticmethod
     def csv_format() -> str:
-        return "title,objective,evidence,phase,status,status_reason"
+        return "title,objective,evidence,phase,status,status_reason,kind,reference_id"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -155,10 +161,14 @@ class Task:
         evidence = "|".join(sanitize_toon_value(e) for e in self.evidence)
         status = sanitize_toon_value(self.status)
         status_reason = sanitize_toon_value(self.status_reason)
+        kind = sanitize_toon_value(self.kind)
+        reference_id = sanitize_toon_value(self.reference_id)
         lines = []
         if include_format:
             lines.append(f"{self.toon_format()}:")
-        lines.append(f"  {title},{objective},{evidence},{self.phase},{status},{status_reason}")
+        lines.append(
+            f"  {title},{objective},{evidence},{self.phase},{status},{status_reason},{kind},{reference_id}"
+        )
         return "\n".join(lines).strip()
 
     @staticmethod
@@ -427,6 +437,27 @@ class PlanStore:
                     )
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_operation_id ON tasks(operation_id)")
+                task_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(tasks)")
+                }
+                if "kind" not in task_columns:
+                    conn.execute("ALTER TABLE tasks ADD COLUMN kind TEXT DEFAULT 'standard'")
+                if "reference_id" not in task_columns:
+                    conn.execute("ALTER TABLE tasks ADD COLUMN reference_id TEXT")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS finding_records (
+                        finding_uid TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        candidate_data TEXT NOT NULL,
+                        verification_task_uid TEXT NOT NULL,
+                        validation_data TEXT,
+                        resolution TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(operation_id, fingerprint)
+                    )
+                """)
 
     def store_plan(self, operation_id: str, plan: OperationPlan):
         """Store or update a plan."""
@@ -480,8 +511,8 @@ class PlanStore:
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
-                    INSERT INTO tasks (task_uid, operation_id, title, objective, phase, status, status_reason, evidence, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO tasks (task_uid, operation_id, title, objective, phase, status, status_reason, evidence, created_at, updated_at, kind, reference_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
@@ -489,6 +520,8 @@ class PlanStore:
                         status=excluded.status,
                         status_reason=excluded.status_reason,
                         evidence=excluded.evidence,
+                        kind=excluded.kind,
+                        reference_id=excluded.reference_id,
                         updated_at=excluded.updated_at
                 """, (
                     task.task_uid,
@@ -500,7 +533,9 @@ class PlanStore:
                     task.status_reason,
                     json.dumps(task.evidence),
                     task_dict["created_at"],
-                    task_dict["updated_at"]
+                    task_dict["updated_at"],
+                    task.kind,
+                    task.reference_id,
                 ))
 
     def get_tasks(self, operation_id: str) -> List[Task]:
@@ -508,20 +543,114 @@ class PlanStore:
         tasks = []
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("SELECT title, objective, phase, status, status_reason, evidence, task_uid, created_at, updated_at FROM tasks WHERE operation_id = ?", (operation_id,))
+                cursor = conn.execute(
+                    "SELECT title, objective, phase, status, status_reason, evidence, task_uid, "
+                    "created_at, updated_at, kind, reference_id FROM tasks WHERE operation_id = ?",
+                    (operation_id,),
+                )
                 for row in cursor:
-                    tasks.append(Task(
-                        title=row[0],
-                        objective=row[1],
-                        phase=row[2],
-                        status=row[3],
-                        status_reason=row[4],
-                        evidence=json.loads(row[5]),
-                        task_uid=row[6],
-                        created_at=row[7],
-                        updated_at=row[8]
-                    ))
+                    tasks.append(
+                        Task(
+                            title=row[0],
+                            objective=row[1],
+                            phase=row[2],
+                            status=row[3],
+                            status_reason=row[4],
+                            evidence=json.loads(row[5]),
+                            task_uid=row[6],
+                            created_at=row[7],
+                            updated_at=row[8],
+                            kind=row[9] or "standard",
+                            reference_id=row[10],
+                        )
+                    )
         return tasks
+
+    def get_finding_by_fingerprint(self, operation_id: str, fingerprint: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT finding_uid, candidate_data, verification_task_uid, validation_data, resolution "
+                    "FROM finding_records WHERE operation_id = ? AND fingerprint = ?",
+                    (operation_id, fingerprint),
+                ).fetchone()
+        if not row:
+            return None
+        return {
+            "finding_uid": row[0],
+            "candidate_data": json.loads(row[1]),
+            "verification_task_uid": row[2],
+            "validation_data": json.loads(row[3]) if row[3] else None,
+            "resolution": row[4],
+        }
+
+    def get_finding(self, operation_id: str, finding_uid: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
+                    "FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
+                    (operation_id, finding_uid),
+                ).fetchone()
+        if not row:
+            return None
+        return {
+            "finding_uid": finding_uid,
+            "fingerprint": row[0],
+            "candidate_data": json.loads(row[1]),
+            "verification_task_uid": row[2],
+            "validation_data": json.loads(row[3]) if row[3] else None,
+            "resolution": row[4],
+        }
+
+    def store_finding_candidate(
+        self,
+        operation_id: str,
+        finding_uid: str,
+        fingerprint: str,
+        candidate_data: Dict[str, Any],
+        verification_task_uid: str,
+    ) -> None:
+        now = datetime.now().isoformat()
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO finding_records "
+                    "(finding_uid, operation_id, fingerprint, candidate_data, verification_task_uid, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        finding_uid,
+                        operation_id,
+                        fingerprint,
+                        json.dumps(candidate_data),
+                        verification_task_uid,
+                        now,
+                        now,
+                    ),
+                )
+
+    def store_finding_validation(
+        self,
+        operation_id: str,
+        finding_uid: str,
+        validation_data: Dict[str, Any],
+    ) -> None:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE finding_records SET validation_data = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND finding_uid = ?",
+                    (json.dumps(validation_data), datetime.now().isoformat(), operation_id, finding_uid),
+                )
+
+    def resolve_finding(self, operation_id: str, finding_uid: str, resolution: str) -> None:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE finding_records SET resolution = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND finding_uid = ?",
+                    (resolution, datetime.now().isoformat(), operation_id, finding_uid),
+                )
 
 
 def _get_plan_store() -> PlanStore:
@@ -569,8 +698,10 @@ def _user_id(user_id: Optional[str] = None) -> str:
         return user_id
     return (_MEMORY_CONFIG or {}).get("user_id", "cyber-agent")
 
+
 def _agent_id(agent_id: Optional[str] = None) -> Optional[str]:
     return agent_id
+
 
 def _operation_id(operation_id: Optional[str] = None) -> str:
     return operation_id or (_MEMORY_CONFIG or {}).get("operation_id", os.getenv("CYBER_OPERATION_ID", "default_operation"))
@@ -648,300 +779,308 @@ def _has_valid_proof_pack(finding: Any) -> bool:
 
     return False
 
-@tool
-def mem0_store(
-    content: str,
-    metadata: Dict[str, Any],
-) -> str:
-    """Store a single memory entry.
-    Use this for atomic entries (ONE finding/observation per call). Prefer storing immediately after you confirm something.
+def _clean_memory_text(value: Any, field_name: str) -> str:
+    """Return compact, control-character-free memory text."""
 
-    REQUIRED:
-    - `metadata.category` MUST be set.
-      Valid values: finding | signal | observation | discovery | plan | decision
-        finding     Exploits, flags, vulnerabilities - APPEARS IN REPORTS
-        signal      Strong indicators, access evidence - APPEARS IN REPORTS
-        observation Reconnaissance, artifacts, failed attempts - APPEARS IN REPORTS
-        discovery   New techniques, bypasses - APPEARS IN REPORTS
-        plan        Strategic planning - internal only, NOT in reports
-        decision    Filtering choices - internal only, NOT in reports
+    cleaned = str(value or "").replace("\x00", " ").replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        raise ValueError(f"{field_name} is required")
+    return cleaned
 
-    CATEGORY DECISION TREE (CRITICAL - wrong category = empty report):
-        Q: Did you EXPLOIT something or extract sensitive data?
-           YES → category="finding" (SQLi data dump, auth bypass, flag, RCE, credentials)
-           NO  → Q: Did you CONFIRM a vulnerability exists?
-                    YES → category="finding" (XSS fires, IDOR returns other user data)
-                    NO  → category="observation" (recon, tech stack, failed attempts)
 
-        COMMON MISTAKE: Using category="observation" for successful exploits
-        RESULT: Report generator finds 0 findings → NO REPORT GENERATED
-        FIX: ANY successful exploit or confirmed vuln = category="finding"
+def _clean_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    cleaned: Dict[str, Any] = {}
+    for key, value in (metadata or {}).items():
+        cleaned[key] = _clean_memory_text(value, key) if isinstance(value, str) else value
+    return cleaned
 
-    RECOMMENDED for findings:
-    - metadata.severity: CRITICAL/HIGH/MEDIUM/LOW
-    - metadata.status: hypothesis/unverified/verified (only use verified after external validation)
-    - metadata.validation_status: hypothesis/unverified/verified
-    - metadata.technique: short snake_case identifier
-    - metadata.proof_pack: artifact path for HIGH/CRITICAL when available
 
-    QUICK START:
-        # Store finding ONLY after verification succeeds
-        mem0_store(content="[FINDING] XSS Vulnerability confirmed on /contactus endpoint with name parameter. - Technique: stored_xss",
-            metadata={"category": "finding", "severity": "HIGH",
-                      "status": "verified", "validation_status": "verified",
-                      "technique": "stored_xss"})
+def _store_memory_entry(content: str, category: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    """Store one category-fixed semantic memory with duplicate protection."""
 
-        # Store observation during reconnaissance
-        mem0_store(content="[OBSERVATION] Discovered 15 endpoints, JWT auth, admin panel at /admin returns 403",
-            metadata={"category": "observation"})
-
-    STORAGE RULES:
-        1. ONE finding = ONE memory (atomic, not summaries)
-        2. Store IMMEDIATELY after success (not batched at end)
-        3. Use category="finding" for exploits/flags (required for reports)
-        4. Include severity="HIGH" minimum (CRITICAL for auth bypass, RCE, data exfil)
-        5. Add technique metadata for pattern-based cross-learning queries
-
-    STATUS VERIFICATION (prevent hallucination):
-        - status="hypothesis" → Flag extracted but NOT verified (requires testing/submission)
-        - status="unverified" → Flag in artifact, grep verified, but NOT submitted
-        - status="verified" → Flag submission accepted (ONLY use after external validation success)
-        - FORBIDDEN: status="solved" (ambiguous - use "verified" or "hypothesis")
-        - Memory contamination: status="solved" + validation_status="hypothesis" = contradiction/hallucination
-
-    Args:
-        content: Content string with [FINDING] or [OBSERVATION] markers (store artifact paths, no large blobs)
-        agent_id: Agent ID
-        metadata: Dict with category (required), severity, technique, status, etc.
-
-    Returns:
-        JSON/text with operation result.
-    """
-    if not content:
-        raise ValueError("content is required")
-
-    user_id = _user_id()
-    agent_id = _agent_id()
-
-    # Clean content to prevent JSON issues
-    cleaned_content = (
-        str(content)
-        .replace("\x00", "")
-        .replace("\n", " ")
-        .replace("\r", " ")
-        .replace("\t", " ")
-        .strip()
-    )
-    # Also clean multiple spaces
-    cleaned_content = re.sub(r"\s+", " ", cleaned_content)
-    if not cleaned_content:
-        raise ValueError("Content is empty after cleaning")
-
-    # Clean metadata values too
-    if metadata:
-        cleaned_metadata = {}
-        for key, value in metadata.items():
-            if isinstance(value, str):
-                cleaned_value = (
-                    str(value)
-                    .replace("\x00", "")
-                    .replace("\n", " ")
-                    .replace("\r", " ")
-                    .replace("\t", " ")
-                    .strip()
-                )
-                cleaned_value = re.sub(r"\s+", " ", cleaned_value)
-                cleaned_metadata[key] = cleaned_value
-            else:
-                cleaned_metadata[key] = value
-        metadata = cleaned_metadata
-    else:
-        metadata = {}
-
-    # Tag with current operation ID when available
-    # Keep operation_id in metadata for backward compatibility and debugging
-    # Primary scoping now uses session_id parameter in mem0.add()
+    cleaned_content = _clean_memory_text(content, "content")
+    cleaned_metadata = _clean_metadata(metadata)
+    cleaned_metadata["category"] = category
     op_id = _operation_id()
-    if op_id:
-        metadata["operation_id"] = op_id
-        logger.debug("Tagged memory with operation_id=%s (metadata backup)", op_id)
-
-    # Validate category field exists (CRITICAL for report generation)
-    # Category is REQUIRED - agents must explicitly specify finding vs observation
-    VALID_CATEGORIES = {"finding", "signal", "observation", "discovery", "decision"}
-    if "category" not in metadata:
-        raise ValueError(
-            "MISSING CATEGORY: metadata must include 'category' field.\n"
-            "  - category='finding' for exploits, vulns, flags (APPEARS IN REPORTS)\n"
-            "  - category='observation' for recon, failed attempts (background context)\n"
-            f"VALID CATEGORIES: {', '.join(VALID_CATEGORIES)}\n"
-            "Example: metadata={'category': 'finding', 'severity': 'HIGH'}"
-        )
-
-    # Validate category is a known value
-    category_val = str(metadata.get("category", "")).lower()
-    if category_val and category_val not in VALID_CATEGORIES:
-        logger.warning(
-            "Invalid category '%s'. Valid categories: %s. Defaulting to 'observation'.",
-            category_val, VALID_CATEGORIES
-        )
-        metadata["category"] = "observation"
-
-    # Debug: Log category before any processing
-    logger.debug("Category validation: category=%s", metadata.get("category"))
-
-    # Consolidated validation for findings (single pass)
-    if metadata.get("category") in ["observation", "discovery"] and metadata.get("severity", "INFO") != "INFO":
-        logger.warning("category '%s' != 'finding' with severity != 'INFO', changing category to 'finding'", metadata.get("category"))
-        metadata["category"] = "finding"
-        if isinstance(cleaned_content, str):
-            cleaned_content = (cleaned_content
-                               .replace("[OBSERVATION]", "[FINDING]")
-                               .replace("[DISCOVERY]", "[FINDING]"))
-
-    if metadata.get("category") == "finding":
-        # 0. Warn on forbidden status="solved" (ambiguous - use verified/hypothesis)
-        status_val = str(metadata.get("status", "")).lower()
-        if status_val == "solved":
-            logger.warning(
-                "FORBIDDEN status='solved' detected - this is ambiguous. "
-                "Use status='verified' (after verification/submission success) or status='hypothesis' (unconfirmed). "
-                "Changing to 'hypothesis' to prevent memory contamination."
-            )
-            metadata["status"] = "hypothesis"
-
-        # 1. Normalize severity
-        valid_severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-        sev = str(metadata.get("severity", "MEDIUM")).upper()
-        if sev not in valid_severities:
-            logger.warning(f"Invalid severity '{sev}', defaulting to MEDIUM")
-            sev = "MEDIUM"
-        metadata["severity"] = sev
-
-        # 2. Validate proof_pack for HIGH/CRITICAL findings
-        vstat = str(metadata.get("validation_status", "")).lower()
-        if sev in {"HIGH", "CRITICAL"}:
-            if _has_valid_proof_pack(metadata):
-                # Valid proof_pack exists - respect or default to unverified
-                if vstat not in {"verified", "unverified", "hypothesis"}:
-                    metadata["validation_status"] = "unverified"
-            else:
-                # Missing/invalid proof_pack - downgrade to hypothesis and cap confidence
-                metadata["validation_status"] = "hypothesis"
-                metadata["confidence"] = normalize_confidence(
-                    metadata.get("confidence", "60%"), cap_to=60.0
-                )
-        else:
-            # Non-critical findings - default validation_status if not set
-            if vstat not in {"verified", "unverified", "hypothesis"}:
-                metadata["validation_status"] = "unverified"
-
-        # 3. Determine evidence_type based on confidence (if not already set)
-        if "evidence_type" not in metadata:
-            confidence_str = metadata.get("confidence", "0%")
-            try:
-                confidence_val = float(str(confidence_str).rstrip("%"))
-            except Exception:
-                confidence_val = 0
-
-            if confidence_val >= 70:
-                metadata["evidence_type"] = "exploited"
-            elif confidence_val >= 50:
-                metadata["evidence_type"] = "behavioral"
-            else:
-                metadata["evidence_type"] = "pattern_match"
-
-        # 4. Cap confidence for pattern matches
-        if metadata.get("evidence_type") == "pattern_match":
-            metadata["confidence"] = normalize_confidence(
-                metadata.get("confidence", "35%"), cap_to=40.0
-            )
-
-    # Cross-field validation: Ensure status and validation_status are consistent
-    status_val = str(metadata.get("status", "")).lower()
-    validation_status = str(metadata.get("validation_status", "")).lower()
-
-    # If status="verified" but validation_status contradicts, fix it
-    if status_val == "verified" and validation_status and validation_status != "verified":
-        logger.warning(
-            "Inconsistent status fields: status='verified' but validation_status='%s'. "
-            "Setting validation_status='verified' to prevent contradiction.",
-            validation_status
-        )
-        metadata["validation_status"] = "verified"
-        validation_status = "verified"
-
-    # If validation_status="verified" but status isn't "verified", fix it
-    if validation_status == "verified" and status_val != "verified":
-        logger.warning(
-            "Inconsistent status fields: validation_status='verified' but status='%s'. "
-            "Setting status='verified'.",
-            status_val
-        )
-        metadata["status"] = "verified"
-        status_val = "verified"
-
-    # Suppress mem0's internal error logging during operation
-    mem0_logger = logging.getLogger("root")
-    original_level = mem0_logger.level
-    mem0_logger.setLevel(logging.CRITICAL)
-
+    cleaned_metadata["operation_id"] = op_id
     client = _ensure_memory_client()
-
-    existing_search = client.mem0.search(query=cleaned_content, user_id=user_id, run_id=op_id, limit=1,
-                                         filters={"category": metadata.get("category")})
-    if existing_search.get("results"):
-        existing_best_match = existing_search["results"][0]
-        existing_best_score = existing_best_match.get("score", 1.0)
-        if existing_best_score < 0.1:
-            # Sensitive data comparison: URLs and paths must match exactly if present
-            new_patterns = set(_extract_sensitive_patterns(cleaned_content))
-            existing_content = existing_best_match.get("memory", "")
-            existing_patterns = set(_extract_sensitive_patterns(existing_content))
-
-            if new_patterns == existing_patterns:
-                logger.debug(
-                    f"Found memory duplicate with score {existing_best_score}: {cleaned_content} ~= {existing_best_match.get('memory')}")
-                return "Memory stored."
-                # result = [{"role": "user", "event": "DUPLICATE", "id": existing_best_match.get("id")}]
-                # return json.dumps(result, indent=2, sort_keys=True)
-            else:
-                logger.debug(
-                    f"Memory similarity is high ({existing_best_score}) but sensitive patterns differ. "
-                    f"New: {new_patterns}, Existing: {existing_patterns}. Not treating as duplicate.")
+    user_id = _user_id()
 
     try:
-        client.store_memory(
-            cleaned_content, user_id, agent_id, metadata
+        search = client.mem0.search(
+            query=cleaned_content,
+            user_id=user_id,
+            run_id=op_id,
+            limit=1,
+            filters={"category": category},
         )
-    except Exception as store_error:
-        # Handle mem0 library errors - attempt recovery before failing
-        error_str = str(store_error)
-        if "Extra data" in error_str or "Expecting value" in error_str:
-            # JSON parsing error - try with more aggressive cleaning
-            logger.warning("JSON parsing error in mem0, attempting recovery: %s", error_str)
-            try:
-                # Escape problematic characters and retry
-                escaped_content = json.dumps(cleaned_content)[1:-1]  # Remove outer quotes
-                client.store_memory(
-                    escaped_content, user_id, agent_id, metadata
-                )
-                logger.info("Memory stored after content escaping")
-            except Exception as retry_error:
-                # Recovery failed - log and return error (don't fake success!)
-                logger.error(
-                    "Memory storage failed after retry: %s (original: %s)",
-                    retry_error, store_error
-                )
-                raise RuntimeError(f"Storage failed: {store_error}, content_preview: {cleaned_content[:50]}...")
-        else:
-            raise store_error
-    finally:
-        # Restore original logging level
-        mem0_logger.setLevel(original_level)
+    except Exception:
+        search = {}
+        logger.debug("Unable to check for memory duplicate", exc_info=True)
 
-    # We don't return results because the LLM sometimes considers them as instructions and gets misdirected.
-    return "Memory stored."
+    if search.get("results"):
+        best = search["results"][0]
+        if best.get("score", 1.0) < 0.1:
+            existing_patterns = set(_extract_sensitive_patterns(best.get("memory", "")))
+            if existing_patterns == set(_extract_sensitive_patterns(cleaned_content)):
+                return
+
+    client.store_memory(cleaned_content, user_id, _agent_id(), cleaned_metadata)
+
+
+def _operation_output_root() -> str:
+    output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or (_MEMORY_CONFIG or {}).get(
+        "output_dir", get_default_base_dir()
+    )
+    return os.path.realpath(
+        os.path.join(
+            output_dir,
+            (_MEMORY_CONFIG or {}).get("target_name", "default_target"),
+            _operation_id(),
+        )
+    )
+
+
+def _validated_artifact_paths(artifacts: Any, *, require_one: bool = False) -> List[str]:
+    root = _operation_output_root()
+    validated: List[str] = []
+    for raw_path in _normalize_evidence(artifacts):
+        candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
+        resolved = os.path.realpath(candidate)
+        if os.path.commonpath([root, resolved]) != root:
+            raise ValueError(f"Artifact is outside the current operation output: {raw_path}")
+        if not os.path.isfile(resolved):
+            raise ValueError(f"Artifact does not exist: {raw_path}")
+        validated.append(resolved)
+    if require_one and not validated:
+        raise ValueError("At least one existing artifact is required")
+    return validated
+
+
+@tool
+def store_observation(
+    content: str,
+    artifacts: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Store one operation-specific fact, failed attempt, or informational result.
+
+    Observations may be reportable but are never promoted into findings based on severity.
+    """
+
+    merged = _clean_metadata(metadata)
+    if artifacts:
+        merged["artifacts"] = _validated_artifact_paths(artifacts)
+    _store_memory_entry(content, "observation", merged)
+    return "Observation stored."
+
+
+@tool
+def store_knowledge(content: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+    """Store one reusable technique, lesson, or durable internal note.
+
+    Knowledge remains retrievable but is excluded from security assessment reports.
+    """
+
+    _store_memory_entry(content, "knowledge", metadata)
+    return "Knowledge stored."
+
+
+def _finding_fingerprint(title: str, claim: str, target: str, technique: str) -> str:
+    normalized = "|".join(
+        re.sub(r"\s+", " ", value.strip().lower()) for value in (title, claim, target, technique)
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+@tool
+def store_finding(
+    title: str,
+    claim: str,
+    severity: str,
+    target: str,
+    technique: str,
+    expected_result: str,
+    observed_result: str,
+    reproduction_steps: List[str],
+    artifacts: Optional[List[str]] = None,
+) -> str:
+    """Submit one finding candidate and create its dedicated verification task.
+
+    This tool never creates a verified finding directly. Every distinct candidate is verified by a separate,
+    same-phase task before it can affect confirmed risk totals.
+    """
+
+    candidate = {
+        "title": _clean_memory_text(title, "title"),
+        "claim": _clean_memory_text(claim, "claim"),
+        "severity": str(severity or "MEDIUM").upper(),
+        "target": _clean_memory_text(target, "target"),
+        "technique": _clean_memory_text(technique, "technique"),
+        "expected_result": _clean_memory_text(expected_result, "expected_result"),
+        "observed_result": _clean_memory_text(observed_result, "observed_result"),
+        "reproduction_steps": [_clean_memory_text(step, "reproduction step") for step in reproduction_steps],
+    }
+    if candidate["severity"] not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
+        raise ValueError("severity must be one of CRITICAL, HIGH, MEDIUM, LOW, INFO")
+    if not candidate["reproduction_steps"]:
+        raise ValueError("reproduction_steps requires at least one step")
+
+    artifact_issues: List[str] = []
+    try:
+        candidate["artifacts"] = _validated_artifact_paths(artifacts)
+    except ValueError as error:
+        candidate["artifacts"] = []
+        artifact_issues.append(str(error))
+    if artifact_issues:
+        candidate["validation_issues"] = artifact_issues
+
+    fingerprint = _finding_fingerprint(
+        candidate["title"], candidate["claim"], candidate["target"], candidate["technique"]
+    )
+    op_id = _operation_id()
+    store = _get_plan_store()
+    existing = store.get_finding_by_fingerprint(op_id, fingerprint)
+    if existing:
+        return json.dumps(
+            {
+                "finding_uid": existing["finding_uid"],
+                "verification_task_uid": existing["verification_task_uid"],
+                "status": existing.get("resolution") or "pending_validation",
+            },
+            sort_keys=True,
+        )
+
+    finding_uid = str(uuid.uuid4())
+    task_uid = str(uuid.uuid4())
+    candidate["finding_uid"] = finding_uid
+    candidate["validation_status"] = "pending"
+    content = (
+        f"[VULNERABILITY] {candidate['title']} [WHERE] {candidate['target']} "
+        f"[IMPACT] {candidate['claim']} [EVIDENCE] {candidate['observed_result']} "
+        f"[STEPS] {'; '.join(candidate['reproduction_steps'])}"
+    )
+    _store_memory_entry(content, "finding_candidate", candidate)
+
+    current_phase = _get_plan_current_phase()
+    task = Task(
+        task_uid=task_uid,
+        title=f"Verify finding: {candidate['title']}",
+        objective=(
+            f"Independently verify finding candidate {finding_uid} against {candidate['target']}. "
+            "Reproduce the claimed behavior, capture direct or differential artifacts, call "
+            "record_finding_validation with the outcome, and stop."
+        ),
+        evidence=candidate["artifacts"],
+        phase=current_phase,
+        status="pending",
+        kind="finding_validation",
+        reference_id=finding_uid,
+    )
+    store.store_finding_candidate(op_id, finding_uid, fingerprint, candidate, task_uid)
+    _ensure_memory_client().store_task(task=task, user_id=_user_id())
+    return json.dumps(
+        {"finding_uid": finding_uid, "verification_task_uid": task_uid, "status": "pending_validation"},
+        sort_keys=True,
+    )
+
+
+@tool
+def record_finding_validation(
+    finding_uid: str,
+    outcome: str,
+    summary: str,
+    reproduction_steps: List[str],
+    evidence_strategy: str = "direct",
+    evidence_artifacts: Optional[List[str]] = None,
+    control_artifacts: Optional[List[str]] = None,
+) -> str:
+    """Record the result of the active, dedicated finding-verification task."""
+
+    op_id = _operation_id()
+    store = _get_plan_store()
+    record = store.get_finding(op_id, finding_uid)
+    if not record:
+        raise ValueError("Unknown finding_uid for the current operation")
+    active = [task for task in store.get_tasks(op_id) if task.status == "active"]
+    if len(active) != 1 or active[0].task_uid != record["verification_task_uid"]:
+        raise ValueError("Finding validation may only be recorded by its active verification task")
+
+    normalized_outcome = str(outcome).strip().lower()
+    if normalized_outcome not in {"confirmed", "not_confirmed"}:
+        raise ValueError("outcome must be confirmed or not_confirmed")
+    strategy = str(evidence_strategy).strip().lower()
+    if strategy not in {"direct", "differential"}:
+        raise ValueError("evidence_strategy must be direct or differential")
+    evidence = _validated_artifact_paths(evidence_artifacts, require_one=normalized_outcome == "confirmed")
+    controls = _validated_artifact_paths(control_artifacts)
+    if normalized_outcome == "confirmed" and strategy == "differential" and not controls:
+        raise ValueError("Differential confirmation requires at least one negative-control artifact")
+
+    validation = {
+        "finding_uid": finding_uid,
+        "outcome": normalized_outcome,
+        "summary": _clean_memory_text(summary, "summary"),
+        "reproduction_steps": [_clean_memory_text(step, "reproduction step") for step in reproduction_steps],
+        "evidence_strategy": strategy,
+        "evidence_artifacts": evidence,
+        "control_artifacts": controls,
+        "validation_status": "submitted",
+    }
+    if not validation["reproduction_steps"]:
+        raise ValueError("reproduction_steps requires at least one step")
+    _store_memory_entry(validation["summary"], "finding_validation", validation)
+    store.store_finding_validation(op_id, finding_uid, validation)
+    return "Finding validation recorded for evaluator review."
+
+
+def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> Optional[str]:
+    """Materialize the evaluator-approved resolution for a verification task."""
+
+    if task.kind != "finding_validation" or not task.reference_id:
+        return None
+    op_id = _operation_id()
+    store = _get_plan_store()
+    record = store.get_finding(op_id, task.reference_id)
+    if not record or record.get("resolution"):
+        return record.get("resolution") if record else None
+
+    candidate = record["candidate_data"]
+    validation = record.get("validation_data")
+    confirmed = evaluator_status == "done" and validation and validation.get("outcome") == "confirmed"
+    if confirmed:
+        metadata = dict(candidate)
+        metadata.update(validation)
+        metadata.update(
+            {
+                "category": "finding",
+                "status": "verified",
+                "validation_status": "verified",
+                "artifacts": validation["evidence_artifacts"],
+                "negative_control_artifacts": validation["control_artifacts"],
+            }
+        )
+        _store_memory_entry(candidate["claim"], "finding", metadata)
+        resolution = "verified"
+    else:
+        reason = evaluator_reason or (
+            validation.get("summary") if validation else "Verification was not completed"
+        )
+        metadata = dict(candidate)
+        metadata.update(
+            {
+                "validation_status": "failed",
+                "validation_reason": reason,
+                "claimed_severity": candidate["severity"],
+            }
+        )
+        if validation:
+            metadata["validation"] = validation
+        _store_memory_entry(candidate["claim"], "validation_failure", metadata)
+        resolution = "validation_failure"
+    store.resolve_finding(op_id, task.reference_id, resolution)
+    return resolution
 
 
 def get_plan() -> str:
@@ -1157,7 +1296,7 @@ def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:
 
 @tool
 def mem0_list() -> str:
-    """List operation findings, observations, and discoveries."""
+    """List operation findings, validation records, observations, and knowledge."""
     try:
         client = _ensure_memory_client()
 
@@ -1209,7 +1348,7 @@ def mem0_retrieve(
         Cross-Learning Query Examples:
         - Learn from past: mem0_retrieve(query="SQLi techniques")
         - Skip verified: metadata={"status": "verified"} to find verified findings
-        - Learn techniques: metadata={"category": "discovery"}
+        - Learn techniques: metadata={"category": "knowledge"}
         - Avoid failures: query for failed_technique or blocker in metadata
 
     Returns a list of memories.
@@ -2295,7 +2434,9 @@ class Mem0ServiceClient:
                             phase=t.phase,
                             status="pending",
                             status_reason="demoted",
-                            created_at=t.created_at
+                            created_at=t.created_at,
+                            kind=t.kind,
+                            reference_id=t.reference_id,
                         )
                         _get_plan_store().store_task(op_id, demoted)
             except Exception as e:
@@ -2341,7 +2482,9 @@ class Mem0ServiceClient:
                 phase=target.phase,
                 status=new_status,
                 status_reason=new_status_reason,
-                created_at=target.created_at
+                created_at=target.created_at,
+                kind=target.kind,
+                reference_id=target.reference_id,
             )
             self.store_task(task=updated, user_id=user_id)
 
@@ -2364,7 +2507,9 @@ class Mem0ServiceClient:
                         phase=p.phase,
                         status="active",
                         status_reason="activated",
-                        created_at=p.created_at
+                        created_at=p.created_at,
+                        kind=p.kind,
+                        reference_id=p.reference_id,
                     )
                     self.store_task(task=next_active, user_id=user_id)
 
@@ -2403,7 +2548,9 @@ class Mem0ServiceClient:
             phase=p.phase,
             status="active",
             status_reason="activated",
-            created_at=p.created_at
+            created_at=p.created_at,
+            kind=p.kind,
+            reference_id=p.reference_id,
         )
 
         self.store_task(task=next_active, user_id=user_id)

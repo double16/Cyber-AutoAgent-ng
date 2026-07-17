@@ -284,22 +284,17 @@ def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_p
     assert mod.memory_is_cross_operation() is True
     monkeypatch.setenv("MEMORY_ISOLATION", "operation")
 
-    stored = mod.mem0_store(
+    stored = mod.store_observation(
         "[OBSERVATION] confirmed issue",
-        {
-            "category": "observation",
+        metadata={
             "severity": "HIGH",
-            "status": "solved",
-            "validation_status": "hypothesis",
             "confidence": "95%",
-            "proof_pack": {"artifacts": [str(proof)]},
         },
     )
-    assert stored == "Memory stored."
+    assert stored == "Observation stored."
     metadata = client.mem0.add_calls[0]["metadata"]
-    assert metadata["category"] == "finding"
-    assert metadata["status"] == "hypothesis"
-    assert metadata["validation_status"] == "hypothesis"
+    assert metadata["category"] == "observation"
+    assert metadata["severity"] == "HIGH"
 
     plan = mod.OperationPlan(
         objective="Assess",

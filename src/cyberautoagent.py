@@ -18,11 +18,11 @@ License: MIT
 """
 
 import argparse
-import json
 import asyncio
 import atexit
 import base64
 import importlib
+import json
 import os
 import signal
 import sys
@@ -36,11 +36,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import litellm
 import requests
 from botocore.exceptions import (
-    ReadTimeoutError as BotoReadTimeoutError,
-    EndpointConnectionError as BotoEndpointConnectionError,
     ConnectTimeoutError as BotoConnectTimeoutError,
+)
+from botocore.exceptions import (
+    EndpointConnectionError as BotoEndpointConnectionError,
+)
+from botocore.exceptions import (
+    ReadTimeoutError as BotoReadTimeoutError,
 )
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
@@ -48,34 +53,48 @@ from requests.exceptions import ReadTimeout as RequestsReadTimeout
 from strands.telemetry.config import StrandsTelemetry
 from strands.types.exceptions import MaxTokensReachedException
 
-import litellm
-
 from modules.agents.cyber_autoagent import (
     AgentConfig,
+    _ensure_prompt_within_budget,
     create_agent,
     create_agent_runtime_resources,
-    _ensure_prompt_within_budget,
 )
-from modules.agents.multi_agent_workflow import MultiAgentWorkflowController, WorkflowInvariantError
+from modules.agents.multi_agent_workflow import (
+    MultiAgentWorkflowController,
+    TaskExecutorCycleResult,
+    WorkflowInvariantError,
+)
 from modules.agents.run_policy import AgentRunPolicy
-from modules.config.models.factory import configure_model_rate_limits, get_model_timeout  # noqa: F401
-from modules.config.system.environment import auto_setup, clean_operation_memory, setup_logging
 from modules.config.manager import get_config_manager
-from modules.config.types import get_default_base_dir, BudgetConfig, DEFAULT_MAX_DURATION
+from modules.config.models.factory import (  # noqa: F401
+    configure_model_rate_limits,
+    get_model_timeout,
+)
+from modules.config.system.environment import (
+    auto_setup,
+    clean_operation_memory,
+    setup_logging,
+)
+from modules.config.types import (
+    DEFAULT_MAX_DURATION,
+    BudgetConfig,
+    get_default_base_dir,
+)
 from modules.handlers.base import BudgetLimitReached, is_docker
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.utils import (
     Colors,
+    dumpstacks,
     get_output_path,
     get_terminal_width,
     print_banner,
     print_section,
     print_status,
     sanitize_target_name,
-    dumpstacks,
     update_latest_output_pointer,
 )
 from modules.tools import browser, channel_close_all
+from modules.tools.memory import get_memory_client
 from modules.tools.oast import close_oast_providers
 from modules.utils.telemetry import flush_traces
 
@@ -384,11 +403,12 @@ def _run_policy_allows_terminal_text(
 
     if not run_policy.terminal_after_required_tools:
         return False
+    required_tools_satisfied = _required_tools_satisfied(callback_handler, run_policy, baseline)
+    if not required_tools_satisfied:
+        return False
     if not run_policy.allow_text_final_after_tools:
-        return False
-    if actionless_attempt_count <= run_policy.max_actionless_after_tools:
-        return False
-    return _required_tools_satisfied(callback_handler, run_policy, baseline)
+        return True
+    return actionless_attempt_count > run_policy.max_actionless_after_tools
 
 
 def run_agent_until_terminal_state(
@@ -499,7 +519,7 @@ def run_agent_until_terminal_state(
                             break
 
                     current_message += (
-                        "**MANDATORY ACTION**: Take your time to decide which tool to call next. "
+                        "**MANDATORY ACTION**: Think thoroughly to decide which tool to call next. "
                         "A tool MUST be called next to make progress."
                     )
                 else:
@@ -568,9 +588,19 @@ def finalize_report_and_evaluation(
         logger.warning("Error in final report/evaluation: %s", error)
     finally:
         try:
-            callback_handler.emit_assessment_complete()
+            plan = get_memory_client(silent=True).get_active_plan()
+            workflow_complete = bool(plan and plan.assessment_complete)
+            termination_complete = getattr(callback_handler, "termination_reason", None) == "complete"
+            if workflow_complete and termination_complete:
+                callback_handler.emit_assessment_complete()
+            else:
+                logger.info(
+                    "Skipping assessment_complete: workflow_complete=%s termination_reason=%s",
+                    workflow_complete,
+                    getattr(callback_handler, "termination_reason", None),
+                )
         except Exception as error:
-            logger.warning("Unable to emit assessment completion: %s", error)
+            logger.warning("Unable to determine or emit assessment completion: %s", error)
 
 
 def close_log_outputs() -> None:
@@ -1266,7 +1296,30 @@ def main():
                     include_tool_catalog=True,
                 )
                 try:
-                    yield lambda prompt, run_policy=None: run_workflow_agent(agent, prompt, run_policy)
+                    callback = getattr(agent, "_cyber_callback_handler", None)
+                    recovery_hook = getattr(agent, "_cyber_failure_recovery_hook", None)
+
+                    def run_retained_executor(
+                        prompt: str,
+                        run_policy: Optional[AgentRunPolicy] = None,
+                    ) -> TaskExecutorCycleResult:
+                        journal = getattr(callback, "tool_outcome_journal", None)
+                        snapshot = journal.snapshot() if journal is not None else 0
+                        text = run_workflow_agent(agent, prompt, run_policy)
+                        outcomes = journal.since(snapshot) if journal is not None else []
+                        return TaskExecutorCycleResult(
+                            text=text,
+                            outcomes=outcomes,
+                            recovery_required=bool(recovery_hook and recovery_hook.unresolved),
+                            recovery_exhausted=bool(recovery_hook and recovery_hook.exhausted),
+                            recovery_guidance=(
+                                recovery_hook.recovery_guidance()
+                                if recovery_hook and recovery_hook.unresolved
+                                else ""
+                            ),
+                        )
+
+                    yield run_retained_executor
                 finally:
                     try:
                         agent.cleanup()

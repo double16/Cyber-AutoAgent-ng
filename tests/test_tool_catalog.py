@@ -289,8 +289,8 @@ def test_tool_catalog_wrapper_includes_shell_commands_and_handles_missing_cyber_
     assert "command: httpx" in text
     assert "capabilities: web_recon, http_client" in text
     assert "shell_preference: preferred" in text
-    assert "Native agent tools take precedence" in text
-    assert "supplemental command-line programs" in text
+    assert "command-line programs invoked through the **shell** tool" in text
+    assert "Native agent tools take precedence" not in text
     assert "HELP(httpx)" in text
 
     # grep entry does not exist in cyber_tools but should still render without crashing

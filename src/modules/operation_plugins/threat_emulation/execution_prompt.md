@@ -24,10 +24,10 @@ MITRE ATT&CK techniques, marker-based execution, IoC and telemetry validation, d
 </module_execution_policy>
 
 <evidence_policy>
-- Store verified TTP execution as `category="finding"` with ATT&CK ID, marker/IoC type and value, detection source,
+- Submit TTP execution candidates with `store_finding`, including ATT&CK ID, marker/IoC type and value, detection source,
   artifact path, expected behavior, actual behavior, and cleanup state.
 - Store threat-intelligence mappings, blocked TTPs, environment mismatches, and unverified telemetry as
-  `category="observation"`.
+  `store_observation`.
 - Cleanup evidence must show the removal command or action, verification result, and any residual artifacts.
 </evidence_policy>
 

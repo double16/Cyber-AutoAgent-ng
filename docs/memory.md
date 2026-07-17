@@ -97,38 +97,32 @@ sequenceDiagram
 Evidence storage employs structured metadata for efficient retrieval and analysis:
 
 ```python
-# Finding storage with metadata
-mem0_store(
-    content="[WHAT] SQL injection [WHERE] /login [IMPACT] Auth bypass [EVIDENCE] payload",
-    metadata={
-        "category": "finding",
-        "severity": "CRITICAL",
-        "confidence": "95%",
-        "status": "verified"
-    }
+store_observation("The login endpoint returns a distinct error for unknown users")
+store_knowledge("Use a test/control request pair for behavioral security claims")
+store_finding(
+    title="SQL injection in login",
+    claim="The username parameter changes query behavior",
+    severity="CRITICAL",
+    target="/login",
+    technique="sql_injection",
+    expected_result="The payload is rejected",
+    observed_result="The response differs from the negative control",
+    reproduction_steps=["Send the control request", "Send the test payload"],
+    artifacts=["artifacts/login-test.txt", "artifacts/login-control.txt"],
 )
 ```
 
 ### Category Taxonomy
 
-**Report-Generating Categories** (appear in final reports):
-- **finding**: Exploited vulnerabilities, extracted data, confirmed security issues
-- **signal**: Security signals that warrant attention
-- **observation**: Reconnaissance data, failed attempts, recon findings
-- **discovery**: Techniques learned, patterns identified
+- **observation**: Operation-specific facts, reconnaissance, failed attempts, and informational behavior.
+- **knowledge**: Reusable techniques and lessons. Knowledge is retrievable but excluded from reports.
+- **finding_candidate**: A claim submitted through `store_finding`; it automatically creates one verification task.
+- **finding**: A candidate promoted only after its verification task and evaluator approve the evidence.
+- **validation_failure**: A claim that was rejected, not confirmed, incomplete, or still pending at report time.
 
-**Internal Categories** (not in reports):
-- **plan**: Strategic assessment roadmaps
-- **decision**: Tactical decisions and pivot reasoning
-
-**Category Decision Tree** (CRITICAL - wrong category = empty report):
-```
-Q: Did you EXPLOIT something or extract sensitive data?
-   YES → category="finding" (SQLi data dump, auth bypass, flag, RCE, creds)
-   NO  → Q: Did you CONFIRM a vulnerability exists?
-            YES → category="finding" (XSS fires, IDOR returns other user data)
-            NO  → category="observation" (recon, tech stack, failed attempts)
-```
+Legacy `signal` and `discovery` memories are read as observations. Legacy `decision` memories remain internally
+retrievable but are excluded from reports. New workflow decisions are stored in plans, tasks, evaluator results, and
+logs rather than semantic memory.
 
 **Severity Levels** (for findings):
 - **CRITICAL**: Remote code execution, authentication bypass, data breach
@@ -230,11 +224,9 @@ phase_decision = {"status": "partial_failure", "reason": "Soft budget reached; r
 
 ### Basic Operations
 ```python
-# Store finding with metadata
-mem0_store(
-    content="[WHAT] RCE [WHERE] /upload [IMPACT] Shell access [EVIDENCE] shell.php",
-    metadata={"category": "finding", "severity": "critical", "confidence": "98%"}
-)
+# Store operation facts and reusable lessons
+store_observation("The upload route accepts multipart requests", artifacts=["artifacts/upload.txt"])
+store_knowledge("Validate upload execution with a harmless marker and a negative control")
 
 # Search memories  
 mem0_retrieve(query="SQL injection")
@@ -245,12 +237,13 @@ mem0_list()
 
 ### Advanced Operations
 
-Agents should use semantic memory tools for observations, findings, and evidence:
+Agents should use typed semantic memory tools:
 
 ```python
-mem0_store(
-    content="[WHAT] SQL injection hypothesis [WHERE] /login [EVIDENCE] /outputs/.../request.txt",
-    metadata={"category": "observation", "confidence": "65%"}
+store_observation(
+    "The login response changes for a quote character",
+    artifacts=["artifacts/login-response.txt"],
+    metadata={"confidence": "65%"},
 )
 
 mem0_retrieve(query="authentication findings")
@@ -333,12 +326,9 @@ Structured finding format ensures consistent evidence collection:
 
 ### Metadata Standards
 
-**Required Fields:**
-- **category**: Taxonomy classification (finding, observation, discovery, signal) - **REQUIRED, missing category raises error**
-- **severity**: Risk level for findings (CRITICAL/HIGH/MEDIUM/LOW)
-- **confidence**: Assessment certainty (percentage, e.g., "85%")
-
-> **Note**: The `category` field is mandatory for store operations. Attempting to store without a category will raise a `ValueError` with guidance on proper categorization.
+Memory tools assign their category; agents do not provide it. `store_finding` requires severity, target, expected and
+observed behavior, reproduction steps, and a technique. A confirmed validation requires existing operation-scoped
+artifacts. Differential evidence also requires a negative-control artifact.
 
 **Optional Fields:**
 - **status**: Verification state (hypothesis, unverified, verified)

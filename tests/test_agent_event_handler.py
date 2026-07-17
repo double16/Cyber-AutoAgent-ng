@@ -4,12 +4,16 @@ import threading
 import time
 from collections import OrderedDict
 from types import SimpleNamespace
-from unittest.mock import Mock, MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
 from modules.handlers.react import agent_event_handler as rb
-from modules.handlers.react.agent_event_handler import OperationEventCoordinator, AgentEventHandler, ReportBudgetEstimate
+from modules.handlers.react.agent_event_handler import (
+    AgentEventHandler,
+    OperationEventCoordinator,
+    ReportBudgetEstimate,
+)
 
 
 def make_handler():
@@ -155,10 +159,10 @@ def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
         pricing_fallback={"input": 0.0, "output": 0.0},
     )
 
-    assert estimate.findings == 2
-    assert estimate.observations == 1
-    assert estimate.input_tokens == math.ceil((2500 + 1900 + 1825 + 1440 + 2200) * 1.15)
-    assert estimate.output_tokens == math.ceil((1500 + 1800 + 1800 + 900 + 1200) * 1.15)
+    assert estimate.findings == 1
+    assert estimate.observations == 2
+    assert estimate.input_tokens == math.ceil((2500 + 1900 + 1440 + 1425 + 2200) * 1.15)
+    assert estimate.output_tokens == math.ceil((1500 + 1800 + 900 + 900 + 1200) * 1.15)
     assert estimate.remaining_steps == 5
 
     coordinator.set_report_items(
@@ -272,8 +276,8 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
         }
     )
 
-    handler.tool_name_buffer["mem"] = "mem0_store"
-    handler.tool_input_buffer["mem"] = {"metadata": {"category": "finding"}}
+    handler.tool_name_buffer["mem"] = "store_finding"
+    handler.tool_input_buffer["mem"] = {"claim": "finding", "severity": "HIGH"}
     handler._process_tool_result_from_message(
         {"toolUseId": "mem", "status": "success", "content": [{"text": "stored"}]}
     )
@@ -284,6 +288,7 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert "task_started" not in types
     assert handler.memory_ops == 1
     assert handler.evidence_count == 1
+    assert handler.coordinator.report_findings == 1
 
 
 @pytest.mark.parametrize(
@@ -334,11 +339,11 @@ def test_non_task_state_tool_result_does_not_emit_task_lifecycle_events():
     assert "task_started" not in event_types(handler)
 
 
-def test_mem0_store_success_updates_report_estimate_without_memory_reads(monkeypatch):
+def test_store_observation_success_updates_report_estimate_without_memory_reads(monkeypatch):
     handler = make_handler()
     monkeypatch.setattr(rb, "token_calc", lambda chars, model_id=None: int(chars))
 
-    handler.tool_name_buffer["high_obs"] = "mem0_store"
+    handler.tool_name_buffer["high_obs"] = "store_observation"
     handler.tool_input_buffer["high_obs"] = {
         "content": "x" * 37,
         "metadata": {"category": "observation", "severity": "HIGH"},
@@ -349,9 +354,50 @@ def test_mem0_store_success_updates_report_estimate_without_memory_reads(monkeyp
 
     assert handler.memory_ops == 1
     assert handler.evidence_count == 1
-    assert handler.coordinator.report_findings == 1
+    assert handler.coordinator.report_findings == 0
+    assert handler.coordinator.report_observations == 1
+    assert handler.coordinator.report_observation_content_tokens == 37
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("store_knowledge", {"content": "Use a negative control"}),
+        (
+            "record_finding_validation",
+            {"finding_uid": "finding-1", "summary": "Direct evidence reproduced"},
+        ),
+    ],
+)
+def test_non_evidence_memory_tools_increment_only_memory_operations(tool_name, tool_input):
+    handler = make_handler()
+    handler.tool_name_buffer["memory"] = tool_name
+    handler.tool_input_buffer["memory"] = tool_input
+
+    handler._process_tool_result_from_message(
+        {"toolUseId": "memory", "status": "success", "content": [{"text": "stored"}]}
+    )
+
+    assert handler.memory_ops == 1
+    assert handler.evidence_count == 0
+    assert handler.coordinator.memory_ops == 1
+    assert handler.coordinator.evidence_count == 0
+    assert handler.coordinator.report_findings == 0
     assert handler.coordinator.report_observations == 0
-    assert handler.coordinator.report_finding_content_tokens == 37
+
+
+def test_failed_typed_memory_tool_does_not_increment_metrics():
+    handler = make_handler()
+    handler.tool_name_buffer["memory"] = "record_finding_validation"
+    handler.tool_input_buffer["memory"] = {"finding_uid": "missing", "summary": "failed"}
+
+    handler._process_tool_result_from_message(
+        {"toolUseId": "memory", "status": "error", "content": [{"text": "unknown finding"}]}
+    )
+
+    assert handler.memory_ops == 0
+    assert handler.evidence_count == 0
+    assert handler.coordinator.memory_ops == 0
 
 
 def test_python_repl_preview_and_empty_result_paths(monkeypatch):

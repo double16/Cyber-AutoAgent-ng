@@ -82,8 +82,8 @@ export type AdditionalStreamEvent =
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
-  | { type: 'task_started'; task_uid?: string; title?: string; status?: string; [key: string]: any }
-  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; [key: string]: any }
+  | { type: 'task_started'; task_uid?: string; title?: string; status?: string; task_kind?: string; reference_id?: string; [key: string]: any }
+  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; finding_resolution?: string; [key: string]: any }
   | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; message?: string; [key: string]: any };
 
 // Combined event type supporting both SDK-aligned and additional events
@@ -624,10 +624,12 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         const reportIndex = Number((event as any)['report_step_index']);
         const reportTotal = Number((event as any)['report_step_total']);
         const reportLabel = String((event as any)['report_step_label'] || '').trim();
+        const reportKind = String((event as any)['report_step_kind'] || '').trim();
         const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
           ? `${reportIndex}/${reportTotal}`
           : 'REPORT';
-        stepDisplay = `[FINAL REPORT ${progressLabel}]${reportLabel ? ` ${reportLabel}` : ''}`;
+        const kindLabel = reportKind === 'validation_failure' ? ' [REQUIRES VALIDATION]' : '';
+        stepDisplay = `[FINAL REPORT ${progressLabel}]${kindLabel}${reportLabel ? ` ${reportLabel}` : ''}`;
       } else if (event.step === "FINAL REPORT") {
         stepDisplay = "[FINAL REPORT]";
       } else if (typeof event.step === 'string' && String(event.step).toUpperCase() === 'TERMINATED') {
@@ -682,13 +684,35 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       );
       
     case 'task_started': {
-      return null;
+      if (String((event as any).task_kind || '') !== 'finding_validation') {
+        return null;
+      }
+      const title = String((event as any).title || 'Finding').replace(/^Verify finding:\s*/i, '').trim();
+      return (
+        <Box marginLeft={2}>
+          <Text color="yellow">{`VERIFYING FINDING ${title}`}</Text>
+        </Box>
+      );
     }
 
     case 'task_done': {
       const title = String((event as any).title || '').trim();
       const status = String((event as any).status || 'done').trim().toLowerCase();
       const statusReason = String((event as any).status_reason || '').trim();
+      const findingResolution = String((event as any).finding_resolution || '').trim();
+      if (findingResolution) {
+        const findingTitle = title.replace(/^Verify finding:\s*/i, '').trim();
+        const verified = findingResolution === 'verified';
+        const label = verified ? 'FINDING VERIFIED' : 'FINDING REQUIRES VALIDATION';
+        const detail = statusReason ? `: ${statusReason}` : '';
+        return (
+          <Box marginLeft={2}>
+            <Text color={verified ? 'green' : 'yellow'}>
+              {`${label}${findingTitle ? ` ${findingTitle}` : ''}${detail}`}
+            </Text>
+          </Box>
+        );
+      }
       const label = status === 'partial_failure'
         ? 'TASK PARTIAL FAILURE'
         : status === 'blocked'
@@ -891,7 +915,6 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
               </Box>
             </Box>
           );
-        case 'mem0_store':
         case 'mem0_get':
         case 'mem0_retrieve':
         case 'mem0_list': {
@@ -932,6 +955,24 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
                   <Text dimColor>└─ </Text>
                 </Box>
               )}
+            </Box>
+          );
+        }
+
+        case 'store_observation':
+        case 'store_knowledge':
+        case 'store_finding':
+        case 'record_finding_validation': {
+          const preview = formatToolInput(event.tool_name, latestInput);
+          const color = event.tool_name === 'store_finding' || event.tool_name === 'record_finding_validation'
+            ? 'yellow'
+            : 'green';
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              <Text color={color} bold>tool: {event.tool_name}{agentContext}</Text>
+              <Box marginLeft={2}>
+                <Text dimColor>└─ {preview}</Text>
+              </Box>
             </Box>
           );
         }

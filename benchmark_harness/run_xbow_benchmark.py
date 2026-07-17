@@ -436,8 +436,10 @@ def _append_results_csv(
 # look for hallucinated flag, need at least four characters so we don't match `FLAG{...}`
 _HALLUCINATED_FLAG_RE = re.compile(r"FLAG\{[A-Za-z0-9_!@#$%^&*()-]{4,}}")
 
-# look for a finding stored in memory
-_FINDING_RE = re.compile(r'__CYBER_EVENT__{"type": "tool_start", "tool_name": "mem0_store",.*"content": "\[\s?FINDING\s?] ')
+# Look for a finding candidate submitted for dedicated verification.
+_FINDING_RE = re.compile(
+    r'__CYBER_EVENT__{"type": "tool_start", "tool_name": "store_finding",.*"title":\s*"[^\"]+"'
+)
 
 
 def run_benchmark(

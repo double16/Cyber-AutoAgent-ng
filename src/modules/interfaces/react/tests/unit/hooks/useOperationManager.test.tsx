@@ -31,13 +31,15 @@ const operation = {
   status: 'running',
   description: 'check auth',
   findings: 1,
+  memoryOps: 0,
+  evidence: 0,
   cost: { tokensUsed: 0, estimatedCost: 0 },
 };
 
 const operationManager = {
   startOperation: jest.fn(() => operation),
   pauseOperation: jest.fn(() => true),
-  updateOperation: jest.fn(),
+  updateOperation: jest.fn((_id: string, updates: Record<string, unknown>) => Object.assign(operation, updates)),
   updateTokenUsage: jest.fn((_id: string, input: number, output: number, cost: number) => {
     operation.cost.tokensUsed += input + output;
     operation.cost.estimatedCost += cost;
@@ -138,6 +140,8 @@ describe('useOperationManager', () => {
       id: 'op-local',
       status: 'running',
       findings: 1,
+      memoryOps: 0,
+      evidence: 0,
       cost: { tokensUsed: 0, estimatedCost: 0 },
     });
     currentModule = 'web';
@@ -207,6 +211,10 @@ describe('useOperationManager', () => {
     );
 
     act(() => {
+      jest.advanceTimersByTime(301);
+    });
+
+    act(() => {
       executionService.emit('event', { type: 'operation_init', operation_id: 'backend-op' });
       executionService.emit('event', { type: 'progress_update', step: 1, progressPercent: 40, content: 'Enumerating' });
       executionService.emit('event', {
@@ -222,10 +230,22 @@ describe('useOperationManager', () => {
       progressPercentage: 40,
     }));
     expect(operationManager.updateTokenUsage).toHaveBeenCalledWith('backend-op', 10, 5, 0.02, 0, 0);
+    expect(operationManager.updateOperation).toHaveBeenCalledWith('backend-op', {memoryOps: 2, evidence: 3});
+    expect(actions.updateMetrics).toHaveBeenCalledWith(expect.objectContaining({memoryOps: 2, evidence: 3}));
     expect(actions.setUserHandoff).toHaveBeenCalledWith(true);
     expect(hook.current.operationHistoryEntries).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'error', content: 'CRITICAL finding' }),
     ]));
+
+    act(() => {
+      jest.advanceTimersByTime(301);
+      executionService.emit('event', {
+        type: 'metrics_update',
+        metrics: {inputTokens: 0, outputTokens: 0, cost: 0, memoryOps: 0, evidence: 0, progressPercent: 40},
+      });
+    });
+    expect(operationManager.updateOperation).toHaveBeenCalledWith('backend-op', {memoryOps: 0, evidence: 0});
+    expect(actions.updateMetrics).toHaveBeenCalledWith(expect.objectContaining({memoryOps: 0, evidence: 0}));
 
     act(() => {
       executionService.emit('complete', { ok: true });

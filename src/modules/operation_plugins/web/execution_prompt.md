@@ -28,8 +28,9 @@ mapping, prioritized hypothesis testing, exploitation validation, impact demonst
 <evidence_policy>
 - A finding requires the affected request or workflow, expected and actual behavior, a negative control, impact,
   reproduction steps, confidence, validation status, and artifact paths containing the relevant runtime evidence.
-- Store verified exploitable behavior as `category="finding"`. Store reconnaissance, technology clues, failed attempts,
-  constraints, and unverified hypotheses as `category="observation"`.
+- Submit exploitable behavior with `store_finding`; it will receive a separate verification task. Store reconnaissance,
+  technology clues, failed attempts,
+  constraints, and unverified hypotheses with `store_observation`.
 - High and critical findings require a proof pack and independent validation when the applicable validation capability
   is available.
 </evidence_policy>

@@ -5,43 +5,44 @@ It is intentionally UI-agnostic: the React terminal is one consumer, but the
 event protocol is shared by CLI/logging/automation surfaces.
 """
 
+import asyncio
 import json
 import math
 import os
 import re
 import threading
 import time
-import asyncio
 import uuid
 from collections import OrderedDict
-from datetime import datetime
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from strands.handlers import PrintingCallbackHandler
 
-from ..base import BudgetLimitReached
-from ..events import EventEmitter, get_emitter
-from ..output_interceptor import (
-    get_buffered_output,
-    get_buffered_error_output,
-    set_tool_execution_state,
-)
-from .tool_emitters import ToolEventEmitter
 from modules.config.system.logger import get_logger
+from modules.handlers.utils import (
+    get_output_path,
+    sanitize_target_name,
+)
+
 from ...config import get_config_manager
 from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
 from ...config.types import DEFAULT_MAX_DURATION
-from ..conversation_budget import token_calc
 from ...utils.text_reducer import collapse_first_repeated_sequence
-
-from modules.handlers.utils import (
-    get_output_path,
-    sanitize_target_name,
+from ..base import BudgetLimitReached
+from ..conversation_budget import token_calc
+from ..events import EventEmitter, get_emitter
+from ..output_interceptor import (
+    get_buffered_error_output,
+    get_buffered_output,
+    set_tool_execution_state,
 )
+from ..tool_recovery import ToolOutcomeJournal
+from .tool_emitters import ToolEventEmitter
 
 logger = get_logger("Handlers.AgentEvent")
 
@@ -167,9 +168,8 @@ class OperationEventCoordinator:
                 return
 
             normalized_category = str(category or "").strip().lower()
-            normalized_severity = str(severity or "").strip().upper()
             content_tokens = token_calc(max(0, int(content_length or 0)), model_id=model_id)
-            if normalized_category == "finding" or normalized_severity in {"CRITICAL", "HIGH"}:
+            if normalized_category in {"finding", "finding_candidate", "validation_failure"}:
                 self.report_findings += 1
                 self.report_finding_content_tokens += content_tokens
                 self._report_finding_content_token_items.append(content_tokens)
@@ -488,6 +488,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         self.announced_tools = set()
         self.tool_input_buffer = {}
         self.tool_name_buffer = {}  # Map tool_id -> tool_name for correct attribution
+        self.tool_outcome_journal = ToolOutcomeJournal()
         self.tools_used = set()
         # Track per-tool usage counts for accurate reporting
         self.tool_counts = {}
@@ -1629,39 +1630,40 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         # Update live metrics for memory operations and evidence collection
         try:
-            if tool_name in {"mem0_store"} and success:
+            memory_tools = {
+                "store_observation",
+                "store_knowledge",
+                "store_finding",
+                "record_finding_validation",
+            }
+            if tool_name in memory_tools and success:
                 # Increment memory operation count on successful storage actions
                 if isinstance(tool_input, dict):
                     self.memory_ops += 1
-                    # Only count evidence for store actions with report-generating categories.
-                    # Categories per memory.py: finding, signal, observation, discovery
-                    if tool_name == "mem0_store":
-                        metadata = (
-                            tool_input.get("metadata", {})
-                            if isinstance(tool_input.get("metadata"), dict)
-                            else {}
-                        )
-                        category = str(metadata.get("category", "")).lower()
+                    # Only observations and finding candidates contribute evidence/report items.
+                    if tool_name in {"store_observation", "store_finding"}:
+                        category = "finding_candidate" if tool_name == "store_finding" else "observation"
+                        metadata = tool_input.get("metadata", {}) if isinstance(tool_input.get("metadata"), dict) else {}
                         severity = str(metadata.get("severity", "") or tool_input.get("severity", ""))
-                        content = tool_input.get("content") or tool_input.get("memory") or ""
-                        if category in ("finding", "signal", "observation", "discovery"):
-                            self.evidence_count += 1
-                            if self.coordinator is not None:
-                                self.coordinator.record_memory(
-                                    evidence=True,
-                                    category=category,
-                                    severity=severity,
-                                    content_length=len(str(content)),
-                                    model_id=self.model_id,
-                                )
-                        elif self.coordinator is not None:
+                        content = tool_input.get("content") or tool_input.get("claim") or ""
+                        self.evidence_count += 1
+                        if self.coordinator is not None:
                             self.coordinator.record_memory(
-                                evidence=False,
+                                evidence=True,
                                 category=category,
                                 severity=severity,
                                 content_length=len(str(content)),
                                 model_id=self.model_id,
                             )
+                    elif self.coordinator is not None:
+                        category = "knowledge" if tool_name == "store_knowledge" else "finding_validation"
+                        content = tool_input.get("content") or tool_input.get("summary") or ""
+                        self.coordinator.record_memory(
+                            evidence=False,
+                            category=category,
+                            content_length=len(str(content)),
+                            model_id=self.model_id,
+                        )
         except Exception:
             # Never allow metrics update errors to disrupt output
             pass

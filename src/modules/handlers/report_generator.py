@@ -17,21 +17,20 @@ from typing import Any, Dict, List, Optional
 from modules.agents.report_agent import ReportGenerator
 from modules.config import get_config_manager
 from modules.config.system.logger import get_logger
-from modules.handlers.utils import sanitize_target_name, get_output_path, duration_max
+from modules.handlers.utils import duration_max, get_output_path, sanitize_target_name
 from modules.prompts.factory import (
     _extract_domain_lens,
     _transform_evidence_to_content,
     format_evidence_for_report,
     format_tools_summary,
     generate_findings_summary_table,
-    safe_truncate,
+    get_report_appendix_system_prompt,
     get_report_executive_system_prompt,
     get_report_finding_system_prompt,
     get_report_observation_system_prompt,
-    get_report_appendix_system_prompt,
+    safe_truncate,
 )
-from modules.tools.memory import Task
-from modules.tools.memory import get_memory_client, memory_is_cross_operation
+from modules.tools.memory import Task, get_memory_client, memory_is_cross_operation
 
 logger = get_logger("Handlers.ReportGenerator")
 
@@ -69,6 +68,40 @@ def _has_artifact_reference(value: Any) -> bool:
     return False
 
 
+def _artifact_references(value: Any) -> set[str]:
+    references: set[str] = set()
+    if isinstance(value, str):
+        references.update(match.strip(".,;:") for match in _ARTIFACT_REFERENCE.findall(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            references.update(_artifact_references(item))
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            references.update(_artifact_references(item))
+    return references
+
+
+def _ground_report_item(text: str, item: Dict[str, Any], *, observation: bool = False) -> str:
+    """Reject report prose that cites artifact paths absent from the supplied record."""
+
+    allowed = _artifact_references(item)
+    cited = _artifact_references(text)
+    if cited.issubset(allowed):
+        return text
+    metadata = item.get("metadata", {}) or {}
+    title = _report_item_title(item, "Observation" if observation else "Finding")
+    artifacts = sorted(allowed)
+    artifact_text = "\n".join(f"- `{path}`" for path in artifacts) or "- No artifact supplied."
+    if observation:
+        return f"### {title}\n\n**Evidence:**\n{artifact_text}\n\n{item.get('content', '')}"
+    return (
+        f"### {title}\n\n"
+        f"**Severity:** {metadata.get('severity', item.get('severity', 'Unknown'))}\n\n"
+        f"**Evidence:**\n{artifact_text}\n\n"
+        f"**Verified claim:** {item.get('content', '')}\n"
+    )
+
+
 def _normalize_report_category(
     category: Any,
     metadata: Dict[str, Any],
@@ -78,8 +111,14 @@ def _normalize_report_category(
     """Enforce finding evidence requirements without mutating stored memory."""
 
     normalized = str(category or "").strip().lower()
+    if normalized in {"signal", "observation", "discovery"}:
+        return "observation"
+    if normalized in {"finding_candidate", "validation_failure"}:
+        return "validation_failure"
+    if normalized in {"decision", "knowledge", "finding_validation"}:
+        return ""
     if normalized != "finding":
-        return "observation" if normalized in {"signal", "observation", "discovery"} else normalized
+        return normalized
 
     validation_status = str(
         metadata.get("validation_status") or metadata.get("status") or ""
@@ -105,9 +144,13 @@ def _normalize_report_category(
         names_control = "negative control" in lowered_content or "control case" in lowered_content
         artifact_backed_control = names_control and _has_artifact_reference(content)
 
-    if validation_status == "verified" and durable_evidence and artifact_backed_control:
+    evidence_strategy = str(metadata.get("evidence_strategy", "differential")).strip().lower()
+    evidence_contract_met = durable_evidence and (
+        evidence_strategy == "direct" or artifact_backed_control
+    )
+    if validation_status == "verified" and evidence_contract_met:
         return "finding"
-    return "observation"
+    return "validation_failure"
 
 
 def _emit_report_progress(
@@ -291,7 +334,12 @@ def generate_security_report(
             for i, finding in enumerate(raw_findings)
             if finding.get("category") in ["signal", "observation", "discovery"]
         ]
-        report_step_total = 2 + len(report_findings) + len(report_observations)
+        report_validation_failures = [
+            (i, finding)
+            for i, finding in enumerate(raw_findings)
+            if finding.get("category") == "validation_failure"
+        ]
+        report_step_total = 2 + len(report_findings) + len(report_observations) + len(report_validation_failures)
         report_step_index = 0
 
         # Part 1: Executive Summary
@@ -312,7 +360,7 @@ Objective: {objective}
 Module: {module_str}
 
 Use the following data:
-{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts']})}
+{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'validation_failure_count']})}
 """
         report_step_index += 1
         _emit_report_progress(
@@ -384,6 +432,7 @@ Finding Data:
             finding_text = _extract_text_from_result(finding_result)
 
             if finding_text:
+                finding_text = _ground_report_item(finding_text, finding)
                 finding_filename = f"finding_{i+1}_{sanitize_target_name(finding.get('title', 'finding')[:50])}.md"
                 finding_path = os.path.join(output_path, finding_filename)
                 with open(finding_path, "w") as f:
@@ -395,7 +444,55 @@ Finding Data:
         except Exception as error:
             logger.warning("Unable to clean up report finding agent: %s", error)
 
-        # Part 3: Observations and Discoveries
+        # Part 3: Findings Requiring Validation. This section is deterministic so an
+        # unverified claim cannot gain invented evidence during report generation.
+        if report_validation_failures:
+            validation_header_file = os.path.join(output_path, "report_validation_failures_header.md")
+            with open(validation_header_file, "w") as f:
+                f.write(
+                    _PAGE_BREAK
+                    + '<a name="findings-requiring-validation"></a>\n'
+                    + "## FINDINGS REQUIRING VALIDATION\n\n"
+                    + "These claims were not verified by the evidence contract. They remain investigation items, "
+                    + "not confirmed vulnerabilities.\n\n"
+                )
+            report_parts_files.append(validation_header_file)
+            for i, item in report_validation_failures:
+                report_step_index += 1
+                title = _report_item_title(item, f"Validation item {i + 1}")
+                metadata = item.get("metadata", {}) or {}
+                reason = metadata.get("validation_reason") or "Verification was incomplete or evidence requirements failed."
+                artifacts = metadata.get("artifacts") or metadata.get("evidence_artifacts") or []
+                if not isinstance(artifacts, list):
+                    artifacts = [artifacts]
+                artifact_lines = "\n".join(f"- `{path}`" for path in artifacts if path) or "- No valid artifact was recorded."
+                text = (
+                    f"### {title}\n\n"
+                    f"- **Claimed severity:** {metadata.get('claimed_severity') or metadata.get('severity') or 'Unknown'}\n"
+                    f"- **Validation status:** {item.get('validation_status') or metadata.get('validation_status') or 'failed'}\n"
+                    f"- **Why validation failed:** {reason}\n\n"
+                    f"**Claim:** {item.get('content', '')}\n\n"
+                    f"**Available artifacts:**\n{artifact_lines}\n\n"
+                    "**Required follow-up:** Reproduce this claim in a dedicated task and capture decisive direct "
+                    "evidence or a test/control comparison before treating it as a vulnerability.\n"
+                )
+                path = os.path.join(
+                    output_path,
+                    f"validation_failure_{i + 1}_{sanitize_target_name(title[:50])}.md",
+                )
+                with open(path, "w") as f:
+                    f.write(_PAGE_BREAK + text + "\n")
+                report_parts_files.append(path)
+                _emit_report_progress(
+                    callback_handler,
+                    operation_id,
+                    report_step_index,
+                    report_step_total,
+                    "validation_failure",
+                    f"Requires validation: {title}",
+                )
+
+        # Part 4: Observations and Discoveries
         logger.info("Generating Observations and Discoveries...")
         observations_header = _PAGE_BREAK + "<a name=\"observations-and-discoveries\"></a>\n## OBSERVATIONS AND DISCOVERIES\n\n"
         has_observations = False
@@ -434,6 +531,7 @@ Observation Data:
             obs_text = _extract_text_from_result(obs_result)
 
             if obs_text:
+                obs_text = _ground_report_item(obs_text, finding, observation=True)
                 obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
                 obs_path = os.path.join(output_path, obs_filename)
                 with open(obs_path, "w") as f:
@@ -452,7 +550,7 @@ Observation Data:
             report_parts_files.append(observations_header_file)
             report_parts_files.extend(observation_parts_files)
 
-        # Part 4: Assessment Methodology
+        # Part 5: Assessment Methodology
         logger.info("Generating Assessment Methodology...")
         appendix_agent = ReportGenerator.create_report_agent(
             provider=provider,
@@ -506,6 +604,7 @@ Use the following data:
             final_f.write("## TABLE OF CONTENTS\n")
             final_f.write("- [Executive Summary](#executive-summary)\n")
             final_f.write("- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n")
+            final_f.write("- [Findings Requiring Validation](#findings-requiring-validation)\n")
             if has_observations:
                 final_f.write("- [Observations and Discoveries](#observations-and-discoveries)\n")
             final_f.write("- [Assessment Methodology](#assessment-methodology)\n\n")
@@ -882,12 +981,24 @@ def build_report_sections(
 
         logger.info(f"Processing {len(raw_memories)} memories for evidence")
 
+        resolved_finding_uids = {
+            str((item.get("metadata", {}) or {}).get("finding_uid"))
+            for item in raw_memories
+            if (item.get("metadata", {}) or {}).get("category") in {"finding", "validation_failure"}
+            and (item.get("metadata", {}) or {}).get("finding_uid")
+        }
+
         for memory_item in raw_memories:
             memory_content = memory_item.get("memory", "")
             metadata = memory_item.get("metadata", {}) or {}
             logger.info(
                 f"Checking memory item: id={memory_item.get('id')}, category={metadata.get('category')}, op_id={metadata.get('operation_id')}")
             if not metadata:
+                continue
+            if (
+                metadata.get("category") == "finding_candidate"
+                and str(metadata.get("finding_uid", "")) in resolved_finding_uids
+            ):
                 continue
 
             if not cross_operation:
@@ -922,17 +1033,23 @@ def build_report_sections(
                 memory_content,
                 parsed_evidence,
             )
-            if category in ["finding", "signal", "observation", "discovery"]:
-                if stored_category == "finding" and category == "observation":
+            if category in ["finding", "observation", "validation_failure"]:
+                if stored_category == "finding" and category == "validation_failure":
                     logger.info(
-                        "Downgrading report item '%s' (id: %s) to observation: finding evidence requirements unmet",
+                        "Classifying report item '%s' (id: %s) as requiring validation",
                         metadata.get("vulnerability") or memory_content[:30],
                         memory_item.get("id"),
                     )
 
                 evidence_included += 1
                 item = base_evidence.copy()
-                sev = metadata.get("severity", "MEDIUM") if category == "finding" else "INFO"
+                sev = (
+                    metadata.get("severity", "MEDIUM")
+                    if category == "finding"
+                    else metadata.get("claimed_severity", metadata.get("severity", "INFO"))
+                    if category == "validation_failure"
+                    else "INFO"
+                )
                 conf = str(metadata.get("confidence", ""))
                 item.update(
                     {
@@ -970,19 +1087,22 @@ def build_report_sections(
         # Count severities from actual evidence, not just text
         severity_counts = {
             "critical": sum(
-                1 for e in evidence if str(e.get("severity", "")).upper() == "CRITICAL"
+                1 for e in evidence if e.get("category") == "finding" and str(e.get("severity", "")).upper() == "CRITICAL"
             ),
             "high": sum(
-                1 for e in evidence if str(e.get("severity", "")).upper() == "HIGH"
+                1 for e in evidence if e.get("category") == "finding" and str(e.get("severity", "")).upper() == "HIGH"
             ),
             "medium": sum(
-                1 for e in evidence if str(e.get("severity", "")).upper() == "MEDIUM"
+                1 for e in evidence if e.get("category") == "finding" and str(e.get("severity", "")).upper() == "MEDIUM"
             ),
             "low": sum(
-                1 for e in evidence if str(e.get("severity", "")).upper() == "LOW"
+                1 for e in evidence if e.get("category") == "finding" and str(e.get("severity", "")).upper() == "LOW"
             ),
             "info": sum(
-                1 for e in evidence if str(e.get("severity", "")).upper() == "INFO"
+                1
+                for e in evidence
+                if e.get("category") in {"finding", "observation"}
+                and str(e.get("severity", "")).upper() == "INFO"
             ),
         }
 
@@ -1007,7 +1127,9 @@ def build_report_sections(
 
         # Generate structured finding sections - include ALL findings for comprehensive report
         summary_table = (
-            _format_summary_table(evidence) if evidence else ""
+            _format_summary_table([item for item in evidence if item.get("category") == "finding"])
+            if evidence
+            else ""
         )
 
         # Extract token/duration/cost metrics from the operation log (best-effort)
@@ -1091,7 +1213,9 @@ def build_report_sections(
         canonical_findings: Dict[str, Dict[str, Any]] = {}
         for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
             sev_items = [
-                e for e in evidence if str(e.get("severity", "")).upper() == sev
+                e
+                for e in evidence
+                if e.get("category") == "finding" and str(e.get("severity", "")).upper() == sev
             ]
             if not sev_items:
                 continue
@@ -1137,6 +1261,9 @@ def build_report_sections(
             "short_term_recommendations": report_content.get("short_term", ""),
             "long_term_recommendations": report_content.get("long_term", ""),
             "raw_evidence": evidence,
+            "validation_failure_count": sum(
+                1 for item in evidence if item.get("category") == "validation_failure"
+            ),
             "tools_summary": tools_summary,
             "analysis_framework": domain_lens.get("framework", ""),
             "module": module,

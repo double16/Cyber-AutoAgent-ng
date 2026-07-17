@@ -13,14 +13,14 @@ from strands import Agent
 from strands.handlers import PrintingCallbackHandler
 from strands.models import BedrockModel
 from strands.models.litellm import LiteLLMModel
-from strands_tools.editor import editor
-from modules.config.models.ollama import OllamaModel
 
+from modules import __version__
+from modules.agents.patches import ToolUseIdHook
 from modules.config.manager import get_config_manager
 from modules.config.models.factory import create_gemini_model, get_capabilities
+from modules.config.models.ollama import OllamaModel
 from modules.config.system.logger import get_logger
-from modules.agents.patches import ToolUseIdHook
-from modules import __version__
+from modules.tools.artifact import create_bounded_artifact_reader
 
 logger = get_logger("Agents.ReportAgent")
 
@@ -189,7 +189,7 @@ class ReportGenerator:
             model=model,
             name=f"Cyber-ReportGenerator {operation_id}",
             system_prompt=system_prompt,
-            tools=[editor],
+            tools=[create_bounded_artifact_reader()],
             trace_attributes=trace_attrs if operation_id else None,
             callback_handler=callback_handler or NoOpCallbackHandler(),
             hooks=[ToolUseIdHook()],

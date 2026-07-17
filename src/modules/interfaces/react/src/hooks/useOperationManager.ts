@@ -488,18 +488,25 @@ export function useOperationManager({
 
           if (inputTokens > 0 || outputTokens > 0) {
             operationManager.updateTokenUsage(operation.id, inputTokens, outputTokens, cost, cacheReadTokens, cacheWriteTokens);
-            
-            const currentOp = operationManager.getOperation(operation.id);
-            if (currentOp) {
-              updateMetricsThrottled({
-                tokens: currentOp.cost.tokensUsed,
-                cost: currentOp.cost.estimatedCost,
-                duration: event.metrics.duration || operationManager.getOperationDuration(operation.id),
-                memoryOps: event.metrics.memoryOps || currentOp.findings,
-                evidence: event.metrics.evidence || currentOp.findings,
-                progressPercent: event.metrics.progressPercent,
-              });
-            }
+          }
+
+          const currentOp = operationManager.getOperation(operation.id);
+          if (currentOp) {
+            const memoryOps = typeof event.metrics.memoryOps === 'number'
+              ? event.metrics.memoryOps
+              : currentOp.memoryOps;
+            const evidence = typeof event.metrics.evidence === 'number'
+              ? event.metrics.evidence
+              : currentOp.evidence;
+            operationManager.updateOperation(operation.id, { memoryOps, evidence });
+            updateMetricsThrottled({
+              tokens: currentOp.cost.tokensUsed,
+              cost: currentOp.cost.estimatedCost,
+              duration: event.metrics.duration || operationManager.getOperationDuration(operation.id),
+              memoryOps,
+              evidence,
+              progressPercent: event.metrics.progressPercent ?? currentOp.progressPercentage,
+            });
           }
         }
 
@@ -530,8 +537,8 @@ export function useOperationManager({
             tokens: currentOp.cost.tokensUsed,
             cost: currentOp.cost.estimatedCost,
             duration: operationManager.getOperationDuration(operation.id),
-            memoryOps: currentOp.findings,
-            evidence: currentOp.findings
+            memoryOps: currentOp.memoryOps,
+            evidence: currentOp.evidence
           });
         }
         
@@ -612,8 +619,8 @@ export function useOperationManager({
             tokens: currentOp.cost.tokensUsed,
             cost: currentOp.cost.estimatedCost,
             duration: operationManager.getOperationDuration(operation.id),
-            memoryOps: currentOp.findings,
-            evidence: currentOp.findings
+            memoryOps: currentOp.memoryOps,
+            evidence: currentOp.evidence
           });
         }
       }, 5000) as unknown as NodeJS.Timeout;

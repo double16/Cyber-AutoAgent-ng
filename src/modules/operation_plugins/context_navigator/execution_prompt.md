@@ -26,8 +26,9 @@ exploitation or lateral-movement operation.
 
 <evidence_policy>
 - Store system profiles, topology, data locations, trust relationships, controls, and business context as
-  `category="observation"` with the discovery layer and artifact path.
-- Use `category="finding"` only for a separately verified security weakness with reproducible evidence and impact.
+  `store_observation` with the discovery layer and artifact path.
+- Use `store_finding` only for a security weakness candidate with reproducible evidence and impact; verification is a
+  separate task.
 - Evidence must identify the granted context, command or query used, relevant output artifact, and the conclusion it
   supports. Redact secrets and personal or sensitive content.
 </evidence_policy>

@@ -37,7 +37,8 @@
 - Use async/await for asynchronous operations
 - Use template literals for string concatenation
 
-## LLM Prompt Best Practices
+## LLM Best Practices
+- Design considerations should prefer deterministic actions in Python or Typescript code, reasoning actions in agents/LLM.
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
 - When an LLM is to return structured data, prefer JSON.
 - Primary use-case LLM have ~26b parameters and 48,000 tokens context window.

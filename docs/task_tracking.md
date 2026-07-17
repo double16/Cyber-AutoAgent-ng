@@ -143,6 +143,19 @@ executor/evaluator passes and has a minimum of one. Each evaluator is short-live
 conversation are retained across passes. Only `done` is approval; a final `partial_failure` or `blocked` verdict is
 persisted unchanged.
 
+Correctable tool invocation failures receive one bounded recovery turn in the same retained executor conversation.
+The executor may use one diagnostic/preflight invocation and one corrected invocation. Evidence storage and
+`create_tasks` are rejected until that correction succeeds, preventing failed command output from producing fabricated
+discoveries. Recovery does not consume an actor/critic pass; if it remains unresolved, Python marks the task
+`partial_failure` without asking the evaluator to approve it. Evaluators receive controller-observed tool outcomes and
+treat them as authoritative over contradictory worker narration.
+
+Every `store_finding` call creates one narrow, same-phase `finding_validation` task. The linked task must call
+`record_finding_validation`; only an evaluator-approved confirmation is promoted to a verified finding. Failed or
+unfinished validations remain visible in the final report under **Findings Requiring Validation**. Evaluators and
+report agents can inspect operation artifacts with the read-only `read_artifact` tool, limited by
+`CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation).
+
 After creating or durably changing a plan, the controller also emits a standard `output` event containing the
 objective, current phase, and status of every phase. These snapshots appear in interactive and headless output.
 Unchanged plan reads do not emit an event, and display failures do not interrupt persistence or workflow execution.
@@ -217,6 +230,10 @@ Task creation still uses the `create_tasks` tool so agents can turn discoveries 
 Python decides when any pending task becomes active.
 
 `create_tasks` returns only `Tasks created.`. It does not activate pending tasks or return active-task XML.
+
+Shell command arrays are fail-fast: sequential arrays stop at the first failed command, while parallel arrays finish
+already-started commands and return an error if any command failed. Every command retains its exit code, standard
+output, and standard error. The shell tool does not expose an option to mask failures.
 
 ## Evaluation
 

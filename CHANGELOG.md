@@ -2,6 +2,9 @@
 
 ### Features
 
+- Add typed observation, knowledge, finding-submission, and finding-validation tools with dedicated Ink and headless
+  terminal displays and one verification task per finding.
+- Add read-only, operation-scoped artifact access for evaluators and report agents.
 - Add configurable task execution actor/critic cycles that retain the task-executor conversation and stop early on
   evaluator approval.
 - Validate executor-created future-phase follow-ups against named plan criteria and resume continued operations from
@@ -25,6 +28,16 @@
 
 ### Fixes
 
+- Stop task creators and executors immediately after their required tool sequence, and repair small-model
+  `tool_use(tool_name=..., parameters=...)` wrappers only when the nested tool is registered.
+- Stop task executors from treating correctable tool failures as successful evidence, allow one bounded correction in
+  the retained conversation, and block evidence/task writes until the failure is resolved.
+- Make shell command batches fail when any command fails and remove the ambiguous `ignore_errors` option.
+- Avoid thread-unsafe PTY forks when the non-interactive shell executes multiple commands in parallel on macOS.
+- Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.
+- Keep terminal memory and evidence counters aligned with typed storage events, including explicit zero values and
+  validation-only memory operations.
+- Emit assessment completion only when the persisted workflow plan is complete.
 - Put the exact `create_tasks` payload shape in its tool description to improve local-model argument compliance.
 - Allow task prompt builders to select overlapping native tools and shell commands without critic rejection.
 - Display structured termination reasons and messages in React terminal auto-run output.

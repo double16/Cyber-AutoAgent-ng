@@ -1,6 +1,7 @@
 import os
 import sqlite3
-from modules.tools.memory import PlanStore, OperationPlan, PlanPhase, Task
+
+from modules.tools.memory import OperationPlan, PlanPhase, PlanStore, Task
 
 
 def test_sqlite_plan_store_init(tmp_path):
@@ -81,7 +82,9 @@ def test_sqlite_plan_store_task_operations(tmp_path):
         title="Task 1",
         objective="Objective 1",
         phase=1,
-        status="pending"
+        status="pending",
+        kind="finding_validation",
+        reference_id="finding-1",
     )
 
     # Store task
@@ -94,6 +97,8 @@ def test_sqlite_plan_store_task_operations(tmp_path):
     assert tasks[0].title == "Task 1"
     assert tasks[0].created_at is not None
     assert tasks[0].updated_at is not None
+    assert tasks[0].kind == "finding_validation"
+    assert tasks[0].reference_id == "finding-1"
 
     # Update task
     updated_task = Task(
@@ -112,6 +117,22 @@ def test_sqlite_plan_store_task_operations(tmp_path):
     assert updated_tasks[0].status == "active"
     assert updated_tasks[0].created_at == tasks[0].created_at
     assert updated_tasks[0].updated_at > tasks[0].updated_at
+
+
+def test_sqlite_finding_ledger_operations(tmp_path):
+    store = PlanStore(str(tmp_path / "test.db"))
+    store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
+
+    record = store.get_finding_by_fingerprint("op", "fingerprint")
+    assert record["finding_uid"] == "finding-1"
+    assert record["candidate_data"] == {"claim": "claim"}
+
+    store.store_finding_validation("op", "finding-1", {"outcome": "confirmed"})
+    store.resolve_finding("op", "finding-1", "verified")
+
+    resolved = store.get_finding("op", "finding-1")
+    assert resolved["validation_data"] == {"outcome": "confirmed"}
+    assert resolved["resolution"] == "verified"
 
 
 def test_sqlite_plan_store_multiple_tasks(tmp_path):

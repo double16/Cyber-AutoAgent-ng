@@ -89,7 +89,7 @@ These tools have dedicated display formatters in `StreamDisplay.tsx`:
 
 #### `mem0_*` - Memory Operations
 ```
-tool: mem0_store
+tool: store_finding
 ├─ action: storing
 └─ content: Evidence from vulnerability scan...
 ```

@@ -26,8 +26,8 @@ Style issues and unsupported theoretical risks are not security findings.
 <evidence_policy>
 - A finding requires an exact repository-relative file and line, vulnerable behavior, attacker-controlled path or
   exploit scenario, contextual false-positive check, impact, remediation, and an artifact containing supporting output.
-- Store verified vulnerabilities as `category="finding"` with severity, confidence, validation status, and CWE when
-  applicable. Store unverified tool matches, coverage notes, and architectural context as `category="observation"`.
+- Submit vulnerability candidates with `store_finding`, including severity and CWE when
+  applicable. Store unverified tool matches, coverage notes, and architectural context with `store_observation`.
 - Never store a secret value in memory; reference the redacted artifact and location instead.
 </evidence_policy>
 

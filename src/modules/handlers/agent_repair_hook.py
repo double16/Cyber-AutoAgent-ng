@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from strands.hooks import HookProvider, HookRegistry
-from strands.hooks.events import BeforeModelCallEvent, AfterModelCallEvent
+from strands.hooks.events import AfterModelCallEvent, BeforeModelCallEvent, BeforeToolCallEvent
 from strands.types.exceptions import MaxTokensReachedException
 
 from modules.config.system.logger import get_logger
@@ -38,7 +38,39 @@ class AgentRepairHook(HookProvider):
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(AfterModelCallEvent, self.after_model_call_check)
         registry.add_callback(BeforeModelCallEvent, self.before_model_call_inject)
+        registry.add_callback(BeforeToolCallEvent, self.before_tool_call_repair)
         logger.debug("AgentRepairHook registered")
+
+    def before_tool_call_repair(self, event: BeforeToolCallEvent) -> None:
+        """Repair a model-emitted generic tool_use wrapper when its target is registered."""
+
+        tool_use = event.tool_use
+        if tool_use.get("name") != "tool_use":
+            return
+        wrapper_input = tool_use.get("input", {})
+        if not isinstance(wrapper_input, dict):
+            event.cancel_tool = "Generic tool_use wrappers are invalid; call an available tool directly."
+            return
+
+        nested_name = str(wrapper_input.get("tool_name") or wrapper_input.get("name") or "").strip()
+        nested_input = wrapper_input.get("parameters", wrapper_input.get("arguments", {}))
+        registry = getattr(getattr(event.agent, "tool_registry", None), "registry", {})
+        selected_tool = registry.get(nested_name) if isinstance(registry, dict) else None
+        if selected_tool is None or not isinstance(nested_input, dict):
+            available = ", ".join(sorted(registry)) if isinstance(registry, dict) else ""
+            event.cancel_tool = (
+                "Generic tool_use wrappers are invalid. Call a registered tool directly. "
+                f"Available tools: {available or 'none'}."
+            )
+            return
+
+        event.selected_tool = selected_tool
+        event.tool_use = {
+            **tool_use,
+            "name": nested_name,
+            "input": nested_input,
+        }
+        logger.warning("Repaired generic tool_use wrapper to registered tool %s", nested_name)
 
     def after_model_call_check(self, event: AfterModelCallEvent) -> None:
         """
@@ -68,6 +100,7 @@ class AgentRepairHook(HookProvider):
                     or "invalid character" in error_str_l
                     or "parse tool call" in error_str_l
                     or "xml syntax error" in error_str_l
+                    # FIXME: The status code check is for Ollama tool call errors. It should include a condition identifying the source as Ollama in the event.exception.
                     or status_code == 500
                 ):
                     state = self._state_bag(event)

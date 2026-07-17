@@ -1,11 +1,12 @@
 import json
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
-from modules.agents.cyber_autoagent import build_role_tools
 from modules.agents import multi_agent_workflow as workflow_mod
+from modules.agents.cyber_autoagent import build_role_tools
 from modules.agents.multi_agent_workflow import (
     MultiAgentWorkflowController,
     WorkflowInvariantError,
@@ -75,6 +76,34 @@ def test_default_text_runner_preserves_agent_error_when_cleanup_fails(monkeypatc
         workflow_mod.default_text_runner(runtime)("planner", "prompt", [], "system")
 
 
+def test_default_text_runner_disables_catalog_for_evaluators(monkeypatch):
+    kwargs_seen = []
+
+    class Agent:
+        def __call__(self, prompt):
+            return "{}"
+
+        def cleanup(self):
+            return None
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(provider="litellm", target="example.com", objective="test"),
+        operation_id="OP_TEST",
+    )
+
+    def create_agent(*args, **kwargs):
+        kwargs_seen.append(kwargs)
+        return Agent()
+
+    monkeypatch.setattr(workflow_mod, "create_agent", create_agent)
+    runner = workflow_mod.default_text_runner(runtime)
+    runner("task_evaluator", "prompt", [], "system")
+    runner("task_executor", "prompt", [], "system")
+
+    assert kwargs_seen[0]["include_tool_catalog"] is False
+    assert kwargs_seen[1]["include_tool_catalog"] is True
+
+
 class FakeCallbackHandler:
     def __init__(self, progress=0):
         self.progress = progress
@@ -135,6 +164,8 @@ class FakeState:
             status_reason="activated",
             evidence=task.evidence,
             created_at=task.created_at,
+            kind=task.kind,
+            reference_id=task.reference_id,
         ))
 
     def mark_task(self, task, status, reason=""):
@@ -147,6 +178,8 @@ class FakeState:
             status_reason=reason,
             evidence=task.evidence,
             created_at=task.created_at,
+            kind=task.kind,
+            reference_id=task.reference_id,
         ))
 
     def reassign_task_phase(self, task, phase_id):
@@ -159,6 +192,8 @@ class FakeState:
             status_reason=task.status_reason,
             evidence=task.evidence,
             created_at=task.created_at,
+            kind=task.kind,
+            reference_id=task.reference_id,
         ))
 
     def mark_phase(self, plan, phase_id, status):
@@ -410,7 +445,7 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy():
     assert captured["role"] == "task_executor"
     assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
     assert "Execute only the assigned task objective" in captured["prompt"]
-    assert "create pending\ntasks with `create_tasks`" in captured["prompt"]
+    assert "create\npending tasks with `create_tasks`" in captured["prompt"]
     assert "Python owns task, phase, and operation state transitions" in captured["prompt"]
     assert "## Tool Selection Policy (Controller-owned)" in captured["prompt"]
     assert "Multiple methods with\noverlapping capabilities may be used" in captured["prompt"]
@@ -420,6 +455,7 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy():
     assert captured["system_prompt"] == "base prompt\n\ntask capture prompt"
     assert captured["policy"].min_tool_calls == 1
     assert captured["policy"].terminal_after_required_tools is True
+    assert captured["policy"].allow_text_final_after_tools is False
     assert captured["policy"].ignored_terminal_tool_names == frozenset({"create_tasks"})
     assert captured["policy"].terminal_reason == "task_executor_done"
 
@@ -478,6 +514,63 @@ def test_task_execution_reuses_session_and_stops_when_critic_approves():
     ]
     assert state.tasks[0].status == "done"
     assert state.tasks[0].status_reason == "all endpoints validated"
+
+
+def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch):
+    runtime = _runtime()
+    task = Task(
+        task_uid="verify-1",
+        title="Verify finding",
+        objective="verify",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(_plan(), tasks=[task])
+    policies = []
+    finalize = Mock(return_value="verified")
+    monkeypatch.setattr(workflow_mod, "finalize_finding_validation", finalize)
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"verify","tools":[]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"evidence approved"}'
+        raise AssertionError(role)
+
+    @contextmanager
+    def executor_session(role, tools, system_prompt):
+        def run(prompt, policy):
+            policies.append(policy)
+            return "validation submitted"
+
+        yield run
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        executor_session_factory=executor_session,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert policies[0].required_tool_names == {"record_finding_validation"}
+    finalize.assert_called_once_with(task, "done", "evidence approved")
+    assert state.tasks[0].status == "done"
+    assert state.tasks[0].status_reason == "evidence approved"
+    assert runtime.callback_handler.events[-1] == {
+        "type": "task_done",
+        "task_uid": "verify-1",
+        "title": "Verify finding",
+        "status": "done",
+        "status_reason": "evidence approved",
+        "task_kind": "finding_validation",
+        "reference_id": "finding-1",
+        "finding_resolution": "verified",
+    }
 
 
 def test_task_execution_approval_short_circuits_first_cycle():
@@ -835,6 +928,149 @@ def test_task_evaluator_receives_task_worker_final_context():
 
     assert "## Task worker final context" in captured["evaluator_prompt"]
     assert "Missing credentials blocked validation." in captured["evaluator_prompt"]
+    assert state.tasks[0].status == "partial_failure"
+
+
+def test_task_executor_recovers_in_same_session_and_evaluator_receives_authoritative_outcomes():
+    runtime = _runtime()
+    state = FakeState(
+        _plan(),
+        tasks=[Task(task_uid="active", title="Active", objective="enumerate paths", phase=1, status="active")],
+    )
+    captured = {"executor_prompts": []}
+    failed = workflow_mod.ToolOutcome(
+        sequence=1,
+        tool_use_id="failed",
+        tool_name="shell",
+        success=False,
+        correctable=True,
+        input_summary="feroxbuster -w /missing.txt",
+        output_summary="Could not open /missing.txt",
+    )
+    corrected = workflow_mod.ToolOutcome(
+        sequence=2,
+        tool_use_id="corrected",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary="feroxbuster -w /valid.txt",
+        output_summary="200 /login.php",
+        recovery_role="correction",
+    )
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"enumerate paths","tools":[]}'
+        if role == "task_evaluator":
+            captured["evaluator_prompt"] = prompt
+            return '{"status":"done","reason":"corrected scan stored evidence"}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        captured["executor_prompts"].append(prompt)
+        if len(captured["executor_prompts"]) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="feroxbuster found fake paths",
+                outcomes=[failed],
+                recovery_required=True,
+                recovery_guidance="correct the missing wordlist",
+            )
+        return workflow_mod.TaskExecutorCycleResult(text="found /login.php", outcomes=[corrected])
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
+
+    assert captured["executor_prompts"] == ["enumerate paths\n\n" + controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy(), "correct the missing wordlist"]
+    assert "## Controller-observed tool outcomes" in captured["evaluator_prompt"]
+    assert "Could not open /missing.txt" in captured["evaluator_prompt"]
+    assert "200 /login.php" in captured["evaluator_prompt"]
+    assert state.tasks[0].status == "done"
+
+
+def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval():
+    runtime = _runtime()
+    state = FakeState(
+        _plan(),
+        tasks=[Task(task_uid="active", title="Active", objective="enumerate paths", phase=1, status="active")],
+    )
+    executor_calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"enumerate paths","tools":[]}'
+        if role == "task_evaluator":
+            pytest.fail("an unresolved correctable failure must not be approved")
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        executor_calls.append(prompt)
+        return workflow_mod.TaskExecutorCycleResult(
+            text="claimed success",
+            outcomes=[],
+            recovery_required=True,
+            recovery_exhausted=len(executor_calls) > 1,
+            recovery_guidance="retry once",
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
+
+    assert executor_calls == [
+        "enumerate paths\n\n" + controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy(),
+        "retry once",
+    ]
+    assert state.tasks[0].status == "partial_failure"
+    assert "remained unresolved" in state.tasks[0].status_reason
+
+
+def test_task_executor_does_not_offer_another_turn_after_correction_was_exhausted():
+    runtime = _runtime()
+    state = FakeState(
+        _plan(),
+        tasks=[Task(task_uid="active", title="Active", objective="enumerate paths", phase=1, status="active")],
+    )
+    executor_calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"enumerate paths","tools":[]}'
+        pytest.fail(f"unexpected evaluator role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        executor_calls.append(prompt)
+        return workflow_mod.TaskExecutorCycleResult(
+            text="correction failed",
+            outcomes=[],
+            recovery_required=True,
+            recovery_exhausted=True,
+            recovery_guidance="must not run",
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
+
+    assert len(executor_calls) == 1
     assert state.tasks[0].status == "partial_failure"
 
 
@@ -1683,6 +1919,7 @@ def test_task_creator_passes_required_tool_run_policy():
     assert captured["tools"] == {"create_tasks"}
     assert captured["policy"].required_tool_names == frozenset({"create_tasks"})
     assert captured["policy"].terminal_after_required_tools is True
+    assert captured["policy"].allow_text_final_after_tools is False
 
 
 def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
@@ -1900,7 +2137,7 @@ def test_optional_tool_catalog_uses_tool_spec_name_and_description():
 
     catalog = controller._optional_tool_catalog()
 
-    assert catalog.startswith("optional_tools[1]{name,description}:")
+    assert catalog.startswith("optional_tools[1]{name,description,input_schema}:")
     assert "spec_name,Spec description." in catalog
     assert "python_name" not in catalog
 
@@ -1926,9 +2163,9 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "core_tools[4]{name,description}:" in prompt
+    assert "core_tools[4]{name,description,input_schema}:" in prompt
     assert "spec_shell,Execute shell commands." in prompt
-    assert "optional_tools[2]{name,description}:" in prompt
+    assert "optional_tools[2]{name,description,input_schema}:" in prompt
     assert "spec_scan,Run a targeted scan." in prompt
     assert "`tools` JSON field contains optional-tool names only" in prompt
     assert "Never return core-tool names in `tools`" in prompt
@@ -2051,9 +2288,9 @@ def test_task_prompt_spec_rejects_runtime_supplied_core_tools():
     )
     task = Task(task_uid="task", title="Store", objective="Store evidence", phase=1, status="pending")
 
-    with pytest.raises(workflow_mod.TaskPromptBuildError, match="core-only.*mem0_store"):
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="core-only.*store_observation"):
         controller._normalize_task_prompt_spec(
-            {"prompt": "Store evidence", "tools": ["mem0_store"], "shell_commands": []},
+            {"prompt": "Store evidence", "tools": ["store_observation"], "shell_commands": []},
             task,
         )
 
@@ -2125,8 +2362,8 @@ def test_tool_catalog_renders_empty_lists_and_rejects_unknown_structure_names():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert controller._core_tool_catalog() == "core_tools[0]{name,description}:\n"
-    assert controller._optional_tool_catalog() == "optional_tools[0]{name,description}:\n"
+    assert controller._core_tool_catalog() == "core_tools[0]{name,description,input_schema}:\n"
+    assert controller._optional_tool_catalog() == "optional_tools[0]{name,description,input_schema}:\n"
     with pytest.raises(ValueError, match="Unsupported tool catalog structure"):
         controller._tool_catalog("tools", [])
 
@@ -2154,7 +2391,7 @@ def test_phase_evaluator_receives_module_termination_policy():
 
     assert decision.status == "done"
     assert captured["role"] == "phase_evaluator"
-    assert {tool.__name__ for tool in captured["tools"]} == {"editor", "mem0_retrieve"}
+    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "mem0_retrieve"}
     assert "## Module Termination Policy" in captured["system_prompt"]
     assert "Require verified exploitability" in captured["system_prompt"]
     assert "Apply the module termination policy" in captured["prompt"]
@@ -2206,7 +2443,7 @@ def test_task_evaluator_does_not_receive_module_termination_policy():
 
     assert decision.status == "partial_failure"
     assert captured["role"] == "task_evaluator"
-    assert {tool.__name__ for tool in captured["tools"]} == {"editor", "mem0_retrieve"}
+    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "mem0_retrieve"}
     assert "Evaluator Role Boundary" in captured["system_prompt"]
     assert "Module Termination Policy" not in captured["system_prompt"]
     assert "sole evaluation target" in captured["prompt"]
@@ -2227,7 +2464,7 @@ def test_evaluator_tools_exclude_shell_and_optional_execution_tools():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert {tool.__name__ for tool in controller._evaluator_tools()} == {"editor", "mem0_retrieve"}
+    assert {tool.__name__ for tool in controller._evaluator_tools()} == {"read_artifact", "mem0_retrieve"}
 
 
 def test_phase_evaluator_prompt_is_review_only():

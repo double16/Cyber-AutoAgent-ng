@@ -26,8 +26,8 @@ confirmation. A vulnerability or intermediate capability is progress, not succes
 - Store a candidate immediately with the artifact path that contains the exact candidate value or command output.
 - A confirmed flag requires preconditions, the exact request or command, expected and actual results, and an artifact
   that visibly contains the value. Prefer the strongest reproducible candidate when several exist.
-- Store confirmed flags and verified exploitable capabilities as `category="finding"`. Store failed attempts, surface
-  mapping, constraints, and unconfirmed candidates as `category="observation"`.
+- Submit flags and exploitable-capability candidates with `store_finding`. Store failed attempts and surface
+  mapping, constraints, and unconfirmed candidates with `store_observation`.
 - When the assigned task captures a required flag, store its evidence and report that result to the controller; do not
   claim or perform task, phase, or operation termination.
 </evidence_policy>

@@ -1,7 +1,10 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from modules.handlers.report_generator import (
     _extract_text_from_result,
+    _ground_report_item,
     _has_artifact_reference,
     _normalize_report_category,
     build_report_sections,
@@ -34,6 +37,20 @@ def test_extract_text_from_result():
     assert lines[1] == "## Heading 2"
     assert lines[2] == "Some normal text"
     assert lines[3] == "### Heading 3 with spaces"
+
+
+def test_ground_report_item_rejects_invented_artifact_paths():
+    item = {
+        "title": "Verified issue",
+        "content": "Supported claim",
+        "severity": "HIGH",
+        "metadata": {"artifacts": ["/outputs/op/real.txt"]},
+    }
+
+    grounded = _ground_report_item("### Issue\nEvidence: /transcripts/invented.txt", item)
+
+    assert "/transcripts/invented.txt" not in grounded
+    assert "/outputs/op/real.txt" in grounded
 
 
 def test_extract_text_from_result_markdown_table():
@@ -92,7 +109,7 @@ def test_report_category_helpers_cover_structured_and_free_form_artifacts():
         {"status": "verified", "proof_pack": "legacy"},
         "Control case without an artifact",
         {"evidence": "/tmp/proof.txt"},
-    ) == "observation"
+    ) == "validation_failure"
 
 
 @pytest.fixture(autouse=True)
@@ -177,17 +194,17 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     item1 = next(e for e in evidence if e["id"] == "1")
     assert item1["category"] == "finding", "Item 1 should remain a finding"
 
-    # Check item 2: Should be downgraded to observation (unverified)
+    # Unverified claims remain visible as validation failures.
     item3 = next(e for e in evidence if e["id"] == "2")
-    assert item3["category"] == "observation", "Item 2 should be downgraded to observation (unverified)"
+    assert item3["category"] == "validation_failure"
 
     # Check item 3: Should be downgraded to observation (hypothesis)
     item4 = next(e for e in evidence if e["id"] == "3")
-    assert item4["category"] == "observation", "Item 3 should be downgraded to observation (hypothesis)"
+    assert item4["category"] == "validation_failure"
 
     missing_control = next(e for e in evidence if e["id"] == "4")
-    assert missing_control["category"] == "observation"
-    assert missing_control["severity"] == "INFO"
+    assert missing_control["category"] == "validation_failure"
+    assert missing_control["severity"] == "HIGH"
 
     endpoint_observation = next(e for e in evidence if e["id"] == "5")
     assert endpoint_observation["category"] == "observation"
@@ -449,6 +466,67 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
     assert (output_dir / "report_observations_header.md").exists()
     assert (output_dir / "observation_1_Some_Observation.md").exists()
     assert not list(output_dir.glob("finding_*Some_Observation.md"))
+
+
+@patch("modules.handlers.report_generator.ReportGenerator")
+@patch("modules.handlers.report_generator.get_output_path")
+@patch("modules.handlers.report_generator.build_report_sections")
+@patch("modules.handlers.report_generator.get_config_manager")
+def test_generate_security_report_validation_failures(
+    mock_get_config, mock_build_sections, mock_get_output_path, mock_report_gen, tmp_path
+):
+    output_dir = tmp_path / "validation_output"
+    output_dir.mkdir()
+    mock_get_output_path.return_value = str(output_dir)
+    config = MagicMock()
+    config.get_provider.return_value = "test_provider"
+    config.get_llm_config.return_value.model_id = "test_model"
+    config.get_swarm_config.return_value.llm.model_id = "test_swarm_model"
+    mock_get_config.return_value = config
+    mock_build_sections.return_value = {
+        "evidence_count": 1,
+        "steps_executed": 1,
+        "overview": "Overview",
+        "findings_table": "",
+        "risk_assessment": "",
+        "severity_counts": {},
+        "validation_failure_count": 1,
+        "summary_table": "",
+        "raw_evidence": [
+            {
+                "id": "v1",
+                "title": "Possible authorization bypass",
+                "category": "validation_failure",
+                "content": "Admin data may be exposed",
+                "validation_status": "failed",
+                "metadata": {
+                    "claimed_severity": "HIGH",
+                    "validation_reason": "The response artifact contained a tool error",
+                },
+            }
+        ],
+        "operation_plan": {},
+        "operation_tasks": [],
+        "tools_summary": "",
+    }
+    agent = MagicMock()
+    mock_report_gen.create_report_agent.return_value = agent
+    agent.return_value.message = {"content": [{"text": "Generated section"}]}
+
+    report_file = tmp_path / "validation_report.md"
+    generate_security_report(
+        target="example.com",
+        objective="Test Objective",
+        operation_id="OP-VALIDATION",
+        config_params={},
+        filename=str(report_file),
+    )
+
+    content = report_file.read_text()
+    assert "FINDINGS REQUIRING VALIDATION" in content
+    assert "Possible authorization bypass" in content
+    assert "The response artifact contained a tool error" in content
+    assert "not confirmed vulnerabilities" in content
 
 if __name__ == "__main__":
     pytest.main([__file__])

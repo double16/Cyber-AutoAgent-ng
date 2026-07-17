@@ -20,6 +20,8 @@ import { formatAutoRunEvaluationEvent } from './utils/evaluationEventFormatting.
 import { installAutoRunInterruptFallback } from './utils/autoRunInterrupt.js';
 import { formatAutoRunTerminationEvent } from './utils/autoRunTerminationFormatting.js';
 import { resolveRecordingMode } from './utils/recordingMode.js';
+import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
+import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
 
 // Check for --debug flag early (before meow parsing) to enable logging
 if (process.argv.includes('--debug') || process.argv.includes('-d')) {
@@ -411,7 +413,11 @@ const runAutoAssessment = async () => {
       // In auto-run mode, listen to events and display them to console
       // This provides real-time progress visibility during assessment
       executionService.on('event', (event: any) => {
-        if (event.type === 'output' && event.content) {
+        const memoryEventMessage = formatAutoRunMemoryEvent(event);
+        if (memoryEventMessage) {
+          loggingService.info(memoryEventMessage);
+        }
+        else if (event.type === 'output' && event.content) {
           loggingService.info(event.content);
         }
         else if (event.type === 'reasoning' && event.content) {
@@ -433,13 +439,7 @@ const runAutoAssessment = async () => {
             if (message) loggingService.info(message);
           }
           else if (event.operation_stage === 'final_report') {
-            const reportIndex = Number(event.report_step_index);
-            const reportTotal = Number(event.report_step_total);
-            const reportLabel = typeof event.report_step_label === 'string' ? event.report_step_label : '';
-            const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
-              ? `${reportIndex}/${reportTotal}`
-              : 'report';
-            loggingService.info(`➡️ Final report ${progressLabel}${reportLabel ? `: ${reportLabel}` : ''}`);
+            loggingService.info(formatAutoRunReportProgress(event));
           }
           else if (Number.isFinite(event.progressPercent)) {
             const etaSeconds = estimateEtaSeconds(event.duration, event.progressPercent);

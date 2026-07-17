@@ -31,8 +31,8 @@ within the applicable operational phases; do not create a separate consolidation
 
 <evidence_policy>
 - Store services, auth posture, roles, technology, journeys, endpoints, negative controls, coverage gaps, and mapping
-  results as separate `category="observation"` records with artifact paths.
-- Store only safely verified security weaknesses as `category="finding"`, with expected and actual behavior, affected
+  results as separate `store_observation` calls with artifact paths.
+- Submit security weakness candidates with `store_finding`, including expected and actual behavior, affected
   scope, negative control, reproduction steps, and artifacts. Default uncertain impact to an observation.
 - Never store response bodies containing sensitive data in memory; reference redacted artifacts instead.
 </evidence_policy>

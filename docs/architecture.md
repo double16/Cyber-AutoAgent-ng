@@ -51,7 +51,7 @@ graph TB
     F --> I[AI Models]
     
     G --> J[shell]
-    G --> K[mem0_store / mem0_retrieve]
+    G --> K[Typed memory tools / mem0_retrieve]
     G --> L[create_tasks when allowed]
     G --> M[Selected Module Tools]
     G --> N[Selected MCP Tools]
@@ -108,6 +108,13 @@ flowchart LR
 `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits total executor/evaluator passes and defaults to two, with a minimum of
 one. Evaluator guidance is sent back to the same executor instance so the next pass continues its existing
 conversation. Approval (`done`) short-circuits the loop; otherwise Python persists the last evaluator status.
+
+Each retained task executor also keeps a bounded controller-owned tool-outcome journal. A locally correctable failure,
+such as a missing input file, unavailable command, invalid argument, or timeout, permits one optional diagnostic and
+one corrected invocation without consuming another actor/critic pass. Until correction succeeds, the executor cannot
+create follow-up tasks or write observations, knowledge, findings, or validation results. An unresolved correction is
+deterministically `partial_failure`. Evaluators receive the authoritative outcome journal separately from the worker's
+final narrative and must prefer it when the two conflict.
 
 There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt
 adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task
@@ -184,7 +191,7 @@ flowchart TD
     D -->|Medium 50-80%| F[Deploy Swarm or Module Tool]
     D -->|Low <50%| G[Gather More Intelligence]
     
-    E --> H[mem0_store: Evidence]
+    E --> H[Typed memory: Evidence]
     F --> H
     G --> H
     
@@ -263,7 +270,7 @@ MCP Tools pre-configured:
 ```mermaid
 graph TB
     A[Agent Actions] --> B[Finding Discovered]
-    B --> C[mem0_store]
+    B --> C[store_finding / store_observation / store_knowledge]
     C --> D[Backend Selection]
 
     D --> E[Mem0 Platform<br/>MEM0_API_KEY]

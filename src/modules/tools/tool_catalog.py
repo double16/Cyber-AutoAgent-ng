@@ -175,8 +175,7 @@ name: {tool_name}
             catalog += """
 # COMMAND LINE PROGRAMS
 
-These are supplemental command-line programs invoked through **shell**. Prefer a native agent tool when it provides
-the required capability. Use a command only for additional capability or after a concrete native-tool limitation.
+These are command-line programs invoked through the **shell** tool.
 """
             cyber_tools = _get_cyber_tools()
             for shell_command in shell_commands:
@@ -217,9 +216,6 @@ shell_preference: {preference}
 
         prologue = """
 # TOOL CATALOG
-
-**Selection policy**: Native agent tools take precedence over command-line programs with overlapping capabilities.
-Command shell_preference values compare command-line programs only, never commands against native tools.
 
 """
         if len(found_tools) + len(found_cyber_tools) > 1:
