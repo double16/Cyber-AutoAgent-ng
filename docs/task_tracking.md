@@ -126,9 +126,10 @@ The controller runs this loop:
 10. If task creation produces no tasks for an empty phase, raise a workflow invariant error.
 11. For each active task:
     - run `task_prompt_builder`, then apply the configured critic/revision cycle
-    - run `task_executor` with restricted tools
-    - run `task_evaluator`
-    - Python marks the task terminal
+    - create one `task_executor` agent with restricted tools
+    - run `task_executor`, then run `task_evaluator` as its critic
+    - stop immediately when the evaluator returns `done`; otherwise send its guidance to the same executor conversation
+    - after the configured cycle limit, Python marks the task with the evaluator's final status and reason
     - loop back to active phase/task selection
 12. When all phases are terminal, Python marks the plan complete and emits the completion `termination_reason` event for UI consumers.
 
@@ -136,6 +137,11 @@ Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_I
 critic reviews. Setting it to `0` uses the initial builder output without critique. A final rejection or invalid
 builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
 evaluator are not invoked for that task.
+
+Task execution actor/critic cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to two
+executor/evaluator passes and has a minimum of one. Each evaluator is short-lived, while the task-executor agent and
+conversation are retained across passes. Only `done` is approval; a final `partial_failure` or `blocked` verdict is
+persisted unchanged.
 
 After creating or durably changing a plan, the controller also emits a standard `output` event containing the
 objective, current phase, and status of every phase. These snapshots appear in interactive and headless output.

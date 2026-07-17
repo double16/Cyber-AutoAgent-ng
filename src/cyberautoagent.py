@@ -30,6 +30,7 @@ import threading
 import time
 import traceback
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -344,10 +345,25 @@ def extract_last_assistant_text(messages: Any) -> str:
     return ""
 
 
-def _required_tools_satisfied(callback_handler: Any, run_policy: AgentRunPolicy) -> bool:
-    """Return true when the callback has observed enough required tool calls."""
+def _tool_count_deltas(callback_handler: Any, baseline: Optional[dict[str, int]] = None) -> dict[str, int]:
+    """Return non-negative tool-call counts observed after a run-pass baseline."""
 
     tool_counts = getattr(callback_handler, "tool_counts", {}) or {}
+    baseline = baseline or {}
+    return {
+        name: max(0, int(count or 0) - int(baseline.get(name, 0) or 0))
+        for name, count in tool_counts.items()
+    }
+
+
+def _required_tools_satisfied(
+    callback_handler: Any,
+    run_policy: AgentRunPolicy,
+    baseline: Optional[dict[str, int]] = None,
+) -> bool:
+    """Return true when this run pass has observed enough required tool calls."""
+
+    tool_counts = _tool_count_deltas(callback_handler, baseline)
     tool_total_count = sum(
         count
         for name, count in tool_counts.items()
@@ -362,6 +378,7 @@ def _run_policy_allows_terminal_text(
     callback_handler: Any,
     run_policy: AgentRunPolicy,
     actionless_attempt_count: int,
+    baseline: Optional[dict[str, int]] = None,
 ) -> bool:
     """Return true when an actionless turn is a valid final response under policy."""
 
@@ -371,7 +388,7 @@ def _run_policy_allows_terminal_text(
         return False
     if actionless_attempt_count <= run_policy.max_actionless_after_tools:
         return False
-    return _required_tools_satisfied(callback_handler, run_policy)
+    return _required_tools_satisfied(callback_handler, run_policy, baseline)
 
 
 def run_agent_until_terminal_state(
@@ -393,6 +410,7 @@ def run_agent_until_terminal_state(
     actionless_attempt_count = 0
     recoverable_attempt_count = 0
     agent_callback_handler = getattr(agent, "_cyber_callback_handler", None) or callback_handler
+    run_tool_count_baseline = dict(getattr(agent_callback_handler, "tool_counts", {}) or {})
 
     while not interrupted:
         last_tool_call_count = sum(agent_callback_handler.tool_counts.values(), start=0)
@@ -426,7 +444,12 @@ def run_agent_until_terminal_state(
                     tool_total_count,
                 )
 
-            if _run_policy_allows_terminal_text(agent_callback_handler, run_policy, actionless_attempt_count):
+            if _run_policy_allows_terminal_text(
+                agent_callback_handler,
+                run_policy,
+                actionless_attempt_count,
+                run_tool_count_baseline,
+            ):
                 return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
 
             if agent_callback_handler and agent_callback_handler.should_stop():
@@ -435,7 +458,7 @@ def run_agent_until_terminal_state(
                     raise BudgetLimitReached("Budget limit reached")
                 return AgentRunResult("callback_stop", "Callback requested stop")
 
-            if sum(agent_callback_handler.tool_counts.values()) == 0:
+            if sum(_tool_count_deltas(agent_callback_handler, run_tool_count_baseline).values()) == 0:
                 if getattr(agent_callback_handler, "_emitted_any_reasoning", False):
                     logger.debug("Initial reasoning observed with no tools yet; continuing one more cycle")
                 elif initial_reasoning_retry <= 0:
@@ -1172,6 +1195,37 @@ def main():
         callback_handler = runtime_resources.callback_handler
 
         if not bool(args.report):
+            def run_workflow_agent(
+                agent: Any,
+                prompt: str,
+                run_policy: Optional[AgentRunPolicy],
+            ) -> str:
+                try:
+                    message_start = len(agent.messages)
+                except (AttributeError, TypeError):
+                    message_start = 0
+                result = run_agent_until_terminal_state(
+                    agent=agent,
+                    callback_handler=callback_handler,
+                    current_message=prompt,
+                    initial_prompt=initial_prompt,
+                    budget_cfg=budget_cfg,
+                    operation_start=operation_start,
+                    max_duration=args.max_duration,
+                    logger=logger,
+                    run_policy=run_policy,
+                )
+                try:
+                    current_pass_messages = list(agent.messages)[message_start:]
+                except (AttributeError, TypeError):
+                    current_pass_messages = []
+                assistant_text = extract_last_assistant_text(current_pass_messages)
+                if assistant_text:
+                    return assistant_text
+                if run_policy and result.reason == run_policy.terminal_reason:
+                    return ""
+                return result.message or result.reason
+
             def workflow_work_runner(
                 role: str,
                 prompt: str,
@@ -1191,25 +1245,28 @@ def main():
                     include_tool_catalog=role != "task_creator",
                 )
                 try:
-                    result = run_agent_until_terminal_state(
-                        agent=agent,
-                        callback_handler=callback_handler,
-                        current_message=prompt,
-                        initial_prompt=initial_prompt,
-                        budget_cfg=budget_cfg,
-                        operation_start=operation_start,
-                        max_duration=args.max_duration,
-                        logger=logger,
-                        run_policy=run_policy,
-                    )
-                    assistant_text = extract_last_assistant_text(
-                        getattr(agent, "messages", [])
-                    )
-                    if assistant_text:
-                        return assistant_text
-                    if run_policy and result.reason == run_policy.terminal_reason:
-                        return ""
-                    return result.message or result.reason
+                    return run_workflow_agent(agent, prompt, run_policy)
+                finally:
+                    try:
+                        agent.cleanup()
+                    except Exception as error:
+                        logger.warning("Unable to clean up role agent %s: %s", role, error)
+
+            @contextmanager
+            def workflow_executor_session(role: str, tools: list[Any], system_prompt: str):
+                agent = create_agent(
+                    target=args.target,
+                    objective=args.objective,
+                    config=config,
+                    runtime_resources=runtime_resources,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    name=f"Cyber-AutoAgent {operation_id} {role}",
+                    agent_type=role,
+                    include_tool_catalog=True,
+                )
+                try:
+                    yield lambda prompt, run_policy=None: run_workflow_agent(agent, prompt, run_policy)
                 finally:
                     try:
                         agent.cleanup()
@@ -1220,6 +1277,7 @@ def main():
                 runtime=runtime_resources,
                 budget=budget_cfg,
                 work_runner=workflow_work_runner,
+                executor_session_factory=workflow_executor_session,
             )
 
             try:

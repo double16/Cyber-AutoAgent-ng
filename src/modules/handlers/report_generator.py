@@ -57,18 +57,6 @@ def _report_item_title(item: Dict[str, Any], default: str) -> str:
     return safe_truncate(str(title).strip() or default, 80)
 
 
-def _has_explicit_artifact(value: Any) -> bool:
-    """Return whether an artifact metadata field contains a concrete reference."""
-
-    if isinstance(value, str):
-        return bool(_ARTIFACT_REFERENCE.search(value))
-    if isinstance(value, dict):
-        return any(_has_explicit_artifact(item) for item in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_has_explicit_artifact(item) for item in value)
-    return False
-
-
 def _has_artifact_reference(value: Any) -> bool:
     """Return whether free-form evidence text contains an artifact-like path."""
 
@@ -98,8 +86,8 @@ def _normalize_report_category(
     ).strip().lower()
     proof_pack = metadata.get("proof_pack") or {}
     durable_evidence = (
-        _has_explicit_artifact(metadata.get("artifacts"))
-        or _has_explicit_artifact(proof_pack.get("artifacts") if isinstance(proof_pack, dict) else None)
+        _has_artifact_reference(metadata.get("artifacts"))
+        or _has_artifact_reference(proof_pack.get("artifacts") if isinstance(proof_pack, dict) else None)
         or _has_artifact_reference(parsed.get("evidence", ""))
     )
     negative_control_fields = (
@@ -110,7 +98,7 @@ def _normalize_report_category(
         proof_pack.get("negative_control_artifacts") if isinstance(proof_pack, dict) else None,
     )
     artifact_backed_control = any(
-        _has_explicit_artifact(value) for value in negative_control_fields
+        _has_artifact_reference(value) for value in negative_control_fields
     )
     if not artifact_backed_control:
         lowered_content = content.lower()
@@ -583,7 +571,7 @@ _RE_MERAID_SINGLE_ROUNDED = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\((?!")(.*?)(?<
 _RE_MERMAID_SQUARE = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\[(?!")(.*?)(?<!")\](?:\s|$|[-=])')
 _RE_MERMAID_BRACES = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)\{(?!")(.*?)(?<!")\}(?:\s|$|[-=])')
 _RE_MERMAID_ANGLE = re.compile(r'([a-zA-Z][a-zA-Z0-9_-]*)>(?!")(.*?)(?<!")\](?:\s|$|[-=])')
-_RE_MERAID_EDGE = re.compile(r'(--\s+)(?!")(.*?)(?<!")(\s*-->)')
+_RE_MERMAID_EDGE = re.compile(r'(--\s+)(?!")(.*?)(?<!")(\s*-->)')
 _RE_MERMAID_SEQUENCE_LABELS = re.compile(r'(->>[^:]+:\s*)(.*)')
 _RE_MERMAID_PIPE_LABELS = re.compile(r'(\|)(?!")(.*?)(?<!")(\|)')
 _RE_MERMAID_SUBGRAPH_LABEL = re.compile(r'(subgraph\s+)(.*)')
@@ -685,7 +673,7 @@ def _sanitize_mermaid_diagrams(text: str) -> str:
 
             # 6. Edge labels: -- label -->
             if '-- ' in line and '-->' in line:
-                match_edge = _RE_MERAID_EDGE.search(line)
+                match_edge = _RE_MERMAID_EDGE.search(line)
                 if match_edge:
                     prefix = match_edge.group(1)
                     label_content = match_edge.group(2)

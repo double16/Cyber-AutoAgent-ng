@@ -40,6 +40,7 @@
 ## LLM Prompt Best Practices
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
 - When an LLM is to return structured data, prefer JSON.
+- Primary use-case LLM have ~26b parameters and 48,000 tokens context window.
 
 ## User Interface
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.

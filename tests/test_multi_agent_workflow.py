@@ -424,6 +424,125 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy():
     assert captured["policy"].terminal_reason == "task_executor_done"
 
 
+def test_task_execution_reuses_session_and_stops_when_critic_approves():
+    runtime = _runtime()
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    evaluator_prompts = []
+    actor_prompts = []
+    lifecycle = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        if role == "task_evaluator":
+            evaluator_prompts.append(prompt)
+            if len(evaluator_prompts) == 1:
+                return '{"status":"partial_failure","reason":"validate the remaining endpoint"}'
+            return '{"status":"done","reason":"all endpoints validated"}'
+        raise AssertionError(role)
+
+    @contextmanager
+    def executor_session(role, tools, system_prompt):
+        lifecycle.append(("created", role, system_prompt))
+
+        def run(prompt, run_policy):
+            actor_prompts.append(prompt)
+            return f"actor result {len(actor_prompts)}"
+
+        try:
+            yield run
+        finally:
+            lifecycle.append(("cleaned", role))
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        executor_session_factory=executor_session,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_prompts) == 2
+    assert actor_prompts[0].startswith("execute active")
+    assert "## Task Critic Guidance" in actor_prompts[1]
+    assert "validate the remaining endpoint" in actor_prompts[1]
+    assert "actor cycle 2 of\n2" in actor_prompts[1]
+    assert "Cycle 1: actor result 1" in evaluator_prompts[1]
+    assert "Cycle 2: actor result 2" in evaluator_prompts[1]
+    assert lifecycle == [
+        ("created", "task_executor", "base prompt\n\ntask capture prompt"),
+        ("cleaned", "task_executor"),
+    ]
+    assert state.tasks[0].status == "done"
+    assert state.tasks[0].status_reason == "all endpoints validated"
+
+
+def test_task_execution_approval_short_circuits_first_cycle():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 4})
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    actor_calls = []
+    evaluator_calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        if role == "task_evaluator":
+            evaluator_calls.append(prompt)
+            return '{"status":"done","reason":"approved immediately"}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_calls.append(prompt)
+        return "complete"
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_calls) == 1
+    assert len(evaluator_calls) == 1
+    assert state.tasks[0].status == "done"
+
+
+def test_task_execution_persists_final_non_approval_and_clamps_cycle_count():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": -1})
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    actor_calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        if role == "task_evaluator":
+            return '{"status":"blocked","reason":"credentials are unavailable"}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda role, prompt, tools, system_prompt, run_policy: actor_calls.append(prompt),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert controller.task_execution_cycles == 1
+    assert len(actor_calls) == 1
+    assert state.tasks[0].status == "blocked"
+    assert state.tasks[0].status_reason == "credentials are unavailable"
+
+
 def test_task_executor_appends_selected_memories_from_prompt_spec():
     runtime = _runtime()
     state = FakeState(

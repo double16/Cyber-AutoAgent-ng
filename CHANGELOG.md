@@ -2,6 +2,8 @@
 
 ### Features
 
+- Add configurable task execution actor/critic cycles that retain the task-executor conversation and stop early on
+  evaluator approval.
 - Validate executor-created future-phase follow-ups against named plan criteria and resume continued operations from
   their earliest actionable incomplete phase.
 - Add configurable actor/critic refinement for task execution prompts and mark tasks `partial_failure` when an approved prompt cannot be built.

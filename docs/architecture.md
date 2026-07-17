@@ -26,8 +26,8 @@ The controller creates agents for specific jobs:
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
 - **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
-- **task_executor**: executes one active task objective
-- **task_evaluator**: returns task status: `done`, `partial_failure`, or `blocked`
+- **task_executor**: executes one active task objective and retains its conversation across critic-guided passes
+- **task_evaluator**: critiques each executor pass and returns `done`, `partial_failure`, or `blocked`
 - **phase_evaluator**: returns phase status: `continue`, `done`, `partial_failure`, or `blocked`
 
 Module execution guidance supplies operation intent, explicit access boundaries, domain behavior, and evidence rules to
@@ -94,6 +94,20 @@ the final configured review fails the workflow so an unapproved plan is never pe
 Task prompt generation uses the same bounded pattern. `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` defaults to
 two critic reviews and accepts `0` to disable critique. A final rejection or invalid structured response after JSON
 retries marks only the active task `partial_failure`, without invoking its executor or evaluator.
+
+Task execution then uses a second bounded actor/critic loop:
+
+```mermaid
+flowchart LR
+    E[Retained task-executor] --> V[Fresh task-evaluator]
+    V -->|done| D[Persist done]
+    V -->|partial_failure or blocked; pass remains| E
+    V -->|cycle limit reached| F[Persist final verdict]
+```
+
+`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits total executor/evaluator passes and defaults to two, with a minimum of
+one. Evaluator guidance is sent back to the same executor instance so the next pass continues its existing
+conversation. Approval (`done`) short-circuits the loop; otherwise Python persists the last evaluator status.
 
 There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt
 adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task

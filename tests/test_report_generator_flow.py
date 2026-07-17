@@ -3,7 +3,6 @@ from unittest.mock import patch, MagicMock
 from modules.handlers.report_generator import (
     _extract_text_from_result,
     _has_artifact_reference,
-    _has_explicit_artifact,
     _normalize_report_category,
     build_report_sections,
     generate_security_report,
@@ -75,11 +74,9 @@ def test_extract_text_from_result_empty():
 
 
 def test_report_category_helpers_cover_structured_and_free_form_artifacts():
-    assert _has_explicit_artifact({"artifacts": ["/tmp/control.txt"]}) is True
-    assert _has_explicit_artifact(["", None]) is False
-    assert _has_explicit_artifact(7) is False
+    assert _has_artifact_reference({"artifacts": ["/tmp/control.txt"]}) is True
     assert _has_artifact_reference({"evidence": ["saved at artifacts/control.txt"]}) is True
-    assert _has_artifact_reference(["no path", None]) is False
+    assert _has_artifact_reference(["", "no path", None]) is False
     assert _has_artifact_reference(7) is False
 
     assert _normalize_report_category("signal", {}, "", {}) == "observation"

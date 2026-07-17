@@ -36,8 +36,9 @@ import logging
 import re
 import sys
 import uuid
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from modules.agents.cyber_autoagent import (
     AgentRuntimeResources,
@@ -61,6 +62,11 @@ logger = logging.getLogger(__name__)
 
 AgentTextRunner = Callable[[str, str, List[Any], str], str]
 AgentWorkRunner = Callable[..., Any]
+AgentExecutorSession = Callable[[str, Optional[AgentRunPolicy]], Any]
+AgentExecutorSessionFactory = Callable[
+    [str, List[Any], str],
+    AbstractContextManager[AgentExecutorSession],
+]
 CHECKPOINT_BANDS = (20, 40, 60, 80, 90)
 WORKER_CONTEXT_LIMIT = 6000
 
@@ -350,6 +356,7 @@ class MultiAgentWorkflowController:
         state_store: Optional[WorkflowStateStore] = None,
         text_runner: Optional[AgentTextRunner] = None,
         work_runner: Optional[AgentWorkRunner] = None,
+        executor_session_factory: Optional[AgentExecutorSessionFactory] = None,
         max_iterations: int = sys.maxsize,
     ):
         """
@@ -359,6 +366,7 @@ class MultiAgentWorkflowController:
         :param state_store:
         :param text_runner:
         :param work_runner:
+        :param executor_session_factory: Creates one retained task-executor conversation per active task.
         :param max_iterations: Present to prevent unit tests from running in an infinite loop.
         """
         self.runtime = runtime
@@ -366,10 +374,12 @@ class MultiAgentWorkflowController:
         self.state = state_store or WorkflowStateStore(runtime.operation_id)
         self.text_runner = text_runner or default_text_runner(runtime)
         self.work_runner = work_runner or self.text_runner
+        self.executor_session_factory = executor_session_factory
         self.max_iterations = max_iterations
         self.json_retries = self._json_retry_count()
         self.plan_refinement_iterations = self._plan_refinement_iteration_count()
         self.task_prompt_refinement_iterations = self._task_prompt_refinement_iteration_count()
+        self.task_execution_cycles = self._task_execution_cycle_count()
         self._can_reopen_completed_plan = True
         self._crossed_checkpoints: set[int] = set()
         self._emitted_started_task_uids: set[str] = set()
@@ -464,14 +474,21 @@ class MultiAgentWorkflowController:
             return max(0, config_manager.getenv_int("CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS", 2))
         return 1
 
+    def _task_execution_cycle_count(self) -> int:
+        config_manager = self.runtime.config_manager
+        if config_manager:
+            return max(1, config_manager.getenv_int("CYBER_WORKFLOW_TASK_EXECUTION_CYCLES", 2))
+        return 2
+
     def run(self) -> None:
         self._log_workflow(
             "start max_iterations=%s json_retries=%s plan_refinement_iterations=%s "
-            "task_prompt_refinement_iterations=%s",
+            "task_prompt_refinement_iterations=%s task_execution_cycles=%s",
             self.max_iterations,
             self.json_retries,
             self.plan_refinement_iterations,
             self.task_prompt_refinement_iterations,
+            self.task_execution_cycles,
         )
         for iteration in range(1, self.max_iterations + 1):
             if self.runtime.callback_handler.has_reached_limit():
@@ -725,26 +742,55 @@ class MultiAgentWorkflowController:
             existing.task_uid
             for existing in self.state.list_tasks()
         }
-        worker_result = self._run_worker_agent(
-            "task_executor",
-            execution_prompt,
-            tools,
-            self.runtime.system_prompt + "\n\n" + (self.runtime.task_capture_prompt or ""),
-            task_policy,
-        )
-        self._validate_executor_follow_up_phases(
-            plan,
-            phase,
-            existing_task_uids,
-        )
-        worker_context = self._worker_context_summary(worker_result)
-        self._log_workflow(
-            "task worker context task=%s included=%s chars=%s",
-            self._task_label(task),
-            bool(worker_context),
-            len(worker_context),
-        )
-        decision = self._evaluate_task(plan, phase, task, worker_context)
+        system_prompt = self.runtime.system_prompt + "\n\n" + (self.runtime.task_capture_prompt or "")
+        worker_contexts = []
+        decision = WorkflowDecision(status="partial_failure", reason="Task executor did not run")
+        with self._task_executor_session("task_executor", tools, system_prompt) as run_executor:
+            actor_prompt = execution_prompt
+            for cycle in range(1, self.task_execution_cycles + 1):
+                self._log_workflow(
+                    "task actor cycle task=%s cycle=%s max_cycles=%s",
+                    self._task_label(task),
+                    cycle,
+                    self.task_execution_cycles,
+                )
+                worker_result = run_executor(actor_prompt, task_policy)
+                self._validate_executor_follow_up_phases(
+                    plan,
+                    phase,
+                    existing_task_uids,
+                )
+                worker_context = self._worker_context_summary(worker_result)
+                if worker_context:
+                    worker_contexts.append(f"Cycle {cycle}: {worker_context}")
+                combined_worker_context = self._worker_context_summary("\n".join(worker_contexts))
+                self._log_workflow(
+                    "task worker context task=%s cycle=%s included=%s chars=%s",
+                    self._task_label(task),
+                    cycle,
+                    bool(combined_worker_context),
+                    len(combined_worker_context),
+                )
+                decision = self._evaluate_task(plan, phase, task, combined_worker_context)
+                if decision.status == "done":
+                    self._log_workflow(
+                        "task critic approved task=%s cycle=%s",
+                        self._task_label(task),
+                        cycle,
+                    )
+                    break
+                if cycle < self.task_execution_cycles:
+                    actor_prompt = self._task_executor_critic_guidance(
+                        decision,
+                        next_cycle=cycle + 1,
+                    )
+                    self._log_workflow(
+                        "task critic requested continuation task=%s cycle=%s status=%s reason=%s",
+                        self._task_label(task),
+                        cycle,
+                        decision.status,
+                        self._short(decision.reason),
+                    )
         self._log_workflow(
             "task evaluated task=%s status=%s reason=%s",
             self._task_label(task),
@@ -753,6 +799,16 @@ class MultiAgentWorkflowController:
         )
         updated_task = self.state.mark_task(task, decision.status, decision.reason)
         self._emit_task_done(updated_task)
+
+    def _task_executor_critic_guidance(self, decision: WorkflowDecision, *, next_cycle: int) -> str:
+        return f"""## Task Critic Guidance
+Continue the same assigned task in this existing conversation. This is actor cycle {next_cycle} of
+{self.task_execution_cycles}. Do not restart work that is already complete. Address the unmet criteria identified by
+the critic, use tools to make concrete progress, and store durable evidence for the next review.
+
+Critic status: {decision.status}
+Critic reason: {decision.reason}
+"""
 
     def _validate_executor_follow_up_phases(
         self,
@@ -1288,6 +1344,23 @@ Do not explain, execute, inspect, or gather evidence.
             return self.work_runner(role, prompt, tools, system_prompt, run_policy)
         self._log_workflow("running worker role=%s tool_count=%s policy_unsupported", role, len(tools))
         return self.work_runner(role, prompt, tools, system_prompt)
+
+    @contextmanager
+    def _task_executor_session(
+        self,
+        role: str,
+        tools: List[Any],
+        system_prompt: str,
+    ) -> Iterator[AgentExecutorSession]:
+        if self.executor_session_factory:
+            with self.executor_session_factory(role, tools, system_prompt) as run_executor:
+                yield run_executor
+            return
+
+        def run_executor(prompt: str, run_policy: Optional[AgentRunPolicy]) -> Any:
+            return self._run_worker_agent(role, prompt, tools, system_prompt, run_policy)
+
+        yield run_executor
 
     def _task_creator_tools(self) -> List[Any]:
         tools = [

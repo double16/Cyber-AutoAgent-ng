@@ -1076,6 +1076,44 @@ def test_run_agent_until_terminal_state_policy_stops_after_required_tool(monkeyp
     assert not logger.warning.called
 
 
+def test_run_agent_policy_requires_new_tool_calls_for_reused_agent_pass(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    role_callback.tool_counts = {"shell": 1}
+
+    class ReusedAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            if len(self.calls) == 2:
+                role_callback.tool_counts["shell"] += 1
+            return SimpleNamespace(metrics=None)
+
+    agent = ReusedAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            min_tool_calls=1,
+            terminal_after_required_tools=True,
+        ),
+    )
+
+    assert result.reason == "agent_completed_required_tools"
+    assert len(agent.calls) == 3
+    assert role_callback.tool_counts == {"shell": 2}
+    assert "MANDATORY ACTION" in agent.calls[1]
+
+
 def test_extract_last_assistant_text_skips_tool_use_messages():
     messages = [
         {"role": "assistant", "content": [{"text": "older"}]},
@@ -1582,13 +1620,52 @@ def test_cli_main_workflow_runner_creates_role_agent(monkeypatch, tmp_path):
     fake_agent.cleanup.assert_called_once()
 
 
+def test_cli_main_executor_session_reuses_and_cleans_role_agent(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    runner_result = cyberautoagent.AgentRunResult("task_executor_done", "worker finished")
+    run_count = 0
+
+    def run_agent(**kwargs):
+        nonlocal run_count
+        run_count += 1
+        if run_count == 1:
+            fake_agent.messages.append({"role": "assistant", "content": [{"text": "first summary"}]})
+        return runner_result
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(side_effect=run_agent))
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"],
+    )
+
+    def run_workflow():
+        session_factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
+        policy = cyberautoagent.AgentRunPolicy(min_tool_calls=1, terminal_after_required_tools=True)
+        with session_factory("task_executor", ["shell"], "role system") as run_executor:
+            assert run_executor("first pass", policy) == "first summary"
+            assert run_executor("critic guidance", policy) == "worker finished"
+        fake_agent.cleanup.assert_called_once()
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
+
+    cyberautoagent.create_agent.assert_called_once()
+    assert cyberautoagent.run_agent_until_terminal_state.call_count == 2
+    assert [
+        call.kwargs["current_message"]
+        for call in cyberautoagent.run_agent_until_terminal_state.call_args_list
+    ] == ["first pass", "critic guidance"]
+    fake_agent.cleanup.assert_called_once()
+
+
 def test_cli_main_workflow_runner_prefers_agent_final_text_over_policy_message(monkeypatch, tmp_path):
     callback = CliCallback()
     fake_agent = CallableCliAgent()
-    fake_agent.messages = [
-        {"role": "assistant", "content": [{"toolUse": {"name": "shell"}}]},
-        {"role": "assistant", "content": [{"text": "real task summary"}]},
-    ]
+    fake_agent.messages = [{"role": "assistant", "content": [{"toolUse": {"name": "shell"}}]}]
     config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
     policy = cyberautoagent.AgentRunPolicy(
         required_tool_names={"shell"},
@@ -1597,7 +1674,11 @@ def test_cli_main_workflow_runner_prefers_agent_final_text_over_policy_message(m
         terminal_message="Task executor completed after tool use",
     )
     runner_result = cyberautoagent.AgentRunResult(policy.terminal_reason, policy.terminal_message)
-    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(return_value=runner_result))
+    def run_agent(**kwargs):
+        fake_agent.messages.append({"role": "assistant", "content": [{"text": "real task summary"}]})
+        return runner_result
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(side_effect=run_agent))
     monkeypatch.setattr(
         cyberautoagent.sys,
         "argv",
