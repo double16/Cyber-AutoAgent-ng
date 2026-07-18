@@ -1898,7 +1898,11 @@ The generated prompt must instruct the task-executor agent:
 - Do not continue into later phase objectives, adjacent tasks, or newly discovered follow-up work.
 - If new follow-up work is discovered, create durable pending tasks for it using create_tasks.
 - Do not execute newly created follow-up tasks in this run.
-- Store concise evidence or observations when useful, then stop with a brief summary once the assigned task is done, partial, or blocked.
+- When the task objective asks to gather, map, enumerate, identify, inspect, collect, or document information, require
+  the executor to store the requested facts or negative results with `store_observation`. Worker summaries alone are
+  not durable storage for requested information.
+- Store each security claim with `store_finding` and reusable lessons with `store_knowledge`, then stop with a brief
+  summary once the assigned task is done, partial, or blocked.
 
 Tool selection guidance:
 - The `tools` JSON field contains optional-tool names only.
@@ -1970,9 +1974,14 @@ Approve only when the draft:
 - treats every plan constraint as a mandatory execution guardrail;
 - prevents execution of later phases, adjacent tasks, and newly created follow-up tasks;
 - preserves explicit `scheme://host:port` URL and `host:port` netloc service scope when present;
-- requests useful evidence and a concise completion summary;
+- requires `store_observation` for requested informational results, including negative results that answer the task,
+  and asks for a concise completion summary;
 - selects memories, optional tools, and shell commands with a reasonable relationship to the task; and
 - follows the required task prompt schema.
+
+For task objectives that ask to gather, map, enumerate, identify, inspect, collect, or document information, reject
+drafts that leave storage optional or rely only on worker narration, artifacts, or final summaries for the requested
+information.
 
 The `tools` field contains optional tools only. Core tools are supplied automatically and must not appear in `tools`;
 never require a core tool to be listed there. Tool overlap is permitted. Do not reject a draft because selections
@@ -2120,7 +2129,11 @@ successful corrected invocation. Bare `curl -s` output with no captured response
 
 Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"instructions": string}}.
 - Use done only when every material part of the task objective is supported by durable evidence.
+- When the task objective asks to gather, map, enumerate, identify, inspect, collect, or document information, use done
+  only when the requested information or negative result is present in the Memories section. Worker context, task
+  evidence, or artifacts may corroborate the memory, but they do not replace memory storage for requested information.
 - Use partial_failure when useful progress was made but any material part remains unsupported.
+- Use partial_failure when the worker appears to have gathered requested information but did not store it in memories.
 - When the objective is to map presence or accessibility, an artifact-backed negative result such as a captured 404,
   403, 401, 405, empty response with captured status, or explicit rejection is durable evidence that the target was
   assessed and absent or inaccessible. Do not treat that as missing evidence merely because the positive condition was

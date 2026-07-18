@@ -1069,6 +1069,79 @@ def test_task_evaluator_receives_task_worker_final_context():
     assert state.tasks[0].status == "partial_failure"
 
 
+def test_task_evaluator_requires_memory_for_information_gathering_task():
+    state = FakeState(
+        _plan(),
+        tasks=[
+            Task(
+                task_uid="active",
+                title="Inventory routes",
+                objective="Identify exposed routes and collect their response status",
+                phase=1,
+                status="active",
+            )
+        ],
+    )
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: [
+            {
+                "id": "obs-1",
+                "memory": "[OBSERVATION] /login returned 200 and /admin returned 403",
+                "metadata": {"category": "observation"},
+            }
+        ]
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    prompt = controller._task_evaluator_prompt(
+        _plan(),
+        _plan().phases[0],
+        state.tasks[0],
+        worker_context="I checked the routes and stored the results.",
+    )
+
+    assert "use done" in prompt
+    assert "only when the requested information or negative result is present in the Memories section" in prompt
+    assert "[OBSERVATION] /login returned 200 and /admin returned 403" in prompt
+
+
+def test_task_evaluator_marks_gathered_but_unstored_information_partial():
+    state = FakeState(
+        _plan(),
+        tasks=[
+            Task(
+                task_uid="active",
+                title="Inventory routes",
+                objective="Enumerate exposed routes and document response status",
+                phase=1,
+                status="active",
+            )
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    prompt = controller._task_evaluator_prompt(
+        _plan(),
+        _plan().phases[0],
+        state.tasks[0],
+        worker_context="Found /login 200 and /admin 403 but did not store observations.",
+    )
+
+    assert "memories[0]{id,memory}:" in prompt
+    assert "Use partial_failure when the worker appears to have gathered requested information" in prompt
+    assert "but did not store it in memories" in prompt
+
+
 def test_task_executor_recovers_in_same_session_and_evaluator_receives_authoritative_outcomes():
     runtime = _runtime()
     state = FakeState(
@@ -2327,6 +2400,57 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert 'curl -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" <url>' in prompt
     assert "curl -sS -D - -o /dev/null <url>" in prompt
     assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
+
+
+def test_task_prompt_builder_requires_storing_requested_information():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Map endpoints",
+        objective="Enumerate login and admin endpoints and document whether each is accessible",
+        phase=1,
+        status="active",
+    )
+
+    prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+
+    assert "store the requested facts or negative results with `store_observation`" in prompt
+    assert "Worker summaries alone are" in prompt
+    assert "not durable storage for requested information" in prompt
+    assert "Store concise evidence or observations when useful" not in prompt
+
+
+def test_task_prompt_critic_rejects_optional_information_storage():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Inventory routes",
+        objective="Identify exposed routes and collect their response status",
+        phase=1,
+        status="active",
+    )
+
+    prompt = controller._task_prompt_critic_prompt(
+        _plan(),
+        _plan().phases[0],
+        task,
+        {"prompt": "Identify exposed routes and summarize what you found.", "memory_ids": [], "tools": []},
+    )
+
+    assert "requires `store_observation` for requested informational results" in prompt
+    assert "reject" in prompt
+    assert "drafts that leave storage optional" in prompt
+    assert "rely only on worker narration" in prompt
 
 
 def test_task_target_scope_text_preserves_explicit_url_service_boundaries():
