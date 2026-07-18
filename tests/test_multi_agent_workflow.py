@@ -877,7 +877,7 @@ def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
 
     def text_runner(role, prompt, tools, system_prompt):
         if role == "task_prompt_builder":
-            return '{"prompt":"execute active","tools":[],"shell_commands":["httpx","unknown","httpx"]}'
+            return '{"prompt":"execute active","tools":[],"shell_commands":["httpx","unknown","nmap"]}'
         if role == "task_evaluator":
             return '{"status":"done","reason":"completed"}'
         raise AssertionError(role)
@@ -2623,6 +2623,57 @@ def test_task_prompt_spec_accepts_tools_and_commands_in_either_selection_list(mo
 
     assert normalized["tools"] == ["mcp_scan", "dual_probe", "module_probe"]
     assert normalized["shell_commands"] == ["curl", "dual_probe", "whatweb", "katana", "feroxbuster"]
+
+
+def test_task_prompt_spec_filters_common_shell_commands_before_validation(monkeypatch):
+    runtime = _runtime()
+    runtime.config.available_tools = ["httpx"]
+    monkeypatch.setattr(
+        workflow_mod,
+        "get_shell_command_specs",
+        lambda available: [
+            {"command": "httpx", "description": "HTTP probe", "capabilities": []}
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Inspect", objective="Inspect target", phase=1, status="pending")
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Inspect the target",
+            "tools": ["grep", "python3", "module_probe", "httpx"],
+            "shell_commands": ["awk", "python3", "module_probe", "httpx"],
+        },
+        task,
+    )
+
+    assert normalized["tools"] == ["module_probe"]
+    assert normalized["shell_commands"] == ["httpx"]
+
+
+def test_task_prompt_spec_still_rejects_unknown_names_after_common_command_filtering():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Inspect", objective="Inspect target", phase=1, status="pending")
+
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="unavailable selection.*mystery-tool"):
+        controller._normalize_task_prompt_spec(
+            {
+                "prompt": "Inspect the target",
+                "tools": ["grep", "python3", "mystery-tool"],
+                "shell_commands": [],
+            },
+            task,
+        )
 
 
 def test_task_prompt_spec_reclassifies_optional_tools_when_shell_is_unavailable():

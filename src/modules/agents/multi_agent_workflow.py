@@ -82,6 +82,30 @@ AgentExecutorSessionFactory = Callable[
 ]
 CHECKPOINT_BANDS = (20, 40, 60, 80, 90)
 WORKER_CONTEXT_LIMIT = 6000
+TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
+    {
+        "awk",
+        "bash",
+        "cat",
+        "cut",
+        "find",
+        "grep",
+        "head",
+        "jq",
+        "ls",
+        "python",
+        "python3",
+        "sed",
+        "sh",
+        "sort",
+        "tail",
+        "tr",
+        "uniq",
+        "wc",
+        "which",
+        "xargs",
+    }
+)
 
 
 class WorkflowInvariantError(RuntimeError):
@@ -1267,6 +1291,10 @@ Return exactly one decision for each candidate.
             prompt_spec.get("shell_commands", []),
             "shell_commands",
         )
+        selected_tools = [name for name in selected_tools if name not in TASK_PROMPT_IGNORED_SHELL_COMMANDS]
+        selected_shell_commands = [
+            name for name in selected_shell_commands if name not in TASK_PROMPT_IGNORED_SHELL_COMMANDS
+        ]
         available_specs = self._available_shell_command_specs()
         available_commands = {str(spec["command"]) for spec in available_specs}
 
