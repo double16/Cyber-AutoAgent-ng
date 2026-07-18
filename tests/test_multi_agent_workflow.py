@@ -300,6 +300,7 @@ def _runtime(progress=0, env_ints=None):
         termination_policy="",
         config_manager=SimpleNamespace(getenv_int=lambda name, default=0: env_ints.get(name, default)),
         callback_handler=FakeCallbackHandler(progress=progress),
+        trace_attributes={"operation.id": "OP_TEST"},
         core_tools_list=[
             _tool("shell"),
             _tool("editor"),
@@ -491,6 +492,105 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy():
     assert captured["policy"].terminal_reason == "task_executor_done"
 
 
+def test_task_roles_share_task_trace_attributes():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1})
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    captured = {}
+
+    def capture(role):
+        captured.setdefault(role, []).append(dict(runtime.trace_attributes))
+
+    def text_runner(role, prompt, tools, system_prompt):
+        capture(role)
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        if role == "task_prompt_critic":
+            return '{"approved":true,"feedback":[]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"completed"}'
+        raise AssertionError(role)
+
+    @contextmanager
+    def executor_session(role, tools, system_prompt):
+        capture(role)
+
+        def run(prompt, run_policy):
+            capture(f"{role}:run")
+            return "actor result"
+
+        yield run
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        executor_session_factory=executor_session,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    shared_roles = [
+        "task_prompt_builder",
+        "task_prompt_critic",
+        "task_executor",
+        "task_executor:run",
+        "task_evaluator",
+    ]
+    trace_names = {
+        captured[role][0]["langfuse.trace.name"]
+        for role in shared_roles
+    }
+    assert len(trace_names) == 1
+    for role in shared_roles:
+        attrs = captured[role][0]
+        assert attrs["workflow.trace.scope"] == "task"
+        assert attrs["workflow.task.uid"] == "active"
+        assert attrs["workflow.phase.id"] == 1
+        assert "workflow-task" in attrs["langfuse.trace.tags"]
+    assert runtime.trace_attributes == {"operation.id": "OP_TEST"}
+
+
+def test_different_tasks_get_distinct_task_trace_attributes():
+    runtime = _runtime()
+    task_one = Task(task_uid="task-one", title="First", objective="run first", phase=1, status="active")
+    task_two = Task(task_uid="task-two", title="Second", objective="run second", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task_one, task_two])
+    trace_names = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            trace_names.append(runtime.trace_attributes["langfuse.trace.name"])
+            return '{"prompt":"execute active","tools":[]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"completed"}'
+        raise AssertionError(role)
+
+    @contextmanager
+    def executor_session(role, tools, system_prompt):
+        def run(prompt, run_policy):
+            return "actor result"
+
+        yield run
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        executor_session_factory=executor_session,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task_one)
+    controller._run_task(_plan(), _plan().phases[0], task_two)
+
+    assert len(trace_names) == 2
+    assert trace_names[0] != trace_names[1]
+    assert "task-one" in trace_names[0]
+    assert "task-two" in trace_names[1]
+
+
 def test_task_execution_reuses_session_and_stops_when_critic_approves():
     runtime = _runtime()
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
@@ -505,7 +605,13 @@ def test_task_execution_reuses_session_and_stops_when_critic_approves():
         if role == "task_evaluator":
             evaluator_prompts.append(prompt)
             if len(evaluator_prompts) == 1:
-                return '{"status":"partial_failure","reason":"validate the remaining endpoint"}'
+                return json.dumps(
+                    {
+                        "status": "partial_failure",
+                        "reason": "remaining endpoint lacks evidence",
+                        "instructions": "Run endpoint validation and store the artifact path.",
+                    }
+                )
             return '{"status":"done","reason":"all endpoints validated"}'
         raise AssertionError(role)
 
@@ -535,7 +641,8 @@ def test_task_execution_reuses_session_and_stops_when_critic_approves():
     assert len(actor_prompts) == 2
     assert actor_prompts[0].startswith("execute active")
     assert "## Task Critic Guidance" in actor_prompts[1]
-    assert "validate the remaining endpoint" in actor_prompts[1]
+    assert "remaining endpoint lacks evidence" in actor_prompts[1]
+    assert "Run endpoint validation and store the artifact path." in actor_prompts[1]
     assert "actor cycle 2 of\n2" in actor_prompts[1]
     assert "Cycle 1: actor result 1" in evaluator_prompts[1]
     assert "Cycle 2: actor result 2" in evaluator_prompts[1]
@@ -1189,7 +1296,7 @@ def test_controller_closes_phase_before_pending_task_when_hard_budget_cap_reache
     def text_runner(role, prompt, tools, system_prompt):
         calls.append(role)
         assert role == "phase_evaluator"
-        assert "mandatory 100.00% budget cap" in prompt
+        assert "mandatory budget cap" in prompt
         assert "continue|done" not in prompt
         return '{"status":"partial_failure","reason":"hard budget cap reached"}'
 
@@ -1993,8 +2100,9 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
     assert "## Active Phase" in captured["prompt"]
     assert "## Existing Tasks Across All Phases" in captured["prompt"]
     assert "Existing" in captured["prompt"]
-    assert "valid plan phase IDs: 1, 2" in captured["prompt"]
-    assert "future phases" in captured["prompt"]
+    assert "set it explicitly to active phase 1" in captured["prompt"]
+    assert "Do not create tasks for earlier or future phases" in captured["prompt"]
+    assert "valid plan phase IDs: 1, 2" not in captured["prompt"]
     assert "## create_tasks Payload Contract (Non-negotiable)" in captured["prompt"]
     assert '"title":"Short actionable title"' in captured["prompt"]
     assert '"objective":"Action, target, context, and completion condition"' in captured["prompt"]
@@ -2027,7 +2135,7 @@ def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
     assert len(state.tasks) == 1
 
 
-def test_task_creator_retries_when_only_future_phase_tasks_are_created():
+def test_task_creator_reassigns_new_future_phase_tasks_to_active_phase():
     plan = OperationPlan(
         objective="assess",
         current_phase=1,
@@ -2037,19 +2145,21 @@ def test_task_creator_retries_when_only_future_phase_tasks_are_created():
             PlanPhase(id=2, title="Validate", status="pending"),
         ],
     )
-    state = FakeState(plan)
+    existing_future = Task(
+        task_uid="existing",
+        title="Existing",
+        objective="Validate later",
+        phase=2,
+        status="pending",
+    )
+    state = FakeState(plan, tasks=[existing_future])
     prompts = []
 
     def work_runner(role, prompt, tools, system_prompt, run_policy):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            state.store_task(
-                Task(task_uid="future", title="Validate", objective="Validate later", phase=2, status="pending")
-            )
-        else:
-            state.store_task(
-                Task(task_uid="current", title="Recon", objective="Recon now", phase=1, status="pending")
-            )
+        state.store_task(
+            Task(task_uid="future", title="Validate", objective="Validate later", phase=2, status="pending")
+        )
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -2061,8 +2171,9 @@ def test_task_creator_retries_when_only_future_phase_tasks_are_created():
 
     controller._create_tasks(plan, plan.phases[0])
 
-    assert len(prompts) == 2
-    assert {task.phase for task in state.tasks} == {1, 2}
+    assert len(prompts) == 1
+    phases_by_uid = {task.task_uid: task.phase for task in state.tasks}
+    assert phases_by_uid == {"existing": 2, "future": 1}
 
 
 def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
@@ -2080,7 +2191,7 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
     assert "Every task object MUST contain non-empty `title` and `objective`" in prompt
     assert "unsupported `context` or `description` fields" in prompt
     assert "Stop immediately" in prompt
-    assert "future phases" in prompt
+    assert "Do not create tasks for earlier or future phases" in prompt
     assert "without violating any plan constraint" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
     assert "Stay within the authorized target scope" in prompt
@@ -2173,7 +2284,7 @@ def test_optional_tool_catalog_uses_tool_spec_name_and_description():
 
     catalog = controller._optional_tool_catalog()
 
-    assert catalog.startswith("optional_tools[1]{name,description,input_schema}:")
+    assert catalog.startswith("optional_tools[1]{name,description}:")
     assert "spec_name,Spec description." in catalog
     assert "python_name" not in catalog
 
@@ -2199,9 +2310,9 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "core_tools[4]{name,description,input_schema}:" in prompt
+    assert "core_tools[4]{name,description}:" in prompt
     assert "spec_shell,Execute shell commands." in prompt
-    assert "optional_tools[2]{name,description,input_schema}:" in prompt
+    assert "optional_tools[2]{name,description}:" in prompt
     assert "spec_scan,Run a targeted scan." in prompt
     assert "`tools` JSON field contains optional-tool names only" in prompt
     assert "Never return core-tool names in `tools`" in prompt
@@ -2517,8 +2628,8 @@ def test_tool_catalog_renders_empty_lists_and_rejects_unknown_structure_names():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert controller._core_tool_catalog() == "core_tools[0]{name,description,input_schema}:\n"
-    assert controller._optional_tool_catalog() == "optional_tools[0]{name,description,input_schema}:\n"
+    assert controller._core_tool_catalog() == "core_tools[0]{name,description}:\n"
+    assert controller._optional_tool_catalog() == "optional_tools[0]{name,description}:\n"
     with pytest.raises(ValueError, match="Unsupported tool catalog structure"):
         controller._tool_catalog("tools", [])
 
@@ -2597,6 +2708,8 @@ def test_task_evaluator_does_not_receive_module_termination_policy():
     decision = controller._evaluate_task(_plan(), _plan().phases[0], task)
 
     assert decision.status == "partial_failure"
+    assert decision.reason == "not enough access"
+    assert decision.instructions == ""
     assert captured["role"] == "task_evaluator"
     assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "mem0_retrieve"}
     assert "Evaluator Role Boundary" in captured["system_prompt"]
@@ -2605,9 +2718,41 @@ def test_task_evaluator_does_not_receive_module_termination_policy():
     assert "## Evaluation target: active task" in captured["prompt"]
     assert "## Context only: operation objective" in captured["prompt"]
     assert "## Acceptance guardrails: plan constraints" in captured["prompt"]
+    assert '"instructions": string' in captured["prompt"]
+    assert "concrete prescriptive next actions" in captured["prompt"]
     assert "an evidenced violation prevents done" in captured["prompt"].lower()
     assert "Stay within the authorized target scope" in captured["prompt"]
     assert "## Plan" not in captured["prompt"]
+
+
+def test_task_evaluator_decision_includes_prescriptive_instructions():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    captured = {}
+
+    def text_runner(role, prompt, tools, system_prompt):
+        captured["role"] = role
+        captured["prompt"] = prompt
+        return json.dumps(
+            {
+                "status": "partial_failure",
+                "reason": "control endpoint was not assessed",
+                "instructions": "Request the control endpoint and store a status-coded artifact.",
+            }
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=text_runner,
+    )
+
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task)
+
+    assert captured["role"] == "task_evaluator"
+    assert decision.status == "partial_failure"
+    assert decision.reason == "control endpoint was not assessed"
+    assert decision.instructions == "Request the control endpoint and store a status-coded artifact."
     assert "Satisfying the phase or operation objective does not make this task done" in captured["prompt"]
 
 

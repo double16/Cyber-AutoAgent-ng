@@ -2,22 +2,12 @@
 
 ### Features
 
-- Add typed observation, knowledge, finding-submission, and finding-validation tools with dedicated Ink and headless
-  terminal displays and one verification task per finding.
-- Add read-only, operation-scoped artifact access for evaluators and report agents.
-- Add configurable task execution actor/critic cycles that retain the task-executor conversation and stop early on
-  evaluator approval.
 - Add executable target registries and per-task target scopes so logical `--target` names can coexist with concrete
   URLs, hosts, CIDRs, and filesystem paths from the objective.
 - Add deterministic final-report target coverage showing task, verified-finding, and validation-failure counts by
   executable target.
-- Validate executor-created future-phase follow-ups against named plan criteria and resume continued operations from
-  their earliest actionable incomplete phase.
-- Add configurable actor/critic refinement for task execution prompts and mark tasks `partial_failure` when an approved prompt cannot be built.
-- Add configurable actor/critic refinement for initial plan generation, persisting only critic-approved plans.
-- Infer durable operation constraints during plan generation and enforce them during task planning and evaluation.
 - Rename the React terminal `/plugins` command to `/modules`.
-- Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation.
+- Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation. Actor/critic refinement for improved quality.
 - Add interactive React terminal `continue` and `report` commands for previous operations.
 - Add readline-style editing shortcuts to the React terminal command entry.
 - Move React thinking/spinner status into a persistent footer line above the existing metrics footer.
@@ -32,43 +22,12 @@
 
 ### Fixes
 
-- Show WorkflowInvariantError termination messages in the React terminal termination panel.
-- Include full failed-command help in shell recovery prompts so executors can correct invalid options without
-  rediscovering syntax.
-- Treat curl responses with captured status codes as interpretable negative evidence while keeping silent no-status
-  requests from proving endpoint absence.
-- Preserve explicit URL scheme and port scope in workflow and web-module prompts so service-specific targets are not
-  treated as host-wide or all-port scan authorization.
-- Stop task creators and executors immediately after their required tool sequence, and repair small-model
-  `tool_use(tool_name=..., parameters=...)` wrappers only when the nested tool is registered.
-- Stop task executors from treating correctable tool failures as successful evidence, allow one bounded correction in
-  the retained conversation, and block evidence/task writes until the failure is resolved.
-- Keep pending finding-validation tasks ahead of standard work and prevent advisory phase checkpoints from closing
-  phases while tasks remain unresolved.
-- Require `store_finding` submissions to include existing artifact evidence and concrete observed behavior before
-  creating verification tasks.
-- Make shell command batches fail when any command fails and remove the ambiguous `ignore_errors` option.
-- Avoid thread-unsafe PTY forks when the non-interactive shell executes multiple commands in parallel on macOS.
 - Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.
-- Keep terminal memory and evidence counters aligned with typed storage events, including explicit zero values and
-  validation-only memory operations.
-- Emit assessment completion only when the persisted workflow plan is complete.
-- Put the exact `create_tasks` payload shape in its tool description to improve local-model argument compliance.
-- Allow task prompt builders to select overlapping native tools and shell commands without critic rejection.
-- Display structured termination reasons and messages in React terminal auto-run output.
-- Enforce proportional workflow phase budget targets as hard caps before task execution, activation, or creation.
-- Align operation-plugin execution and termination prompts with the Python-owned workflow, explicit module access
-  boundaries, evidence categories, and policy-directed plan creation.
-- Show the exact workflow invariant failure message in operation termination events.
-- Reject unregistered agent tool calls instead of automatically executing them as shell commands.
 - Stop active XBOW benchmark containers when the benchmark runner is interrupted with Ctrl-C.
 - Show final report progress labels as the React terminal thinking task title while reporting.
 - Skip public OSINT recon tools for non-public hostnames in `specialized_recon_orchestrator`.
 - Bound React inline final-report file reads to a preview so very large reports cannot spike heap on operation completion or exit.
-- Avoid LiteLLM async logging queue cross-event-loop errors when model calls run from thread-pool event loops.
-- Reserve estimated final-report token and cost budget during assessment so constrained runs stop early enough to generate reports.
 - Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.
-- Update the React footer connection indicator from deployment detection and color the status icon.
 - Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.
 
 ## v0.9.0

@@ -21,7 +21,7 @@ The workflow controller creates focused agents as needed:
 |------|---------|-----------------------------|
 | `plan_creator` | Create or revise an initial high-level plan | No; returns structured plan data for Python to store |
 | `plan_critic` | Approve a proposed plan or return actionable revision feedback | No |
-| `task_creator` | Create concrete tasks for current and future phases | May call `create_tasks` only |
+| `task_creator` | Create concrete tasks for the current phase | May call `create_tasks` only |
 | `task_prompt_builder` | Build a task-specific execution prompt and select applicable memory/tools | No |
 | `task_prompt_critic` | Approve a proposed task prompt or return actionable revision feedback | No |
 | `task_executor` | Execute one active task objective | May call `create_tasks` for follow-up work |
@@ -38,8 +38,9 @@ The task creator receives a deterministic controller-owned prompt and payload co
 non-empty `title` and `objective`; supported optional fields are `phase`, `status`, and `evidence`. Context belongs in
 the objective rather than an unsupported `context` or `description` field. The controller permits one bounded repair
 attempt when an empty phase receives no durable tasks, and it never retries after tasks are successfully stored.
-Valid future-phase IDs are preserved so useful follow-up work can be planned early. Missing, malformed, or nonexistent
-phase IDs default to the active phase, as do IDs for phases earlier than the active phase.
+Task-creator output is scoped to the active phase; any newly created task assigned to another phase is reclassified to
+the active phase without changing pre-existing queued work. Executor-created follow-up tasks may still request future
+phases, where the controller validates assignments against phase criteria.
 
 Agents also do not have a stop tool. Operation completion is a Python workflow decision; the controller emits a `termination_reason` event with reason `complete`.
 
@@ -222,7 +223,7 @@ Task creation still uses the `create_tasks` tool so agents can turn discoveries 
 
 - create one task per distinct actionable thread
 - use `status=pending`
-- set `phase` explicitly when known; missing or invalid values use the current plan phase
+- task creators must omit `phase` or set it to the current phase; missing or invalid values use the current plan phase
 - include evidence paths where available
 - do not create duplicates
 - do not reduce task coverage based only on likelihood or convenience
@@ -242,8 +243,15 @@ Task and phase closure is evaluator-driven but Python-applied.
 `task_evaluator` returns:
 
 ```json
-{"status": "done|partial_failure|blocked", "reason": "short evidence-based reason"}
+{
+  "status": "done|partial_failure|blocked",
+  "reason": "short evidence-based reason",
+  "instructions": "prescriptive next-cycle guidance"
+}
 ```
+
+The controller uses `instructions` only as critic guidance when another task-executor cycle is available. It does not
+persist instructions as task state or emit them in task completion events.
 
 `phase_evaluator` returns:
 

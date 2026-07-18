@@ -22,7 +22,7 @@ The controller creates agents for specific jobs:
 
 - **plan_creator**: creates or revises an initial high-level plan and infers operation-wide constraints
 - **plan_critic**: reviews an initial plan and either approves it or returns actionable revision feedback
-- **task_creator**: creates concrete current- and future-phase tasks from a deterministic controller prompt
+- **task_creator**: creates concrete current-phase tasks from a deterministic controller prompt
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
 - **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
