@@ -254,15 +254,15 @@ class WorkflowStateStore:
         if resume_phase is None:
             return plan
 
-        phases = [
-            PlanPhase(
-                id=phase.id,
-                title=phase.title,
-                status="active" if phase.id == resume_phase.id else phase.status,
-                criteria=phase.criteria,
-            )
-            for phase in plan.phases
-        ]
+        reopened_phase_ids = actionable_phase_ids or {resume_phase.id}
+        phases = []
+        for phase in plan.phases:
+            status = phase.status
+            if phase.id == resume_phase.id:
+                status = "active"
+            elif phase.id in reopened_phase_ids or phase.status == "active":
+                status = "pending"
+            phases.append(PlanPhase(id=phase.id, title=phase.title, status=status, criteria=phase.criteria))
         return self.store_plan(OperationPlan(
             objective=plan.objective,
             current_phase=resume_phase.id,
@@ -361,6 +361,24 @@ class WorkflowStateStore:
             objective=task.objective,
             phase=task.phase,
             status=status,
+            status_reason=reason,
+            evidence=task.evidence,
+            created_at=task.created_at,
+            kind=task.kind,
+            reference_id=task.reference_id,
+            target_scope=task.target_scope,
+            target_ids=task.target_ids,
+        ))
+
+    def defer_task(self, task: Task, reason: str = "") -> Task:
+        """Return interrupted task work to the pending queue for a later continuation."""
+
+        return self.store_task(Task(
+            task_uid=task.task_uid,
+            title=task.title,
+            objective=task.objective,
+            phase=task.phase,
+            status="pending",
             status_reason=reason,
             evidence=task.evidence,
             created_at=task.created_at,
@@ -616,7 +634,7 @@ class MultiAgentWorkflowController:
     def _task_execution_cycle_count(self) -> int:
         config_manager = self.runtime.config_manager
         if config_manager:
-            return max(1, config_manager.getenv_int("CYBER_WORKFLOW_TASK_EXECUTION_CYCLES", 2))
+            return max(1, config_manager.getenv_int("CYBER_WORKFLOW_TASK_EXECUTION_CYCLES", 3))
         return 2
 
     def run(self) -> None:
@@ -1209,6 +1227,26 @@ Return exactly one decision for each candidate.
             event["finding_resolution"] = str(finding_resolution)
         self._emit_workflow_event(event)
 
+    def _emit_task_deferred(self, task: Task) -> None:
+        task_uid = str(task.task_uid or "").strip()
+        if not task_uid:
+            return
+        event = {
+            "type": "task_deferred",
+            "task_uid": task_uid,
+            "title": str(task.title or ""),
+            "status": "pending",
+            "status_reason": str(task.status_reason or ""),
+        }
+        if task.target_scope != "all" or task.target_ids:
+            event["target_scope"] = task.target_scope
+            event["target_ids"] = list(task.target_ids)
+        if task.kind and task.kind != "standard":
+            event["task_kind"] = str(task.kind)
+        if task.reference_id:
+            event["reference_id"] = str(task.reference_id)
+        self._emit_workflow_event(event)
+
     def _emit_workflow_event(self, event: Dict[str, Any]) -> None:
         emit_ui_event = getattr(self.runtime.callback_handler, "emit_ui_event", None)
         if not callable(emit_ui_event):
@@ -1285,15 +1323,17 @@ Return exactly one decision for each candidate.
         if not isinstance(prompt, str) or not prompt.strip():
             raise TaskPromptBuildError("task prompt must be a non-empty string")
 
+        core_names = {get_tool_name(tool) for tool in self.runtime.core_tools_list}
         optional_names = {get_tool_name(tool) for tool in self.runtime.optional_tools_list}
         selected_tools = self._validated_selection_list(prompt_spec.get("tools", []), "tools")
         selected_shell_commands = self._validated_selection_list(
             prompt_spec.get("shell_commands", []),
             "shell_commands",
         )
-        selected_tools = [name for name in selected_tools if name not in TASK_PROMPT_IGNORED_SHELL_COMMANDS]
+        ignored_selection_names = TASK_PROMPT_IGNORED_SHELL_COMMANDS | core_names
+        selected_tools = [name for name in selected_tools if name not in ignored_selection_names]
         selected_shell_commands = [
-            name for name in selected_shell_commands if name not in TASK_PROMPT_IGNORED_SHELL_COMMANDS
+            name for name in selected_shell_commands if name not in ignored_selection_names
         ]
         available_specs = self._available_shell_command_specs()
         available_commands = {str(spec["command"]) for spec in available_specs}
@@ -1305,7 +1345,7 @@ Return exactly one decision for each candidate.
         ]
         if unknown_tools:
             raise TaskPromptBuildError(
-                "task prompt tools contains unknown, core-only, or unavailable selection(s): "
+                "task prompt tools contains unknown or unavailable selection(s): "
                 + ", ".join(unknown_tools)
             )
 
@@ -1418,18 +1458,20 @@ Return exactly one decision for each candidate.
     ) -> OperationPlan:
         """Stop phase work at its budget boundary, classify it, and advance."""
 
-        unresolved_tasks = self.state.list_tasks(phase=phase.id, status=["active", "pending"])
-        for active_task in unresolved_tasks:
-            reason = f"Phase budget hard cap reached at {progress:.2f}% (cap {phase_cap:.2f}%)"
+        active_tasks = self.state.list_tasks(phase=phase.id, status=["active"])
+        for active_task in active_tasks:
+            reason = (
+                f"Phase budget hard cap reached at {progress:.2f}% (cap {phase_cap:.2f}%); "
+                "task deferred until continuation"
+            )
             self._log_workflow(
-                "closing unresolved task at phase hard cap task=%s progress=%.2f cap=%.2f",
+                "deferring active task at phase hard cap task=%s progress=%.2f cap=%.2f",
                 self._task_label(active_task),
                 progress,
                 phase_cap,
             )
-            updated_task = self.state.mark_task(active_task, "partial_failure", reason)
-            resolution = finalize_finding_validation(updated_task, "partial_failure", reason)
-            self._emit_task_done(updated_task, finding_resolution=resolution)
+            deferred_task = self.state.defer_task(active_task, reason)
+            self._emit_task_deferred(deferred_task)
 
         try:
             decision = self._evaluate_phase_with_policy(plan, phase, hard_cap=phase_cap)

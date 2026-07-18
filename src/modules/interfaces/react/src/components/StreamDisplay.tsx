@@ -84,6 +84,7 @@ export type AdditionalStreamEvent =
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
   | { type: 'task_started'; task_uid?: string; title?: string; status?: string; task_kind?: string; reference_id?: string; [key: string]: any }
   | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; finding_resolution?: string; [key: string]: any }
+  | { type: 'task_deferred'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; [key: string]: any }
   | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; message?: string; [key: string]: any };
 
 // Combined event type supporting both SDK-aligned and additional events
@@ -731,6 +732,18 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       return (
         <Box marginLeft={2}>
           <Text color={color}>{`${label}${suffix}${detail}`}</Text>
+        </Box>
+      );
+    }
+
+    case 'task_deferred': {
+      const title = String((event as any).title || '').trim();
+      const statusReason = String((event as any).status_reason || '').trim();
+      const suffix = title ? ` ${title}` : '';
+      const detail = statusReason ? `: ${statusReason}` : '';
+      return (
+        <Box marginLeft={2}>
+          <Text color="yellow">{`TASK DEFERRED${suffix}${detail}`}</Text>
         </Box>
       );
     }

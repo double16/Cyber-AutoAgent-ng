@@ -182,6 +182,22 @@ class FakeState:
             reference_id=task.reference_id,
         ))
 
+    def defer_task(self, task, reason=""):
+        return self.store_task(Task(
+            task_uid=task.task_uid,
+            title=task.title,
+            objective=task.objective,
+            phase=task.phase,
+            status="pending",
+            status_reason=reason,
+            evidence=task.evidence,
+            created_at=task.created_at,
+            kind=task.kind,
+            reference_id=task.reference_id,
+            target_scope=task.target_scope,
+            target_ids=task.target_ids,
+        ))
+
     def reassign_task_phase(self, task, phase_id):
         return self.store_task(Task(
             task_uid=task.task_uid,
@@ -643,7 +659,7 @@ def test_task_execution_reuses_session_and_stops_when_critic_approves():
     assert "## Task Critic Guidance" in actor_prompts[1]
     assert "remaining endpoint lacks evidence" in actor_prompts[1]
     assert "Run endpoint validation and store the artifact path." in actor_prompts[1]
-    assert "actor cycle 2 of\n2" in actor_prompts[1]
+    assert "actor cycle 2 of\n3" in actor_prompts[1]
     assert "Cycle 1: actor result 1" in evaluator_prompts[1]
     assert "Cycle 2: actor result 2" in evaluator_prompts[1]
     assert lifecycle == [
@@ -1359,7 +1375,7 @@ def test_controller_emits_task_started_when_activating_pending_task():
     ]
 
 
-def test_controller_closes_phase_before_pending_task_when_hard_budget_cap_reached():
+def test_controller_closes_phase_but_preserves_pending_task_when_hard_budget_cap_reached():
     calls = []
     state = FakeState(
         _plan(),
@@ -1387,11 +1403,12 @@ def test_controller_closes_phase_before_pending_task_when_hard_budget_cap_reache
     assert calls == ["phase_evaluator"]
     assert state.plan.assessment_complete is True
     assert state.plan.phases[0].status == "partial_failure"
-    assert state.tasks[0].status == "partial_failure"
+    assert state.tasks[0].status == "pending"
+    assert not any(event["type"] in ("task_done", "task_deferred") for event in controller.runtime.callback_handler.events)
     assert controller.runtime.callback_handler.termination_events[0][0] == "complete"
 
 
-def test_phase_hard_cap_closes_active_task_without_running_worker_and_advances():
+def test_phase_hard_cap_defers_active_task_without_running_worker_and_advances():
     calls = []
     plan = OperationPlan(
         objective="assess",
@@ -1428,18 +1445,16 @@ def test_phase_hard_cap_closes_active_task_without_running_worker_and_advances()
     assert calls == ["phase_evaluator"]
     assert state.plan.phases[0].status == "done"
     assert state.plan.phases[1].status == "active"
-    assert next(task for task in state.tasks if task.task_uid == "active").status == "partial_failure"
-    assert next(task for task in state.tasks if task.task_uid == "pending").status == "partial_failure"
+    assert next(task for task in state.tasks if task.task_uid == "active").status == "pending"
+    assert next(task for task in state.tasks if task.task_uid == "pending").status == "pending"
     assert controller.runtime.callback_handler.events[0] == {
-        "type": "task_done",
+        "type": "task_deferred",
         "task_uid": "active",
         "title": "Active",
-        "status": "partial_failure",
+        "status": "pending",
         "status_reason": next(task for task in state.tasks if task.task_uid == "active").status_reason,
     }
-    assert controller.runtime.callback_handler.events[1]["task_uid"] == "pending"
-    assert controller.runtime.callback_handler.events[1]["status"] == "partial_failure"
-    plan_event = controller.runtime.callback_handler.events[2]
+    plan_event = controller.runtime.callback_handler.events[1]
     assert "[done] 1. Recon" in plan_event["content"]
     assert "[active] 2. Validate" in plan_event["content"]
     assert plan_event["metadata"] == {
@@ -1450,6 +1465,39 @@ def test_phase_hard_cap_closes_active_task_without_running_worker_and_advances()
         "total_phases": 3,
         "assessment_complete": False,
     }
+
+
+def test_phase_hard_cap_defers_finding_validation_without_resolving_it(monkeypatch):
+    task = Task(
+        task_uid="validation",
+        title="Verify finding",
+        objective="validate",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(_plan(), tasks=[task])
+    monkeypatch.setattr(
+        workflow_mod,
+        "finalize_finding_validation",
+        lambda *args: pytest.fail("deferred validation must not be finalized"),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(progress=100),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: '{"status":"partial_failure","reason":"phase capped"}',
+        work_runner=lambda *args: pytest.fail("capped task work must not run"),
+        max_iterations=1,
+    )
+
+    controller.run()
+
+    assert state.tasks[0].status == "pending"
+    assert controller.runtime.callback_handler.events[0]["type"] == "task_deferred"
+    assert controller.runtime.callback_handler.events[0]["task_kind"] == "finding_validation"
+    assert controller.runtime.callback_handler.events[0]["reference_id"] == "finding-1"
 
 
 @pytest.mark.parametrize("response", ['{"status":"continue","reason":"keep going"}', "not json"])
@@ -1477,7 +1525,7 @@ def test_phase_hard_cap_falls_back_to_partial_failure_for_nonterminal_evaluation
 
     assert calls == ["phase_evaluator"]
     assert state.plan.phases[0].status == "partial_failure"
-    assert state.tasks[0].status == "partial_failure"
+    assert state.tasks[0].status == "pending"
 
 
 def test_advisory_checkpoint_can_continue_below_phase_hard_cap():
@@ -2700,7 +2748,31 @@ def test_task_prompt_spec_reclassifies_optional_tools_when_shell_is_unavailable(
     assert normalized["shell_commands"] == []
 
 
-def test_task_prompt_spec_rejects_runtime_supplied_core_tools():
+def test_task_prompt_spec_filters_runtime_supplied_core_tools_from_both_selection_fields():
+    runtime = _runtime()
+    runtime.core_tools_list.extend([_tool("read_artifact"), _tool("store_observation")])
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Store", objective="Store evidence", phase=1, status="pending")
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Store evidence",
+            "tools": ["read_artifact", "shell", "store_observation", "mcp_scan"],
+            "shell_commands": ["shell", "store_observation", "module_probe"],
+        },
+        task,
+    )
+
+    assert normalized["tools"] == ["mcp_scan", "module_probe"]
+    assert normalized["shell_commands"] == []
+
+
+def test_task_prompt_spec_still_rejects_unknown_tools_after_filtering_core_tools():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -2709,9 +2781,13 @@ def test_task_prompt_spec_rejects_runtime_supplied_core_tools():
     )
     task = Task(task_uid="task", title="Store", objective="Store evidence", phase=1, status="pending")
 
-    with pytest.raises(workflow_mod.TaskPromptBuildError, match="core-only.*store_observation"):
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="unknown or unavailable.*mystery-tool"):
         controller._normalize_task_prompt_spec(
-            {"prompt": "Store evidence", "tools": ["store_observation"], "shell_commands": []},
+            {
+                "prompt": "Store evidence",
+                "tools": ["store_observation", "mystery-tool"],
+                "shell_commands": [],
+            },
             task,
         )
 
@@ -3337,7 +3413,10 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
     assert store.list_tasks(phase=2, status=["pending"]) == [task]
     active_task = store.activate_task(task)
     assert active_task.status == "active"
-    done_task = store.mark_task(active_task, "partial_failure", "soft cap")
+    deferred_task = store.defer_task(active_task, "hard cap")
+    assert deferred_task.status == "pending"
+    assert deferred_task.status_reason == "hard cap"
+    done_task = store.mark_task(store.activate_task(deferred_task), "partial_failure", "soft cap")
     assert done_task.status == "partial_failure"
     assert done_task.status_reason == "soft cap"
 
@@ -3345,6 +3424,57 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
         store.mark_phase(activated_phase, 2, "active")
     with pytest.raises(ValueError, match="task status"):
         store.mark_task(task, "pending")
+
+
+def test_state_store_reopens_all_actionable_phases_in_plan_order(monkeypatch):
+    stored = {
+        "plan": OperationPlan(
+            objective="assess",
+            current_phase=3,
+            total_phases=3,
+            phases=[
+                PlanPhase(id=1, title="Recon", status="done"),
+                PlanPhase(id=2, title="Validate", status="partial_failure"),
+                PlanPhase(id=3, title="Exploit", status="blocked"),
+            ],
+            assessment_complete=True,
+        ),
+        "tasks": [
+            Task(task_uid="terminal", title="Done", objective="done", phase=1, status="done", created_at="1"),
+            Task(task_uid="first", title="Resume validation", objective="resume", phase=2, status="pending", created_at="2"),
+            Task(task_uid="second", title="Resume exploit", objective="resume", phase=3, status="pending", created_at="3"),
+        ],
+    }
+
+    class Client:
+        def get_active_plan(self, operation_id=None):
+            return stored["plan"]
+
+        def store_plan(self, plan, operation_id=None):
+            stored["plan"] = plan
+
+        def list_tasks(self, phase=None, status=None):
+            tasks = stored["tasks"]
+            if phase is not None:
+                tasks = [task for task in tasks if task.phase == phase]
+            if status:
+                tasks = [task for task in tasks if task.status in status]
+            return tasks
+
+    monkeypatch.setattr(workflow_mod, "get_memory_client", lambda silent=True: Client())
+    store = WorkflowStateStore("OP_TEST")
+
+    reopened = store.reopen_plan(stored["plan"])
+
+    assert reopened.current_phase == 2
+    assert reopened.assessment_complete is False
+    assert [phase.status for phase in reopened.phases] == ["done", "active", "pending"]
+
+    advanced = store.mark_phase(reopened, 2, "done")
+
+    assert advanced.current_phase == 3
+    assert advanced.assessment_complete is False
+    assert [phase.status for phase in advanced.phases] == ["done", "done", "active"]
 
 
 def test_state_store_does_not_reopen_completed_plan_without_actionable_work(monkeypatch):

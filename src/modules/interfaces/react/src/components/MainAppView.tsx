@@ -141,7 +141,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
     if (eventType === 'task_started') {
       const title = typeof event?.title === 'string' ? event.title.trim() : '';
       setCurrentTaskTitle(title ? `${title}${formatTaskScope(event)}` : null);
-    } else if (eventType === 'task_done') {
+    } else if (eventType === 'task_done' || eventType === 'task_deferred') {
       setCurrentTaskTitle(null);
     }
     if (hasStreamBegunRef.current) return;

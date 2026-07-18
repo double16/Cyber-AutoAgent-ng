@@ -82,6 +82,7 @@ from modules.config.types import (
 )
 from modules.handlers.base import BudgetLimitReached, is_docker
 from modules.handlers.react import AgentEventHandler
+from modules.handlers.tool_repeat_guard import REPEATED_TOOL_LOOP_STATE_KEY
 from modules.handlers.utils import (
     Colors,
     dumpstacks,
@@ -464,6 +465,22 @@ def run_agent_until_terminal_state(
 
             logger.debug("Agent result: %r", result)
             process_agent_metrics(agent_callback_handler, result)
+
+            result_state = getattr(result, "state", {})
+            repeated_tool_loop = (
+                result_state.get(REPEATED_TOOL_LOOP_STATE_KEY)
+                if isinstance(result_state, dict)
+                else None
+            )
+            if isinstance(repeated_tool_loop, dict):
+                tool_name = str(repeated_tool_loop.get("tool_name", "unknown"))
+                repeat_count = int(repeated_tool_loop.get("repeat_count", 0) or 0)
+                message = (
+                    f"Stopped agent after {repeat_count} consecutive identical calls to {tool_name}; "
+                    "the latest completed result was reused."
+                )
+                logger.warning(message)
+                return AgentRunResult("repeated_tool_loop", message)
 
             tool_total_count = sum(agent_callback_handler.tool_counts.values())
             if tool_total_count > last_tool_call_count:

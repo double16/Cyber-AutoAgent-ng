@@ -117,7 +117,8 @@ The controller runs this loop:
 1. Load the current plan.
 2. If no plan exists, run `plan_creator`, then apply the configured critic/revision cycle before storing an approved
    plan. A final critic rejection fails the workflow without persisting the draft.
-3. If a plan was previously marked complete at startup, reopen it by making phase 1 active and later phases pending.
+3. If a plan was previously marked complete at startup, reopen the earliest phase with active or pending tasks and
+   mark later phases with actionable tasks pending.
 4. Ensure exactly one active phase, or mark the plan complete if all phases are terminal.
 5. If an active task exists for the active phase, run it first.
 6. If no active task exists, choose the next pending task unless the phase is at or beyond its soft budget cap.
@@ -139,7 +140,7 @@ critic reviews. Setting it to `0` uses the initial builder output without critiq
 builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
 evaluator are not invoked for that task.
 
-Task execution actor/critic cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to two
+Task execution actor/critic cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three
 executor/evaluator passes and has a minimum of one. Each evaluator is short-lived, while the task-executor agent and
 conversation are retained across passes. Only `done` is approval; a final `partial_failure` or `blocked` verdict is
 persisted unchanged.
@@ -169,16 +170,30 @@ Budget progress is distributed across phases using mandatory proportional caps:
 phase_cap = phase_id / total_phases * 100
 ```
 
-When a phase reaches its cap, the controller performs no more task work for that phase. An active task is marked
-`partial_failure`, pending tasks remain pending, and `phase_evaluator` must return `done`, `partial_failure`, or
-`blocked` before Python advances the plan. If terminal evaluation fails, Python closes the phase as `partial_failure`
-so the cap cannot be bypassed.
+When a phase reaches its cap, the controller performs no more task work for that phase. An active task returns to
+`pending` with a hard-cap deferral reason, existing pending tasks remain pending, and `phase_evaluator` must return
+`done`, `partial_failure`, or `blocked` before Python advances the plan. Task deferral emits `task_deferred`; it does
+not emit `task_done` or finalize a pending finding validation as failed. If terminal evaluation fails, Python closes
+the phase as `partial_failure` so the current run still advances to later phases.
+
+On continuation, phases containing deferred work reopen in plan order. The earliest actionable phase becomes active,
+later actionable phases become pending, and the normal phase transition processes all of them within the continued
+run's new budget.
+
+```mermaid
+stateDiagram-v2
+    active_task --> pending_task: phase hard cap / task_deferred
+    active_phase --> terminal_phase: terminal phase evaluation
+    terminal_phase --> active_phase: continuation with pending tasks
+    pending_task --> active_task: resumed execution
+```
 
 The controller also tracks advisory budget checkpoints at 20%, 40%, 60%, 80%, and 90%. Below the phase cap, crossing
 a checkpoint asks the phase evaluator whether continuing the current phase is still the best use of remaining budget.
 These checkpoints may return `continue` and are not injected as prompt instructions.
 
-This design prefers reaching all phases and leaving some tasks pending over spending too much budget on one phase.
+This design prefers reaching all phases and deferring unfinished tasks for an explicitly continued operation over
+spending too much of the current run's budget on one phase.
 
 ## Tool Policy
 
@@ -202,7 +217,8 @@ Selection happens in two passes:
 1. Python narrows candidates based on objective, phase/task context, available tools, MCP metadata, and memories.
 2. A prompt-builder agent sees separate `core_tools` and `optional_tools` TOON catalogs, then selects the final
    applicable optional tools and memory references. Core capabilities are supplied automatically and are not returned
-   in the prompt-builder's `tools` selection.
+   in the prompt-builder's `tools` selection. If a model nevertheless returns a core tool in either selection field,
+   workflow normalization silently removes it because the executor already receives that tool.
 
 When shell is available, the prompt-builder also receives a compact `shell_commands` TOON catalog containing installed
 command names, bounded descriptions, capabilities, and shell-only preferred/fallback metadata. The builder may select

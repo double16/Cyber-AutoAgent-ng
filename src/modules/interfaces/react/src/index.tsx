@@ -486,6 +486,14 @@ const runAutoAssessment = async () => {
                     break;
             }
         }
+        else if (event.type === 'task_deferred') {
+            const eventTitle = event.title || lastTaskTitle;
+            const reason = typeof event.status_reason === 'string' && event.status_reason.trim()
+              ? `: ${event.status_reason.trim()}`
+              : '';
+            lastTaskTitle = "";
+            loggingService.info(`⏸ Task ${eventTitle ? `"${eventTitle}" ` : ''}deferred${reason}`);
+        }
       });
 
       const result = await handle.result;

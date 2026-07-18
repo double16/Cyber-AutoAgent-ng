@@ -321,7 +321,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_SDK_CONTEXT_MANAGER`                        | Strands context facade (`auto`, `agentic`, `false`)        | No (default: `false`)          |
 | `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `2`)              |
 | `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `2`)              |
-| `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum executor/evaluator passes per task                 | No (default: `2`, minimum `1`) |
+| `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum executor/evaluator passes per task                 | No (default: `3`, minimum `1`) |
 | `AWS_ACCESS_KEY_ID`                                | AWS credentials for Bedrock                                | For Bedrock provider           |
 | `AWS_SECRET_ACCESS_KEY`                            | AWS credentials for Bedrock                                | For Bedrock provider           |
 | `AWS_REGION`                                       | AWS region (default: us-east-1)                            | For Bedrock provider           |

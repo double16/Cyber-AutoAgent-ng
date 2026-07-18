@@ -1238,11 +1238,18 @@ def record_finding_validation(
         raise ValueError("Finding validation may only be recorded by its active verification task")
 
     normalized_outcome = str(outcome).strip().lower()
+    # be lenient with outcome
+    if normalized_outcome in {"verified"}:
+        normalized_outcome = "confirmed"
+    if normalized_outcome in {"not_verified"}:
+        normalized_outcome = "not_confirmed"
     if normalized_outcome not in {"confirmed", "not_confirmed"}:
         raise ValueError("outcome must be confirmed or not_confirmed")
+
     strategy = str(evidence_strategy).strip().lower()
     if strategy not in {"direct", "differential"}:
         raise ValueError("evidence_strategy must be direct or differential")
+
     evidence = _validated_artifact_paths(evidence_artifacts, require_one=normalized_outcome == "confirmed")
     controls = _validated_artifact_paths(control_artifacts)
     if normalized_outcome == "confirmed" and strategy == "differential" and not controls:

@@ -66,6 +66,11 @@ from modules.handlers.conversation_budget import (
 )
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.tool_recovery import TaskFailureRecoveryHook
+from modules.handlers.tool_repeat_guard import (
+    DEFAULT_TOOL_REPEAT_THRESHOLD,
+    ToolRepeatGuardHook,
+    normalize_tool_repeat_threshold,
+)
 from modules.handlers.tool_router import ToolRouterHook
 from modules.handlers.utils import (
     get_tool_name,
@@ -812,6 +817,19 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     tool_call_repair_hook = AgentRepairHook()
 
+    repeat_threshold = normalize_tool_repeat_threshold(
+        config_manager.getenv_int(
+            "CYBER_TOOL_REPEAT_THRESHOLD",
+            DEFAULT_TOOL_REPEAT_THRESHOLD,
+        )
+    )
+    if repeat_threshold == 0:
+        tool_repeat_guard_hook = None
+        agent_logger.info("Repeated tool-call guard disabled")
+    else:
+        tool_repeat_guard_hook = ToolRepeatGuardHook(repeat_threshold)
+        agent_logger.info("Repeated tool-call guard threshold: %d", repeat_threshold)
+
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
 
     tool_router_hook = ToolRouterHook(
@@ -821,9 +839,18 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     ) if sdk_context_manager is None else None
 
     # hooks to include in agents, order is important
-    hooks: List[HookProvider] = list(filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
+    hooks: List[HookProvider] = list(
+        filter(
+            bool,
+            [tool_call_repair_hook, tool_repeat_guard_hook, tool_router_hook, react_hooks, prompt_budget_hook],
+        )
+    )
     subagent_hooks: List[HookProvider] = list(
-        filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
+        filter(
+            bool,
+            [tool_call_repair_hook, tool_repeat_guard_hook, tool_router_hook, react_hooks, prompt_budget_hook],
+        )
+    )
 
     # Update conversation window size and limits from SDK config
     try:

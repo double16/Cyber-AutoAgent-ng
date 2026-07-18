@@ -56,8 +56,9 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Execution results
-- `task_started` / `task_done`: Workflow lifecycle events; finding-validation tasks include their candidate reference
-  and final `verified` or `validation_failure` resolution
+- `task_started` / `task_deferred` / `task_done`: Workflow lifecycle events; deferred tasks return to the pending queue,
+  while completed finding-validation tasks include their candidate reference and final `verified` or
+  `validation_failure` resolution
 - `output`: User-visible text, including controller-owned plan creation and update snapshots
 - `reasoning`: Agent decision context
 - `metrics_update`: Operation-wide token, cost, duration, and budget progress, including reporting and evaluation usage

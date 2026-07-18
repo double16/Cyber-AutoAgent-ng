@@ -105,7 +105,7 @@ flowchart LR
     V -->|cycle limit reached| F[Persist final verdict]
 ```
 
-`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits total executor/evaluator passes and defaults to two, with a minimum of
+`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits total executor/evaluator passes and defaults to three, with a minimum of
 one. Evaluator guidance is sent back to the same executor instance so the next pass continues its existing
 conversation. Approval (`done`) short-circuits the loop; otherwise Python persists the last evaluator status.
 

@@ -103,6 +103,7 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'task_started', title: 'Enumerate target' },
       { type: 'task_started', title: 'Verify finding: IDOR', task_kind: 'finding_validation' },
       { type: 'thinking', context: 'reasoning', startTime: Date.now(), message: 'working' },
+      { type: 'task_deferred', title: 'Enumerate routes', status: 'pending', status_reason: 'Phase budget cap reached' },
       { type: 'task_done', title: 'Enumerate target', status: 'blocked', status_reason: 'Needs credentials' },
       {
         type: 'task_done',
@@ -151,6 +152,7 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('[RAGAS EVALUATION 2/5] Operation: Evidence Quality');
     expect(output).toContain('[RAGAS EVALUATION PREPARING] Report: Generate Reference Topics');
     expect(output).toContain('TASK BLOCKED Enumerate target: Needs credentials');
+    expect(output).toContain('TASK DEFERRED Enumerate routes: Phase budget cap reached');
     expect(output).toContain('VERIFYING FINDING IDOR');
     expect(output).toContain('FINDING VERIFIED IDOR: Direct evidence approved');
     expect(output).toContain('FINDING REQUIRES VALIDATION SQL injection: Control request missing');

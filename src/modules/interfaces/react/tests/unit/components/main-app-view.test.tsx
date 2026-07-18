@@ -47,6 +47,9 @@ jest.unstable_mockModule('../../../src/components/Terminal.js', () => ({
                 onEvent({type: 'task_done', title: 'Late task title'});
             }}>terminal:task-done</button>
             <button onClick={() => {
+                onEvent({type: 'task_deferred', title: 'Late task title'});
+            }}>terminal:task-deferred</button>
+            <button onClick={() => {
                 onEvent({type: 'output'});
                 onEvent({type: 'operation_complete'});
                 onThinkingUpdate({active: false});
@@ -248,6 +251,16 @@ describe('MainAppView', () => {
         });
 
         expect(textFromTree(view.toJSON())).toContain('footer::connected:tool_execution:');
+        expect(textFromTree(view.toJSON())).not.toContain('Late task title');
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:late-task'))!.props.onClick();
+        });
+        expect(textFromTree(view.toJSON())).toContain('Late task title');
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:task-deferred'))!.props.onClick();
+        });
         expect(textFromTree(view.toJSON())).not.toContain('Late task title');
     });
 

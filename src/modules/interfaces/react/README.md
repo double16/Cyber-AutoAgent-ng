@@ -152,7 +152,8 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 Event types handled by interface:
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Tool execution results
-- `task_started` / `task_done`: Workflow lifecycle events, including finding-validation resolution
+- `task_started` / `task_deferred` / `task_done`: Workflow lifecycle events; deferral keeps work pending for
+  continuation, while completion includes finding-validation resolution
 - `reasoning`: Agent decision-making context
 - `progress_update`: Progress boundary; `step` is internal sequence metadata and `progressPercent` is budget usage
 - `metrics_update`: Token usage, costs and budget usage
