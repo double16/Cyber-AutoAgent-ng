@@ -622,7 +622,7 @@ class MultiAgentWorkflowController:
     def _plan_refinement_iteration_count(self) -> int:
         config_manager = self.runtime.config_manager
         if config_manager:
-            return max(0, config_manager.getenv_int("CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS", 2))
+            return max(0, config_manager.getenv_int("CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS", 3))
         return 1
 
     def _task_prompt_refinement_iteration_count(self) -> int:

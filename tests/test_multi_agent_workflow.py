@@ -1727,7 +1727,7 @@ def test_plan_refinement_defaults_to_two_and_negative_values_disable_it():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert default_controller.plan_refinement_iterations == 2
+    assert default_controller.plan_refinement_iterations == 3
     assert disabled_controller.plan_refinement_iterations == 0
 
 
