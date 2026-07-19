@@ -1525,6 +1525,7 @@ review existing memories. Return only the requested JSON decision."""
         return f"{system_prompt}\n\n## Module Termination Policy\n{termination_policy}"
 
     def _create_tasks(self, plan: OperationPlan, phase: PlanPhase) -> None:
+        system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
         prompt = self._task_creator_prompt(plan, phase)
         tools = self._task_creator_tools()
         before_count = len(self.state.list_tasks(phase=phase.id))
@@ -1549,7 +1550,7 @@ review existing memories. Return only the requested JSON decision."""
             "task_creator",
             prompt,
             tools,
-            self.runtime.system_prompt,
+            system_prompt,
             run_policy,
         )
         self._reassign_new_task_creator_tasks_to_active_phase(phase, before_task_uids)
@@ -1566,7 +1567,7 @@ review existing memories. Return only the requested JSON decision."""
                 "task_creator",
                 self._task_creator_repair_prompt(plan, phase),
                 tools,
-                self.runtime.system_prompt,
+                system_prompt,
                 run_policy,
             )
             self._reassign_new_task_creator_tasks_to_active_phase(phase, before_task_uids)
@@ -1996,8 +1997,6 @@ Shell command selection guidance:
   capture such as `curl -sS -o /dev/null -w "%{{http_code}} %{{url_effective}}\\n" <url>` or
   `curl -sS -D - -o /dev/null <url>`. Do not rely on bare `curl -s <url>` as evidence because silent output can mean
   either no body or suppressed diagnostics.
-- Treat shell_preference as advisory ranking among command-line programs. It does not suppress an applicable selection
-  or make any selected method exclusive.
 - Do not select unrelated commands or reproduce command syntax in the generated prompt.
 - The selection is advisory, not exhaustive; the task-executor may discover other commands through tool_catalog.
 
@@ -2060,7 +2059,7 @@ selections than the executor may ultimately use, or omit an overlapping alternat
 exclusivity, or minimal-selection requirement. Reject a selection only when it has no reasonable relationship to the
 task.
 
-For assigned targets shaped as `scheme://host:port` or `host:port` netloc, reject drafts that convert the target to host-only form, ask for
+For assigned targets shaped as `scheme://host:port` or `host:port`, reject drafts that convert the target to host-only form, ask for
 all open ports, or select broad host/port enumeration such as omitted-port scans, `-p-`, `1-65535`, or host-wide
 scanners. Port-specific checks are acceptable only for the exact assigned port, and scheme-appropriate service tooling
 is preferred.
@@ -2317,14 +2316,13 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
 
     def _shell_command_catalog(self, specs: Optional[List[Dict[str, Any]]] = None) -> str:
         specs = self._available_shell_command_specs() if specs is None else specs
-        toon = f"shell_commands[{len(specs)}]{{command,description,capabilities,shell_preference}}:\n"
+        toon = f"shell_commands[{len(specs)}]{{command,description,capabilities}}:\n"
         for spec in specs:
             command = sanitize_toon_value(spec.get("command", ""))
             description = sanitize_toon_value(spec.get("description", ""))[:250]
             capabilities = spec.get("capabilities") or []
             capabilities_text = sanitize_toon_value(";".join(str(item) for item in capabilities))
-            preference = sanitize_toon_value(spec.get("shell_preference", ""))
-            toon += f"  {command},{description},{capabilities_text},{preference}\n"
+            toon += f"  {command},{description},{capabilities_text}\n"
         return toon
 
     def _failed_shell_command_help_context(self, failed_executable: str) -> str:
@@ -2339,7 +2337,7 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
         return """## Task Executor Contract (Controller-owned)
 Execute only the assigned task objective. Treat plan constraints and module access, safety, execution, evidence, and
 prohibition policies as mandatory guardrails. Operate only on the assigned target scope; do not touch unrelated
-targets even if the operation objective mentions them. For assigned targets shaped as `scheme://host:port` or `host:port` netloc, preserve
+targets even if the operation objective mentions them. For assigned targets shaped as `scheme://host:port` or `host:port`, preserve
 that exact scheme, host, and port boundary; do not convert it to host-only form, run omitted-port/all-port discovery,
 or scan other ports on the same host. Port-specific checks are acceptable only for the exact assigned port, and
 scheme-appropriate service tooling is preferred. Do not continue into adjacent tasks or later phase objectives. Store
@@ -2358,10 +2356,9 @@ perform them."""
 Use any supplied native tool, optional tool, or shell command suited to the assigned task. Multiple methods with
 overlapping capabilities may be used for validation, reproduction, coverage, convenience, or output-format needs.
 Selection makes a capability available; it neither mandates use nor makes another selected method exclusive.
-shell_preference is advisory ranking among shell commands and does not suppress applicable methods. For explicit
-`scheme://host:port` and `host:port` netloc URL targets, prefer scheme-appropriate service tooling and exact host:port checks; do not use
-host-wide scanners, omitted-port scans, all-port scans, or other broad enumeration unless a separate executable host or
-network target authorizes that scope."""
+For explicit `scheme://host:port` and `host:port` targets, prefer scheme-appropriate service tooling and
+exact host:port checks; do not use host-wide scanners, omitted-port scans, all-port scans, or other broad enumeration
+unless a separate executable host or network target authorizes that scope."""
 
     @staticmethod
     def _task_target_scope_text(plan: OperationPlan, task: Task) -> str:

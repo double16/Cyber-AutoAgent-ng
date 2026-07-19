@@ -24,10 +24,10 @@ def _get_cyber_tools() -> Dict[str, Any]:
     return env_config.get("cyber_tools", {})
 
 
-def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, Dict[str, Any]]:
+def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, List[str]]:
     """
     Returns command line tools:
-        capability -> preferred|fallback -> tools (list[str])
+        capability -> tools (list[str])
     """
     result = {}
     cyber_tools = _get_cyber_tools()
@@ -37,21 +37,11 @@ def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, Dict[str, Any]]:
         tool_cfg = cyber_tools.get(tool_name) or {}
         real_command = tool_cfg.get("command", tool_name)
 
-        pref_raw = tool_cfg.get("preference") or "fallback"
-        pref_raw = str(pref_raw).strip().lower()
-        pref = "preferred" if pref_raw.startswith("p") else "fallback"
-
         caps = tool_cfg.get("caps") or []
         if isinstance(caps, str):
             caps = [caps]
         for cap in caps:
-            if cap not in result:
-                result[cap] = {}
-            cap_dict = result.get(cap)
-            if pref not in cap_dict:
-                cap_dict[pref] = []
-            pref_list = cap_dict.get(pref)
-            pref_list.append(real_command)
+            result.setdefault(cap, []).append(real_command)
     return result
 
 
@@ -69,14 +59,11 @@ def get_shell_command_specs(available: List[str]) -> List[Dict[str, Any]]:
         capabilities = tool_cfg.get("caps") or []
         if isinstance(capabilities, str):
             capabilities = [capabilities]
-        preference = str(tool_cfg.get("preference") or "fallback").strip().lower()
-        preference = "preferred" if preference.startswith("p") else "fallback"
         specs.append(
             {
                 "command": command,
                 "description": str(tool_cfg.get("description") or ""),
                 "capabilities": [str(capability) for capability in capabilities],
-                "shell_preference": preference,
             }
         )
         seen_commands.add(command)
@@ -127,7 +114,6 @@ def _render_shell_command_help(shell_command: str, *, require_help: bool) -> str
     if not real_command:
         return ""
     description = str(tool_cfg.get("description", ""))
-    preference = str(tool_cfg.get("preference", ""))
     caps = tool_cfg.get("caps") or []
     if isinstance(caps, str):
         caps = [caps]
@@ -138,7 +124,6 @@ def _render_shell_command_help(shell_command: str, *, require_help: bool) -> str
 {_SEPARATOR}
 command: {real_command}
 capabilities: {", ".join(str(capability) for capability in caps)}
-shell_preference: {preference}
 
 {description}
 
@@ -184,8 +169,6 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
         How:
         - Search by keywords and prefer native agent tools over command-line programs for overlapping capabilities.
         - Use a command-line program only for a required additional capability or a concrete native-tool limitation.
-        - `shell_preference` ranks command-line programs only against other command-line programs.
-
         Args:
             keywords:
                 - None/empty: return full catalog.

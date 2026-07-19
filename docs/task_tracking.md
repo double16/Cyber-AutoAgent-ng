@@ -221,13 +221,13 @@ Selection happens in two passes:
    workflow normalization silently removes it because the executor already receives that tool.
 
 When shell is available, the prompt-builder also receives a compact `shell_commands` TOON catalog containing installed
-command names, bounded descriptions, capabilities, and shell-only preferred/fallback metadata. The builder may select
+command names, bounded descriptions, and capabilities. The builder may select
 every tool and command reasonably applicable to the task, including capabilities that overlap across native, optional,
 and shell methods. Overlap, apparent redundancy, and selection count are not critic rejection reasons; selection makes
-a capability available without requiring its use or excluding another method. `shell_preference` is advisory ranking
-among shell commands only. Selected commands do not restrict shell execution or replace runtime `tool_catalog`
-discovery. The builder should return optional tools in `tools` and command-line programs in `shell_commands`; workflow
-validation tolerates either selection list and normalizes recognized names into their correct runtime categories.
+a capability available without requiring its use or excluding another method. Selected commands do not restrict shell
+execution or replace runtime `tool_catalog` discovery. The builder should return optional tools in `tools` and
+command-line programs in `shell_commands`; workflow validation tolerates either selection list and normalizes
+recognized names into their correct runtime categories.
 
 Prompt-builder agents also receive compact task history. Successful tasks become useful context for prioritizing similar paths, while `partial_failure` and `blocked` tasks provide dead-end context so workers can pivot without rewriting module prompts on disk.
 

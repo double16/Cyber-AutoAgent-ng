@@ -158,7 +158,6 @@ class TestGetSystemPrompt:
 
         assert "Use any native tool, optional tool, or shell command applicable to the task" in prompt
         assert "Overlap between native tools, optional tools" in prompt
-        assert "shell_preference" in prompt
         assert "required capability absent from native tools" not in prompt
         assert "Medium confidence (50-80%) → Parallel shell" not in prompt
 

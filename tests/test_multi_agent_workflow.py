@@ -880,13 +880,11 @@ def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
                 "command": "httpx",
                 "description": "HTTP probe",
                 "capabilities": ["web_recon"],
-                "shell_preference": "preferred",
             },
             {
                 "command": "nmap",
                 "description": "Port scan",
                 "capabilities": ["network_scan"],
-                "shell_preference": "fallback",
             },
         ],
     )
@@ -2441,7 +2439,7 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "Overlapping capabilities are allowed" in prompt
     assert "Select any reasonably useful command working set" in prompt
     assert "no single-tool, exclusivity, minimal-selection, or redundancy requirement" in prompt
-    assert "does not suppress an applicable selection" in prompt
+    assert "Selection makes a command available; it does not require the executor to use it" in prompt
     assert "capability required by the task that supplied native tools do not provide" not in prompt
     assert "mandatory execution guardrail" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
@@ -2609,7 +2607,6 @@ def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
                 "command": "curl",
                 "description": "HTTP client for URL requests",
                 "capabilities": ["http_client"],
-                "shell_preference": "fallback",
             }
         ],
     )
@@ -2803,7 +2800,6 @@ def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
                 "command": "longscan",
                 "description": "line one,\n" + ("x" * 600),
                 "capabilities": ["scan", "validate"],
-                "shell_preference": "preferred",
             }
         ],
     )
@@ -2822,9 +2818,9 @@ def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
     catalog = prompt.split("## Candidate shell commands\n", maxsplit=1)[1]
     row = catalog.splitlines()[1]
 
-    assert catalog.startswith("shell_commands[1]{command,description,capabilities,shell_preference}:")
+    assert catalog.startswith("shell_commands[1]{command,description,capabilities}:")
     assert row.startswith("  longscan,line one;")
-    assert row.endswith(",scan;validate,preferred")
+    assert row.endswith(",scan;validate")
     description = row.split(",", maxsplit=2)[1]
     assert len(description) == 250
     assert "keys prompt, memory_ids, tools, shell_commands" in prompt
@@ -2844,7 +2840,7 @@ def test_shell_command_catalog_is_empty_without_shell_tool(monkeypatch):
     )
 
     assert controller._shell_command_catalog() == (
-        "shell_commands[0]{command,description,capabilities,shell_preference}:\n"
+        "shell_commands[0]{command,description,capabilities}:\n"
     )
 
 

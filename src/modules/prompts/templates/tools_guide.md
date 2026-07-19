@@ -8,8 +8,7 @@
 6. POC reuse → python_repl for prototype → if logic needed >2 times → editor+load_tool promotion
 
 **Core Rule**: Select and use capabilities based on task applicability. Overlap between native tools, optional tools,
-and shell commands is allowed and does not make any method exclusive. A command's `shell_preference` is advisory ranking
-among shell commands; it does not suppress an applicable method or rank capabilities across tool types.
+and shell commands is allowed and does not make any method exclusive.
 Save all artifacts to OPERATION ARTIFACTS DIRECTORY (path injected above).
 **Discovery Rule**: When choosing between tools or unsure what exists → `tool_catalog` first.
 
