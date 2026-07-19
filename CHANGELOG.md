@@ -25,6 +25,8 @@
 
 ### Fixes
 
+- Speed up `test_idor_specialist` by mocking `requests.request` in malformed-input coverage so tests do not perform real network calls.
+- Avoid real delays in `test_idor_specialist_evasion_flag` by monkeypatching `time.sleep` while still asserting sleep is invoked during evasion mode.
 - Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.
 - Stop active XBOW benchmark containers when the benchmark runner is interrupted with Ctrl-C.
 - Show final report progress labels as the React terminal thinking task title while reporting.
