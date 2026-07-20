@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import shlex
 from collections import deque
@@ -57,6 +59,16 @@ def _redacted_input(value: Any) -> Any:
     if isinstance(value, list):
         return [_redacted_input(item) for item in value]
     return value
+
+
+def _input_fingerprint(value: Any) -> str:
+    """Return a deterministic redacted fingerprint for tool input."""
+
+    try:
+        canonical = json.dumps(_redacted_input(value), sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        canonical = str(_redacted_input(value))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _result_text(result: Any) -> str:
@@ -211,6 +223,7 @@ class TaskFailureRecoveryHook(HookProvider):
         self.exhausted = False
         self.failed_tool_name = ""
         self.failed_executable = ""
+        self.failed_input_fingerprint = ""
         self.failed_output = ""
         self._diagnostic_used = False
         self._correction_attempted = False
@@ -228,12 +241,6 @@ class TaskFailureRecoveryHook(HookProvider):
         tool_id = str(tool_use.get("toolUseId", tool_use.get("_toolUseId", "")))
         tool_input = tool_use.get("input", {})
 
-        if tool_name in _MUTATING_TOOLS:
-            event.cancel_tool = (
-                "Resolve the correctable tool failure before creating tasks or storing durable evidence."
-            )
-            self._recovery_roles[tool_id] = "blocked"
-            return
         if self.exhausted:
             event.cancel_tool = "The task's single correction allowance has been exhausted."
             self._recovery_roles[tool_id] = "blocked"
@@ -241,13 +248,19 @@ class TaskFailureRecoveryHook(HookProvider):
         if self._is_read_only(tool_name):
             self._recovery_roles[tool_id] = "read_only"
             return
-        if self._is_correction(tool_name, tool_input):
-            if self._correction_attempted:
-                event.cancel_tool = "Only one corrected invocation is allowed for this task."
-                self._recovery_roles[tool_id] = "blocked"
-                return
-            self._correction_attempted = True
-            self._recovery_roles[tool_id] = "correction"
+        correction_status = self._correction_status(tool_name, tool_input)
+        if correction_status == "changed":
+            self._mark_correction_or_block(event, tool_id)
+            return
+        if correction_status == "same_input":
+            event.cancel_tool = "The corrected invocation must change the failed input."
+            self._recovery_roles[tool_id] = "blocked"
+            return
+        if tool_name in _MUTATING_TOOLS:
+            event.cancel_tool = (
+                "Resolve the correctable tool failure before creating tasks or storing durable evidence."
+            )
+            self._recovery_roles[tool_id] = "blocked"
             return
         if self._diagnostic_used:
             event.cancel_tool = "Only one diagnostic invocation is allowed before the corrected invocation."
@@ -260,13 +273,31 @@ class TaskFailureRecoveryHook(HookProvider):
         event.cancel_tool = "Recovery may only use read-only inspection, one diagnostic, and one corrected call."
         self._recovery_roles[tool_id] = "blocked"
 
-    def _is_correction(self, tool_name: str, tool_input: Any) -> bool:
+    def _mark_correction_or_block(self, event: BeforeToolCallEvent, tool_id: str) -> None:
+        if self._correction_attempted:
+            event.cancel_tool = "Only one corrected invocation is allowed for this task."
+            self._recovery_roles[tool_id] = "blocked"
+            return
+        self._correction_attempted = True
+        self._recovery_roles[tool_id] = "correction"
+
+    def _correction_status(self, tool_name: str, tool_input: Any) -> str:
         if tool_name != self.failed_tool_name:
-            return False
-        if tool_name != "shell" or not isinstance(tool_input, dict):
-            return True
+            return "different_tool"
+        if _input_fingerprint(tool_input) == self.failed_input_fingerprint:
+            return "same_input"
+        if tool_name != "shell":
+            return "changed"
+        if not isinstance(tool_input, dict):
+            return "different_tool"
         executable = _shell_executable(tool_input)
-        return bool(executable and executable == self.failed_executable and executable not in _DIAGNOSTIC_EXECUTABLES)
+        if not self.failed_executable:
+            if executable and executable not in _DIAGNOSTIC_EXECUTABLES:
+                return "changed"
+            return "different_tool"
+        if executable and executable == self.failed_executable and executable not in _DIAGNOSTIC_EXECUTABLES:
+            return "changed"
+        return "different_tool"
 
     @staticmethod
     def _is_read_only(tool_name: str) -> bool:
@@ -317,6 +348,7 @@ class TaskFailureRecoveryHook(HookProvider):
             self.failed_executable = (
                 _shell_executable(tool_input) if tool_name == "shell" and isinstance(tool_input, dict) else ""
             )
+            self.failed_input_fingerprint = _input_fingerprint(tool_input)
             self.failed_output = _bounded_text(output)
             self._diagnostic_used = False
             self._correction_attempted = False

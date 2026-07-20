@@ -7,7 +7,6 @@ services:
       args:
         APT_PROXY: ${APT_PROXY:-}
     container_name: cyber-autoagent
-    # React terminal is now the default entrypoint
     # No command override needed - starts interactively
     # Add capabilities for network tools without full root access
     cap_add:

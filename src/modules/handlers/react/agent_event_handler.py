@@ -103,6 +103,7 @@ class OperationEventCoordinator:
         self._agent_sequence = 0
         self._termination_emitted = False
         self._termination_reason: Optional[str] = None
+        self._termination_message: Optional[str] = None
         self._report_generated = False
         self.memory_ops = 0
         self.evidence_count = 0
@@ -318,12 +319,13 @@ class OperationEventCoordinator:
 
         return fallback_cost
 
-    def mark_termination(self, reason: str) -> bool:
+    def mark_termination(self, reason: str, message: Optional[str] = None) -> bool:
         with self._lock:
             if self._termination_emitted:
                 return False
             self._termination_emitted = True
             self._termination_reason = reason
+            self._termination_message = message
             return True
 
     @property
@@ -335,6 +337,11 @@ class OperationEventCoordinator:
     def termination_reason(self) -> Optional[str]:
         with self._lock:
             return self._termination_reason
+
+    @property
+    def termination_message(self) -> Optional[str]:
+        with self._lock:
+            return self._termination_message
 
 
 class AgentEventHandler(PrintingCallbackHandler):
@@ -538,6 +545,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         # Termination tracking (workflow completion, user abort, or budget limit)
         self._termination_emitted = False
         self._termination_reason: Optional[str] = None
+        self._termination_message: Optional[str] = None
         # Track python_repl preview emission per tool id to suppress generic completion
         self._python_preview_emitted = set()
 
@@ -687,14 +695,16 @@ class AgentEventHandler(PrintingCallbackHandler):
         try:
             with self._state_lock:
                 coordinator = self.coordinator
-                if coordinator is not None and not coordinator.mark_termination(reason):
+                if coordinator is not None and not coordinator.mark_termination(reason, message):
                     self._termination_emitted = True
                     self._termination_reason = coordinator.termination_reason
+                    self._termination_message = coordinator.termination_message
                     return
                 if coordinator is None and self._termination_emitted:
                     return
                 self._termination_emitted = True
                 self._termination_reason = reason
+                self._termination_message = message
 
                 # Flush any accumulated reasoning so it doesn't appear after termination
                 try:
@@ -1627,6 +1637,13 @@ class AgentEventHandler(PrintingCallbackHandler):
         tool_input = self.tool_input_buffer.get(tool_use_id, {})
 
         success = status != "error"
+        outcome = str(tool_result_dict.get("_cyber_outcome") or ("success" if success else "error"))
+        executed = bool(tool_result_dict.get("_cyber_executed", True))
+        completion_metadata = {
+            "success": success,
+            "outcome": outcome,
+            "executed": executed,
+        }
 
         # Update live metrics for memory operations and evidence collection
         try:
@@ -1678,7 +1695,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         _deferred_tool_end = {
             "tool_name": tool_name,
             "tool_id": tool_use_id,
-            "success": success,
+            **completion_metadata,
         }
         if duration is not None:
             _deferred_tool_end["duration"] = f"{duration:.2f}s"
@@ -1775,8 +1792,8 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self.emit_ui_event(
                     {
                         "type": "tool_invocation_end",
-                        "success": success,
                         "tool_name": tool_name,
+                        **completion_metadata,
                     }
                 )
                 # Emit tool_end after output and invocation_end
@@ -1838,8 +1855,8 @@ class AgentEventHandler(PrintingCallbackHandler):
                         self.emit_ui_event(
                             {
                                 "type": "tool_invocation_end",
-                                "success": success,
                                 "tool_name": tool_name,
+                                **completion_metadata,
                             }
                         )
                         self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
@@ -1861,8 +1878,8 @@ class AgentEventHandler(PrintingCallbackHandler):
             self.emit_ui_event(
                 {
                     "type": "tool_invocation_end",
-                    "success": success,
                     "tool_name": tool_name,
+                    **completion_metadata,
                 }
             )
             # Emit tool_end after output and invocation_end
@@ -1897,8 +1914,8 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         tool_inv_end_event = {
             "type": "tool_invocation_end",
-            "success": success,
             "tool_name": tool_name,
+            **completion_metadata,
         }
         self.emit_ui_event(tool_inv_end_event)
         # Emit tool_end after output and invocation_end
@@ -2825,14 +2842,24 @@ class AgentEventHandler(PrintingCallbackHandler):
 
     # Report generation methods
     def ensure_report_generated(
-        self, agent, target: str, objective: str, module: str = None
+        self,
+        agent,
+        target: str,
+        objective: str,
+        module: str = None,
+        completion_status: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Ensure report is generated only once."""
         if not self._report_generated:
-            self.generate_final_report(agent, target, objective, module)
+            self.generate_final_report(agent, target, objective, module, completion_status=completion_status)
 
     def generate_final_report(
-        self, agent, target: str, objective: str, module: str = None
+        self,
+        agent,
+        target: str,
+        objective: str,
+        module: str = None,
+        completion_status: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Generate final security assessment report.
 
@@ -2910,6 +2937,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "provider": provider,
                 "module": module,
                 "model_id": model_id,  # Pass main model for reports
+                "completion_status": completion_status,
             }
 
             target_name = sanitize_target_name(target)
@@ -3207,6 +3235,10 @@ class AgentEventHandler(PrintingCallbackHandler):
     @property
     def termination_reason(self) -> Optional[str]:
         return self._termination_reason
+
+    @property
+    def termination_message(self) -> Optional[str]:
+        return self._termination_message
 
     @property
     def report_generated(self) -> bool:

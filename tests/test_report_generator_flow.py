@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -291,7 +292,17 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
         target=target,
         objective=objective,
         operation_id=operation_id,
-        config_params={"steps_executed": 5, "tools_used": ["nmap"]},
+        config_params={
+            "steps_executed": 5,
+            "tools_used": ["nmap"],
+            "completion_status": {
+                "assessment_complete": False,
+                "workflow_complete": False,
+                "termination_reason": "stalled",
+                "termination_message": "No actions taken after 25 attempts",
+                "incomplete_reason": "Workflow stalled before assessment_complete=true.",
+            },
+        },
         filename=str(report_file)
     )
 
@@ -300,11 +311,17 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     content = report_file.read_text()
     assert "# SECURITY ASSESSMENT REPORT" in content
     assert "## TABLE OF CONTENTS" in content
+    assert "**Assessment Status: Incomplete**" in content
+    assert "Termination reason: `stalled`." in content
+    assert "Do not interpret the absence of verified findings as absence of vulnerabilities." in content
     assert "## Section Content" in content
     assert f"Operation ID: {operation_id}" in content
 
     # Verify that intermediate files were created
     assert (output_dir / "security_assessment_report.json").exists()
+    report_json = json.loads((output_dir / "security_assessment_report.json").read_text())
+    assert report_json["completion_status"]["assessment_complete"] is False
+    assert report_json["completion_status"]["termination_reason"] == "stalled"
     assert (output_dir / "report_executive_summary.md").exists()
     assert (output_dir / "report_findings_header.md").exists()
     # finding_1_High_Finding.md

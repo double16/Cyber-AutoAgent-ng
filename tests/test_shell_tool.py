@@ -1,225 +1,204 @@
+import importlib.util
+import os
 import shlex
 import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from src.modules.tools.shell import shell
+
+def _load_shell_module():
+    module_name = "src.modules.tools.shell"
+    module_path = Path(__file__).resolve().parents[1] / "src" / "modules" / "tools" / "shell.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
-@pytest.fixture
-def mock_shell_original():
-    with patch("src.modules.tools.shell.shell_original") as mock:
-        yield mock
+shell_module = _load_shell_module()
+CommandExecutor = shell_module.CommandExecutor
+execute_commands = shell_module.execute_commands
+execute_single_command = shell_module.execute_single_command
+shell = shell_module.shell
+validate_command = shell_module.validate_command
 
 
-@pytest.fixture
-def mock_os_system():
-    with patch("src.modules.tools.shell.os.system") as mock:
-        yield mock
+def _completed(stdout="", stderr="", returncode=0):
+    return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
 
 
-@pytest.fixture
-def mock_os_path_isdir():
-    with patch("src.modules.tools.shell.os.path.isdir") as mock:
-        yield mock
+def _single_success(command="cmd", output="ok"):
+    return [{"command": command, "exit_code": 0, "output": output, "error": "", "status": "success"}]
 
 
-@pytest.fixture
-def mock_os_path_isfile():
-    with patch("src.modules.tools.shell.os.path.isfile") as mock:
-        yield mock
+def test_command_executor_execute_uses_subprocess_without_pty():
+    assert "pty" not in shell_module.__dict__
 
+    with patch.object(shell_module.subprocess, "run", return_value=_completed(stdout="hello\n")) as run:
+        exit_code, output, error = CommandExecutor(timeout=45).execute("printf hello", "/tmp")
 
-@pytest.fixture
-def mock_os_access():
-    with patch("src.modules.tools.shell.os.access") as mock:
-        yield mock
-
-
-def test_shell_single_command(mock_shell_original):
-    command = "ls -la"
-    shell(command)
-    mock_shell_original.assert_called_once_with(
-        command=command,
-        parallel=False,
-        ignore_errors=False,
-        timeout=None,
-        work_dir=None,
+    assert (exit_code, output, error) == (0, "hello\n", "")
+    run.assert_called_once_with(
+        "printf hello",
+        cwd="/tmp",
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
     )
 
 
-def test_shell_multiple_independent_commands(mock_shell_original, mock_os_system):
-    # If the first and second commands are both known, it's treated as a list of independent commands
-    command = ["ls", "pwd"]
-    mock_os_system.return_value = 0  # 'which ls' and 'which pwd' both succeed
+def test_command_executor_execute_reports_nonzero_stderr():
+    with patch.object(
+        shell_module.subprocess,
+        "run",
+        return_value=_completed(stderr="bad flag\n", returncode=7),
+    ):
+        exit_code, output, error = CommandExecutor(timeout=30).execute("tool --bad", "/tmp")
 
-    shell(command)
+    assert exit_code == 7
+    assert output == ""
+    assert error == "bad flag\n"
 
-    # It should not have joined them
-    mock_shell_original.assert_called_once_with(
-        command=command,
-        parallel=False,
-        ignore_errors=False,
-        timeout=None,
-        work_dir=None,
+
+def test_command_executor_execute_reports_timeout_with_partial_output():
+    timeout = subprocess.TimeoutExpired(
+        cmd="slow",
+        timeout=30,
+        output="partial stdout",
+        stderr="partial stderr",
     )
+    with patch.object(shell_module.subprocess, "run", side_effect=timeout):
+        exit_code, output, error = CommandExecutor(timeout=30).execute("slow", "/tmp")
+
+    assert exit_code == 124
+    assert output == "partial stdout"
+    assert "partial stderr" in error
+    assert "Command timed out after 30 seconds" in error
 
 
-def test_shell_command_joining_heuristic(mock_shell_original, mock_os_system, mock_os_path_isdir, mock_os_path_isfile):
-    # If first is known, but second is not known, it joins them
+def test_execute_single_command_preserves_command_options():
+    result = execute_single_command({"command": "printf hi", "timeout": 60}, "/tmp", 30)
+
+    assert result["command"] == "printf hi"
+    assert result["status"] == "success"
+    assert result["output"] == "hi"
+    assert result["options"] == {"command": "printf hi", "timeout": 60}
+
+
+def test_execute_single_command_validation_error_shape():
+    result = execute_single_command({"not_command": "printf hi"}, "/tmp", 30)
+
+    assert result["status"] == "error"
+    assert result["exit_code"] == 1
+    assert "Command object must contain" in result["error"]
+
+
+def test_execute_commands_sequential_cd_context(tmp_path):
+    start_dir = os.getcwd()
+    result = execute_commands(["pwd", f"cd {shlex.quote(str(tmp_path))}", "pwd"], False, False, start_dir, 30)
+
+    assert [item["status"] for item in result] == ["success", "success", "success"]
+    assert result[0]["output"].strip() == start_dir
+    assert result[2]["output"].strip() == str(tmp_path)
+
+
+def test_execute_commands_parallel_runs_without_pty_and_preserves_input_order():
+    result = execute_commands(["printf one", "printf two"], True, False, os.getcwd(), 30)
+
+    assert [item["status"] for item in result] == ["success", "success"]
+    assert [item["output"] for item in result] == ["one", "two"]
+
+
+def test_execute_commands_parallel_reports_failures():
+    result = execute_commands(["printf ok", "exit 7"], True, False, os.getcwd(), 30)
+
+    assert result[0]["status"] == "success"
+    assert result[1]["status"] == "error"
+    assert result[1]["exit_code"] == 7
+
+
+def test_shell_formats_success_response():
+    with patch.object(shell_module, "execute_commands", return_value=_single_success("printf hi", "hi")) as run:
+        result = shell("printf hi", work_dir="/tmp", timeout=60)
+
+    run.assert_called_once_with(["printf hi"], False, False, "/tmp", 60)
+    assert result["status"] == "success"
+    assert "Total commands: 1" in result["content"][0]["text"]
+    assert "Output: hi" in result["content"][1]["text"]
+
+
+def test_shell_formats_error_response():
+    failed = [{"command": "exit 7", "exit_code": 7, "output": "", "error": "", "status": "error"}]
+    with patch.object(shell_module, "execute_commands", return_value=failed):
+        result = shell("exit 7")
+
+    assert result["status"] == "error"
+    assert "Failed: 1" in result["content"][0]["text"]
+    assert "Exit Code: 7" in result["content"][1]["text"]
+
+
+def test_shell_timeout_normalization_and_clamping():
+    with patch.object(shell_module, "execute_commands", return_value=_single_success()) as run:
+        shell("ls", timeout=5000)
+        assert run.call_args.args[4] == 30
+
+        shell("ls", timeout=3000000)
+        assert run.call_args.args[4] == 30
+
+        shell("ls", timeout=1200)
+        assert run.call_args.args[4] == 900
+
+        shell("ls", timeout=10)
+        assert run.call_args.args[4] == 30
+
+        shell("ls", timeout=100)
+        assert run.call_args.args[4] == 100
+
+
+def test_shell_command_joining_heuristic(monkeypatch):
     command = ["ls", "-la", "/tmp"]
 
-    def side_effect(cmd):
+    def fake_system(cmd):
         if "which ls" in cmd:
             return 0
         if "which -la" in cmd:
             return 1
         return 1
 
-    mock_os_system.side_effect = side_effect
-    mock_os_path_isdir.return_value = False
-    mock_os_path_isfile.return_value = False
+    monkeypatch.setattr(shell_module.os, "system", fake_system)
+    monkeypatch.setattr(shell_module.os.path, "isdir", lambda _path: False)
+    monkeypatch.setattr(shell_module.os.path, "isfile", lambda _path: False)
 
-    shell(command)
+    with patch.object(shell_module, "execute_commands", return_value=_single_success()) as run:
+        shell(command)
 
     expected_command = " ".join(map(shlex.quote, command))
-    mock_shell_original.assert_called_once_with(
-        command=expected_command,
-        parallel=False,
-        ignore_errors=False,
-        timeout=None,
-        work_dir=None,
-    )
+    assert run.call_args.args[0] == [expected_command]
 
 
-def test_shell_timeout_normalization_and_clamping(mock_shell_original):
-    # Test large timeout (> 2000)
-    shell("ls", timeout=5000)  # 5000 // 1000 = 5, then clamped to [30, 900] -> 30
-    mock_shell_original.assert_called_with(
-        command="ls",
-        parallel=False,
-        ignore_errors=False,
-        timeout=30,
-        work_dir=None,
-    )
+def test_shell_multiple_independent_commands_are_not_joined(monkeypatch):
+    monkeypatch.setattr(shell_module.os, "system", lambda _cmd: 0)
 
-    # Test large timeout that takes multiple divisions
-    shell("ls", timeout=3000000)  # 3000 -> 3, clamped -> 30
-    mock_shell_original.assert_called_with(
-        command="ls",
-        parallel=False,
-        ignore_errors=False,
-        timeout=30,
-        work_dir=None,
-    )
+    with patch.object(shell_module, "execute_commands", return_value=_single_success()) as run:
+        shell(["ls", "pwd"])
 
-    # Test clamping high
-    shell("ls", timeout=1200)  # 1200 clamped to 900
-    mock_shell_original.assert_called_with(
-        command="ls",
-        parallel=False,
-        ignore_errors=False,
-        timeout=900,
-        work_dir=None,
-    )
-
-    # Test clamping low
-    shell("ls", timeout=10)  # 10 clamped to 30
-    mock_shell_original.assert_called_with(
-        command="ls",
-        parallel=False,
-        ignore_errors=False,
-        timeout=30,
-        work_dir=None,
-    )
-
-    # Test sane timeout
-    shell("ls", timeout=100)  # 100 stays 100
-    mock_shell_original.assert_called_with(
-        command="ls",
-        parallel=False,
-        ignore_errors=False,
-        timeout=100,
-        work_dir=None,
-    )
-
-    # Test list of objects (should not be joined by heuristic as they are not strings)
-    command_objs = [{"command": "ls"}, {"command": "pwd"}]
-    shell(command_objs)
-    mock_shell_original.assert_called_with(
-        command=command_objs,
-        parallel=False,
-        ignore_errors=False,
-        timeout=None,
-        work_dir=None,
-    )
+    assert run.call_args.args[0] == ["ls", "pwd"]
 
 
-def test_shell_command_joining_heuristic_edge_cases(mock_shell_original, mock_os_system, mock_os_path_isdir,
-                                                    mock_os_path_isfile, mock_os_access):
-    # Test second item is a directory -> SHOULD BE JOINED
-    command = ["ls", "/tmp"]
+def test_shell_parses_json_array_command_string():
+    with patch.object(shell_module, "execute_commands", return_value=_single_success()) as run:
+        shell('["printf one", "printf two"]', parallel=True)
 
-    def side_effect(cmd):
-        if "which ls" in cmd:
-            return 0
-        return 1
-
-    mock_os_system.side_effect = side_effect
-    mock_os_path_isdir.return_value = True
-    shell(command)
-    # The heuristic joins them if the second element is NOT a known command.
-    # In this case, /tmp is a directory, so is_second_cmd_known is False.
-    expected_command = " ".join(map(shlex.quote, command))
-    mock_shell_original.assert_called_with(
-        command=expected_command,
-        parallel=False,
-        ignore_errors=False,
-        timeout=None,
-        work_dir=None,
-    )
-
-    # Test second item is a file but not executable -> SHOULD BE JOINED
-    command = ["ls", "file.txt"]
-    mock_os_path_isdir.return_value = False
-    mock_os_path_isfile.return_value = True
-    mock_os_access.return_value = False  # not executable
-    shell(command)
-    expected_command = " ".join(map(shlex.quote, command))
-    mock_shell_original.assert_called_with(
-        command=expected_command,
-        parallel=False,
-        ignore_errors=False,
-        timeout=None,
-        work_dir=None,
-    )
-
-    # Test second item is NEITHER a command NOR a file/dir -> SHOULD BE JOINED
-    command = ["ls", "--flag"]
-    mock_os_path_isdir.return_value = False
-    mock_os_path_isfile.return_value = False
-    mock_os_system.side_effect = side_effect  # only 'ls' is known
-    shell(command)
-    expected_command = " ".join(map(shlex.quote, command))
-    mock_shell_original.assert_called_with(
-        command=expected_command,
-        parallel=False,
-        ignore_errors=False,
-        timeout=None,
-        work_dir=None,
-    )
-
-
-def test_shell_pass_arguments(mock_shell_original):
-    shell("ls", parallel=True, work_dir="/tmp")
-    mock_shell_original.assert_called_once_with(
-        command="ls",
-        parallel=True,
-        ignore_errors=False,
-        timeout=None,
-        work_dir="/tmp",
-    )
+    assert run.call_args.args[0] == ["printf one", "printf two"]
+    assert run.call_args.args[1] is True
 
 
 def test_shell_rejects_removed_ignore_errors_argument():
@@ -227,50 +206,12 @@ def test_shell_rejects_removed_ignore_errors_argument():
         shell("false", ignore_errors=True)
 
 
-def test_shell_parallel_non_interactive_avoids_pty(mock_shell_original, monkeypatch):
-    monkeypatch.setenv("STRANDS_NON_INTERACTIVE", "true")
+def test_shell_requires_command():
+    result = shell(None)
 
-    result = shell(["printf one", "printf two"], parallel=True)
-
-    mock_shell_original.assert_not_called()
-    assert result["status"] == "success"
-    assert "Total commands: 2" in result["content"][0]["text"]
-    assert "Output: one" in result["content"][1]["text"]
-    assert "Output: two" in result["content"][2]["text"]
+    assert result == {"status": "error", "content": [{"text": "Command is required"}]}
 
 
-def test_shell_parallel_non_interactive_reports_failures(mock_shell_original, monkeypatch):
-    monkeypatch.setenv("STRANDS_NON_INTERACTIVE", "true")
-
-    result = shell(["printf ok", "exit 7"], parallel=True)
-
-    mock_shell_original.assert_not_called()
-    assert result["status"] == "error"
-    assert "Exit Code: 7" in result["content"][2]["text"]
-
-
-def test_shell_parallel_non_interactive_reports_timeout(mock_shell_original, monkeypatch):
-    monkeypatch.setenv("STRANDS_NON_INTERACTIVE", "true")
-    timeout = subprocess.TimeoutExpired("slow", 30, output="partial")
-    with patch("src.modules.tools.shell.subprocess.run", side_effect=timeout):
-        result = shell(["slow one", "slow two"], parallel=True, timeout=30)
-
-    mock_shell_original.assert_not_called()
-    assert result["status"] == "error"
-    assert "Exit Code: 124" in result["content"][1]["text"]
-    assert "timed out after 30 seconds" in result["content"][1]["text"]
-
-
-def test_shell_parallel_interactive_keeps_dependency_consent_path(mock_shell_original, monkeypatch):
-    monkeypatch.delenv("STRANDS_NON_INTERACTIVE", raising=False)
-    commands = ["printf one", "printf two"]
-
-    shell(commands, parallel=True)
-
-    mock_shell_original.assert_called_once_with(
-        command=commands,
-        parallel=True,
-        ignore_errors=False,
-        timeout=None,
-        work_dir=None,
-    )
+def test_validate_command_rejects_unsupported_shape():
+    with pytest.raises(ValueError, match="Command must be string or dict"):
+        validate_command(["printf hi"])

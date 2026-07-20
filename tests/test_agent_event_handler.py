@@ -205,6 +205,7 @@ def test_reasoning_termination_metrics_and_basic_helpers():
 
     handler._stop_metrics_thread.assert_not_called()
     assert event_types(handler).count("termination_reason") == 1
+    assert handler.termination_message == "done"
     assert handler._format_duration(65) == "1m 5s"
     assert handler._extract_code_from_input({"code": "print(1)"}) == "print(1)"
     assert handler._extract_code_from_input({"value": [1, 2]}).startswith("{")
@@ -398,6 +399,29 @@ def test_failed_typed_memory_tool_does_not_increment_metrics():
     assert handler.memory_ops == 0
     assert handler.evidence_count == 0
     assert handler.coordinator.memory_ops == 0
+
+
+def test_tool_completion_preserves_execution_outcome_metadata():
+    handler = make_handler()
+    handler.tool_name_buffer["blocked"] = "shell"
+
+    handler._process_tool_result_from_message(
+        {
+            "toolUseId": "blocked",
+            "status": "error",
+            "content": [{"text": "blocked by recovery"}],
+            "_cyber_outcome": "blocked",
+            "_cyber_executed": False,
+        }
+    )
+
+    invocation_end = [event for event in handler._events if event["type"] == "tool_invocation_end"][-1]
+    tool_end = [event for event in handler._events if event["type"] == "tool_end"][-1]
+    assert invocation_end["success"] is False
+    assert invocation_end["outcome"] == "blocked"
+    assert invocation_end["executed"] is False
+    assert tool_end["outcome"] == "blocked"
+    assert tool_end["executed"] is False
 
 
 def test_python_repl_preview_and_empty_result_paths(monkeypatch):
@@ -1049,6 +1073,7 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     )
     assert generated_calls
     assert generated_calls[0]["config_params"]["provider"] == "litellm"
+    assert generated_calls[0]["config_params"]["completion_status"] is None
     assert "assessment_complete" not in event_types(handler)
     handler.emitter = SimpleNamespace()
     handler._stop_metrics_thread = Mock()
@@ -1068,6 +1093,7 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
 
     def fake_generate_security_report(**kwargs):
         assert kwargs["config_params"]["tools_used"].count("shell") == 2
+        assert kwargs["config_params"]["completion_status"]["assessment_complete"] is False
         with open(kwargs["filename"], "w", encoding="utf-8") as report:
             report.write("# Report\nConfirmed finding")
 
@@ -1078,6 +1104,13 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
         target="example.com",
         objective="assess",
         module="web",
+        completion_status={
+            "assessment_complete": False,
+            "workflow_complete": False,
+            "termination_reason": "stalled",
+            "termination_message": "No actions taken",
+            "incomplete_reason": "Workflow stalled before assessment completion.",
+        },
     )
 
     types = event_types(handler)

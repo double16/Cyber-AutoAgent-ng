@@ -43,6 +43,72 @@ _ARTIFACT_REFERENCE = re.compile(
 )
 
 
+def _normalize_completion_status(value: Any) -> Dict[str, Any]:
+    """Return a stable report completion status block."""
+    if not isinstance(value, dict):
+        return {
+            "assessment_complete": True,
+            "workflow_complete": True,
+            "termination_reason": "complete",
+            "termination_message": None,
+            "incomplete_reason": None,
+        }
+
+    assessment_complete = bool(value.get("assessment_complete"))
+    workflow_complete = bool(value.get("workflow_complete"))
+    termination_reason = value.get("termination_reason")
+    termination_message = value.get("termination_message")
+    incomplete_reason = value.get("incomplete_reason")
+    if assessment_complete:
+        incomplete_reason = None
+    elif not incomplete_reason:
+        incomplete_reason = "Workflow ended before assessment completion."
+
+    return {
+        "assessment_complete": assessment_complete,
+        "workflow_complete": workflow_complete,
+        "termination_reason": str(termination_reason) if termination_reason is not None else None,
+        "termination_message": str(termination_message) if termination_message is not None else None,
+        "incomplete_reason": str(incomplete_reason) if incomplete_reason is not None else None,
+    }
+
+
+def _completion_status_guidance(completion_status: Dict[str, Any]) -> str:
+    """Prompt guidance that prevents complete-run claims for partial assessments."""
+    if completion_status.get("assessment_complete"):
+        return (
+            "Assessment status: complete. The workflow marked assessment_complete=true and terminated with "
+            "reason=complete."
+        )
+
+    return (
+        "Assessment status: incomplete. Treat this report as a partial assessment. Do not claim all planned tasks "
+        "were completed, do not claim the target is free of vulnerabilities, and do not interpret missing verified "
+        "findings as proof of absence. Explicitly state that findings, observations, coverage, and validation "
+        f"counts may be partial. Completion status data: {json.dumps(completion_status, sort_keys=True)}"
+    )
+
+
+def _completion_status_notice(completion_status: Dict[str, Any]) -> str:
+    """Deterministic report notice for incomplete assessments."""
+    if completion_status.get("assessment_complete"):
+        return ""
+
+    reason = completion_status.get("termination_reason") or "unknown"
+    message = completion_status.get("termination_message")
+    incomplete_reason = completion_status.get("incomplete_reason") or "Workflow ended before assessment completion."
+    message_line = f"> Termination message: {message}\n" if message else ""
+    return (
+        "> **Assessment Status: Incomplete**\n"
+        ">\n"
+        f"> {incomplete_reason}\n"
+        f"> Termination reason: `{reason}`.\n"
+        f"{message_line}"
+        "> Findings, observations, validation counts, and coverage in this report are partial. "
+        "Do not interpret the absence of verified findings as absence of vulnerabilities.\n\n"
+    )
+
+
 def _report_item_title(item: Dict[str, Any], default: str) -> str:
     """Return a compact title for report progress labels."""
     parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
@@ -287,6 +353,7 @@ def generate_security_report(
         # Log the report generation request
         logger.info("Generating security report for operation: %s", operation_id)
         config_manager = get_config_manager()
+        config_params = config_params or {}
 
         # Extract parameters with defaults
         steps_executed = config_params.get("steps_executed", 0)
@@ -294,6 +361,7 @@ def generate_security_report(
         provider = config_params.get("provider", config_manager.get_provider())
         model_id = config_params.get("model_id")
         module = config_params.get("module")
+        completion_status = _normalize_completion_status(config_params.get("completion_status"))
 
         sections = build_report_sections(
             operation_id=operation_id,
@@ -303,6 +371,7 @@ def generate_security_report(
             steps_executed=steps_executed,
             tools_used=tools_used,
         )
+        sections["completion_status"] = completion_status
 
         # these values may have been updated when building the report section
         steps_executed = max(steps_executed, sections.get("steps_executed", 0))
@@ -351,6 +420,8 @@ def generate_security_report(
             if module_report_prompt
             else "Apply general security assessment best practices focusing on common vulnerability patterns."
         )
+        completion_guidance = _completion_status_guidance(completion_status)
+        completion_notice = _completion_status_notice(completion_status)
 
         report_parts_files = []
         raw_findings = sections.get("raw_evidence", [])
@@ -386,7 +457,15 @@ def generate_security_report(
             operation_id=operation_id,
             target=target,
             callback_handler=report_metrics_callback,
-            system_prompt=get_report_executive_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_executive_system_prompt
+            system_prompt=(
+                get_report_executive_system_prompt()
+                + "\n"
+                + module_guidance
+                + "\n"
+                + completion_guidance
+                + "\n"
+                + module_report_agent_executive_system_prompt
+            )
         )
         
         exec_prompt = f"""
@@ -397,9 +476,10 @@ Module: {module_str}
 
 Only verified findings may be counted as confirmed risk. If there are zero verified findings, do not label the target
 as "low risk"; state that no findings were verified and list validation failures separately.
+{completion_guidance}
 
 Use the following data:
-{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'validation_failure_count', 'target_coverage']})}
+{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'validation_failure_count', 'target_coverage', 'completion_status']})}
 """
         report_step_index += 1
         _emit_report_progress(
@@ -447,7 +527,15 @@ Use the following data:
             operation_id=operation_id,
             target=target,
             callback_handler=report_metrics_callback,
-            system_prompt=get_report_finding_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_finding_system_prompt
+            system_prompt=(
+                get_report_finding_system_prompt()
+                + "\n"
+                + module_guidance
+                + "\n"
+                + completion_guidance
+                + "\n"
+                + module_report_agent_finding_system_prompt
+            )
         )
         for i, finding in report_findings:
             logger.info(f"Generating report for finding {i+1}: {finding.get('content')}")
@@ -455,6 +543,7 @@ Use the following data:
             finding_prompt = f"""
 Generate a detailed report for the following finding.
 Target: {target}
+{completion_guidance}
 Finding Data:
 {json.dumps(finding)}
 """
@@ -545,7 +634,15 @@ Finding Data:
             operation_id=operation_id,
             target=target,
             callback_handler=report_metrics_callback,
-            system_prompt=get_report_observation_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_observation_system_prompt
+            system_prompt=(
+                get_report_observation_system_prompt()
+                + "\n"
+                + module_guidance
+                + "\n"
+                + completion_guidance
+                + "\n"
+                + module_report_agent_observation_system_prompt
+            )
         )
         for i, finding in report_observations:
             has_observations = True
@@ -554,6 +651,7 @@ Finding Data:
             obs_prompt = f"""
 Generate a brief report for the following observation/discovery.
 Target: {target}
+{completion_guidance}
 Observation Data:
 {json.dumps(finding)}
 """
@@ -608,7 +706,15 @@ Observation Data:
             operation_id=operation_id,
             target=target,
             callback_handler=report_metrics_callback,
-            system_prompt=get_report_appendix_system_prompt() + "\n" + module_guidance + "\n" + module_report_agent_appendix_system_prompt
+            system_prompt=(
+                get_report_appendix_system_prompt()
+                + "\n"
+                + module_guidance
+                + "\n"
+                + completion_guidance
+                + "\n"
+                + module_report_agent_appendix_system_prompt
+            )
         )
 
         appendix_prompt = f"""
@@ -616,9 +722,10 @@ Generate all requested sections.
 Target: {target}
 Operation ID: {operation_id}
 Steps Executed: {steps_executed}
+{completion_guidance}
 
 Use the following data:
-{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'tools_summary']})}
+{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'tools_summary', 'completion_status']})}
 """
         report_step_index += 1
         _emit_report_progress(
@@ -659,6 +766,7 @@ Use the following data:
                 final_f.write("- [Observations and Discoveries](#observations-and-discoveries)\n")
             final_f.write("- [Target Coverage](#target-coverage)\n")
             final_f.write("- [Assessment Methodology](#assessment-methodology)\n\n")
+            final_f.write(completion_notice)
 
             for part_file in report_parts_files:
                 with open(part_file, "r") as part_f:

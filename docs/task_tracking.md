@@ -135,6 +135,11 @@ The controller runs this loop:
     - loop back to active phase/task selection
 12. When all phases are terminal, Python marks the plan complete and emits the completion `termination_reason` event for UI consumers.
 
+Final report generation receives the workflow completion status before it runs. If the plan has not reached
+`assessment_complete=true` or the termination reason is not `complete`, the report is marked as incomplete and states
+that findings, observations, validation counts, and target coverage are partial. The progress value itself is reported
+unchanged from budget utilization.
+
 Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS`, which defaults to two
 critic reviews. Setting it to `0` uses the initial builder output without critique. A final rejection or invalid
 builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
@@ -146,11 +151,14 @@ conversation are retained across passes. Only `done` is approval; a final `parti
 persisted unchanged.
 
 Correctable tool invocation failures receive one bounded recovery turn in the same retained executor conversation.
-The executor may use one diagnostic/preflight invocation and one corrected invocation. Evidence storage and
+The executor may use one diagnostic/preflight invocation and one corrected invocation. The correction must call the
+same failed tool with changed input; shell corrections must also keep the same executable so a failed scanner run cannot
+be replaced by an unrelated command. If input validation failed before an executable could be identified, the next
+changed shell call with a valid, non-diagnostic executable is treated as the correction. Evidence storage and
 `create_tasks` are rejected until that correction succeeds, preventing failed command output from producing fabricated
-discoveries. Recovery does not consume an actor/critic pass; if it remains unresolved, Python marks the task
-`partial_failure` without asking the evaluator to approve it. Evaluators receive controller-observed tool outcomes and
-treat them as authoritative over contradictory worker narration.
+discoveries. Recovery does not consume an actor/critic pass;
+if it remains unresolved, Python marks the task `partial_failure` without asking the evaluator to approve it. Evaluators
+receive controller-observed tool outcomes and treat them as authoritative over contradictory worker narration.
 
 Every `store_finding` call creates one narrow, same-phase `finding_validation` task. The linked task must call
 `record_finding_validation`; only an evaluator-approved confirmation is promoted to a verified finding. Failed or

@@ -630,27 +630,69 @@ def finalize_report_and_evaluation(
     if not callback_handler:
         logger.warning("No callback_handler available for evaluation trigger")
         return
+    completion_status: dict[str, Any] | None = None
     try:
-        callback_handler.ensure_report_generated(agent, target, objective, module)
+        try:
+            plan = get_memory_client(silent=True).get_active_plan()
+        except Exception as error:
+            logger.warning("Unable to determine workflow completion before report generation: %s", error)
+            plan = None
+        completion_status = _build_report_completion_status(plan, callback_handler)
+        callback_handler.ensure_report_generated(
+            agent,
+            target,
+            objective,
+            module,
+            completion_status=completion_status,
+        )
         logger.info("Triggering evaluation on completion")
         callback_handler.trigger_evaluation_on_completion()
     except Exception as error:
         logger.warning("Error in final report/evaluation: %s", error)
     finally:
         try:
-            plan = get_memory_client(silent=True).get_active_plan()
-            workflow_complete = bool(plan and plan.assessment_complete)
-            termination_complete = getattr(callback_handler, "termination_reason", None) == "complete"
+            if completion_status is None:
+                plan = get_memory_client(silent=True).get_active_plan()
+                completion_status = _build_report_completion_status(plan, callback_handler)
+            workflow_complete = bool(completion_status.get("workflow_complete"))
+            termination_complete = completion_status.get("termination_reason") == "complete"
             if workflow_complete and termination_complete:
                 callback_handler.emit_assessment_complete()
             else:
                 logger.info(
                     "Skipping assessment_complete: workflow_complete=%s termination_reason=%s",
                     workflow_complete,
-                    getattr(callback_handler, "termination_reason", None),
+                    completion_status.get("termination_reason"),
                 )
         except Exception as error:
             logger.warning("Unable to determine or emit assessment completion: %s", error)
+
+
+def _build_report_completion_status(plan: Any, callback_handler: Any) -> dict[str, Any]:
+    """Describe whether the final report is based on a completed workflow."""
+    termination_reason = getattr(callback_handler, "termination_reason", None)
+    termination_message = getattr(callback_handler, "termination_message", None)
+    workflow_complete = bool(plan and getattr(plan, "assessment_complete", False))
+    assessment_complete = workflow_complete and termination_reason == "complete"
+    if assessment_complete:
+        incomplete_reason = None
+    elif not workflow_complete and termination_reason:
+        incomplete_reason = (
+            f"Workflow ended with termination_reason={termination_reason!r} before assessment_complete=true."
+        )
+    elif not workflow_complete:
+        incomplete_reason = "Workflow ended before assessment_complete=true."
+    else:
+        incomplete_reason = (
+            f"Workflow reached assessment_complete=true but termination_reason={termination_reason!r}."
+        )
+    return {
+        "assessment_complete": assessment_complete,
+        "workflow_complete": workflow_complete,
+        "termination_reason": termination_reason,
+        "termination_message": termination_message,
+        "incomplete_reason": incomplete_reason,
+    }
 
 
 def close_log_outputs() -> None:
@@ -1200,6 +1242,8 @@ def main():
     output_base_path = get_output_path(
         target_sanitized, operation_id, "", server_config.output.base_dir
     )
+    # TODO: change the CWD so relative paths are in the output_base_path
+    os.chdir(output_base_path)
 
     # Prepare path display based on environment
     if is_docker():
@@ -1396,7 +1440,17 @@ def main():
                             "max_tokens",
                             "Model token limit reached. Switching to final report.",
                         )
-                        callback_handler.ensure_report_generated(None, args.target, args.objective, args.module)
+                        try:
+                            plan = get_memory_client(silent=True).get_active_plan()
+                        except Exception:
+                            plan = None
+                        callback_handler.ensure_report_generated(
+                            None,
+                            args.target,
+                            args.objective,
+                            args.module,
+                            completion_status=_build_report_completion_status(plan, callback_handler),
+                        )
                 except Exception as max_tokens_finish_error:
                     logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
             except WorkflowInvariantError as error:

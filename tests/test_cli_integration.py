@@ -787,7 +787,7 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
                 "capability_expansion": [],
             }
 
-        def ensure_report_generated(self, *_args):
+        def ensure_report_generated(self, *_args, **_kwargs):
             self.report_generated = True
 
         def trigger_evaluation_on_completion(self):
@@ -1479,7 +1479,16 @@ def test_finalize_report_and_evaluation_runs_once(monkeypatch):
         logger=logger,
     )
 
-    callback.ensure_report_generated.assert_called_once_with(agent, "example.com", "test", "web")
+    callback.ensure_report_generated.assert_called_once()
+    report_call = callback.ensure_report_generated.call_args
+    assert report_call.args == (agent, "example.com", "test", "web")
+    assert report_call.kwargs["completion_status"] == {
+        "assessment_complete": True,
+        "workflow_complete": True,
+        "termination_reason": "complete",
+        "termination_message": None,
+        "incomplete_reason": None,
+    }
     callback.trigger_evaluation_on_completion.assert_called_once()
     callback.emit_assessment_complete.assert_called_once()
     assert [call[0] for call in lifecycle.method_calls] == [
@@ -1509,7 +1518,10 @@ def test_finalize_report_and_evaluation_allows_missing_agent_for_report_mode(mon
         logger=logger,
     )
 
-    callback.ensure_report_generated.assert_called_once_with(None, "example.com", "test", "web")
+    callback.ensure_report_generated.assert_called_once()
+    report_call = callback.ensure_report_generated.call_args
+    assert report_call.args == (None, "example.com", "test", "web")
+    assert report_call.kwargs["completion_status"]["assessment_complete"] is True
     callback.emit_assessment_complete.assert_called_once()
 
 
@@ -1567,6 +1579,10 @@ def test_finalize_report_and_evaluation_handles_missing_handler_and_errors(monke
     )
 
     assert logger.warning.call_args.args[0] == "Error in final report/evaluation: %s"
+    report_call = callback.ensure_report_generated.call_args
+    assert report_call.kwargs["completion_status"]["assessment_complete"] is False
+    assert report_call.kwargs["completion_status"]["workflow_complete"] is False
+    assert report_call.kwargs["completion_status"]["termination_reason"] == "error"
     callback.trigger_evaluation_on_completion.assert_not_called()
     callback.emit_assessment_complete.assert_not_called()
 
@@ -1626,7 +1642,10 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
 
     assert os.environ["CYBER_OPERATION_ID"] == "OP_20260102_000000"
     assert json.loads(os.environ["CYBER_BUG_BOUNTY_HEADERS"]) == {"X-Test": "1"}
-    callback.ensure_report_generated.assert_called_once_with(None, "example.com", "report", "web")
+    callback.ensure_report_generated.assert_called_once()
+    report_call = callback.ensure_report_generated.call_args
+    assert report_call.args == (None, "example.com", "report", "web")
+    assert report_call.kwargs["completion_status"]["assessment_complete"] is False
     fake_agent.cleanup.assert_not_called()
 
 

@@ -25,6 +25,9 @@
 
 ### Fixes
 
+- Prevent schema-invalid shell calls from trapping valid corrections, exclude policy-canceled calls from repeat-loop
+  suppression, and distinguish non-executed tool calls in completion telemetry.
+- Mark final reports incomplete when workflow completion gating has not passed, without clamping progress status.
 - Speed up `test_idor_specialist` by mocking `requests.request` in malformed-input coverage so tests do not perform real network calls.
 - Avoid real delays in `test_idor_specialist_evasion_flag` by monkeypatching `time.sleep` while still asserting sleep is invoked during evasion mode.
 - Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.

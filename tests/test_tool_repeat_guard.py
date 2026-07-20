@@ -62,13 +62,14 @@ def _before(invocation_state, selected_tool, tool_id, tool_input=None, name="she
     )
 
 
-def _after(before_event, result, exception=None):
+def _after(before_event, result, exception=None, cancel_message=None):
     return SimpleNamespace(
         invocation_state=before_event.invocation_state,
         selected_tool=before_event.selected_tool,
         tool_use=before_event.tool_use,
         result=result,
         exception=exception,
+        cancel_message=cancel_message,
     )
 
 
@@ -278,6 +279,61 @@ def test_error_results_are_reused_without_mutating_authoritative_result():
     assert cached["toolUseId"] == "two"
     assert cached["content"][0] == {"text": "permission denied"}
     assert original == _result("one", "permission denied", status="error")
+
+
+def test_canceled_calls_are_removed_from_repeat_history_and_not_cached():
+    hook = ToolRepeatGuardHook(repeat_threshold=2)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    for tool_id in ("one", "two", "three"):
+        event = _before(invocation_state, real_tool, tool_id, {"command": "curl http://target"})
+        hook._before_tool(event)
+        hook._after_tool(
+            _after(
+                event,
+                _result(tool_id, "Recovery may only use a corrected call", status="error"),
+                cancel_message="Recovery may only use a corrected call",
+            )
+        )
+        assert event.selected_tool is real_tool
+
+    repeat_state = invocation_state["_cyber_tool_repeat_guard"]
+    assert repeat_state.history == []
+    assert repeat_state.completed_results == {}
+    assert invocation_state["request_state"] == {}
+
+
+def test_cancellation_rolls_back_repeat_suppression_and_stop_state():
+    hook = ToolRepeatGuardHook(repeat_threshold=2)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    first = _before(invocation_state, real_tool, "one")
+    hook._before_tool(first)
+    hook._after_tool(_after(first, _result("one", "first")))
+
+    suppressed = _before(invocation_state, real_tool, "two")
+    hook._before_tool(suppressed)
+    assert suppressed.selected_tool is not real_tool
+    suppressed_result = asyncio.run(
+        _stream_result(suppressed.selected_tool, suppressed.tool_use, invocation_state)
+    )
+    hook._after_tool(_after(suppressed, suppressed_result))
+
+    canceled_stop = _before(invocation_state, real_tool, "three")
+    hook._before_tool(canceled_stop)
+    assert canceled_stop.selected_tool is not real_tool
+    assert invocation_state["request_state"]["stop_event_loop"] is True
+    hook._after_tool(
+        _after(
+            canceled_stop,
+            _result("three", "blocked", status="error"),
+            cancel_message="blocked by recovery",
+        )
+    )
+
+    assert invocation_state["request_state"] == {}
 
 
 def test_repeat_state_is_scoped_to_invocation_and_requires_completed_result():

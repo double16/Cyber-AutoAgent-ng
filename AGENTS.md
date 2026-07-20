@@ -38,6 +38,9 @@
 - Use async/await for asynchronous operations
 - Use template literals for string concatenation
 
+## Application Best Practices
+- Budget is reporting only after reporting or evaluation stages are reached.
+
 ## LLM Best Practices
 - Design considerations should prefer deterministic actions in Python or Typescript code, reasoning actions in agents/LLM.
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.

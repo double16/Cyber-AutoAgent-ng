@@ -23,6 +23,28 @@ from ...config import AgentConfig
 
 logger = get_logger("Handlers.ReactHooks")
 
+_TOOL_OUTCOME_KEY = "_cyber_outcome"
+_TOOL_EXECUTED_KEY = "_cyber_executed"
+_VALIDATION_ERROR_PREFIX = "Validation failed for input parameters:"
+
+
+def classify_tool_outcome(result: Any, cancel_message: Optional[str] = None) -> tuple[str, bool]:
+    """Classify whether a tool ran and how its invocation ended."""
+
+    if cancel_message is not None:
+        return "blocked", False
+    if not isinstance(result, dict) or result.get("status", "success") != "error":
+        return "success", True
+
+    output = "\n".join(
+        str(item.get("text", ""))
+        for item in result.get("content", [])
+        if isinstance(item, dict)
+    )
+    if _VALIDATION_ERROR_PREFIX in output:
+        return "validation_error", False
+    return "error", True
+
 
 class ReactHooks(HookProvider):
     """
@@ -180,6 +202,10 @@ class ReactHooks(HookProvider):
 
             # Extract and process result
             result = event.result
+            outcome, executed = classify_tool_outcome(result, getattr(event, "cancel_message", None))
+            if isinstance(result, dict):
+                result[_TOOL_OUTCOME_KEY] = outcome
+                result[_TOOL_EXECUTED_KEY] = executed
             success, output = self._process_tool_result(result)
 
             # Log completion at INFO level
@@ -198,6 +224,8 @@ class ReactHooks(HookProvider):
                         "type": "tool_invocation_end",
                         "success": success,
                         "tool_name": tool_name,
+                        "outcome": outcome,
+                        "executed": executed,
                     }
                 )
                 self.emitter.emit(
@@ -207,6 +235,8 @@ class ReactHooks(HookProvider):
                         "tool_id": tool_id,
                         "success": success,
                         "duration": f"{duration:.2f}s",
+                        "outcome": outcome,
+                        "executed": executed,
                     }
                 )
 

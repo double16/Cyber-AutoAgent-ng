@@ -404,6 +404,10 @@ and allows one model recovery turn. If the model continues the same cycle, the g
 and stops only that agent as a normal completion. A different call resets recovery state, and the surrounding workflow
 continues without an exception.
 
+Calls canceled by policy hooks are excluded from repeat detection and cached-result reuse because their error result
+describes a controller decision rather than an executed tool. Tool completion events expose `outcome` and `executed`
+fields so consumers can distinguish command errors from input validation failures and policy blocks.
+
 #### Conversation Preservation
 
 | Variable                             | Default | Description                                                               |

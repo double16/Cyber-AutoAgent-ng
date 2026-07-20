@@ -1456,6 +1456,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           agent_name: event.agent_name,
           agent_type: event.agent_type,
           parent_agent_run_id: event.parent_agent_run_id,
+          success: event.success,
+          outcome: event.outcome,
+          executed: event.executed,
           id: `tool_end_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           timestamp: new Date().toISOString(),
           sessionId: 'current'

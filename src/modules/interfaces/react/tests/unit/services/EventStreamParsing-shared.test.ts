@@ -71,6 +71,36 @@ describe('shared cyber event stream parsing behavior', () => {
     expect(chunks.map(event => event.content)).toEqual(['backend tool output']);
   });
 
+  it.each([
+    ['DirectDockerService', () => new DirectDockerService(), 'parseEvents'],
+    ['PythonExecutionService', () => new PythonExecutionService(), 'processOutputStream'],
+  ])('%s distinguishes blocked and executed tool failures', (_name, createService, method) => {
+    const service: any = createService();
+    const emitted = captureEvents(service);
+
+    service[method](wrapEvent({
+      type: 'tool_end',
+      tool_name: 'shell',
+      success: false,
+      outcome: 'blocked',
+      executed: false,
+      timestamp: 1,
+    }));
+    service[method](wrapEvent({
+      type: 'tool_end',
+      tool_name: 'shell',
+      success: false,
+      outcome: 'error',
+      executed: true,
+      timestamp: 2,
+    }));
+
+    expect(emitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'output', content: '○ shell (blocked)' }),
+      expect.objectContaining({ type: 'output', content: '○ shell (failed)' }),
+    ]));
+  });
+
   it('emits a user-visible parse error for malformed Docker events', () => {
     const service: any = new DirectDockerService();
     const emitted = captureEvents(service);

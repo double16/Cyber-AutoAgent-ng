@@ -38,6 +38,8 @@ class _InvocationRepeatState:
     completed_results: dict[str, ToolResult] = field(default_factory=dict)
     tool_names: dict[str, str] = field(default_factory=dict)
     call_fingerprints: dict[str, str] = field(default_factory=dict)
+    suppressed_call_ids: set[str] = field(default_factory=set)
+    stop_call_ids: set[str] = field(default_factory=set)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -233,6 +235,7 @@ class ToolRepeatGuardHook(HookProvider):
                 return
 
             state.suppressed += 1
+            state.suppressed_call_ids.add(tool_id)
             event.selected_tool = _CachedResultTool(
                 event.selected_tool,
                 completed_result,
@@ -260,6 +263,7 @@ class ToolRepeatGuardHook(HookProvider):
                 "tool_name": str(event.tool_use.get("name", "unknown")),
                 "tool_names": [state.tool_names.get(item, "unknown") for item in cycle],
             }
+            state.stop_call_ids.add(tool_id)
             logger.warning(
                 "Stopping agent after repeated tool-call cycle: tool=%s cycle_length=%d repeat=%d",
                 str(event.tool_use.get("name", "unknown")),
@@ -273,8 +277,53 @@ class ToolRepeatGuardHook(HookProvider):
 
         with state.lock:
             fingerprint = state.call_fingerprints.pop(tool_id, "")
+            if event.cancel_message is not None:
+                self._discard_canceled_call(state, tool_id, fingerprint, event.invocation_state)
+                return
+            state.suppressed_call_ids.discard(tool_id)
+            state.stop_call_ids.discard(tool_id)
             if isinstance(event.selected_tool, _CachedResultTool):
                 return
             if not fingerprint or fingerprint not in state.history or not isinstance(event.result, dict):
                 return
             state.completed_results[fingerprint] = copy.deepcopy(event.result)
+
+    def _discard_canceled_call(
+        self,
+        state: _InvocationRepeatState,
+        tool_id: str,
+        fingerprint: str,
+        invocation_state: dict[str, Any],
+    ) -> None:
+        """Remove a hook-canceled call from repeat detection and cached-result recovery."""
+
+        for index in range(len(state.history) - 1, -1, -1):
+            if state.history[index] == fingerprint:
+                del state.history[index]
+                break
+
+        if tool_id in state.suppressed_call_ids:
+            state.suppressed = max(0, state.suppressed - 1)
+            state.suppressed_call_ids.discard(tool_id)
+
+        if tool_id in state.stop_call_ids:
+            request_state = invocation_state.get("request_state")
+            if isinstance(request_state, dict) and REPEATED_TOOL_LOOP_STATE_KEY in request_state:
+                request_state.pop("stop_event_loop", None)
+                request_state.pop(REPEATED_TOOL_LOOP_STATE_KEY, None)
+            state.stop_call_ids.discard(tool_id)
+
+        repeated_cycle = _repeating_suffix(
+            state.history,
+            self.repeat_threshold,
+            self.max_cycle_length,
+        )
+        if repeated_cycle is None:
+            state.active_cycle = ()
+            state.suppressed = 0
+        else:
+            _, state.active_cycle, _ = repeated_cycle
+
+        retained_fingerprints = set(state.history)
+        if fingerprint not in retained_fingerprints:
+            state.tool_names.pop(fingerprint, None)

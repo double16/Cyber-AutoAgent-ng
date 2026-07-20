@@ -152,7 +152,10 @@ class OllamaModel(Model):
                 )
             ]
 
-        raise TypeError(f"content_type=<{next(iter(content))}> | unsupported type")
+        for unknown in iter(content):
+            logger.warning(f"content_type=<{unknown}> | unsupported type")
+
+        return []
 
     def _format_request_messages(self, messages: Messages, system_prompt: str | None = None) -> list[dict[str, Any]]:
         """Format an Ollama compatible messages array.

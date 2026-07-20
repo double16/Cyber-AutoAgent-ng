@@ -302,6 +302,12 @@ export interface ToolEvent extends BaseEvent {
   error?: string;
   /** Tool execution duration in milliseconds */
   duration?: number;
+  /** Backward-compatible success indicator */
+  success?: boolean;
+  /** Controller-observed completion classification */
+  outcome?: 'success' | 'error' | 'validation_error' | 'blocked';
+  /** Whether the selected tool reached execution */
+  executed?: boolean;
   /** Visual emphasis level for UI rendering */
   emphasis?: 'high' | 'medium' | 'low';
 }

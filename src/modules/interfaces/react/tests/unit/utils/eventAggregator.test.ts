@@ -170,6 +170,28 @@ describe('EventAggregator', () => {
             .toEqual([expect.objectContaining({type: 'tool_start', toolId: 'dup'})]);
     });
 
+    it('preserves tool completion outcome metadata', () => {
+        const aggregator = new EventAggregator();
+
+        const events = aggregator.processEvent({
+            type: 'tool_end',
+            toolId: 'blocked',
+            toolName: 'shell',
+            success: false,
+            outcome: 'blocked',
+            executed: false,
+        });
+
+        expect(events).toEqual([
+            expect.objectContaining({
+                type: 'tool_end',
+                success: false,
+                outcome: 'blocked',
+                executed: false,
+            }),
+        ]);
+    });
+
     it('flushes pending progress updates for shell_command and starts delayed thinking', () => {
         const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(12345);
 

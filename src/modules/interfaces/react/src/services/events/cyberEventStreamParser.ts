@@ -114,9 +114,14 @@ function updateToolExecutionState(
     state.currentToolName = undefined;
 
     if (eventData.type === 'tool_end') {
+      const completion = eventData.success
+        ? `✓ ${eventData.tool_name}`
+        : eventData.executed === false
+          ? `○ ${eventData.tool_name} (${eventData.outcome === 'blocked' ? 'blocked' : 'input validation failed'})`
+          : `○ ${eventData.tool_name} (failed)`;
       emitEvent({
         type: 'output',
-        content: eventData.success ? `✓ ${eventData.tool_name}` : `○ ${eventData.tool_name}`,
+        content: completion,
         timestamp: Date.now(),
       });
     }
