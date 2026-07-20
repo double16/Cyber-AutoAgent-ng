@@ -29,6 +29,7 @@
 - Use f-strings for string formatting
 - If a class member is set in __init__, do not use getattr(), use direct reference.
 - For multi-line strings, use triple quotes and limit each line to 100 characters.
+- Environment variables used for configuration must be given an example in .env.example and forwarded through docker-compose.yml.
 
 ## JavaScript Best Practices
 - Follow ESLint and Prettier configurations

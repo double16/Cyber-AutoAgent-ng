@@ -3,8 +3,8 @@
 ### Features
 
 - Present shell commands solely by capability and applicability, without ranking metadata.
-- Detect consecutive identical tool-call loops, reuse the latest completed result, and gracefully stop an agent that
-  ignores the cached-result guidance.
+- Detect exact repeating tool-call cycles, reuse matching completed results, and gracefully stop an agent that ignores
+  the cached-result guidance.
 - Add executable target registries and per-task target scopes so logical `--target` names can coexist with concrete
   URLs, hosts, CIDRs, and filesystem paths from the objective.
 - Add deterministic final-report target coverage showing task, verified-finding, and validation-failure counts by

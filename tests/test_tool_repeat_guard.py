@@ -9,9 +9,11 @@ from strands.types._events import ToolResultEvent
 from strands.types.tools import AgentTool
 
 from modules.handlers.tool_repeat_guard import (
+    DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
     DEFAULT_TOOL_REPEAT_THRESHOLD,
     REPEATED_TOOL_LOOP_STATE_KEY,
     ToolRepeatGuardHook,
+    normalize_tool_repeat_max_cycle_length,
     normalize_tool_repeat_threshold,
 )
 
@@ -121,7 +123,7 @@ def test_third_call_reuses_result_and_fourth_stops_normally():
     assert third_result["toolUseId"] == "three"
     assert third_result["status"] == "success"
     assert third_result["content"][0] == {"text": "second"}
-    assert "continue using this result" in third_result["content"][-1]["text"]
+    assert "use the returned result" in third_result["content"][-1]["text"]
     hook._after_tool(_after(third, third_result))
 
     fourth = _before(invocation_state, real_tool, "four")
@@ -131,9 +133,108 @@ def test_third_call_reuses_result_and_fourth_stops_normally():
     assert fourth_result["content"][0] == {"text": "second"}
     assert invocation_state["request_state"]["stop_event_loop"] is True
     assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
+        "cycle_length": 1,
         "repeat_count": 4,
         "tool_name": "shell",
+        "tool_names": ["shell"],
     }
+
+
+def test_alternating_two_call_cycle_reuses_each_result_then_stops():
+    hook = ToolRepeatGuardHook(repeat_threshold=3, max_cycle_length=8)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+    calls = ["alpha", "beta", "alpha", "beta", "alpha"]
+
+    for index, command in enumerate(calls, start=1):
+        event = _before(invocation_state, real_tool, str(index), {"command": command})
+        hook._before_tool(event)
+        assert event.selected_tool is real_tool
+        hook._after_tool(_after(event, _result(str(index), f"result-{index}")))
+
+    completes_third_cycle = _before(invocation_state, real_tool, "six", {"command": "beta"})
+    hook._before_tool(completes_third_cycle)
+    cached_beta = asyncio.run(
+        _stream_result(completes_third_cycle.selected_tool, completes_third_cycle.tool_use, invocation_state)
+    )
+    hook._after_tool(_after(completes_third_cycle, cached_beta))
+
+    assert cached_beta["content"][0] == {"text": "result-4"}
+    assert "cycle length 2, repeat 3" in cached_beta["content"][-1]["text"]
+    assert invocation_state["request_state"].get("stop_event_loop") is None
+
+    rotated_cycle = _before(invocation_state, real_tool, "seven", {"command": "alpha"})
+    hook._before_tool(rotated_cycle)
+    cached_alpha = asyncio.run(_stream_result(rotated_cycle.selected_tool, rotated_cycle.tool_use, invocation_state))
+
+    assert cached_alpha["content"][0] == {"text": "result-5"}
+    assert invocation_state["request_state"]["stop_event_loop"] is True
+    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
+        "cycle_length": 2,
+        "repeat_count": 3,
+        "tool_name": "shell",
+        "tool_names": ["shell", "shell"],
+    }
+
+
+def test_three_call_cycle_is_detected_at_configured_threshold():
+    hook = ToolRepeatGuardHook(repeat_threshold=2, max_cycle_length=3)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    for index, command in enumerate(["alpha", "beta", "gamma", "alpha", "beta"], start=1):
+        event = _before(invocation_state, real_tool, str(index), {"command": command})
+        hook._before_tool(event)
+        assert event.selected_tool is real_tool
+        hook._after_tool(_after(event, _result(str(index), f"result-{index}")))
+
+    repeated = _before(invocation_state, real_tool, "six", {"command": "gamma"})
+    hook._before_tool(repeated)
+    cached = asyncio.run(_stream_result(repeated.selected_tool, repeated.tool_use, invocation_state))
+
+    assert cached["content"][0] == {"text": "result-3"}
+    assert "cycle length 3, repeat 2" in cached["content"][-1]["text"]
+
+
+def test_incomplete_or_oversized_cycles_are_not_suppressed():
+    real_tool = FakeTool()
+
+    incomplete_hook = ToolRepeatGuardHook(repeat_threshold=3, max_cycle_length=2)
+    incomplete_state = {"request_state": {}}
+    for index, command in enumerate(["alpha", "beta", "alpha", "beta", "alpha"], start=1):
+        event = _before(incomplete_state, real_tool, str(index), {"command": command})
+        incomplete_hook._before_tool(event)
+        assert event.selected_tool is real_tool
+        incomplete_hook._after_tool(_after(event, _result(str(index), f"result-{index}")))
+
+    bounded_hook = ToolRepeatGuardHook(repeat_threshold=2, max_cycle_length=2)
+    bounded_state = {"request_state": {}}
+    for index, command in enumerate(["alpha", "beta", "gamma", "alpha", "beta", "gamma"], start=1):
+        event = _before(bounded_state, real_tool, str(index), {"command": command})
+        bounded_hook._before_tool(event)
+        assert event.selected_tool is real_tool
+        bounded_hook._after_tool(_after(event, _result(str(index), f"result-{index}")))
+
+
+def test_unrelated_call_resets_cycle_recovery_state():
+    hook = ToolRepeatGuardHook(repeat_threshold=2, max_cycle_length=2)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    for index, command in enumerate(["alpha", "beta", "alpha"], start=1):
+        event = _before(invocation_state, real_tool, str(index), {"command": command})
+        hook._before_tool(event)
+        hook._after_tool(_after(event, _result(str(index), f"result-{index}")))
+
+    repeated = _before(invocation_state, real_tool, "four", {"command": "beta"})
+    hook._before_tool(repeated)
+    assert repeated.selected_tool is not real_tool
+
+    changed = _before(invocation_state, real_tool, "changed", {"command": "whoami"})
+    hook._before_tool(changed)
+
+    assert changed.selected_tool is real_tool
+    assert invocation_state["request_state"].get("stop_event_loop") is None
 
 
 def test_structurally_equal_arguments_repeat_but_changed_arguments_reset():
@@ -200,6 +301,9 @@ def test_threshold_must_allow_an_initial_execution():
     with pytest.raises(ValueError, match="at least 2"):
         ToolRepeatGuardHook(repeat_threshold=1)
 
+    with pytest.raises(ValueError, match="max_cycle_length must be at least 1"):
+        ToolRepeatGuardHook(max_cycle_length=0)
+
 
 @pytest.mark.parametrize("value", [-10, -1, 1, None, "3", SimpleNamespace()])
 def test_invalid_configured_threshold_uses_default(value):
@@ -209,3 +313,13 @@ def test_invalid_configured_threshold_uses_default(value):
 @pytest.mark.parametrize("value", [0, 2, 7])
 def test_supported_configured_threshold_is_preserved(value):
     assert normalize_tool_repeat_threshold(value) == value
+
+
+@pytest.mark.parametrize("value", [-10, -1, 0, None, "8", True, SimpleNamespace()])
+def test_invalid_max_cycle_length_uses_default(value):
+    assert normalize_tool_repeat_max_cycle_length(value) == DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH
+
+
+@pytest.mark.parametrize("value", [1, 2, 8, 32])
+def test_supported_max_cycle_length_is_preserved(value):
+    assert normalize_tool_repeat_max_cycle_length(value) == value

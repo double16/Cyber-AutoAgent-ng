@@ -1177,6 +1177,44 @@ def test_run_agent_until_terminal_state_stops_repeated_tool_loop_without_error(m
     assert logger.warning.called
 
 
+def test_run_agent_until_terminal_state_describes_multi_call_tool_cycle(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class RepeatedToolAgent:
+        def __init__(self):
+            self.messages = []
+            self._cyber_callback_handler = callback
+
+        def __call__(self, message):
+            del message
+            callback.tool_counts["shell"] = 7
+            return SimpleNamespace(
+                metrics=None,
+                state={
+                    "repeated_tool_loop": {
+                        "cycle_length": 2,
+                        "repeat_count": 3,
+                        "tool_name": "shell",
+                        "tool_names": ["shell", "shell"],
+                    }
+                },
+            )
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(RepeatedToolAgent(), callback, logger=logger)
+
+    assert result.reason == "repeated_tool_loop"
+    assert result.message == (
+        "Stopped agent after 3 repetitions of a 2-call tool cycle involving shell; "
+        "matching completed results were reused."
+    )
+
+
 def test_run_agent_policy_can_stop_immediately_after_required_tool(monkeypatch):
     root_callback = CliCallback()
     role_callback = CliCallback()

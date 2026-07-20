@@ -395,11 +395,14 @@ Artifact references include immediate context for LLM comprehension:
 | `CYBER_TOOL_COMPRESS_TRUNCATE`         | 8,000   | Compression target size (characters)                                                         |
 | `CYBER_TOOL_MAX_RESULT_CHARS`          | 30,000  | Conversation truncation limit                                                                |
 | `CYBER_TOOL_RESULT_ARTIFACT_THRESHOLD` | 10,000  | Artifact externalization trigger                                                             |
-| `CYBER_TOOL_REPEAT_THRESHOLD`          | 3       | Reuse results at this consecutive identical call; `0` disables the repeated-call loop guard. |
+| `CYBER_TOOL_REPEAT_THRESHOLD`          | 3       | Reuse results after this many exact cycle repetitions; `0` disables the guard.                |
+| `CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH`   | 8       | Maximum number of calls in a detected repeating cycle; must be at least `1`.                  |
 
-The repeated-call guard is scoped to one agent invocation. It allows one model turn after reusing a result. If the
-model makes the same unchanged call again, the guard returns the cached result once more and stops only that agent as
-a normal completion. The surrounding workflow continues without an exception.
+The repeat guard is scoped to one agent invocation and detects exact contiguous cycles, including a single unchanged
+call or alternating calls such as `A, B, A, B, A, B`. It reuses the most recent completed result for the matching call
+and allows one model recovery turn. If the model continues the same cycle, the guard reuses the next matching result
+and stops only that agent as a normal completion. A different call resets recovery state, and the surrounding workflow
+continues without an exception.
 
 #### Conversation Preservation
 

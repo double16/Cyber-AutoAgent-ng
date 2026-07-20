@@ -67,8 +67,10 @@ from modules.handlers.conversation_budget import (
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.tool_recovery import TaskFailureRecoveryHook
 from modules.handlers.tool_repeat_guard import (
+    DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
     DEFAULT_TOOL_REPEAT_THRESHOLD,
     ToolRepeatGuardHook,
+    normalize_tool_repeat_max_cycle_length,
     normalize_tool_repeat_threshold,
 )
 from modules.handlers.tool_router import ToolRouterHook
@@ -159,6 +161,33 @@ class AgentRuntimeResources:
 
 def _tool_names(tools: List[Any]) -> set[str]:
     return {get_tool_name(tool) for tool in tools}
+
+
+def _create_tool_repeat_guard(config_manager: Any, agent_logger: logging.Logger) -> Optional[ToolRepeatGuardHook]:
+    """Build the configured repeat guard, or return None when disabled."""
+
+    repeat_threshold = normalize_tool_repeat_threshold(
+        config_manager.getenv_int(
+            "CYBER_TOOL_REPEAT_THRESHOLD",
+            DEFAULT_TOOL_REPEAT_THRESHOLD,
+        )
+    )
+    if repeat_threshold == 0:
+        agent_logger.info("Repeated tool-call guard disabled")
+        return None
+
+    repeat_max_cycle_length = normalize_tool_repeat_max_cycle_length(
+        config_manager.getenv_int(
+            "CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH",
+            DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
+        )
+    )
+    agent_logger.info(
+        "Repeated tool-call guard threshold: %d; maximum cycle length: %d",
+        repeat_threshold,
+        repeat_max_cycle_length,
+    )
+    return ToolRepeatGuardHook(repeat_threshold, repeat_max_cycle_length)
 
 
 def build_role_tools(
@@ -817,18 +846,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     tool_call_repair_hook = AgentRepairHook()
 
-    repeat_threshold = normalize_tool_repeat_threshold(
-        config_manager.getenv_int(
-            "CYBER_TOOL_REPEAT_THRESHOLD",
-            DEFAULT_TOOL_REPEAT_THRESHOLD,
-        )
-    )
-    if repeat_threshold == 0:
-        tool_repeat_guard_hook = None
-        agent_logger.info("Repeated tool-call guard disabled")
-    else:
-        tool_repeat_guard_hook = ToolRepeatGuardHook(repeat_threshold)
-        agent_logger.info("Repeated tool-call guard threshold: %d", repeat_threshold)
+    tool_repeat_guard_hook = _create_tool_repeat_guard(config_manager, agent_logger)
 
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
 

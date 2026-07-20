@@ -569,6 +569,45 @@ class TestCheckExistingMemories:
             mock_logger.debug.assert_called_once()
 
 
+def test_create_tool_repeat_guard_uses_threshold_and_max_cycle_configuration():
+    values = {
+        "CYBER_TOOL_REPEAT_THRESHOLD": 4,
+        "CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH": 6,
+    }
+    config_manager = SimpleNamespace(getenv_int=lambda name, default: values.get(name, default))
+    agent_logger = Mock()
+
+    guard = cyber_agent_module._create_tool_repeat_guard(config_manager, agent_logger)
+
+    assert guard.repeat_threshold == 4
+    assert guard.max_cycle_length == 6
+    assert guard.history_limit == 24
+    agent_logger.info.assert_called_once_with(
+        "Repeated tool-call guard threshold: %d; maximum cycle length: %d",
+        4,
+        6,
+    )
+
+
+def test_create_tool_repeat_guard_disable_switch_skips_cycle_configuration():
+    calls = []
+
+    def getenv_int(name, default):
+        calls.append((name, default))
+        return 0
+
+    agent_logger = Mock()
+
+    guard = cyber_agent_module._create_tool_repeat_guard(
+        SimpleNamespace(getenv_int=getenv_int),
+        agent_logger,
+    )
+
+    assert guard is None
+    assert [name for name, _default in calls] == ["CYBER_TOOL_REPEAT_THRESHOLD"]
+    agent_logger.info.assert_called_once_with("Repeated tool-call guard disabled")
+
+
 def test_create_agent_reuses_runtime_resources(monkeypatch):
     class FakeAgent:
         def __init__(self, **kwargs):
