@@ -16,6 +16,7 @@ from modules.handlers.tool_repeat_guard import (
     normalize_tool_repeat_max_cycle_length,
     normalize_tool_repeat_threshold,
 )
+from modules.handlers.tool_recovery import TaskFailureRecoveryHook, ToolOutcomeJournal
 
 
 class FakeTool(AgentTool):
@@ -59,6 +60,7 @@ def _before(invocation_state, selected_tool, tool_id, tool_input=None, name="she
             "toolUseId": tool_id,
             "input": tool_input or {"command": "id", "options": {"a": 1, "b": 2}},
         },
+        cancel_tool=False,
     )
 
 
@@ -85,6 +87,22 @@ async def _stream_result(selected_tool, tool_use, invocation_state):
     events = [event async for event in selected_tool.stream(tool_use, invocation_state)]
     assert len(events) == 1
     return events[0].tool_result
+
+
+def _run_combined_before(repeat_hook, recovery_hook, event):
+    """Run before callbacks in production registration order."""
+
+    repeat_hook._before_tool(event)
+    recovery_hook._before_tool(event)
+
+
+def _run_combined_after(recovery_hook, repeat_hook, before_event, result, cancel_message=None):
+    """Run after callbacks in Strands' reverse callback order."""
+
+    event = _after(before_event, result, cancel_message=cancel_message)
+    recovery_hook._after_tool(event)
+    repeat_hook._after_tool(event)
+    return event
 
 
 def test_registers_before_and_after_callbacks():
@@ -197,6 +215,56 @@ def test_three_call_cycle_is_detected_at_configured_threshold():
     assert "cycle length 3, repeat 2" in cached["content"][-1]["text"]
 
 
+def test_default_three_call_cycle_works_with_failure_recovery_hook():
+    repeat_hook = ToolRepeatGuardHook()
+    journal = ToolOutcomeJournal()
+    recovery_hook = TaskFailureRecoveryHook(journal)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    commands = ["alpha", "beta", "gamma", "alpha", "beta", "gamma", "alpha", "beta"]
+    for index, command in enumerate(commands, start=1):
+        event = _before(invocation_state, real_tool, str(index), {"command": command})
+        _run_combined_before(repeat_hook, recovery_hook, event)
+        assert event.selected_tool is real_tool
+        assert event.cancel_tool is False
+        _run_combined_after(recovery_hook, repeat_hook, event, _result(str(index), f"result-{index}"))
+
+    completes_third_cycle = _before(invocation_state, real_tool, "nine", {"command": "gamma"})
+    _run_combined_before(repeat_hook, recovery_hook, completes_third_cycle)
+    cached_gamma = asyncio.run(
+        _stream_result(
+            completes_third_cycle.selected_tool,
+            completes_third_cycle.tool_use,
+            invocation_state,
+        )
+    )
+    _run_combined_after(recovery_hook, repeat_hook, completes_third_cycle, cached_gamma)
+
+    assert cached_gamma["content"][0] == {"text": "result-6"}
+    assert "cycle length 3, repeat 3" in cached_gamma["content"][-1]["text"]
+    assert invocation_state["request_state"].get("stop_event_loop") is None
+
+    rotated_cycle = _before(invocation_state, real_tool, "ten", {"command": "alpha"})
+    _run_combined_before(repeat_hook, recovery_hook, rotated_cycle)
+    cached_alpha = asyncio.run(
+        _stream_result(rotated_cycle.selected_tool, rotated_cycle.tool_use, invocation_state)
+    )
+    _run_combined_after(recovery_hook, repeat_hook, rotated_cycle, cached_alpha)
+
+    assert cached_alpha["content"][0] == {"text": "result-7"}
+    assert recovery_hook.unresolved is False
+    assert len(journal.entries()) == 10
+    assert all(outcome.success and outcome.recovery_role == "normal" for outcome in journal.entries())
+    assert invocation_state["request_state"]["stop_event_loop"] is True
+    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
+        "cycle_length": 3,
+        "repeat_count": 3,
+        "tool_name": "shell",
+        "tool_names": ["shell", "shell", "shell"],
+    }
+
+
 def test_incomplete_or_oversized_cycles_are_not_suppressed():
     real_tool = FakeTool()
 
@@ -281,59 +349,208 @@ def test_error_results_are_reused_without_mutating_authoritative_result():
     assert original == _result("one", "permission denied", status="error")
 
 
-def test_canceled_calls_are_removed_from_repeat_history_and_not_cached():
-    hook = ToolRepeatGuardHook(repeat_threshold=2)
+def test_alternating_canceled_calls_are_detected_but_not_cached():
+    hook = ToolRepeatGuardHook(repeat_threshold=3)
     invocation_state = {"request_state": {}}
     real_tool = FakeTool()
 
-    for tool_id in ("one", "two", "three"):
-        event = _before(invocation_state, real_tool, tool_id, {"command": "curl http://target"})
+    commands = ["alpha", "beta", "alpha", "beta", "alpha", "beta"]
+    for index, command in enumerate(commands, start=1):
+        event = _before(invocation_state, real_tool, str(index), {"command": command})
         hook._before_tool(event)
         hook._after_tool(
             _after(
                 event,
-                _result(tool_id, "Recovery may only use a corrected call", status="error"),
+                _result(str(index), "Recovery may only use a corrected call", status="error"),
                 cancel_message="Recovery may only use a corrected call",
             )
         )
         assert event.selected_tool is real_tool
 
     repeat_state = invocation_state["_cyber_tool_repeat_guard"]
-    assert repeat_state.history == []
+    assert len(repeat_state.history) == 6
+    assert repeat_state.completed_results == {}
+    assert invocation_state["request_state"]["stop_event_loop"] is True
+    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
+        "cycle_length": 2,
+        "repeat_count": 3,
+        "tool_name": "shell",
+        "tool_names": ["shell", "shell"],
+    }
+
+
+def test_repeated_single_canceled_call_stops_at_threshold_without_cached_result():
+    hook = ToolRepeatGuardHook(repeat_threshold=3)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    for tool_id in ("one", "two", "three"):
+        event = _before(invocation_state, real_tool, tool_id)
+        hook._before_tool(event)
+        hook._after_tool(
+            _after(event, _result(tool_id, "blocked", status="error"), cancel_message="blocked by recovery")
+        )
+        assert event.selected_tool is real_tool
+
+    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY]["cycle_length"] == 1
+    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY]["repeat_count"] == 3
+
+
+def test_interrupted_canceled_cycle_does_not_stop_or_cache_results():
+    hook = ToolRepeatGuardHook(repeat_threshold=3, max_cycle_length=2)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    for index, command in enumerate(["alpha", "beta", "alpha", "changed"], start=1):
+        event = _before(invocation_state, real_tool, str(index), {"command": command})
+        hook._before_tool(event)
+        hook._after_tool(
+            _after(event, _result(str(index), "blocked", status="error"), cancel_message="blocked by recovery")
+        )
+
+    repeat_state = invocation_state["_cyber_tool_repeat_guard"]
     assert repeat_state.completed_results == {}
     assert invocation_state["request_state"] == {}
 
 
-def test_cancellation_rolls_back_repeat_suppression_and_stop_state():
-    hook = ToolRepeatGuardHook(repeat_threshold=2)
+def test_recovery_blocked_alternating_cycle_is_stopped_without_caching_policy_results():
+    repeat_hook = ToolRepeatGuardHook(repeat_threshold=3, max_cycle_length=2)
+    recovery_hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     invocation_state = {"request_state": {}}
     real_tool = FakeTool()
 
-    first = _before(invocation_state, real_tool, "one")
-    hook._before_tool(first)
-    hook._after_tool(_after(first, _result("one", "first")))
-
-    suppressed = _before(invocation_state, real_tool, "two")
-    hook._before_tool(suppressed)
-    assert suppressed.selected_tool is not real_tool
-    suppressed_result = asyncio.run(
-        _stream_result(suppressed.selected_tool, suppressed.tool_use, invocation_state)
+    failed = _before(
+        invocation_state,
+        real_tool,
+        "failed",
+        {"command": "feroxbuster -u http://target -w /missing.txt"},
     )
-    hook._after_tool(_after(suppressed, suppressed_result))
+    _run_combined_before(repeat_hook, recovery_hook, failed)
+    _run_combined_after(
+        recovery_hook,
+        repeat_hook,
+        failed,
+        _result("failed", "Could not open /missing.txt", status="error"),
+    )
+    assert recovery_hook.unresolved is True
 
-    canceled_stop = _before(invocation_state, real_tool, "three")
-    hook._before_tool(canceled_stop)
-    assert canceled_stop.selected_tool is not real_tool
-    assert invocation_state["request_state"]["stop_event_loop"] is True
-    hook._after_tool(
-        _after(
-            canceled_stop,
-            _result("three", "blocked", status="error"),
-            cancel_message="blocked by recovery",
+    diagnostic = _before(invocation_state, real_tool, "diagnostic", {"command": "ls /usr/share/wordlists"})
+    _run_combined_before(repeat_hook, recovery_hook, diagnostic)
+    assert diagnostic.cancel_tool is False
+    _run_combined_after(recovery_hook, repeat_hook, diagnostic, _result("diagnostic", "dirb"))
+
+    commands = ["ls -la /missing", "ls -F /missing"] * 3
+    for index, command in enumerate(commands, start=1):
+        blocked = _before(invocation_state, real_tool, f"blocked-{index}", {"command": command})
+        _run_combined_before(repeat_hook, recovery_hook, blocked)
+        assert isinstance(blocked.cancel_tool, str)
+        _run_combined_after(
+            recovery_hook,
+            repeat_hook,
+            blocked,
+            _result(blocked.tool_use["toolUseId"], blocked.cancel_tool, status="error"),
+            cancel_message=blocked.cancel_tool,
         )
+
+    state = invocation_state["_cyber_tool_repeat_guard"]
+    assert state.completed_results == {}
+    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
+        "cycle_length": 2,
+        "repeat_count": 3,
+        "tool_name": "shell",
+        "tool_names": ["shell", "shell"],
+    }
+
+
+def test_recovery_blocked_three_call_cycle_stops_at_default_threshold():
+    repeat_hook = ToolRepeatGuardHook()
+    journal = ToolOutcomeJournal()
+    recovery_hook = TaskFailureRecoveryHook(journal)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    failed = _before(
+        invocation_state,
+        real_tool,
+        "failed",
+        {"command": "feroxbuster -u http://target -w /missing.txt"},
+    )
+    _run_combined_before(repeat_hook, recovery_hook, failed)
+    _run_combined_after(
+        recovery_hook,
+        repeat_hook,
+        failed,
+        _result("failed", "Could not open /missing.txt", status="error"),
+    )
+    assert recovery_hook.unresolved is True
+
+    commands = ["printf alpha", "printf beta", "printf gamma"] * 3
+    for index, command in enumerate(commands, start=1):
+        blocked = _before(invocation_state, real_tool, f"blocked-{index}", {"command": command})
+        _run_combined_before(repeat_hook, recovery_hook, blocked)
+        assert blocked.selected_tool is real_tool
+        assert isinstance(blocked.cancel_tool, str)
+        _run_combined_after(
+            recovery_hook,
+            repeat_hook,
+            blocked,
+            _result(blocked.tool_use["toolUseId"], blocked.cancel_tool, status="error"),
+            cancel_message=blocked.cancel_tool,
+        )
+
+    state = invocation_state["_cyber_tool_repeat_guard"]
+    assert len(state.completed_results) == 1
+    assert next(iter(state.completed_results.values()))["content"] == [{"text": "Could not open /missing.txt"}]
+    assert recovery_hook.unresolved is True
+    assert [outcome.recovery_role for outcome in journal.entries()] == ["normal"] + ["blocked"] * 9
+    assert invocation_state["request_state"]["stop_event_loop"] is True
+    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
+        "cycle_length": 3,
+        "repeat_count": 3,
+        "tool_name": "shell",
+        "tool_names": ["shell", "shell", "shell"],
+    }
+
+
+def test_successful_recovery_correction_remains_executable_with_repeat_guard():
+    repeat_hook = ToolRepeatGuardHook(repeat_threshold=3)
+    recovery_hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    failed = _before(
+        invocation_state,
+        real_tool,
+        "failed",
+        {"command": "feroxbuster -u http://target -w /missing.txt"},
+    )
+    _run_combined_before(repeat_hook, recovery_hook, failed)
+    _run_combined_after(
+        recovery_hook,
+        repeat_hook,
+        failed,
+        _result("failed", "Could not open /missing.txt", status="error"),
     )
 
+    correction = _before(
+        invocation_state,
+        real_tool,
+        "correction",
+        {"command": "feroxbuster -u http://target -w /valid.txt"},
+    )
+    _run_combined_before(repeat_hook, recovery_hook, correction)
+    assert correction.cancel_tool is False
+    assert correction.selected_tool is real_tool
+    _run_combined_after(
+        recovery_hook,
+        repeat_hook,
+        correction,
+        _result("correction", "200 /login.php"),
+    )
+
+    assert recovery_hook.unresolved is False
     assert invocation_state["request_state"] == {}
+    assert [outcome.recovery_role for outcome in recovery_hook.journal.entries()] == ["normal", "correction"]
 
 
 def test_repeat_state_is_scoped_to_invocation_and_requires_completed_result():

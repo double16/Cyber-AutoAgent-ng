@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -18,6 +19,15 @@ from strands.types.exceptions import MaxTokensReachedException
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import cyberautoagent
+
+
+@pytest.fixture(autouse=True)
+def restore_working_directory_after_test():
+    """Prevent operation-scoped CLI working directories from leaking between tests."""
+
+    original_cwd = Path.cwd()
+    yield
+    os.chdir(original_cwd)
 
 
 class TestCLIArguments:
@@ -1810,6 +1820,8 @@ def test_cli_main_runs_workflow_controller(monkeypatch, tmp_path):
 
     config_manager.workflow.run.assert_called_once()
     agent.cleanup.assert_not_called()
+    expected_cwd = tmp_path / "example.com" / os.environ["CYBER_OPERATION_ID"]
+    assert Path.cwd() == expected_cwd
 
 
 def test_cli_main_workflow_runner_creates_role_agent(monkeypatch, tmp_path):

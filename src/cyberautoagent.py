@@ -1242,7 +1242,7 @@ def main():
     output_base_path = get_output_path(
         target_sanitized, operation_id, "", server_config.output.base_dir
     )
-    # TODO: change the CWD so relative paths are in the output_base_path
+    # Keep relative tool paths inside the operation workspace.
     os.chdir(output_base_path)
 
     # Prepare path display based on environment

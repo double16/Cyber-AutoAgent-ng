@@ -853,6 +853,9 @@ cyber-autoagent/
 └── README.md                 # This file
 ```
 
+Each running operation uses its `outputs/<target>/OP_<id>/` directory as the process working directory, so relative
+artifact and tool paths stay inside that operation workspace.
+
 ### Key Files
 
 | File                                    | Purpose                                       |
