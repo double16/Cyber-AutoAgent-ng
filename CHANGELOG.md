@@ -2,6 +2,8 @@
 
 ### Features
 
+- Add optional, shell-free executable canaries and operation-scoped runtime quarantine while keeping unprobed commands
+  available and capability-compatible alternatives selectable.
 - Require the compact task-proposal `limits` object, discard it for snapshot tasks, and retain task-creator reasoning
   across four configurable correction turns so successive repairs preserve earlier schema fixes.
 - Compile canonical inventory snapshots into one task per target and normalized endpoint route, grouping known
@@ -43,6 +45,8 @@
 
 ### Fixes
 
+- Scope task-executor recovery to the failed invocation so missing prerequisites can be repaired and unrelated tools,
+  artifacts, memories, and evidence operations remain usable; recognize timeouts only from structured process results.
 - Prevent continuation task creators from bypassing endpoint-scoped coverage by omitting a model-selected coverage
   flag, and close empty phases cleanly instead of terminating the operation when task creation produces no work.
 - Bound retained task-executor continuations after repeated text-only responses or excessive model calls, without

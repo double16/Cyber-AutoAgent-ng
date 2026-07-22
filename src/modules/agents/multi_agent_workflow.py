@@ -887,7 +887,7 @@ class MultiAgentWorkflowController:
         )
         self.runtime.callback_handler.emit_termination("complete", message)
 
-    TOOL_GUIDE_PROMPT = re.compile(r"<tool_protocols>.*</tool_protocols>|<tools_and_capabilities>.*</tools_and_capabilities>", re.MULTILINE | re.DOTALL)
+    TOOL_GUIDE_PROMPT = re.compile(r"<task_capture>.*</task_capture>|<tool_protocols>.*</tool_protocols>|<tools_and_capabilities>.*</tools_and_capabilities>", re.MULTILINE | re.DOTALL)
 
     def _remove_tool_guide_from_prompt(self, prompt: str) -> str:
         """Remove the tool guide from the prompt."""
@@ -1131,7 +1131,7 @@ class MultiAgentWorkflowController:
                     decision = WorkflowDecision(
                         status="partial_failure",
                         reason=(
-                            "A correctable tool failure remained unresolved after the task's single recovery attempt."
+                            "A correctable tool failure remained unresolved after the task's bounded recovery turn."
                         ),
                     )
                 else:
@@ -1233,8 +1233,8 @@ class MultiAgentWorkflowController:
 Continue the same assigned task in this existing conversation. This is actor cycle {next_cycle} of
 {self.task_execution_cycles}. Do not restart work that is already complete. Address the unmet criteria identified by
 the critic, use tools to make concrete progress, and store durable evidence for the next review.
-If the prior cycle contained a rejected tool call, use the registered input schema to make at most one corrected call
-for that failed tool; never assume or describe a result from a rejected invocation.
+If the prior cycle contained a rejected tool call, use its registered input schema and controller guidance for bounded
+changed retries; never repeat identical input or assume a result from a rejected invocation.
 
 Critic reason: {decision.reason}
 Critic instructions: {decision.instructions}

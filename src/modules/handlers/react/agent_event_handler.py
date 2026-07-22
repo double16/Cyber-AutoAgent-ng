@@ -1762,11 +1762,19 @@ class AgentEventHandler(PrintingCallbackHandler):
                 except Exception:
                     requested_timeout = None
 
+                exit_code = None
+                try:
+                    exit_match = re.search(r"(?im)^Exit Code:\s*(-?\d+)\s*$", error_text)
+                    if exit_match:
+                        exit_code = int(exit_match.group(1))
+                except (TypeError, ValueError):
+                    exit_code = None
+
                 # Emit a structured error event with guidance if this looks like a timeout
                 looks_like_timeout = (
-                    ("timed out" in clean_error.lower())
-                    or ("timeout" in clean_error.lower())
-                    or ("TimeoutExpired" in clean_error)
+                    exit_code == 124
+                    or bool(re.search(r"timed out after\s+\d+\s*seconds?", clean_error, re.IGNORECASE))
+                    or "TimeoutExpired" in clean_error
                 )
                 if looks_like_timeout:
                     friendly_msg_lines = [

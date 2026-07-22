@@ -34,7 +34,7 @@ def _after(tool_id, name, tool_input, *, status, text):
     )
 
 
-def test_correctable_failure_blocks_side_effects_until_successful_correction():
+def test_prerequisite_failure_allows_independent_work_until_successful_correction():
     journal = ToolOutcomeJournal()
     hook = TaskFailureRecoveryHook(journal, max_policy_violations=10)
     failed_input = {
@@ -56,10 +56,10 @@ def test_correctable_failure_blocks_side_effects_until_successful_correction():
 
     create_tasks = _before("tasks", "create_tasks", {"tasks": [{"title": "Fake /admin"}]})
     hook._before_tool(create_tasks)
-    assert create_tasks.cancel_tool
+    assert create_tasks.cancel_tool is False
     acceptance = _before("acceptance", "record_task_acceptance", {"results": []})
     hook._before_tool(acceptance)
-    assert acceptance.cancel_tool
+    assert acceptance.cancel_tool is False
 
     diagnostic = _before("diagnostic", "shell", {"command": "find /usr/share/wordlists -type f"})
     hook._before_tool(diagnostic)
@@ -89,14 +89,10 @@ def test_correctable_failure_blocks_side_effects_until_successful_correction():
     valid_tasks = _before("valid-tasks", "create_tasks", {"tasks": [{"title": "Verify /login.php"}]})
     hook._before_tool(valid_tasks)
     assert valid_tasks.cancel_tool is False
-    assert [outcome.recovery_role for outcome in journal.entries()] == [
-        "normal",
-        "diagnostic",
-        "correction",
-    ]
+    assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "diagnostic", "correction"]
 
 
-def test_failed_correction_exhausts_allowance_and_keeps_writes_blocked():
+def test_failed_corrections_exhaust_configured_allowance_without_blocking_independent_work():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster --not-an-option http://target"}
     hook._after_tool(
@@ -114,15 +110,21 @@ def test_failed_correction_exhausts_allowance_and_keeps_writes_blocked():
     hook._after_tool(failed_correction)
 
     assert hook.unresolved is True
+    assert hook.exhausted is False
+    second_input = {"command": "feroxbuster -u http://target --timeout 30"}
+    second = _before("second", "shell", second_input)
+    hook._before_tool(second)
+    second_after = _after("second", "shell", second_input, status="error", text="timed out")
+    hook._after_tool(second_after)
     assert hook.exhausted is True
-    assert failed_correction.invocation_state["request_state"]["stop_event_loop"] is True
+    assert second_after.invocation_state["request_state"]["stop_event_loop"] is True
     assert (
-        failed_correction.invocation_state["request_state"][TOOL_RECOVERY_EXHAUSTED_STATE_KEY]["reason"]
+        second_after.invocation_state["request_state"][TOOL_RECOVERY_EXHAUSTED_STATE_KEY]["reason"]
         == "correction_failed"
     )
     observation = _before("observation", "store_observation", {"content": "invented success"})
     hook._before_tool(observation)
-    assert observation.cancel_tool
+    assert observation.cancel_tool is False
 
 
 @pytest.mark.parametrize("limit", [1, 2, 3])
@@ -135,7 +137,7 @@ def test_recovery_stops_at_configured_policy_violation_limit(limit):
 
     last_event = None
     for index in range(limit):
-        last_event = _before(f"blocked-{index}", "python_repl", {"code": "print('diagnostic')"})
+        last_event = _before(f"blocked-{index}", "shell", failed_input)
         hook._before_tool(last_event)
         assert last_event.cancel_tool
         if index < limit - 1:
@@ -153,7 +155,7 @@ def test_recovery_stops_at_configured_policy_violation_limit(limit):
     assert hook.exhausted is True
 
 
-def test_non_shell_correction_requires_same_tool_and_changed_input():
+def test_non_shell_correction_allows_independent_tools_and_requires_changed_input():
     journal = ToolOutcomeJournal()
     hook = TaskFailureRecoveryHook(journal, max_policy_violations=10)
     failed_input = {
@@ -172,12 +174,12 @@ def test_non_shell_correction_requires_same_tool_and_changed_input():
 
     unrelated_write = _before("observation", "store_observation", {"content": "invented success"})
     hook._before_tool(unrelated_write)
-    assert unrelated_write.cancel_tool
+    assert unrelated_write.cancel_tool is False
 
     identical_retry = _before("identical", "store_finding", dict(failed_input))
     hook._before_tool(identical_retry)
     assert identical_retry.cancel_tool
-    assert "change the failed input" in identical_retry.cancel_tool
+    assert "identical failed invocation" in identical_retry.cancel_tool
 
     corrected_input = {
         "title": "Vulnerability pages accessible without authentication",
@@ -225,13 +227,16 @@ def test_non_shell_failed_correction_exhausts_recovery():
     )
 
     assert hook.unresolved is True
-    assert hook.exhausted is True
-    retry = _before("retry", "create_tasks", {"tasks": [{"title": "Task", "objective": "Run it"}]})
+    assert hook.exhausted is False
+    retry_input = {"tasks": [{"title": "Task", "objective": "Run it"}]}
+    retry = _before("retry", "create_tasks", retry_input)
     hook._before_tool(retry)
-    assert retry.cancel_tool == "The task's single correction allowance has been exhausted."
+    assert retry.cancel_tool is False
+    hook._after_tool(_after("retry", "create_tasks", retry_input, status="error", text="validation error"))
+    assert hook.exhausted is True
 
 
-def test_shell_correction_requires_same_executable_and_changed_input():
+def test_shell_correction_allows_different_executable_and_requires_changed_input():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
     hook._after_tool(
@@ -241,12 +246,25 @@ def test_shell_correction_requires_same_executable_and_changed_input():
     identical = _before("identical", "shell", dict(failed_input))
     hook._before_tool(identical)
     assert identical.cancel_tool
-    assert "change the failed input" in identical.cancel_tool
+    assert "identical failed invocation" in identical.cancel_tool
 
     different_executable = _before("curl", "shell", {"command": "curl http://target"})
     hook._before_tool(different_executable)
-    assert different_executable.cancel_tool
+    assert different_executable.cancel_tool is False
+    hook._after_tool(
+        _after(
+            "curl",
+            "shell",
+            different_executable.tool_use["input"],
+            status="success",
+            text="HTTP/1.1 200 OK",
+        )
+    )
+    assert hook.unresolved is False
 
+    hook._after_tool(
+        _after("failed-again", "shell", failed_input, status="error", text="Could not open /missing.txt")
+    )
     corrected = _before("corrected", "shell", {"command": "feroxbuster -u http://target -w /valid.txt"})
     hook._before_tool(corrected)
     assert corrected.cancel_tool is False
@@ -268,11 +286,11 @@ def test_shell_validation_failure_without_executable_accepts_valid_changed_corre
 
     identical = _before("identical", "shell", {})
     hook._before_tool(identical)
-    assert "change the failed input" in identical.cancel_tool
+    assert "identical failed invocation" in identical.cancel_tool
 
     invalid = _before("invalid", "shell", {"command": '"unterminated'})
     hook._before_tool(invalid)
-    assert invalid.cancel_tool
+    assert invalid.cancel_tool is False
 
     diagnostic = _before("diagnostic", "shell", {"command": "which curl"})
     hook._before_tool(diagnostic)
@@ -313,6 +331,71 @@ def test_correctable_classifier_does_not_retry_ordinary_negative_result():
     assert is_correctable_tool_failure("shell", tool_input, "error: unrecognized argument --bad") is True
     assert is_correctable_tool_failure("shell", tool_input, "HTTP 404: route was not found") is False
     assert is_correctable_tool_failure("shell", tool_input, "scan completed; zero results") is False
+
+
+def test_startup_dependency_failure_quarantines_only_failed_executable():
+    quarantined = []
+    shared_quarantine = set()
+
+    def quarantine(executable):
+        quarantined.append(executable)
+        return ["ffuf"]
+
+    hook = TaskFailureRecoveryHook(
+        ToolOutcomeJournal(),
+        quarantine_callback=quarantine,
+        quarantined_executables=shared_quarantine,
+    )
+    failed_input = {"command": "dirsearch -u http://target"}
+    hook._after_tool(
+        _after(
+            "failed",
+            "shell",
+            failed_input,
+            status="error",
+            text="Traceback (most recent call last):\nModuleNotFoundError: No module named 'dependency'",
+        )
+    )
+
+    assert quarantined == ["dirsearch"]
+    assert hook.quarantined_executables == {"dirsearch"}
+    assert hook.alternative_executables == ["ffuf"]
+    assert hook.unresolved is False
+
+    retry = _before("retry", "shell", failed_input)
+    hook._before_tool(retry)
+    assert "quarantined" in retry.cancel_tool
+
+    alternative = _before("alternative", "shell", {"command": "ffuf -u http://target/FUZZ -w words.txt"})
+    hook._before_tool(alternative)
+    assert alternative.cancel_tool is False
+
+    later_hook = TaskFailureRecoveryHook(
+        ToolOutcomeJournal(),
+        quarantined_executables=shared_quarantine,
+    )
+    later_retry = _before("later-retry", "shell", failed_input)
+    later_hook._before_tool(later_retry)
+    assert "quarantined" in later_retry.cancel_tool
+
+
+def test_missing_prerequisite_allows_creation_before_retry():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    failed_input = {"command": "scanner -w /missing/words.txt http://target"}
+    hook._after_tool(
+        _after("failed", "shell", failed_input, status="error", text="No such file or directory: words.txt")
+    )
+
+    create_input = {"code": "open('/tmp/words.txt', 'w').write('admin')"}
+    create = _before("create", "python_repl", create_input)
+    hook._before_tool(create)
+    assert create.cancel_tool is False
+    hook._after_tool(_after("create", "python_repl", create_input, status="success", text="created"))
+
+    corrected_input = {"command": "scanner -w /tmp/words.txt http://target"}
+    corrected = _before("corrected", "shell", corrected_input)
+    hook._before_tool(corrected)
+    assert corrected.cancel_tool is False
 
 
 @pytest.mark.parametrize("executable", ["command", "find", "ls", "stat", "test", "type", "which"])
@@ -480,7 +563,7 @@ def test_outcome_helpers_cover_schema_variants_and_journal_slices():
     assert "success" in outcomes_to_toon(journal.entries())
 
 
-def test_recovery_rejects_extra_diagnostic_and_second_correction():
+def test_recovery_allows_multiple_diagnostics_and_two_corrections():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster --bad http://target"}
     hook._after_tool(
@@ -491,14 +574,14 @@ def test_recovery_rejects_extra_diagnostic_and_second_correction():
     hook._before_tool(first_diagnostic)
     second_diagnostic = _before("diagnostic-2", "shell", {"command": "ls /usr/share/wordlists"})
     hook._before_tool(second_diagnostic)
-    assert second_diagnostic.cancel_tool
+    assert second_diagnostic.cancel_tool is False
 
     correction_input = {"command": "feroxbuster -u http://target"}
     first_correction = _before("correction-1", "shell", correction_input)
     hook._before_tool(first_correction)
     second_correction = _before("correction-2", "shell", correction_input)
     hook._before_tool(second_correction)
-    assert second_correction.cancel_tool
+    assert second_correction.cancel_tool is False
     assert "Failed tool: shell" in hook.recovery_guidance()
 
 
@@ -518,7 +601,7 @@ def test_recovery_guidance_includes_optional_failed_command_help():
     assert "-w, --wordlist <FILE>" in guidance
 
 
-def test_recovery_allows_read_only_without_consuming_diagnostic_and_blocks_unrelated_shell():
+def test_recovery_allows_read_only_diagnostics_and_unrelated_shell():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
     hook._after_tool(
@@ -536,7 +619,7 @@ def test_recovery_allows_read_only_without_consuming_diagnostic_and_blocks_unrel
 
     unrelated = _before("unrelated", "shell", {"command": "curl http://target/"})
     hook._before_tool(unrelated)
-    assert unrelated.cancel_tool
+    assert unrelated.cancel_tool is False
 
     diagnostic = _before("diagnostic", "shell", {"command": "which feroxbuster"})
     hook._before_tool(diagnostic)

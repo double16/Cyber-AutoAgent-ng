@@ -4,188 +4,185 @@ cyber_tools:
     description: "Network discovery and security auditing"
     caps: [network_recon]
     # the tools container would need elevated caps for nmap to run
-    #canary: "nmap --help"
+    # canary: {args: ["--help"]}
   nikto:
     description: "Web server scanner"
     caps: [web_scanning]
-    canary: "nikto --help"
+    canary: {args: ["--help"]}
   sqlmap:
     description: "SQL injection detection and exploitation"
     caps: [injection_testing, exploitation_framework]
-    canary: "sqlmap --help"
+    canary: {args: ["--help"]}
   gobuster:
     description: "Directory/file brute-forcer"
     caps: [web_crawling, web_fuzzing]
-    canary: "gobuster -h"
+    canary: {args: ["-h"]}
   whatweb:
     description: "Web technology fingerprinting"
     caps: [web_recon]
-    canary: "whatweb -h"
+    canary: {args: ["-h"]}
   wafw00f:
     description: "WAF fingerprinting"
     caps: [web_recon]
-    canary: "wafw00f -h"
+    canary: {args: ["-h"]}
 
   # Web app scanners (GUI/CLI)
   zaproxy:
     description: "OWASP ZAP web scanner (CLI/API)"
     caps: [web_scanning, web_recon]
-    canary: "zaproxy -h"
+    canary: {args: ["-h"]}
 
   # WebDAV scanning
   davtest:
     description: "WebDAV scanner/tester (detect/upload/misconfig checks)"
     caps: [web_scanning, web_recon]
-    canary: "davtest"
 
   # GraphQL-specific tools
   clairvoyance:
     description: "GraphQL schema enumeration and introspection"
     caps: [graphql]
-    canary: "clairvoyance --help"
+    canary: {args: ["--help"]}
   graphql-inspector:
     description: "GraphQL schema analysis and validation"
     caps: [graphql]
-    canary: "graphql-inspector --help"
+    canary: {args: ["--help"]}
   graphql-path-enum:
     description: "Lists the different ways of reaching a given type in a GraphQL schema."
     caps: [graphql]
-    canary: "graphql-path-enum --help"
+    canary: {args: ["--help"]}
 
   # gRPC tools
   grpcurl:
     description: "Client for gRPC"
     caps: [grp_client]
-    canary: "grpcurl --help"
+    canary: {args: ["--help"]}
 
   # JWT manipulation tools
   jwt-tool:
     description: "JWT analysis and manipulation toolkit"
     caps: [jwt]
-    canary: "jwt-tool --help"
+    canary: {args: ["--help"]}
 
   # Injection tools
   sstimap:
     description: "Detection and exploitation of Server-Side Template Injection (SSTI) vulnerabilities."
     caps: [injection_testing]
-    canary: "sstimap --help"
+    canary: {args: ["--help"]}
   commix:
     description: "Detection and exploitation of command injection vulnerabilities."
     caps: [injection_testing, exploitation_framework]
-    canary: "commix --help"
+    canary: {args: ["--help"]}
   lfimap:
     description: "Local File Inclusion Exploitation Framework."
     caps: [file_inclusion]
-    canary: "lfimap --help"
+    canary: {args: ["--help"]}
 
   # ProjectDiscovery ecosystem
   nuclei:
     description: "Templated vulnerability scanner"
     caps: [web_scanning]
-    canary: "nuclei -h"
+    canary: {args: ["-h"]}
   naabu:
     description: "Fast TCP port scanner (SYN/CONNECT)"
     caps: [network_recon]
-    canary: "naabu -h"
+    canary: {args: ["-h"]}
   amass:
     description: "In-depth DNS enumeration and attack surface mapping"
     caps: [dns_recon, osint]
     # -h may update the amass database, which may fail on tool check, which may fail the docker build, which may cause mass hysteria, the end
-    #canary: "amass -h"
+    # canary: {args: ["-h"]}
   subfinder:
     description: "Passive subdomain discovery"
     caps: [dns_recon, osint]
-    canary: "subfinder -h"
+    canary: {args: ["-h"]}
   cewl:
     description: "Generate custom wordlists by crawling target content"
     caps: [osint, password_cracking]
-    canary: "cewl -h"
+    canary: {args: ["-h"]}
 
   # Web fuzzing & dirs
   ffuf:
     description: "Fast web fuzzer"
     caps: [web_fuzzing]
-    canary: "ffuf -h"
+    canary: {args: ["-h"]}
   feroxbuster:
     description: "Fast recursive content discovery"
     caps: [web_crawling, web_fuzzing]
-    canary: "feroxbuster -h"
+    canary: {args: ["-h"]}
   dirb:
     description: "HTTP(S) web content scanner"
     caps: [web_fuzzing]
   dirsearch:
     description: "Web path/directory discovery scanner"
     caps: [web_content_discovery, web_fuzzing]
-    canary: "dirsearch -h"
+    canary: {args: ["-h"]}
 # 2026-07-21: arjun has issues writing to a JSON output file, keep it installed for advanced_payload_coordinator
 #  arjun:
 #    description: "HTTP parameter discovery suite"
 #    caps: [web_recon, injection_testing]
-#    canary: "arjun -h"
+#    canary: {args: ["-h"]}
   wapiti:
     description: "Web vulnerability scanner"
     caps: [web_scanning]
-    canary: "wapiti -h"
+    canary: {args: ["-h"]}
   wfuzz:
     description: "Web application bruteforcer"
     caps: [web_fuzzing]
-    canary: "wfuzz -h"
+    canary: {args: ["-h"]}
   wpscan:
     description: "WordPress security scanner"
     caps: [web_scanning]
-    canary: "wpscan -h"
+    canary: {args: ["-h"]}
   joomscan:
     description: "Joomla vulnerability scanner"
     caps: [web_scanning]
-#    canary: "joomscan --help"
+#    canary: {args: ["--help"]}
   corsy:
     description: "Scan websites for Cross-Origin Resource Sharing (CORS) misconfigurations"
     caps: [web_scanning]
-    canary: "corsy --help"
+    canary: {args: ["--help"]}
   paramspider:
     description: "Mining URLs from dark corners of Web Archives for bug hunting/fuzzing/further probing"
     caps: [web_recon, injection_testing]
-    canary: "paramspider --help"
+    canary: {args: ["--help"]}
   qsreplace:
     description: "Replace all query string values with a user-supplied value"
     caps: [web_fuzzing, injection_testing]
-    canary: "qsreplace -h"
+    canary: {args: ["-h"]}
 
   # Web recon helpers
   gospider:
     description: "Web spider for finding URLs and endpoints"
     caps: [web_crawling]
-    canary: "gospider -h"
+    canary: {args: ["-h"]}
   httprobe:
     description: "Probes for working HTTP and HTTPS servers"
     caps: [web_recon]
-    canary: "httprobe -h"
+    canary: {args: ["-h"]}
   subjack:
     description: "Subdomain takeover tool"
     caps: [web_recon]
-    canary: "subjack -h"
+    canary: {args: ["-h"]}
   knockpy:
     description: "DNS subdomain scanner"
     caps: [dns_recon]
-    canary: "knockpy -h"
+    canary: {args: ["-h"]}
   assetfinder:
     description: "Subdomain discovery (tomnomnom)"
     caps: [dns_recon]
-    canary: "assetfinder -h"
+    canary: {args: ["-h"]}
   httpx:
     description: "HTTP probing and technology detection (ProjectDiscovery)"
     caps: [web_recon, http_client]
-    canary: "httpx --help"
+    canary: {args: ["--help"]}
   katana:
     description: "Fast web crawler (ProjectDiscovery)"
     caps: [web_crawling, web_recon]
-    canary: "katana -h"
+    canary: {args: ["-h"]}
   opengrep:
     description: "Static source code analysis"
     caps: [sast]
-    canary:
-      - "opengrep scan --version"
-      - "opengrep scan -version"
+    canary: {args: ["scan", "--version"]}
     help:
       - "opengrep scan --help"
       - "opengrep scan -help"
@@ -194,7 +191,7 @@ cyber_tools:
   dnsrecon:
     description: "DNS reconnaissance"
     caps: [dns_recon]
-    canary: "dnsrecon -h"
+    canary: {args: ["-h"]}
   dnsenum:
     description: "DNS enumeration"
     caps: [dns_recon]
@@ -202,7 +199,7 @@ cyber_tools:
     description: "Emails, subdomains, IPs and URLs OSINT"
     command: "theHarvester"
     caps: [osint, dns_recon]
-    canary: "theHarvester -h"
+    canary: {args: ["-h"]}
 
   # Network scanning
   masscan:
@@ -213,11 +210,11 @@ cyber_tools:
   smbclient:
     description: "Samba SMB/CIFS client"
     caps: [ad_enum]
-    canary: "smbclient --help"
+    canary: {args: ["--help"]}
   smbmap:
     description: "Enumerate Samba share drives across domains"
     caps: [ad_enum, network_recon]
-    canary: "smbmap --help"
+    canary: {args: ["--help"]}
   nbtscan:
     description: "NetBIOS name network scanner"
     caps: [ad_enum, network_recon]
@@ -226,11 +223,11 @@ cyber_tools:
   arp-scan:
     description: "ARP scanning and fingerprinting"
     caps: [network_recon]
-    canary: "arp-scan -h"
+    canary: {args: ["-h"]}
   ike-scan:
     description: "VPN IKE scanner"
     caps: [network_recon]
-    canary: "ike-scan -h"
+    canary: {args: ["-h"]}
   onesixtyone:
     description: "Fast SNMP scanner"
     caps: [network_recon]
@@ -238,7 +235,7 @@ cyber_tools:
     description: "SNMP enumerator"
     command: "snmp-check"
     caps: [network_recon]
-    canary: "snmp-check -h"
+    canary: {args: ["-h"]}
   netdiscover:
     description: "Active/passive ARP reconnaissance"
     caps: [network_recon]
@@ -247,47 +244,47 @@ cyber_tools:
   hping3:
     description: "TCP/IP packet assembler/analyzer"
     caps: [network_recon]
-    canary: "hping3 -h"
+    canary: {args: ["-h"]}
   socat:
     description: "Multipurpose relay (SOcket CAT)"
     caps: [tunneling]
-    canary: "socat -h"
+    canary: {args: ["-h"]}
   proxychains4:
     description: "Force any TCP connection through proxy"
     caps: [proxying]
   sslscan:
     description: "SSL/TLS scanner"
     caps: [network_recon, web_recon]
-    canary: "sslscan -h"
+    canary: {args: ["-h"]}
   testssl.sh:
     description: "Comprehensive TLS/SSL configuration tester"
     caps: [network_recon, web_recon]
     command: "testssl"
-    canary: "testssl --help"
+    canary: {args: ["--help"]}
 
   # Frameworks and cracking
   metasploit:
     description: "Penetration testing framework"
     command: "msfconsole"
     caps: [exploitation_framework]
-    canary: "msfconsole -h"
+    canary: {args: ["-h"]}
   msfvenom:
     description: "Payload generator for Metasploit"
     caps: [exploitation_framework]
   john:
     description: "John the Ripper password cracker"
     caps: [password_cracking, crypto]
-    canary: "john -h"
+    canary: {args: ["-h"]}
 
   # Password brute forcing
   hydra:
     description: "Online login/password brute force (multi-protocol)"
     caps: [password_cracking, ad_enum]
-#    canary: "hydra -h"
+#    canary: {args: ["-h"]}
   ncrack:
     description: "Network authentication cracking tool"
     caps: [ password_cracking, network_recon ]
-#    canary: "ncrack -h"
+#    canary: {args: ["-h"]}
 
   # Networking suites
   iproute2:
@@ -301,67 +298,67 @@ cyber_tools:
   tshark:
     description: "Captures and analyzes packets off the wire or pcap files supporting too many protocols to list."
     caps: [traffic_capture, forensics]
-    canary: "tshark -h"
+    canary: {args: ["-h"]}
 
   # Basics
   netcat:
     description: "Network utility for reading/writing data"
     command: "nc"
     caps: [tunneling]
-    canary: "nc -h"
+    canary: {args: ["-h"]}
   curl:
     description: "HTTP client for URL requests"
     caps: [http_client, ftp_client]
-    canary: "curl -h"
+    canary: {args: ["-h"]}
   tcpdump:
     description: "Network packet capture"
     caps: [traffic_capture, forensics]
-    canary: "tcpdump -h"
+    canary: {args: ["-h"]}
 
   # Binary Exploitation & Reversing
   gdb:
     description: "GNU Debugger"
     caps: [reverse_engineering, exploitation_framework]
-    canary: "gdb -h"
+    canary: {args: ["-h"]}
   ltrace:
     description: "Library call tracer"
     caps: [reverse_engineering]
-    canary: "ltrace -h"
+    canary: {args: ["-h"]}
   strace:
     description: "System call tracer"
     caps: [reverse_engineering]
-    canary: "strace -h"
+    canary: {args: ["-h"]}
   radare2:
     description: "Reverse engineering framework"
     caps: [reverse_engineering, forensics]
-    canary: "radare2 -h"
+    canary: {args: ["-h"]}
   ROPgadget:
     description: "ROP gadget finder"
     command: "ROPgadget"
     caps: [reverse_engineering, exploitation_framework]
-    canary: "ROPgadget --help"
+    canary: {args: ["--help"]}
   ropper:
     description: "ROP gadget finder and binary information"
     caps: [reverse_engineering, exploitation_framework]
-    canary: "ropper -h"
+    canary: {args: ["-h"]}
 
   # Steganography & Forensics
   steghide:
     description: "Steganography tool"
     caps: [steganography]
-    canary: "steghide --help"
+    canary: {args: ["--help"]}
   binwalk:
     description: "Firmware analysis tool"
     caps: [forensics, reverse_engineering, steganography]
-    canary: "binwalk --help"
+    canary: {args: ["--help"]}
   foremost:
     description: "File carving tool"
     caps: [forensics]
-    canary: "foremost -h"
+    canary: {args: ["-h"]}
   zsteg:
     description: "PNG/BMP steganography"
     caps: [steganography]
-    canary: "zsteg -h"
+    canary: {args: ["-h"]}
 
   # Deserialization
   ysoserial:
@@ -370,24 +367,24 @@ cyber_tools:
   phpggc:
     description: "PHP generic gadget chains"
     caps: [deserialization, exploitation_framework]
-    canary: "phpggc --help"
+    canary: {args: ["--help"]}
 
   # SSRF
   gopherus:
     description: "SSRF payload generator"
     caps: [ssrf]
-    canary: "gopherus --help"
+    canary: {args: ["--help"]}
 
   # Tunneling & OOB
   interactsh-client:
     description: "OOB interaction client"
     caps: [oob_interaction, ssrf]
-    canary: "interactsh-client --help"
+    canary: {args: ["--help"]}
   ligolo-proxy:
     description: "Advanced tunneling tool (Ligolo-ng)"
     command: "proxy"
     caps: [tunneling, proxying]
-    canary: "proxy --help"
+    canary: {args: ["--help"]}
   chisel:
     description: "Fast TCP/UDP tunnel over HTTP"
     caps: [tunneling, proxying]
@@ -396,46 +393,46 @@ cyber_tools:
   hashcat:
     description: "Advanced password recovery"
     caps: [password_cracking]
-    canary: "hashcat -h"
+    canary: {args: ["-h"]}
   kerbrute:
     description: "Kerberos pre-auth brute-forcing"
     caps: [ad_enum, password_cracking]
-    canary: "kerbrute -h"
+    canary: {args: ["-h"]}
 
   # Windows/AD
   enum4linux:
     description: "SMB enumeration tool"
     caps: [ad_enum, network_recon]
-    canary: "enum4linux -h"
+    canary: {args: ["-h"]}
   netexec:
     description: "Network service exploitation (SMB/WinRM/etc)"
     command: "nxc"
     caps: [ad_enum, exploitation_framework]
-    canary: "nxc -h"
+    canary: {args: ["-h"]}
   evil-winrm:
     description: "WinRM shell access"
     caps: [ad_enum]
-    canary: "evil-winrm --help"
+    canary: {args: ["--help"]}
 
   # XSS Advanced
   xsstrike:
     description: "Advanced XSS detection suite"
     caps: [xss_testing]
-    canary: "xsstrike --help"
+    canary: {args: ["--help"]}
   dalfox:
     description: "Parameter analysis and XSS scanning"
     caps: [xss_testing]
-    canary: "dalfox --help"
+    canary: {args: ["--help"]}
 
   # Privilege Escalation
   linpeas:
     description: "Linux Privilege Escalation Awesome Script"
     caps: [priv_esc]
-    canary: "linpeas -h"
+    canary: {args: ["-h"]}
   pwncat-cs:
     description: "Advanced reverse shell handler"
     caps: [tunneling]
-    canary: "pwncat-cs --help"
+    canary: {args: ["--help"]}
 
   # C2 & Post-Exploitation
   sliver:
@@ -443,31 +440,31 @@ cyber_tools:
     command: "sliver-client"
     # sliver install is unstable
     caps: [exploitation_framework]
-    canary: "sliver-client -h"
+    canary: {args: ["-h"]}
 
   # Active Directory Advanced
   bloodhound-python:
     description: "AD ingestor for BloodHound"
     caps: [ad_enum, osint]
-    canary: "bloodhound-python -h"
+    canary: {args: ["-h"]}
   certipy:
     description: "Active Directory Certificate Services abuse"
     caps: [ad_enum, exploitation_framework]
-    canary: "certipy -h"
+    canary: {args: ["-h"]}
   coercer:
     description: "Active Directory coercion attacks"
     caps: [ad_enum, exploitation_framework]
-    canary: "coercer -h"
+    canary: {args: ["-h"]}
   responder:
     description: "LLMNR/NBT-NS poisoner"
     caps: [ad_enum, network_recon]
-    canary: "responder --help"
+    canary: {args: ["--help"]}
 
   # Secrets & Git
   trufflehog:
     description: "Find leaked credentials"
     caps: [osint]
-    canary: "trufflehog -h"
+    canary: {args: ["-h"]}
   gitdumper:
     description: "Dump git repositories from websites"
     caps: [web_recon]
@@ -477,9 +474,9 @@ cyber_tools:
     description: "RSA attack tool"
     command: "rsacrack"
     caps: [crypto]
-    canary: "rsacrack --help"
+    canary: {args: ["--help"]}
   volatility:
     description: "Memory forensics framework"
     command: "vol"
     caps: [forensics]
-    canary: "vol -h"
+    canary: {args: ["-h"]}

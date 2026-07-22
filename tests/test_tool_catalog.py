@@ -161,19 +161,36 @@ def test_curl_is_configured_as_shell_command():
     assert "HTTP client for" in curl["description"]
 
 
+def test_remove_command_and_find_capability_alternatives(monkeypatch, tmp_path):
+    _write_env(
+        tmp_path,
+        {
+            "dirsearch": {"caps": ["web_fuzzing"]},
+            "ffuf": {"caps": ["web_fuzzing"]},
+            "curl": {"caps": ["http_client"]},
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+    available = ["dirsearch", "ffuf", "curl"]
+
+    assert tc.get_shell_command_alternatives("dirsearch", available) == ["ffuf"]
+    assert tc.remove_shell_command(available, "dirsearch") == ["dirsearch"]
+    assert available == ["ffuf", "curl"]
+
+
 def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeypatch):
     calls = []
 
     def fake_run(cmd, capture_output, text, timeout):
         calls.append(cmd)
         # First attempt: foo --help returns short -> should continue
-        if cmd == "foo -help":
+        if cmd == ["foo", "-help"]:
             return SimpleNamespace(stdout="x", stderr="")
         # Second attempt: --help returns short -> should continue
-        if cmd == "foo --help":
+        if cmd == ["foo", "--help"]:
             return SimpleNamespace(stdout="x", stderr="")
         # Third attempt: -h returns long -> should return it
-        if cmd == "foo -h":
+        if cmd == ["foo", "-h"]:
             return SimpleNamespace(stdout="A" * 40, stderr="")
         return SimpleNamespace(stdout="", stderr="")
 
@@ -181,15 +198,15 @@ def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeyp
 
     out = tc._get_shell_command_help("foo", "[]")
     assert len(out) >= 40
-    assert calls[0] == "foo --help"
-    assert calls[1] == "foo -h"
+    assert calls[0] == ["foo", "--help"]
+    assert calls[1] == ["foo", "-h"]
 
     calls = []
     out = tc._get_shell_command_help("foo", '["foo -help", ""]')
     assert len(out) >= 40
-    assert calls[0] == "foo -help"
-    assert calls[1] == "foo --help"
-    assert calls[2] == "foo -h"
+    assert calls[0] == ["foo", "-help"]
+    assert calls[1] == ["foo", "--help"]
+    assert calls[2] == ["foo", "-h"]
 
 
 def test_get_shell_command_help_context_returns_full_help_for_available_command(monkeypatch, tmp_path):

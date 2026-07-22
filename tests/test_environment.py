@@ -1,10 +1,124 @@
 import io
 import json
 import logging
+import subprocess
 import sys
+from types import SimpleNamespace
+
+import pytest
+import yaml
 
 from modules.config.system import environment as mod
 from modules.config.system import logger as logger_mod
+
+
+def test_configured_canaries_use_optional_structured_schema():
+    config_path = mod.Path(mod.__file__).with_name("environment.yaml")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    canaries = [
+        tool["canary"]
+        for tool in config["cyber_tools"].values()
+        if isinstance(tool, dict) and "canary" in tool
+    ]
+    assert canaries
+    assert all(isinstance(canary, dict) and isinstance(canary.get("args"), list) for canary in canaries)
+
+
+def test_shell_command_without_canary_is_available_unverified(monkeypatch):
+    monkeypatch.setattr(mod.shutil, "which", lambda command: "/usr/bin/scanner")
+
+    health = mod.check_shell_command("scanner")
+
+    assert health.state == "available_unverified"
+    assert health.path == "/usr/bin/scanner"
+    assert health.available is True
+
+
+def test_shell_command_canary_uses_resolved_argv_without_shell(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mod.shutil, "which", lambda command: "/opt/tools/scanner")
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=1, stdout="usage", stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", run)
+    health = mod.check_shell_command(
+        "scanner",
+        {"args": ["--help"], "timeout_seconds": 4, "accepted_exit_codes": [0, 1]},
+    )
+
+    assert health.state == "available_verified"
+    assert calls == [
+        (
+            ["/opt/tools/scanner", "--help"],
+            {"capture_output": True, "text": True, "timeout": 4, "check": False},
+        )
+    ]
+
+
+def test_shell_command_canary_rejects_generic_dependency_failure(monkeypatch):
+    monkeypatch.setattr(mod.shutil, "which", lambda command: "/usr/bin/dirsearch")
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="Traceback (most recent call last): ModuleNotFoundError: No module named 'dependency'",
+        ),
+    )
+
+    health = mod.check_shell_command("dirsearch", {"args": ["-h"]})
+
+    assert health.state == "broken"
+    assert "ModuleNotFoundError" in health.reason
+
+
+def test_shell_command_canary_timeout_and_invalid_config_are_broken(monkeypatch):
+    monkeypatch.setattr(mod.shutil, "which", lambda command: "/usr/bin/scanner")
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("scanner", 5)),
+    )
+
+    assert mod.check_shell_command("scanner", {"args": ["--version"]}).reason == "canary timed out"
+    assert mod.check_shell_command("scanner", "scanner --version").state == "broken"
+
+
+@pytest.mark.parametrize(
+    "canary",
+    [
+        {"args": "--help"},
+        {"args": ["--help"], "timeout_seconds": 0},
+        {"args": ["--help"], "accepted_exit_codes": []},
+    ],
+)
+def test_shell_command_canary_rejects_invalid_structures(monkeypatch, canary):
+    monkeypatch.setattr(mod.shutil, "which", lambda command: "/usr/bin/scanner")
+
+    health = mod.check_shell_command("scanner", canary)
+
+    assert health.state == "broken"
+    assert health.reason
+
+
+def test_shell_command_missing_and_nonzero_canary_are_unavailable(monkeypatch):
+    monkeypatch.setattr(mod.shutil, "which", lambda command: None)
+    assert mod.check_shell_command("missing").state == "missing"
+    assert mod._get_shell_command_path("missing") is None
+
+    monkeypatch.setattr(mod.shutil, "which", lambda command: "/usr/bin/scanner")
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=2, stdout="", stderr="bad arguments"),
+    )
+    health = mod.check_shell_command("scanner", {"args": ["--help"]})
+    assert health.state == "broken"
+    assert health.reason == "bad arguments"
 
 
 def test_tee_output_writes_terminal_and_clean_log(tmp_path):

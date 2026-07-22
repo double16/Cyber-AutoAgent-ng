@@ -292,6 +292,33 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert handler.coordinator.report_findings == 1
 
 
+def test_shell_help_text_with_timeout_option_is_not_reported_as_timeout():
+    handler = make_handler()
+    handler.tool_name_buffer["help"] = "shell"
+
+    handler._process_tool_result_from_message(
+        {
+            "toolUseId": "help",
+            "status": "error",
+            "content": [
+                {
+                    "text": (
+                        "Command: scanner --help\nStatus: error\nExit Code: 1\n"
+                        "Output: --timeout request timeout\nError: missing required input"
+                    )
+                }
+            ],
+        }
+    )
+
+    timeout_events = [
+        event
+        for event in handler._events
+        if event["type"] == "error" and event.get("metadata", {}).get("type") == "timeout"
+    ]
+    assert timeout_events == []
+
+
 @pytest.mark.parametrize(
     "tool_name",
     ["create_tasks"],

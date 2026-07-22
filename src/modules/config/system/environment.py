@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import atexit
+import json
 import logging
 import os
 import re
@@ -8,10 +9,10 @@ import shutil
 import subprocess
 import sys
 import threading
-import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import yaml
 
@@ -76,30 +77,91 @@ def clean_operation_memory(operation_id: str, target_name: str = None):
         logger.debug("Memory path does not exist: %s", memory_path)
 
 
-def _get_shell_command_path(command: str, canary: str | list[str]) -> Optional[str]:
-    """Check if a shell command is available"""
+_STARTUP_FAILURE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:module|package)notfounderror\b",
+        r"\bimporterror\b",
+        r"\bno module named\b",
+        r"\berror while loading shared libraries\b",
+        r"\b(?:shared object|dynamic library) .* (?:not found|cannot open)\b",
+        r"\btraceback \(most recent call last\)\b",
+    )
+)
+
+
+@dataclass(frozen=True)
+class ToolHealth:
+    """Result of deterministic executable discovery and optional startup verification."""
+
+    state: str
+    path: Optional[str]
+    reason: str = ""
+
+    @property
+    def available(self) -> bool:
+        return self.state in {"available_verified", "available_unverified"}
+
+
+def _bounded_probe_reason(value: Any, limit: int = 300) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _probe_config(canary: Any) -> tuple[list[str], int, set[int]]:
+    if not isinstance(canary, dict):
+        raise ValueError("canary must be an object")
+    args = canary.get("args")
+    if not isinstance(args, list) or not all(isinstance(arg, str) and arg for arg in args):
+        raise ValueError("canary.args must be a list of non-empty strings")
+    timeout_seconds = canary.get("timeout_seconds", 5)
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 60:
+        raise ValueError("canary.timeout_seconds must be an integer from 1 through 60")
+    exit_codes = canary.get("accepted_exit_codes", [0])
+    if not isinstance(exit_codes, list) or not exit_codes or not all(
+        isinstance(code, int) and not isinstance(code, bool) for code in exit_codes
+    ):
+        raise ValueError("canary.accepted_exit_codes must be a non-empty list of integers")
+    return args, timeout_seconds, set(exit_codes)
+
+
+def check_shell_command(command: str, canary: Any = None) -> ToolHealth:
+    """Resolve a command and optionally verify that it starts without generic dependency failures."""
+
     tool_path = shutil.which(command)
     if not tool_path:
-        return None
+        return ToolHealth("missing", None, "executable not found in PATH")
+    if canary is None:
+        return ToolHealth("available_unverified", tool_path)
+    try:
+        args, timeout_seconds, accepted_exit_codes = _probe_config(canary)
+        result = subprocess.run(
+            [tool_path, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, ValueError) as error:
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(error))
+    except subprocess.TimeoutExpired:
+        return ToolHealth("broken", tool_path, "canary timed out")
 
-    if canary:
-        canaries = canary if isinstance(canary, list) else [canary]
-        success = False
-        for c in canaries:
-            try:
-                # Use bash explicitly as in the original script
-                result = subprocess.run(c, shell=True, executable='/bin/bash', stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL)
-                if result.returncode == 0:
-                    success = True
-                    break
-            except Exception:
-                pass
+    output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+    startup_failure = next((pattern.pattern for pattern in _STARTUP_FAILURE_PATTERNS if pattern.search(output)), "")
+    if startup_failure:
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(output))
+    if result.returncode not in accepted_exit_codes:
+        reason = output or f"canary exited with code {result.returncode}"
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(reason))
+    return ToolHealth("available_verified", tool_path)
 
-        if not success:
-            return None
 
-    return tool_path
+def _get_shell_command_path(command: str, canary: Any = None) -> Optional[str]:
+    """Return the path for an available command, preserving the historical helper contract."""
+
+    health = check_shell_command(command, canary)
+    return health.path if health.available else None
 
 
 def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
@@ -185,8 +247,9 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
         description = tool_info.get("description", "")
         binary = tool_info.get("command", tool_name)
 
-        tool_path = _get_shell_command_path(binary, tool_info.get('canary'))
-        is_available = tool_path is not None
+        health = check_shell_command(binary, tool_info.get("canary"))
+        tool_path = health.path
+        is_available = health.available
 
         if is_available:
             available_tools.append(tool_name)
@@ -199,13 +262,14 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
                 "tool_name": tool_name,
                 "description": description,
                 "status": "available",
+                "health": health.state,
                 "binary": binary,
                 "path": tool_path,
             }
             print(f"__CYBER_EVENT__{json.dumps(tool_event)}__CYBER_EVENT_END__")
         else:
             print_status(
-                f"○ {tool_name:<12} - {description} (not available)", "WARNING"
+                f"○ {tool_name:<12} - {description} ({health.state}: {health.reason})", "WARNING"
             )
 
             # Emit structured event for React UI
@@ -215,6 +279,8 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
                 "tool_name": tool_name,
                 "description": description,
                 "status": "unavailable",
+                "health": health.state,
+                "reason": health.reason,
                 "binary": binary,
                 "path": None,
             }

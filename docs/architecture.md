@@ -144,15 +144,19 @@ Python rejects mismatched evidence requirements during task creation. Inventory 
 shape in both their task prompt and acceptance-tool description, and acceptance validation evaluates each referenced
 artifact independently so an unrelated supporting file cannot invalidate a separate valid inventory.
 
-Each retained task executor also keeps a bounded controller-owned tool-outcome journal. A locally correctable failure,
-such as a missing input file, unavailable command, invalid argument, or timeout, permits one optional diagnostic and
-one corrected invocation without consuming another actor/critic pass. Until correction succeeds, the executor cannot
-create follow-up tasks or write observations, knowledge, findings, or validation results. An unresolved correction is
+Each retained task executor also keeps a bounded controller-owned tool-outcome journal. A locally correctable failure
+permits prerequisite inspection or creation, independent work, alternative methods, and two changed retries by
+default. Identical failed calls are blocked, but recovery does not lock unrelated tools or durable evidence operations.
+Generic executable startup and dependency failures quarantine only that executable for the current operation; later
+task prompts omit it while capability-compatible commands remain available. An unresolved correction is
 deterministically `partial_failure`. Evaluators receive the authoritative outcome journal separately from the worker's
 final narrative and must prefer it when the two conflict. Failed diagnostic and preflight shell commands remain visible
-in the journal but do not start recovery; only failed task actions can open the bounded correction path. A failed
-correction stops the executor immediately, while other recovery-policy violations stop it after a configurable limit
-of two by default.
+in the journal but do not start recovery.
+
+Shell-tool discovery first resolves each configured command on `PATH`. A tool may optionally declare a side-effect-free
+`canary` object with `args`, `timeout_seconds`, and `accepted_exit_codes`; successful canaries mark tools verified.
+Commands without a safe standalone canary remain available but unverified. The Docker tools-image verifier implements
+the same configuration contract independently and is not imported by application runtime code.
 
 Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
 controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (four by

@@ -1,6 +1,7 @@
 import json
-import subprocess
 import re
+import shlex
+import subprocess
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Any, Dict, Optional
@@ -70,6 +71,44 @@ def get_shell_command_specs(available: List[str]) -> List[Dict[str, Any]]:
     return specs
 
 
+def remove_shell_command(available: List[str], executable: str) -> List[str]:
+    """Remove configured tool names that resolve to an unavailable executable."""
+
+    executable = str(executable or "").strip()
+    removed = []
+    for tool_name in list(available):
+        real_command, _, _ = _shell_command_config(str(tool_name))
+        if executable not in {str(tool_name), real_command}:
+            continue
+        available.remove(tool_name)
+        removed.append(str(tool_name))
+    return removed
+
+
+def get_shell_command_alternatives(executable: str, available: List[str]) -> List[str]:
+    """Return available commands sharing at least one declared capability."""
+
+    executable = str(executable or "").strip()
+    specs = get_shell_command_specs(available)
+    failed = next((spec for spec in specs if spec["command"] == executable), None)
+    if failed is None:
+        cyber_tools = _get_cyber_tools()
+        for tool_name, config in cyber_tools.items():
+            if str((config or {}).get("command") or tool_name) == executable:
+                caps = (config or {}).get("caps") or []
+                failed = {"capabilities": [caps] if isinstance(caps, str) else caps}
+                break
+    failed_capabilities = set((failed or {}).get("capabilities") or [])
+    if not failed_capabilities:
+        return []
+    return [
+        str(spec["command"])
+        for spec in specs
+        if spec["command"] != executable
+        and failed_capabilities.intersection(spec.get("capabilities") or [])
+    ]
+
+
 @lru_cache(maxsize=1000)
 def _get_shell_command_help(command: str, help_commands_json: str) -> str:
     """
@@ -88,7 +127,10 @@ def _get_shell_command_help(command: str, help_commands_json: str) -> str:
         ]:
             if not cmd:
                 continue
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            argv = shlex.split(str(cmd))
+            if not argv:
+                continue
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=30)
             if result.stdout is None and result.stderr is None:
                 continue
             result_str = str(result.stdout) + str(result.stderr)

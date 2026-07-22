@@ -413,7 +413,7 @@ def test_interrupted_canceled_cycle_does_not_stop_or_cache_results():
     assert invocation_state["request_state"] == {}
 
 
-def test_recovery_blocked_alternating_cycle_is_stopped_without_caching_policy_results():
+def test_recovery_allows_independent_diagnostics_to_reach_repeat_guard():
     repeat_hook = ToolRepeatGuardHook(repeat_threshold=3, max_cycle_length=2)
     recovery_hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=100)
     invocation_state = {"request_state": {}}
@@ -439,27 +439,21 @@ def test_recovery_blocked_alternating_cycle_is_stopped_without_caching_policy_re
     assert diagnostic.cancel_tool is False
     _run_combined_after(recovery_hook, repeat_hook, diagnostic, _result("diagnostic", "dirb"))
 
-    commands = ["ls -la /missing", "ls -F /missing"] * 3
+    commands = ["ls -la /missing", "ls -F /missing"]
     for index, command in enumerate(commands, start=1):
-        blocked = _before(invocation_state, real_tool, f"blocked-{index}", {"command": command})
-        _run_combined_before(repeat_hook, recovery_hook, blocked)
-        assert isinstance(blocked.cancel_tool, str)
+        allowed = _before(invocation_state, real_tool, f"allowed-{index}", {"command": command})
+        _run_combined_before(repeat_hook, recovery_hook, allowed)
+        assert allowed.cancel_tool is False
         _run_combined_after(
             recovery_hook,
             repeat_hook,
-            blocked,
-            _result(blocked.tool_use["toolUseId"], blocked.cancel_tool, status="error"),
-            cancel_message=blocked.cancel_tool,
+            allowed,
+            _result(allowed.tool_use["toolUseId"], "missing", status="error"),
         )
 
     state = invocation_state["_cyber_tool_repeat_guard"]
-    assert state.completed_results == {}
-    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
-        "cycle_length": 2,
-        "repeat_count": 3,
-        "tool_name": "shell",
-        "tool_names": ["shell", "shell"],
-    }
+    assert state.completed_results
+    assert REPEATED_TOOL_LOOP_STATE_KEY not in invocation_state["request_state"]
 
 
 def test_failed_diagnostic_does_not_seed_recovery_blocked_calls():
@@ -488,7 +482,7 @@ def test_failed_diagnostic_does_not_seed_recovery_blocked_calls():
     assert invocation_state["request_state"] == {}
 
 
-def test_recovery_blocked_three_call_cycle_stops_at_default_threshold():
+def test_recovery_allows_unrelated_three_call_sequence():
     repeat_hook = ToolRepeatGuardHook()
     journal = ToolOutcomeJournal()
     recovery_hook = TaskFailureRecoveryHook(journal, max_policy_violations=100)
@@ -510,32 +504,24 @@ def test_recovery_blocked_three_call_cycle_stops_at_default_threshold():
     )
     assert recovery_hook.unresolved is True
 
-    commands = ["printf alpha", "printf beta", "printf gamma"] * 3
+    commands = ["printf alpha", "printf beta", "printf gamma"]
     for index, command in enumerate(commands, start=1):
-        blocked = _before(invocation_state, real_tool, f"blocked-{index}", {"command": command})
-        _run_combined_before(repeat_hook, recovery_hook, blocked)
-        assert blocked.selected_tool is real_tool
-        assert isinstance(blocked.cancel_tool, str)
+        allowed = _before(invocation_state, real_tool, f"allowed-{index}", {"command": command})
+        _run_combined_before(repeat_hook, recovery_hook, allowed)
+        assert allowed.selected_tool is real_tool
+        assert allowed.cancel_tool is False
         _run_combined_after(
             recovery_hook,
             repeat_hook,
-            blocked,
-            _result(blocked.tool_use["toolUseId"], blocked.cancel_tool, status="error"),
-            cancel_message=blocked.cancel_tool,
+            allowed,
+            _result(allowed.tool_use["toolUseId"], command),
         )
 
     state = invocation_state["_cyber_tool_repeat_guard"]
-    assert len(state.completed_results) == 1
-    assert next(iter(state.completed_results.values()))["content"] == [{"text": "Could not open /missing.txt"}]
-    assert recovery_hook.unresolved is True
-    assert [outcome.recovery_role for outcome in journal.entries()] == ["normal"] + ["blocked"] * 9
-    assert invocation_state["request_state"]["stop_event_loop"] is True
-    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
-        "cycle_length": 3,
-        "repeat_count": 3,
-        "tool_name": "shell",
-        "tool_names": ["shell", "shell", "shell"],
-    }
+    assert len(state.completed_results) == 4
+    assert recovery_hook.unresolved is False
+    assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "alternative", "normal", "normal"]
+    assert invocation_state["request_state"] == {}
 
 
 def test_successful_recovery_correction_remains_executable_with_repeat_guard():

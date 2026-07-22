@@ -202,12 +202,11 @@ recorded. Once the atomic ledger passes structural validation, one short-lived s
 `done`, `partial_failure`, or `blocked` verdict; immutable acceptance results are not replayed through another pass.
 
 Correctable tool invocation failures receive one bounded recovery turn in the same retained executor conversation.
-The executor may use one diagnostic/preflight invocation and one corrected invocation. The correction must call the
-same failed tool with changed input; shell corrections must also keep the same executable so a failed scanner run cannot
-be replaced by an unrelated command. If input validation failed before an executable could be identified, the next
-changed shell call with a valid, non-diagnostic executable is treated as the correction. Evidence storage and
-`create_tasks` are rejected until that correction succeeds, preventing failed command output from producing fabricated
-discoveries. Recovery does not consume an actor/critic pass;
+The executor may inspect or create prerequisites, continue independent work, select another executable, and make a
+bounded number of corrected invocations. A correction must change the failed input; an identical failed call is blocked.
+Generic startup and dependency failures quarantine only the failed executable for the current operation. Other
+executables and durable operations remain available, but failed output cannot be cited as successful evidence.
+Recovery does not consume an actor/critic pass;
 if it remains unresolved, Python marks the task `partial_failure` without asking the evaluator to approve it. Evaluators
 receive controller-observed tool outcomes and treat them as authoritative over contradictory worker narration.
 

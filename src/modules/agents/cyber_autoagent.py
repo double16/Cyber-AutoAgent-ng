@@ -125,7 +125,11 @@ from modules.tools.oast import (
 )
 from modules.tools.shell import shell
 from modules.tools.swarm import swarm
-from modules.tools.tool_catalog import tool_catalog_wrapper
+from modules.tools.tool_catalog import (
+    get_shell_command_alternatives,
+    remove_shell_command,
+    tool_catalog_wrapper,
+)
 from modules.tools.web_search import web_search
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -157,6 +161,7 @@ class AgentRuntimeResources:
     prompt_token_limit: int
     core_tools_list: List[Any] = field(default_factory=list)
     optional_tools_list: List[Any] = field(default_factory=list)
+    quarantined_shell_commands: set[str] = field(default_factory=set)
     termination_policy: str = ""
 
 
@@ -1116,9 +1121,29 @@ def create_agent(
             "CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS",
             2,
         )
+        max_corrections = runtime.config_manager.getenv_int(
+            "CYBER_TOOL_RECOVERY_MAX_CORRECTIONS",
+            2,
+        )
+        if config.available_tools is None:
+            config.available_tools = []
+
+        def quarantine_shell_command(executable: str) -> List[str]:
+            alternatives = get_shell_command_alternatives(executable, config.available_tools)
+            remove_shell_command(config.available_tools, executable)
+            agent_logger.warning(
+                "Quarantined unavailable shell executable '%s'; alternatives=%s",
+                executable,
+                ",".join(alternatives),
+            )
+            return alternatives
+
         failure_recovery_hook = TaskFailureRecoveryHook(
             callback_handler.tool_outcome_journal,
             max_policy_violations=max_policy_violations,
+            max_corrections=max_corrections,
+            quarantine_callback=quarantine_shell_command,
+            quarantined_executables=runtime.quarantined_shell_commands,
         )
         agent_hooks.append(failure_recovery_hook)
     if agent_type in {"task_creator", "task_executor"}:

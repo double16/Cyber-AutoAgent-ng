@@ -8,7 +8,7 @@ import re
 import shlex
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 
 from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
 
@@ -26,6 +26,25 @@ _CORRECTABLE_ERROR_PATTERNS = tuple(
         r"timed? out",
         r"usage error",
         r"validation error",
+    )
+)
+_STARTUP_FAILURE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bcommand not found\b",
+        r"\b(?:module|package)notfounderror\b",
+        r"\bimporterror\b",
+        r"\bno module named\b",
+        r"\berror while loading shared libraries\b",
+        r"\b(?:shared object|dynamic library) .* (?:not found|cannot open)\b",
+        r"\btraceback \(most recent call last\)\b",
+    )
+)
+_PREREQUISITE_FAILURE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:could not|cannot|failed to) (?:open|read|stat)\b",
+        r"\b(?:no such file or directory|file not found)\b",
     )
 )
 _HTTP_STATUS_LINE_PATTERN = re.compile(r"\bHTTP/\d(?:\.\d)?\s+([1-5]\d{2})\b", re.IGNORECASE)
@@ -228,19 +247,30 @@ class ToolOutcomeJournal:
 
 
 class TaskFailureRecoveryHook(HookProvider):
-    """Block task side effects while allowing one diagnostic and one correction."""
+    """Bound retries for one failed invocation without locking unrelated task work."""
 
-    def __init__(self, journal: ToolOutcomeJournal, max_policy_violations: int = 2) -> None:
+    def __init__(
+        self,
+        journal: ToolOutcomeJournal,
+        max_policy_violations: int = 2,
+        max_corrections: int = 2,
+        quarantine_callback: Optional[Callable[[str], List[str]]] = None,
+        quarantined_executables: Optional[set[str]] = None,
+    ) -> None:
         self.journal = journal
         self.max_policy_violations = max(1, int(max_policy_violations))
+        self.max_corrections = max(1, int(max_corrections))
+        self.quarantine_callback = quarantine_callback
         self.unresolved = False
         self.exhausted = False
         self.failed_tool_name = ""
         self.failed_executable = ""
         self.failed_input_fingerprint = ""
         self.failed_output = ""
-        self._diagnostic_used = False
-        self._correction_attempted = False
+        self.failure_category = ""
+        self.alternative_executables: List[str] = []
+        self.quarantined_executables = quarantined_executables if quarantined_executables is not None else set()
+        self._correction_attempts = 0
         self._policy_violations = 0
         self._recovery_roles: Dict[str, str] = {}
 
@@ -249,52 +279,41 @@ class TaskFailureRecoveryHook(HookProvider):
         registry.add_callback(AfterToolCallEvent, self._after_tool)
 
     def _before_tool(self, event: BeforeToolCallEvent) -> None:
-        if not self.unresolved:
-            return
         tool_use = event.tool_use
         tool_name = str(tool_use.get("name", "unknown"))
         tool_id = str(tool_use.get("toolUseId", tool_use.get("_toolUseId", "")))
         tool_input = tool_use.get("input", {})
-
-        if self.exhausted:
-            self._block(event, tool_id, "The task's single correction allowance has been exhausted.")
-            return
-        if self._is_read_only(tool_name):
-            self._recovery_roles[tool_id] = "read_only"
-            return
-        correction_status = self._correction_status(tool_name, tool_input)
-        if correction_status == "changed":
-            self._mark_correction_or_block(event, tool_id)
-            return
-        if correction_status == "same_input":
-            self._block(event, tool_id, "The corrected invocation must change the failed input.")
-            return
-        if tool_name in _MUTATING_TOOLS:
+        executable = _shell_executable(tool_input) if tool_name == "shell" and isinstance(tool_input, dict) else ""
+        if executable and executable in self.quarantined_executables:
+            alternatives = ", ".join(self.alternative_executables)
+            suffix = f" Available capability-compatible alternatives: {alternatives}." if alternatives else ""
             self._block(
                 event,
                 tool_id,
-                "Resolve the correctable tool failure before creating tasks or storing durable evidence.",
+                f"Executable '{executable}' is quarantined for this operation.{suffix}",
             )
             return
-        if self._diagnostic_used:
-            self._block(event, tool_id, "Only one diagnostic invocation is allowed before the corrected invocation.")
+        if not self.unresolved:
+            return
+        if tool_name == self.failed_tool_name and _input_fingerprint(tool_input) == self.failed_input_fingerprint:
+            self._block(event, tool_id, "Do not repeat the identical failed invocation; change its input or method.")
+            return
+        if self._is_correction(tool_name, tool_input):
+            if self._correction_attempts >= self.max_corrections:
+                self.exhausted = True
+                self._block(event, tool_id, "The configured correction allowance has been exhausted.")
+                return
+            self._correction_attempts += 1
+            self._recovery_roles[tool_id] = "correction"
             return
         if self._is_diagnostic(tool_name, tool_input):
-            self._diagnostic_used = True
             self._recovery_roles[tool_id] = "diagnostic"
-            return
-        self._block(
-            event,
-            tool_id,
-            "Recovery may only use read-only inspection, one diagnostic, and one corrected call.",
-        )
-
-    def _mark_correction_or_block(self, event: BeforeToolCallEvent, tool_id: str) -> None:
-        if self._correction_attempted:
-            self._block(event, tool_id, "Only one corrected invocation is allowed for this task.")
-            return
-        self._correction_attempted = True
-        self._recovery_roles[tool_id] = "correction"
+        elif self._is_read_only(tool_name):
+            self._recovery_roles[tool_id] = "read_only"
+        elif tool_name == "shell" or tool_name not in _MUTATING_TOOLS | {"editor", "python_repl"}:
+            self._recovery_roles[tool_id] = "alternative"
+        else:
+            self._recovery_roles[tool_id] = "independent"
 
     def _block(self, event: BeforeToolCallEvent, tool_id: str, message: str) -> None:
         event.cancel_tool = message
@@ -316,23 +335,15 @@ class TaskFailureRecoveryHook(HookProvider):
             "failed_tool": self.failed_tool_name,
         }
 
-    def _correction_status(self, tool_name: str, tool_input: Any) -> str:
+    def _is_correction(self, tool_name: str, tool_input: Any) -> bool:
         if tool_name != self.failed_tool_name:
-            return "different_tool"
-        if _input_fingerprint(tool_input) == self.failed_input_fingerprint:
-            return "same_input"
+            return False
         if tool_name != "shell":
-            return "changed"
-        if not isinstance(tool_input, dict):
-            return "different_tool"
-        executable = _shell_executable(tool_input)
+            return True
+        executable = _shell_executable(tool_input) if isinstance(tool_input, dict) else ""
         if not self.failed_executable:
-            if executable and executable not in _DIAGNOSTIC_EXECUTABLES:
-                return "changed"
-            return "different_tool"
-        if executable and executable == self.failed_executable and executable not in _DIAGNOSTIC_EXECUTABLES:
-            return "changed"
-        return "different_tool"
+            return bool(executable and executable not in _DIAGNOSTIC_EXECUTABLES)
+        return executable == self.failed_executable
 
     @staticmethod
     def _is_read_only(tool_name: str) -> bool:
@@ -354,7 +365,14 @@ class TaskFailureRecoveryHook(HookProvider):
             status_code = _captured_http_status(output, allow_write_out_status=_uses_curl_write_out(tool_input))
             output = f"{output}\nInterpretable curl response status captured: {status_code}"
         role = self._recovery_roles.pop(tool_id, "normal")
-        correctable = not success and is_correctable_tool_failure(tool_name, tool_input, output)
+        startup_failure = (
+            not success
+            and tool_name == "shell"
+            and any(pattern.search(output) for pattern in _STARTUP_FAILURE_PATTERNS)
+        )
+        correctable = not success and (
+            startup_failure or is_correctable_tool_failure(tool_name, tool_input, output)
+        )
         self.journal.append(
             tool_use_id=tool_id,
             tool_name=tool_name,
@@ -365,36 +383,63 @@ class TaskFailureRecoveryHook(HookProvider):
             recovery_role=role,
         )
 
+        if startup_failure:
+            executable = _shell_executable(tool_input) if tool_name == "shell" else ""
+            if executable:
+                self.quarantined_executables.add(executable)
+                if self.quarantine_callback is not None:
+                    self.alternative_executables = self.quarantine_callback(executable)
+            if executable == self.failed_executable:
+                self.unresolved = False
+            return
         if role == "correction":
             if success:
                 self.unresolved = False
                 self.exhausted = False
                 self._policy_violations = 0
-            else:
+            elif self._correction_attempts >= self.max_corrections:
                 self.exhausted = True
                 self._stop_event_loop(event, "correction_failed")
             return
-        if role in {"blocked", "diagnostic", "read_only"}:
+        if role == "alternative" and success:
+            self.unresolved = False
+            self.exhausted = False
+            return
+        if role == "independent" and success and tool_name == "record_task_acceptance":
+            self.unresolved = False
+            self.exhausted = False
+            return
+        if role in {"blocked", "diagnostic", "read_only", "independent", "alternative"}:
             return
         if correctable:
+            category = self._failure_category(tool_name, tool_input, output)
             self.unresolved = True
             self.exhausted = False
+            self.failure_category = category
             self.failed_tool_name = tool_name
             self.failed_executable = (
                 _shell_executable(tool_input) if tool_name == "shell" and isinstance(tool_input, dict) else ""
             )
             self.failed_input_fingerprint = _input_fingerprint(tool_input)
             self.failed_output = _bounded_text(output)
-            self._diagnostic_used = False
-            self._correction_attempted = False
+            self._correction_attempts = 0
             self._policy_violations = 0
+
+    @staticmethod
+    def _failure_category(tool_name: str, tool_input: Any, output: str) -> str:
+        if tool_name == "shell" and any(pattern.search(output) for pattern in _STARTUP_FAILURE_PATTERNS):
+            return "startup_failure"
+        if tool_name == "shell" and any(pattern.search(output) for pattern in _PREREQUISITE_FAILURE_PATTERNS):
+            return "missing_prerequisite"
+        return "invalid_invocation"
 
     def recovery_guidance(self, tool_catalog_context: str = "") -> str:
         guidance = (
-            "A correctable tool invocation failed. Do not claim output from it or create tasks/store evidence until "
-            "it is resolved. You may make read-only inspection calls, at most one diagnostic/preflight call, and one "
-            "corrected invocation of the failed tool. "
-            f"Failed tool: {self.failed_tool_name}. Error: {self.failed_output}"
+            "A tool invocation failed and needs bounded correction. Do not claim output from the failed call. "
+            "You may inspect or create missing prerequisites, use a different method, continue independent work, "
+            f"or make up to {self.max_corrections} changed retries of the failed invocation. "
+            f"Failure category: {self.failure_category}. Failed tool: {self.failed_tool_name}. "
+            f"Error: {self.failed_output}"
         )
         tool_catalog_context = str(tool_catalog_context or "").strip()
         if not tool_catalog_context:
