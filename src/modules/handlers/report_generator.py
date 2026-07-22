@@ -1133,7 +1133,18 @@ def build_report_sections(
 
         operation_plan = memory_client.get_active_plan()
         task_records = memory_client.list_tasks()
-        operation_tasks = [task.to_toon(include_format=False) for task in task_records]
+        operation_tasks = []
+        for task in task_records:
+            acceptance_results = memory_client.list_task_acceptance_results(task.task_uid)
+            acceptance_results = acceptance_results if isinstance(acceptance_results, list) else []
+            completed_ids = {result.criterion_id for result in acceptance_results}
+            completed_count = sum(
+                1 for criterion in task.acceptance.criteria if criterion.id in completed_ids
+            )
+            operation_tasks.append(
+                f"{task.to_toon(include_format=False)},acceptance={completed_count}/"
+                f"{len(task.acceptance.criteria)},manifest={task.acceptance.manifest_hash}"
+            )
 
         # Process evidence entries - FILTER BY OPERATION_ID
         evidence_skipped = 0

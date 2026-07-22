@@ -503,11 +503,15 @@ def get_system_prompt(
     # Extract and format operation directories from output_config
     operation_paths_block = ""
     if isinstance(output_config, dict):
+        base_dir = output_config.get("base_dir", "")
         artifacts_path = output_config.get("artifacts_path", "")
         tools_path = output_config.get("tools_path", "")
 
         # Use absolute paths, LLMs can get confused with relative paths and prepend a false root
         path_lines = []
+        if isinstance(base_dir, str) and base_dir:
+            path_lines.append(f"**ROOT DIRECTORY**: `{base_dir}`")
+
         if isinstance(artifacts_path, str) and artifacts_path:
             path_lines.append(f"**ARTIFACTS DIRECTORY**: `{artifacts_path}`")
 
@@ -518,7 +522,6 @@ def get_system_prompt(
             operation_paths_block = "\n".join(path_lines)
 
     # Load Tools Guide
-    tools_guide_text = ""
     try:
         tools_guide_text = load_prompt_template("tools_guide.md")
     except Exception:

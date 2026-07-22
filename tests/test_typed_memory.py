@@ -13,6 +13,7 @@ from src.modules.tools.memory import (
     store_knowledge,
     store_observation,
 )
+from tests.helpers.acceptance import make_acceptance
 
 
 @pytest.fixture
@@ -20,6 +21,7 @@ def memory_client():
     with patch("src.modules.tools.memory._ensure_memory_client") as ensure:
         client = MagicMock()
         client.mem0.search.return_value = {"results": []}
+        client.store_memory.return_value = {"results": [{"id": "m-new"}]}
         ensure.return_value = client
         yield client
 
@@ -36,7 +38,11 @@ def operation_ids():
 def test_store_observation_fixes_category_and_never_promotes(memory_client, operation_ids):
     result = store_observation("High priority fact", metadata={"category": "finding", "severity": "HIGH"})
 
-    assert result == "Observation stored."
+    assert json.loads(result) == {
+        "stored": True,
+        "created": True,
+        "memory_ref": "memory:m-new",
+    }
     metadata = memory_client.store_memory.call_args.args[3]
     assert metadata["category"] == "observation"
     assert metadata["severity"] == "HIGH"
@@ -52,11 +58,76 @@ def test_store_knowledge_is_internal_category(memory_client, operation_ids):
 
 def test_typed_memory_cleaning_and_duplicates(memory_client, operation_ids):
     memory_client.mem0.search.return_value = {
-        "results": [{"memory": "Line one Line two", "score": 0.01}]
+        "results": [{"id": "m-existing", "memory": "Line one Line two", "score": 0.01}]
     }
 
-    store_observation("Line one\nLine two")
+    result = json.loads(store_observation("Line one\nLine two"))
 
+    assert result == {
+        "stored": True,
+        "created": False,
+        "memory_ref": "memory:m-existing",
+    }
+    memory_client.store_memory.assert_not_called()
+
+
+def test_duplicate_without_id_creates_referenceable_memory(memory_client, operation_ids):
+    memory_client.mem0.search.return_value = {"results": [{"memory": "Same observation"}]}
+
+    result = json.loads(store_observation("Same observation"))
+
+    assert result["created"] is True
+    assert result["memory_ref"] == "memory:m-new"
+    memory_client.store_memory.assert_called_once()
+
+
+def test_store_memory_entry_accepts_direct_id_envelope(memory_client, operation_ids):
+    memory_client.store_memory.return_value = {"id": "m-direct"}
+
+    result = json.loads(store_observation("Direct response"))
+
+    assert result["memory_ref"] == "memory:m-direct"
+
+
+def test_store_memory_entry_recovers_missing_write_id(memory_client, operation_ids):
+    memory_client.store_memory.return_value = {"results": []}
+    memory_client.mem0.search.side_effect = [
+        {"results": []},
+        {"results": [{"id": "m-recovered", "memory": "Recover this observation"}]},
+    ]
+
+    result = json.loads(store_observation("Recover this observation"))
+
+    assert result["memory_ref"] == "memory:m-recovered"
+
+
+def test_store_memory_entry_rejects_unrecoverable_id(memory_client, operation_ids):
+    memory_client.store_memory.return_value = {"results": []}
+
+    with pytest.raises(RuntimeError, match="did not return a durable ID"):
+        store_observation("Unreferenceable observation")
+
+
+def test_store_memory_entry_reports_recovery_search_failure(memory_client, operation_ids):
+    memory_client.store_memory.return_value = {"results": []}
+    memory_client.mem0.search.side_effect = [{"results": []}, RuntimeError("search unavailable")]
+
+    with pytest.raises(RuntimeError, match="durable ID could not be recovered"):
+        store_observation("Recovery search failure")
+
+
+def test_store_observation_reports_current_root_for_outside_artifact(memory_client, operation_ids, tmp_path):
+    operation_root = tmp_path / "current-operation"
+    operation_root.mkdir()
+    outside_artifact = tmp_path / "previous-operation" / "result.txt"
+    outside_artifact.parent.mkdir()
+    outside_artifact.write_text("result", encoding="utf-8")
+
+    with patch("src.modules.tools.memory._operation_output_root", return_value=str(operation_root)):
+        with pytest.raises(ValueError, match=f"current operation output {operation_root}") as error:
+            store_observation("Outside artifact", artifacts=[str(outside_artifact)])
+
+    assert "Use a path relative to the current operation output" in str(error.value)
     memory_client.store_memory.assert_not_called()
 
 
@@ -157,7 +228,10 @@ def test_store_finding_rejects_assumed_observed_result(memory_client, operation_
 def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, operation_ids):
     artifact = tmp_path / "response.txt"
     artifact.write_text("HTTP 200", encoding="utf-8")
-    task = Task("task-1", "Verify", "Verify claim", 1, "active", kind="finding_validation", reference_id="finding-1")
+    task = Task(
+        "task-1", "Verify", "Verify claim", make_acceptance().to_dict(), 1, "active",
+        kind="finding_validation", reference_id="finding-1"
+    )
     plan_store = MagicMock()
     plan_store.get_finding.return_value = {"verification_task_uid": "task-1"}
     plan_store.get_tasks.return_value = [task]
@@ -193,7 +267,10 @@ def test_differential_confirmation_requires_control(tmp_path: Path, operation_id
 
 
 def test_finalize_finding_validation_promotes_only_approved_confirmation(operation_ids):
-    task = Task("task-1", "Verify", "Verify", 1, "active", kind="finding_validation", reference_id="finding-1")
+    task = Task(
+        "task-1", "Verify", "Verify", make_acceptance().to_dict(), 1, "active",
+        kind="finding_validation", reference_id="finding-1"
+    )
     plan_store = MagicMock()
     plan_store.get_finding.return_value = {
         "candidate_data": {"claim": "Confirmed claim", "severity": "HIGH"},
@@ -217,7 +294,10 @@ def test_finalize_finding_validation_promotes_only_approved_confirmation(operati
 
 
 def test_finalize_rejected_confirmation_becomes_validation_failure(operation_ids):
-    task = Task("task-1", "Verify", "Verify", 1, "active", kind="finding_validation", reference_id="finding-1")
+    task = Task(
+        "task-1", "Verify", "Verify", make_acceptance().to_dict(), 1, "active",
+        kind="finding_validation", reference_id="finding-1"
+    )
     plan_store = MagicMock()
     plan_store.get_finding.return_value = {
         "candidate_data": {"claim": "Unsupported claim", "severity": "CRITICAL"},

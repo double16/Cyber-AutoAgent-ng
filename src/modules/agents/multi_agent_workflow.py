@@ -60,13 +60,18 @@ from modules.handlers.utils import (
 from modules.handlers.tool_recovery import ToolOutcome, outcomes_to_toon
 from modules.tools.artifact import create_bounded_artifact_reader
 from modules.tools.memory import (
+    DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
     OperationPlan,
     OperationTarget,
     PlanPhase,
     Task,
+    build_create_tasks_tool,
+    build_record_task_acceptance_tool,
+    _artifact_path_from_ref,
     finalize_finding_validation,
     get_memory_client,
+    inventory_manifest_contract_text,
     resolve_operation_targets,
 )
 from modules.tools.tool_catalog import get_shell_command_help_context, get_shell_command_specs
@@ -233,6 +238,9 @@ class WorkflowStateStore:
         tasks.sort(key=lambda task: task.created_at or "")
         return tasks
 
+    def list_task_acceptance_results(self, task_uid: str) -> List[Any]:
+        return self.client.list_task_acceptance_results(task_uid)
+
     def store_task(self, task: Task) -> Task:
         self.client.store_task(task=task)
         return task
@@ -341,6 +349,7 @@ class WorkflowStateStore:
             task_uid=task.task_uid,
             title=task.title,
             objective=task.objective,
+            acceptance=task.acceptance,
             phase=task.phase,
             status="active",
             status_reason="activated",
@@ -359,6 +368,7 @@ class WorkflowStateStore:
             task_uid=task.task_uid,
             title=task.title,
             objective=task.objective,
+            acceptance=task.acceptance,
             phase=task.phase,
             status=status,
             status_reason=reason,
@@ -377,6 +387,7 @@ class WorkflowStateStore:
             task_uid=task.task_uid,
             title=task.title,
             objective=task.objective,
+            acceptance=task.acceptance,
             phase=task.phase,
             status="pending",
             status_reason=reason,
@@ -395,6 +406,7 @@ class WorkflowStateStore:
             task_uid=task.task_uid,
             title=task.title,
             objective=task.objective,
+            acceptance=task.acceptance,
             phase=phase_id,
             status=task.status,
             status_reason=task.status_reason,
@@ -637,6 +649,12 @@ class MultiAgentWorkflowController:
             return max(1, config_manager.getenv_int("CYBER_WORKFLOW_TASK_EXECUTION_CYCLES", 3))
         return 2
 
+    def _task_creator_correction_count(self) -> int:
+        config_manager = self.runtime.config_manager
+        if config_manager:
+            return max(0, config_manager.getenv_int("CYBER_TASK_CREATOR_MAX_CORRECTIONS", 2))
+        return 2
+
     def run(self) -> None:
         self._log_workflow(
             "start max_iterations=%s json_retries=%s plan_refinement_iterations=%s "
@@ -867,7 +885,15 @@ class MultiAgentWorkflowController:
             selected_optional_tool_names=selected_tools if isinstance(selected_tools, list) else [],
             include_create_tasks=True,
         )
+        tools = [tool for tool in tools if get_tool_name(tool) != "record_task_acceptance"]
+        tools.append(build_record_task_acceptance_tool(task.task_uid))
         execution_prompt = str(prompt_spec.get("prompt") or task.objective)
+        execution_prompt = (
+            execution_prompt.rstrip()
+            + "\n\n## Frozen Task Acceptance Contract (Controller-owned)\n"
+            + json.dumps(task.acceptance.to_dict(), indent=2, sort_keys=True)
+        )
+        execution_prompt += self._inventory_manifest_evidence_prompt(task)
         selected_memory_context = self._selected_memory_context(prompt_spec.get("memory_ids"))
         if selected_memory_context:
             execution_prompt = execution_prompt.rstrip() + "\n\n## Selected Memory Context\n" + selected_memory_context
@@ -892,11 +918,14 @@ class MultiAgentWorkflowController:
             ",".join(get_tool_name(tool) for tool in tools),
             ",".join(spec["command"] for spec in selected_shell_commands),
         )
-        required_tools = {"record_finding_validation"} if task.kind == "finding_validation" else set()
+        required_tools = {"record_task_acceptance"}
+        if task.kind == "finding_validation":
+            required_tools.add("record_finding_validation")
         task_policy = AgentRunPolicy(
             min_tool_calls=1,
             required_tool_names=required_tools,
             terminal_after_required_tools=True,
+            require_successful_required_tools=True,
             allow_text_final_after_tools=False,
             ignored_terminal_tool_names={"create_tasks"},
             terminal_reason="task_executor_done",
@@ -966,6 +995,7 @@ class MultiAgentWorkflowController:
                 if worker_context:
                     worker_contexts.append(f"Cycle {cycle}: {worker_context}")
                 combined_worker_context = self._worker_context_summary("\n".join(worker_contexts))
+                acceptance_submitted = False
                 self._log_workflow(
                     "task worker context task=%s cycle=%s included=%s chars=%s",
                     self._task_label(task),
@@ -981,18 +1011,47 @@ class MultiAgentWorkflowController:
                         ),
                     )
                 else:
-                    decision = self._evaluate_task(
-                        plan,
-                        phase,
-                        task,
-                        combined_worker_context,
-                        tool_outcomes,
-                    )
+                    acceptance_results = self.state.list_task_acceptance_results(task.task_uid)
+                    missing_criteria = self._missing_acceptance_criteria(task, acceptance_results)
+                    if missing_criteria:
+                        missing_text = ", ".join(missing_criteria)
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=f"Acceptance manifest is incomplete; missing criteria: {missing_text}.",
+                            instructions=(
+                                "Complete and record evidence-backed terminal results for these frozen criterion IDs: "
+                                f"{missing_text}."
+                            ),
+                        )
+                        self._log_workflow(
+                            "task acceptance gate incomplete task=%s cycle=%s missing=%s",
+                            self._task_label(task),
+                            cycle,
+                            missing_text,
+                        )
+                    else:
+                        acceptance_submitted = True
+                        decision = self._evaluate_task(
+                            plan,
+                            phase,
+                            task,
+                            combined_worker_context,
+                            tool_outcomes,
+                            acceptance_results,
+                        )
                 if decision.status == "done":
                     self._log_workflow(
                         "task critic approved task=%s cycle=%s",
                         self._task_label(task),
                         cycle,
+                    )
+                    break
+                if acceptance_submitted:
+                    self._log_workflow(
+                        "task acceptance evaluated terminally task=%s cycle=%s status=%s",
+                        self._task_label(task),
+                        cycle,
+                        decision.status,
                     )
                     break
                 if cycle_result.recovery_required:
@@ -1041,6 +1100,11 @@ for that failed tool; never assume or describe a result from a rejected invocati
 Critic reason: {decision.reason}
 Critic instructions: {decision.instructions}
 """
+
+    @staticmethod
+    def _missing_acceptance_criteria(task: Task, results: List[Any]) -> List[str]:
+        recorded_ids = {str(result.criterion_id) for result in results}
+        return [criterion.id for criterion in task.acceptance.criteria if criterion.id not in recorded_ids]
 
     @staticmethod
     def _executor_cycle_result(result: Any) -> TaskExecutorCycleResult:
@@ -1401,10 +1465,18 @@ Return exactly one decision for each candidate.
         task: Task,
         worker_context: str = "",
         tool_outcomes: Optional[List[ToolOutcome]] = None,
+        acceptance_results: Optional[List[Any]] = None,
     ) -> WorkflowDecision:
         data = self._run_json_text_agent(
             "task_evaluator",
-            self._task_evaluator_prompt(plan, phase, task, worker_context, tool_outcomes),
+            self._task_evaluator_prompt(
+                plan,
+                phase,
+                task,
+                worker_context,
+                tool_outcomes,
+                acceptance_results,
+            ),
             self._evaluator_tools(),
             self._task_evaluator_system_prompt(),
         )
@@ -1542,11 +1614,12 @@ review existing memories. Return only the requested JSON decision."""
         run_policy = AgentRunPolicy(
             required_tool_names={"create_tasks"},
             terminal_after_required_tools=True,
+            require_successful_required_tools=True,
             allow_text_final_after_tools=False,
             terminal_reason="task_creator_done",
             terminal_message="Task creator completed after create_tasks",
         )
-        self._run_worker_agent(
+        creator_result = self._run_worker_agent(
             "task_creator",
             prompt,
             tools,
@@ -1558,7 +1631,10 @@ review existing memories. Return only the requested JSON decision."""
         after_actionable_count = len(
             self.state.list_tasks(phase=phase.id, status=["active", "pending"])
         )
-        if before_actionable_count == 0 and after_actionable_count == 0:
+        corrections_exhausted = (
+            getattr(creator_result, "reason", "") == "task_creator_corrections_exhausted"
+        )
+        if before_actionable_count == 0 and after_actionable_count == 0 and not corrections_exhausted:
             self._log_workflow(
                 "task creator produced no durable tasks for empty phase=%s; retrying once with schema repair",
                 self._phase_label(phase),
@@ -1593,27 +1669,47 @@ review existing memories. Return only the requested JSON decision."""
                 phase.id,
             )
 
-    @staticmethod
-    def _task_creator_contract(plan: OperationPlan, phase: PlanPhase) -> str:
+    def _task_creator_contract(self, plan: OperationPlan, phase: PlanPhase) -> str:
         """Return the controller-owned create_tasks payload contract."""
 
+        max_corrections = self._task_creator_correction_count()
         target_lines = "\n".join(
             f"- {target.target_id} [{target.type}]: {target.value}"
             for target in plan.targets
-        ) or "- No executable targets resolved; omit target_ids and use target_scope \"all\"."
+        ) or "- No executable targets resolved; omit target_ids."
         return f"""## create_tasks Payload Contract (Non-negotiable)
-Make exactly one successful `create_tasks` call. A rejected validation attempt does not count as the successful call;
-correct the payload and retry once. Stop immediately after success.
+Make exactly one successful `create_tasks` call. A rejected validation attempt does not count as the successful call.
+You may make at most {max_corrections} corrected call(s) after the initial attempt. Stop immediately after success.
 
-Every task object MUST contain non-empty `title` and `objective` strings. It MAY contain only `phase`, `status`, and
-`evidence`, `target_scope`, and `target_ids` in addition to those required fields. Omit `phase` to use active phase
-{phase.id}, or set it explicitly to active phase {phase.id}. Do not create tasks for earlier or future phases. Set
-`status` to `pending` and provide `evidence` as a JSON array of expected artifact paths or completion signals. Put
-relevant context in `objective`. Never emit unsupported `context` or `description` fields.
+Every proposal MUST contain non-empty `title`, `objective`, `basis_kind`, `basis_description`, and `criteria` values.
+Python assigns active phase {phase.id} and pending status, infers target scope from `target_ids`, and compiles the full
+immutable acceptance contract. Never emit `acceptance`, `phase`, `status`, `target_scope`, task `evidence`, `context`,
+`stop_condition`, `gap_policy`, `output_kind`, or unsupported top-level `description` fields.
+
+Acceptance basis rules:
+- Use `basis_kind: "procedure"` for bounded work. Supply non-empty `methods` and one or more positive integer
+  `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
+  stop condition, gap policy, and output kind. Require `inventory_manifest` evidence only for canonical inventory
+  JSON; require `artifact` evidence for workflow maps, reports, and other files.
+- Use `basis_kind: "snapshot"` for dependent work. Supply `snapshot_refs`, omit methods and limits, and set
+  `coverage: true` only when every item in one existing version-1 inventory manifest must be assessed. Referenced
+  producer tasks must be done.
+- If the required snapshot does not exist, create a bounded procedure-based prerequisite inventory task in this
+  active phase instead of creating dependent coverage tasks.
+- Do not use moving claims such as "all reachable", "all discovered", "across the application", or "key workflows"
+  in acceptance criteria. Refer to the declared procedure or frozen manifest items.
+- Criterion `evidence` entries use `kind` values artifact, inventory_manifest, observation,
+  finding_candidate, verified_finding, or memory, plus a positive `min_count`.
+- Criteria contain only `description` and `evidence`; Python generates readable unique IDs in the frozen contract.
+- An artifact procedure must require artifact evidence and must not require inventory_manifest evidence. An
+  inventory_manifest procedure must require inventory_manifest evidence.
+
+Canonical inventory manifest contract:
+{inventory_manifest_contract_text()}
 
 Target scoping:
-- Use `target_scope` "all" when the task intentionally covers every executable target.
-- Use `target_scope` "subset" and `target_ids` when the task is scoped to one or more targets.
+- Omit `target_ids` when the task intentionally covers every executable target.
+- Supply `target_ids` when the task is scoped to one or more targets.
 - `target_ids` MUST be exact IDs from the executable target registry below. Never invent placeholder IDs.
 - When a registry value is an explicit `scheme://host:port` URL or `host:port` netloc, create tasks for that exact service boundary. Do not
   turn it into host-wide or all-port work unless a separate executable host or network target authorizes that scope.
@@ -1625,15 +1721,19 @@ A list of tasks is required, including the case of one task being provided.
 
 Before calling, verify every object against this exact shape:
 ```json
-{{"tasks":[{{"title":"Short actionable title","objective":"Action, target, context, and completion condition",
-"phase":{phase.id},"status":"pending","evidence":["Expected artifact or completion signal"],
-"target_scope":"all","target_ids":[]}}]}}
+{{"tasks":[{{"title":"Cohesive actionable title","objective":"Action and target",
+"basis_kind":"procedure","basis_description":"Bounded inventory procedure","methods":["crawl"],
+"limits":{{"max_requests":500,"max_depth":3}},"criteria":[{{
+"description":"Execute the declared procedure and store its finite manifest",
+"evidence":[{{"kind":"inventory_manifest","min_count":1}}]}}],"target_ids":["target-1"]}}]}}
 ```"""
 
     def _task_creator_repair_prompt(self, plan: OperationPlan, phase: PlanPhase) -> str:
         """Return one bounded repair instruction when no durable task was created."""
 
-        return f"""No durable task was created for the active phase. Make one corrected `create_tasks` call now.
+        return f"""No durable task was created for the active phase. The likely cause is a missing or invalid frozen
+snapshot. Make one corrected `create_tasks` call now. If dependent coverage has no valid snapshot, create one bounded
+procedure-based prerequisite inventory task in active phase {phase.id}; do not recreate the rejected coverage tasks.
 Do not explain, execute, inspect, or gather evidence.
 
 {self._task_creator_contract(plan, phase)}"""
@@ -1683,14 +1783,9 @@ Do not explain, execute, inspect, or gather evidence.
         yield run_executor
 
     def _task_creator_tools(self) -> List[Any]:
-        tools = [
-            tool
-            for tool in self.runtime.core_tools_list
-            if get_tool_name(tool) == "create_tasks"
-        ]
-        if not tools:
+        if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
             raise WorkflowInvariantError("create_tasks tool is required for task_creator")
-        return tools
+        return [build_create_tasks_tool()]
 
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
         pending = self.state.list_tasks(phase=phase.id, status=["pending", "active"])
@@ -1881,6 +1976,8 @@ access or safety boundaries.
 
 Use bounded criteria. Replace absolute claims such as "all publicly reachable services" with the discovery sources or
 inventory being assessed, the durable evidence expected, and how unassessed gaps will be documented.
+Every coverage phase must identify the bounded discovery procedure that produces its inventory. Dependent mapping work
+uses a frozen snapshot of that inventory; later discoveries become follow-up work rather than moving completion scope.
 
 ### START OF OPERATION OBJECTIVE ###
 
@@ -1906,6 +2003,8 @@ Approve only when the draft:
 - translates every applicable module completion outcome into ordered phases and measurable criteria;
 - uses complete, logically ordered phases with bounded, measurable criteria that name the assessed discovery basis,
   expected evidence, and handling of coverage gaps;
+- rejects circular criteria such as "all discovered", "across the application", or "key workflows" unless the draft
+  states how the finite inventory is produced and frozen;
 - follows the required plan schema; and
 - excludes specific tools and every report, executive-summary, findings-consolidation, evidence-consolidation, or
   equivalent post-processing phase, regardless of its title.
@@ -1969,11 +2068,15 @@ The generated prompt must instruct the task-executor agent:
 - Do not continue into later phase objectives, adjacent tasks, or newly discovered follow-up work.
 - If new follow-up work is discovered, create durable pending tasks for it using create_tasks.
 - Do not execute newly created follow-up tasks in this run.
-- When the task objective asks to gather, map, enumerate, identify, inspect, collect, or document information, require
-  the executor to store the requested facts or negative results with `store_observation`. Worker summaries alone are
-  not durable storage for requested information.
+- Require every acceptance summary to state the concrete result or negative result. Successful acceptance publishes
+  those summaries and evidence references as one operation observation for later tasks. Use `store_observation` only
+  for useful interim facts not represented by the acceptance ledger.
 - Store each security claim with `store_finding` and reusable lessons with `store_knowledge`, then stop with a brief
   summary once the assigned task is done, partial, or blocked.
+- Treat the task's acceptance contract as an immutable manifest. Address every criterion ID, use batch operations when
+  useful, and call `record_task_acceptance` with evidence-backed terminal results. The controller has already bound the
+  tool to the assigned task, so do not supply or guess a task UID. Never add criteria to the active task; create a
+  separately contracted follow-up task for discoveries outside the frozen manifest.
 
 Tool selection guidance:
 - The `tools` JSON field contains optional-tool names only.
@@ -2043,14 +2146,15 @@ Approve only when the draft:
 - treats every plan constraint as a mandatory execution guardrail;
 - prevents execution of later phases, adjacent tasks, and newly created follow-up tasks;
 - preserves explicit `scheme://host:port` URL and `host:port` netloc service scope when present;
-- requires `store_observation` for requested informational results, including negative results that answer the task,
-  and asks for a concise completion summary;
+- requires concrete, reusable acceptance summaries for requested informational and negative results, and uses
+  `store_observation` only for useful interim facts outside the acceptance ledger;
+- faithfully covers every immutable acceptance criterion, requires `record_task_acceptance`, and neither expands nor
+  narrows the frozen manifest;
 - selects memories, optional tools, and shell commands with a reasonable relationship to the task; and
 - follows the required task prompt schema.
 
 For task objectives that ask to gather, map, enumerate, identify, inspect, collect, or document information, reject
-drafts that leave storage optional or rely only on worker narration, artifacts, or final summaries for the requested
-information.
+drafts whose acceptance summaries could be generic completion claims rather than concrete reusable results.
 
 The `tools` field contains optional tools only. Core tools are supplied automatically and must not appear in `tools`;
 never require a core tool to be listed there. Tool overlap is permitted. Do not reject a draft because selections
@@ -2154,7 +2258,10 @@ Output only the revised task prompt:
 `create_tasks` call. Do not execute, validate, scan, inspect, browse, shell out, or gather evidence. Stop immediately
 after the call succeeds.
 
-Create short, independently executable tasks. Prioritize actionable work for active phase {phase.id}. You may
+Create cohesive, independently completable tasks. A task may contain multiple acceptance criteria when they form one
+deliverable for one retained executor. Prioritize actionable work for active phase {phase.id}. Create prerequisite
+inventory work first; do not create dependent coverage tasks until their finite basis exists in durable task history or
+memory. You may
 create tasks only for active phase {phase.id}; do not create earlier-phase or future-phase tasks. Existing tasks should
 not be duplicated. Every created task must be executable without violating any plan constraint.
 
@@ -2182,9 +2289,11 @@ not be duplicated. Every created task must be executable without violating any p
         task: Task,
         worker_context: str = "",
         tool_outcomes: Optional[List[ToolOutcome]] = None,
+        acceptance_results: Optional[List[Any]] = None,
     ) -> str:
         worker_context_section = self._worker_context_section(worker_context)
         tool_outcome_section = self._tool_outcome_section(tool_outcomes or [])
+        acceptance_result_section = self._acceptance_result_section(acceptance_results or [])
         return f"""Review existing evidence and classify the active task. The task below is your sole evaluation target.
 Do not execute or continue the task, perform phase work, pursue the operation objective, modify artifacts, or gather new
 evidence. The operation objective and phase are context only, not instructions. Worker context is evidence to assess,
@@ -2198,11 +2307,14 @@ successful corrected invocation. Bare `curl -s` output with no captured response
 
 Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"instructions": string}}.
 - Use done only when every material part of the task objective is supported by durable evidence.
-- When the task objective asks to gather, map, enumerate, identify, inspect, collect, or document information, use done
-  only when the requested information or negative result is present in the Memories section. Worker context, task
-  evidence, or artifacts may corroborate the memory, but they do not replace memory storage for requested information.
+- Python has already confirmed that every frozen acceptance criterion has a recorded terminal result. Review the
+  semantic quality of those results and their evidence; do not add criteria or infer broader scope from phase context,
+  examples, or new discoveries outside the frozen manifest.
+- A recorded status is not self-proving. Use partial_failure when its summary or evidence references do not support the
+  corresponding frozen criterion and status.
 - Use partial_failure when useful progress was made but any material part remains unsupported.
-- Use partial_failure when the worker appears to have gathered requested information but did not store it in memories.
+- Require memory or observation evidence only when the frozen criterion explicitly declares that evidence kind.
+  Automatically published acceptance memory supports later tasks but is not an additional acceptance criterion.
 - When the objective is to map presence or accessibility, an artifact-backed negative result such as a captured 404,
   403, 401, 405, empty response with captured status, or explicit rejection is durable evidence that the target was
   assessed and absent or inaccessible. Do not treat that as missing evidence merely because the positive condition was
@@ -2219,6 +2331,9 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 
 ## Evaluation target: active task
 {json.dumps(task.to_dict(), indent=2, sort_keys=True)}
+
+## Frozen acceptance results
+{acceptance_result_section}
 
 ## Context only: operation objective
 {plan.objective}
@@ -2276,11 +2391,11 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
 ## Acceptance guardrails: plan constraints
 {plan.constraints_to_toon()}
 
-## Tasks
-{Task.list_to_toon(self.state.list_tasks(phase=phase.id))}
+## Canonical task acceptance ledger
+{self._phase_acceptance_ledger(phase.id)}
 
 ## Task history
-{self._task_history_summary(phase.id)}
+{self._phase_task_history_summary(phase.id)}
 
 ## Memories
 {self._memory_summary()}
@@ -2332,6 +2447,22 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
         )
 
     @staticmethod
+    def _inventory_manifest_evidence_prompt(task: Task) -> str:
+        """Return the canonical inventory contract only for tasks that require it."""
+
+        requires_inventory = any(
+            requirement.kind == "inventory_manifest"
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.evidence_requirements
+        )
+        if not requires_inventory:
+            return ""
+        return (
+            "\n\n## Inventory Manifest Evidence Contract (Controller-owned)\n"
+            + inventory_manifest_contract_text()
+        )
+
+    @staticmethod
     def _task_executor_contract() -> str:
         """Return the controller-owned execution boundary shared by all modules."""
         return """## Task Executor Contract (Controller-owned)
@@ -2341,10 +2472,20 @@ targets even if the operation objective mentions them. For assigned targets shap
 that exact scheme, host, and port boundary; do not convert it to host-only form, run omitted-port/all-port discovery,
 or scan other ports on the same host. Port-specific checks are acceptable only for the exact assigned port, and
 scheme-appropriate service tooling is preferred. Do not continue into adjacent tasks or later phase objectives. Store
-operation facts with `store_observation`, reusable lessons with `store_knowledge`, and each security claim with
-`store_finding`; reference durable artifact paths rather than pasting large outputs. A finding submission creates a
+useful interim facts outside the acceptance ledger with `store_observation`, reusable lessons with `store_knowledge`,
+and each security claim with `store_finding`; reference durable artifact paths rather than pasting large outputs.
+When an acceptance criterion requires observation evidence, call `store_observation` and copy its returned
+`memory_ref` into the criterion's `evidence_refs`; an artifact reference cannot satisfy an observation requirement.
+A finding submission creates a
 separate verification task, so do not validate that new task in this run. If new follow-up work is discovered, create
-pending tasks with `create_tasks`, but do not execute them in this run. End with a concise summary of completed work,
+pending tasks with their own acceptance contracts using `create_tasks`, but do not execute them in this run.
+`create_tasks` never completes, replaces, or records acceptance for the assigned task. For the
+assigned task, record one terminal result for every frozen criterion using `record_task_acceptance`; this ledger does
+not replace storing substantive artifact evidence. Each acceptance summary must state the concrete result or negative
+result because successful acceptance publishes the summaries and evidence references as one operation observation for
+later tasks. Coverage-mode results must include one terminal coverage disposition for every item ID in the frozen
+inventory manifest. The controller binds that tool to the assigned task; submit the entire result ledger atomically and
+never guess a task UID. End with a concise summary of completed work,
 partial progress, or a concrete blocker. Python owns task, phase, and operation state transitions; never claim or
 perform them."""
 
@@ -2513,9 +2654,84 @@ unless a separate executable host or network target authorizes that scope."""
 {outcomes_to_toon(tool_outcomes)}
 """
 
+    @staticmethod
+    def _acceptance_result_section(results: List[Any]) -> str:
+        return json.dumps(
+            [result.to_dict() if hasattr(result, "to_dict") else result for result in results],
+            indent=2,
+            sort_keys=True,
+        )
+
     def _task_history_summary(self, phase_id: int) -> str:
         tasks = list(filter(
             lambda task: task.status in ["done", "partial_failure", "blocked"],
             self.state.list_tasks(phase=phase_id)
         ))
         return Task.list_to_toon(tasks)
+
+    def _phase_task_history_summary(self, phase_id: int) -> str:
+        """Return terminal task state without non-authoritative evidence fields."""
+
+        rows = [
+            {
+                "task_uid": task.task_uid,
+                "title": task.title,
+                "status": task.status,
+                "status_reason": task.status_reason,
+            }
+            for task in self.state.list_tasks(phase=phase_id)
+            if task.status in TERMINAL_PLAN_STATUSES
+        ]
+        return json.dumps(rows, indent=2, sort_keys=True)
+
+    def _phase_acceptance_ledger(self, phase_id: int) -> str:
+        """Return authoritative accepted evidence without creator-predicted paths."""
+
+        rows = []
+        for task in self.state.list_tasks(phase=phase_id):
+            results = self.state.list_task_acceptance_results(task.task_uid)
+            result_by_id = {str(result.criterion_id): result for result in results}
+            criteria = []
+            for criterion in task.acceptance.criteria:
+                result = result_by_id.get(criterion.id)
+                result_data = result.to_dict() if result is not None else None
+                if result_data is not None:
+                    result_data["evidence"] = [
+                        self._phase_evidence_reference(reference)
+                        for reference in result.evidence_refs
+                    ]
+                    for coverage_item, coverage_data in zip(result.coverage, result_data["coverage"]):
+                        coverage_data["evidence"] = [
+                            self._phase_evidence_reference(reference)
+                            for reference in coverage_item.evidence_refs
+                        ]
+                criteria.append(
+                    {
+                        "criterion": criterion.to_dict(),
+                        "result": result_data,
+                    }
+                )
+            rows.append(
+                {
+                    "task_uid": task.task_uid,
+                    "title": task.title,
+                    "status": task.status,
+                    "status_reason": task.status_reason,
+                    "manifest_hash": task.acceptance.manifest_hash,
+                    "criteria": criteria,
+                }
+            )
+        return json.dumps(rows, indent=2, sort_keys=True)
+
+    @staticmethod
+    def _phase_evidence_reference(reference: str) -> Dict[str, Any]:
+        view: Dict[str, Any] = {"reference": reference}
+        if not reference.startswith("artifact:"):
+            return view
+        try:
+            view["read_path"] = _artifact_path_from_ref(reference)
+            view["available"] = True
+        except ValueError as error:
+            view["available"] = False
+            view["error"] = str(error)
+        return view

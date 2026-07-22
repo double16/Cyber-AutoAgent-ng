@@ -50,7 +50,7 @@ from modules.config.models.capabilities import (
     get_capabilities,
 )
 from modules.config.models.factory import (
-    _resolve_prompt_token_limit,
+    require_prompt_token_limit,
     create_strands_model,
 )
 from modules.config.system.logger import get_logger
@@ -66,6 +66,7 @@ from modules.handlers.conversation_budget import (
 )
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.tool_recovery import TaskFailureRecoveryHook
+from modules.handlers.terminal_tool import TerminalToolHook
 from modules.handlers.tool_repeat_guard import (
     DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
     DEFAULT_TOOL_REPEAT_THRESHOLD,
@@ -341,7 +342,7 @@ def create_agent_runtime_resources(
         logger.debug("Unable to set overlay environment context", exc_info=True)
 
     # Create agent with telemetry for token tracking
-    prompt_token_limit = _resolve_prompt_token_limit(
+    prompt_token_limit = require_prompt_token_limit(
         config.provider, config.model_id
     )
     logger.info("Prompt token limit (input tokens): %d", prompt_token_limit)
@@ -536,7 +537,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     python_repl_instructions = """
 - Usage: Rapid PoC prototyping, batch multiple tests. NO TIMEOUT (avoid >600s operations)
-- File writes: MUST use absolute paths from OPERATION ARTIFACTS DIRECTORY (relative paths write to project root)
+- File writes: MUST use absolute paths from OPERATION ARTIFACTS DIRECTORY (relative paths write to operation root)
 - Promotion trigger: POC works + logic needed >2 times → MUST promote via editor+load_tool to OPERATION TOOLS DIRECTORY
 - Results: Store all outputs as artifacts with descriptive names
 
@@ -1108,8 +1109,26 @@ def create_agent(
     agent_hooks = list(runtime.hooks) if runtime.hooks else []
     failure_recovery_hook = None
     if agent_type == "task_executor" and isinstance(callback_handler, AgentEventHandler):
-        failure_recovery_hook = TaskFailureRecoveryHook(callback_handler.tool_outcome_journal)
+        max_policy_violations = runtime.config_manager.getenv_int(
+            "CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS",
+            2,
+        )
+        failure_recovery_hook = TaskFailureRecoveryHook(
+            callback_handler.tool_outcome_journal,
+            max_policy_violations=max_policy_violations,
+        )
         agent_hooks.append(failure_recovery_hook)
+    if agent_type in {"task_creator", "task_executor"}:
+        max_task_creator_corrections = runtime.config_manager.getenv_int(
+            "CYBER_TASK_CREATOR_MAX_CORRECTIONS",
+            2,
+        )
+        agent_hooks.append(
+            TerminalToolHook(
+                agent_type,
+                max_task_creator_corrections=max_task_creator_corrections,
+            )
+        )
 
     agent_kwargs = {
         "model": model,

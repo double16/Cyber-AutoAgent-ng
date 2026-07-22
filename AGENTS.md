@@ -23,7 +23,7 @@
 ## Python Best Practices
 - Use the `uv` tool for python ecosystem, i.e `uv run ...`
 - Follow PEP 8 with a 120-character line limit
-- Run `uv run ruff` on new or changed files to validate python coding standards
+- Run `uv run ruff` on new or changed files to validate Python coding standards
 - Use double quotes for Python strings
 - Sort imports with `isort`
 - Use f-strings for string formatting

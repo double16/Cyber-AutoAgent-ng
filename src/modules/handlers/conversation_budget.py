@@ -167,7 +167,7 @@ def _get_context_limit() -> int:
             return int(new_val)
         except ValueError:
             pass
-    return 100000  # Default
+    return 0
 
 CONTEXT_LIMIT = _get_context_limit()
 # Legacy alias for backward compatibility
@@ -1231,6 +1231,11 @@ def _get_prompt_token_limit(agent: Agent) -> Optional[int]:
             return int(limit)
     except Exception:
         logger.debug("Invalid prompt token limit on agent", exc_info=True)
+    model_limit = getattr(getattr(agent, "model", None), "context_window_limit", None)
+    if isinstance(model_limit, (int, float)) and model_limit > 0:
+        resolved = int(model_limit)
+        setattr(agent, "_prompt_token_limit", resolved)
+        return resolved
     if PROMPT_TOKEN_FALLBACK_LIMIT > 0:
         setattr(agent, "_prompt_token_limit", PROMPT_TOKEN_FALLBACK_LIMIT)
         logger.warning(

@@ -17,7 +17,7 @@ from strands.models.litellm import LiteLLMModel
 from modules import __version__
 from modules.agents.patches import ToolUseIdHook
 from modules.config.manager import get_config_manager
-from modules.config.models.factory import create_gemini_model, get_capabilities
+from modules.config.models.factory import apply_model_context_window, create_gemini_model, get_capabilities
 from modules.config.models.ollama import OllamaModel
 from modules.config.system.logger import get_logger
 from modules.tools.artifact import create_bounded_artifact_reader
@@ -143,6 +143,8 @@ class ReportGenerator:
                 "timeout": 1200,
             }
             model = LiteLLMModel(model_id=mid, params=params, client_args=client_args, stream=False)
+
+        apply_model_context_window(model, prov, mid)
 
         # Create agent with report-specific configuration
         trace_attrs = {

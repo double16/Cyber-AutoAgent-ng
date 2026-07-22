@@ -287,13 +287,18 @@ safe_max = model_output_limit * 0.5
 
 ### Token Limit Resolution
 
-Token limits use **five-tier precedence**:
+Context-window limits use the existing provider-aware precedence:
 
 1. **Explicit override** - `CYBER_PROMPT_LIMIT_FORCE` environment variable
-2. **Context window maximum** - `CYBER_CONTEXT_LIMIT`, if defined, limits the following
-3. **Models.dev API** - Authoritative registry (preferred)
-4. **Fallback mappings** - `CYBER_CONTEXT_WINDOW_FALLBACKS` (JSON)
-5. **Provider defaults** - Safe defaults per provider
+2. **Ollama configuration or runtime detection** - `OLLAMA_CONTEXT_LENGTH`, model metadata, or the loaded model
+3. **Models.dev/static model registry** - Authoritative known-model data
+4. **LiteLLM provider detection** - Remote-provider model metadata
+5. **Context window maximum** - `CYBER_CONTEXT_LIMIT`, used as a clamp or configured fallback
+6. **Provider defaults** - Conservative final resolution
+
+The resolved value is written to the Strands model's `context_window_limit` and reused for prompt budgeting and
+conversation compression. Ollama also receives the same value as `num_ctx`. Values such as 48,000 are configuration or
+detection results, not application defaults. Startup fails when no positive context window can be resolved.
 
 **Example fallback configuration:**
 ```bash
@@ -322,6 +327,8 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `3`)              |
 | `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `2`)              |
 | `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum executor/evaluator passes per task                 | No (default: `3`, minimum `1`) |
+| `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS`        | Blocked recovery calls before stopping the task executor   | No (default: `2`, minimum `1`) |
+| `CYBER_TASK_CREATOR_MAX_CORRECTIONS`               | Corrected calls allowed after rejected task creation       | No (default: `2`, minimum `0`) |
 | `AWS_ACCESS_KEY_ID`                                | AWS credentials for Bedrock                                | For Bedrock provider           |
 | `AWS_SECRET_ACCESS_KEY`                            | AWS credentials for Bedrock                                | For Bedrock provider           |
 | `AWS_REGION`                                       | AWS region (default: us-east-1)                            | For Bedrock provider           |

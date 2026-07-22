@@ -1,6 +1,7 @@
 import json
 
 from modules.tools import memory as mod
+from tests.helpers.acceptance import make_acceptance
 from tests.helpers import memory_tasks
 
 
@@ -27,6 +28,7 @@ def test_active_task_message_for_none_active_and_closed_task():
         task_uid="t1",
         title="Closed",
         objective="Do it",
+        acceptance=make_acceptance("closed"),
         phase=1,
         status="done",
         evidence=["proof"],
@@ -45,6 +47,7 @@ def test_active_task_message_for_active_task_and_confidence():
         task_uid="t2",
         title="Active",
         objective="Test auth",
+        acceptance=make_acceptance("active"),
         phase=3,
         status="active",
         status_reason="next",

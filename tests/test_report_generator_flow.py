@@ -13,6 +13,7 @@ from modules.handlers.report_generator import (
     generate_security_report,
 )
 from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task, clear_memory_client
+from tests.helpers.acceptance import make_acceptance
 
 
 def test_extract_text_from_result():
@@ -126,8 +127,8 @@ def test_format_target_coverage_counts_scoped_tasks_and_report_items():
         ],
     )
     tasks = [
-        Task("task-1", "One", "Check one", 1, "done", target_scope="subset", target_ids=["target-1"]),
-        Task("task-2", "All", "Check all", 1, "done"),
+        Task("task-1", "One", "Check one", make_acceptance("task-1"), 1, "done", target_scope="subset", target_ids=["target-1"]),
+        Task("task-2", "All", "Check all", make_acceptance("task-2"), 1, "done"),
     ]
     evidence = [
         {"category": "finding", "metadata": {"target": "http://one.test"}, "content": "confirmed"},

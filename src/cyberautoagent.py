@@ -94,6 +94,10 @@ from modules.handlers.utils import (
     sanitize_target_name,
     update_latest_output_pointer,
 )
+from modules.handlers.terminal_tool import (
+    TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY,
+    TERMINAL_TOOL_COMPLETED_STATE_KEY,
+)
 from modules.tools import browser, channel_close_all
 from modules.tools.memory import get_memory_client
 from modules.tools.oast import close_oast_providers
@@ -416,6 +420,8 @@ def _run_policy_allows_terminal_text(
 
     if not run_policy.terminal_after_required_tools:
         return False
+    if run_policy.require_successful_required_tools:
+        return False
     required_tools_satisfied = _required_tools_satisfied(callback_handler, run_policy, baseline)
     if not required_tools_satisfied:
         return False
@@ -467,6 +473,27 @@ def run_agent_until_terminal_state(
             process_agent_metrics(agent_callback_handler, result)
 
             result_state = getattr(result, "state", {})
+            terminal_tool_completed = (
+                result_state.get(TERMINAL_TOOL_COMPLETED_STATE_KEY)
+                if isinstance(result_state, dict)
+                else None
+            )
+            if run_policy.require_successful_required_tools and isinstance(terminal_tool_completed, dict):
+                completed_tool = str(terminal_tool_completed.get("tool_name", ""))
+                if completed_tool in run_policy.required_tool_names:
+                    return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+            task_creator_exhausted = (
+                result_state.get(TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY)
+                if isinstance(result_state, dict)
+                else None
+            )
+            if isinstance(task_creator_exhausted, dict):
+                failed_attempts = int(task_creator_exhausted.get("failed_attempts", 0) or 0)
+                max_corrections = int(task_creator_exhausted.get("max_corrections", 0) or 0)
+                return AgentRunResult(
+                    "task_creator_corrections_exhausted",
+                    f"Task creator stopped after {failed_attempts} failed calls and {max_corrections} corrections",
+                )
             repeated_tool_loop = (
                 result_state.get(REPEATED_TOOL_LOOP_STATE_KEY)
                 if isinstance(result_state, dict)
@@ -1243,6 +1270,7 @@ def main():
         target_sanitized, operation_id, "", server_config.output.base_dir
     )
     # Keep relative tool paths inside the operation workspace.
+    os.makedirs(output_base_path, exist_ok=True, mode=0o775)
     os.chdir(output_base_path)
 
     # Prepare path display based on environment

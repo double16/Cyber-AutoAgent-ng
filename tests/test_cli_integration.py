@@ -1261,6 +1261,46 @@ def test_run_agent_policy_can_stop_immediately_after_required_tool(monkeypatch):
     assert agent.calls == ["initial"]
 
 
+def test_run_agent_policy_requires_success_marker_when_configured(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+
+    class PolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            role_callback.tool_counts["record_task_acceptance"] = len(self.calls)
+            state = {}
+            if len(self.calls) == 2:
+                state["terminal_tool_completed"] = {"tool_name": "record_task_acceptance"}
+            return SimpleNamespace(metrics=None, state=state)
+
+    agent = PolicyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            terminal_reason="task_executor_done",
+        ),
+    )
+
+    assert result.reason == "task_executor_done"
+    assert len(agent.calls) == 2
+
+
 def test_run_agent_policy_requires_new_tool_calls_for_reused_agent_pass(monkeypatch):
     root_callback = CliCallback()
     role_callback = CliCallback()
@@ -1297,6 +1337,41 @@ def test_run_agent_policy_requires_new_tool_calls_for_reused_agent_pass(monkeypa
     assert len(agent.calls) == 3
     assert role_callback.tool_counts == {"shell": 2}
     assert "MANDATORY ACTION" in agent.calls[1]
+
+
+def test_run_agent_stops_when_task_creator_corrections_are_exhausted(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+
+    class ExhaustedAgent:
+        def __init__(self):
+            self.messages = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, _message):
+            return SimpleNamespace(
+                metrics=None,
+                state={
+                    "task_creator_corrections_exhausted": {
+                        "failed_attempts": 3,
+                        "max_corrections": 2,
+                    }
+                },
+            )
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        ExhaustedAgent(),
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(required_tool_names={"create_tasks"}),
+    )
+
+    assert result.reason == "task_creator_corrections_exhausted"
+    assert result.message == "Task creator stopped after 3 failed calls and 2 corrections"
 
 
 def test_extract_last_assistant_text_skips_tool_use_messages():

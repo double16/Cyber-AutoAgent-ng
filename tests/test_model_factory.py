@@ -15,6 +15,16 @@ class FakeModel:
         self.model_id = kwargs.get("model_id")
         self.client_args = kwargs.get("client_args", kwargs.get("ollama_client_args", {}))
 
+    def update_config(self, **kwargs):
+        self.config.update(kwargs)
+
+    def get_config(self):
+        return self.config
+
+    @property
+    def context_window_limit(self):
+        return self.config.get("context_window_limit")
+
 
 class FakeConfigManager:
     def __init__(self):
@@ -195,16 +205,24 @@ def test_create_models_propagate_enabled_sdk_streaming(monkeypatch, config_manag
 
 
 def test_create_strands_dispatch_all_providers_and_rate_limits(monkeypatch, config_manager):
-    monkeypatch.setattr(mod, "create_bedrock_model", Mock(return_value="bedrock"))
-    monkeypatch.setattr(mod, "create_litellm_model", Mock(return_value="litellm"))
-    monkeypatch.setattr(mod, "create_gemini_model", Mock(return_value="gemini"))
+    monkeypatch.setattr(mod, "create_bedrock_model", Mock(return_value=FakeModel(model_id="bedrock")))
+    monkeypatch.setattr(mod, "create_litellm_model", Mock(return_value=FakeModel(model_id="litellm")))
+    monkeypatch.setattr(mod, "create_gemini_model", Mock(return_value=FakeModel(model_id="gemini")))
+    monkeypatch.setattr(mod, "_resolve_prompt_token_limit", lambda _provider, _model_id: 48000)
     monkeypatch.setattr(mod, "print_status", Mock())
 
-    assert mod.create_strands_model("bedrock", "m") == "bedrock"
-    assert mod.create_strands_model("litellm", "m") == "litellm"
-    assert mod.create_strands_model("gemini", "m") == "gemini"
+    assert mod.create_strands_model("bedrock", "m").context_window_limit == 48000
+    assert mod.create_strands_model("litellm", "m").context_window_limit == 48000
+    assert mod.create_strands_model("gemini", "m").context_window_limit == 48000
     with pytest.raises(ValueError):
         mod.create_strands_model("bad", "m")
+
+
+def test_require_prompt_token_limit_rejects_unresolved_context(monkeypatch):
+    monkeypatch.setattr(mod, "_resolve_prompt_token_limit", lambda _provider, _model_id: None)
+
+    with pytest.raises(ValueError, match="CYBER_CONTEXT_LIMIT"):
+        mod.require_prompt_token_limit("unknown", "unlisted-model")
 
 
 def test_prompt_limit_from_litellm_candidates(monkeypatch):
@@ -300,10 +318,14 @@ def test_create_strands_model_dispatch_and_error(monkeypatch):
         get_default_region=Mock(return_value="us-east-1"),
     )
     monkeypatch.setattr(mod, "_get_config_manager", lambda: config_manager)
-    monkeypatch.setattr(mod, "create_ollama_model", Mock(return_value="ollama-model"))
+    model = FakeModel(model_id="ollama-model", options={})
+    monkeypatch.setattr(mod, "create_ollama_model", Mock(return_value=model))
+    monkeypatch.setattr(mod, "_resolve_prompt_token_limit", lambda _provider, _model_id: 48000)
     monkeypatch.setattr(mod, "print_status", Mock())
 
-    assert mod.create_strands_model() == "ollama-model"
+    assert mod.create_strands_model() is model
+    assert model.context_window_limit == 48000
+    assert model.config["options"]["num_ctx"] == 48000
 
     monkeypatch.setattr(mod, "create_ollama_model", Mock(side_effect=RuntimeError("boom")))
     monkeypatch.setattr(mod, "_handle_model_creation_error", Mock())

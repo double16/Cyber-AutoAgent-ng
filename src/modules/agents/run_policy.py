@@ -17,6 +17,7 @@ class AgentRunPolicy:
     min_tool_calls: int = 0
     required_tool_names: FrozenSet[str] = field(default_factory=frozenset)
     terminal_after_required_tools: bool = False
+    require_successful_required_tools: bool = False
     allow_text_final_after_tools: bool = True
     max_actionless_after_tools: int = 0
     max_tool_calls: int = 0
@@ -29,6 +30,7 @@ class AgentRunPolicy:
         min_tool_calls: int = 0,
         required_tool_names: Iterable[str] = frozenset(),
         terminal_after_required_tools: bool = False,
+        require_successful_required_tools: bool = False,
         allow_text_final_after_tools: bool = True,
         max_actionless_after_tools: int = 0,
         max_tool_calls: int = 0,
@@ -39,6 +41,7 @@ class AgentRunPolicy:
         object.__setattr__(self, "min_tool_calls", min_tool_calls)
         object.__setattr__(self, "required_tool_names", frozenset(required_tool_names))
         object.__setattr__(self, "terminal_after_required_tools", terminal_after_required_tools)
+        object.__setattr__(self, "require_successful_required_tools", require_successful_required_tools)
         object.__setattr__(self, "allow_text_final_after_tools", allow_text_final_after_tools)
         object.__setattr__(self, "max_actionless_after_tools", max_actionless_after_tools)
         object.__setattr__(self, "max_tool_calls", max_tool_calls)

@@ -5,6 +5,7 @@ from strands import ToolContext
 from modules.tools import memory
 from modules.tools.memory import OperationPlan, Task
 from tests.helpers.memory_tasks import store_plan
+from tests.helpers.acceptance import make_acceptance
 
 
 def test_store_plan_with_operation_plan_object():
@@ -100,7 +101,9 @@ def test_store_plan_phase_change_validation_refusal():
         mc.return_value = mock_client
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = prev_plan
-        active_task = Task(task_uid="uuid", title="T1", objective="O1", phase=1, status="active")
+        active_task = Task(
+            task_uid="uuid", title="T1", objective="O1", acceptance=make_acceptance(), phase=1, status="active"
+        )
         mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
         mock_msg.return_value = "msg"
         with pytest.raises(ValueError, match="Cannot advance phase due to activate tasks remaining"):
@@ -160,7 +163,9 @@ def test_store_plan_phase_change_refused_with_active_task_at_high_budget_progres
         mc.return_value = mock_client
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = prev_plan
-        active_task = Task(task_uid="uuid", title="T1", objective="O1", phase=1, status="active")
+        active_task = Task(
+            task_uid="uuid", title="T1", objective="O1", acceptance=make_acceptance(), phase=1, status="active"
+        )
         mock_client.get_or_activate_next_task_in_phase.return_value = (active_task, False)
         mock_msg.return_value = "msg"
         with pytest.raises(ValueError, match="Cannot advance phase due to activate tasks remaining"):

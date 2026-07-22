@@ -34,6 +34,7 @@ _CURL_WRITE_OUT_STATUS_PATTERN = re.compile(r"(?m)^\s*(?:http_code=|status=)?([1
 _MUTATING_TOOLS = {
     "create_tasks",
     "record_finding_validation",
+    "record_task_acceptance",
     "store_finding",
     "store_knowledge",
     "store_observation",
@@ -41,6 +42,7 @@ _MUTATING_TOOLS = {
 _READ_ONLY_TOOLS = {"mem0_retrieve", "read_artifact"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 _SENSITIVE_KEYS = {"api_key", "authorization", "cookie", "password", "secret", "token"}
+TOOL_RECOVERY_EXHAUSTED_STATE_KEY = "tool_recovery_exhausted"
 
 
 def _bounded_text(value: Any, limit: int = 500) -> str:
@@ -91,13 +93,6 @@ def _result_success(result: Any, exception: Optional[Exception] = None) -> bool:
     return not isinstance(result, dict) or result.get("status", "success") != "error"
 
 
-def is_correctable_tool_failure(tool_name: str, output: str) -> bool:
-    """Return whether a failed invocation can reasonably be corrected locally."""
-
-    del tool_name  # Reserved for future tool-specific classifiers.
-    return any(pattern.search(output) for pattern in _CORRECTABLE_ERROR_PATTERNS)
-
-
 def _shell_executable(tool_input: Dict[str, Any]) -> str:
     command = tool_input.get("command", "")
     if isinstance(command, list):
@@ -108,11 +103,29 @@ def _shell_executable(tool_input: Dict[str, Any]) -> str:
         parts = shlex.split(str(command))
     except ValueError:
         return ""
-    while parts and "=" in parts[0] and not parts[0].startswith(("/", "./", "../")):
-        parts.pop(0)
-    if parts and parts[0] in {"env", "sudo"}:
-        parts.pop(0)
+    while parts:
+        if "=" in parts[0] and not parts[0].startswith(("/", "./", "../")):
+            parts.pop(0)
+            continue
+        if parts[0] in {"env", "sudo"}:
+            parts.pop(0)
+            continue
+        break
     return parts[0].rsplit("/", 1)[-1] if parts else ""
+
+
+def _is_diagnostic_tool(tool_name: str, tool_input: Any) -> bool:
+    if tool_name != "shell" or not isinstance(tool_input, dict):
+        return False
+    return _shell_executable(tool_input) in _DIAGNOSTIC_EXECUTABLES
+
+
+def is_correctable_tool_failure(tool_name: str, tool_input: Any, output: str) -> bool:
+    """Return whether a failed task invocation can reasonably be corrected locally."""
+
+    if _is_diagnostic_tool(tool_name, tool_input):
+        return False
+    return any(pattern.search(output) for pattern in _CORRECTABLE_ERROR_PATTERNS)
 
 
 def _shell_command_text(tool_input: Any) -> str:
@@ -217,8 +230,9 @@ class ToolOutcomeJournal:
 class TaskFailureRecoveryHook(HookProvider):
     """Block task side effects while allowing one diagnostic and one correction."""
 
-    def __init__(self, journal: ToolOutcomeJournal) -> None:
+    def __init__(self, journal: ToolOutcomeJournal, max_policy_violations: int = 2) -> None:
         self.journal = journal
+        self.max_policy_violations = max(1, int(max_policy_violations))
         self.unresolved = False
         self.exhausted = False
         self.failed_tool_name = ""
@@ -227,6 +241,7 @@ class TaskFailureRecoveryHook(HookProvider):
         self.failed_output = ""
         self._diagnostic_used = False
         self._correction_attempted = False
+        self._policy_violations = 0
         self._recovery_roles: Dict[str, str] = {}
 
     def register_hooks(self, registry: HookRegistry) -> None:
@@ -242,8 +257,7 @@ class TaskFailureRecoveryHook(HookProvider):
         tool_input = tool_use.get("input", {})
 
         if self.exhausted:
-            event.cancel_tool = "The task's single correction allowance has been exhausted."
-            self._recovery_roles[tool_id] = "blocked"
+            self._block(event, tool_id, "The task's single correction allowance has been exhausted.")
             return
         if self._is_read_only(tool_name):
             self._recovery_roles[tool_id] = "read_only"
@@ -253,33 +267,54 @@ class TaskFailureRecoveryHook(HookProvider):
             self._mark_correction_or_block(event, tool_id)
             return
         if correction_status == "same_input":
-            event.cancel_tool = "The corrected invocation must change the failed input."
-            self._recovery_roles[tool_id] = "blocked"
+            self._block(event, tool_id, "The corrected invocation must change the failed input.")
             return
         if tool_name in _MUTATING_TOOLS:
-            event.cancel_tool = (
-                "Resolve the correctable tool failure before creating tasks or storing durable evidence."
+            self._block(
+                event,
+                tool_id,
+                "Resolve the correctable tool failure before creating tasks or storing durable evidence.",
             )
-            self._recovery_roles[tool_id] = "blocked"
             return
         if self._diagnostic_used:
-            event.cancel_tool = "Only one diagnostic invocation is allowed before the corrected invocation."
-            self._recovery_roles[tool_id] = "blocked"
+            self._block(event, tool_id, "Only one diagnostic invocation is allowed before the corrected invocation.")
             return
         if self._is_diagnostic(tool_name, tool_input):
             self._diagnostic_used = True
             self._recovery_roles[tool_id] = "diagnostic"
             return
-        event.cancel_tool = "Recovery may only use read-only inspection, one diagnostic, and one corrected call."
-        self._recovery_roles[tool_id] = "blocked"
+        self._block(
+            event,
+            tool_id,
+            "Recovery may only use read-only inspection, one diagnostic, and one corrected call.",
+        )
 
     def _mark_correction_or_block(self, event: BeforeToolCallEvent, tool_id: str) -> None:
         if self._correction_attempted:
-            event.cancel_tool = "Only one corrected invocation is allowed for this task."
-            self._recovery_roles[tool_id] = "blocked"
+            self._block(event, tool_id, "Only one corrected invocation is allowed for this task.")
             return
         self._correction_attempted = True
         self._recovery_roles[tool_id] = "correction"
+
+    def _block(self, event: BeforeToolCallEvent, tool_id: str, message: str) -> None:
+        event.cancel_tool = message
+        self._recovery_roles[tool_id] = "blocked"
+        self._policy_violations += 1
+        if self.exhausted or self._policy_violations >= self.max_policy_violations:
+            self.exhausted = True
+            self._stop_event_loop(event, "policy_violation_limit")
+
+    def _stop_event_loop(self, event: BeforeToolCallEvent | AfterToolCallEvent, reason: str) -> None:
+        request_state = event.invocation_state.setdefault("request_state", {})
+        if not isinstance(request_state, dict):
+            return
+        request_state["stop_event_loop"] = True
+        request_state[TOOL_RECOVERY_EXHAUSTED_STATE_KEY] = {
+            "reason": reason,
+            "policy_violations": self._policy_violations,
+            "max_policy_violations": self.max_policy_violations,
+            "failed_tool": self.failed_tool_name,
+        }
 
     def _correction_status(self, tool_name: str, tool_input: Any) -> str:
         if tool_name != self.failed_tool_name:
@@ -305,9 +340,7 @@ class TaskFailureRecoveryHook(HookProvider):
 
     @staticmethod
     def _is_diagnostic(tool_name: str, tool_input: Any) -> bool:
-        if tool_name != "shell" or not isinstance(tool_input, dict):
-            return False
-        return _shell_executable(tool_input) in _DIAGNOSTIC_EXECUTABLES
+        return _is_diagnostic_tool(tool_name, tool_input)
 
     def _after_tool(self, event: AfterToolCallEvent) -> None:
         tool_use = event.tool_use
@@ -321,7 +354,7 @@ class TaskFailureRecoveryHook(HookProvider):
             status_code = _captured_http_status(output, allow_write_out_status=_uses_curl_write_out(tool_input))
             output = f"{output}\nInterpretable curl response status captured: {status_code}"
         role = self._recovery_roles.pop(tool_id, "normal")
-        correctable = not success and is_correctable_tool_failure(tool_name, output)
+        correctable = not success and is_correctable_tool_failure(tool_name, tool_input, output)
         self.journal.append(
             tool_use_id=tool_id,
             tool_name=tool_name,
@@ -336,8 +369,10 @@ class TaskFailureRecoveryHook(HookProvider):
             if success:
                 self.unresolved = False
                 self.exhausted = False
+                self._policy_violations = 0
             else:
                 self.exhausted = True
+                self._stop_event_loop(event, "correction_failed")
             return
         if role in {"blocked", "diagnostic", "read_only"}:
             return
@@ -352,6 +387,7 @@ class TaskFailureRecoveryHook(HookProvider):
             self.failed_output = _bounded_text(output)
             self._diagnostic_used = False
             self._correction_attempted = False
+            self._policy_violations = 0
 
     def recovery_guidance(self, tool_catalog_context: str = "") -> str:
         guidance = (

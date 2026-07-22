@@ -3,13 +3,15 @@
 **Purpose**: Externalized work queue. You may create tasks when the current role asks for task creation for follow-up work, do not execute created tasks.
 
 ## Task spec
-- Fields: `title`, `objective`, `evidence`, optional `phase`, `status=active|pending|done|partial_failure|blocked`, `status_reason`.
+- Fields: `title`, `objective`, `basis_kind`, `basis_description`, `criteria`, and optional proposal fields
+  `methods`, `limits`, `snapshot_refs`, `coverage`, and `target_ids`.
 - `objective`: what to accomplish / problem to solve / more info to gather.
-- `evidence`: list of artifact path refs that motivated the task (paths may include `:line`/`#anchor`).
+- Procedure proposals provide methods and limits. Snapshot proposals provide existing snapshot references.
+- Criteria provide only `description` and `evidence`; Python generates their IDs when freezing the contract.
 
 ## Create tasks
 Prefer batch creation of tasks over single task creation:
-- `create_tasks(tasks=[{title, objective, evidence:[...], status}, ...])`
+- `create_tasks(tasks=[{title, objective, basis_kind, basis_description, criteria, ...}, ...])`
 
 When to create:
 - DISCOVERY: new surface/endpoint/path/file/host needs exploration
@@ -40,7 +42,7 @@ Fan-out rules (MUST create multiple tasks when lists exist):
 
 Capture invariants:
 - Existing tasks do NOT satisfy capture; rerun after new evidence even if it yields 0 tasks.
-- You MAY also create future-phase tasks (phase>current_phase) **in the same pass** if evidence implies them, but they must remain `pending`.
+- New proposals always become pending tasks in the active phase.
 - Capture is tasks-only (no heavy tool runs).
 
 **Clarification: capture vs execute**

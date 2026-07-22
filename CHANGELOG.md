@@ -2,6 +2,14 @@
 
 ### Features
 
+- Replace the nested task-creation payload with a flat `TaskProposal` schema that Python compiles into immutable
+  acceptance contracts, including deterministic procedure policies, source references, output kinds, and target scope.
+- Add versioned finite inventory manifests, typed per-criterion evidence requirements, and exact coverage ledgers for
+  deterministic task acceptance.
+- Recover missing coverage prerequisites by creating a bounded inventory task in the active phase before dependent
+  coverage work.
+- Add immutable task acceptance manifests, per-criterion result ledgers, and deterministic completion gating while
+  retaining one executor for cohesive multi-item coverage tasks.
 - Use the operation output directory as the process working directory so relative files stay in its workspace.
 - Present shell commands solely by capability and applicability, without ranking metadata.
 - Detect exact repeating tool-call cycles, reuse matching completed results, and gracefully stop an agent that ignores
@@ -26,6 +34,29 @@
 
 ### Fixes
 
+- Generate acceptance criterion IDs from task-proposal descriptions in Python instead of requiring task-creator models
+  to invent identifiers before the acceptance contract exists.
+- Return durable `memory:<id>` references from `store_observation` so executors can satisfy typed observation evidence
+  requirements in `record_task_acceptance`, including deduplicated observations and supported Mem0 response formats.
+- Remove conflicting legacy `create_tasks` and task-capture instructions for phase, status, evidence, target scope,
+  and nested acceptance fields that agents no longer control.
+- Publish completed task-acceptance summaries and evidence as replay-safe operation memories so later task prompts can
+  reuse accepted information without keeping the executor alive after its terminal acceptance call.
+- Stop task creators after their configured correction allowance instead of permitting unbounded rejected calls.
+- Propagate configured or detected context windows into every model and budget consumer, evaluate phases from canonical
+  accepted evidence, stop recovery violation spirals, and expose a strict controller-owned task-creation schema.
+- Keep failed diagnostic and preflight shell commands in outcome telemetry without incorrectly starting bounded task
+  failure recovery.
+- Publish the canonical inventory-manifest schema to task executors, distinguish inventory procedures from generic
+  artifact procedures, and avoid rejecting valid manifests when acceptance also references non-manifest artifacts.
+- Stop task creators after the first successful task mutation and task executors after complete acceptance recording,
+  without treating rejected terminal-tool calls as completion.
+- Reject coverage tasks whose frozen artifacts, producer tasks, memories, or findings are missing or incomplete, and
+  reject acceptance evidence that does not resolve within the current operation.
+- Bind `record_task_acceptance` to the controller-assigned task so executors cannot fail completion by guessing a task
+  UID or misuse `create_tasks` as a task-completion mechanism.
+- Prevent open-ended task criteria from expanding during execution by freezing finite inventory criteria and requiring
+  evidence-backed terminal results before semantic evaluation.
 - Prevent schema-invalid shell calls from trapping valid corrections, detect repeating policy-canceled calls without
   caching their synthetic results, and distinguish non-executed tool calls in completion telemetry.
 - Mark final reports incomplete when workflow completion gating has not passed, without clamping progress status.

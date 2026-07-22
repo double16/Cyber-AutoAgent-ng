@@ -1,7 +1,10 @@
+import pytest
+
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
 from src.modules.handlers.tool_recovery import (
     TaskFailureRecoveryHook,
+    TOOL_RECOVERY_EXHAUSTED_STATE_KEY,
     ToolOutcomeJournal,
     _input_fingerprint,
     _result_success,
@@ -33,7 +36,7 @@ def _after(tool_id, name, tool_input, *, status, text):
 
 def test_correctable_failure_blocks_side_effects_until_successful_correction():
     journal = ToolOutcomeJournal()
-    hook = TaskFailureRecoveryHook(journal)
+    hook = TaskFailureRecoveryHook(journal, max_policy_violations=10)
     failed_input = {
         "command": (
             "feroxbuster -u http://target/ "
@@ -54,6 +57,9 @@ def test_correctable_failure_blocks_side_effects_until_successful_correction():
     create_tasks = _before("tasks", "create_tasks", {"tasks": [{"title": "Fake /admin"}]})
     hook._before_tool(create_tasks)
     assert create_tasks.cancel_tool
+    acceptance = _before("acceptance", "record_task_acceptance", {"results": []})
+    hook._before_tool(acceptance)
+    assert acceptance.cancel_tool
 
     diagnostic = _before("diagnostic", "shell", {"command": "find /usr/share/wordlists -type f"})
     hook._before_tool(diagnostic)
@@ -98,26 +104,58 @@ def test_failed_correction_exhausts_allowance_and_keeps_writes_blocked():
     )
     correction = _before("correction", "shell", {"command": "feroxbuster -u http://target"})
     hook._before_tool(correction)
-    hook._after_tool(
-        _after(
-            "correction",
-            "shell",
-            correction.tool_use["input"],
-            status="error",
-            text="timed out",
-        )
+    failed_correction = _after(
+        "correction",
+        "shell",
+        correction.tool_use["input"],
+        status="error",
+        text="timed out",
     )
+    hook._after_tool(failed_correction)
 
     assert hook.unresolved is True
     assert hook.exhausted is True
+    assert failed_correction.invocation_state["request_state"]["stop_event_loop"] is True
+    assert (
+        failed_correction.invocation_state["request_state"][TOOL_RECOVERY_EXHAUSTED_STATE_KEY]["reason"]
+        == "correction_failed"
+    )
     observation = _before("observation", "store_observation", {"content": "invented success"})
     hook._before_tool(observation)
     assert observation.cancel_tool
 
 
+@pytest.mark.parametrize("limit", [1, 2, 3])
+def test_recovery_stops_at_configured_policy_violation_limit(limit):
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=limit)
+    failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
+    hook._after_tool(
+        _after("failed", "shell", failed_input, status="error", text="Could not open /missing.txt")
+    )
+
+    last_event = None
+    for index in range(limit):
+        last_event = _before(f"blocked-{index}", "python_repl", {"code": "print('diagnostic')"})
+        hook._before_tool(last_event)
+        assert last_event.cancel_tool
+        if index < limit - 1:
+            assert last_event.invocation_state.get("request_state", {}) == {}
+
+    assert last_event is not None
+    recovery_state = last_event.invocation_state["request_state"]
+    assert recovery_state["stop_event_loop"] is True
+    assert recovery_state[TOOL_RECOVERY_EXHAUSTED_STATE_KEY] == {
+        "reason": "policy_violation_limit",
+        "policy_violations": limit,
+        "max_policy_violations": limit,
+        "failed_tool": "shell",
+    }
+    assert hook.exhausted is True
+
+
 def test_non_shell_correction_requires_same_tool_and_changed_input():
     journal = ToolOutcomeJournal()
-    hook = TaskFailureRecoveryHook(journal)
+    hook = TaskFailureRecoveryHook(journal, max_policy_violations=10)
     failed_input = {
         "claim": "Vulnerability pages are accessible without authentication",
         "target": "http://target/vulnerabilities/sqli/",
@@ -167,7 +205,7 @@ def test_non_shell_correction_requires_same_tool_and_changed_input():
 
 
 def test_non_shell_failed_correction_exhausts_recovery():
-    hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"tasks": "not-a-list"}
     hook._after_tool(
         _after("failed", "create_tasks", failed_input, status="error", text="validation error: input should be a list")
@@ -194,7 +232,7 @@ def test_non_shell_failed_correction_exhausts_recovery():
 
 
 def test_shell_correction_requires_same_executable_and_changed_input():
-    hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
     hook._after_tool(
         _after("failed", "shell", failed_input, status="error", text="Could not open /missing.txt")
@@ -216,7 +254,7 @@ def test_shell_correction_requires_same_executable_and_changed_input():
 
 def test_shell_validation_failure_without_executable_accepts_valid_changed_correction():
     journal = ToolOutcomeJournal()
-    hook = TaskFailureRecoveryHook(journal)
+    hook = TaskFailureRecoveryHook(journal, max_policy_violations=10)
     failed_input = {}
     hook._after_tool(
         _after(
@@ -270,10 +308,96 @@ def test_outcome_journal_is_bounded_and_redacts_sensitive_input():
 
 
 def test_correctable_classifier_does_not_retry_ordinary_negative_result():
-    assert is_correctable_tool_failure("shell", "Could not open /missing/wordlist.txt") is True
-    assert is_correctable_tool_failure("shell", "error: unrecognized argument --bad") is True
-    assert is_correctable_tool_failure("shell", "HTTP 404: route was not found") is False
-    assert is_correctable_tool_failure("shell", "scan completed; zero results") is False
+    tool_input = {"command": "feroxbuster -u http://target"}
+    assert is_correctable_tool_failure("shell", tool_input, "Could not open /missing/wordlist.txt") is True
+    assert is_correctable_tool_failure("shell", tool_input, "error: unrecognized argument --bad") is True
+    assert is_correctable_tool_failure("shell", tool_input, "HTTP 404: route was not found") is False
+    assert is_correctable_tool_failure("shell", tool_input, "scan completed; zero results") is False
+
+
+@pytest.mark.parametrize("executable", ["command", "find", "ls", "stat", "test", "type", "which"])
+def test_failed_diagnostic_shell_command_does_not_start_recovery(executable):
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal)
+    tool_input = {"command": f"{executable} /missing"}
+
+    hook._after_tool(
+        _after(
+            "diagnostic",
+            "shell",
+            tool_input,
+            status="error",
+            text="No such file or directory",
+        )
+    )
+
+    outcome = journal.entries()[0]
+    assert outcome.success is False
+    assert outcome.correctable is False
+    assert outcome.recovery_role == "normal"
+    assert hook.unresolved is False
+    assert hook.exhausted is False
+    assert hook.failed_tool_name == ""
+
+    following_call = _before("following", "shell", {"command": "curl -I http://target"})
+    hook._before_tool(following_call)
+    assert following_call.cancel_tool is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "CHECK_PATH=/missing ls /missing",
+        "env CHECK_PATH=/missing ls /missing",
+        "sudo ls /missing",
+        "sudo env CHECK_PATH=/missing ls /missing",
+    ],
+)
+def test_wrapped_diagnostic_shell_command_does_not_start_recovery(command):
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    tool_input = {"command": command}
+
+    assert is_correctable_tool_failure("shell", tool_input, "No such file or directory") is False
+    hook._after_tool(
+        _after("diagnostic", "shell", tool_input, status="error", text="No such file or directory")
+    )
+
+    assert hook.unresolved is False
+
+
+def test_failed_diagnostic_during_recovery_preserves_original_failure():
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal)
+    failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
+    hook._after_tool(
+        _after("failed", "shell", failed_input, status="error", text="Could not open /missing.txt")
+    )
+    original_fingerprint = hook.failed_input_fingerprint
+
+    diagnostic_input = {"command": "ls /also-missing"}
+    diagnostic = _before("diagnostic", "shell", diagnostic_input)
+    hook._before_tool(diagnostic)
+    assert diagnostic.cancel_tool is False
+    hook._after_tool(
+        _after("diagnostic", "shell", diagnostic_input, status="error", text="No such file or directory")
+    )
+
+    assert hook.unresolved is True
+    assert hook.exhausted is False
+    assert hook.failed_tool_name == "shell"
+    assert hook.failed_executable == "feroxbuster"
+    assert hook.failed_input_fingerprint == original_fingerprint
+    assert [outcome.correctable for outcome in journal.entries()] == [True, False]
+    assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "diagnostic"]
+
+    correction_input = {"command": "feroxbuster -u http://target -w /valid.txt"}
+    correction = _before("correction", "shell", correction_input)
+    hook._before_tool(correction)
+    assert correction.cancel_tool is False
+    hook._after_tool(
+        _after("correction", "shell", correction_input, status="success", text="200 /login.php")
+    )
+    assert hook.unresolved is False
 
 
 def test_curl_header_status_is_interpretable_even_when_shell_status_is_error():

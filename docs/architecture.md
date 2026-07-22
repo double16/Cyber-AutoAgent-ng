@@ -22,18 +22,34 @@ The controller creates agents for specific jobs:
 
 - **plan_creator**: creates or revises an initial high-level plan and infers operation-wide constraints
 - **plan_critic**: reviews an initial plan and either approves it or returns actionable revision feedback
-- **task_creator**: creates concrete current-phase tasks from a deterministic controller prompt
+- **task_creator**: creates concrete current-phase tasks with finite acceptance contracts from a deterministic
+  controller prompt
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
 - **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
 - **task_executor**: executes one active task objective and retains its conversation across critic-guided passes
-- **task_evaluator**: critiques each executor pass and returns `done`, `partial_failure`, or `blocked`
+- **task_evaluator**: reviews semantically complete acceptance ledgers and returns `done`, `partial_failure`, or `blocked`
 - **phase_evaluator**: returns phase status: `continue`, `done`, `partial_failure`, or `blocked`
 
 Module execution guidance supplies operation intent, explicit access boundaries, domain behavior, and evidence rules to
 planning and execution roles. The module termination policy is also supplied directly to plan creation, plan criticism,
 plan revision, and phase evaluation so required end states become measurable plan criteria. A controller-owned executor
 contract keeps individual workers scoped to one task regardless of module.
+
+Each task also has an immutable acceptance manifest. Procedure bases declare machine-readable limits and whether they
+produce a generic artifact or versioned inventory manifest; coverage bases freeze one inventory artifact and its hash.
+Executors submit an atomic evidence-backed result for every criterion and, for coverage work, one terminal disposition
+per manifest item. Python resolves typed artifact, memory, observation, and finding evidence before semantic
+evaluation. This preserves broad, cohesive work under one retained executor without allowing moving completion
+targets.
+
+```mermaid
+flowchart LR
+    M[Missing or invalid snapshot] --> R[Reject coverage task batch]
+    R --> P[Create bounded prerequisite inventory task]
+    P --> V[Validate and hash version-1 manifest]
+    V --> C[Create coverage tasks against frozen snapshot]
+```
 
 The swarm tool remains available as an execution capability, but it is no longer the top-level orchestration model.
 
@@ -101,20 +117,51 @@ Task execution then uses a second bounded actor/critic loop:
 flowchart LR
     E[Retained task-executor] --> V[Fresh task-evaluator]
     V -->|done| D[Persist done]
-    V -->|partial_failure or blocked; pass remains| E
-    V -->|cycle limit reached| F[Persist final verdict]
+    V -->|partial_failure or blocked| F[Persist final verdict]
+    E -->|no valid complete ledger; pass remains| E
+    E -->|cycle limit reached| F
 ```
 
-`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits total executor/evaluator passes and defaults to three, with a minimum of
-one. Evaluator guidance is sent back to the same executor instance so the next pass continues its existing
-conversation. Approval (`done`) short-circuits the loop; otherwise Python persists the last evaluator status.
+`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits executor attempts to produce a valid atomic ledger and defaults to three,
+with a minimum of one. Once that ledger exists, the evaluator's semantic verdict is terminal because the ledger cannot
+be revised. Python persists `done`, `partial_failure`, or `blocked` without replaying completed acceptance.
+
+Task creators stop within the Strands event loop after the first successful `create_tasks` mutation. Task executors
+stop the same way after a complete `record_task_acceptance` result. Rejected calls do not set the success marker and
+remain correctable; role completion therefore depends on durable success rather than raw tool-call counts or a later
+text-only turn.
+
+Bounded procedure contracts declare whether their output is a generic artifact or a version-1 inventory manifest.
+Python rejects mismatched evidence requirements during task creation. Inventory executors receive the canonical JSON
+shape in both their task prompt and acceptance-tool description, and acceptance validation evaluates each referenced
+artifact independently so an unrelated supporting file cannot invalidate a separate valid inventory.
 
 Each retained task executor also keeps a bounded controller-owned tool-outcome journal. A locally correctable failure,
 such as a missing input file, unavailable command, invalid argument, or timeout, permits one optional diagnostic and
 one corrected invocation without consuming another actor/critic pass. Until correction succeeds, the executor cannot
 create follow-up tasks or write observations, knowledge, findings, or validation results. An unresolved correction is
 deterministically `partial_failure`. Evaluators receive the authoritative outcome journal separately from the worker's
-final narrative and must prefer it when the two conflict.
+final narrative and must prefer it when the two conflict. Failed diagnostic and preflight shell commands remain visible
+in the journal but do not start recovery; only failed task actions can open the bounded correction path. A failed
+correction stops the executor immediately, while other recovery-policy violations stop it after a configurable limit
+of two by default.
+
+Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
+creator may make `CYBER_TASK_CREATOR_MAX_CORRECTIONS` corrected calls (two by default). Exhausting that allowance stops
+the role inside the current Strands loop, so payload variations cannot evade the outer workflow policy or repeat guard.
+Agents submit a flat `TaskProposal`; Python supplies procedure invariants, derives source references and target scope,
+and compiles the proposal into the frozen acceptance domain before validation and storage.
+
+Successful task acceptance populates task evidence with the validated immutable ledger references. Phase
+evaluators receive that canonical per-criterion ledger and may read only its resolved artifact paths, preventing stale
+predicted filenames from overriding accepted evidence. Task creators use a closed flat schema with explicit limits,
+criterion descriptions and evidence, snapshot references, and target IDs. Python generates readable unique criterion
+IDs and owns the remaining contract and lifecycle fields.
+
+Complete task acceptance also publishes one bounded operation observation containing the task objective, criterion
+statuses, concrete summaries, evidence references, and aggregate coverage counts. Publication is replay-safe and lets
+later task-prompt-builders select accepted information by memory ID. A memory-backend failure is reported in the tool
+result but does not invalidate the immutable acceptance ledger or add an undeclared evaluator requirement.
 
 There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt
 adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task

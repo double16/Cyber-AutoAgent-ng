@@ -114,6 +114,13 @@ store_finding(
 )
 ```
 
+Successful `record_task_acceptance` calls automatically publish one operation-scoped observation for the completed
+task. The observation contains concrete criterion statuses and summaries, direct evidence references, and bounded
+coverage aggregates. Metadata identifies `source=task_acceptance`, the task UID, phase, targets, acceptance manifest,
+and a replay-safe publication key. Later task-prompt-builders can select this memory when it applies to a new objective.
+Publication warnings do not invalidate the already persisted acceptance ledger; explicit `memory` or `observation`
+acceptance requirements still require their referenced evidence to exist before acceptance is recorded.
+
 `store_finding` requires at least one existing artifact path and an `observed_result` that describes concrete observed
 behavior. Assumptions, hypothetical findings, or unread output should be stored as observations or follow-up tasks
 instead of findings.
@@ -255,8 +262,12 @@ phase_decision = {"status": "partial_failure", "reason": "Soft budget reached; r
 
 ### Basic Operations
 ```python
-# Store operation facts and reusable lessons
-store_observation("The upload route accepts multipart requests", artifacts=["artifacts/upload.txt"])
+# Store operation facts and reusable lessons. Keep memory_ref when the fact is acceptance evidence.
+observation = store_observation(
+    "The upload route accepts multipart requests",
+    artifacts=["artifacts/upload.txt"],
+)
+# {"stored": true, "created": true, "memory_ref": "memory:<id>"}
 store_knowledge("Validate upload execution with a harmless marker and a negative control")
 
 # Search memories  
@@ -276,6 +287,9 @@ store_observation(
     artifacts=["artifacts/login-response.txt"],
     metadata={"confidence": "65%"},
 )
+
+# Pass the returned memory_ref in record_task_acceptance.evidence_refs when a
+# frozen criterion requires observation evidence. Artifact references remain artifact evidence.
 
 mem0_retrieve(query="authentication findings")
 mem0_list()

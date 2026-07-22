@@ -16,7 +16,78 @@ from modules.agents.multi_agent_workflow import (
 )
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
-from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task
+from modules.tools.memory import (
+    AcceptanceBasis,
+    AcceptanceContract,
+    AcceptanceCriterion,
+    EvidenceRequirement,
+    AcceptanceResult,
+    OperationPlan,
+    OperationTarget,
+    PlanPhase,
+    Task as TaskModel,
+)
+
+
+def _acceptance(criterion_id="task-outcome"):
+    return AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(
+            kind="procedure",
+            description="Bounded test procedure",
+            source_refs=["target:target-1", "plan:phase-1"],
+            procedure={
+                "methods": ["test-fixture"],
+                "limits": {"max_items": 1},
+                "stop_condition": "first_limit_reached",
+                "gap_policy": "record_unassessed",
+                "output_kind": "inventory_manifest",
+            },
+        ),
+        criteria=[
+            AcceptanceCriterion(
+                id=criterion_id,
+                description="Complete the test task objective",
+                evidence_requirements=[EvidenceRequirement(kind="inventory_manifest")],
+            )
+        ],
+    )
+
+
+def _artifact_acceptance(criterion_id="artifact-output"):
+    return AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(
+            kind="procedure",
+            description="Bounded artifact procedure",
+            source_refs=["target:target-1", "plan:phase-1"],
+            procedure={
+                "methods": ["workflow-analysis"],
+                "limits": {"max_items": 1},
+                "stop_condition": "first_limit_reached",
+                "gap_policy": "record_unassessed",
+                "output_kind": "artifact",
+            },
+        ),
+        criteria=[
+            AcceptanceCriterion(
+                id=criterion_id,
+                description="Store the bounded workflow map",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )
+        ],
+    )
+
+
+def Task(*args, **kwargs):
+    """Construct strict tasks while preserving the older positional style inside workflow tests."""
+
+    positional_fields = ("task_uid", "title", "objective", "phase", "status", "status_reason", "evidence")
+    for field_name, value in zip(positional_fields, args):
+        kwargs[field_name] = value
+    task_uid = str(kwargs.get("task_uid", "task"))
+    kwargs.setdefault("acceptance", _acceptance(f"criterion:{task_uid}"))
+    return TaskModel(**kwargs)
 
 
 def _tool(name):
@@ -129,9 +200,11 @@ class FakeCallbackHandler:
 
 
 class FakeState:
-    def __init__(self, plan, tasks=None):
+    def __init__(self, plan, tasks=None, acceptance_complete=True):
         self.plan = plan
         self.tasks = list(tasks or [])
+        self.acceptance_complete = acceptance_complete
+        self.acceptance_results = {}
         self.client = SimpleNamespace(list_memories=lambda **kwargs: [])
 
     def get_plan(self):
@@ -154,11 +227,28 @@ class FakeState:
         self.tasks.append(task)
         return task
 
+    def list_task_acceptance_results(self, task_uid):
+        if task_uid in self.acceptance_results:
+            return self.acceptance_results[task_uid]
+        if not self.acceptance_complete:
+            return []
+        task = next(item for item in self.tasks if item.task_uid == task_uid)
+        return [
+            AcceptanceResult(
+                criterion_id=criterion.id,
+                status="satisfied",
+                summary="Test criterion completed",
+                evidence_refs=["memory:test-evidence"],
+            )
+            for criterion in task.acceptance.criteria
+        ]
+
     def activate_task(self, task):
         return self.store_task(Task(
             task_uid=task.task_uid,
             title=task.title,
             objective=task.objective,
+            acceptance=task.acceptance,
             phase=task.phase,
             status="active",
             status_reason="activated",
@@ -173,6 +263,7 @@ class FakeState:
             task_uid=task.task_uid,
             title=task.title,
             objective=task.objective,
+            acceptance=task.acceptance,
             phase=task.phase,
             status=status,
             status_reason=reason,
@@ -187,6 +278,7 @@ class FakeState:
             task_uid=task.task_uid,
             title=task.title,
             objective=task.objective,
+            acceptance=task.acceptance,
             phase=task.phase,
             status="pending",
             status_reason=reason,
@@ -203,6 +295,7 @@ class FakeState:
             task_uid=task.task_uid,
             title=task.title,
             objective=task.objective,
+            acceptance=task.acceptance,
             phase=phase_id,
             status=task.status,
             status_reason=task.status_reason,
@@ -458,13 +551,21 @@ def test_controller_runs_existing_active_task_before_pending_task():
     assert runtime.callback_handler.termination_events == [("complete", "Assessment complete: 1 phase evaluated")]
 
 
-def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy():
+def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy(monkeypatch):
     runtime = _runtime()
     state = FakeState(
         _plan(),
         tasks=[Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")],
     )
     captured = {}
+    bound_task_uids = []
+    original_factory = workflow_mod.build_record_task_acceptance_tool
+
+    def build_bound_tool(task_uid):
+        bound_task_uids.append(task_uid)
+        return original_factory(task_uid)
+
+    monkeypatch.setattr(workflow_mod, "build_record_task_acceptance_tool", build_bound_tool)
 
     def text_runner(role, prompt, tools, system_prompt):
         if role == "task_prompt_builder":
@@ -491,21 +592,40 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy():
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
     assert captured["role"] == "task_executor"
-    assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
+    assert bound_task_uids == ["active"]
+    assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
+    assert state.tasks[0].acceptance.manifest_hash in captured["prompt"]
+    assert "## Inventory Manifest Evidence Contract (Controller-owned)" in captured["prompt"]
+    assert '"schema_version": 1' in captured["prompt"]
     assert "Execute only the assigned task objective" in captured["prompt"]
-    assert "create\npending tasks with `create_tasks`" in captured["prompt"]
+    assert "pending tasks with their own acceptance contracts using `create_tasks`" in captured["prompt"]
+    assert "record one terminal result for every frozen criterion" in captured["prompt"]
     assert "Python owns task, phase, and operation state transitions" in captured["prompt"]
     assert "## Tool Selection Policy (Controller-owned)" in captured["prompt"]
     assert "Multiple methods with\noverlapping capabilities may be used" in captured["prompt"]
     assert "neither mandates use nor makes another selected method exclusive" in captured["prompt"]
     assert "module_probe" in captured["tools"]
     assert "create_tasks" in captured["tools"]
+    assert "record_task_acceptance" in captured["tools"]
     assert captured["system_prompt"] == "base prompt\n\ntask capture prompt"
     assert captured["policy"].min_tool_calls == 1
     assert captured["policy"].terminal_after_required_tools is True
     assert captured["policy"].allow_text_final_after_tools is False
     assert captured["policy"].ignored_terminal_tool_names == frozenset({"create_tasks"})
     assert captured["policy"].terminal_reason == "task_executor_done"
+
+
+def test_inventory_manifest_prompt_is_omitted_for_generic_artifact_task():
+    task = TaskModel(
+        task_uid="workflow-map",
+        title="Workflow map",
+        objective="Store a bounded workflow map",
+        acceptance=_artifact_acceptance(),
+        phase=1,
+        status="active",
+    )
+
+    assert MultiAgentWorkflowController._inventory_manifest_evidence_prompt(task) == ""
 
 
 def test_task_roles_share_task_trace_attributes():
@@ -607,7 +727,7 @@ def test_different_tasks_get_distinct_task_trace_attributes():
     assert "task-two" in trace_names[1]
 
 
-def test_task_execution_reuses_session_and_stops_when_critic_approves():
+def test_task_execution_finalizes_after_semantic_review_of_atomic_acceptance():
     runtime = _runtime()
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task])
@@ -620,15 +740,13 @@ def test_task_execution_reuses_session_and_stops_when_critic_approves():
             return '{"prompt":"execute active","tools":[]}'
         if role == "task_evaluator":
             evaluator_prompts.append(prompt)
-            if len(evaluator_prompts) == 1:
-                return json.dumps(
-                    {
-                        "status": "partial_failure",
-                        "reason": "remaining endpoint lacks evidence",
-                        "instructions": "Run endpoint validation and store the artifact path.",
-                    }
-                )
-            return '{"status":"done","reason":"all endpoints validated"}'
+            return json.dumps(
+                {
+                    "status": "partial_failure",
+                    "reason": "remaining endpoint lacks evidence",
+                    "instructions": "Run endpoint validation and store the artifact path.",
+                }
+            )
         raise AssertionError(role)
 
     @contextmanager
@@ -654,20 +772,15 @@ def test_task_execution_reuses_session_and_stops_when_critic_approves():
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert len(actor_prompts) == 2
+    assert len(actor_prompts) == 1
     assert actor_prompts[0].startswith("execute active")
-    assert "## Task Critic Guidance" in actor_prompts[1]
-    assert "remaining endpoint lacks evidence" in actor_prompts[1]
-    assert "Run endpoint validation and store the artifact path." in actor_prompts[1]
-    assert "actor cycle 2 of\n3" in actor_prompts[1]
-    assert "Cycle 1: actor result 1" in evaluator_prompts[1]
-    assert "Cycle 2: actor result 2" in evaluator_prompts[1]
+    assert "Cycle 1: actor result 1" in evaluator_prompts[0]
     assert lifecycle == [
         ("created", "task_executor", "base prompt\n\ntask capture prompt"),
         ("cleaned", "task_executor"),
     ]
-    assert state.tasks[0].status == "done"
-    assert state.tasks[0].status_reason == "all endpoints validated"
+    assert state.tasks[0].status == "partial_failure"
+    assert state.tasks[0].status_reason == "remaining endpoint lacks evidence"
 
 
 def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch):
@@ -711,7 +824,7 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert policies[0].required_tool_names == {"record_finding_validation"}
+    assert policies[0].required_tool_names == {"record_finding_validation", "record_task_acceptance"}
     finalize.assert_called_once_with(task, "done", "evidence approved")
     assert state.tasks[0].status == "done"
     assert state.tasks[0].status_reason == "evidence approved"
@@ -790,6 +903,67 @@ def test_task_execution_persists_final_non_approval_and_clamps_cycle_count():
     assert state.tasks[0].status_reason == "credentials are unavailable"
 
 
+def test_task_acceptance_gate_skips_evaluator_and_lists_missing_criteria():
+    task = TaskModel(
+        task_uid="coverage",
+        title="Map parameters",
+        objective="Map the frozen endpoint inventory",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Endpoint enumeration snapshot",
+                source_refs=["memory:endpoints"],
+            ),
+            criteria=[
+                AcceptanceCriterion(
+                    id="endpoint:/login.php",
+                    description="Map login parameters",
+                    evidence_requirements=[EvidenceRequirement(kind="memory")],
+                ),
+                AcceptanceCriterion(
+                    id="endpoint:/security.php",
+                    description="Map security parameters",
+                    evidence_requirements=[EvidenceRequirement(kind="memory")],
+                ),
+            ],
+        ),
+        phase=1,
+        status="active",
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    roles = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        roles.append(role)
+        if role == "task_prompt_builder":
+            return '{"prompt":"map manifest","memory_ids":[],"tools":[],"shell_commands":[]}'
+        raise AssertionError(f"unexpected role: {role}")
+
+    @contextmanager
+    def executor_session(role, tools, system_prompt):
+        yield lambda prompt, policy: "Executor stopped without recording acceptance results"
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(
+            env_ints={
+                "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 0,
+                "CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1,
+            }
+        ),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        executor_session_factory=executor_session,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert roles == ["task_prompt_builder"]
+    assert state.tasks[0].status == "partial_failure"
+    assert "endpoint:/login.php, endpoint:/security.php" in state.tasks[0].status_reason
+
+
 def test_task_executor_appends_selected_memories_from_prompt_spec():
     runtime = _runtime()
     state = FakeState(
@@ -826,7 +1000,8 @@ def test_task_executor_appends_selected_memories_from_prompt_spec():
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
     assert requested_memory_ids == ["m2", "m1"]
-    assert captured["prompt"].startswith("execute active\n\n## Selected Memory Context\n")
+    assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
+    assert "## Selected Memory Context\n" in captured["prompt"]
     assert "memories[2]{id,memory}:" in captured["prompt"]
     assert "m2,memory for m2" in captured["prompt"]
     assert "m1,memory for m1" in captured["prompt"]
@@ -861,7 +1036,7 @@ def test_task_executor_continues_when_selected_memory_lookup_fails():
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
+    assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
 
 
 def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
@@ -945,7 +1120,7 @@ def test_task_executor_omits_shell_command_context_for_missing_or_invalid_select
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert captured["prompt"].startswith("execute active\n\n## Task Executor Contract (Controller-owned)")
+    assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
 
 
 @pytest.mark.parametrize(
@@ -1083,7 +1258,7 @@ def test_task_evaluator_receives_task_worker_final_context():
     assert state.tasks[0].status == "partial_failure"
 
 
-def test_task_evaluator_requires_memory_for_information_gathering_task():
+def test_task_evaluator_uses_memory_as_evidence_without_inventing_a_requirement():
     state = FakeState(
         _plan(),
         tasks=[
@@ -1119,12 +1294,13 @@ def test_task_evaluator_requires_memory_for_information_gathering_task():
         worker_context="I checked the routes and stored the results.",
     )
 
-    assert "use done" in prompt
-    assert "only when the requested information or negative result is present in the Memories section" in prompt
+    assert "Use done only" in prompt
+    assert "Require memory or observation evidence only when the frozen criterion explicitly declares" in prompt
+    assert "not an additional acceptance criterion" in prompt
     assert "[OBSERVATION] /login returned 200 and /admin returned 403" in prompt
 
 
-def test_task_evaluator_marks_gathered_but_unstored_information_partial():
+def test_task_evaluator_does_not_invent_memory_requirement_for_gathered_information():
     state = FakeState(
         _plan(),
         tasks=[
@@ -1152,8 +1328,8 @@ def test_task_evaluator_marks_gathered_but_unstored_information_partial():
     )
 
     assert "memories[0]{id,memory}:" in prompt
-    assert "Use partial_failure when the worker appears to have gathered requested information" in prompt
-    assert "but did not store it in memories" in prompt
+    assert "did not store it in memories" not in prompt
+    assert "Automatically published acceptance memory supports later tasks" in prompt
 
 
 def test_task_executor_recovers_in_same_session_and_evaluator_receives_authoritative_outcomes():
@@ -1212,7 +1388,13 @@ def test_task_executor_recovers_in_same_session_and_evaluator_receives_authorita
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert captured["executor_prompts"] == ["enumerate paths\n\n" + controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy(), "correct the missing wordlist"]
+    assert captured["executor_prompts"][0].startswith(
+        "enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)"
+    )
+    assert captured["executor_prompts"][0].endswith(
+        controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy()
+    )
+    assert captured["executor_prompts"][1] == "correct the missing wordlist"
     assert "## Controller-observed tool outcomes" in captured["evaluator_prompt"]
     assert "Could not open /missing.txt" in captured["evaluator_prompt"]
     assert "200 /login.php" in captured["evaluator_prompt"]
@@ -1254,10 +1436,9 @@ def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert executor_calls == [
-        "enumerate paths\n\n" + controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy(),
-        "retry once",
-    ]
+    assert executor_calls[0].startswith("enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)")
+    assert executor_calls[0].endswith(controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy())
+    assert executor_calls[1] == "retry once"
     assert state.tasks[0].status == "partial_failure"
     assert "remained unresolved" in state.tasks[0].status_reason
 
@@ -2219,13 +2400,20 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
     assert "## Active Phase" in captured["prompt"]
     assert "## Existing Tasks Across All Phases" in captured["prompt"]
     assert "Existing" in captured["prompt"]
-    assert "set it explicitly to active phase 1" in captured["prompt"]
-    assert "Do not create tasks for earlier or future phases" in captured["prompt"]
+    assert "Python assigns active phase 1 and pending status" in captured["prompt"]
     assert "valid plan phase IDs: 1, 2" not in captured["prompt"]
     assert "## create_tasks Payload Contract (Non-negotiable)" in captured["prompt"]
-    assert '"title":"Short actionable title"' in captured["prompt"]
-    assert '"objective":"Action, target, context, and completion condition"' in captured["prompt"]
-    assert "Never emit unsupported `context` or `description` fields" in captured["prompt"]
+    assert '"title":"Cohesive actionable title"' in captured["prompt"]
+    assert '"basis_kind":"procedure"' in captured["prompt"]
+    assert '"evidence":[{"kind":"inventory_manifest"' in captured["prompt"]
+    assert '"output_kind":' not in captured["prompt"]
+    assert "Canonical inventory manifest contract" in captured["prompt"]
+    assert "Workflow maps, reports, and arbitrary JSON outputs are artifact evidence" in captured["prompt"]
+    assert "unsupported top-level `description` fields" in captured["prompt"]
+    example = captured["prompt"].split("```json\n", 1)[1].split("\n```", 1)[0]
+    example_task = json.loads(example)["tasks"][0]
+    assert example_task["basis_kind"] == "procedure"
+    assert set(example_task["criteria"][0]) == {"description", "evidence"}
     assert captured["call_count"] == 1
 
 
@@ -2251,7 +2439,30 @@ def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
     assert len(prompts) == 2
     assert "No durable task was created for the active phase" in prompts[1]
     assert "Make one corrected `create_tasks` call now" in prompts[1]
+    assert "create one bounded" in prompts[1]
+    assert "procedure-based prerequisite inventory task" in prompts[1]
     assert len(state.tasks) == 1
+
+
+def test_task_creator_does_not_restart_after_inline_corrections_are_exhausted():
+    prompts = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        prompts.append(prompt)
+        return SimpleNamespace(reason="task_creator_corrections_exhausted")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+        work_runner=work_runner,
+    )
+
+    controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert len(prompts) == 1
+    assert "at most 2 corrected call(s)" in prompts[0]
 
 
 def test_task_creator_reassigns_new_future_phase_tasks_to_active_phase():
@@ -2307,10 +2518,11 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
 
     assert "Candidate optional tools" not in prompt
     assert "Your only action is one successful" in prompt
-    assert "Every task object MUST contain non-empty `title` and `objective`" in prompt
-    assert "unsupported `context` or `description` fields" in prompt
+    assert "Every proposal MUST contain non-empty `title`, `objective`, `basis_kind`, `basis_description`" in prompt
+    assert "unsupported top-level `description` fields" in prompt
     assert "Stop immediately" in prompt
-    assert "Do not create tasks for earlier or future phases" in prompt
+    assert "Python assigns active phase 1" in prompt
+    assert "Never emit `acceptance`, `phase`, `status`, `target_scope`" in prompt
     assert "without violating any plan constraint" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
     assert "Stay within the authorized target scope" in prompt
@@ -2386,7 +2598,60 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
     assert "## Plan\nplan_overview[1]" in builder_prompt
     assert "plan_phases[1]{id,title,status,criteria}:" in builder_prompt
     assert "## Existing Tasks Across All Phases\ntask[1]" in creator_prompt
-    assert "## Tasks\ntask[1]" in phase_evaluator_prompt
+    assert "## Canonical task acceptance ledger\n[" in phase_evaluator_prompt
+    assert '"manifest_hash"' in phase_evaluator_prompt
+
+
+def test_phase_evaluator_uses_accepted_artifact_instead_of_predicted_task_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CYBER_OPERATION_ROOT", str(tmp_path))
+    accepted_artifact = tmp_path / "artifacts" / "accepted.json"
+    accepted_artifact.parent.mkdir()
+    accepted_artifact.write_text('{"result":"accepted"}', encoding="utf-8")
+    monkeypatch.setattr(
+        workflow_mod,
+        "_artifact_path_from_ref",
+        lambda reference: str(accepted_artifact) if reference.endswith("accepted.json") else "missing",
+    )
+    task = Task(
+        task_uid="mapped",
+        title="Map surface",
+        objective="Map the bounded surface",
+        acceptance=_artifact_acceptance("mapped-artifact"),
+        phase=1,
+        status="done",
+        evidence=["artifact:artifacts/predicted.json"],
+    )
+    state = FakeState(_plan(), tasks=[task])
+    state.acceptance_results[task.task_uid] = [
+        AcceptanceResult(
+            criterion_id="mapped-artifact",
+            status="satisfied",
+            summary="Stored the accepted map",
+            evidence_refs=["artifact:artifacts/accepted.json"],
+        )
+    ]
+    captured = {}
+
+    def text_runner(role, prompt, tools, system_prompt):
+        captured["prompt"] = prompt
+        return '{"status":"done","reason":"Accepted evidence is complete"}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    decision = controller._evaluate_phase(_plan(), _plan().phases[0])
+
+    assert decision.status == "done"
+    assert "artifact:artifacts/accepted.json" in captured["prompt"]
+    assert str(accepted_artifact) in captured["prompt"]
+    assert "artifact:artifacts/predicted.json" not in captured["prompt"]
 
 
 def test_optional_tool_catalog_uses_tool_spec_name_and_description():
@@ -2448,7 +2713,7 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
 
 
-def test_task_prompt_builder_requires_storing_requested_information():
+def test_task_prompt_builder_requires_reusable_acceptance_summaries():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -2465,13 +2730,43 @@ def test_task_prompt_builder_requires_storing_requested_information():
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "store the requested facts or negative results with `store_observation`" in prompt
-    assert "Worker summaries alone are" in prompt
-    assert "not durable storage for requested information" in prompt
-    assert "Store concise evidence or observations when useful" not in prompt
+    assert "Require every acceptance summary to state the concrete result or negative result" in prompt
+    assert "publishes" in prompt
+    assert "Use `store_observation` only" in prompt
 
 
-def test_task_prompt_critic_rejects_optional_information_storage():
+def test_task_prompt_builder_can_select_published_acceptance_memory():
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: [
+            {
+                "id": "acceptance-memory-1",
+                "memory": "Task acceptance for route mapping. Criterion routes [satisfied]: /login returned 200.",
+                "metadata": {"category": "observation", "source": "task_acceptance"},
+            }
+        ]
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Test login",
+        objective="Use the mapped login route",
+        phase=1,
+        status="active",
+    )
+
+    prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+
+    assert "acceptance-memory-1" in prompt
+    assert "/login returned 200" in prompt
+
+
+def test_task_prompt_critic_rejects_generic_acceptance_summaries():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -2493,10 +2788,9 @@ def test_task_prompt_critic_rejects_optional_information_storage():
         {"prompt": "Identify exposed routes and summarize what you found.", "memory_ids": [], "tools": []},
     )
 
-    assert "requires `store_observation` for requested informational results" in prompt
+    assert "requires concrete, reusable acceptance summaries" in prompt
     assert "reject" in prompt
-    assert "drafts that leave storage optional" in prompt
-    assert "rely only on worker narration" in prompt
+    assert "generic completion claims" in prompt
 
 
 def test_task_target_scope_text_preserves_explicit_url_service_boundaries():

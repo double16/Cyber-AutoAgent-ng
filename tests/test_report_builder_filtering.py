@@ -15,6 +15,7 @@ import pytest
 
 from modules.handlers.report_generator import build_report_sections
 from modules.tools.memory import OperationPlan, PlanPhase, Task, clear_memory_client
+from tests.helpers.acceptance import make_acceptance
 
 
 @pytest.fixture(autouse=True)
@@ -45,10 +46,10 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         )
 
         tasks = [
-            Task(task_uid=uuid4().hex, title="Task 1", phase=1, objective="Perform Task 1", status="done"),
-            Task(task_uid=uuid4().hex, title="Task 2", phase=2, objective="Perform Task 2", status="done"),
-            Task(task_uid=uuid4().hex, title="Task 3", phase=3, objective="Perform Task 3", status="done"),
-            Task(task_uid=uuid4().hex, title="Task 4", phase=4, objective="Perform Task 4", status="blocked"),
+            Task(task_uid=uuid4().hex, title="Task 1", phase=1, objective="Perform Task 1", acceptance=make_acceptance("t1"), status="done"),
+            Task(task_uid=uuid4().hex, title="Task 2", phase=2, objective="Perform Task 2", acceptance=make_acceptance("t2"), status="done"),
+            Task(task_uid=uuid4().hex, title="Task 3", phase=3, objective="Perform Task 3", acceptance=make_acceptance("t3"), status="done"),
+            Task(task_uid=uuid4().hex, title="Task 4", phase=4, objective="Perform Task 4", acceptance=make_acceptance("t4"), status="blocked"),
         ]
 
         # Mock list_memories to return both tagged and untagged
@@ -172,7 +173,10 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert out.get("operation_plan", "{}") == plan.to_dict()
 
         assert out.get("operation_tasks", {}).get("columns") == Task.csv_format()
-        assert out.get("operation_tasks", {}).get("items", []) == [ task.to_toon(include_format=False) for task in tasks ]
+        assert out.get("operation_tasks", {}).get("items", []) == [
+            f"{task.to_toon(include_format=False)},acceptance=0/1,manifest={task.acceptance.manifest_hash}"
+            for task in tasks
+        ]
 
         evidence_text = out.get("evidence_text")
         assert all([f" /{chr(c)}\n" in evidence_text for c in range(ord('a'), ord('p'))])

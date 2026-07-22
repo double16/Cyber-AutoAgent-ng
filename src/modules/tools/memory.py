@@ -16,7 +16,7 @@ Key Features:
    • retrieve: Perform semantic search across all memories
 
 2. Task Management:
-   • Work is broken into small tasks per phase with activation managed by these tools.
+   • Work is grouped into cohesive tasks with finite acceptance manifests per phase.
 
 3. Safety Features:
    • Content previews before storage
@@ -49,6 +49,7 @@ import os
 import re
 import sqlite3
 import threading
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -58,6 +59,7 @@ import boto3
 from mem0 import Memory as Mem0Memory
 from mem0 import MemoryClient
 from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator, AliasChoices
 from rapidfuzz import fuzz
 from strands import tool
 
@@ -82,7 +84,82 @@ PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
 TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
 TargetType = Literal["network", "network_range", "filesystem"]
 TargetScope = Literal["all", "subset"]
+AcceptanceMode = Literal["outcome", "coverage"]
+AcceptanceBasisKind = Literal["procedure", "snapshot"]
+ProcedureOutputKind = Literal["artifact", "inventory_manifest"]
+DISCOVERY_PROCEDURE_LIMIT_KEYS = (
+    "max_duration_minutes",
+    "max_requests",
+    "max_items",
+    "max_depth",
+)
+EvidenceRequirementKind = Literal[
+    "artifact",
+    "inventory_manifest",
+    "observation",
+    "finding_candidate",
+    "verified_finding",
+    "memory",
+]
+AcceptanceResultStatus = Literal[
+    "satisfied",
+    "assessed_negative",
+    "inaccessible",
+    "excluded",
+    "duplicate",
+]
 TERMINAL_PLAN_STATUSES = ("done", "partial_failure", "blocked")
+TERMINAL_ACCEPTANCE_STATUSES = (
+    "satisfied",
+    "assessed_negative",
+    "inaccessible",
+    "excluded",
+    "duplicate",
+)
+
+TASK_ACCEPTANCE_MEMORY_MAX_CHARS = 4000
+TASK_ACCEPTANCE_MEMORY_SUMMARY_MAX_CHARS = 500
+TASK_ACCEPTANCE_MEMORY_MAX_EVIDENCE_REFS = 20
+TASK_PROPOSAL_CRITERION_ID_MAX_CHARS = 64
+
+
+@dataclass(frozen=True)
+class _MemoryStoreResult:
+    """The durable identity and creation state of one semantic memory."""
+
+    created: bool
+    memory_id: str
+
+INVENTORY_MANIFEST_SCHEMA_VERSION = 1
+INVENTORY_MANIFEST_ITEM_KINDS = ("endpoint", "parameter", "workflow", "service", "other")
+INVENTORY_MANIFEST_EXAMPLE = {
+    "schema_version": INVENTORY_MANIFEST_SCHEMA_VERSION,
+    "items": [
+        {
+            "id": "endpoint-1",
+            "target_id": "target-1",
+            "kind": "endpoint",
+            "value": "https://target.example/login",
+            "attributes": {"parameters": ["username", "password"]},
+        }
+    ],
+    "unassessed_gaps": [],
+}
+
+
+def inventory_manifest_contract_text() -> str:
+    """Return the canonical model-facing contract for version-1 inventory artifacts."""
+
+    kinds = "|".join(INVENTORY_MANIFEST_ITEM_KINDS)
+    example = json.dumps(INVENTORY_MANIFEST_EXAMPLE, sort_keys=True)
+    return (
+        "An inventory_manifest evidence reference is dereferenced and validated as JSON. "
+        f"It must use this shape: {example}. schema_version must be {INVENTORY_MANIFEST_SCHEMA_VERSION}; "
+        "items must be a non-empty list with unique IDs; every item requires non-empty id, target_id, value, "
+        f"kind ({kinds}), and an optional attributes object; unassessed_gaps must be a list. "
+        "Put item metadata such as parameters in attributes, not in a metadata field. Workflow maps, reports, "
+        "and arbitrary JSON outputs are artifact evidence, not inventory_manifest evidence."
+    )
 
 
 @dataclass(frozen=True)
@@ -148,6 +225,395 @@ class OperationTarget:
 
 
 @dataclass(frozen=True)
+class EvidenceRequirement:
+    """One machine-verifiable evidence requirement for an acceptance criterion."""
+
+    kind: EvidenceRequirementKind
+    min_count: int = 1
+
+    def __post_init__(self) -> None:
+        if self.kind not in (
+            "artifact",
+            "inventory_manifest",
+            "observation",
+            "finding_candidate",
+            "verified_finding",
+            "memory",
+        ):
+            raise ValueError("unsupported acceptance evidence requirement kind")
+        if not isinstance(self.min_count, int) or self.min_count <= 0:
+            raise ValueError("acceptance evidence requirement min_count must be a positive int")
+
+    @staticmethod
+    def from_obj(obj: Any) -> "EvidenceRequirement":
+        if isinstance(obj, EvidenceRequirement):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("acceptance evidence requirement must be an object/dict")
+        return EvidenceRequirement(kind=str(obj.get("kind", "")), min_count=int(obj.get("min_count", 1)))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "min_count": self.min_count}
+
+
+@dataclass(frozen=True)
+class AcceptanceCriterion:
+    """One immutable, independently reportable task completion criterion."""
+
+    id: str
+    description: str
+    evidence_requirements: Tuple[EvidenceRequirement, ...]
+
+    def __post_init__(self) -> None:
+        normalized_id = re.sub(r"\s+", "-", str(self.id or "").strip().lower())
+        if not normalized_id:
+            raise ValueError("acceptance criterion id required")
+        if not str(self.description or "").strip():
+            raise ValueError("acceptance criterion description required")
+        moving_scope = re.search(
+            r"\b(?:all reachable|all discovered|across the application|key workflows)\b",
+            str(self.description),
+            re.IGNORECASE,
+        )
+        if moving_scope:
+            raise ValueError("acceptance criterion uses moving scope with words like 'all', 'across', 'key workflows'; reference the finite basis instead")
+        requirements = tuple(EvidenceRequirement.from_obj(item) for item in self.evidence_requirements)
+        if not requirements:
+            raise ValueError("acceptance criterion evidence_requirements required")
+        object.__setattr__(self, "id", normalized_id)
+        object.__setattr__(self, "description", str(self.description).strip())
+        object.__setattr__(self, "evidence_requirements", requirements)
+
+    @staticmethod
+    def from_obj(obj: Any) -> "AcceptanceCriterion":
+        if isinstance(obj, AcceptanceCriterion):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("acceptance criterion must be an object/dict")
+        return AcceptanceCriterion(
+            id=str(obj.get("id", "")),
+            description=str(obj.get("description", "")),
+            evidence_requirements=obj.get("evidence_requirements", []),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "description": self.description,
+            "evidence_requirements": [requirement.to_dict() for requirement in self.evidence_requirements],
+        }
+
+
+ACCEPTANCE_SOURCE_REF_PATTERN = re.compile(
+    r"^(?:target|plan|task|memory|artifact|finding):\S+$"
+)
+
+
+@dataclass(frozen=True)
+class DiscoveryProcedure:
+    """Deterministic limits for producing a finite inventory snapshot."""
+
+    methods: Tuple[str, ...]
+    limits: Dict[str, int]
+    stop_condition: str
+    gap_policy: str
+    output_kind: ProcedureOutputKind
+
+    def __post_init__(self) -> None:
+        methods = _normalize_non_empty_strings(self.methods, "discovery procedure methods")
+        if not isinstance(self.limits, dict) or not self.limits:
+            raise ValueError("discovery procedure limits required")
+        allowed_limits = set(DISCOVERY_PROCEDURE_LIMIT_KEYS)
+        invalid = sorted(set(self.limits) - allowed_limits)
+        if invalid:
+            raise ValueError(f"unsupported discovery procedure limits: {', '.join(invalid)}")
+        limits = {}
+        for name, value in self.limits.items():
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError("discovery procedure limits must be positive integers")
+            limits[name] = value
+        if self.stop_condition != "first_limit_reached":
+            raise ValueError("discovery procedure stop_condition must be first_limit_reached")
+        if self.gap_policy != "record_unassessed":
+            raise ValueError("discovery procedure gap_policy must be record_unassessed")
+        if self.output_kind not in ("artifact", "inventory_manifest"):
+            raise ValueError("discovery procedure output_kind must be artifact or inventory_manifest")
+        object.__setattr__(self, "methods", methods)
+        object.__setattr__(self, "limits", limits)
+
+    @staticmethod
+    def from_obj(obj: Any) -> "DiscoveryProcedure":
+        if isinstance(obj, DiscoveryProcedure):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("acceptance basis procedure must be an object/dict")
+        return DiscoveryProcedure(
+            methods=obj.get("methods", []),
+            limits=obj.get("limits", {}),
+            stop_condition=str(obj.get("stop_condition", "")),
+            gap_policy=str(obj.get("gap_policy", "")),
+            output_kind=str(obj.get("output_kind", "")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "methods": list(self.methods),
+            "limits": self.limits,
+            "stop_condition": self.stop_condition,
+            "gap_policy": self.gap_policy,
+            "output_kind": self.output_kind,
+        }
+
+
+@dataclass(frozen=True)
+class AcceptanceBasis:
+    """Finite source or bounded procedure used to define task completion scope."""
+
+    kind: AcceptanceBasisKind
+    description: str
+    source_refs: Tuple[str, ...]
+    procedure: Optional[DiscoveryProcedure] = None
+    snapshot_hash: str = ""
+
+    def __post_init__(self) -> None:
+        description = str(self.description or "").strip()
+        if not description:
+            raise ValueError("acceptance basis description required")
+        if self.kind not in ("procedure", "snapshot"):
+            raise ValueError("acceptance basis kind must be procedure or snapshot")
+        source_refs = _normalize_non_empty_strings(self.source_refs, "acceptance basis source_refs")
+        invalid_refs = [ref for ref in source_refs if not ACCEPTANCE_SOURCE_REF_PATTERN.fullmatch(ref)]
+        if invalid_refs:
+            raise ValueError(
+                "acceptance basis source_refs must use target:, plan:, task:, memory:, artifact:, or finding: "
+                f"references; invalid: {', '.join(invalid_refs)}"
+            )
+        procedure = DiscoveryProcedure.from_obj(self.procedure) if self.procedure is not None else None
+        if self.kind == "procedure":
+            if procedure is None:
+                raise ValueError("procedure acceptance basis requires procedure limits")
+            if any(not ref.startswith(("target:", "plan:")) for ref in source_refs):
+                raise ValueError("procedure acceptance basis may reference only target: and plan: sources")
+        elif procedure is not None:
+            raise ValueError("snapshot acceptance basis must not contain procedure")
+        object.__setattr__(self, "description", description)
+        object.__setattr__(self, "source_refs", source_refs)
+        object.__setattr__(self, "procedure", procedure)
+        object.__setattr__(self, "snapshot_hash", str(self.snapshot_hash or "").strip())
+
+    @staticmethod
+    def from_obj(obj: Any) -> "AcceptanceBasis":
+        if isinstance(obj, AcceptanceBasis):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("acceptance basis must be an object/dict")
+        return AcceptanceBasis(
+            kind=str(obj.get("kind", "")),
+            description=str(obj.get("description", "")),
+            source_refs=obj.get("source_refs", []),
+            procedure=obj.get("procedure"),
+            snapshot_hash=str(obj.get("snapshot_hash", "")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = {
+            "kind": self.kind,
+            "description": self.description,
+            "source_refs": list(self.source_refs),
+        }
+        if self.procedure is not None:
+            result["procedure"] = self.procedure.to_dict()
+        if self.snapshot_hash:
+            result["snapshot_hash"] = self.snapshot_hash
+        return result
+
+
+@dataclass(frozen=True)
+class AcceptanceContract:
+    """Frozen task acceptance manifest owned by the workflow controller."""
+
+    mode: AcceptanceMode
+    basis: AcceptanceBasis
+    criteria: Tuple[AcceptanceCriterion, ...]
+    frozen_at: str = ""
+    manifest_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("outcome", "coverage"):
+            raise ValueError("acceptance mode must be outcome or coverage")
+        basis = AcceptanceBasis.from_obj(self.basis)
+        criteria = tuple(AcceptanceCriterion.from_obj(item) for item in self.criteria)
+        if not criteria:
+            raise ValueError("acceptance criteria required")
+        criterion_ids = [criterion.id for criterion in criteria]
+        if len(criterion_ids) != len(set(criterion_ids)):
+            raise ValueError("acceptance criterion ids must be unique")
+        if self.mode == "coverage" and basis.kind != "snapshot":
+            raise ValueError("coverage acceptance mode requires a snapshot basis")
+        if basis.kind == "procedure":
+            requirement_kinds = {
+                requirement.kind
+                for criterion in criteria
+                for requirement in criterion.evidence_requirements
+            }
+            if basis.procedure.output_kind == "inventory_manifest" and "inventory_manifest" not in requirement_kinds:
+                raise ValueError("inventory_manifest procedure requires inventory_manifest evidence")
+            if basis.procedure.output_kind == "artifact":
+                if "inventory_manifest" in requirement_kinds:
+                    raise ValueError("artifact procedure must not require inventory_manifest evidence")
+                if "artifact" not in requirement_kinds:
+                    raise ValueError("artifact procedure requires artifact evidence")
+        frozen_at = str(self.frozen_at or datetime.now().isoformat()).strip()
+        canonical = {
+            "mode": self.mode,
+            "basis": basis.to_dict(),
+            "criteria": [criterion.to_dict() for criterion in criteria],
+        }
+        manifest_hash = hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if self.manifest_hash and self.manifest_hash != manifest_hash:
+            raise ValueError("acceptance manifest hash does not match contract")
+        object.__setattr__(self, "basis", basis)
+        object.__setattr__(self, "criteria", criteria)
+        object.__setattr__(self, "frozen_at", frozen_at)
+        object.__setattr__(self, "manifest_hash", manifest_hash)
+
+    @staticmethod
+    def from_obj(obj: Any) -> "AcceptanceContract":
+        if isinstance(obj, AcceptanceContract):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("acceptance contract must be an object/dict")
+        return AcceptanceContract(
+            mode=str(obj.get("mode", "")),
+            basis=AcceptanceBasis.from_obj(obj.get("basis")),
+            criteria=obj.get("criteria", []),
+            frozen_at=str(obj.get("frozen_at", "")),
+            manifest_hash=str(obj.get("manifest_hash", "")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "basis": self.basis.to_dict(),
+            "criteria": [criterion.to_dict() for criterion in self.criteria],
+            "frozen_at": self.frozen_at,
+            "manifest_hash": self.manifest_hash,
+        }
+
+
+def _normalize_non_empty_strings(value: Any, field_name: str) -> Tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list")
+    normalized = []
+    seen = set()
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            raise ValueError(f"{field_name} must contain non-empty strings")
+        if text not in seen:
+            normalized.append(text)
+            seen.add(text)
+    if not normalized:
+        raise ValueError(f"{field_name} required")
+    return tuple(normalized)
+
+
+@dataclass(frozen=True)
+class CoverageResult:
+    """One terminal disposition for one item in a frozen inventory manifest."""
+
+    item_id: str
+    status: AcceptanceResultStatus
+    evidence_refs: Tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        item_id = str(self.item_id or "").strip()
+        if not item_id:
+            raise ValueError("coverage result item_id required")
+        if self.status not in TERMINAL_ACCEPTANCE_STATUSES:
+            raise ValueError("coverage result status must be terminal")
+        evidence_refs = _normalize_non_empty_strings(self.evidence_refs, "coverage result evidence_refs")
+        object.__setattr__(self, "item_id", item_id)
+        object.__setattr__(self, "evidence_refs", evidence_refs)
+
+    @staticmethod
+    def from_obj(obj: Any) -> "CoverageResult":
+        if isinstance(obj, CoverageResult):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("coverage result must be an object/dict")
+        return CoverageResult(
+            item_id=str(obj.get("item_id", "")),
+            status=str(obj.get("status", "")),
+            evidence_refs=obj.get("evidence_refs", []),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "item_id": self.item_id,
+            "status": self.status,
+            "evidence_refs": list(self.evidence_refs),
+        }
+
+
+@dataclass(frozen=True)
+class AcceptanceResult:
+    """Executor-recorded result for one criterion in a frozen manifest."""
+
+    criterion_id: str
+    status: AcceptanceResultStatus
+    summary: str
+    evidence_refs: Tuple[str, ...]
+    coverage: Tuple[CoverageResult, ...] = ()
+
+    def __post_init__(self) -> None:
+        criterion_id = re.sub(r"\s+", "-", str(self.criterion_id or "").strip().lower())
+        if not criterion_id:
+            raise ValueError("acceptance result criterion_id required")
+        if self.status not in TERMINAL_ACCEPTANCE_STATUSES:
+            raise ValueError(
+                "acceptance result status must be one of: " + "|".join(TERMINAL_ACCEPTANCE_STATUSES)
+            )
+        summary = str(self.summary or "").strip()
+        if not summary:
+            raise ValueError("acceptance result summary required")
+        evidence_refs = _normalize_non_empty_strings(self.evidence_refs, "acceptance result evidence_refs")
+        coverage = tuple(CoverageResult.from_obj(item) for item in self.coverage)
+        coverage_ids = [item.item_id for item in coverage]
+        if len(coverage_ids) != len(set(coverage_ids)):
+            raise ValueError("coverage result item_id values must be unique")
+        object.__setattr__(self, "criterion_id", criterion_id)
+        object.__setattr__(self, "summary", summary)
+        object.__setattr__(self, "evidence_refs", evidence_refs)
+        object.__setattr__(self, "coverage", coverage)
+
+    @staticmethod
+    def from_obj(obj: Any) -> "AcceptanceResult":
+        if isinstance(obj, AcceptanceResult):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("acceptance result must be an object/dict")
+        return AcceptanceResult(
+            criterion_id=str(obj.get("criterion_id", "")),
+            status=str(obj.get("status", "")),
+            summary=str(obj.get("summary", "")),
+            evidence_refs=obj.get("evidence_refs", []),
+            coverage=obj.get("coverage", []),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "criterion_id": self.criterion_id,
+            "status": self.status,
+            "summary": self.summary,
+            "evidence_refs": list(self.evidence_refs),
+            "coverage": [item.to_dict() for item in self.coverage],
+        }
+
+
+@dataclass(frozen=True)
 class Task:
     """A single unit of work tied to an execution-prompt phase.
 
@@ -158,6 +624,7 @@ class Task:
     task_uid: str
     title: str
     objective: str
+    acceptance: AcceptanceContract
     phase: int
     status: TaskStatus
     status_reason: Optional[str] = None
@@ -176,6 +643,7 @@ class Task:
             raise ValueError("title must be a non-empty string")
         if not isinstance(self.objective, str) or not self.objective.strip():
             raise ValueError("objective must be a non-empty string")
+        object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
         if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
@@ -201,6 +669,7 @@ class Task:
             task_uid=str(obj.get("task_uid", "")),
             title=str(obj.get("title", "")),
             objective=str(obj.get("objective", "")),
+            acceptance=AcceptanceContract.from_obj(obj.get("acceptance")),
             evidence=_normalize_evidence(obj.get("evidence", None)),
             phase=int(obj.get("phase")),
             status=str(obj.get("status", "pending")),
@@ -218,6 +687,7 @@ class Task:
             "task_uid": self.task_uid,
             "title": self.title,
             "objective": self.objective,
+            "acceptance": self.acceptance.to_dict(),
             "evidence": self.evidence,
             "phase": self.phase,
             "status": self.status,
@@ -236,11 +706,18 @@ class Task:
 
     @staticmethod
     def csv_format() -> str:
-        return "title,objective,evidence,phase,status,status_reason,kind,reference_id,target_scope,target_ids"
+        return (
+            "title,objective,acceptance_mode,acceptance_criteria,evidence,phase,status,status_reason,kind,"
+            "reference_id,target_scope,target_ids"
+        )
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
         objective = sanitize_toon_value(self.objective)
+        acceptance_mode = sanitize_toon_value(self.acceptance.mode)
+        acceptance_criteria = "|".join(
+            sanitize_toon_value(criterion.id) for criterion in self.acceptance.criteria
+        )
         evidence = "|".join(sanitize_toon_value(e) for e in self.evidence)
         status = sanitize_toon_value(self.status)
         status_reason = sanitize_toon_value(self.status_reason)
@@ -251,7 +728,8 @@ class Task:
         if include_format:
             lines.append(f"{self.toon_format()}:")
         lines.append(
-            f"  {title},{objective},{evidence},{self.phase},{status},{status_reason},{kind},"
+            f"  {title},{objective},{acceptance_mode},{acceptance_criteria},{evidence},{self.phase},{status},"
+            f"{status_reason},{kind},"
             f"{reference_id},{self.target_scope},{target_ids}"
         )
         return "\n".join(lines).strip()
@@ -521,26 +999,47 @@ class PlanStore:
                         operation_id TEXT,
                         title TEXT,
                         objective TEXT,
+                        acceptance_contract TEXT NOT NULL,
                         phase INTEGER,
                         status TEXT,
                         status_reason TEXT,
                         evidence TEXT,
                         created_at TEXT,
-                        updated_at TEXT
+                        updated_at TEXT,
+                        kind TEXT DEFAULT 'standard',
+                        reference_id TEXT,
+                        target_scope TEXT DEFAULT 'all',
+                        target_ids TEXT DEFAULT '[]'
                     )
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_operation_id ON tasks(operation_id)")
-                task_columns = {
-                    row[1] for row in conn.execute("PRAGMA table_info(tasks)")
-                }
-                if "kind" not in task_columns:
-                    conn.execute("ALTER TABLE tasks ADD COLUMN kind TEXT DEFAULT 'standard'")
-                if "reference_id" not in task_columns:
-                    conn.execute("ALTER TABLE tasks ADD COLUMN reference_id TEXT")
-                if "target_scope" not in task_columns:
-                    conn.execute("ALTER TABLE tasks ADD COLUMN target_scope TEXT DEFAULT 'all'")
-                if "target_ids" not in task_columns:
-                    conn.execute("ALTER TABLE tasks ADD COLUMN target_ids TEXT DEFAULT '[]'")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS task_acceptance_results (
+                        operation_id TEXT NOT NULL,
+                        task_uid TEXT NOT NULL,
+                        criterion_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        evidence_refs TEXT NOT NULL,
+                        coverage TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(task_uid, criterion_id),
+                        FOREIGN KEY(task_uid) REFERENCES tasks(task_uid)
+                    )
+                """)
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_acceptance_results_operation_id "
+                    "ON task_acceptance_results(operation_id)"
+                )
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS task_acceptance_memory_publications (
+                        operation_id TEXT NOT NULL,
+                        task_uid TEXT NOT NULL,
+                        publication_key TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(operation_id, task_uid)
+                    )
+                """)
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS finding_records (
                         finding_uid TEXT PRIMARY KEY,
@@ -607,15 +1106,26 @@ class PlanStore:
 
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
+                existing = conn.execute(
+                    "SELECT acceptance_contract FROM tasks WHERE task_uid = ?",
+                    (task.task_uid,),
+                ).fetchone()
+                if existing:
+                    existing_contract = AcceptanceContract.from_obj(json.loads(existing[0]))
+                    contract_changed = existing_contract.manifest_hash != task.acceptance.manifest_hash
+                    if contract_changed:
+                        raise ValueError("acceptance contract is immutable after task creation")
                 conn.execute("""
                     INSERT INTO tasks (
-                        task_uid, operation_id, title, objective, phase, status, status_reason, evidence,
+                        task_uid, operation_id, title, objective, acceptance_contract, phase, status, status_reason,
+                        evidence,
                         created_at, updated_at, kind, reference_id, target_scope, target_ids
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
+                        acceptance_contract=excluded.acceptance_contract,
                         phase=excluded.phase,
                         status=excluded.status,
                         status_reason=excluded.status_reason,
@@ -630,6 +1140,7 @@ class PlanStore:
                     operation_id,
                     task.title,
                     task.objective,
+                    json.dumps(task.acceptance.to_dict()),
                     task.phase,
                     task.status,
                     task.status_reason,
@@ -648,7 +1159,7 @@ class PlanStore:
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute(
-                    "SELECT title, objective, phase, status, status_reason, evidence, task_uid, "
+                    "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
                     "created_at, updated_at, kind, reference_id, target_scope, target_ids "
                     "FROM tasks WHERE operation_id = ?",
                     (operation_id,),
@@ -658,20 +1169,114 @@ class PlanStore:
                         Task(
                             title=row[0],
                             objective=row[1],
-                            phase=row[2],
-                            status=row[3],
-                            status_reason=row[4],
-                            evidence=json.loads(row[5]),
-                            task_uid=row[6],
-                            created_at=row[7],
-                            updated_at=row[8],
-                            kind=row[9] or "standard",
-                            reference_id=row[10],
-                            target_scope=row[11] or "all",
-                            target_ids=json.loads(row[12] or "[]"),
+                            acceptance=AcceptanceContract.from_obj(json.loads(row[2])),
+                            phase=row[3],
+                            status=row[4],
+                            status_reason=row[5],
+                            evidence=json.loads(row[6]),
+                            task_uid=row[7],
+                            created_at=row[8],
+                            updated_at=row[9],
+                            kind=row[10] or "standard",
+                            reference_id=row[11],
+                            target_scope=row[12] or "all",
+                            target_ids=json.loads(row[13] or "[]"),
                         )
                     )
         return tasks
+
+    def store_acceptance_results(
+        self,
+        operation_id: str,
+        task_uid: str,
+        results: List[AcceptanceResult],
+    ) -> None:
+        """Atomically upsert executor results for a frozen task manifest."""
+
+        now = datetime.now().isoformat()
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO task_acceptance_results (
+                        operation_id, task_uid, criterion_id, status, summary, evidence_refs, coverage, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            operation_id,
+                            task_uid,
+                            result.criterion_id,
+                            result.status,
+                            result.summary,
+                            json.dumps(result.evidence_refs),
+                            json.dumps([item.to_dict() for item in result.coverage]),
+                            now,
+                        )
+                        for result in results
+                    ],
+                )
+
+    def get_acceptance_results(self, operation_id: str, task_uid: str) -> List[AcceptanceResult]:
+        """Return the current acceptance ledger for one task."""
+
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT criterion_id, status, summary, evidence_refs, coverage "
+                    "FROM task_acceptance_results WHERE operation_id = ? AND task_uid = ? "
+                    "ORDER BY criterion_id",
+                    (operation_id, task_uid),
+                ).fetchall()
+        return [
+            AcceptanceResult(
+                criterion_id=row[0],
+                status=row[1],
+                summary=row[2],
+                evidence_refs=json.loads(row[3]),
+                coverage=json.loads(row[4]),
+            )
+            for row in rows
+        ]
+
+    def has_acceptance_memory_publication(
+        self,
+        operation_id: str,
+        task_uid: str,
+        publication_key: str,
+    ) -> bool:
+        """Return whether this immutable acceptance ledger was published to operation memory."""
+
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT publication_key FROM task_acceptance_memory_publications "
+                    "WHERE operation_id = ? AND task_uid = ?",
+                    (operation_id, task_uid),
+                ).fetchone()
+        return row is not None and row[0] == publication_key
+
+    def mark_acceptance_memory_published(
+        self,
+        operation_id: str,
+        task_uid: str,
+        publication_key: str,
+    ) -> None:
+        """Record successful publication for replay-safe acceptance handling."""
+
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO task_acceptance_memory_publications (
+                        operation_id, task_uid, publication_key, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(operation_id, task_uid) DO UPDATE SET
+                        publication_key=excluded.publication_key,
+                        updated_at=excluded.updated_at
+                    """,
+                    (operation_id, task_uid, publication_key, datetime.now().isoformat()),
+                )
 
     def get_finding_by_fingerprint(self, operation_id: str, fingerprint: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -1015,7 +1620,60 @@ def _clean_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return cleaned
 
 
-def _store_memory_entry(content: str, category: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+def _memory_result_items(result: Any) -> List[Dict[str, Any]]:
+    """Normalize supported Mem0 result envelopes into memory records."""
+
+    if isinstance(result, dict):
+        nested = result.get("results")
+        if isinstance(nested, list):
+            return [item for item in nested if isinstance(item, dict)]
+        if result.get("id"):
+            return [result]
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    return []
+
+
+def _memory_id_from_result(result: Any) -> str:
+    """Return the first non-empty memory ID in a Mem0 result."""
+
+    for item in _memory_result_items(result):
+        memory_id = str(item.get("id") or "").strip()
+        if memory_id:
+            return memory_id
+    return ""
+
+
+def _exact_memory_match(result: Any, content: str) -> Optional[Dict[str, Any]]:
+    """Return an exact cleaned-content match from a Mem0 search result."""
+
+    for item in _memory_result_items(result):
+        try:
+            candidate = _clean_memory_text(item.get("memory"), "memory")
+        except ValueError:
+            continue
+        if candidate == content:
+            return item
+    return None
+
+
+def _search_memory_entry(client: Any, content: str, user_id: str, operation_id: str, category: str) -> Any:
+    """Search for a category-fixed memory in the current operation."""
+
+    return client.mem0.search(
+        query=content,
+        user_id=user_id,
+        run_id=operation_id,
+        limit=5,
+        filters={"category": category},
+    )
+
+
+def _store_memory_entry(
+    content: str,
+    category: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> _MemoryStoreResult:
     """Store one category-fixed semantic memory with duplicate protection."""
 
     cleaned_content = _clean_memory_text(content, "content")
@@ -1027,25 +1685,27 @@ def _store_memory_entry(content: str, category: str, metadata: Optional[Dict[str
     user_id = _user_id()
 
     try:
-        search = client.mem0.search(
-            query=cleaned_content,
-            user_id=user_id,
-            run_id=op_id,
-            limit=1,
-            filters={"category": category},
-        )
+        search = _search_memory_entry(client, cleaned_content, user_id, op_id, category)
     except Exception:
         search = {}
         logger.debug("Unable to check for memory duplicate", exc_info=True)
 
-    if search.get("results"):
-        best = search["results"][0]
-        if best.get("score", 1.0) < 0.1:
-            existing_patterns = set(_extract_sensitive_patterns(best.get("memory", "")))
-            if existing_patterns == set(_extract_sensitive_patterns(cleaned_content)):
-                return
+    existing = _exact_memory_match(search, cleaned_content)
+    existing_id = _memory_id_from_result(existing)
+    if existing_id:
+        return _MemoryStoreResult(created=False, memory_id=existing_id)
 
-    client.store_memory(cleaned_content, user_id, _agent_id(), cleaned_metadata)
+    stored = client.store_memory(cleaned_content, user_id, _agent_id(), cleaned_metadata)
+    memory_id = _memory_id_from_result(stored)
+    if not memory_id:
+        try:
+            recovered = _search_memory_entry(client, cleaned_content, user_id, op_id, category)
+        except Exception as error:
+            raise RuntimeError("Memory was stored, but its durable ID could not be recovered") from error
+        memory_id = _memory_id_from_result(_exact_memory_match(recovered, cleaned_content))
+    if not memory_id:
+        raise RuntimeError("Memory was stored, but the backend did not return a durable ID")
+    return _MemoryStoreResult(created=True, memory_id=memory_id)
 
 
 def _operation_output_root() -> str:
@@ -1068,7 +1728,10 @@ def _validated_artifact_paths(artifacts: Any, *, require_one: bool = False) -> L
         candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
         resolved = os.path.realpath(candidate)
         if os.path.commonpath([root, resolved]) != root:
-            raise ValueError(f"Artifact is outside the current operation output: {raw_path}")
+            raise ValueError(
+                f"Artifact is outside the current operation output {root}: {raw_path}. "
+                "Use a path relative to the current operation output."
+            )
         if not os.path.isfile(resolved):
             raise ValueError(f"Artifact does not exist: {raw_path}")
         validated.append(resolved)
@@ -1086,13 +1749,20 @@ def store_observation(
     """Store one operation-specific fact, failed attempt, or informational result.
 
     Observations may be reportable but are never promoted into findings based on severity.
+    The returned memory_ref is valid observation evidence for record_task_acceptance.
     """
 
     merged = _clean_metadata(metadata)
     if artifacts:
         merged["artifacts"] = _validated_artifact_paths(artifacts)
-    _store_memory_entry(content, "observation", merged)
-    return "Observation stored."
+    result = _store_memory_entry(content, "observation", merged)
+    return json.dumps(
+        {
+            "stored": True,
+            "created": result.created,
+            "memory_ref": f"memory:{result.memory_id}",
+        }
+    )
 
 
 @tool
@@ -1199,6 +1869,21 @@ def store_finding(
             f"Independently verify finding candidate {finding_uid} against {candidate['target']}. "
             "Reproduce the claimed behavior, capture direct or differential artifacts, call "
             "record_finding_validation with the outcome, and stop."
+        ),
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description=f"Finding candidate {finding_uid}",
+                source_refs=[f"finding:{finding_uid}"],
+            ),
+            criteria=[
+                AcceptanceCriterion(
+                    id=f"verify-finding:{finding_uid}",
+                    description="Record an evidence-backed independent validation outcome for the finding candidate.",
+                    evidence_requirements=[EvidenceRequirement(kind="artifact", min_count=1)],
+                )
+            ],
         ),
         evidence=candidate["artifacts"],
         phase=current_phase,
@@ -1332,60 +2017,81 @@ def get_plan() -> str:
     return plan.to_toon() if plan is not None else "No active plan."
 
 
-@dataclass
-class TaskCreate:
-    title: str
-    objective: str
-    phase: Any = 0
-    status: TaskStatus = "pending"
-    evidence: Any = field(default_factory=list)
-    target_scope: TargetScope = "all"
-    target_ids: Any = field(default_factory=list)
+class _StrictTaskWireModel(BaseModel):
+    """Closed model-facing schema for task creation payloads."""
 
-    def __post_init__(self) -> None:
+    model_config = ConfigDict(extra="forbid")
+
+
+class TaskProposalLimits(_StrictTaskWireModel):
+    max_duration_minutes: Optional[PositiveInt] = None
+    max_requests: Optional[PositiveInt] = None
+    max_items: Optional[PositiveInt] = None
+    max_depth: Optional[PositiveInt] = None
+
+    @model_validator(mode="after")
+    def require_limit(self) -> "TaskProposalLimits":
+        if not any(getattr(self, key) is not None for key in DISCOVERY_PROCEDURE_LIMIT_KEYS):
+            raise ValueError("at least one discovery procedure limit is required")
+        return self
+
+
+class TaskProposalEvidence(_StrictTaskWireModel):
+    kind: EvidenceRequirementKind = Field(description="Durable evidence type required for this criterion")
+    min_count: PositiveInt = Field(default=1, description="Minimum number of matching evidence references")
+
+
+class TaskProposalCriterion(_StrictTaskWireModel):
+    description: str = Field(min_length=1, description="Finite result required from the declared basis")
+    evidence: List[TaskProposalEvidence] = Field(min_length=1, description="Typed durable evidence requirements")
+
+
+class TaskProposal(_StrictTaskWireModel):
+    """Small model-facing task proposal compiled into an immutable acceptance contract by Python."""
+
+    title: str = Field(min_length=1)
+    objective: str = Field(min_length=1)
+    basis_kind: AcceptanceBasisKind = Field(description="Procedure for new bounded work; snapshot for existing evidence")
+    basis_description: str = Field(min_length=1, description="Finite boundary used to decide completion")
+    methods: List[str] = Field(default_factory=list, description="Procedure methods; omit for snapshot proposals")
+    limits: Optional[TaskProposalLimits] = Field(
+        default=None,
+        validation_alias=AliasChoices("limits", "limit"),
+        description="Procedure limits; omit for snapshots"
+    )
+    snapshot_refs: List[str] = Field(
+        default_factory=list,
+        description="Existing task, memory, artifact, or finding references; snapshot proposals only",
+    )
+    coverage: bool = Field(default=False, description="Assess every frozen manifest item; snapshot proposals only")
+    criteria: List[TaskProposalCriterion] = Field(min_length=1)
+    target_ids: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_proposal(self) -> "TaskProposal":
         if not self.title.strip():
             raise ValueError("title required")
         if not self.objective.strip():
             raise ValueError("objective required")
-        if self.status not in ("active", "pending"):
-            self.status = "pending"
-            # raise ValueError("status must be one of: active|pending")
-        self.phase = _normalize_task_phase(self.phase)
-        # Coerce evidence to List[str] to tolerate dict/list-of-dict inputs from models
-        self.evidence = _normalize_evidence(self.evidence)
-        self.target_scope = str(self.target_scope or "all").strip().lower()
-        if self.target_scope not in ("all", "subset"):
-            raise ValueError("target_scope must be all or subset")
-        self.target_ids = _normalize_target_ids(self.target_ids)
-        if self.target_scope == "subset" and not self.target_ids:
-            raise ValueError("target_ids required when target_scope is subset")
-
-    @staticmethod
-    def from_obj(obj: Any) -> "TaskCreate":
-        if obj.__class__.__name__ == "TaskCreate":
-            return obj
-        if not isinstance(obj, dict):
-            raise ValueError("task must be an object/dict")
-        return TaskCreate(
-            title=str(obj.get("title", "")),
-            objective=str(obj.get("objective", "")),
-            evidence=obj.get("evidence", None),
-            phase=obj.get("phase", 0),
-            status=str(obj.get("status", "pending")),
-            target_scope=str(obj.get("target_scope", "all") or "all"),
-            target_ids=obj.get("target_ids", []),
-        )
-
-
-def _normalize_task_phase(value: Any) -> int:
-    """Coerce a task phase, reserving zero for omitted or malformed values."""
-
-    if value is None or value == "":
-        return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return 0
+        if not self.basis_description.strip():
+            raise ValueError("basis_description required")
+        if self.basis_kind == "procedure":
+            if not self.methods:
+                raise ValueError("procedure proposal requires methods")
+            if self.limits is None:
+                raise ValueError("procedure proposal requires limits")
+            if self.snapshot_refs:
+                raise ValueError("procedure proposal must not include snapshot_refs")
+            if self.coverage:
+                raise ValueError("procedure proposal must not enable coverage")
+        else:
+            if not self.snapshot_refs:
+                raise ValueError("snapshot proposal requires snapshot_refs")
+            if self.methods:
+                raise ValueError("snapshot proposal must not include methods")
+            if self.limits is not None:
+                raise ValueError("snapshot proposal must not include limits")
+        return self
 
 
 def _get_active_plan() -> OperationPlan:
@@ -1417,11 +2123,8 @@ def _target_ids_for_literal(target_value: str) -> List[str]:
 
 def _validate_task_target_scope(
     *,
-    target_scope: TargetScope,
     target_ids: List[str],
     plan: Optional[OperationPlan],
-    title: str,
-    objective: str,
 ) -> Tuple[TargetScope, List[str]]:
     if plan is None or not plan.targets:
         return "all", []
@@ -1431,17 +2134,6 @@ def _validate_task_target_scope(
     invalid_ids = [target_id for target_id in target_ids if target_id not in valid_ids]
     if invalid_ids:
         raise ValueError(f"target_ids contain unknown operation target IDs: {', '.join(invalid_ids)}")
-    if target_scope == "subset":
-        return "subset", target_ids
-
-    combined = f"{title}\n{objective}"
-    matched_ids = [
-        target.target_id
-        for target in plan.targets
-        if target.value and target.value in combined
-    ]
-    if len(matched_ids) == 1:
-        return "subset", matched_ids
     if target_ids:
         return "subset", target_ids
     return "all", []
@@ -1454,6 +2146,138 @@ _RE_PATH_PATTERN = re.compile(r'(?:(?<=^)|(?<=\s))(?:/|\./|\.\./)[a-zA-Z0-9._\-/
 _RE_UUID = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 # Regex for numeric IDs: one or more digits, possibly preceded by = or /
 _RE_NUMERIC_ID = re.compile(r'(?<=/|=)\d+(?=$|/|&|\s)')
+
+
+def _artifact_path_from_ref(reference: str) -> str:
+    raw_path = reference.removeprefix("artifact:")
+    root = _operation_output_root()
+    candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
+    resolved = os.path.realpath(candidate)
+    if os.path.commonpath([root, resolved]) != root:
+        raise ValueError(
+            f"Artifact is outside the current operation output {root}: {reference}. "
+            "Use an artifact: path relative to the current operation output."
+        )
+    if not os.path.isfile(resolved):
+        raise ValueError(f"Artifact does not exist: {reference}")
+    return resolved
+
+
+def _load_inventory_manifest(reference: str) -> Tuple[Dict[str, Any], str]:
+    path = _artifact_path_from_ref(reference)
+    try:
+        with open(path, "r", encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Invalid inventory manifest: {reference}") from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != INVENTORY_MANIFEST_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"inventory manifest schema_version must be {INVENTORY_MANIFEST_SCHEMA_VERSION}"
+        )
+    items = manifest.get("items")
+    gaps = manifest.get("unassessed_gaps")
+    if not isinstance(items, list) or not items:
+        raise ValueError("inventory manifest items must be a non-empty list")
+    if not isinstance(gaps, list):
+        raise ValueError("inventory manifest unassessed_gaps must be a list")
+    allowed_kinds = set(INVENTORY_MANIFEST_ITEM_KINDS)
+    item_ids = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("inventory manifest items must be objects")
+        item_id = str(item.get("id", "")).strip()
+        target_id = str(item.get("target_id", "")).strip()
+        kind = str(item.get("kind", "")).strip()
+        value = str(item.get("value", "")).strip()
+        attributes = item.get("attributes", {})
+        if not item_id or not target_id or not value or kind not in allowed_kinds:
+            raise ValueError("inventory manifest item requires id, target_id, supported kind, and value")
+        if not isinstance(attributes, dict):
+            raise ValueError("inventory manifest item attributes must be an object")
+        item_ids.append(item_id)
+    if len(item_ids) != len(set(item_ids)):
+        raise ValueError("inventory manifest item ids must be unique")
+    try:
+        valid_target_ids = {target.target_id for target in _get_active_plan().targets}
+    except Exception:
+        valid_target_ids = set()
+    manifest_target_ids = {str(item["target_id"]) for item in items}
+    if valid_target_ids and not manifest_target_ids.issubset(valid_target_ids):
+        invalid_target_ids = sorted(manifest_target_ids - valid_target_ids)
+        raise ValueError(f"inventory manifest contains unknown target IDs: {', '.join(invalid_target_ids)}")
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _task_evidence_artifact_paths(task: Task) -> set[str]:
+    paths = set()
+    for evidence in task.evidence:
+        raw_path = str(evidence).removeprefix("artifact:")
+        root = _operation_output_root()
+        candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
+        resolved = os.path.realpath(candidate)
+        if os.path.commonpath([root, resolved]) == root:
+            paths.add(resolved)
+    return paths
+
+
+def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks: List[Task]) -> AcceptanceContract:
+    basis = contract.basis
+    if basis.kind == "procedure":
+        try:
+            plan = _get_active_plan()
+        except Exception:
+            return contract
+        valid_target_refs = {f"target:{target.target_id}" for target in plan.targets}
+        valid_plan_refs = {f"plan:phase-{phase.id}" for phase in plan.phases}
+        invalid_refs = []
+        for reference in basis.source_refs:
+            if reference.startswith("target:") and plan.targets and reference not in valid_target_refs:
+                invalid_refs.append(reference)
+            if reference.startswith("plan:") and reference not in valid_plan_refs:
+                invalid_refs.append(reference)
+        if invalid_refs:
+            raise ValueError(f"Procedure acceptance basis contains unknown source references: {', '.join(invalid_refs)}")
+        return contract
+    op_id = _operation_id()
+    store = _get_plan_store()
+    artifact_refs = [ref for ref in basis.source_refs if ref.startswith("artifact:")]
+    for reference in basis.source_refs:
+        prefix, value = reference.split(":", 1)
+        if prefix == "artifact":
+            artifact_path = _artifact_path_from_ref(reference)
+            producers = [task for task in existing_tasks if artifact_path in _task_evidence_artifact_paths(task)]
+            if producers and any(task.status != "done" for task in producers):
+                raise ValueError(f"Acceptance basis producer task is not done: {reference}")
+        elif prefix == "task":
+            task = next((item for item in existing_tasks if item.task_uid == value), None)
+            if task is None or task.status != "done":
+                raise ValueError(f"Acceptance basis task is missing or not done: {reference}")
+        elif prefix == "memory":
+            memory = _ensure_memory_client().get_memory_by_id(value)
+            metadata = (memory or {}).get("metadata", {}) if isinstance(memory, dict) else {}
+            if not memory or metadata.get("operation_id", op_id) != op_id:
+                raise ValueError(f"Acceptance basis memory does not exist in this operation: {reference}")
+        elif prefix == "finding":
+            if store.get_finding(op_id, value) is None:
+                raise ValueError(f"Acceptance basis finding does not exist: {reference}")
+        else:
+            raise ValueError("snapshot acceptance basis may reference only task, memory, artifact, or finding sources")
+    if contract.mode != "coverage":
+        return contract
+    if len(artifact_refs) != 1:
+        raise ValueError("coverage acceptance basis requires exactly one inventory manifest artifact")
+    _manifest, snapshot_hash = _load_inventory_manifest(artifact_refs[0])
+    frozen_basis = AcceptanceBasis(
+        kind="snapshot",
+        description=basis.description,
+        source_refs=basis.source_refs,
+        snapshot_hash=snapshot_hash,
+    )
+    return AcceptanceContract(mode=contract.mode, basis=frozen_basis, criteria=contract.criteria)
 
 
 def _normalize_id(text: str) -> str:
@@ -1480,76 +2304,132 @@ def _extract_sensitive_patterns(text: str) -> List[str]:
     return sorted(list(set(all_patterns)))
 
 
+def _task_proposal_criterion_ids(criteria: List[TaskProposalCriterion]) -> List[str]:
+    """Generate readable, deterministic IDs for one proposal's criteria."""
+
+    generated: List[str] = []
+    used: set[str] = set()
+    for position, criterion in enumerate(criteria, start=1):
+        normalized = unicodedata.normalize("NFKD", criterion.description)
+        ascii_description = normalized.encode("ascii", "ignore").decode("ascii").lower()
+        base = re.sub(r"[^a-z0-9]+", "-", ascii_description).strip("-")
+        base = base[:TASK_PROPOSAL_CRITERION_ID_MAX_CHARS].rstrip("-") or f"criterion-{position}"
+        candidate = base
+        suffix_number = 2
+        while candidate in used:
+            suffix = f"-{suffix_number}"
+            prefix = base[: TASK_PROPOSAL_CRITERION_ID_MAX_CHARS - len(suffix)].rstrip("-")
+            candidate = f"{prefix}{suffix}"
+            suffix_number += 1
+        generated.append(candidate)
+        used.add(candidate)
+    return generated
+
+
+def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -> AcceptanceContract:
+    """Compile a small task proposal into the full immutable acceptance contract."""
+
+    criterion_ids = _task_proposal_criterion_ids(proposal.criteria)
+    criteria = [
+        AcceptanceCriterion(
+            id=criterion_id,
+            description=criterion.description,
+            evidence_requirements=[
+                EvidenceRequirement(kind=requirement.kind, min_count=requirement.min_count)
+                for requirement in criterion.evidence
+            ],
+        )
+        for criterion_id, criterion in zip(criterion_ids, proposal.criteria)
+    ]
+    if proposal.basis_kind == "procedure":
+        evidence_kinds = {
+            requirement.kind
+            for criterion in proposal.criteria
+            for requirement in criterion.evidence
+        }
+        if "inventory_manifest" in evidence_kinds and "artifact" in evidence_kinds:
+            raise ValueError("procedure proposal must not mix artifact and inventory_manifest output evidence")
+        if "inventory_manifest" in evidence_kinds:
+            output_kind: ProcedureOutputKind = "inventory_manifest"
+        elif "artifact" in evidence_kinds:
+            output_kind = "artifact"
+        else:
+            raise ValueError("procedure proposal requires artifact or inventory_manifest output evidence")
+        selected_target_ids = proposal.target_ids or [target.target_id for target in plan.targets]
+        source_refs = [
+            *(f"target:{target_id}" for target_id in selected_target_ids),
+            f"plan:phase-{plan.current_phase}",
+        ]
+        basis = AcceptanceBasis(
+            kind="procedure",
+            description=proposal.basis_description,
+            source_refs=source_refs,
+            procedure=DiscoveryProcedure(
+                methods=proposal.methods,
+                limits=proposal.limits.model_dump(exclude_none=True),
+                stop_condition="first_limit_reached",
+                gap_policy="record_unassessed",
+                output_kind=output_kind,
+            ),
+        )
+        mode: AcceptanceMode = "outcome"
+    else:
+        basis = AcceptanceBasis(
+            kind="snapshot",
+            description=proposal.basis_description,
+            source_refs=proposal.snapshot_refs,
+        )
+        mode = "coverage" if proposal.coverage else "outcome"
+    return AcceptanceContract(mode=mode, basis=basis, criteria=criteria)
+
+
 @tool
-def create_tasks(tasks: List[TaskCreate]) -> str:
-    """Create one or more tasks.
+def create_tasks(tasks: List[TaskProposal]) -> str:
+    """Create pending tasks for the active phase from concise task proposals.
 
-    Required input shape:
-    {"tasks": [{"title": "Short actionable title",
-    "objective": "Action, target, context, and completion condition", "phase": 1,
-    "status": "pending", "evidence": ["Expected artifact or completion signal"]}]}
+    Procedure example:
+    {"tasks": [{"title": "Build surface inventory", "objective": "Map the assigned target",
+    "basis_kind": "procedure", "basis_description": "Bounded crawl", "methods": ["crawl"],
+    "limits": {"max_requests": 500}, "criteria": [{"description":
+    "Execute the bounded procedure and store its manifest",
+    "evidence": [{"kind": "inventory_manifest", "min_count": 1}]}], "target_ids": ["target-1"]}]}
 
-    Every task requires non-empty "title" and "objective" strings. "phase", "status", and
-    "evidence" are optional.
-    Use status="pending" for new work. Never use unsupported "description" or "context" fields.
-
-    Rules:
-    - Valid active or future plan phases are preserved.
-    - If status="active", any other active task in the same operation is demoted to pending.
-    - If you identified N candidates, create N tasks (do not merge).
-
-    Returns:
-        Simple task creation confirmation.
+    Python assigns the active phase and pending status, infers target scope, and compiles the proposal into an
+    immutable acceptance contract. Criterion IDs, procedure stop conditions, gap policy, output kind, and source
+    references are deterministic. Snapshot proposals use snapshot_refs and may set coverage=true.
     """
 
-    # validate input, TaskCreate has post init validation
     if not tasks:
         raise ValueError("must have at least one task")
-    tasks = [TaskCreate.from_obj(task) for task in tasks]
+    proposals = [TaskProposal.model_validate(task) for task in tasks]
 
     client = _ensure_memory_client()
     user_id = _user_id()
     op_id = _operation_id()
-
-    try:
-        plan = _get_active_plan()
-        current_phase = plan.current_phase
-        valid_phase_ids = {phase.id for phase in plan.phases}
-    except Exception:
-        plan = None
-        current_phase = 1
-        valid_phase_ids = None
+    plan = _get_active_plan()
+    current_phase = plan.current_phase
 
     existing_tasks = _get_plan_store().get_tasks(op_id)
+    staged_tasks: List[Task] = []
+    duplicate_count = 0
 
-    for new_task in tasks:
-        # Default omitted phases to the active phase. Preserve every explicit,
-        # valid plan phase, including future phases.
-        requested_phase = new_task.phase
-        if (
-            valid_phase_ids is None
-            or requested_phase not in valid_phase_ids
-            or requested_phase < current_phase
-        ):
-            eff_phase = current_phase
-        else:
-            eff_phase = requested_phase
-
-        title = str(new_task.title).strip()
-        objective = str(new_task.objective).strip()
+    for proposal in proposals:
+        title = proposal.title.strip()
+        objective = proposal.objective.strip()
         target_scope, target_ids = _validate_task_target_scope(
-            target_scope=new_task.target_scope,
-            target_ids=new_task.target_ids,
+            target_ids=_normalize_target_ids(proposal.target_ids),
             plan=plan,
-            title=title,
-            objective=objective,
+        )
+        acceptance = _freeze_and_validate_acceptance(
+            _proposal_acceptance_contract(proposal, plan),
+            [*existing_tasks, *staged_tasks],
         )
 
         # look for duplicate
         duplicate_task = None
         new_patterns = set(_extract_sensitive_patterns(title) + _extract_sensitive_patterns(objective))
 
-        for et in existing_tasks:
+        for et in [*existing_tasks, *staged_tasks]:
             # If sensitive patterns (URLs/paths) are present, they must match exactly
             et_patterns = set(_extract_sensitive_patterns(et.title) + _extract_sensitive_patterns(et.objective))
             if new_patterns != et_patterns:
@@ -1562,6 +2442,7 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
                 break
 
         if duplicate_task:
+            duplicate_count += 1
             continue
 
         task_uid = str(uuid.uuid4())
@@ -1569,18 +2450,375 @@ def create_tasks(tasks: List[TaskCreate]) -> str:
             task_uid=task_uid,
             title=title,
             objective=objective,
-            evidence=new_task.evidence,
-            phase=eff_phase,
-            status=new_task.status,
+            acceptance=acceptance,
+            evidence=[],
+            phase=current_phase,
+            status="pending",
             target_scope=target_scope,
             target_ids=target_ids,
         )
 
-        client.store_task(task=task, user_id=user_id)
-        existing_tasks.append(task)
+        staged_tasks.append(task)
 
-    # Keep the output simple, giving too much info may be interpreted as instructions.
-    return "Tasks created."
+    for task in staged_tasks:
+        client.store_task(task=task, user_id=user_id)
+
+    return json.dumps(
+        {"complete": True, "created_count": len(staged_tasks), "duplicate_count": duplicate_count},
+        sort_keys=True,
+    )
+
+
+def build_create_tasks_tool() -> Any:
+    """Build a task-creator-local tool that permits exactly one successful mutation."""
+
+    completed = False
+
+    @tool(name="create_tasks")
+    def create_tasks_once(tasks: List[TaskProposal]) -> str:
+        """Create the active phase's durable tasks and stop after the first successful call."""
+
+        nonlocal completed
+        if completed:
+            raise ValueError("Task creation already completed for this role run")
+        result = create_tasks(tasks)
+        completed = True
+        return result
+
+    create_tasks_once.__name__ = "create_tasks"
+    return create_tasks_once
+
+
+def _evidence_reference_kind(reference: str, expected_kind: EvidenceRequirementKind) -> bool:
+    op_id = _operation_id()
+    if reference.startswith("artifact:"):
+        if expected_kind not in {"artifact", "inventory_manifest"}:
+            return False
+        if expected_kind == "inventory_manifest":
+            _load_inventory_manifest(reference)
+        else:
+            _artifact_path_from_ref(reference)
+        return True
+    if reference.startswith("memory:"):
+        memory_id = reference.split(":", 1)[1]
+        memory = _ensure_memory_client().get_memory_by_id(memory_id)
+        metadata = (memory or {}).get("metadata", {}) if isinstance(memory, dict) else {}
+        if not memory or metadata.get("operation_id", op_id) != op_id:
+            raise ValueError(f"Acceptance evidence memory does not exist in this operation: {reference}")
+        category = str(metadata.get("category", ""))
+        return expected_kind == "memory" or (expected_kind == "observation" and category == "observation")
+    if reference.startswith("finding:"):
+        finding_uid = reference.split(":", 1)[1]
+        record = _get_plan_store().get_finding(op_id, finding_uid)
+        if record is None:
+            raise ValueError(f"Acceptance evidence finding does not exist: {reference}")
+        if expected_kind == "finding_candidate":
+            return True
+        return expected_kind == "verified_finding" and record.get("resolution") == "verified"
+    raise ValueError("Acceptance evidence references must use artifact:, memory:, or finding: prefixes")
+
+
+def _validate_acceptance_result_evidence(
+    task: Task,
+    criterion: AcceptanceCriterion,
+    result: AcceptanceResult,
+) -> None:
+    references = list(result.evidence_refs)
+    for coverage_item in result.coverage:
+        references.extend(coverage_item.evidence_refs)
+    references = list(dict.fromkeys(references))
+    for reference in references:
+        if reference.startswith("artifact:"):
+            _artifact_path_from_ref(reference)
+        elif reference.startswith("memory:"):
+            _evidence_reference_kind(reference, "memory")
+        elif reference.startswith("finding:"):
+            finding_uid = reference.split(":", 1)[1]
+            if _get_plan_store().get_finding(_operation_id(), finding_uid) is None:
+                raise ValueError(f"Acceptance evidence finding does not exist: {reference}")
+        else:
+            raise ValueError("Acceptance evidence references must use artifact:, memory:, or finding: prefixes")
+    for requirement in criterion.evidence_requirements:
+        if requirement.kind == "inventory_manifest":
+            matching = 0
+            rejected = []
+            for reference in references:
+                if not reference.startswith("artifact:"):
+                    continue
+                try:
+                    _load_inventory_manifest(reference)
+                except ValueError as error:
+                    rejected.append(f"{reference}: {error}")
+                else:
+                    matching += 1
+            if matching < requirement.min_count:
+                diagnostic = f" Rejected candidates: {'; '.join(rejected)}." if rejected else ""
+                raise ValueError(
+                    f"Acceptance criterion {criterion.id} requires {requirement.min_count} "
+                    f"inventory_manifest evidence reference(s); received {matching}.{diagnostic} "
+                    f"Expected contract: {inventory_manifest_contract_text()}"
+                )
+            continue
+        matching = sum(
+            1 for reference in references if _evidence_reference_kind(reference, requirement.kind)
+        )
+        if matching < requirement.min_count:
+            raise ValueError(
+                f"Acceptance criterion {criterion.id} requires {requirement.min_count} "
+                f"{requirement.kind} evidence reference(s); received {matching}"
+            )
+    if task.acceptance.mode != "coverage":
+        if result.coverage:
+            raise ValueError("coverage results are allowed only for coverage acceptance mode")
+        return
+    artifact_ref = next(
+        reference for reference in task.acceptance.basis.source_refs if reference.startswith("artifact:")
+    )
+    manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
+    if snapshot_hash != task.acceptance.basis.snapshot_hash:
+        raise ValueError("Acceptance basis inventory manifest changed after task creation")
+    expected_ids = {str(item["id"]) for item in manifest["items"]}
+    actual_ids = {item.item_id for item in result.coverage}
+    if expected_ids != actual_ids:
+        missing = sorted(expected_ids - actual_ids)
+        unknown = sorted(actual_ids - expected_ids)
+        raise ValueError(f"Coverage ledger mismatch; missing={missing}, unknown={unknown}")
+
+
+def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> str:
+    """Persist acceptance results against the controller-selected task."""
+    normalized_uid = str(task_uid or "").strip()
+    if not normalized_uid:
+        raise ValueError("task_uid required")
+    if not results:
+        raise ValueError("results requires at least one acceptance result")
+    normalized_results = [AcceptanceResult.from_obj(result) for result in results]
+    if len({result.criterion_id for result in normalized_results}) != len(normalized_results):
+        raise ValueError("results must contain unique criterion_id values")
+
+    op_id = _operation_id()
+    store = _get_plan_store()
+    task = next((item for item in store.get_tasks(op_id) if item.task_uid == normalized_uid), None)
+    if task is None:
+        raise ValueError("Unknown task_uid for the current operation")
+    if task.status != "active":
+        raise ValueError("Acceptance results may be recorded only for the active task")
+    known_ids = {criterion.id for criterion in task.acceptance.criteria}
+    result_ids = {result.criterion_id for result in normalized_results}
+    if result_ids != known_ids:
+        missing_ids = sorted(known_ids - result_ids)
+        unknown_ids = sorted(result_ids - known_ids)
+        raise ValueError(f"Acceptance results must exactly match frozen criteria; missing={missing_ids}, unknown={unknown_ids}")
+
+    existing = store.get_acceptance_results(op_id, task.task_uid)
+    if existing:
+        if {result.criterion_id for result in existing} != known_ids:
+            raise ValueError("Existing acceptance ledger is incomplete and cannot be modified")
+        _store_task_acceptance_evidence(task, existing)
+        memory_published, memory_created, memory_warning = _publish_task_acceptance_memory(
+            task,
+            existing,
+        )
+        return _task_acceptance_response(
+            complete=True,
+            recorded_count=len(existing),
+            required_count=len(known_ids),
+            replayed=True,
+            memory_published=memory_published,
+            memory_created=memory_created,
+            memory_warning=memory_warning,
+        )
+
+    criteria = {criterion.id: criterion for criterion in task.acceptance.criteria}
+    for result in normalized_results:
+        _validate_acceptance_result_evidence(task, criteria[result.criterion_id], result)
+
+    store.store_acceptance_results(op_id, task.task_uid, normalized_results)
+    recorded_results = store.get_acceptance_results(op_id, task.task_uid)
+    _store_task_acceptance_evidence(task, recorded_results)
+    recorded_ids = {result.criterion_id for result in recorded_results}
+    memory_published, memory_created, memory_warning = _publish_task_acceptance_memory(
+        task,
+        recorded_results,
+    )
+    return _task_acceptance_response(
+        complete=recorded_ids == known_ids,
+        recorded_count=len(recorded_ids),
+        required_count=len(known_ids),
+        replayed=False,
+        memory_published=memory_published,
+        memory_created=memory_created,
+        memory_warning=memory_warning,
+    )
+
+
+def _task_acceptance_response(
+    *,
+    complete: bool,
+    recorded_count: int,
+    required_count: int,
+    replayed: bool,
+    memory_published: bool,
+    memory_created: bool,
+    memory_warning: str,
+) -> str:
+    payload: Dict[str, Any] = {
+        "complete": complete,
+        "recorded_count": recorded_count,
+        "required_count": required_count,
+        "replayed": replayed,
+        "memory_published": memory_published,
+        "memory_created": memory_created,
+    }
+    if memory_warning:
+        payload["memory_warning"] = memory_warning
+    return json.dumps(payload, sort_keys=True)
+
+
+def _bounded_acceptance_memory_text(value: Any, limit: int) -> str:
+    text = _clean_memory_text(value, "acceptance memory text")
+    if len(text) <= limit:
+        return text
+    marker = "... [truncated]"
+    return text[: limit - len(marker)].rstrip() + marker
+
+
+def _task_acceptance_memory_payload(
+    task: Task,
+    results: List[AcceptanceResult],
+) -> Tuple[str, Dict[str, Any], str]:
+    """Build one bounded, deterministic downstream memory for an immutable acceptance ledger."""
+
+    canonical_results = [result.to_dict() for result in sorted(results, key=lambda item: item.criterion_id)]
+    result_digest = hashlib.sha256(
+        json.dumps(canonical_results, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    publication_key = f"task_acceptance:{task.task_uid}:{result_digest}"
+    sections = [
+        f'Task acceptance for "{task.title}".',
+        f"Objective: {_bounded_acceptance_memory_text(task.objective, TASK_ACCEPTANCE_MEMORY_SUMMARY_MAX_CHARS)}.",
+    ]
+    evidence_refs: List[str] = []
+    status_metadata = []
+    for result in sorted(results, key=lambda item: item.criterion_id):
+        status_metadata.append(f"{result.criterion_id}:{result.status}")
+        section = (
+            f"Criterion {result.criterion_id} [{result.status}]: "
+            f"{_bounded_acceptance_memory_text(result.summary, TASK_ACCEPTANCE_MEMORY_SUMMARY_MAX_CHARS)}"
+        )
+        if result.coverage:
+            coverage_counts: Dict[str, int] = {}
+            for item in result.coverage:
+                coverage_counts[item.status] = coverage_counts.get(item.status, 0) + 1
+            coverage_summary = ", ".join(
+                f"{status}={count}" for status, count in sorted(coverage_counts.items())
+            )
+            section += f" Coverage: {coverage_summary}."
+        sections.append(section)
+        evidence_refs.extend(result.evidence_refs)
+    unique_evidence = list(dict.fromkeys(evidence_refs))
+    included_evidence = unique_evidence[:TASK_ACCEPTANCE_MEMORY_MAX_EVIDENCE_REFS]
+    if included_evidence:
+        sections.append("Evidence: " + ", ".join(included_evidence) + ".")
+    omitted_evidence = len(unique_evidence) - len(included_evidence)
+    if omitted_evidence:
+        sections.append(f"Additional evidence references omitted: {omitted_evidence}.")
+    content = _bounded_acceptance_memory_text(" ".join(sections), TASK_ACCEPTANCE_MEMORY_MAX_CHARS)
+    metadata = {
+        "source": "task_acceptance",
+        "publication_key": publication_key,
+        "task_uid": task.task_uid,
+        "task_phase": task.phase,
+        "acceptance_manifest_hash": task.acceptance.manifest_hash,
+        "criterion_statuses": "|".join(status_metadata),
+    }
+    if task.target_ids:
+        metadata["target_ids"] = "|".join(task.target_ids)
+    return content, metadata, publication_key
+
+
+def _publish_task_acceptance_memory(
+    task: Task,
+    results: List[AcceptanceResult],
+) -> Tuple[bool, bool, str]:
+    """Best-effort publish accepted task information as one replay-safe observation."""
+
+    content, metadata, publication_key = _task_acceptance_memory_payload(task, results)
+    store = _get_plan_store()
+    op_id = _operation_id()
+    if store.has_acceptance_memory_publication(op_id, task.task_uid, publication_key):
+        return True, False, ""
+    try:
+        created = _store_memory_entry(content, "observation", metadata).created
+        store.mark_acceptance_memory_published(op_id, task.task_uid, publication_key)
+        return True, created, ""
+    except Exception as error:
+        warning = _bounded_acceptance_memory_text(str(error).strip() or error.__class__.__name__, 500)
+        logger.warning(
+            "Unable to publish task acceptance memory task_uid=%s: %s",
+            task.task_uid,
+            warning,
+        )
+        return False, False, warning
+
+
+def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult]) -> None:
+    """Replace provisional task evidence with the validated immutable ledger references."""
+
+    evidence = []
+    for result in results:
+        evidence.extend(result.evidence_refs)
+        for coverage_item in result.coverage:
+            evidence.extend(coverage_item.evidence_refs)
+    canonical_evidence = list(dict.fromkeys(evidence))
+    if task.evidence == canonical_evidence:
+        return
+    _ensure_memory_client().store_task(
+        task=Task(
+            task_uid=task.task_uid,
+            title=task.title,
+            objective=task.objective,
+            acceptance=task.acceptance,
+            phase=task.phase,
+            status=task.status,
+            status_reason=task.status_reason,
+            evidence=canonical_evidence,
+            created_at=task.created_at,
+            kind=task.kind,
+            reference_id=task.reference_id,
+            target_scope=task.target_scope,
+            target_ids=task.target_ids,
+        ),
+        user_id=_user_id(),
+    )
+
+
+def build_record_task_acceptance_tool(task_uid: str) -> Any:
+    """Build a model-facing acceptance tool bound to one controller-selected task."""
+
+    normalized_uid = str(task_uid or "").strip()
+    if not normalized_uid:
+        raise ValueError("task_uid required when binding record_task_acceptance")
+
+    def record_task_acceptance(results: List[AcceptanceResult]) -> str:
+        return _record_task_acceptance(normalized_uid, results)
+
+    record_task_acceptance.__doc__ = f"""Record evidence-backed terminal results for the assigned task.
+
+    Input shape: {{"results": [{{"criterion_id": "criterion-id",
+    "status": "satisfied|assessed_negative|inaccessible|excluded|duplicate",
+    "summary": "Observed result", "evidence_refs": ["memory:<id>", "artifact:<path>"],
+    "coverage": [{{"item_id": "manifest-item", "status": "satisfied",
+    "evidence_refs": ["artifact:<path>"]}}]}}]}}
+
+    Task identity is supplied by the workflow controller. Submit every frozen criterion in one atomic call.
+    Successfully recorded results are immutable. Their concrete summaries and evidence references are automatically
+    published as one operation observation for later task-prompt selection. A publication warning does not invalidate
+    the acceptance ledger.
+
+    Inventory artifact contract: {inventory_manifest_contract_text()}
+    """
+    return tool(record_task_acceptance)
 
 
 def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:
@@ -2243,6 +3481,11 @@ class Mem0ServiceClient:
                 add_kwargs["run_id"] = op_id
                 metadata["operation_id"] = op_id
 
+            # Platform writes default to asynchronous processing, which may return before a durable
+            # memory ID can be used as acceptance evidence. The local Mem0 API has no async_mode argument.
+            if isinstance(self.mem0, MemoryClient):
+                add_kwargs["async_mode"] = False
+
             # Debug: Log metadata BEFORE storage
             logger.debug(
                 "BEFORE mem0.add() - category=%s, metadata=%s",
@@ -2732,6 +3975,7 @@ class Mem0ServiceClient:
                             task_uid=t.task_uid,
                             title=t.title,
                             objective=t.objective,
+                            acceptance=t.acceptance,
                             evidence=t.evidence,
                             phase=t.phase,
                             status="pending",
@@ -2739,6 +3983,8 @@ class Mem0ServiceClient:
                             created_at=t.created_at,
                             kind=t.kind,
                             reference_id=t.reference_id,
+                            target_scope=t.target_scope,
+                            target_ids=t.target_ids,
                         )
                         _get_plan_store().store_task(op_id, demoted)
             except Exception as e:
@@ -2780,6 +4026,7 @@ class Mem0ServiceClient:
                 task_uid=target.task_uid,
                 title=target.title,
                 objective=target.objective,
+                acceptance=target.acceptance,
                 evidence=target.evidence,
                 phase=target.phase,
                 status=new_status,
@@ -2787,6 +4034,8 @@ class Mem0ServiceClient:
                 created_at=target.created_at,
                 kind=target.kind,
                 reference_id=target.reference_id,
+                target_scope=target.target_scope,
+                target_ids=target.target_ids,
             )
             self.store_task(task=updated, user_id=user_id)
 
@@ -2805,6 +4054,7 @@ class Mem0ServiceClient:
                         task_uid=p.task_uid,
                         title=p.title,
                         objective=p.objective,
+                        acceptance=p.acceptance,
                         evidence=p.evidence,
                         phase=p.phase,
                         status="active",
@@ -2812,6 +4062,8 @@ class Mem0ServiceClient:
                         created_at=p.created_at,
                         kind=p.kind,
                         reference_id=p.reference_id,
+                        target_scope=p.target_scope,
+                        target_ids=p.target_ids,
                     )
                     self.store_task(task=next_active, user_id=user_id)
 
@@ -2846,6 +4098,7 @@ class Mem0ServiceClient:
             task_uid=p.task_uid,
             title=p.title,
             objective=p.objective,
+            acceptance=p.acceptance,
             evidence=p.evidence,
             phase=p.phase,
             status="active",
@@ -2853,6 +4106,8 @@ class Mem0ServiceClient:
             created_at=p.created_at,
             kind=p.kind,
             reference_id=p.reference_id,
+            target_scope=p.target_scope,
+            target_ids=p.target_ids,
         )
 
         self.store_task(task=next_active, user_id=user_id)
@@ -2874,6 +4129,11 @@ class Mem0ServiceClient:
             if not status or t.status in status:
                 result.append(t)
         return result
+
+    def list_task_acceptance_results(self, task_uid: str) -> List[AcceptanceResult]:
+        """Return the frozen-manifest result ledger for one task."""
+
+        return _get_plan_store().get_acceptance_results(_operation_id(), task_uid)
 
     def get_memory_overview(self, user_id: Optional[str] = None) -> Dict:
         """Get an overview of stored memories."""

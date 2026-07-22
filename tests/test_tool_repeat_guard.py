@@ -415,7 +415,7 @@ def test_interrupted_canceled_cycle_does_not_stop_or_cache_results():
 
 def test_recovery_blocked_alternating_cycle_is_stopped_without_caching_policy_results():
     repeat_hook = ToolRepeatGuardHook(repeat_threshold=3, max_cycle_length=2)
-    recovery_hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    recovery_hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=100)
     invocation_state = {"request_state": {}}
     real_tool = FakeTool()
 
@@ -462,10 +462,36 @@ def test_recovery_blocked_alternating_cycle_is_stopped_without_caching_policy_re
     }
 
 
+def test_failed_diagnostic_does_not_seed_recovery_blocked_calls():
+    repeat_hook = ToolRepeatGuardHook()
+    journal = ToolOutcomeJournal()
+    recovery_hook = TaskFailureRecoveryHook(journal, max_policy_violations=100)
+    invocation_state = {"request_state": {}}
+    real_tool = FakeTool()
+
+    diagnostic = _before(invocation_state, real_tool, "diagnostic", {"command": "ls /missing"})
+    _run_combined_before(repeat_hook, recovery_hook, diagnostic)
+    _run_combined_after(
+        recovery_hook,
+        repeat_hook,
+        diagnostic,
+        _result("diagnostic", "No such file or directory", status="error"),
+    )
+
+    following = _before(invocation_state, real_tool, "following", {"command": "curl -I http://target"})
+    _run_combined_before(repeat_hook, recovery_hook, following)
+
+    assert following.cancel_tool is False
+    assert following.selected_tool is real_tool
+    assert recovery_hook.unresolved is False
+    assert journal.entries()[0].correctable is False
+    assert invocation_state["request_state"] == {}
+
+
 def test_recovery_blocked_three_call_cycle_stops_at_default_threshold():
     repeat_hook = ToolRepeatGuardHook()
     journal = ToolOutcomeJournal()
-    recovery_hook = TaskFailureRecoveryHook(journal)
+    recovery_hook = TaskFailureRecoveryHook(journal, max_policy_violations=100)
     invocation_state = {"request_state": {}}
     real_tool = FakeTool()
 

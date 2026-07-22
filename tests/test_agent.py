@@ -674,7 +674,10 @@ def test_create_agent_uses_role_specific_event_handler(monkeypatch):
         config=config,
         operation_id="OP_ROLE",
         server_config=SimpleNamespace(swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm-model"))),
-        config_manager=SimpleNamespace(getenv=lambda _name, default=None: default),
+        config_manager=SimpleNamespace(
+            getenv=lambda _name, default=None: default,
+            getenv_int=lambda _name, default=None: default,
+        ),
         callback_handler=root_handler,
         tools_list=[],
         tool_executor=object(),
@@ -735,7 +738,10 @@ def test_create_agent_can_disable_tool_catalog_for_restricted_role(monkeypatch):
         config=config,
         operation_id="OP_TASK_CREATOR",
         server_config=SimpleNamespace(swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm-model"))),
-        config_manager=SimpleNamespace(getenv=lambda _name, default=None: default),
+        config_manager=SimpleNamespace(
+            getenv=lambda _name, default=None: default,
+            getenv_int=lambda _name, default=None: default,
+        ),
         callback_handler=root_handler,
         tools_list=[],
         tool_executor=object(),

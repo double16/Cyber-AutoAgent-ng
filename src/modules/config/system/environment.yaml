@@ -117,10 +117,11 @@ cyber_tools:
     description: "Web path/directory discovery scanner"
     caps: [web_content_discovery, web_fuzzing]
     canary: "dirsearch -h"
-  arjun:
-    description: "HTTP parameter discovery suite"
-    caps: [web_recon, injection_testing]
-    canary: "arjun -h"
+# 2026-07-21: arjun has issues writing to a JSON output file, keep it installed for advanced_payload_coordinator
+#  arjun:
+#    description: "HTTP parameter discovery suite"
+#    caps: [web_recon, injection_testing]
+#    canary: "arjun -h"
   wapiti:
     description: "Web vulnerability scanner"
     caps: [web_scanning]
