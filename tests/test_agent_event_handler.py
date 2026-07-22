@@ -950,6 +950,17 @@ def test_concurrent_termination_emits_once():
     assert handler.termination_reason == "budget_limit"
 
 
+def test_child_termination_is_agent_scoped_and_does_not_end_operation():
+    handler = make_handler()
+    handler.parent_agent_run_id = "operation-controller-1"
+
+    handler.emit_termination("stalled", "No actions taken")
+
+    assert event_types(handler) == ["agent_termination"]
+    assert handler._events[0]["scope"] == "agent"
+    assert handler.coordinator.termination_reason is None
+
+
 def test_internal_step_and_event_defensive_paths(monkeypatch):
     handler = make_handler()
 

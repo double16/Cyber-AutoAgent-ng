@@ -19,6 +19,7 @@ from strands.types.exceptions import MaxTokensReachedException
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import cyberautoagent
+from modules.handlers.tool_recovery import ToolOutcomeJournal
 
 
 @pytest.fixture(autouse=True)
@@ -1033,6 +1034,113 @@ def test_run_agent_until_terminal_state_no_actions(monkeypatch):
     assert result.reason == "no_actions"
 
 
+def test_retained_executor_cycle_stalls_with_sticky_reasoning_and_no_new_tools(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    role_callback._emitted_any_reasoning = True
+    role_callback.tool_counts = {"shell": 12}
+
+    class TextOnlyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            return SimpleNamespace(metrics=None)
+
+    agent = TextOnlyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            max_actionless_calls=3,
+        ),
+    )
+
+    assert result.reason == "stalled"
+    assert result.message == "No actions taken after 3 attempts"
+    assert len(agent.calls) == 3
+    assert "Call an available tool now" in agent.calls[1]
+    assert "Call record_task_acceptance now" in agent.calls[2]
+    assert "final answer" not in agent.calls[2]
+    role_callback.emit_termination.assert_called_once_with("stalled", result.message)
+
+
+def test_run_agent_until_terminal_state_has_absolute_agent_call_bound(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+
+    class AlwaysActingAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            role_callback.tool_counts["shell"] = len(self.calls)
+            return SimpleNamespace(metrics=None)
+
+    agent = AlwaysActingAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(max_agent_calls=4),
+    )
+
+    assert result.reason == "stalled"
+    assert result.message == "Stopped after 4 agent calls without reaching the role contract"
+    assert len(agent.calls) == 4
+    role_callback.emit_termination.assert_called_once_with("stalled", result.message)
+
+
+def test_run_agent_until_terminal_state_passes_sdk_turn_limit(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+
+    class LimitedAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+
+        def __call__(self, message, **kwargs):
+            self.calls.append((message, kwargs))
+            return SimpleNamespace(metrics=None, stop_reason="limit_turns")
+
+    agent = LimitedAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        callback,
+        run_policy=cyberautoagent.AgentRunPolicy(max_model_turns=7),
+    )
+
+    assert result.reason == "stalled"
+    assert result.message == "Agent stopped at its configured SDK limit: limit_turns"
+    assert agent.calls == [("initial", {"limits": {"turns": 7}})]
+    callback.emit_termination.assert_called_once_with("stalled", result.message)
+
+
 def test_run_agent_until_terminal_state_uses_agent_callback_for_role_tool_calls(monkeypatch):
     root_callback = CliCallback()
     root_callback.should_stop = Mock(return_value=False)
@@ -1301,6 +1409,53 @@ def test_run_agent_policy_requires_success_marker_when_configured(monkeypatch):
     assert len(agent.calls) == 2
 
 
+def test_run_agent_policy_waits_for_all_successful_required_tool_outcomes(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    role_callback.tool_outcome_journal = ToolOutcomeJournal()
+
+    class PolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            tool_name = "record_task_acceptance" if len(self.calls) == 1 else "record_finding_validation"
+            role_callback.tool_counts[tool_name] = 1
+            role_callback.tool_outcome_journal.append(
+                tool_use_id=f"tool-{len(self.calls)}",
+                tool_name=tool_name,
+                success=True,
+                correctable=False,
+                tool_input={},
+                output="complete",
+            )
+            return SimpleNamespace(metrics=None, state={})
+
+    agent = PolicyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"record_task_acceptance", "record_finding_validation"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            terminal_reason="task_executor_done",
+        ),
+    )
+
+    assert result.reason == "task_executor_done"
+    assert len(agent.calls) == 2
+
+
 def test_run_agent_policy_requires_new_tool_calls_for_reused_agent_pass(monkeypatch):
     root_callback = CliCallback()
     role_callback = CliCallback()
@@ -1536,6 +1691,96 @@ def test_run_agent_until_terminal_state_propagates_max_tokens(monkeypatch):
             max_duration=60,
             logger=logger,
         )
+
+
+def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
+    journal = ToolOutcomeJournal()
+    journal.append(
+        tool_use_id="tool-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        tool_input={"command": "curl target"},
+        output="200 OK",
+    )
+    callback = SimpleNamespace(tool_outcome_journal=journal)
+    agent = SimpleNamespace(
+        _cyber_agent_type="task_executor",
+        _cyber_callback_handler=callback,
+        model=SimpleNamespace(_output_tokens=6000),
+        messages=[{"role": "user", "content": [{"text": "assigned task"}]}],
+    )
+    calls = []
+    repeated = "I should repeat this analysis rather than call the required tool.\n" * 60
+
+    def run_agent(**kwargs):
+        calls.append(kwargs["current_message"])
+        if len(calls) == 1:
+            agent.messages.append({"role": "assistant", "content": [{"text": repeated}]})
+            raise MaxTokensReachedException("max_tokens")
+        return cyberautoagent.AgentRunResult("task_executor_done", "done")
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", run_agent)
+    logger = SimpleNamespace(warning=Mock())
+
+    result = cyberautoagent.run_workflow_agent_with_max_token_recovery(
+        agent=agent,
+        prompt="original task prompt",
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+        ),
+        callback_handler=callback,
+        initial_prompt="initial",
+        budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+        operation_start=cyberautoagent.time.time(),
+        max_duration=60,
+        logger=logger,
+    )
+
+    assert result.reason == "task_executor_done"
+    assert len(calls) == 2
+    assert "repetitive reasoning was detected" in calls[1]
+    assert "Successful tools already observed: shell" in calls[1]
+    assert "Outstanding required tools: record_task_acceptance" in calls[1]
+    assert repeated not in calls[1]
+    assert agent.messages == [{"role": "user", "content": [{"text": "assigned task"}]}]
+
+
+def test_workflow_task_executor_propagates_second_max_tokens(monkeypatch):
+    callback = SimpleNamespace(tool_outcome_journal=ToolOutcomeJournal())
+    agent = SimpleNamespace(
+        _cyber_agent_type="task_executor",
+        _cyber_callback_handler=callback,
+        model=SimpleNamespace(_output_tokens=6000),
+        messages=[],
+    )
+    calls = []
+    repeated = "The same reasoning loop continues without a tool call.\n" * 60
+
+    def run_agent(**kwargs):
+        calls.append(kwargs["current_message"])
+        agent.messages.append({"role": "assistant", "content": [{"text": repeated}]})
+        raise MaxTokensReachedException("max_tokens")
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", run_agent)
+
+    with pytest.raises(MaxTokensReachedException) as exc_info:
+        cyberautoagent.run_workflow_agent_with_max_token_recovery(
+            agent=agent,
+            prompt="original task prompt",
+            run_policy=cyberautoagent.AgentRunPolicy(required_tool_names={"record_task_acceptance"}),
+            callback_handler=callback,
+            initial_prompt="initial",
+            budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+            operation_start=cyberautoagent.time.time(),
+            max_duration=60,
+            logger=SimpleNamespace(warning=Mock()),
+        )
+
+    assert len(calls) == 2
+    assert exc_info.value.max_token_classification.kind == "reasoning_loop"
+    assert agent.messages == []
 
 
 def test_finalize_report_and_evaluation_runs_once(monkeypatch):

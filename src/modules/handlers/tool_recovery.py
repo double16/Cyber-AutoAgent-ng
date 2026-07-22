@@ -39,7 +39,7 @@ _MUTATING_TOOLS = {
     "store_knowledge",
     "store_observation",
 }
-_READ_ONLY_TOOLS = {"mem0_retrieve", "read_artifact"}
+_READ_ONLY_TOOLS = {"mem0_retrieve", "read_artifact", "tool_catalog"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 _SENSITIVE_KEYS = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 TOOL_RECOVERY_EXHAUSTED_STATE_KEY = "tool_recovery_exhausted"

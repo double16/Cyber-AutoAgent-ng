@@ -298,9 +298,9 @@ active-task fetch tool; active task context is selected by Python and included i
 submit flat `TaskProposal` objects, and Python compiles each into a controller-frozen acceptance contract containing a
 basis, source references, unique criteria, and evidence requirements. The rules are:
 
-- create one task per cohesive actionable deliverable; related coverage items belong in one criterion manifest
+- create one task per cohesive actionable deliverable; Python shards large coverage manifests into bounded tasks
 - omit phase, status, task evidence, target scope, and the nested acceptance contract
-- provide criterion descriptions and evidence requirements; Python generates criterion IDs in the frozen contract
+- provide criterion descriptions only; Python generates criterion IDs and evidence requirements in the frozen contract
 - provide procedure methods and positive limits, or provide existing snapshot references
 - omit `target_ids` for all targets or provide exact IDs for a subset
 - do not create duplicates
@@ -308,13 +308,18 @@ basis, source references, unique criteria, and evidence requirements. The rules 
 - create prerequisite inventory work before dependent coverage tasks
 - create a follow-up task for discoveries outside an active task's frozen manifest
 
-Snapshot references use explicit `task:<uid>`, `memory:<id>`, `artifact:<path>`, or `finding:<uid>` namespaces. For
-procedures, Python generates target and active-phase source references, injects the fixed stopping and gap policies,
-infers output kind from criterion evidence, and generates readable unique criterion IDs from descriptions.
+Snapshot references use explicit `task:<uid>`, `memory:<id>`, `artifact:<path>`, or `finding:<uid>` namespaces. Coverage
+may omit the reference when exactly one completed canonical inventory is eligible. For procedures, Python generates
+target and active-phase source references, injects fixed stopping and gap policies, defaults `output_kind` to
+`artifact`, and generates readable unique criterion IDs from descriptions.
 
-The procedure `output_kind` and its evidence requirements must agree. An `artifact` procedure cannot require an
-`inventory_manifest`, while an `inventory_manifest` procedure must require one. This rejects task contracts that
-would otherwise attempt to validate a workflow map or report as a versioned inventory.
+Set procedure `output_kind` to `inventory_manifest` only for a canonical versioned inventory. Snapshot work uses
+generic durable evidence, so assessed-negative coverage can be supported by an artifact or operation memory without
+requiring a vulnerability finding.
+
+Coverage batching uses the configured or detected model context window. At the common 48,000-token context, a batch
+contains at most 12 manifest items and is reduced further when serialized item data would consume more than 20% of
+the context.
 
 For example, parameter mapping can use one retained executor with one criterion per endpoint from the completed
 endpoint inventory. Workflow mapping can freeze login, logout, setup/reset, and security-level transitions as criteria

@@ -45,15 +45,10 @@ def task_proposal(
     return {
         "title": title,
         "objective": objective,
-        "basis_kind": "procedure",
         "basis_description": "Bounded test procedure",
         "methods": ["test-fixture"],
         "limits": {"max_items": 1},
-        "criteria": [
-            {
-                "description": criterion_description,
-                "evidence": [{"kind": evidence_kind, "min_count": 1}],
-            }
-        ],
+        "output_kind": "inventory_manifest" if evidence_kind == "inventory_manifest" else "artifact",
+        "criteria": [{"description": criterion_description}],
         "target_ids": list(target_ids or []),
     }

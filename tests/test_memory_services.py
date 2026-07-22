@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -507,9 +508,35 @@ def test_acceptance_result_rejects_non_terminal_or_evidenceless_results(payload)
 def test_task_proposal_accepts_concise_procedure_shape():
     proposal = mod.TaskProposal.model_validate(task_proposal("Check", "Check target"))
 
-    assert proposal.basis_kind == "procedure"
+    assert proposal.inferred_basis_kind == "procedure"
     assert proposal.limits.max_items == 1
     assert proposal.target_ids == []
+
+
+def test_task_proposal_defaults_basis_description_to_objective():
+    payload = task_proposal("Check", "Check target")
+    payload.pop("basis_description")
+
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.effective_basis_description == "Check target"
+
+
+def test_task_proposal_defaults_procedure_output_to_artifact():
+    payload = task_proposal("Check", "Check target")
+    payload.pop("output_kind")
+    proposal = mod.TaskProposal.model_validate(payload)
+    plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Check", status="active")],
+    )
+
+    contract = mod._proposal_acceptance_contract(proposal, plan)
+
+    assert contract.basis.procedure.output_kind == "artifact"
+    assert contract.criteria[0].evidence_requirements[0].kind == "artifact"
 
 
 @pytest.mark.parametrize(
@@ -517,7 +544,7 @@ def test_task_proposal_accepts_concise_procedure_shape():
     [
         ("title", "title required"),
         ("objective", "objective required"),
-        ("basis_description", "basis_description required"),
+        ("basis_description", "basis_description must be non-empty"),
     ],
 )
 def test_task_proposal_rejects_whitespace_required_fields(field_name, message):
@@ -543,7 +570,6 @@ def test_task_proposal_compiler_generates_readable_unique_criterion_ids():
             {**payload["criteria"][0]},
             {
                 "description": "Store resume route inventory",
-                "evidence": [{"kind": "inventory_manifest", "min_count": 1}],
             },
         ]
     )
@@ -569,7 +595,6 @@ def test_task_proposal_criterion_id_uses_bounded_ordinal_fallback():
     payload["criteria"].append(
         {
             "description": "A" * 100,
-            "evidence": [{"kind": "inventory_manifest", "min_count": 1}],
         }
     )
     proposal = mod.TaskProposal.model_validate(payload)
@@ -616,8 +641,8 @@ def test_task_proposal_limits_require_positive_value():
     [
         ({"methods": []}, "requires methods"),
         ({"limits": None}, "requires limits"),
-        ({"snapshot_refs": ["memory:m1"]}, "must not include snapshot_refs"),
-        ({"coverage": True}, "must not enable coverage"),
+        ({"snapshot_refs": ["memory:m1"]}, "must not mix"),
+        ({"coverage": True}, "must not mix"),
     ],
 )
 def test_task_proposal_rejects_invalid_procedure_combinations(updates, message):
@@ -630,22 +655,30 @@ def test_task_proposal_rejects_invalid_procedure_combinations(updates, message):
 
 def test_task_proposal_rejects_snapshot_procedure_fields():
     payload = task_proposal("Check", "Check target")
-    payload.update({"basis_kind": "snapshot", "snapshot_refs": ["memory:m1"]})
+    payload.update({"snapshot_refs": ["memory:m1"]})
 
-    with pytest.raises(ValueError, match="must not include methods"):
+    with pytest.raises(ValueError, match="must not mix"):
+        mod.TaskProposal.model_validate(payload)
+
+
+def test_task_proposal_rejects_removed_basis_kind():
+    payload = task_proposal("Check", "Check target")
+    payload["basis_kind"] = "procedure"
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         mod.TaskProposal.model_validate(payload)
 
 
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
-        ({"snapshot_refs": []}, "requires snapshot_refs"),
-        ({"limits": {"max_items": 1}}, "must not include limits"),
+        ({"snapshot_refs": []}, "requires methods and limits, snapshot_refs, or coverage"),
+        ({"limits": {"max_items": 1}}, "must not mix"),
     ],
 )
 def test_task_proposal_rejects_invalid_snapshot_combinations(updates, message):
     payload = task_proposal("Check", "Check target")
-    payload.update({"basis_kind": "snapshot", "methods": [], "limits": None, "snapshot_refs": ["memory:m1"]})
+    payload.update({"methods": [], "limits": None, "snapshot_refs": ["memory:m1"]})
     payload.update(updates)
 
     with pytest.raises(ValueError, match=message):
@@ -654,7 +687,7 @@ def test_task_proposal_rejects_invalid_snapshot_combinations(updates, message):
 
 def test_task_proposal_compiler_builds_snapshot_outcome_contract():
     payload = task_proposal("Review", "Review stored evidence", evidence_kind="memory")
-    payload.update({"basis_kind": "snapshot", "methods": [], "limits": None, "snapshot_refs": ["memory:m1"]})
+    payload.update({"methods": [], "limits": None, "snapshot_refs": ["memory:m1"], "output_kind": "artifact"})
     proposal = mod.TaskProposal.model_validate(payload)
     plan = mod.OperationPlan(
         objective="Assess",
@@ -670,26 +703,12 @@ def test_task_proposal_compiler_builds_snapshot_outcome_contract():
     assert contract.basis.source_refs == ("memory:m1",)
 
 
-@pytest.mark.parametrize(
-    ("evidence", "message"),
-    [
-        ([{"kind": "artifact"}, {"kind": "inventory_manifest"}], "must not mix"),
-        ([{"kind": "memory"}], "requires artifact or inventory_manifest"),
-    ],
-)
-def test_task_proposal_compiler_rejects_invalid_procedure_outputs(evidence, message):
+def test_task_proposal_rejects_model_supplied_evidence_contract():
     payload = task_proposal("Check", "Check target")
-    payload["criteria"][0]["evidence"] = evidence
-    proposal = mod.TaskProposal.model_validate(payload)
-    plan = mod.OperationPlan(
-        objective="Assess",
-        current_phase=1,
-        total_phases=1,
-        phases=[mod.PlanPhase(id=1, title="Check", status="active")],
-    )
+    payload["criteria"][0]["evidence"] = [{"kind": "memory"}]
 
-    with pytest.raises(ValueError, match=message):
-        mod._proposal_acceptance_contract(proposal, plan)
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        mod.TaskProposal.model_validate(payload)
 
 
 def test_resolve_operation_targets_prefers_objective_literals_over_logical_target():
@@ -716,24 +735,24 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
     task_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposal"]
     criterion_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposalCriterion"]
 
-    assert task_schema["required"] == ["title", "objective", "basis_kind", "basis_description", "criteria"]
+    assert task_schema["required"] == ["title", "objective", "criteria"]
     assert set(task_schema["properties"]) == {
         "title",
         "objective",
-        "basis_kind",
         "basis_description",
         "methods",
         "limits",
         "snapshot_refs",
         "coverage",
+        "output_kind",
         "criteria",
         "target_ids",
     }
     schema_text = json.dumps(task_schema["properties"])
-    for removed in ("acceptance", "phase", "status", "target_scope", "output_kind", "gap_policy", "stop_condition"):
+    for removed in ("acceptance", "phase", "status", "target_scope", "gap_policy", "stop_condition", "basis_kind"):
         assert removed not in schema_text
-    assert criterion_schema["required"] == ["description", "evidence"]
-    assert set(criterion_schema["properties"]) == {"description", "evidence"}
+    assert criterion_schema["required"] == ["description"]
+    assert set(criterion_schema["properties"]) == {"description"}
 
 
 def test_create_tasks_generated_schema_accepts_proposal_and_rejects_legacy_contract():
@@ -763,10 +782,10 @@ def test_create_tasks_tool_description_contains_exact_required_shape():
     description = tool_spec["description"]
     normalized_description = " ".join(description.split())
 
-    assert '"basis_kind": "procedure"' in normalized_description
-    assert '"evidence": [{"kind": "inventory_manifest"' in normalized_description
-    assert "Python assigns the active phase and pending status" in description
-    assert "Criterion IDs, procedure stop conditions, gap policy, output kind, and source references are deterministic" in normalized_description
+    assert '"output_kind": "inventory_manifest"' in normalized_description
+    assert '"criteria": [{"description": "Store the finite inventory"}]' in normalized_description
+    assert "Python infers the basis kind" in description
+    assert "coverage batches" in normalized_description
 
 
 def test_create_tasks_rejects_task_without_required_title():
@@ -826,10 +845,6 @@ def test_create_tasks_infers_all_targets_and_compiles_multiple_criteria(fake_mem
     proposal["criteria"].append(
         {
             "description": "coverage notes",
-            "evidence": [
-                {"kind": "inventory_manifest", "min_count": 1},
-                {"kind": "observation", "min_count": 1},
-            ],
         }
     )
 
@@ -891,15 +906,11 @@ def test_create_tasks_freezes_valid_coverage_manifest(fake_memory_client):
             {
                 "title": "Test frozen inventory",
                 "objective": "Assess the finite inventory",
-                "basis_kind": "snapshot",
                 "basis_description": "Frozen endpoint inventory",
                 "snapshot_refs": [f"artifact:{manifest}"],
                 "coverage": True,
                 "criteria": [
-                    {
-                        "description": "Assess every item ID in the frozen inventory",
-                        "evidence": [{"kind": "artifact", "min_count": 1}],
-                    }
+                    {"description": "Assess every item ID in the frozen inventory"}
                 ],
             }
         ]
@@ -907,6 +918,116 @@ def test_create_tasks_freezes_valid_coverage_manifest(fake_memory_client):
 
     assert json.loads(result)["created_count"] == 1
     assert len(store.tasks[0].acceptance.basis.snapshot_hash) == 64
+    assert store.tasks[0].acceptance.basis.item_ids == ("endpoint-1",)
+    assert store.tasks[0].acceptance.criteria[0].evidence_requirements[0].kind == "durable_evidence"
+
+
+def test_create_tasks_binds_canonical_manifest_and_shards_for_48k_context(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "large-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": f"endpoint-{index}",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": f"http://target.test/{index}",
+                "attributes": {},
+            }
+            for index in range(25)
+        ],
+        "unassessed_gaps": [],
+    }))
+    producer = mod.Task(
+        task_uid="inventory-task",
+        title="Inventory",
+        objective="Produce inventory",
+        acceptance=make_acceptance("produce-inventory"),
+        evidence=[str(manifest)],
+        phase=1,
+        status="done",
+    )
+    store.store_task("op1", producer)
+
+    result = mod.build_create_tasks_tool(prompt_token_limit=48_000)(tasks=[{
+        "title": "Assess inventory",
+        "objective": "Assess every frozen inventory item",
+        "coverage": True,
+        "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+    }])
+
+    assert json.loads(result)["created_count"] == 3
+    batches = [task for task in store.tasks if task.task_uid != "inventory-task"]
+    assert [len(task.acceptance.basis.item_ids) for task in batches] == [12, 12, 1]
+    assert [task.title for task in batches] == [
+        "Assess inventory (batch 1/3)",
+        "Assess inventory (batch 2/3)",
+        "Assess inventory (batch 3/3)",
+    ]
+    assert all(task.acceptance.basis.source_refs == (f"artifact:{manifest}",) for task in batches)
+
+
+def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "retry-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": f"endpoint-{index}",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": f"http://target.test/{index}",
+                "attributes": {},
+            }
+            for index in range(3)
+        ],
+        "unassessed_gaps": [],
+    }))
+    first_payload = {
+        "title": "Assess inventory",
+        "objective": "Assess every frozen inventory item",
+        "snapshot_refs": [f"artifact:{manifest}"],
+        "coverage": True,
+        "criteria": [{"description": "Record every assigned disposition"}],
+    }
+    mod.create_tasks([first_payload])
+    first = store.tasks[0]
+    first = replace(first, status="partial_failure")
+    store.store_task("op1", first)
+    store.acceptance_results[first.task_uid] = [mod.AcceptanceResult(
+        criterion_id=first.acceptance.criteria[0].id,
+        status="satisfied",
+        summary="One item assessed",
+        evidence_refs=(f"artifact:{manifest}",),
+        coverage=(mod.CoverageResult(
+            item_id="endpoint-0",
+            status="assessed_negative",
+            evidence_refs=(f"artifact:{manifest}",),
+        ),),
+    )]
+
+    result = mod.create_tasks([first_payload])
+
+    assert json.loads(result)["created_count"] == 1
+    assert store.tasks[-1].acceptance.basis.item_ids == ("endpoint-1", "endpoint-2")
 
 
 def test_bound_create_tasks_tool_allows_correction_then_only_one_success(fake_memory_client):
@@ -949,12 +1070,12 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
     assert set(task_schema["properties"]) == {
         "title",
         "objective",
-        "basis_kind",
         "basis_description",
         "methods",
         "limits",
         "snapshot_refs",
         "coverage",
+        "output_kind",
         "criteria",
         "target_ids",
     }
@@ -990,15 +1111,11 @@ def test_create_tasks_rejects_missing_or_incomplete_coverage_basis_atomically(fa
                 {
                     "title": "Invalid dependent coverage",
                     "objective": "Consume a missing inventory",
-                    "basis_kind": "snapshot",
                     "basis_description": "Missing inventory",
                     "snapshot_refs": [f"artifact:{missing}"],
                     "coverage": True,
                     "criteria": [
-                        {
-                            "description": "Assess every item in the missing inventory",
-                            "evidence": [{"kind": "artifact", "min_count": 1}],
-                        }
+                        {"description": "Assess every item in the missing inventory"}
                     ],
                 },
             ]
@@ -1079,15 +1196,11 @@ def test_acceptance_basis_reference_resolution_rejects_invalid_sources(fake_memo
                 {
                     "title": "Coverage with failed producer",
                     "objective": "Consume inventory",
-                    "basis_kind": "snapshot",
                     "basis_description": "Frozen inventory",
                     "snapshot_refs": [f"artifact:{manifest}"],
                     "coverage": True,
                     "criteria": [
-                        {
-                            "description": "Assess every frozen inventory item",
-                            "evidence": [{"kind": "artifact", "min_count": 1}],
-                        }
+                        {"description": "Assess every frozen inventory item"}
                     ],
                 }
             ]

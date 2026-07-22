@@ -96,6 +96,7 @@ DISCOVERY_PROCEDURE_LIMIT_KEYS = (
 EvidenceRequirementKind = Literal[
     "artifact",
     "inventory_manifest",
+    "durable_evidence",
     "observation",
     "finding_candidate",
     "verified_finding",
@@ -235,6 +236,7 @@ class EvidenceRequirement:
         if self.kind not in (
             "artifact",
             "inventory_manifest",
+            "durable_evidence",
             "observation",
             "finding_candidate",
             "verified_finding",
@@ -374,6 +376,7 @@ class AcceptanceBasis:
     source_refs: Tuple[str, ...]
     procedure: Optional[DiscoveryProcedure] = None
     snapshot_hash: str = ""
+    item_ids: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         description = str(self.description or "").strip()
@@ -400,6 +403,10 @@ class AcceptanceBasis:
         object.__setattr__(self, "source_refs", source_refs)
         object.__setattr__(self, "procedure", procedure)
         object.__setattr__(self, "snapshot_hash", str(self.snapshot_hash or "").strip())
+        item_ids = tuple(dict.fromkeys(str(item).strip() for item in self.item_ids if str(item).strip()))
+        if self.kind != "snapshot" and item_ids:
+            raise ValueError("procedure acceptance basis must not contain item_ids")
+        object.__setattr__(self, "item_ids", item_ids)
 
     @staticmethod
     def from_obj(obj: Any) -> "AcceptanceBasis":
@@ -413,6 +420,7 @@ class AcceptanceBasis:
             source_refs=obj.get("source_refs", []),
             procedure=obj.get("procedure"),
             snapshot_hash=str(obj.get("snapshot_hash", "")),
+            item_ids=obj.get("item_ids", []),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -425,6 +433,8 @@ class AcceptanceBasis:
             result["procedure"] = self.procedure.to_dict()
         if self.snapshot_hash:
             result["snapshot_hash"] = self.snapshot_hash
+        if self.item_ids:
+            result["item_ids"] = list(self.item_ids)
         return result
 
 
@@ -2005,6 +2015,15 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
     return resolution
 
 
+def finding_validation_submitted(task: Task) -> bool:
+    """Return whether a verification task has durable validation data."""
+
+    if task.kind != "finding_validation" or not task.reference_id:
+        return True
+    record = _get_plan_store().get_finding(_operation_id(), task.reference_id)
+    return bool(record and record.get("validation_data"))
+
+
 def get_plan() -> str:
     """Get the most recent active plan.
     Returns the plan or null if none found.
@@ -2036,14 +2055,8 @@ class TaskProposalLimits(_StrictTaskWireModel):
         return self
 
 
-class TaskProposalEvidence(_StrictTaskWireModel):
-    kind: EvidenceRequirementKind = Field(description="Durable evidence type required for this criterion")
-    min_count: PositiveInt = Field(default=1, description="Minimum number of matching evidence references")
-
-
 class TaskProposalCriterion(_StrictTaskWireModel):
     description: str = Field(min_length=1, description="Finite result required from the declared basis")
-    evidence: List[TaskProposalEvidence] = Field(min_length=1, description="Typed durable evidence requirements")
 
 
 class TaskProposal(_StrictTaskWireModel):
@@ -2051,8 +2064,7 @@ class TaskProposal(_StrictTaskWireModel):
 
     title: str = Field(min_length=1)
     objective: str = Field(min_length=1)
-    basis_kind: AcceptanceBasisKind = Field(description="Procedure for new bounded work; snapshot for existing evidence")
-    basis_description: str = Field(min_length=1, description="Finite boundary used to decide completion")
+    basis_description: Optional[str] = Field(default=None, description="Finite boundary; defaults to objective")
     methods: List[str] = Field(default_factory=list, description="Procedure methods; omit for snapshot proposals")
     limits: Optional[TaskProposalLimits] = Field(
         default=None,
@@ -2064,6 +2076,7 @@ class TaskProposal(_StrictTaskWireModel):
         description="Existing task, memory, artifact, or finding references; snapshot proposals only",
     )
     coverage: bool = Field(default=False, description="Assess every frozen manifest item; snapshot proposals only")
+    output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
     criteria: List[TaskProposalCriterion] = Field(min_length=1)
     target_ids: List[str] = Field(default_factory=list)
 
@@ -2073,25 +2086,31 @@ class TaskProposal(_StrictTaskWireModel):
             raise ValueError("title required")
         if not self.objective.strip():
             raise ValueError("objective required")
-        if not self.basis_description.strip():
-            raise ValueError("basis_description required")
-        if self.basis_kind == "procedure":
+        if self.basis_description is not None and not self.basis_description.strip():
+            raise ValueError("basis_description must be non-empty when provided")
+        procedure_fields = bool(self.methods or self.limits is not None)
+        snapshot_fields = bool(self.snapshot_refs or self.coverage)
+        if procedure_fields and snapshot_fields:
+            raise ValueError("proposal must not mix procedure and snapshot fields")
+        if not procedure_fields and not snapshot_fields:
+            raise ValueError("proposal requires methods and limits, snapshot_refs, or coverage=true")
+        if procedure_fields:
             if not self.methods:
                 raise ValueError("procedure proposal requires methods")
             if self.limits is None:
                 raise ValueError("procedure proposal requires limits")
-            if self.snapshot_refs:
-                raise ValueError("procedure proposal must not include snapshot_refs")
-            if self.coverage:
-                raise ValueError("procedure proposal must not enable coverage")
         else:
-            if not self.snapshot_refs:
-                raise ValueError("snapshot proposal requires snapshot_refs")
-            if self.methods:
-                raise ValueError("snapshot proposal must not include methods")
-            if self.limits is not None:
-                raise ValueError("snapshot proposal must not include limits")
+            if self.output_kind != "artifact":
+                raise ValueError("snapshot proposal must not set output_kind")
         return self
+
+    @property
+    def inferred_basis_kind(self) -> AcceptanceBasisKind:
+        return "procedure" if self.methods or self.limits is not None else "snapshot"
+
+    @property
+    def effective_basis_description(self) -> str:
+        return (self.basis_description or self.objective).strip()
 
 
 def _get_active_plan() -> OperationPlan:
@@ -2276,7 +2295,12 @@ def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks
         description=basis.description,
         source_refs=basis.source_refs,
         snapshot_hash=snapshot_hash,
+        item_ids=basis.item_ids,
     )
+    manifest_ids = {str(item["id"]) for item in _manifest["items"]}
+    if basis.item_ids and not set(basis.item_ids).issubset(manifest_ids):
+        unknown = sorted(set(basis.item_ids) - manifest_ids)
+        raise ValueError(f"Coverage acceptance basis contains unknown item IDs: {unknown}")
     return AcceptanceContract(mode=contract.mode, basis=frozen_basis, criteria=contract.criteria)
 
 
@@ -2334,27 +2358,18 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
         AcceptanceCriterion(
             id=criterion_id,
             description=criterion.description,
-            evidence_requirements=[
-                EvidenceRequirement(kind=requirement.kind, min_count=requirement.min_count)
-                for requirement in criterion.evidence
-            ],
+            evidence_requirements=[EvidenceRequirement(
+                kind=(
+                    proposal.output_kind
+                    if proposal.inferred_basis_kind == "procedure"
+                    else "durable_evidence"
+                ),
+                min_count=1,
+            )],
         )
         for criterion_id, criterion in zip(criterion_ids, proposal.criteria)
     ]
-    if proposal.basis_kind == "procedure":
-        evidence_kinds = {
-            requirement.kind
-            for criterion in proposal.criteria
-            for requirement in criterion.evidence
-        }
-        if "inventory_manifest" in evidence_kinds and "artifact" in evidence_kinds:
-            raise ValueError("procedure proposal must not mix artifact and inventory_manifest output evidence")
-        if "inventory_manifest" in evidence_kinds:
-            output_kind: ProcedureOutputKind = "inventory_manifest"
-        elif "artifact" in evidence_kinds:
-            output_kind = "artifact"
-        else:
-            raise ValueError("procedure proposal requires artifact or inventory_manifest output evidence")
+    if proposal.inferred_basis_kind == "procedure":
         selected_target_ids = proposal.target_ids or [target.target_id for target in plan.targets]
         source_refs = [
             *(f"target:{target_id}" for target_id in selected_target_ids),
@@ -2362,29 +2377,122 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
         ]
         basis = AcceptanceBasis(
             kind="procedure",
-            description=proposal.basis_description,
+            description=proposal.effective_basis_description,
             source_refs=source_refs,
             procedure=DiscoveryProcedure(
                 methods=proposal.methods,
                 limits=proposal.limits.model_dump(exclude_none=True),
                 stop_condition="first_limit_reached",
                 gap_policy="record_unassessed",
-                output_kind=output_kind,
+                output_kind=proposal.output_kind,
             ),
         )
         mode: AcceptanceMode = "outcome"
     else:
         basis = AcceptanceBasis(
             kind="snapshot",
-            description=proposal.basis_description,
+            description=proposal.effective_basis_description,
             source_refs=proposal.snapshot_refs,
         )
         mode = "coverage" if proposal.coverage else "outcome"
     return AcceptanceContract(mode=mode, basis=basis, criteria=criteria)
 
 
-@tool
-def create_tasks(tasks: List[TaskProposal]) -> str:
+def _task_inventory_artifact_refs(task: Task) -> List[str]:
+    references = [f"artifact:{path}" for path in sorted(_task_evidence_artifact_paths(task))]
+    store = _get_plan_store()
+    list_results = getattr(store, "list_task_acceptance_results", None)
+    results = list_results(task.task_uid) if callable(list_results) else store.get_acceptance_results(
+        _operation_id(), task.task_uid
+    )
+    for result in results:
+        references.extend(ref for ref in result.evidence_refs if ref.startswith("artifact:"))
+    valid = []
+    for reference in dict.fromkeys(references):
+        try:
+            _load_inventory_manifest(reference)
+        except ValueError:
+            continue
+        valid.append(reference)
+    return valid
+
+
+def _resolve_proposal_snapshot_refs(proposal: TaskProposal, existing_tasks: List[Task]) -> TaskProposal:
+    if proposal.inferred_basis_kind != "snapshot":
+        return proposal
+    references = list(proposal.snapshot_refs)
+    if proposal.coverage:
+        expanded = []
+        for reference in references:
+            if reference.startswith("task:"):
+                task_uid = reference.split(":", 1)[1]
+                producer = next(
+                    (task for task in existing_tasks if task.task_uid == task_uid and task.status == "done"),
+                    None,
+                )
+                if producer is None:
+                    raise ValueError(f"Coverage snapshot producer is missing or not done: {reference}")
+                expanded.extend(_task_inventory_artifact_refs(producer))
+            else:
+                expanded.append(reference)
+        references = list(dict.fromkeys(expanded))
+        if not references:
+            references = list(dict.fromkeys(
+                reference
+                for task in existing_tasks
+                if task.status == "done"
+                for reference in _task_inventory_artifact_refs(task)
+            ))
+        if len(references) != 1:
+            raise ValueError(
+                "coverage proposal requires exactly one canonical inventory snapshot; "
+                f"eligible_refs={references}"
+            )
+    if not references:
+        raise ValueError("snapshot proposal requires snapshot_refs")
+    return proposal.model_copy(update={"snapshot_refs": references})
+
+
+def _coverage_item_batches(
+    manifest: Dict[str, Any],
+    *,
+    prompt_token_limit: int,
+) -> List[List[str]]:
+    item_cap = max(1, min(32, int(prompt_token_limit or 48_000) // 4_000))
+    char_cap = max(1_000, int(prompt_token_limit or 48_000) * 4 // 5)
+    batches: List[List[str]] = []
+    current: List[str] = []
+    current_chars = 0
+    for item in manifest["items"]:
+        item_id = str(item["id"])
+        item_chars = len(json.dumps(item, sort_keys=True, separators=(",", ":")))
+        if current and (len(current) >= item_cap or current_chars + item_chars > char_cap):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(item_id)
+        current_chars += item_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _completed_coverage_item_ids(existing_tasks: List[Task], snapshot_hash: str) -> set[str]:
+    completed: set[str] = set()
+    store = _get_plan_store()
+    list_results = getattr(store, "list_task_acceptance_results", None)
+    for task in existing_tasks:
+        if task.acceptance.mode != "coverage" or task.acceptance.basis.snapshot_hash != snapshot_hash:
+            continue
+        results = list_results(task.task_uid) if callable(list_results) else store.get_acceptance_results(
+            _operation_id(), task.task_uid
+        )
+        for result in results:
+            completed.update(item.item_id for item in result.coverage)
+    return completed
+
+
+def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limit: int) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
     Procedure example:
@@ -2414,6 +2522,7 @@ def create_tasks(tasks: List[TaskProposal]) -> str:
     duplicate_count = 0
 
     for proposal in proposals:
+        proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
         title = proposal.title.strip()
         objective = proposal.objective.strip()
         target_scope, target_ids = _validate_task_target_scope(
@@ -2425,40 +2534,70 @@ def create_tasks(tasks: List[TaskProposal]) -> str:
             [*existing_tasks, *staged_tasks],
         )
 
+        acceptance_batches = [acceptance]
+        if acceptance.mode == "coverage":
+            artifact_ref = next(ref for ref in acceptance.basis.source_refs if ref.startswith("artifact:"))
+            manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
+            completed_ids = _completed_coverage_item_ids(existing_tasks, snapshot_hash)
+            batches = [
+                [item_id for item_id in batch if item_id not in completed_ids]
+                for batch in _coverage_item_batches(manifest, prompt_token_limit=prompt_token_limit)
+            ]
+            batches = [batch for batch in batches if batch]
+            acceptance_batches = [
+                AcceptanceContract(
+                    mode="coverage",
+                    basis=AcceptanceBasis(
+                        kind="snapshot",
+                        description=acceptance.basis.description,
+                        source_refs=acceptance.basis.source_refs,
+                        snapshot_hash=acceptance.basis.snapshot_hash,
+                        item_ids=batch,
+                    ),
+                    criteria=acceptance.criteria,
+                )
+                for batch in batches
+            ]
+            if not acceptance_batches:
+                duplicate_count += 1
+                continue
+
         # look for duplicate
         duplicate_task = None
         new_patterns = set(_extract_sensitive_patterns(title) + _extract_sensitive_patterns(objective))
 
-        for et in [*existing_tasks, *staged_tasks]:
-            # If sensitive patterns (URLs/paths) are present, they must match exactly
-            et_patterns = set(_extract_sensitive_patterns(et.title) + _extract_sensitive_patterns(et.objective))
-            if new_patterns != et_patterns:
-                continue
+        if acceptance.mode != "coverage":
+            for et in [*existing_tasks, *staged_tasks]:
+                # If sensitive patterns (URLs/paths) are present, they must match exactly
+                et_patterns = set(_extract_sensitive_patterns(et.title) + _extract_sensitive_patterns(et.objective))
+                if new_patterns != et_patterns:
+                    continue
 
-            title_score = fuzz.ratio(et.title.lower(), title.lower())
-            objective_score = fuzz.ratio(et.objective.lower(), objective.lower())
-            if title_score >= 90 and objective_score >= 90:
-                duplicate_task = et
-                break
+                title_score = fuzz.ratio(et.title.lower(), title.lower())
+                objective_score = fuzz.ratio(et.objective.lower(), objective.lower())
+                if title_score >= 90 and objective_score >= 90:
+                    duplicate_task = et
+                    break
 
         if duplicate_task:
             duplicate_count += 1
             continue
 
-        task_uid = str(uuid.uuid4())
-        task = Task(
-            task_uid=task_uid,
-            title=title,
-            objective=objective,
-            acceptance=acceptance,
-            evidence=[],
-            phase=current_phase,
-            status="pending",
-            target_scope=target_scope,
-            target_ids=target_ids,
-        )
-
-        staged_tasks.append(task)
+        for batch_index, batch_acceptance in enumerate(acceptance_batches, start=1):
+            batch_title = title
+            if len(acceptance_batches) > 1:
+                batch_title = f"{title} (batch {batch_index}/{len(acceptance_batches)})"
+            staged_tasks.append(Task(
+                task_uid=str(uuid.uuid4()),
+                title=batch_title,
+                objective=objective,
+                acceptance=batch_acceptance,
+                evidence=[],
+                phase=current_phase,
+                status="pending",
+                target_scope=target_scope,
+                target_ids=target_ids,
+            ))
 
     for task in staged_tasks:
         client.store_task(task=task, user_id=user_id)
@@ -2469,7 +2608,24 @@ def create_tasks(tasks: List[TaskProposal]) -> str:
     )
 
 
-def build_create_tasks_tool() -> Any:
+@tool
+def create_tasks(tasks: List[TaskProposal]) -> str:
+    """Create pending tasks from concise proposals.
+
+    Procedure example:
+    {"tasks": [{"title": "Build surface inventory", "objective": "Map the assigned target",
+    "methods": ["crawl"], "limits": {"max_requests": 500}, "output_kind": "inventory_manifest",
+    "criteria": [{"description": "Store the finite inventory"}], "target_ids": ["target-1"]}]}
+
+    Python infers the basis kind, defaults basis_description to objective, assigns phase and status, and compiles
+    criterion IDs, evidence requirements, source references, coverage batches, and procedure policies.
+    """
+
+    prompt_token_limit = int((_MEMORY_CONFIG or {}).get("prompt_token_limit") or 48_000)
+    return _create_tasks_from_proposals(tasks, prompt_token_limit=prompt_token_limit)
+
+
+def build_create_tasks_tool(prompt_token_limit: int = 48_000) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
 
     completed = False
@@ -2481,7 +2637,7 @@ def build_create_tasks_tool() -> Any:
         nonlocal completed
         if completed:
             raise ValueError("Task creation already completed for this role run")
-        result = create_tasks(tasks)
+        result = _create_tasks_from_proposals(tasks, prompt_token_limit=prompt_token_limit)
         completed = True
         return result
 
@@ -2492,6 +2648,9 @@ def build_create_tasks_tool() -> Any:
 def _evidence_reference_kind(reference: str, expected_kind: EvidenceRequirementKind) -> bool:
     op_id = _operation_id()
     if reference.startswith("artifact:"):
+        if expected_kind == "durable_evidence":
+            _artifact_path_from_ref(reference)
+            return True
         if expected_kind not in {"artifact", "inventory_manifest"}:
             return False
         if expected_kind == "inventory_manifest":
@@ -2506,13 +2665,15 @@ def _evidence_reference_kind(reference: str, expected_kind: EvidenceRequirementK
         if not memory or metadata.get("operation_id", op_id) != op_id:
             raise ValueError(f"Acceptance evidence memory does not exist in this operation: {reference}")
         category = str(metadata.get("category", ""))
-        return expected_kind == "memory" or (expected_kind == "observation" and category == "observation")
+        return expected_kind in {"memory", "durable_evidence"} or (
+            expected_kind == "observation" and category == "observation"
+        )
     if reference.startswith("finding:"):
         finding_uid = reference.split(":", 1)[1]
         record = _get_plan_store().get_finding(op_id, finding_uid)
         if record is None:
             raise ValueError(f"Acceptance evidence finding does not exist: {reference}")
-        if expected_kind == "finding_candidate":
+        if expected_kind in {"finding_candidate", "durable_evidence"}:
             return True
         return expected_kind == "verified_finding" and record.get("resolution") == "verified"
     raise ValueError("Acceptance evidence references must use artifact:, memory:, or finding: prefixes")
@@ -2577,7 +2738,7 @@ def _validate_acceptance_result_evidence(
     manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
     if snapshot_hash != task.acceptance.basis.snapshot_hash:
         raise ValueError("Acceptance basis inventory manifest changed after task creation")
-    expected_ids = {str(item["id"]) for item in manifest["items"]}
+    expected_ids = set(task.acceptance.basis.item_ids) or {str(item["id"]) for item in manifest["items"]}
     actual_ids = {item.item_id for item in result.coverage}
     if expected_ids != actual_ids:
         missing = sorted(expected_ids - actual_ids)

@@ -212,7 +212,7 @@ def test_agent_repair_hook_ignores_direct_tool_calls_and_rejects_invalid_wrapper
     assert invalid.cancel_tool
 
 
-def test_agent_repair_hook_max_tokens_stop_response_replaces_last_message(monkeypatch):
+def test_agent_repair_hook_leaves_max_tokens_for_controller_recovery():
     hook = AgentRepairHook()
     agent = SimpleNamespace(
         callback_handler=SimpleNamespace(get_budget_progress=lambda: {"progress_percent": 1}, reasoning_buffer=[]),
@@ -232,4 +232,6 @@ def test_agent_repair_hook_max_tokens_stop_response_replaces_last_message(monkey
         state=state,
     )
     hook.after_model_call_check(event)
-    assert event.retry is True
+    assert event.retry is False
+    assert state == {}
+    assert agent.messages[-1]["content"][0]["text"] == "repeat repeat repeat"

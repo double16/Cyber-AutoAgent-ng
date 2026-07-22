@@ -26,7 +26,7 @@ from strands.tools.registry import ToolRegistry
 
 from modules.config.models.dev_client import get_models_client
 from modules.config.models.factory import get_model_id_from_agent
-from modules.utils.text_reducer import reduce_lines_lossy, collapse_first_repeated_sequence
+from modules.handlers.max_token_recovery import classify_max_token_output
 
 logger = logging.getLogger(__name__)
 
@@ -957,29 +957,26 @@ class MappingConversationManager(SummarizingConversationManager):
                         assistant_messages_tokens[-1],
                         avg_assistant_messages_tokens,
                     )
-                    truncated_message = "".join([block.get("text", "") for block in messages[-1].get("content", [])])
-                    reduced_text = reduce_lines_lossy(
-                        collapse_first_repeated_sequence(truncated_message),
-                        similarity_threshold=0.5
-                    ).to_text().strip()
-                    # Consider adding user instructions similar to the main agent loop to reduce the chance of another reasoning loop.
-                    reduced_message_content = [
-                        {
+                    incomplete_text = "".join(
+                        block.get("text", "")
+                        for block in messages[-1].get("content", [])
+                        if isinstance(block, dict)
+                    )
+                    classification = classify_max_token_output(incomplete_text)
+                    if classification.kind == "reasoning_loop":
+                        discarded_message_content = [{
                             "type": "text",
-                            "text": reduced_text
-                        }
-                    ]
-                    reduced_text_tokens = estimate_prompt_tokens(
-                        model_id,
-                        [{"role": "assistant", "content": reduced_message_content}],
-                        None, None, None)
-                    if reduced_text_tokens < avg_assistant_messages_tokens * 5:
+                            "text": (
+                                "[Controller note: An incomplete repetitive assistant response was discarded. "
+                                "No claims from it were retained.]"
+                            ),
+                        }]
                         logger.info(
-                            "Context reduced via reasoning loop compression, est tokens of last message %s->%s",
+                            "Context removed untrusted reasoning loop, est tokens=%s repetition_ratio=%.3f",
                             assistant_messages_tokens[-1],
-                            reduced_text_tokens,
+                            classification.repetition_ratio,
                         )
-                        messages[-1]["content"] = reduced_message_content
+                        messages[-1]["content"] = discarded_message_content
                         content_reduced = True
                         target_count = self.preserve_first + self.preserve_last
                         if len(messages) > target_count and len(messages) > self.preserve_first:

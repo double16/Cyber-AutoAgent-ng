@@ -20,6 +20,9 @@ class AgentRunPolicy:
     require_successful_required_tools: bool = False
     allow_text_final_after_tools: bool = True
     max_actionless_after_tools: int = 0
+    max_actionless_calls: int = 3
+    max_agent_calls: int = 64
+    max_model_turns: int = 64
     max_tool_calls: int = 0
     ignored_terminal_tool_names: FrozenSet[str] = field(default_factory=frozenset)
     terminal_reason: str = "agent_completed_required_tools"
@@ -33,6 +36,9 @@ class AgentRunPolicy:
         require_successful_required_tools: bool = False,
         allow_text_final_after_tools: bool = True,
         max_actionless_after_tools: int = 0,
+        max_actionless_calls: int = 3,
+        max_agent_calls: int = 64,
+        max_model_turns: int = 64,
         max_tool_calls: int = 0,
         ignored_terminal_tool_names: Iterable[str] = frozenset(),
         terminal_reason: str = "agent_completed_required_tools",
@@ -44,6 +50,9 @@ class AgentRunPolicy:
         object.__setattr__(self, "require_successful_required_tools", require_successful_required_tools)
         object.__setattr__(self, "allow_text_final_after_tools", allow_text_final_after_tools)
         object.__setattr__(self, "max_actionless_after_tools", max_actionless_after_tools)
+        object.__setattr__(self, "max_actionless_calls", max(1, int(max_actionless_calls)))
+        object.__setattr__(self, "max_agent_calls", max(1, int(max_agent_calls)))
+        object.__setattr__(self, "max_model_turns", max(1, int(max_model_turns)))
         object.__setattr__(self, "max_tool_calls", max_tool_calls)
         object.__setattr__(self, "ignored_terminal_tool_names", frozenset(ignored_terminal_tool_names))
         object.__setattr__(self, "terminal_reason", terminal_reason)

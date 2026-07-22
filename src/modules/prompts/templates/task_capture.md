@@ -3,15 +3,16 @@
 **Purpose**: Externalized work queue. You may create tasks when the current role asks for task creation for follow-up work, do not execute created tasks.
 
 ## Task spec
-- Fields: `title`, `objective`, `basis_kind`, `basis_description`, `criteria`, and optional proposal fields
-  `methods`, `limits`, `snapshot_refs`, `coverage`, and `target_ids`.
-- `objective`: what to accomplish / problem to solve / more info to gather.
-- Procedure proposals provide methods and limits. Snapshot proposals provide existing snapshot references.
-- Criteria provide only `description` and `evidence`; Python generates their IDs when freezing the contract.
+- Required fields: `title`, `objective`, and `criteria`. Optional fields are `basis_description`, `methods`, `limits`,
+  `output_kind`, `snapshot_refs`, `coverage`, and `target_ids`.
+- `objective`: what to achieve / problem to solve / more info to gather.
+- Procedure proposals require methods and limits
+- Snapshot proposals provide existing snapshot references or set `coverage=true`
+- Criteria provide only `description`
 
 ## Create tasks
 Prefer batch creation of tasks over single task creation:
-- `create_tasks(tasks=[{title, objective, basis_kind, basis_description, criteria, ...}, ...])`
+- `create_tasks(tasks=[{title, objective, criteria, methods, limits, ...}, ...])`
 
 When to create:
 - DISCOVERY: new surface/endpoint/path/file/host needs exploration

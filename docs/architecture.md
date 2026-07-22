@@ -131,6 +131,14 @@ stop the same way after a complete `record_task_acceptance` result. Rejected cal
 remain correctable; role completion therefore depends on durable success rather than raw tool-call counts or a later
 text-only turn.
 
+Every role invocation also has deterministic safety bounds. Three consecutive responses without a new tool action stop
+a required-tool role as stalled, regardless of tool calls or reasoning emitted during an earlier actor cycle. An
+absolute controller-to-agent call ceiling bounds repeated invocations, while the Strands SDK `turns` limit bounds model
+calls and tool executions inside each invocation. Task-executor actor cycles allow 8 agent calls with 32 SDK turns per
+call, bounded tool-recovery runs allow 4 calls with 8 turns, and task creators allow 3 calls with 6 turns.
+No-action redirection prompts respect the role policy: roles that disallow text completion are instructed to call an
+outstanding required tool and are never offered a text-only final-answer path.
+
 Bounded procedure contracts declare whether their output is a generic artifact or a version-1 inventory manifest.
 Python rejects mismatched evidence requirements during task creation. Inventory executors receive the canonical JSON
 shape in both their task prompt and acceptance-tool description, and acceptance validation evaluates each referenced
@@ -147,16 +155,16 @@ correction stops the executor immediately, while other recovery-policy violation
 of two by default.
 
 Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
-creator may make `CYBER_TASK_CREATOR_MAX_CORRECTIONS` corrected calls (two by default). Exhausting that allowance stops
-the role inside the current Strands loop, so payload variations cannot evade the outer workflow policy or repeat guard.
-Agents submit a flat `TaskProposal`; Python supplies procedure invariants, derives source references and target scope,
-and compiles the proposal into the frozen acceptance domain before validation and storage.
+controller may start `CYBER_TASK_CREATOR_MAX_CORRECTIONS` fresh corrected attempts (two by default). Each attempt ends
+after its first tool result and receives only stable phase context plus the prior validation error. Generic reasoning
+loop repair is disabled for this role. Agents submit a flat `TaskProposal`; Python infers its basis, supplies procedure
+invariants, derives source references and target scope, and compiles the proposal before validation and storage.
 
 Successful task acceptance populates task evidence with the validated immutable ledger references. Phase
 evaluators receive that canonical per-criterion ledger and may read only its resolved artifact paths, preventing stale
 predicted filenames from overriding accepted evidence. Task creators use a closed flat schema with explicit limits,
-criterion descriptions and evidence, snapshot references, and target IDs. Python generates readable unique criterion
-IDs and owns the remaining contract and lifecycle fields.
+criterion descriptions, snapshot references, and target IDs. Python generates readable unique criterion IDs and
+evidence requirements and owns the remaining contract and lifecycle fields.
 
 Complete task acceptance also publishes one bounded operation observation containing the task objective, criterion
 statuses, concrete summaries, evidence references, and aggregate coverage counts. Publication is replay-safe and lets

@@ -22,6 +22,7 @@ import asyncio
 import atexit
 import base64
 import importlib
+import inspect
 import json
 import os
 import signal
@@ -81,6 +82,11 @@ from modules.config.types import (
     get_default_base_dir,
 )
 from modules.handlers.base import BudgetLimitReached, is_docker
+from modules.handlers.max_token_recovery import (
+    build_task_executor_max_token_prompt,
+    classify_and_discard_max_token_output,
+    is_repeated_max_token_pattern,
+)
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.tool_repeat_guard import REPEATED_TOOL_LOOP_STATE_KEY
 from modules.handlers.utils import (
@@ -410,6 +416,16 @@ def _required_tools_satisfied(
     return all(int(tool_counts.get(name, 0) or 0) > 0 for name in run_policy.required_tool_names)
 
 
+def _successful_required_tools_satisfied(callback_handler: Any, run_policy: AgentRunPolicy, baseline: int) -> bool:
+    """Return true when every required tool has a successful controller-observed outcome."""
+
+    journal = getattr(callback_handler, "tool_outcome_journal", None)
+    if journal is None or not hasattr(journal, "since"):
+        return False
+    successful = {outcome.tool_name for outcome in journal.since(baseline) if outcome.success}
+    return run_policy.required_tool_names.issubset(successful)
+
+
 def _run_policy_allows_terminal_text(
     callback_handler: Any,
     run_policy: AgentRunPolicy,
@@ -430,6 +446,21 @@ def _run_policy_allows_terminal_text(
     return actionless_attempt_count > run_policy.max_actionless_after_tools
 
 
+def _invoke_agent_with_turn_limit(agent: Any, message: str, max_model_turns: int) -> Any:
+    """Pass the SDK turn bound while remaining compatible with simple callable test doubles."""
+
+    try:
+        parameters = inspect.signature(agent).parameters.values()
+        supports_limits = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+            parameter.name == "limits" for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        supports_limits = True
+    if supports_limits:
+        return agent(message, limits={"turns": max_model_turns})
+    return agent(message)
+
+
 def run_agent_until_terminal_state(
     *,
     agent: Any,
@@ -447,11 +478,20 @@ def run_agent_until_terminal_state(
     run_policy = run_policy or AgentRunPolicy()
     initial_reasoning_retry = 2
     actionless_attempt_count = 0
+    agent_call_count = 0
     recoverable_attempt_count = 0
     agent_callback_handler = getattr(agent, "_cyber_callback_handler", None) or callback_handler
     run_tool_count_baseline = dict(getattr(agent_callback_handler, "tool_counts", {}) or {})
+    outcome_journal = getattr(agent_callback_handler, "tool_outcome_journal", None)
+    outcome_baseline = outcome_journal.snapshot() if outcome_journal is not None else 0
 
     while not interrupted:
+        if agent_call_count >= run_policy.max_agent_calls:
+            termination_reason = f"Stopped after {agent_call_count} agent calls without reaching the role contract"
+            print_status(termination_reason, "WARNING")
+            if agent_callback_handler:
+                agent_callback_handler.emit_termination("stalled", termination_reason)
+            return AgentRunResult("stalled", termination_reason)
         last_tool_call_count = sum(agent_callback_handler.tool_counts.values(), start=0)
         try:
             print_status(
@@ -466,11 +506,20 @@ def run_agent_until_terminal_state(
                 agent.messages = []
             _ensure_prompt_within_budget(agent)
 
-            result = agent(current_message)
+            agent_call_count += 1
+            result = _invoke_agent_with_turn_limit(agent, current_message, run_policy.max_model_turns)
             recoverable_attempt_count = 0
 
             logger.debug("Agent result: %r", result)
             process_agent_metrics(agent_callback_handler, result)
+
+            stop_reason = str(getattr(result, "stop_reason", "") or "")
+            if stop_reason.startswith("limit_"):
+                termination_reason = f"Agent stopped at its configured SDK limit: {stop_reason}"
+                print_status(termination_reason, "WARNING")
+                if agent_callback_handler:
+                    agent_callback_handler.emit_termination("stalled", termination_reason)
+                return AgentRunResult("stalled", termination_reason)
 
             result_state = getattr(result, "state", {})
             terminal_tool_completed = (
@@ -482,6 +531,12 @@ def run_agent_until_terminal_state(
                 completed_tool = str(terminal_tool_completed.get("tool_name", ""))
                 if completed_tool in run_policy.required_tool_names:
                     return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+            if (
+                run_policy.require_successful_required_tools
+                and run_policy.terminal_after_required_tools
+                and _successful_required_tools_satisfied(agent_callback_handler, run_policy, outcome_baseline)
+            ):
+                return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
             task_creator_exhausted = (
                 result_state.get(TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY)
                 if isinstance(result_state, dict)
@@ -492,7 +547,9 @@ def run_agent_until_terminal_state(
                 max_corrections = int(task_creator_exhausted.get("max_corrections", 0) or 0)
                 return AgentRunResult(
                     "task_creator_corrections_exhausted",
-                    f"Task creator stopped after {failed_attempts} failed calls and {max_corrections} corrections",
+                    str(task_creator_exhausted.get("error") or (
+                        f"Task creator stopped after {failed_attempts} failed calls and {max_corrections} corrections"
+                    )),
                 )
             repeated_tool_loop = (
                 result_state.get(REPEATED_TOOL_LOOP_STATE_KEY)
@@ -555,19 +612,21 @@ def run_agent_until_terminal_state(
                     raise BudgetLimitReached("Budget limit reached")
                 return AgentRunResult("callback_stop", "Callback requested stop")
 
+            if actionless_attempt_count >= run_policy.max_actionless_calls:
+                termination_reason = f"No actions taken after {actionless_attempt_count} attempts"
+                if run_policy.required_tool_names or run_policy.min_tool_calls > 0:
+                    print_status(termination_reason, "WARNING")
+                    if agent_callback_handler:
+                        agent_callback_handler.emit_termination("stalled", termination_reason)
+                    return AgentRunResult("stalled", termination_reason)
+                print_status("No actions taken - completing", "SUCCESS")
+                return AgentRunResult("no_actions", termination_reason)
+
             if sum(run_tool_deltas.values()) == 0:
-                if getattr(agent_callback_handler, "_emitted_any_reasoning", False):
-                    logger.debug("Initial reasoning observed with no tools yet; continuing one more cycle")
-                elif initial_reasoning_retry <= 0:
+                if initial_reasoning_retry <= 0:
                     print_status("No actions taken - completing", "SUCCESS")
                     return AgentRunResult("no_actions", "No actions taken")
                 initial_reasoning_retry -= 1
-            elif actionless_attempt_count > 2:
-                termination_reason = f"No actions taken after {actionless_attempt_count} attempts"
-                print_status(termination_reason, "WARNING")
-                if agent_callback_handler:
-                    agent_callback_handler.emit_termination("stalled", termination_reason)
-                return AgentRunResult("stalled", termination_reason)
 
             elapsed = time.time() - operation_start
             if max_duration is not None and elapsed >= float(max_duration) * 60.0:
@@ -596,18 +655,25 @@ def run_agent_until_terminal_state(
                             break
 
                     current_message += (
-                        "**MANDATORY ACTION**: Think thoroughly to decide which tool to call next. "
-                        "A tool MUST be called next to make progress."
+                        "**MANDATORY ACTION**: Call an available tool now to make concrete progress. "
+                        "Do not respond with analysis or a plan."
                     )
                 else:
                     logger.warning(
                         "Attempting to redirect model again because no tool calls were detected in last execution loop."
                     )
-                    current_message += (
-                        "**MANDATORY ACTION**: Continue only the assigned workflow role and make progress now. "
-                        "Call an available tool if tool progress is required; otherwise provide the final answer "
-                        "for this role."
-                    )
+                    if not run_policy.allow_text_final_after_tools:
+                        required_tools = ", ".join(sorted(run_policy.required_tool_names)) or "an available tool"
+                        current_message += (
+                            "**MANDATORY ACTION**: A text-only response cannot complete this role. "
+                            f"Call {required_tools} now using its registered schema. Do not provide more analysis."
+                        )
+                    else:
+                        current_message += (
+                            "**MANDATORY ACTION**: Continue only the assigned workflow role and make progress now. "
+                            "Call an available tool if tool progress is required; otherwise provide the final answer "
+                            "for this role."
+                        )
 
         except StopIteration as error:
             logger.debug("Agent cycle completed: %s", str(error))
@@ -642,6 +708,74 @@ def run_agent_until_terminal_state(
             raise
 
     return AgentRunResult("interrupted", "")
+
+
+def run_workflow_agent_with_max_token_recovery(
+    *,
+    agent: Any,
+    prompt: str,
+    run_policy: Optional[AgentRunPolicy],
+    callback_handler: Any,
+    initial_prompt: str,
+    budget_cfg: BudgetConfig,
+    operation_start: float,
+    max_duration: int | None,
+    logger: Any,
+) -> AgentRunResult:
+    """Run a workflow role with one safe, controller-directed executor recovery."""
+
+    current_prompt = prompt
+    max_token_recovery_attempts = 0
+    while True:
+        try:
+            return run_agent_until_terminal_state(
+                agent=agent,
+                callback_handler=callback_handler,
+                current_message=current_prompt,
+                initial_prompt=initial_prompt,
+                budget_cfg=budget_cfg,
+                operation_start=operation_start,
+                max_duration=max_duration,
+                logger=logger,
+                run_policy=run_policy,
+            )
+        except MaxTokensReachedException as error:
+            classification, removed = classify_and_discard_max_token_output(agent)
+            setattr(error, "max_token_classification", classification)
+            repeated_pattern = is_repeated_max_token_pattern(agent, classification)
+            role = str(getattr(agent, "_cyber_agent_type", "unknown"))
+            output_limit = getattr(getattr(agent, "model", None), "_output_tokens", None)
+            can_retry = role == "task_executor" and max_token_recovery_attempts < 1 and not repeated_pattern
+            logger.warning(
+                "MAX_TOKEN_RECOVERY role=%s classification=%s repetition_ratio=%.3f "
+                "discarded_tokens=%s partial_removed=%s output_limit=%s attempt=%s "
+                "repeated_pattern=%s action=%s",
+                role,
+                classification.kind,
+                classification.repetition_ratio,
+                classification.discarded_tokens,
+                removed,
+                output_limit,
+                max_token_recovery_attempts + 1,
+                repeated_pattern,
+                "retry" if can_retry else "propagate",
+            )
+            if not can_retry:
+                raise
+
+            agent_callback = getattr(agent, "_cyber_callback_handler", None) or callback_handler
+            journal = getattr(agent_callback, "tool_outcome_journal", None)
+            completed_tools = [
+                outcome.tool_name
+                for outcome in (journal.entries() if journal is not None else [])
+                if outcome.success
+            ]
+            current_prompt = build_task_executor_max_token_prompt(
+                classification,
+                completed_tools=completed_tools,
+                required_tools=set(run_policy.required_tool_names) if run_policy else set(),
+            )
+            max_token_recovery_attempts += 1
 
 
 def finalize_report_and_evaluation(
@@ -697,8 +831,10 @@ def finalize_report_and_evaluation(
 
 def _build_report_completion_status(plan: Any, callback_handler: Any) -> dict[str, Any]:
     """Describe whether the final report is based on a completed workflow."""
-    termination_reason = getattr(callback_handler, "termination_reason", None)
-    termination_message = getattr(callback_handler, "termination_message", None)
+    coordinator = getattr(callback_handler, "coordinator", None)
+    termination_source = coordinator or callback_handler
+    termination_reason = getattr(termination_source, "termination_reason", None)
+    termination_message = getattr(termination_source, "termination_message", None)
     workflow_complete = bool(plan and getattr(plan, "assessment_complete", False))
     assessment_complete = workflow_complete and termination_reason == "complete"
     if assessment_complete:
@@ -1356,16 +1492,16 @@ def main():
                     message_start = len(agent.messages)
                 except (AttributeError, TypeError):
                     message_start = 0
-                result = run_agent_until_terminal_state(
+                result = run_workflow_agent_with_max_token_recovery(
                     agent=agent,
+                    prompt=prompt,
+                    run_policy=run_policy,
                     callback_handler=callback_handler,
-                    current_message=prompt,
                     initial_prompt=initial_prompt,
                     budget_cfg=budget_cfg,
                     operation_start=operation_start,
                     max_duration=args.max_duration,
                     logger=logger,
-                    run_policy=run_policy,
                 )
                 try:
                     current_pass_messages = list(agent.messages)[message_start:]
@@ -1427,7 +1563,22 @@ def main():
                     ) -> TaskExecutorCycleResult:
                         journal = getattr(callback, "tool_outcome_journal", None)
                         snapshot = journal.snapshot() if journal is not None else 0
-                        text = run_workflow_agent(agent, prompt, run_policy)
+                        try:
+                            text = run_workflow_agent(agent, prompt, run_policy)
+                        except MaxTokensReachedException as error:
+                            classification = getattr(error, "max_token_classification", None)
+                            kind = getattr(classification, "kind", "output_truncation")
+                            outcomes = journal.since(snapshot) if journal is not None else []
+                            return TaskExecutorCycleResult(
+                                text="",
+                                outcomes=outcomes,
+                                max_tokens_exhausted=True,
+                                max_tokens_reason=(
+                                    "Task executor repeated the same reasoning loop after its bounded recovery."
+                                    if kind == "reasoning_loop"
+                                    else "Task executor reached its output-token limit after its bounded recovery."
+                                ),
+                            )
                         outcomes = journal.since(snapshot) if journal is not None else []
                         return TaskExecutorCycleResult(
                             text=text,
@@ -1459,6 +1610,11 @@ def main():
             except BudgetLimitReached:
                 print_status("Budget limit reached", "SUCCESS")
                 logger.debug("Budget limit reached - terminating gracefully")
+                if callback_handler and not callback_handler.termination_emitted:
+                    callback_handler.emit_termination(
+                        "budget_limit",
+                        "Operation budget limit reached. Switching to final report.",
+                    )
             except MaxTokensReachedException as error:
                 print_status("Token limit reached - generating final report", "WARNING")
                 logger.debug("Termination exception", exc_info=error)

@@ -476,6 +476,9 @@ Module: {module_str}
 
 Only verified findings may be counted as confirmed risk. If there are zero verified findings, do not label the target
 as "low risk"; state that no findings were verified and list validation failures separately.
+Attack chains that were not demonstrated end to end may appear only in a separately titled "Hypothetical Attack
+Paths" section. Label every unsupported transition as a hypothesis, cite the verified findings supporting the chain,
+and keep hypothetical impact out of verified risk counts and conclusions.
 {completion_guidance}
 
 Use the following data:
@@ -1272,7 +1275,7 @@ def build_report_sections(
             "info": sum(
                 1
                 for e in evidence
-                if e.get("category") in {"finding", "observation"}
+                if e.get("category") == "finding"
                 and str(e.get("severity", "")).upper() == "INFO"
             ),
         }

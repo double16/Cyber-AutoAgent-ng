@@ -26,10 +26,7 @@ class TerminalToolHook(HookProvider):
 
     def _after_tool(self, event: AfterToolCallEvent) -> None:
         tool_name = str(event.tool_use.get("name", ""))
-        expected_tool = {
-            "task_creator": "create_tasks",
-            "task_executor": "record_task_acceptance",
-        }.get(self.agent_type)
+        expected_tool = {"task_creator": "create_tasks"}.get(self.agent_type)
         if tool_name != expected_tool:
             return
         if not _result_success(event.result, event.exception):
@@ -50,13 +47,12 @@ class TerminalToolHook(HookProvider):
         if self.agent_type != "task_creator":
             return
         self._task_creator_failures += 1
-        if self._task_creator_failures <= self.max_task_creator_corrections:
-            return
         request_state = event.invocation_state.setdefault("request_state", {})
         if isinstance(request_state, dict):
             request_state["stop_event_loop"] = True
             request_state[TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY] = {
                 "tool_name": tool_name,
                 "failed_attempts": self._task_creator_failures,
-                "max_corrections": self.max_task_creator_corrections,
+                "max_corrections": 0,
+                "error": _result_text(event.result),
             }

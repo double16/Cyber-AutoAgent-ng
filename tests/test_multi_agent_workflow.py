@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from strands.types.exceptions import MaxTokensReachedException
 
 from modules.agents import multi_agent_workflow as workflow_mod
 from modules.agents.cyber_autoagent import build_role_tools
@@ -16,6 +17,7 @@ from modules.agents.multi_agent_workflow import (
 )
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
+from modules.handlers.max_token_recovery import MaxTokenClassification
 from modules.tools.memory import (
     AcceptanceBasis,
     AcceptanceContract,
@@ -145,6 +147,33 @@ def test_default_text_runner_preserves_agent_error_when_cleanup_fails(monkeypatc
 
     with pytest.raises(ValueError, match="agent failed"):
         workflow_mod.default_text_runner(runtime)("planner", "prompt", [], "system")
+
+
+def test_default_text_runner_discards_and_classifies_max_token_output(monkeypatch):
+    partial = "The model repeats the same reasoning instead of acting.\n" * 60
+
+    class Agent:
+        def __init__(self):
+            self.messages = [{"role": "assistant", "content": [{"text": partial}]}]
+
+        def __call__(self, prompt):
+            raise MaxTokensReachedException("max_tokens")
+
+        def cleanup(self):
+            return None
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(provider="litellm", target="example.com", objective="test"),
+        operation_id="OP_TEST",
+    )
+    agent = Agent()
+    monkeypatch.setattr(workflow_mod, "create_agent", lambda *args, **kwargs: agent)
+
+    with pytest.raises(MaxTokensReachedException) as exc_info:
+        workflow_mod.default_text_runner(runtime)("planner", "prompt", [], "system")
+
+    assert agent.messages == []
+    assert exc_info.value.max_token_classification.kind == "reasoning_loop"
 
 
 def test_default_text_runner_disables_catalog_for_evaluators(monkeypatch):
@@ -473,6 +502,53 @@ def test_extract_result_text_handles_common_result_shapes():
     assert extract_result_text(None) == ""
     assert extract_result_text("text") == "text"
     assert extract_result_text(SimpleNamespace(message={"content": [{"text": "a"}, {"text": "b"}]})) == "a\nb"
+
+
+def test_json_agent_retries_fresh_after_reasoning_loop():
+    prompts = []
+    error = MaxTokensReachedException("max_tokens")
+    error.max_token_classification = MaxTokenClassification(
+        kind="reasoning_loop",
+        repetition_ratio=0.8,
+        pattern_hash="abc123",
+        discarded_tokens=6000,
+    )
+
+    def text_runner(role, prompt, tools, system_prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise error
+        return '{"status":"done"}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=text_runner,
+    )
+
+    result = controller._run_json_text_agent("task_evaluator", "original", [], "system")
+
+    assert result == {"status": "done"}
+    assert len(prompts) == 2
+    assert "previous response was discarded" in prompts[1]
+    assert "Return only the required JSON object now" in prompts[1]
+    assert prompts[1].endswith("original\n")
+
+
+def test_json_agent_stops_at_configured_limit_after_max_tokens():
+    def text_runner(role, prompt, tools, system_prompt):
+        raise MaxTokensReachedException("max_tokens")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=text_runner,
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="returned invalid JSON after 2 attempt"):
+        controller._run_json_text_agent("phase_evaluator", "original", [], "system")
     assert extract_result_text(SimpleNamespace(content=[{"text": "c"}])) == "c"
 
 
@@ -798,6 +874,7 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
     policies = []
     finalize = Mock(return_value="verified")
     monkeypatch.setattr(workflow_mod, "finalize_finding_validation", finalize)
+    monkeypatch.setattr(workflow_mod, "finding_validation_submitted", Mock(return_value=True))
 
     def text_runner(role, prompt, tools, system_prompt):
         if role == "task_prompt_builder":
@@ -1478,6 +1555,42 @@ def test_task_executor_does_not_offer_another_turn_after_correction_was_exhauste
 
     assert len(executor_calls) == 1
     assert state.tasks[0].status == "partial_failure"
+
+
+def test_task_executor_max_token_recovery_exhaustion_is_partial_failure():
+    state = FakeState(
+        _plan(),
+        tasks=[Task(task_uid="active", title="Active", objective="enumerate paths", phase=1, status="active")],
+    )
+    executor_calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"enumerate paths","tools":[]}'
+        pytest.fail(f"unexpected evaluator role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        executor_calls.append(prompt)
+        return workflow_mod.TaskExecutorCycleResult(
+            text="",
+            outcomes=[],
+            max_tokens_exhausted=True,
+            max_tokens_reason="Task executor repeated the same reasoning loop after its bounded recovery.",
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
+
+    assert len(executor_calls) == 1
+    assert state.tasks[0].status == "partial_failure"
+    assert "reasoning loop" in state.tasks[0].status_reason
 
 
 def test_task_evaluator_prompt_omits_empty_worker_context_and_truncates_long_context():
@@ -2314,7 +2427,40 @@ def test_controller_raises_when_task_creator_creates_no_initial_tasks():
     assert work_calls == [
         ("task_creator", {"create_tasks"}),
         ("task_creator", {"create_tasks"}),
+        ("task_creator", {"create_tasks"}),
     ]
+
+
+def test_continuing_phase_with_task_history_rechecks_then_advances_on_creator_failure():
+    plan = _plan()
+    completed = Task(task_uid="done", title="Prior work", objective="Inspect target", phase=1, status="done")
+    state = FakeState(plan, tasks=[completed])
+    evaluator_calls = []
+    creator_calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        assert role == "phase_evaluator"
+        evaluator_calls.append(prompt)
+        return '{"status":"continue","reason":"more work remains"}'
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        creator_calls.append(prompt)
+        return SimpleNamespace(reason="task_creator_corrections_exhausted", message="schema rejected")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller.run()
+
+    assert len(evaluator_calls) == 2
+    assert "Controller Task-Creation Outcome" in evaluator_calls[1]
+    assert len(creator_calls) == 3
+    assert state.plan.phases[0].status == "partial_failure"
 
 
 def test_task_creator_requires_create_tasks_tool():
@@ -2404,16 +2550,16 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
     assert "valid plan phase IDs: 1, 2" not in captured["prompt"]
     assert "## create_tasks Payload Contract (Non-negotiable)" in captured["prompt"]
     assert '"title":"Cohesive actionable title"' in captured["prompt"]
-    assert '"basis_kind":"procedure"' in captured["prompt"]
-    assert '"evidence":[{"kind":"inventory_manifest"' in captured["prompt"]
-    assert '"output_kind":' not in captured["prompt"]
+    assert '"basis_kind"' not in captured["prompt"]
+    assert '"output_kind":"inventory_manifest"' in captured["prompt"]
     assert "Canonical inventory manifest contract" in captured["prompt"]
     assert "Workflow maps, reports, and arbitrary JSON outputs are artifact evidence" in captured["prompt"]
     assert "unsupported top-level `description` fields" in captured["prompt"]
     example = captured["prompt"].split("```json\n", 1)[1].split("\n```", 1)[0]
     example_task = json.loads(example)["tasks"][0]
-    assert example_task["basis_kind"] == "procedure"
-    assert set(example_task["criteria"][0]) == {"description", "evidence"}
+    assert "basis_kind" not in example_task
+    assert example_task["output_kind"] == "inventory_manifest"
+    assert set(example_task["criteria"][0]) == {"description"}
     assert captured["call_count"] == 1
 
 
@@ -2444,7 +2590,32 @@ def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
     assert len(state.tasks) == 1
 
 
-def test_task_creator_does_not_restart_after_inline_corrections_are_exhausted():
+def test_task_creator_uses_fresh_correction_after_max_tokens():
+    state = FakeState(_plan())
+    prompts = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise MaxTokensReachedException("max_tokens")
+        state.store_task(Task(task_uid="repaired", title="Repaired", objective="run", phase=1, status="pending"))
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+        work_runner=work_runner,
+    )
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert len(prompts) == 2
+    assert "task creator reached its model token limit" in prompts[1]
+    assert outcome.created_count == 1
+
+
+def test_task_creator_uses_configured_fresh_correction_attempts():
     prompts = []
 
     def work_runner(role, prompt, tools, system_prompt, run_policy):
@@ -2461,8 +2632,31 @@ def test_task_creator_does_not_restart_after_inline_corrections_are_exhausted():
 
     controller._create_tasks(_plan(), _plan().phases[0])
 
+    assert len(prompts) == 3
+    assert "up to 2 correction(s)" in prompts[0]
+    assert "Previous attempt result" in prompts[1]
+
+
+def test_task_creator_duplicate_only_success_does_not_retry_completed_tool():
+    prompts = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        prompts.append(prompt)
+        return SimpleNamespace(reason="task_creator_done", message="Task creator completed after create_tasks")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+        work_runner=work_runner,
+    )
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
     assert len(prompts) == 1
-    assert "at most 2 corrected call(s)" in prompts[0]
+    assert outcome.created_count == 0
+    assert "no new actionable tasks" in outcome.failure_reason
 
 
 def test_task_creator_reassigns_new_future_phase_tasks_to_active_phase():
@@ -2518,7 +2712,7 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
 
     assert "Candidate optional tools" not in prompt
     assert "Your only action is one successful" in prompt
-    assert "Every proposal MUST contain non-empty `title`, `objective`, `basis_kind`, `basis_description`" in prompt
+    assert "Every proposal MUST contain non-empty `title`, `objective`, and `criteria`" in prompt
     assert "unsupported top-level `description` fields" in prompt
     assert "Stop immediately" in prompt
     assert "Python assigns active phase 1" in prompt

@@ -232,6 +232,20 @@ Ratios are resolved dynamically via models.dev integration with result caching.
 | Escalation              | 90% of token limit | Additional reduction passes      |
 | Maximum                 | 98% of token limit | Hard ceiling                     |
 
+### Output Exhaustion and Reasoning Loops
+
+Prompt-window overflow and output exhaustion are separate conditions:
+
+- `ContextWindowOverflowException` means the model input exceeded its resolved context window. Conversation-budget
+  reduction handles this condition.
+- `MaxTokensReachedException` means one model response exhausted its configured output allowance. The workflow
+  classifies the incomplete response as ordinary truncation or a repetitive reasoning loop.
+
+Incomplete max-token responses are untrusted and are not compressed back into conversation history. JSON-producing
+roles retry from the original contract, task creators use their fresh bounded correction attempts, and task executors
+retain completed tool interactions while discarding only the incomplete assistant tail. A task executor receives one
+controller-directed retry; repeated exhaustion becomes a task `partial_failure` rather than ending the operation.
+
 ## Multi-Layer Reduction System
 
 ### Layer 0: Artifact Externalization

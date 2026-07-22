@@ -383,7 +383,10 @@ def create_agent_runtime_resources(
         artifacts_dir=os.getenv("CYBER_ARTIFACTS_DIR"),
     )
     initialize_memory_system(
-        memory_config, operation_id, target_name, has_existing_memories
+        {**memory_config, "prompt_token_limit": prompt_token_limit},
+        operation_id,
+        target_name,
+        has_existing_memories,
     )
     print_status(f"Memory system initialized for operation: {operation_id}", "SUCCESS")
 

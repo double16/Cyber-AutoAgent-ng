@@ -694,6 +694,21 @@ class AgentEventHandler(PrintingCallbackHandler):
         """
         try:
             with self._state_lock:
+                if getattr(self, "parent_agent_run_id", None):
+                    if self._termination_emitted:
+                        return
+                    self._termination_emitted = True
+                    self._termination_reason = reason
+                    self._termination_message = message
+                    self.emit_ui_event(
+                        {
+                            "type": "agent_termination",
+                            "scope": "agent",
+                            "reason": reason,
+                            "message": message,
+                        }
+                    )
+                    return
                 coordinator = self.coordinator
                 if coordinator is not None and not coordinator.mark_termination(reason, message):
                     self._termination_emitted = True
@@ -724,6 +739,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self.emit_ui_event(
                     {
                         "type": "termination_reason",
+                        "scope": "operation",
                         "reason": reason,
                         "message": message,
                         "budget": {

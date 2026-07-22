@@ -18,18 +18,22 @@ def _event(tool_name, payload, *, status="success"):
     )
 
 
-@pytest.mark.parametrize(
-    ("role", "tool_name"),
-    [("task_creator", "create_tasks"), ("task_executor", "record_task_acceptance")],
-)
-def test_terminal_tool_hook_stops_after_successful_complete_result(role, tool_name):
-    event = _event(tool_name, '{"complete": true}')
+def test_terminal_tool_hook_stops_after_successful_task_creation():
+    event = _event("create_tasks", '{"complete": true}')
 
-    TerminalToolHook(role)._after_tool(event)
+    TerminalToolHook("task_creator")._after_tool(event)
 
     state = event.invocation_state["request_state"]
     assert state["stop_event_loop"] is True
-    assert state[TERMINAL_TOOL_COMPLETED_STATE_KEY] == {"tool_name": tool_name}
+    assert state[TERMINAL_TOOL_COMPLETED_STATE_KEY] == {"tool_name": "create_tasks"}
+
+
+def test_terminal_tool_hook_leaves_executor_completion_to_run_policy():
+    event = _event("record_task_acceptance", '{"complete": true}')
+
+    TerminalToolHook("task_executor")._after_tool(event)
+
+    assert event.invocation_state == {}
 
 
 @pytest.mark.parametrize(
@@ -52,22 +56,18 @@ def test_terminal_tool_hook_ignores_non_terminal_tool():
     assert event.invocation_state == {}
 
 
-def test_task_creator_hook_stops_after_configured_corrections_are_exhausted():
+def test_task_creator_hook_stops_each_failed_attempt_for_controller_retry():
     hook = TerminalToolHook("task_creator", max_task_creator_corrections=2)
     events = [_event("create_tasks", "Error", status="error") for _ in range(3)]
 
     hook._after_tool(events[0])
-    hook._after_tool(events[1])
-    hook._after_tool(events[2])
-
-    assert events[0].invocation_state == {}
-    assert events[1].invocation_state == {}
-    state = events[2].invocation_state["request_state"]
+    state = events[0].invocation_state["request_state"]
     assert state["stop_event_loop"] is True
     assert state[TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY] == {
         "tool_name": "create_tasks",
-        "failed_attempts": 3,
-        "max_corrections": 2,
+        "failed_attempts": 1,
+        "max_corrections": 0,
+        "error": "Error",
     }
 
 

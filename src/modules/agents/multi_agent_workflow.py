@@ -43,6 +43,7 @@ from urllib.parse import urlparse
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
+from strands.types.exceptions import MaxTokensReachedException
 
 from modules.agents.cyber_autoagent import (
     AgentRuntimeResources,
@@ -52,6 +53,7 @@ from modules.agents.cyber_autoagent import (
 from modules.agents.run_policy import AgentRunPolicy
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
+from modules.handlers.max_token_recovery import classify_and_discard_max_token_output
 from modules.handlers.utils import (
     get_tool_description,
     get_tool_name,
@@ -70,6 +72,7 @@ from modules.tools.memory import (
     build_record_task_acceptance_tool,
     _artifact_path_from_ref,
     finalize_finding_validation,
+    finding_validation_submitted,
     get_memory_client,
     inventory_manifest_contract_text,
     resolve_operation_targets,
@@ -137,6 +140,21 @@ class TaskExecutorCycleResult:
     recovery_required: bool = False
     recovery_exhausted: bool = False
     recovery_guidance: str = ""
+    max_tokens_exhausted: bool = False
+    max_tokens_reason: str = ""
+
+
+@dataclass(frozen=True)
+class TaskCreationOutcome:
+    """Controller-observed result of bounded task-creator attempts."""
+
+    created_count: int
+    attempts: int
+    failure_reason: str = ""
+
+    @property
+    def made_progress(self) -> bool:
+        return self.created_count > 0
 
 
 def extract_json_object(text: str) -> Dict[str, Any]:
@@ -204,8 +222,22 @@ def default_text_runner(runtime: AgentRuntimeResources) -> AgentTextRunner:
             include_tool_catalog=role == "task_executor",
         )
         try:
-            result = agent(prompt)
-            return extract_result_text(result)
+            try:
+                result = agent(prompt)
+                return extract_result_text(result)
+            except MaxTokensReachedException as error:
+                classification, removed = classify_and_discard_max_token_output(agent)
+                setattr(error, "max_token_classification", classification)
+                logger.warning(
+                    "MAX_TOKEN_RECOVERY role=%s classification=%s repetition_ratio=%.3f "
+                    "discarded_tokens=%s partial_removed=%s action=propagate",
+                    role,
+                    classification.kind,
+                    classification.repetition_ratio,
+                    classification.discarded_tokens,
+                    removed,
+                )
+                raise
         finally:
             try:
                 agent.cleanup()
@@ -726,6 +758,7 @@ class MultiAgentWorkflowController:
                 self._activate_task(pending_task)
                 continue
 
+            phase_continue_decision: Optional[WorkflowDecision] = None
             if should_evaluate_phase:
                 self._log_workflow("evaluating phase=%s pending_task=%s", self._phase_label(phase), self._task_label(pending_task))
                 decision = self._evaluate_phase(plan, phase)
@@ -752,10 +785,11 @@ class MultiAgentWorkflowController:
                     )
                     self._activate_task(pending_task)
                     continue
+                phase_continue_decision = decision
 
             before_count = len(self.state.list_tasks(phase=phase.id))
             self._log_workflow("creating tasks phase=%s existing_task_count=%s", self._phase_label(phase), before_count)
-            self._create_tasks(plan, phase)
+            creation = self._create_tasks(plan, phase)
             task = self._get_or_activate_task(phase.id)
             if task:
                 self._log_workflow("task available after creation task=%s phase=%s", self._task_label(task), phase.id)
@@ -763,6 +797,29 @@ class MultiAgentWorkflowController:
             if before_count == 0:
                 self._log_workflow("no tasks created for empty phase=%s; raising invariant", self._phase_label(phase))
                 raise WorkflowInvariantError(f"No tasks created for phase {phase.id}")
+            if phase_continue_decision is not None:
+                final_decision = self._evaluate_phase_after_task_creation_failure(
+                    plan,
+                    phase,
+                    creation,
+                )
+                if final_decision.status in TERMINAL_PLAN_STATUSES:
+                    final_status = final_decision.status
+                else:
+                    final_status = "partial_failure"
+                self._log_workflow(
+                    "closing phase after task creation failure phase=%s status=%s reason=%s",
+                    self._phase_label(phase),
+                    final_status,
+                    self._short(final_decision.reason),
+                )
+                previous_signature = self._plan_signature(plan)
+                updated_plan = self.state.mark_phase(plan, phase.id, final_status)
+                self._emit_plan_output("updated", updated_plan, previous_signature)
+                if updated_plan.assessment_complete:
+                    self._emit_workflow_completion(updated_plan)
+                    return
+                continue
             self._log_workflow("no active/pending tasks after creation; marking phase=%s partial_failure", self._phase_label(phase))
             previous_signature = self._plan_signature(plan)
             updated_plan = self.state.mark_phase(plan, phase.id, "partial_failure")
@@ -927,6 +984,9 @@ class MultiAgentWorkflowController:
             terminal_after_required_tools=True,
             require_successful_required_tools=True,
             allow_text_final_after_tools=False,
+            max_actionless_calls=3,
+            max_agent_calls=8,
+            max_model_turns=32,
             ignored_terminal_tool_names={"create_tasks"},
             terminal_reason="task_executor_done",
             terminal_message="Task executor completed after tool use",
@@ -936,6 +996,9 @@ class MultiAgentWorkflowController:
             max_tool_calls=3,
             terminal_after_required_tools=False,
             allow_text_final_after_tools=False,
+            max_actionless_calls=3,
+            max_agent_calls=4,
+            max_model_turns=8,
             ignored_terminal_tool_names={"create_tasks"},
             terminal_reason="task_executor_recovery_done",
             terminal_message="Task executor recovery completed after bounded tool use",
@@ -967,6 +1030,25 @@ class MultiAgentWorkflowController:
                 worker_result = run_executor(actor_prompt, task_policy)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
+                if cycle_result.max_tokens_exhausted:
+                    self._validate_executor_follow_up_phases(
+                        plan,
+                        phase,
+                        existing_task_uids,
+                    )
+                    decision = WorkflowDecision(
+                        status="partial_failure",
+                        reason=cycle_result.max_tokens_reason or (
+                            "Task executor exhausted its bounded output-token recovery."
+                        ),
+                    )
+                    self._log_workflow(
+                        "task executor max-token recovery exhausted task=%s cycle=%s reason=%s",
+                        self._task_label(task),
+                        cycle,
+                        self._short(decision.reason),
+                    )
+                    break
                 if (
                     cycle_result.recovery_required
                     and not cycle_result.recovery_exhausted
@@ -1013,7 +1095,22 @@ class MultiAgentWorkflowController:
                 else:
                     acceptance_results = self.state.list_task_acceptance_results(task.task_uid)
                     missing_criteria = self._missing_acceptance_criteria(task, acceptance_results)
-                    if missing_criteria:
+                    validation_missing = not finding_validation_submitted(task)
+                    if validation_missing:
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason="Finding validation was not recorded by record_finding_validation.",
+                            instructions=(
+                                "Call record_finding_validation with the independent outcome, then record the frozen "
+                                "task acceptance results."
+                            ),
+                        )
+                        self._log_workflow(
+                            "finding validation gate incomplete task=%s cycle=%s",
+                            self._task_label(task),
+                            cycle,
+                        )
+                    elif missing_criteria:
                         missing_text = ", ".join(missing_criteria)
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -1492,6 +1589,47 @@ Return exactly one decision for each candidate.
     def _evaluate_phase(self, plan: OperationPlan, phase: PlanPhase) -> WorkflowDecision:
         return self._evaluate_phase_with_policy(plan, phase)
 
+    def _evaluate_phase_after_task_creation_failure(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        creation: TaskCreationOutcome,
+    ) -> WorkflowDecision:
+        """Give an exhausted phase one final evidence review before advancing."""
+
+        context = (
+            "\n\n## Controller Task-Creation Outcome\n"
+            f"No new actionable task was created after {creation.attempts} attempt(s). "
+            f"Reason: {creation.failure_reason or 'no actionable task was created'}.\n"
+            "Re-evaluate the existing phase evidence once. A continue decision will cause Python to close the phase "
+            "as partial_failure and advance."
+        )
+        try:
+            data = self._run_json_text_agent(
+                "phase_evaluator",
+                self._phase_evaluator_prompt(plan, phase) + context,
+                self._evaluator_tools(),
+                self._phase_evaluator_system_prompt(),
+            )
+            decision = self._decision_from_data(data, allowed=("continue", *TERMINAL_PLAN_STATUSES))
+        except WorkflowInvariantError as error:
+            return WorkflowDecision(
+                status="partial_failure",
+                reason=(
+                    "Task creation made no actionable progress and final phase evaluation failed: "
+                    f"{self._short(error, 500)}"
+                ),
+            )
+        if decision.status == "continue":
+            return WorkflowDecision(
+                status="continue",
+                reason=(
+                    f"{decision.reason} Task creation made no actionable progress after "
+                    f"{creation.attempts} attempt(s): {creation.failure_reason or 'no actionable task was created'}."
+                ).strip(),
+            )
+        return decision
+
     def _evaluate_phase_with_policy(
         self,
         plan: OperationPlan,
@@ -1596,7 +1734,7 @@ review existing memories. Return only the requested JSON decision."""
             return system_prompt
         return f"{system_prompt}\n\n## Module Termination Policy\n{termination_policy}"
 
-    def _create_tasks(self, plan: OperationPlan, phase: PlanPhase) -> None:
+    def _create_tasks(self, plan: OperationPlan, phase: PlanPhase) -> TaskCreationOutcome:
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
         prompt = self._task_creator_prompt(plan, phase)
         tools = self._task_creator_tools()
@@ -1616,43 +1754,56 @@ review existing memories. Return only the requested JSON decision."""
             terminal_after_required_tools=True,
             require_successful_required_tools=True,
             allow_text_final_after_tools=False,
+            max_actionless_calls=3,
+            max_agent_calls=3,
+            max_model_turns=6,
             terminal_reason="task_creator_done",
             terminal_message="Task creator completed after create_tasks",
         )
-        creator_result = self._run_worker_agent(
-            "task_creator",
-            prompt,
-            tools,
-            system_prompt,
-            run_policy,
-        )
-        self._reassign_new_task_creator_tasks_to_active_phase(phase, before_task_uids)
-        after_count = len(self.state.list_tasks(phase=phase.id))
-        after_actionable_count = len(
-            self.state.list_tasks(phase=phase.id, status=["active", "pending"])
-        )
-        corrections_exhausted = (
-            getattr(creator_result, "reason", "") == "task_creator_corrections_exhausted"
-        )
-        if before_actionable_count == 0 and after_actionable_count == 0 and not corrections_exhausted:
-            self._log_workflow(
-                "task creator produced no durable tasks for empty phase=%s; retrying once with schema repair",
-                self._phase_label(phase),
+        failure_reason = ""
+        attempts = 0
+        max_attempts = 1 + self._task_creator_correction_count()
+        for attempt in range(1, max_attempts + 1):
+            attempts = attempt
+            creator_result = None
+            attempt_prompt = prompt if attempt == 1 else self._task_creator_repair_prompt(
+                plan,
+                phase,
+                failure_reason,
             )
-            self._run_worker_agent(
-                "task_creator",
-                self._task_creator_repair_prompt(plan, phase),
-                tools,
-                system_prompt,
-                run_policy,
-            )
+            try:
+                creator_result = self._run_worker_agent(
+                    "task_creator",
+                    attempt_prompt,
+                    tools,
+                    system_prompt,
+                    run_policy,
+                )
+                failure_reason = str(
+                    getattr(creator_result, "message", "")
+                    or getattr(creator_result, "reason", "")
+                    or "no actionable task was created"
+                )
+            except MaxTokensReachedException as error:
+                failure_reason = f"task creator reached its model token limit: {self._short(error, 300)}"
             self._reassign_new_task_creator_tasks_to_active_phase(phase, before_task_uids)
-            after_count = len(self.state.list_tasks(phase=phase.id))
+            after_actionable_count = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
+            if after_actionable_count > before_actionable_count:
+                break
+            if creator_result is not None and getattr(creator_result, "reason", "") == run_policy.terminal_reason:
+                failure_reason = "create_tasks succeeded but produced no new actionable tasks"
+                break
+        after_count = len(self.state.list_tasks(phase=phase.id))
         self._log_workflow(
             "task creator finished phase=%s after_count=%s delta=%s",
             phase.id,
             after_count,
             after_count - before_count,
+        )
+        return TaskCreationOutcome(
+            created_count=max(0, after_actionable_count - before_actionable_count),
+            attempts=attempts,
+            failure_reason=failure_reason,
         )
 
     def _reassign_new_task_creator_tasks_to_active_phase(self, phase: PlanPhase, before_task_uids: set[str]) -> None:
@@ -1679,30 +1830,29 @@ review existing memories. Return only the requested JSON decision."""
         ) or "- No executable targets resolved; omit target_ids."
         return f"""## create_tasks Payload Contract (Non-negotiable)
 Make exactly one successful `create_tasks` call. A rejected validation attempt does not count as the successful call.
-You may make at most {max_corrections} corrected call(s) after the initial attempt. Stop immediately after success.
+Python starts a fresh, compact attempt after a rejection, up to {max_corrections} correction(s). Stop after this call.
 
-Every proposal MUST contain non-empty `title`, `objective`, `basis_kind`, `basis_description`, and `criteria` values.
+Every proposal MUST contain non-empty `title`, `objective`, and `criteria` values. Each criterion contains only a
+non-empty `description`. `basis_description` is optional and defaults to the objective.
 Python assigns active phase {phase.id} and pending status, infers target scope from `target_ids`, and compiles the full
 immutable acceptance contract. Never emit `acceptance`, `phase`, `status`, `target_scope`, task `evidence`, `context`,
-`stop_condition`, `gap_policy`, `output_kind`, or unsupported top-level `description` fields.
+`stop_condition`, `gap_policy`, or unsupported top-level `description` fields.
 
 Acceptance basis rules:
-- Use `basis_kind: "procedure"` for bounded work. Supply non-empty `methods` and one or more positive integer
+- For bounded procedure work, supply non-empty `methods` and one or more positive integer
   `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
-  stop condition, gap policy, and output kind. Require `inventory_manifest` evidence only for canonical inventory
-  JSON; require `artifact` evidence for workflow maps, reports, and other files.
-- Use `basis_kind: "snapshot"` for dependent work. Supply `snapshot_refs`, omit methods and limits, and set
+  stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
+  inventory JSON; otherwise omit it and Python defaults to `artifact`.
+- For dependent snapshot work, supply canonical `snapshot_refs`, omit methods and limits, and set
   `coverage: true` only when every item in one existing version-1 inventory manifest must be assessed. Referenced
   producer tasks must be done.
+- Never mix procedure fields with snapshot fields. Python infers the basis kind.
 - If the required snapshot does not exist, create a bounded procedure-based prerequisite inventory task in this
   active phase instead of creating dependent coverage tasks.
 - Do not use moving claims such as "all reachable", "all discovered", "across the application", or "key workflows"
   in acceptance criteria. Refer to the declared procedure or frozen manifest items.
-- Criterion `evidence` entries use `kind` values artifact, inventory_manifest, observation,
-  finding_candidate, verified_finding, or memory, plus a positive `min_count`.
-- Criteria contain only `description` and `evidence`; Python generates readable unique IDs in the frozen contract.
-- An artifact procedure must require artifact evidence and must not require inventory_manifest evidence. An
-  inventory_manifest procedure must require inventory_manifest evidence.
+- Python requires generic durable evidence for snapshot work, including negative coverage dispositions; findings are
+  optional outputs and are never required to prove that an item was assessed.
 
 Canonical inventory manifest contract:
 {inventory_manifest_contract_text()}
@@ -1722,19 +1872,32 @@ A list of tasks is required, including the case of one task being provided.
 Before calling, verify every object against this exact shape:
 ```json
 {{"tasks":[{{"title":"Cohesive actionable title","objective":"Action and target",
-"basis_kind":"procedure","basis_description":"Bounded inventory procedure","methods":["crawl"],
-"limits":{{"max_requests":500,"max_depth":3}},"criteria":[{{
-"description":"Execute the declared procedure and store its finite manifest",
-"evidence":[{{"kind":"inventory_manifest","min_count":1}}]}}],"target_ids":["target-1"]}}]}}
+"basis_description":"Bounded inventory procedure","methods":["crawl"],
+"limits":{{"max_requests":500,"max_depth":3}},"output_kind":"inventory_manifest",
+"criteria":[{{"description":"Execute the declared procedure and store its finite manifest"}}],
+"target_ids":["target-1"]}}]}}
 ```"""
 
-    def _task_creator_repair_prompt(self, plan: OperationPlan, phase: PlanPhase) -> str:
+    def _task_creator_repair_prompt(self, plan: OperationPlan, phase: PlanPhase, failure_reason: str = "") -> str:
         """Return one bounded repair instruction when no durable task was created."""
 
-        return f"""No durable task was created for the active phase. The likely cause is a missing or invalid frozen
-snapshot. Make one corrected `create_tasks` call now. If dependent coverage has no valid snapshot, create one bounded
+        return f"""No durable task was created for the active phase.
+Previous attempt result: {failure_reason or "no actionable task was created"}
+Make one corrected `create_tasks` call now. If dependent coverage has no valid snapshot, create one bounded
 procedure-based prerequisite inventory task in active phase {phase.id}; do not recreate the rejected coverage tasks.
 Do not explain, execute, inspect, or gather evidence.
+
+## Operation Objective
+{self.runtime.config.objective}
+
+## Active Phase
+{json.dumps(phase.to_dict(), indent=2, sort_keys=True)}
+
+## Existing Tasks Across All Phases
+{Task.list_to_toon(self.state.list_tasks())}
+
+## Eligible Canonical Snapshot Handles
+{self._eligible_snapshot_handles()}
 
 {self._task_creator_contract(plan, phase)}"""
 
@@ -1785,7 +1948,7 @@ Do not explain, execute, inspect, or gather evidence.
     def _task_creator_tools(self) -> List[Any]:
         if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
             raise WorkflowInvariantError("create_tasks tool is required for task_creator")
-        return [build_create_tasks_tool()]
+        return [build_create_tasks_tool(prompt_token_limit=getattr(self.runtime, "prompt_token_limit", 48_000))]
 
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
         pending = self.state.list_tasks(phase=phase.id, status=["pending", "active"])
@@ -1843,7 +2006,23 @@ Do not explain, execute, inspect, or gather evidence.
         last_error: Optional[Exception] = None
         for attempt in range(self.json_retries + 1):
             self._log_workflow("json agent role=%s attempt=%s max_retries=%s", role, attempt + 1, self.json_retries)
-            response = self.text_runner(role, current_prompt, tools, system_prompt)
+            try:
+                response = self.text_runner(role, current_prompt, tools, system_prompt)
+            except MaxTokensReachedException as error:
+                last_error = error
+                classification = getattr(error, "max_token_classification", None)
+                kind = getattr(classification, "kind", "output_truncation")
+                ratio = float(getattr(classification, "repetition_ratio", 0.0) or 0.0)
+                if attempt >= self.json_retries:
+                    break
+                self._log_workflow(
+                    "json agent role=%s max_tokens retrying classification=%s repetition_ratio=%.3f",
+                    role,
+                    kind,
+                    ratio,
+                )
+                current_prompt = self._json_max_token_retry_prompt(prompt, kind)
+                continue
             last_response = response
             try:
                 data = extract_json_object(response)
@@ -1874,6 +2053,17 @@ Do not explain, execute, inspect, or gather evidence.
             f"{role} returned invalid JSON after {self.json_retries + 1} attempt(s): {last_error}. "
             f"Response excerpt: {excerpt}"
         )
+
+    @staticmethod
+    def _json_max_token_retry_prompt(original_prompt: str, classification: str) -> str:
+        cause = "repetitive output" if classification == "reasoning_loop" else "the output-generation limit"
+        return f"""Your previous response was discarded because it reached {cause}.
+Do not reconstruct, summarize, or rely on that response. Return only the required JSON object now. Do not include
+analysis, markdown fences, prose, or explanations.
+
+Original prompt:
+{original_prompt}
+"""
 
     def _json_retry_prompt(self, original_prompt: str, invalid_response: str, error: Exception) -> str:
         return f"""Your previous response could not be parsed as the required JSON object.
@@ -2277,10 +2467,21 @@ not be duplicated. Every created task must be executable without violating any p
 ## Existing Tasks Across All Phases
 {Task.list_to_toon(self.state.list_tasks())}
 
+## Eligible Canonical Snapshot Handles
+{self._eligible_snapshot_handles()}
+
 ## Memories
 {self._memory_summary()}
 
 {self._task_creator_contract(plan, phase)}"""
+
+    def _eligible_snapshot_handles(self) -> str:
+        handles = []
+        for task in self.state.list_tasks():
+            procedure = task.acceptance.basis.procedure
+            if task.status == "done" and procedure is not None and procedure.output_kind == "inventory_manifest":
+                handles.append(f"- task:{task.task_uid} — {task.title}")
+        return "\n".join(handles) or "- None"
 
     def _task_evaluator_prompt(
         self,

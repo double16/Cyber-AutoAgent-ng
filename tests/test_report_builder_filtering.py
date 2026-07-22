@@ -162,13 +162,13 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert out.get("objective") == "test"
         assert out.get("date")
         assert out.get("steps_executed") == 197
-        assert out.get("severity_counts", {}) == {"critical": 1, "high": 1, "medium": 2, "low": 2, "info": 5}
+        assert out.get("severity_counts", {}) == {"critical": 1, "high": 1, "medium": 2, "low": 2, "info": 0}
         assert out["validation_failure_count"] == 4
         assert out.get("critical_count") == 1
         assert out.get("high_count") == 1
         assert out.get("medium_count") == 2
         assert out.get("low_count") == 2
-        assert out.get("info_count") == 5
+        assert out.get("info_count") == 0
         assert "Comprehensive web application security assessment" in out.get("overview")
         assert out.get("operation_plan", "{}") == plan.to_dict()
 
@@ -374,4 +374,4 @@ def test_report_builder_only_has_info_evidence(mock_client_cls):
     assert "/b" in evidence_text, "Expected matching discovery from current operation"
     assert "/c" in evidence_text, "Expected matching signal from current operation"
 
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 3}
+    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}

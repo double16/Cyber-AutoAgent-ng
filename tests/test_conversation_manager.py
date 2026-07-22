@@ -63,13 +63,11 @@ def test_pruning_conversation_manager_falls_back_to_summary(monkeypatch):
     reduction is impossible (all messages in preservation zone).
     Use larger window to allow actual summarization to occur.
     """
-    import pytest
-
     manager = MappingConversationManager(
         window_size=10, summary_ratio=0.5, preserve_recent_messages=2
     )
     # More messages to give room for summarization
-    agent = _AgentStub([_make_message(f"objective")] + [_make_message(f"msg{i}") for i in range(5)])
+    agent = _AgentStub([_make_message("objective")] + [_make_message(f"msg{i}") for i in range(5)])
 
     # Force sliding reduction to raise overflow so summarization path executes
     def _raise_overflow(*_args, **_kwargs):
@@ -242,8 +240,7 @@ def test_pruning_conversation_manager_removes_redacted_reasoning():
 
 
 def test_pruning_conversation_manager_reduces_reasoning_loop():
-    """Test that conversation manager removes reasoning content.
-    """
+    """Test that conversation manager discards untrusted reasoning-loop claims."""
     manager = MappingConversationManager(
         window_size=10, summary_ratio=0.5, preserve_recent_messages=5
     )
@@ -254,8 +251,10 @@ def test_pruning_conversation_manager_reduces_reasoning_loop():
     manager.reduce_context(agent)
 
     assert len(agent.messages) == 5
-    assert len(agent.messages[-1]["content"][0]["text"]) < 100
-    assert "In a reasoning loop." in agent.messages[-1]["content"][0]["text"]
+    retained_text = agent.messages[-1]["content"][0]["text"]
+    assert len(retained_text) < 150
+    assert "incomplete repetitive assistant response was discarded" in retained_text
+    assert "In a reasoning loop." not in retained_text
 
 
 def test_preserve_recent_messages_scaling():
