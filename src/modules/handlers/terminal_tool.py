@@ -10,16 +10,14 @@ from strands.hooks import AfterToolCallEvent, HookProvider, HookRegistry
 from modules.handlers.tool_recovery import _result_success, _result_text
 
 TERMINAL_TOOL_COMPLETED_STATE_KEY = "terminal_tool_completed"
-TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY = "task_creator_corrections_exhausted"
+TERMINAL_TOOL_REJECTED_STATE_KEY = "terminal_tool_rejected"
 
 
 class TerminalToolHook(HookProvider):
     """End the current Strands event loop when a role's durable terminal action completes."""
 
-    def __init__(self, agent_type: str, *, max_task_creator_corrections: int = 2) -> None:
+    def __init__(self, agent_type: str) -> None:
         self.agent_type = agent_type
-        self.max_task_creator_corrections = max(0, int(max_task_creator_corrections))
-        self._task_creator_failures = 0
 
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(AfterToolCallEvent, self._after_tool)
@@ -46,13 +44,10 @@ class TerminalToolHook(HookProvider):
     def _record_task_creator_failure(self, event: AfterToolCallEvent, tool_name: str) -> None:
         if self.agent_type != "task_creator":
             return
-        self._task_creator_failures += 1
         request_state = event.invocation_state.setdefault("request_state", {})
         if isinstance(request_state, dict):
             request_state["stop_event_loop"] = True
-            request_state[TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY] = {
+            request_state[TERMINAL_TOOL_REJECTED_STATE_KEY] = {
                 "tool_name": tool_name,
-                "failed_attempts": self._task_creator_failures,
-                "max_corrections": 0,
                 "error": _result_text(event.result),
             }

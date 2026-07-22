@@ -54,6 +54,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 import boto3
 from mem0 import Memory as Mem0Memory
@@ -1325,6 +1326,29 @@ class PlanStore:
             "resolution": row[4],
         }
 
+    def list_findings(self, operation_id: str) -> List[Dict[str, Any]]:
+        """Return finding records for deterministic workflow scheduling decisions."""
+
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT finding_uid, fingerprint, candidate_data, verification_task_uid, "
+                    "validation_data, resolution FROM finding_records WHERE operation_id = ? "
+                    "ORDER BY created_at, finding_uid",
+                    (operation_id,),
+                ).fetchall()
+        return [
+            {
+                "finding_uid": row[0],
+                "fingerprint": row[1],
+                "candidate_data": json.loads(row[2]),
+                "verification_task_uid": row[3],
+                "validation_data": json.loads(row[4]) if row[4] else None,
+                "resolution": row[5],
+            }
+            for row in rows
+        ]
+
     def store_finding_candidate(
         self,
         operation_id: str,
@@ -2048,12 +2072,6 @@ class TaskProposalLimits(_StrictTaskWireModel):
     max_items: Optional[PositiveInt] = None
     max_depth: Optional[PositiveInt] = None
 
-    @model_validator(mode="after")
-    def require_limit(self) -> "TaskProposalLimits":
-        if not any(getattr(self, key) is not None for key in DISCOVERY_PROCEDURE_LIMIT_KEYS):
-            raise ValueError("at least one discovery procedure limit is required")
-        return self
-
 
 class TaskProposalCriterion(_StrictTaskWireModel):
     description: str = Field(min_length=1, description="Finite result required from the declared basis")
@@ -2066,18 +2084,17 @@ class TaskProposal(_StrictTaskWireModel):
     objective: str = Field(min_length=1)
     basis_description: Optional[str] = Field(default=None, description="Finite boundary; defaults to objective")
     methods: List[str] = Field(default_factory=list, description="Procedure methods; omit for snapshot proposals")
-    limits: Optional[TaskProposalLimits] = Field(
-        default=None,
+    limits: TaskProposalLimits = Field(
+        ...,
         validation_alias=AliasChoices("limits", "limit"),
-        description="Procedure limits; omit for snapshots"
+        description="Required object; procedure bounds are discarded when snapshot_refs are supplied",
     )
     snapshot_refs: List[str] = Field(
         default_factory=list,
         description="Existing task, memory, artifact, or finding references; snapshot proposals only",
     )
-    coverage: bool = Field(default=False, description="Assess every frozen manifest item; snapshot proposals only")
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
-    criteria: List[TaskProposalCriterion] = Field(min_length=1)
+    criteria: List[TaskProposalCriterion] = Field(min_length=1, max_length=1)
     target_ids: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -2088,25 +2105,22 @@ class TaskProposal(_StrictTaskWireModel):
             raise ValueError("objective required")
         if self.basis_description is not None and not self.basis_description.strip():
             raise ValueError("basis_description must be non-empty when provided")
-        procedure_fields = bool(self.methods or self.limits is not None)
-        snapshot_fields = bool(self.snapshot_refs or self.coverage)
-        if procedure_fields and snapshot_fields:
+        snapshot_fields = bool(self.snapshot_refs)
+        if self.methods and snapshot_fields:
             raise ValueError("proposal must not mix procedure and snapshot fields")
-        if not procedure_fields and not snapshot_fields:
-            raise ValueError("proposal requires methods and limits, snapshot_refs, or coverage=true")
-        if procedure_fields:
-            if not self.methods:
-                raise ValueError("procedure proposal requires methods")
-            if self.limits is None:
-                raise ValueError("procedure proposal requires limits")
-        else:
+        if snapshot_fields:
             if self.output_kind != "artifact":
                 raise ValueError("snapshot proposal must not set output_kind")
+        else:
+            if not self.methods:
+                raise ValueError("proposal requires procedure methods or snapshot_refs")
+            if not any(getattr(self.limits, key) is not None for key in DISCOVERY_PROCEDURE_LIMIT_KEYS):
+                raise ValueError("procedure proposal requires at least one discovery procedure limit")
         return self
 
     @property
     def inferred_basis_kind(self) -> AcceptanceBasisKind:
-        return "procedure" if self.methods or self.limits is not None else "snapshot"
+        return "snapshot" if self.snapshot_refs else "procedure"
 
     @property
     def effective_basis_description(self) -> str:
@@ -2350,9 +2364,27 @@ def _task_proposal_criterion_ids(criteria: List[TaskProposalCriterion]) -> List[
     return generated
 
 
+@dataclass(frozen=True)
+class _NormalizedTaskProposal:
+    """Controller-owned task proposal values after mode-specific fields are discarded."""
+
+    proposal: TaskProposal
+    basis_kind: AcceptanceBasisKind
+    limits: Optional[Dict[str, int]]
+
+
+def _normalize_task_proposal(proposal: TaskProposal) -> _NormalizedTaskProposal:
+    """Discard required wire fields that do not apply to the inferred proposal mode."""
+
+    basis_kind = proposal.inferred_basis_kind
+    limits = proposal.limits.model_dump(exclude_none=True) if basis_kind == "procedure" else None
+    return _NormalizedTaskProposal(proposal=proposal, basis_kind=basis_kind, limits=limits)
+
+
 def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -> AcceptanceContract:
     """Compile a small task proposal into the full immutable acceptance contract."""
 
+    normalized = _normalize_task_proposal(proposal)
     criterion_ids = _task_proposal_criterion_ids(proposal.criteria)
     criteria = [
         AcceptanceCriterion(
@@ -2361,7 +2393,7 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
             evidence_requirements=[EvidenceRequirement(
                 kind=(
                     proposal.output_kind
-                    if proposal.inferred_basis_kind == "procedure"
+                    if normalized.basis_kind == "procedure"
                     else "durable_evidence"
                 ),
                 min_count=1,
@@ -2369,7 +2401,7 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
         )
         for criterion_id, criterion in zip(criterion_ids, proposal.criteria)
     ]
-    if proposal.inferred_basis_kind == "procedure":
+    if normalized.basis_kind == "procedure":
         selected_target_ids = proposal.target_ids or [target.target_id for target in plan.targets]
         source_refs = [
             *(f"target:{target_id}" for target_id in selected_target_ids),
@@ -2381,7 +2413,7 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
             source_refs=source_refs,
             procedure=DiscoveryProcedure(
                 methods=proposal.methods,
-                limits=proposal.limits.model_dump(exclude_none=True),
+                limits=normalized.limits or {},
                 stop_condition="first_limit_reached",
                 gap_policy="record_unassessed",
                 output_kind=proposal.output_kind,
@@ -2394,7 +2426,13 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
             description=proposal.effective_basis_description,
             source_refs=proposal.snapshot_refs,
         )
-        mode = "coverage" if proposal.coverage else "outcome"
+        mode = "coverage" if _proposal_inventory_snapshot(proposal) is not None else "outcome"
+        if mode == "coverage":
+            criteria = [AcceptanceCriterion(
+                id="assess-the-assigned-endpoint",
+                description="Assess the assigned endpoint and record one evidence-backed terminal disposition.",
+                evidence_requirements=[EvidenceRequirement(kind="durable_evidence", min_count=1)],
+            )]
     return AcceptanceContract(mode=mode, basis=basis, criteria=criteria)
 
 
@@ -2420,61 +2458,88 @@ def _task_inventory_artifact_refs(task: Task) -> List[str]:
 def _resolve_proposal_snapshot_refs(proposal: TaskProposal, existing_tasks: List[Task]) -> TaskProposal:
     if proposal.inferred_basis_kind != "snapshot":
         return proposal
-    references = list(proposal.snapshot_refs)
-    if proposal.coverage:
-        expanded = []
-        for reference in references:
-            if reference.startswith("task:"):
-                task_uid = reference.split(":", 1)[1]
-                producer = next(
-                    (task for task in existing_tasks if task.task_uid == task_uid and task.status == "done"),
-                    None,
-                )
-                if producer is None:
-                    raise ValueError(f"Coverage snapshot producer is missing or not done: {reference}")
-                expanded.extend(_task_inventory_artifact_refs(producer))
-            else:
-                expanded.append(reference)
-        references = list(dict.fromkeys(expanded))
-        if not references:
-            references = list(dict.fromkeys(
-                reference
-                for task in existing_tasks
-                if task.status == "done"
-                for reference in _task_inventory_artifact_refs(task)
-            ))
-        if len(references) != 1:
-            raise ValueError(
-                "coverage proposal requires exactly one canonical inventory snapshot; "
-                f"eligible_refs={references}"
-            )
+    references = []
+    for reference in proposal.snapshot_refs:
+        if not reference.startswith("task:"):
+            references.append(reference)
+            continue
+        task_uid = reference.split(":", 1)[1]
+        producer = next(
+            (task for task in existing_tasks if task.task_uid == task_uid and task.status == "done"),
+            None,
+        )
+        inventory_refs = _task_inventory_artifact_refs(producer) if producer is not None else []
+        references.extend(inventory_refs or [reference])
+    references = list(dict.fromkeys(references))
     if not references:
         raise ValueError("snapshot proposal requires snapshot_refs")
+    inventory_refs = [reference for reference in references if _inventory_snapshot(reference) is not None]
+    if inventory_refs and (len(inventory_refs) != 1 or len(references) != 1):
+        raise ValueError(
+            "inventory snapshot proposal requires exactly one canonical inventory snapshot; "
+            f"eligible_refs={inventory_refs}"
+        )
     return proposal.model_copy(update={"snapshot_refs": references})
 
 
-def _coverage_item_batches(
+def _inventory_snapshot(reference: str) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Return a validated inventory snapshot, or None for another snapshot type."""
+
+    if not reference.startswith("artifact:"):
+        return None
+    try:
+        return _load_inventory_manifest(reference)
+    except ValueError:
+        return None
+
+
+def _proposal_inventory_snapshot(proposal: TaskProposal) -> Optional[Tuple[Dict[str, Any], str]]:
+    if proposal.inferred_basis_kind != "snapshot" or len(proposal.snapshot_refs) != 1:
+        return None
+    return _inventory_snapshot(proposal.snapshot_refs[0])
+
+
+def _normalized_route(value: str) -> Optional[Tuple[str, str]]:
+    """Return a stable route key and display URL for an absolute HTTP(S) value."""
+
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    netloc = parsed.netloc.lower()
+    route_url = urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
+    return route_url, route_url
+
+
+def _coverage_route_groups(
     manifest: Dict[str, Any],
     *,
     prompt_token_limit: int,
-) -> List[List[str]]:
-    item_cap = max(1, min(32, int(prompt_token_limit or 48_000) // 4_000))
+) -> List[Tuple[str, str, List[str]]]:
+    """Group endpoint and parameter entries by route; keep other units isolated."""
+
     char_cap = max(1_000, int(prompt_token_limit or 48_000) * 4 // 5)
-    batches: List[List[str]] = []
-    current: List[str] = []
-    current_chars = 0
+    groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for item in manifest["items"]:
         item_id = str(item["id"])
-        item_chars = len(json.dumps(item, sort_keys=True, separators=(",", ":")))
-        if current and (len(current) >= item_cap or current_chars + item_chars > char_cap):
-            batches.append(current)
-            current = []
-            current_chars = 0
-        current.append(item_id)
-        current_chars += item_chars
-    if current:
-        batches.append(current)
-    return batches
+        route = _normalized_route(str(item["value"])) if item["kind"] in {"endpoint", "parameter"} else None
+        if route is None:
+            group_key = (str(item["target_id"]), f"item:{item_id}")
+            label = str(item["value"])
+        else:
+            route_key, label = route
+            group_key = (str(item["target_id"]), f"route:{route_key}")
+        group = groups.setdefault(group_key, {"label": label, "ids": [], "chars": 0})
+        group["ids"].append(item_id)
+        group["chars"] += len(json.dumps(item, sort_keys=True, separators=(",", ":")))
+        if group["chars"] > char_cap:
+            raise ValueError(f"Inventory route exceeds the resolved context safety limit: {group['label']}")
+    return [
+        (target_id, str(group["label"]), list(group["ids"]))
+        for (target_id, _group_key), group in groups.items()
+    ]
 
 
 def _completed_coverage_item_ids(existing_tasks: List[Task], snapshot_hash: str) -> set[str]:
@@ -2497,14 +2562,13 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
 
     Procedure example:
     {"tasks": [{"title": "Build surface inventory", "objective": "Map the assigned target",
-    "basis_kind": "procedure", "basis_description": "Bounded crawl", "methods": ["crawl"],
-    "limits": {"max_requests": 500}, "criteria": [{"description":
-    "Execute the bounded procedure and store its manifest",
-    "evidence": [{"kind": "inventory_manifest", "min_count": 1}]}], "target_ids": ["target-1"]}]}
+    "basis_description": "Bounded crawl", "methods": ["crawl"], "limits": {"max_requests": 500},
+    "output_kind": "inventory_manifest", "criteria": [{"description":
+    "Execute the bounded procedure and store its manifest"}], "target_ids": ["target-1"]}]}
 
     Python assigns the active phase and pending status, infers target scope, and compiles the proposal into an
     immutable acceptance contract. Criterion IDs, procedure stop conditions, gap policy, output kind, and source
-    references are deterministic. Snapshot proposals use snapshot_refs and may set coverage=true.
+    references are deterministic. Inventory snapshot proposals become route-scoped coverage tasks.
     """
 
     if not tasks:
@@ -2534,31 +2598,39 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
             [*existing_tasks, *staged_tasks],
         )
 
-        acceptance_batches = [acceptance]
+        acceptance_groups = [(title, objective, acceptance, target_scope, target_ids)]
         if acceptance.mode == "coverage":
             artifact_ref = next(ref for ref in acceptance.basis.source_refs if ref.startswith("artifact:"))
             manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
             completed_ids = _completed_coverage_item_ids(existing_tasks, snapshot_hash)
-            batches = [
-                [item_id for item_id in batch if item_id not in completed_ids]
-                for batch in _coverage_item_batches(manifest, prompt_token_limit=prompt_token_limit)
-            ]
-            batches = [batch for batch in batches if batch]
-            acceptance_batches = [
-                AcceptanceContract(
+            route_groups = []
+            for group_target_id, route_label, item_ids in _coverage_route_groups(
+                manifest,
+                prompt_token_limit=prompt_token_limit,
+            ):
+                remaining_ids = [item_id for item_id in item_ids if item_id not in completed_ids]
+                if not remaining_ids:
+                    continue
+                group_acceptance = AcceptanceContract(
                     mode="coverage",
                     basis=AcceptanceBasis(
                         kind="snapshot",
-                        description=acceptance.basis.description,
+                        description=f"Frozen inventory entries for {route_label}",
                         source_refs=acceptance.basis.source_refs,
                         snapshot_hash=acceptance.basis.snapshot_hash,
-                        item_ids=batch,
+                        item_ids=remaining_ids,
                     ),
                     criteria=acceptance.criteria,
                 )
-                for batch in batches
-            ]
-            if not acceptance_batches:
+                route_groups.append((
+                    f"Assess endpoint {route_label} [{group_target_id}]",
+                    f"Perform hypothesis-driven security testing for {route_label} and its frozen inventory entries.",
+                    group_acceptance,
+                    "subset",
+                    [group_target_id],
+                ))
+            acceptance_groups = route_groups
+            if not acceptance_groups:
                 duplicate_count += 1
                 continue
 
@@ -2583,20 +2655,17 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
             duplicate_count += 1
             continue
 
-        for batch_index, batch_acceptance in enumerate(acceptance_batches, start=1):
-            batch_title = title
-            if len(acceptance_batches) > 1:
-                batch_title = f"{title} (batch {batch_index}/{len(acceptance_batches)})"
+        for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
             staged_tasks.append(Task(
                 task_uid=str(uuid.uuid4()),
-                title=batch_title,
-                objective=objective,
-                acceptance=batch_acceptance,
+                title=group_title,
+                objective=group_objective,
+                acceptance=group_acceptance,
                 evidence=[],
                 phase=current_phase,
                 status="pending",
-                target_scope=target_scope,
-                target_ids=target_ids,
+                target_scope=group_target_scope,
+                target_ids=group_target_ids,
             ))
 
     for task in staged_tasks:
@@ -2618,7 +2687,7 @@ def create_tasks(tasks: List[TaskProposal]) -> str:
     "criteria": [{"description": "Store the finite inventory"}], "target_ids": ["target-1"]}]}
 
     Python infers the basis kind, defaults basis_description to objective, assigns phase and status, and compiles
-    criterion IDs, evidence requirements, source references, coverage batches, and procedure policies.
+    criterion IDs, evidence requirements, source references, route-scoped coverage tasks, and procedure policies.
     """
 
     prompt_token_limit = int((_MEMORY_CONFIG or {}).get("prompt_token_limit") or 48_000)
@@ -2954,25 +3023,54 @@ def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult])
     )
 
 
-def build_record_task_acceptance_tool(task_uid: str) -> Any:
+def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None) -> Any:
     """Build a model-facing acceptance tool bound to one controller-selected task."""
 
     normalized_uid = str(task_uid or "").strip()
     if not normalized_uid:
         raise ValueError("task_uid required when binding record_task_acceptance")
 
-    def record_task_acceptance(results: List[AcceptanceResult]) -> str:
-        return _record_task_acceptance(normalized_uid, results)
+    task = task or next(
+        (item for item in _get_plan_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
+        None,
+    )
+    if task is None:
+        raise ValueError("Unknown task_uid for the current operation")
+    if len(task.acceptance.criteria) != 1:
+        raise ValueError("record_task_acceptance requires exactly one frozen criterion")
+    criterion_id = task.acceptance.criteria[0].id
+    coverage_item_ids = task.acceptance.basis.item_ids
+    if task.acceptance.mode == "coverage" and not coverage_item_ids:
+        artifact_ref = next(
+            reference for reference in task.acceptance.basis.source_refs if reference.startswith("artifact:")
+        )
+        manifest, _snapshot_hash = _load_inventory_manifest(artifact_ref)
+        coverage_item_ids = tuple(str(item["id"]) for item in manifest["items"])
+
+    def record_task_acceptance(
+        status: AcceptanceResultStatus,
+        summary: str,
+        evidence_refs: List[str],
+    ) -> str:
+        coverage = tuple(
+            CoverageResult(item_id=item_id, status=status, evidence_refs=tuple(evidence_refs))
+            for item_id in coverage_item_ids
+        ) if task.acceptance.mode == "coverage" else ()
+        result = AcceptanceResult(
+            criterion_id=criterion_id,
+            status=status,
+            summary=summary,
+            evidence_refs=tuple(evidence_refs),
+            coverage=coverage,
+        )
+        return _record_task_acceptance(normalized_uid, [result])
 
     record_task_acceptance.__doc__ = f"""Record evidence-backed terminal results for the assigned task.
 
-    Input shape: {{"results": [{{"criterion_id": "criterion-id",
-    "status": "satisfied|assessed_negative|inaccessible|excluded|duplicate",
-    "summary": "Observed result", "evidence_refs": ["memory:<id>", "artifact:<path>"],
-    "coverage": [{{"item_id": "manifest-item", "status": "satisfied",
-    "evidence_refs": ["artifact:<path>"]}}]}}]}}
+    Input shape: {{"status": "satisfied|assessed_negative|inaccessible|excluded|duplicate",
+    "summary": "Observed result", "evidence_refs": ["memory:<id>", "artifact:<path>"]}}
 
-    Task identity is supplied by the workflow controller. Submit every frozen criterion in one atomic call.
+    Task identity, its single criterion, and frozen coverage item IDs are supplied by the workflow controller.
     Successfully recorded results are immutable. Their concrete summaries and evidence references are automatically
     published as one operation observation for later task-prompt selection. A publication warning does not invalidate
     the acceptance ledger.
@@ -4295,6 +4393,11 @@ class Mem0ServiceClient:
         """Return the frozen-manifest result ledger for one task."""
 
         return _get_plan_store().get_acceptance_results(_operation_id(), task_uid)
+
+    def list_finding_records(self) -> List[Dict[str, Any]]:
+        """Return finding records for the current operation."""
+
+        return _get_plan_store().list_findings(_operation_id())
 
     def get_memory_overview(self, user_id: Optional[str] = None) -> Dict:
         """Get an overview of stored memories."""

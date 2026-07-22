@@ -101,8 +101,8 @@ from modules.handlers.utils import (
     update_latest_output_pointer,
 )
 from modules.handlers.terminal_tool import (
-    TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY,
     TERMINAL_TOOL_COMPLETED_STATE_KEY,
+    TERMINAL_TOOL_REJECTED_STATE_KEY,
 )
 from modules.tools import browser, channel_close_all
 from modules.tools.memory import get_memory_client
@@ -537,19 +537,15 @@ def run_agent_until_terminal_state(
                 and _successful_required_tools_satisfied(agent_callback_handler, run_policy, outcome_baseline)
             ):
                 return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
-            task_creator_exhausted = (
-                result_state.get(TASK_CREATOR_CORRECTIONS_EXHAUSTED_STATE_KEY)
+            terminal_tool_rejected = (
+                result_state.get(TERMINAL_TOOL_REJECTED_STATE_KEY)
                 if isinstance(result_state, dict)
                 else None
             )
-            if isinstance(task_creator_exhausted, dict):
-                failed_attempts = int(task_creator_exhausted.get("failed_attempts", 0) or 0)
-                max_corrections = int(task_creator_exhausted.get("max_corrections", 0) or 0)
+            if isinstance(terminal_tool_rejected, dict):
                 return AgentRunResult(
-                    "task_creator_corrections_exhausted",
-                    str(task_creator_exhausted.get("error") or (
-                        f"Task creator stopped after {failed_attempts} failed calls and {max_corrections} corrections"
-                    )),
+                    "required_tool_rejected",
+                    str(terminal_tool_rejected.get("error") or "Required tool call was rejected"),
                 )
             repeated_tool_loop = (
                 result_state.get(REPEATED_TOOL_LOOP_STATE_KEY)
@@ -1551,7 +1547,7 @@ def main():
                     tools=tools,
                     name=f"Cyber-AutoAgent {operation_id} {role}",
                     agent_type=role,
-                    include_tool_catalog=True,
+                    include_tool_catalog=role != "task_creator",
                 )
                 try:
                     callback = getattr(agent, "_cyber_callback_handler", None)
@@ -1569,14 +1565,15 @@ def main():
                             classification = getattr(error, "max_token_classification", None)
                             kind = getattr(classification, "kind", "output_truncation")
                             outcomes = journal.since(snapshot) if journal is not None else []
+                            role_label = "Task creator" if role == "task_creator" else "Task executor"
                             return TaskExecutorCycleResult(
                                 text="",
                                 outcomes=outcomes,
                                 max_tokens_exhausted=True,
                                 max_tokens_reason=(
-                                    "Task executor repeated the same reasoning loop after its bounded recovery."
+                                    f"{role_label} repeated the same reasoning loop after its bounded recovery."
                                     if kind == "reasoning_loop"
-                                    else "Task executor reached its output-token limit after its bounded recovery."
+                                    else f"{role_label} reached its output-token limit after its bounded recovery."
                                 ),
                             )
                         outcomes = journal.since(snapshot) if journal is not None else []

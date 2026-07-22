@@ -1494,7 +1494,7 @@ def test_run_agent_policy_requires_new_tool_calls_for_reused_agent_pass(monkeypa
     assert "MANDATORY ACTION" in agent.calls[1]
 
 
-def test_run_agent_stops_when_task_creator_corrections_are_exhausted(monkeypatch):
+def test_run_agent_returns_rejected_required_tool_error(monkeypatch):
     root_callback = CliCallback()
     role_callback = CliCallback()
     role_callback.should_stop = Mock(return_value=False)
@@ -1508,9 +1508,9 @@ def test_run_agent_stops_when_task_creator_corrections_are_exhausted(monkeypatch
             return SimpleNamespace(
                 metrics=None,
                 state={
-                    "task_creator_corrections_exhausted": {
-                        "failed_attempts": 3,
-                        "max_corrections": 2,
+                    "terminal_tool_rejected": {
+                        "tool_name": "create_tasks",
+                        "error": "limits field required",
                     }
                 },
             )
@@ -1525,8 +1525,8 @@ def test_run_agent_stops_when_task_creator_corrections_are_exhausted(monkeypatch
         run_policy=cyberautoagent.AgentRunPolicy(required_tool_names={"create_tasks"}),
     )
 
-    assert result.reason == "task_creator_corrections_exhausted"
-    assert result.message == "Task creator stopped after 3 failed calls and 2 corrections"
+    assert result.reason == "required_tool_rejected"
+    assert result.message == "limits field required"
 
 
 def test_extract_last_assistant_text_skips_tool_use_messages():
@@ -2179,7 +2179,13 @@ def test_cli_main_workflow_runner_creates_role_agent(monkeypatch, tmp_path):
     fake_agent.cleanup.assert_called_once()
 
 
-def test_cli_main_executor_session_reuses_and_cleans_role_agent(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("role", "include_tool_catalog"), [("task_executor", True), ("task_creator", False)])
+def test_cli_main_worker_session_reuses_and_cleans_role_agent(
+    monkeypatch,
+    tmp_path,
+    role,
+    include_tool_catalog,
+):
     callback = CliCallback()
     fake_agent = CallableCliAgent()
     config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
@@ -2203,7 +2209,7 @@ def test_cli_main_executor_session_reuses_and_cleans_role_agent(monkeypatch, tmp
     def run_workflow():
         session_factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
         policy = cyberautoagent.AgentRunPolicy(min_tool_calls=1, terminal_after_required_tools=True)
-        with session_factory("task_executor", ["shell"], "role system") as run_executor:
+        with session_factory(role, ["shell"], "role system") as run_executor:
             first_result = run_executor("first pass", policy)
             second_result = run_executor("critic guidance", policy)
             assert first_result.text == "first summary"
@@ -2217,6 +2223,9 @@ def test_cli_main_executor_session_reuses_and_cleans_role_agent(monkeypatch, tmp
     cyberautoagent.main()
 
     cyberautoagent.create_agent.assert_called_once()
+    create_kwargs = cyberautoagent.create_agent.call_args.kwargs
+    assert create_kwargs["agent_type"] == role
+    assert create_kwargs["include_tool_catalog"] is include_tool_catalog
     assert cyberautoagent.run_agent_until_terminal_state.call_count == 2
     assert [
         call.kwargs["current_message"]

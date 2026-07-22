@@ -35,11 +35,12 @@ task, phase, or operation objective while classifying existing evidence.
 Agents may create follow-up work with `create_tasks` when their role permits it. Plan reads/writes, task activation, active-task lookup, task closure, and uncompleted-task listing are applied directly by Python rather than agent-callable tools.
 
 The task creator receives a deterministic controller-owned prompt and a flat `TaskProposal` contract. A proposal
-contains its title, objective, basis kind and description, concise criteria, and optional procedure, snapshot, and
-target fields. Python compiles the full immutable acceptance contract, assigns pending status and the active phase,
-and infers target scope from `target_ids`. The controller permits a configurable number of corrected calls after an
-initial rejection (two by default) and stops the role when that allowance is exhausted. It never retries after tasks
-are successfully stored.
+contains its title, objective, required limits object, one concise criterion, and optional procedure, snapshot, and
+target fields. Snapshot proposals use `limits: {}`, which Python discards after validation. Python compiles the full
+immutable acceptance contract, assigns pending status and the active phase, and infers target scope from `target_ids`.
+The controller permits a configurable number of corrected calls after an initial rejection (four by default) in the
+same retained conversation and stops the role when that allowance is exhausted. It never retries after tasks are
+successfully stored.
 
 Agents also do not have a stop tool. Operation completion is a Python workflow decision; the controller emits a `termination_reason` event with reason `complete`.
 
@@ -298,9 +299,9 @@ active-task fetch tool; active task context is selected by Python and included i
 submit flat `TaskProposal` objects, and Python compiles each into a controller-frozen acceptance contract containing a
 basis, source references, unique criteria, and evidence requirements. The rules are:
 
-- create one task per cohesive actionable deliverable; Python shards large coverage manifests into bounded tasks
+- create one task per cohesive actionable deliverable; Python expands inventory snapshots by target and normalized route
 - omit phase, status, task evidence, target scope, and the nested acceptance contract
-- provide criterion descriptions only; Python generates criterion IDs and evidence requirements in the frozen contract
+- provide exactly one criterion description; Python generates its ID and evidence requirement in the frozen contract
 - provide procedure methods and positive limits, or provide existing snapshot references
 - omit `target_ids` for all targets or provide exact IDs for a subset
 - do not create duplicates
@@ -308,8 +309,8 @@ basis, source references, unique criteria, and evidence requirements. The rules 
 - create prerequisite inventory work before dependent coverage tasks
 - create a follow-up task for discoveries outside an active task's frozen manifest
 
-Snapshot references use explicit `task:<uid>`, `memory:<id>`, `artifact:<path>`, or `finding:<uid>` namespaces. Coverage
-may omit the reference when exactly one completed canonical inventory is eligible. For procedures, Python generates
+Snapshot references use explicit `task:<uid>`, `memory:<id>`, `artifact:<path>`, or `finding:<uid>` namespaces. A
+snapshot that resolves to a canonical inventory automatically becomes coverage work. For procedures, Python generates
 target and active-phase source references, injects fixed stopping and gap policies, defaults `output_kind` to
 `artifact`, and generates readable unique criterion IDs from descriptions.
 
@@ -317,13 +318,13 @@ Set procedure `output_kind` to `inventory_manifest` only for a canonical version
 generic durable evidence, so assessed-negative coverage can be supported by an artifact or operation memory without
 requiring a vulnerability finding.
 
-Coverage batching uses the configured or detected model context window. At the common 48,000-token context, a batch
-contains at most 12 manifest items and is reduced further when serialized item data would consume more than 20% of
-the context.
+Inventory coverage groups endpoint and parameter/query entries with the same target and normalized URL path. Each
+route becomes an independently executable task; workflows, services, non-URL entries, and other inventory units remain
+isolated tasks. The configured or detected context window is only a safety limit ensuring one route fits its prompt. It
+does not increase the number of routes assigned to one executor.
 
-For example, parameter mapping can use one retained executor with one criterion per endpoint from the completed
-endpoint inventory. Workflow mapping can freeze login, logout, setup/reset, and security-level transitions as criteria
-so browser and cookie state remain in one conversation.
+For example, `/login` and its username/password parameter entries share one retained executor, while `/security` is a
+separate task. Stateful workflow entries remain individually bounded so browser and cookie state stay focused.
 
 Python decides when any pending task becomes active.
 
@@ -349,8 +350,9 @@ flowchart LR
     V --> S[Python stores task status]
 ```
 
-The executor records a terminal result for every frozen criterion: `satisfied`, `assessed_negative`, `inaccessible`,
-`excluded`, or `duplicate`. Each result requires a concrete summary and evidence references. Python publishes one
+The executor submits one terminal status for the frozen criterion: `satisfied`, `assessed_negative`, `inaccessible`,
+`excluded`, or `duplicate`, plus a concrete summary and evidence references. Python injects the bound task, criterion,
+and route coverage IDs, then publishes one
 bounded observation per completed task so later prompt builders can select the accepted information without a separate
 post-acceptance executor turn. `store_observation` remains available for useful interim facts outside the ledger, and
 returns structured JSON with a durable `memory_ref`. When a frozen criterion requires observation evidence, the
@@ -360,7 +362,8 @@ exact missing IDs to the next executor cycle. The evaluator runs only after stru
 the referenced evidence actually supports each result; memory is required only by an explicit frozen evidence kind.
 
 The controller binds `record_task_acceptance` to the assigned task before creating its retained executor conversation.
-The model submits only criterion results; it cannot select, guess, or replace the task UID. `create_tasks` remains
+The model submits only `status`, `summary`, and `evidence_refs`; it cannot select, guess, or replace task, criterion, or
+coverage IDs. `create_tasks` remains
 limited to new follow-up work and never completes or records acceptance for the assigned task.
 
 `task_evaluator` returns:

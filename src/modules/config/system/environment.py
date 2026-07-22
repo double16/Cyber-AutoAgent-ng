@@ -5,12 +5,13 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import yaml
 
@@ -73,6 +74,32 @@ def clean_operation_memory(operation_id: str, target_name: str = None):
             print_status(f"Failed to clean {memory_path}: {e}", "ERROR")
     else:
         logger.debug("Memory path does not exist: %s", memory_path)
+
+
+def _get_shell_command_path(command: str, canary: str | list[str]) -> Optional[str]:
+    """Check if a shell command is available"""
+    tool_path = shutil.which(command)
+    if not tool_path:
+        return None
+
+    if canary:
+        canaries = canary if isinstance(canary, list) else [canary]
+        success = False
+        for c in canaries:
+            try:
+                # Use bash explicitly as in the original script
+                result = subprocess.run(c, shell=True, executable='/bin/bash', stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL)
+                if result.returncode == 0:
+                    success = True
+                    break
+            except Exception:
+                pass
+
+        if not success:
+            return None
+
+    return tool_path
 
 
 def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
@@ -158,7 +185,7 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
         description = tool_info.get("description", "")
         binary = tool_info.get("command", tool_name)
 
-        tool_path = shutil.which(binary)
+        tool_path = _get_shell_command_path(binary, tool_info.get('canary'))
         is_available = tool_path is not None
 
         if is_available:

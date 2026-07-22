@@ -1,3 +1,4 @@
+import inspect
 import json
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -229,11 +230,12 @@ class FakeCallbackHandler:
 
 
 class FakeState:
-    def __init__(self, plan, tasks=None, acceptance_complete=True):
+    def __init__(self, plan, tasks=None, acceptance_complete=True, finding_records=None):
         self.plan = plan
         self.tasks = list(tasks or [])
         self.acceptance_complete = acceptance_complete
         self.acceptance_results = {}
+        self.finding_records = list(finding_records or [])
         self.client = SimpleNamespace(list_memories=lambda **kwargs: [])
 
     def get_plan(self):
@@ -271,6 +273,9 @@ class FakeState:
             )
             for criterion in task.acceptance.criteria
         ]
+
+    def list_finding_records(self):
+        return list(self.finding_records)
 
     def activate_task(self, task):
         return self.store_task(Task(
@@ -379,6 +384,21 @@ class FakeState:
             constraints=plan_data.get("constraints", []),
         )
         return self.plan
+
+
+def retained_work_runner(work_runner):
+    """Adapt a test work runner to the retained worker-session interface."""
+
+    @contextmanager
+    def session(role, tools, system_prompt):
+        def run(prompt, run_policy):
+            if len(inspect.signature(work_runner).parameters) >= 5:
+                return work_runner(role, prompt, tools, system_prompt, run_policy)
+            return work_runner(role, prompt, tools, system_prompt)
+
+        yield run
+
+    return session
 
 
 class AdvancingFakeState(FakeState):
@@ -637,9 +657,9 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy(monkey
     bound_task_uids = []
     original_factory = workflow_mod.build_record_task_acceptance_tool
 
-    def build_bound_tool(task_uid):
+    def build_bound_tool(task_uid, task):
         bound_task_uids.append(task_uid)
-        return original_factory(task_uid)
+        return original_factory(task_uid, task)
 
     monkeypatch.setattr(workflow_mod, "build_record_task_acceptance_tool", build_bound_tool)
 
@@ -675,7 +695,7 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy(monkey
     assert '"schema_version": 1' in captured["prompt"]
     assert "Execute only the assigned task objective" in captured["prompt"]
     assert "pending tasks with their own acceptance contracts using `create_tasks`" in captured["prompt"]
-    assert "record one terminal result for every frozen criterion" in captured["prompt"]
+    assert "call `record_task_acceptance` with one terminal status" in captured["prompt"]
     assert "Python owns task, phase, and operation state transitions" in captured["prompt"]
     assert "## Tool Selection Policy (Controller-owned)" in captured["prompt"]
     assert "Multiple methods with\noverlapping capabilities may be used" in captured["prompt"]
@@ -991,18 +1011,14 @@ def test_task_acceptance_gate_skips_evaluator_and_lists_missing_criteria():
                 kind="snapshot",
                 description="Endpoint enumeration snapshot",
                 source_refs=["memory:endpoints"],
+                item_ids=["endpoint:/login.php"],
             ),
             criteria=[
                 AcceptanceCriterion(
-                    id="endpoint:/login.php",
-                    description="Map login parameters",
+                    id="assess-the-assigned-endpoint",
+                    description="Assess the assigned endpoint",
                     evidence_requirements=[EvidenceRequirement(kind="memory")],
-                ),
-                AcceptanceCriterion(
-                    id="endpoint:/security.php",
-                    description="Map security parameters",
-                    evidence_requirements=[EvidenceRequirement(kind="memory")],
-                ),
+                )
             ],
         ),
         phase=1,
@@ -1038,7 +1054,7 @@ def test_task_acceptance_gate_skips_evaluator_and_lists_missing_criteria():
 
     assert roles == ["task_prompt_builder"]
     assert state.tasks[0].status == "partial_failure"
-    assert "endpoint:/login.php, endpoint:/security.php" in state.tasks[0].status_reason
+    assert "assess-the-assigned-endpoint" in state.tasks[0].status_reason
 
 
 def test_task_executor_appends_selected_memories_from_prompt_spec():
@@ -2260,6 +2276,7 @@ def test_controller_creates_plan_when_missing():
         state_store=state,
         text_runner=text_runner,
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
         max_iterations=4,
     )
 
@@ -2399,7 +2416,7 @@ def test_controller_reopens_completed_plan_only_at_start():
     assert "[pending] 2. Validate" in first_plan_event["content"]
 
 
-def test_controller_raises_when_task_creator_creates_no_initial_tasks():
+def test_controller_marks_empty_phase_partial_when_task_creator_creates_no_tasks():
     state = FakeState(_plan())
 
     def text_runner(role, prompt, tools, system_prompt):
@@ -2418,17 +2435,74 @@ def test_controller_raises_when_task_creator_creates_no_initial_tasks():
         state_store=state,
         text_runner=text_runner,
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
         max_iterations=1,
     )
 
-    with pytest.raises(WorkflowInvariantError, match="No tasks created"):
-        controller.run()
+    controller.run()
 
+    assert state.plan.phases[0].status == "partial_failure"
+    assert state.plan.assessment_complete is True
     assert work_calls == [
         ("task_creator", {"create_tasks"}),
         ("task_creator", {"create_tasks"}),
         ("task_creator", {"create_tasks"}),
+        ("task_creator", {"create_tasks"}),
+        ("task_creator", {"create_tasks"}),
     ]
+
+
+def test_controller_completes_empty_final_validation_phase_without_task_creator():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(
+            id=1,
+            title="Impact Validation and Proof Generation",
+            status="active",
+            criteria="Validate findings with proof",
+        )],
+    )
+    state = FakeState(plan, finding_records=[{"resolution": "verified"}])
+
+    def work_runner(*_args):
+        raise AssertionError("task creator must not run when no finding requires validation")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        work_runner=work_runner,
+    )
+
+    controller.run()
+
+    assert state.plan.phases[0].status == "done"
+    assert state.plan.assessment_complete is True
+
+
+def test_empty_final_validation_phase_with_unresolved_finding_requires_tasks():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(
+            id=1,
+            title="Impact Validation and Proof Generation",
+            status="active",
+            criteria="Validate findings with proof",
+        )],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, finding_records=[{"resolution": None}]),
+        text_runner=lambda *_args: "{}",
+    )
+
+    assert controller._can_complete_empty_validation_phase(plan, plan.phases[0]) is False
 
 
 def test_continuing_phase_with_task_history_rechecks_then_advances_on_creator_failure():
@@ -2445,7 +2519,7 @@ def test_continuing_phase_with_task_history_rechecks_then_advances_on_creator_fa
 
     def work_runner(role, prompt, tools, system_prompt, run_policy):
         creator_calls.append(prompt)
-        return SimpleNamespace(reason="task_creator_corrections_exhausted", message="schema rejected")
+        return SimpleNamespace(reason="required_tool_rejected", message="schema rejected")
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 2}),
@@ -2453,6 +2527,7 @@ def test_continuing_phase_with_task_history_rechecks_then_advances_on_creator_fa
         state_store=state,
         text_runner=text_runner,
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
     )
 
     controller.run()
@@ -2477,6 +2552,18 @@ def test_task_creator_requires_create_tasks_tool():
         controller._task_creator_tools()
 
 
+def test_task_creator_requires_retained_session_factory():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda *_args: "{}",
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="requires a retained worker session factory"):
+        controller._create_tasks(_plan(), _plan().phases[0])
+
+
 def test_task_creator_passes_required_tool_run_policy():
     state = FakeState(_plan())
     captured = {}
@@ -2498,6 +2585,7 @@ def test_task_creator_passes_required_tool_run_policy():
         state_store=state,
         text_runner=text_runner,
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
         max_iterations=1,
     )
 
@@ -2538,6 +2626,7 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
         state_store=state,
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
     )
 
     controller._create_tasks(plan, plan.phases[0])
@@ -2578,19 +2667,53 @@ def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
         state_store=state,
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
     )
 
     controller._create_tasks(_plan(), _plan().phases[0])
 
     assert len(prompts) == 2
-    assert "No durable task was created for the active phase" in prompts[1]
-    assert "Make one corrected `create_tasks` call now" in prompts[1]
-    assert "create one bounded" in prompts[1]
-    assert "procedure-based prerequisite inventory task" in prompts[1]
+    assert "preceding `create_tasks` call was rejected" in prompts[1]
+    assert "exactly one corrected `create_tasks` call" in prompts[1]
+    assert "Preserve every correction already made" in prompts[1]
+    assert "## Active Phase" not in prompts[1]
     assert len(state.tasks) == 1
 
 
-def test_task_creator_uses_fresh_correction_after_max_tokens():
+def test_task_creator_opens_and_cleans_one_session_for_all_default_attempts():
+    prompts = []
+    lifecycle = []
+
+    @contextmanager
+    def session(role, tools, system_prompt):
+        lifecycle.append(("open", role))
+
+        def run(prompt, run_policy):
+            prompts.append(prompt)
+            return SimpleNamespace(reason="required_tool_rejected", message="schema rejected")
+
+        try:
+            yield run
+        finally:
+            lifecycle.append(("close", role))
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda *_args: "{}",
+        executor_session_factory=session,
+    )
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert outcome.attempts == 5
+    assert len(prompts) == 5
+    assert lifecycle == [("open", "task_creator"), ("close", "task_creator")]
+    assert all("## Complete Plan" not in prompt for prompt in prompts[1:])
+
+
+def test_task_creator_uses_retained_correction_after_max_tokens():
     state = FakeState(_plan())
     prompts = []
 
@@ -2606,6 +2729,7 @@ def test_task_creator_uses_fresh_correction_after_max_tokens():
         state_store=state,
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
     )
 
     outcome = controller._create_tasks(_plan(), _plan().phases[0])
@@ -2615,12 +2739,12 @@ def test_task_creator_uses_fresh_correction_after_max_tokens():
     assert outcome.created_count == 1
 
 
-def test_task_creator_uses_configured_fresh_correction_attempts():
+def test_task_creator_uses_configured_retained_correction_attempts():
     prompts = []
 
     def work_runner(role, prompt, tools, system_prompt, run_policy):
         prompts.append(prompt)
-        return SimpleNamespace(reason="task_creator_corrections_exhausted")
+        return SimpleNamespace(reason="required_tool_rejected")
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 2}),
@@ -2628,13 +2752,14 @@ def test_task_creator_uses_configured_fresh_correction_attempts():
         state_store=FakeState(_plan()),
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
     )
 
     controller._create_tasks(_plan(), _plan().phases[0])
 
     assert len(prompts) == 3
     assert "up to 2 correction(s)" in prompts[0]
-    assert "Previous attempt result" in prompts[1]
+    assert "Validation result" in prompts[1]
 
 
 def test_task_creator_duplicate_only_success_does_not_retry_completed_tool():
@@ -2650,6 +2775,7 @@ def test_task_creator_duplicate_only_success_does_not_retry_completed_tool():
         state_store=FakeState(_plan()),
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
     )
 
     outcome = controller._create_tasks(_plan(), _plan().phases[0])
@@ -2691,6 +2817,7 @@ def test_task_creator_reassigns_new_future_phase_tasks_to_active_phase():
         state_store=state,
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
     )
 
     controller._create_tasks(plan, plan.phases[0])
@@ -2712,7 +2839,7 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
 
     assert "Candidate optional tools" not in prompt
     assert "Your only action is one successful" in prompt
-    assert "Every proposal MUST contain non-empty `title`, `objective`, and `criteria`" in prompt
+    assert "Every proposal MUST contain non-empty `title`, `objective`, a `limits` object" in prompt
     assert "unsupported top-level `description` fields" in prompt
     assert "Stop immediately" in prompt
     assert "Python assigns active phase 1" in prompt

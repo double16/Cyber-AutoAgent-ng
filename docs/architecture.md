@@ -155,10 +155,11 @@ correction stops the executor immediately, while other recovery-policy violation
 of two by default.
 
 Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
-controller may start `CYBER_TASK_CREATOR_MAX_CORRECTIONS` fresh corrected attempts (two by default). Each attempt ends
-after its first tool result and receives only stable phase context plus the prior validation error. Generic reasoning
-loop repair is disabled for this role. Agents submit a flat `TaskProposal`; Python infers its basis, supplies procedure
-invariants, derives source references and target scope, and compiles the proposal before validation and storage.
+controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (four by
+default). Each turn ends after its first tool result; the initial prompt contains stable phase context and corrections
+contain only the prior validation error. Generic reasoning-loop repair is disabled for this role. Agents submit a flat
+`TaskProposal` whose `limits` object is always required. Python discards it for snapshot work, infers the basis,
+supplies procedure invariants, derives source references and target scope, and compiles the proposal before storage.
 
 Successful task acceptance populates task evidence with the validated immutable ledger references. Phase
 evaluators receive that canonical per-criterion ledger and may read only its resolved artifact paths, preventing stale

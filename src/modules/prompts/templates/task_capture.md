@@ -3,12 +3,13 @@
 **Purpose**: Externalized work queue. You may create tasks when the current role asks for task creation for follow-up work, do not execute created tasks.
 
 ## Task spec
-- Required fields: `title`, `objective`, and `criteria`. Optional fields are `basis_description`, `methods`, `limits`,
-  `output_kind`, `snapshot_refs`, `coverage`, and `target_ids`.
+- Required fields: `title`, `objective`, `limits`, and `criteria`. Optional fields are `basis_description`, `methods`,
+  `output_kind`, `snapshot_refs`, and `target_ids`.
 - `objective`: what to achieve / problem to solve / more info to gather.
 - Procedure proposals require methods and limits
-- Snapshot proposals provide existing snapshot references or set `coverage=true`
-- Criteria provide only `description`
+- Snapshot proposals provide existing snapshot references and `limits: {}`; Python discards limits and expands
+  inventory snapshots into endpoint tasks
+- Provide exactly one criterion containing only `description`
 
 ## Create tasks
 Prefer batch creation of tasks over single task creation:

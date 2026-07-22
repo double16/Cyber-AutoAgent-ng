@@ -273,6 +273,9 @@ class WorkflowStateStore:
     def list_task_acceptance_results(self, task_uid: str) -> List[Any]:
         return self.client.list_task_acceptance_results(task_uid)
 
+    def list_finding_records(self) -> List[Dict[str, Any]]:
+        return self.client.list_finding_records()
+
     def store_task(self, task: Task) -> Task:
         self.client.store_task(task=task)
         return task
@@ -494,7 +497,7 @@ class MultiAgentWorkflowController:
         :param state_store:
         :param text_runner:
         :param work_runner:
-        :param executor_session_factory: Creates one retained task-executor conversation per active task.
+        :param executor_session_factory: Creates one retained worker conversation for bounded continuation turns.
         :param max_iterations: Present to prevent unit tests from running in an infinite loop.
         """
         self.runtime = runtime
@@ -684,8 +687,8 @@ class MultiAgentWorkflowController:
     def _task_creator_correction_count(self) -> int:
         config_manager = self.runtime.config_manager
         if config_manager:
-            return max(0, config_manager.getenv_int("CYBER_TASK_CREATOR_MAX_CORRECTIONS", 2))
-        return 2
+            return max(0, config_manager.getenv_int("CYBER_TASK_CREATOR_MAX_CORRECTIONS", 4))
+        return 4
 
     def run(self) -> None:
         self._log_workflow(
@@ -788,6 +791,18 @@ class MultiAgentWorkflowController:
                 phase_continue_decision = decision
 
             before_count = len(self.state.list_tasks(phase=phase.id))
+            if before_count == 0 and self._can_complete_empty_validation_phase(plan, phase):
+                self._log_workflow(
+                    "completing empty finding-validation phase=%s reason=no_pending_candidates",
+                    self._phase_label(phase),
+                )
+                previous_signature = self._plan_signature(plan)
+                updated_plan = self.state.mark_phase(plan, phase.id, "done")
+                self._emit_plan_output("updated", updated_plan, previous_signature)
+                if updated_plan.assessment_complete:
+                    self._emit_workflow_completion(updated_plan)
+                    return
+                continue
             self._log_workflow("creating tasks phase=%s existing_task_count=%s", self._phase_label(phase), before_count)
             creation = self._create_tasks(plan, phase)
             task = self._get_or_activate_task(phase.id)
@@ -795,8 +810,19 @@ class MultiAgentWorkflowController:
                 self._log_workflow("task available after creation task=%s phase=%s", self._task_label(task), phase.id)
                 continue
             if before_count == 0:
-                self._log_workflow("no tasks created for empty phase=%s; raising invariant", self._phase_label(phase))
-                raise WorkflowInvariantError(f"No tasks created for phase {phase.id}")
+                reason = creation.failure_reason or f"No tasks created for phase {phase.id}"
+                self._log_workflow(
+                    "no tasks created for empty phase=%s; marking partial_failure reason=%s",
+                    self._phase_label(phase),
+                    self._short(reason),
+                )
+                previous_signature = self._plan_signature(plan)
+                updated_plan = self.state.mark_phase(plan, phase.id, "partial_failure")
+                self._emit_plan_output("updated", updated_plan, previous_signature)
+                if updated_plan.assessment_complete:
+                    self._emit_workflow_completion(updated_plan)
+                    return
+                continue
             if phase_continue_decision is not None:
                 final_decision = self._evaluate_phase_after_task_creation_failure(
                     plan,
@@ -830,6 +856,22 @@ class MultiAgentWorkflowController:
                 return
         self._log_workflow("iteration limit reached max_iterations=%s", self.max_iterations)
         raise WorkflowInvariantError("Workflow iteration limit reached")
+
+    def _can_complete_empty_validation_phase(self, plan: OperationPlan, phase: PlanPhase) -> bool:
+        """Return whether a final finding-validation phase has no unresolved candidates."""
+
+        if phase.id != max(item.id for item in plan.phases):
+            return False
+        phase_text = f"{phase.title} {phase.criteria}".lower()
+        if not any(token in phase_text for token in ("finding", "impact", "proof")):
+            return False
+        if "validat" not in phase_text and "proof" not in phase_text:
+            return False
+        list_records = getattr(self.state, "list_finding_records", None)
+        if not callable(list_records):
+            return False
+        records = list_records()
+        return not any(not str(record.get("resolution") or "").strip() for record in records)
 
     def _emit_workflow_completion(self, plan: OperationPlan) -> None:
         """Notify consumers that Python workflow evaluation completed the operation."""
@@ -943,7 +985,7 @@ class MultiAgentWorkflowController:
             include_create_tasks=True,
         )
         tools = [tool for tool in tools if get_tool_name(tool) != "record_task_acceptance"]
-        tools.append(build_record_task_acceptance_tool(task.task_uid))
+        tools.append(build_record_task_acceptance_tool(task.task_uid, task))
         execution_prompt = str(prompt_spec.get("prompt") or task.objective)
         execution_prompt = (
             execution_prompt.rstrip()
@@ -1763,36 +1805,24 @@ review existing memories. Return only the requested JSON decision."""
         failure_reason = ""
         attempts = 0
         max_attempts = 1 + self._task_creator_correction_count()
-        for attempt in range(1, max_attempts + 1):
-            attempts = attempt
-            creator_result = None
-            attempt_prompt = prompt if attempt == 1 else self._task_creator_repair_prompt(
-                plan,
-                phase,
-                failure_reason,
-            )
-            try:
-                creator_result = self._run_worker_agent(
-                    "task_creator",
-                    attempt_prompt,
-                    tools,
-                    system_prompt,
-                    run_policy,
-                )
-                failure_reason = str(
-                    getattr(creator_result, "message", "")
-                    or getattr(creator_result, "reason", "")
-                    or "no actionable task was created"
-                )
-            except MaxTokensReachedException as error:
-                failure_reason = f"task creator reached its model token limit: {self._short(error, 300)}"
-            self._reassign_new_task_creator_tasks_to_active_phase(phase, before_task_uids)
-            after_actionable_count = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
-            if after_actionable_count > before_actionable_count:
-                break
-            if creator_result is not None and getattr(creator_result, "reason", "") == run_policy.terminal_reason:
-                failure_reason = "create_tasks succeeded but produced no new actionable tasks"
-                break
+        with self._task_creator_session(tools, system_prompt) as run_creator:
+            for attempt in range(1, max_attempts + 1):
+                attempts = attempt
+                creator_result = None
+                attempt_prompt = prompt if attempt == 1 else self._task_creator_repair_prompt(failure_reason)
+                try:
+                    creator_result = run_creator(attempt_prompt, run_policy)
+                    failure_reason = self._task_creator_failure_reason(creator_result)
+                except MaxTokensReachedException as error:
+                    failure_reason = f"task creator reached its model token limit: {self._short(error, 300)}"
+                self._reassign_new_task_creator_tasks_to_active_phase(phase, before_task_uids)
+                after_actionable_count = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
+                if after_actionable_count > before_actionable_count:
+                    break
+                raw_result = creator_result.text if isinstance(creator_result, TaskExecutorCycleResult) else creator_result
+                if raw_result is not None and getattr(raw_result, "reason", "") == run_policy.terminal_reason:
+                    failure_reason = "create_tasks succeeded but produced no new actionable tasks"
+                    break
         after_count = len(self.state.list_tasks(phase=phase.id))
         self._log_workflow(
             "task creator finished phase=%s after_count=%s delta=%s",
@@ -1830,10 +1860,11 @@ review existing memories. Return only the requested JSON decision."""
         ) or "- No executable targets resolved; omit target_ids."
         return f"""## create_tasks Payload Contract (Non-negotiable)
 Make exactly one successful `create_tasks` call. A rejected validation attempt does not count as the successful call.
-Python starts a fresh, compact attempt after a rejection, up to {max_corrections} correction(s). Stop after this call.
+Python continues this conversation after a rejection, up to {max_corrections} correction(s). Preserve prior fixes and
+stop after this call.
 
-Every proposal MUST contain non-empty `title`, `objective`, and `criteria` values. Each criterion contains only a
-non-empty `description`. `basis_description` is optional and defaults to the objective.
+Every proposal MUST contain non-empty `title`, `objective`, a `limits` object, and exactly one `criteria` value. The
+criterion contains only a non-empty `description`. `basis_description` is optional and defaults to the objective.
 Python assigns active phase {phase.id} and pending status, infers target scope from `target_ids`, and compiles the full
 immutable acceptance contract. Never emit `acceptance`, `phase`, `status`, `target_scope`, task `evidence`, `context`,
 `stop_condition`, `gap_policy`, or unsupported top-level `description` fields.
@@ -1843,12 +1874,13 @@ Acceptance basis rules:
   `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
   stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
   inventory JSON; otherwise omit it and Python defaults to `artifact`.
-- For dependent snapshot work, supply canonical `snapshot_refs`, omit methods and limits, and set
-  `coverage: true` only when every item in one existing version-1 inventory manifest must be assessed. Referenced
-  producer tasks must be done.
+- For dependent snapshot work, supply canonical `snapshot_refs`, omit methods, and set `limits` to `{{}}`; Python
+  silently discards limits because they do not apply. When the reference
+  resolves to an inventory manifest, Python automatically creates one task per target and normalized endpoint route,
+  grouping that route's parameter/query entries with it. Referenced producer tasks must be done.
 - Never mix procedure fields with snapshot fields. Python infers the basis kind.
 - If the required snapshot does not exist, create a bounded procedure-based prerequisite inventory task in this
-  active phase instead of creating dependent coverage tasks.
+  active phase instead of creating dependent assessment tasks.
 - Do not use moving claims such as "all reachable", "all discovered", "across the application", or "key workflows"
   in acceptance criteria. Refer to the declared procedure or frozen manifest items.
 - Python requires generic durable evidence for snapshot work, including negative coverage dispositions; findings are
@@ -1878,28 +1910,34 @@ Before calling, verify every object against this exact shape:
 "target_ids":["target-1"]}}]}}
 ```"""
 
-    def _task_creator_repair_prompt(self, plan: OperationPlan, phase: PlanPhase, failure_reason: str = "") -> str:
-        """Return one bounded repair instruction when no durable task was created."""
+    def _task_creator_repair_prompt(self, failure_reason: str = "") -> str:
+        """Return a compact correction turn for the retained task-creator conversation."""
 
-        return f"""No durable task was created for the active phase.
-Previous attempt result: {failure_reason or "no actionable task was created"}
-Make one corrected `create_tasks` call now. If dependent coverage has no valid snapshot, create one bounded
-procedure-based prerequisite inventory task in active phase {phase.id}; do not recreate the rejected coverage tasks.
-Do not explain, execute, inspect, or gather evidence.
+        return f"""The preceding `create_tasks` call was rejected.
+Validation result: {failure_reason or "no actionable task was created"}
+Preserve every correction already made in this conversation. Change only the fields needed to resolve this validation
+result, then make exactly one corrected `create_tasks` call. Do not restart the proposal, repeat completed reasoning,
+explain, execute, inspect, or gather evidence."""
 
-## Operation Objective
-{self.runtime.config.objective}
+    def _task_creator_failure_reason(self, result: Any) -> str:
+        """Return the most specific controller-observed task-creation failure."""
 
-## Active Phase
-{json.dumps(phase.to_dict(), indent=2, sort_keys=True)}
-
-## Existing Tasks Across All Phases
-{Task.list_to_toon(self.state.list_tasks())}
-
-## Eligible Canonical Snapshot Handles
-{self._eligible_snapshot_handles()}
-
-{self._task_creator_contract(plan, phase)}"""
+        if isinstance(result, TaskExecutorCycleResult):
+            if result.max_tokens_exhausted:
+                return result.max_tokens_reason or "task creator reached its model token limit"
+            failed_calls = [
+                outcome for outcome in result.outcomes
+                if outcome.tool_name == "create_tasks" and not outcome.success
+            ]
+            if failed_calls:
+                return failed_calls[-1].output_summary
+            result = result.text
+        return str(
+            getattr(result, "message", "")
+            or getattr(result, "reason", "")
+            or extract_result_text(result)
+            or "no actionable task was created"
+        )
 
     def _run_worker_agent(
         self,
@@ -1944,6 +1982,19 @@ Do not explain, execute, inspect, or gather evidence.
             return self._run_worker_agent(role, prompt, tools, system_prompt, run_policy)
 
         yield run_executor
+
+    @contextmanager
+    def _task_creator_session(
+        self,
+        tools: List[Any],
+        system_prompt: str,
+    ) -> Iterator[AgentExecutorSession]:
+        """Create one retained task-creator conversation for the complete correction sequence."""
+
+        if self.executor_session_factory is None:
+            raise WorkflowInvariantError("task_creator requires a retained worker session factory")
+        with self.executor_session_factory("task_creator", tools, system_prompt) as run_creator:
+            yield run_creator
 
     def _task_creator_tools(self) -> List[Any]:
         if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
@@ -2263,9 +2314,10 @@ The generated prompt must instruct the task-executor agent:
   for useful interim facts not represented by the acceptance ledger.
 - Store each security claim with `store_finding` and reusable lessons with `store_knowledge`, then stop with a brief
   summary once the assigned task is done, partial, or blocked.
-- Treat the task's acceptance contract as an immutable manifest. Address every criterion ID, use batch operations when
-  useful, and call `record_task_acceptance` with evidence-backed terminal results. The controller has already bound the
-  tool to the assigned task, so do not supply or guess a task UID. Never add criteria to the active task; create a
+- Treat the task's acceptance contract as an immutable manifest. Address its single criterion, use batch operations
+  when useful, and call `record_task_acceptance` with one evidence-backed status, summary, and evidence_refs payload.
+  The controller has already bound the tool to the task, criterion, and coverage IDs, so do not supply or guess them.
+  Never add criteria to the active task; create a
   separately contracted follow-up task for discoveries outside the frozen manifest.
 
 Tool selection guidance:
@@ -2448,9 +2500,9 @@ Output only the revised task prompt:
 `create_tasks` call. Do not execute, validate, scan, inspect, browse, shell out, or gather evidence. Stop immediately
 after the call succeeds.
 
-Create cohesive, independently completable tasks. A task may contain multiple acceptance criteria when they form one
-deliverable for one retained executor. Prioritize actionable work for active phase {phase.id}. Create prerequisite
-inventory work first; do not create dependent coverage tasks until their finite basis exists in durable task history or
+Create cohesive, independently completable tasks with exactly one acceptance criterion. Prioritize actionable work
+for active phase {phase.id}. Create prerequisite inventory work first; do not create dependent snapshot tasks until
+their finite basis exists in durable task history or
 memory. You may
 create tasks only for active phase {phase.id}; do not create earlier-phase or future-phase tasks. Existing tasks should
 not be duplicated. Every created task must be executable without violating any plan constraint.
@@ -2681,12 +2733,10 @@ A finding submission creates a
 separate verification task, so do not validate that new task in this run. If new follow-up work is discovered, create
 pending tasks with their own acceptance contracts using `create_tasks`, but do not execute them in this run.
 `create_tasks` never completes, replaces, or records acceptance for the assigned task. For the
-assigned task, record one terminal result for every frozen criterion using `record_task_acceptance`; this ledger does
-not replace storing substantive artifact evidence. Each acceptance summary must state the concrete result or negative
-result because successful acceptance publishes the summaries and evidence references as one operation observation for
-later tasks. Coverage-mode results must include one terminal coverage disposition for every item ID in the frozen
-inventory manifest. The controller binds that tool to the assigned task; submit the entire result ledger atomically and
-never guess a task UID. End with a concise summary of completed work,
+assigned task, call `record_task_acceptance` with one terminal status, concrete summary, and evidence_refs list; this
+ledger does not replace storing substantive artifact evidence. Successful acceptance publishes the summary and
+evidence references as one operation observation for later tasks. The controller binds the tool to the assigned task,
+criterion, and coverage IDs; never guess or submit those IDs. End with a concise summary of completed work,
 partial progress, or a concrete blocker. Python owns task, phase, and operation state transitions; never claim or
 perform them."""
 

@@ -563,16 +563,8 @@ def test_task_proposal_rejects_model_supplied_criterion_id():
         mod.TaskProposal.model_validate(payload)
 
 
-def test_task_proposal_compiler_generates_readable_unique_criterion_ids():
+def test_task_proposal_compiler_generates_readable_criterion_id():
     payload = task_proposal("Check", "Check target", "Store résumé & route inventory!")
-    payload["criteria"].extend(
-        [
-            {**payload["criteria"][0]},
-            {
-                "description": "Store resume route inventory",
-            },
-        ]
-    )
     proposal = mod.TaskProposal.model_validate(payload)
     plan = mod.OperationPlan(
         objective="Assess",
@@ -583,20 +575,11 @@ def test_task_proposal_compiler_generates_readable_unique_criterion_ids():
 
     contract = mod._proposal_acceptance_contract(proposal, plan)
 
-    assert [criterion.id for criterion in contract.criteria] == [
-        "store-resume-route-inventory",
-        "store-resume-route-inventory-2",
-        "store-resume-route-inventory-3",
-    ]
+    assert [criterion.id for criterion in contract.criteria] == ["store-resume-route-inventory"]
 
 
 def test_task_proposal_criterion_id_uses_bounded_ordinal_fallback():
     payload = task_proposal("Check", "Check target", "測試")
-    payload["criteria"].append(
-        {
-            "description": "A" * 100,
-        }
-    )
     proposal = mod.TaskProposal.model_validate(payload)
     plan = mod.OperationPlan(
         objective="Assess",
@@ -608,7 +591,14 @@ def test_task_proposal_criterion_id_uses_bounded_ordinal_fallback():
     contract = mod._proposal_acceptance_contract(proposal, plan)
 
     assert contract.criteria[0].id == "criterion-1"
-    assert contract.criteria[1].id == "a" * mod.TASK_PROPOSAL_CRITERION_ID_MAX_CHARS
+
+
+def test_task_proposal_rejects_multiple_criteria():
+    payload = task_proposal("Check", "Check target")
+    payload["criteria"].append({"description": "Second result"})
+
+    with pytest.raises(ValueError, match="at most 1 item"):
+        mod.TaskProposal.model_validate(payload)
 
 
 def test_task_proposal_criterion_ids_are_scoped_to_each_task():
@@ -632,17 +622,25 @@ def test_task_proposal_limits_require_positive_value():
     payload = task_proposal("Check", "Check target")
     payload["limits"] = {}
 
-    with pytest.raises(ValueError, match="at least one discovery procedure limit"):
+    with pytest.raises(ValueError, match="requires at least one discovery procedure limit"):
+        mod.TaskProposal.model_validate(payload)
+
+
+def test_task_proposal_requires_limits_field():
+    payload = task_proposal("Check", "Check target")
+    payload.pop("limits")
+
+    with pytest.raises(ValueError, match="Field required"):
         mod.TaskProposal.model_validate(payload)
 
 
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
-        ({"methods": []}, "requires methods"),
-        ({"limits": None}, "requires limits"),
+        ({"methods": []}, "requires procedure methods"),
+        ({"limits": None}, "valid dictionary or instance"),
         ({"snapshot_refs": ["memory:m1"]}, "must not mix"),
-        ({"coverage": True}, "must not mix"),
+        ({"coverage": True}, "Extra inputs are not permitted"),
     ],
 )
 def test_task_proposal_rejects_invalid_procedure_combinations(updates, message):
@@ -672,13 +670,13 @@ def test_task_proposal_rejects_removed_basis_kind():
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
-        ({"snapshot_refs": []}, "requires methods and limits, snapshot_refs, or coverage"),
-        ({"limits": {"max_items": 1}}, "must not mix"),
+        ({"snapshot_refs": []}, "requires procedure methods or snapshot_refs"),
+        ({"methods": ["inspect"]}, "must not mix"),
     ],
 )
 def test_task_proposal_rejects_invalid_snapshot_combinations(updates, message):
     payload = task_proposal("Check", "Check target")
-    payload.update({"methods": [], "limits": None, "snapshot_refs": ["memory:m1"]})
+    payload.update({"methods": [], "limits": {}, "snapshot_refs": ["memory:m1"]})
     payload.update(updates)
 
     with pytest.raises(ValueError, match=message):
@@ -687,7 +685,7 @@ def test_task_proposal_rejects_invalid_snapshot_combinations(updates, message):
 
 def test_task_proposal_compiler_builds_snapshot_outcome_contract():
     payload = task_proposal("Review", "Review stored evidence", evidence_kind="memory")
-    payload.update({"methods": [], "limits": None, "snapshot_refs": ["memory:m1"], "output_kind": "artifact"})
+    payload.update({"methods": [], "limits": {"max_items": 7}, "snapshot_refs": ["memory:m1"], "output_kind": "artifact"})
     proposal = mod.TaskProposal.model_validate(payload)
     plan = mod.OperationPlan(
         objective="Assess",
@@ -701,6 +699,8 @@ def test_task_proposal_compiler_builds_snapshot_outcome_contract():
     assert contract.mode == "outcome"
     assert contract.basis.kind == "snapshot"
     assert contract.basis.source_refs == ("memory:m1",)
+    assert contract.basis.procedure is None
+    assert mod._normalize_task_proposal(proposal).limits is None
 
 
 def test_task_proposal_rejects_model_supplied_evidence_contract():
@@ -735,7 +735,7 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
     task_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposal"]
     criterion_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposalCriterion"]
 
-    assert task_schema["required"] == ["title", "objective", "criteria"]
+    assert task_schema["required"] == ["title", "objective", "limits", "criteria"]
     assert set(task_schema["properties"]) == {
         "title",
         "objective",
@@ -743,7 +743,6 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
         "methods",
         "limits",
         "snapshot_refs",
-        "coverage",
         "output_kind",
         "criteria",
         "target_ids",
@@ -785,7 +784,7 @@ def test_create_tasks_tool_description_contains_exact_required_shape():
     assert '"output_kind": "inventory_manifest"' in normalized_description
     assert '"criteria": [{"description": "Store the finite inventory"}]' in normalized_description
     assert "Python infers the basis kind" in description
-    assert "coverage batches" in normalized_description
+    assert "route-scoped coverage tasks" in normalized_description
 
 
 def test_create_tasks_rejects_task_without_required_title():
@@ -829,7 +828,7 @@ def test_create_tasks_compiles_bounded_procedure_proposal(fake_memory_client):
     assert task.status == "pending"
 
 
-def test_create_tasks_infers_all_targets_and_compiles_multiple_criteria(fake_memory_client):
+def test_create_tasks_infers_all_targets_and_compiles_single_criterion(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
         objective="Assess two targets",
@@ -842,19 +841,13 @@ def test_create_tasks_infers_all_targets_and_compiles_multiple_criteria(fake_mem
         ],
     )
     proposal = task_proposal("Map targets", "Map both assigned targets", "inventory")
-    proposal["criteria"].append(
-        {
-            "description": "coverage notes",
-        }
-    )
-
     mod.create_tasks([proposal])
 
     task = store.tasks[0]
     assert task.target_scope == "all"
     assert task.target_ids == []
     assert task.acceptance.basis.source_refs == ("target:target-1", "target:target-2", "plan:phase-1")
-    assert [criterion.id for criterion in task.acceptance.criteria] == ["inventory", "coverage-notes"]
+    assert [criterion.id for criterion in task.acceptance.criteria] == ["inventory"]
 
 
 def test_create_tasks_accepts_inventory_and_workflow_artifact_procedures(fake_memory_client):
@@ -907,8 +900,8 @@ def test_create_tasks_freezes_valid_coverage_manifest(fake_memory_client):
                 "title": "Test frozen inventory",
                 "objective": "Assess the finite inventory",
                 "basis_description": "Frozen endpoint inventory",
+                "limits": {},
                 "snapshot_refs": [f"artifact:{manifest}"],
-                "coverage": True,
                 "criteria": [
                     {"description": "Assess every item ID in the frozen inventory"}
                 ],
@@ -922,7 +915,96 @@ def test_create_tasks_freezes_valid_coverage_manifest(fake_memory_client):
     assert store.tasks[0].acceptance.criteria[0].evidence_requirements[0].kind == "durable_evidence"
 
 
-def test_create_tasks_binds_canonical_manifest_and_shards_for_48k_context(fake_memory_client):
+def test_create_tasks_groups_endpoint_parameter_and_trailing_slash_variants(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "route-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": "login-route",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "HTTP://TARGET.TEST/login/",
+            },
+            {
+                "id": "login-username",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "http://target.test/login?username=test",
+            },
+            {
+                "id": "security-route",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "http://target.test/security",
+            },
+            {
+                "id": "login-workflow",
+                "target_id": "target-1",
+                "kind": "workflow",
+                "value": "login then logout",
+            },
+        ],
+        "unassessed_gaps": [],
+    }))
+
+    mod.create_tasks([{
+        "title": "Assess inventory",
+        "objective": "Assess the frozen inventory",
+        "limits": {},
+        "snapshot_refs": [f"artifact:{manifest}"],
+        "criteria": [{"description": "Record the assigned result"}],
+    }])
+
+    assert [task.acceptance.basis.item_ids for task in store.tasks] == [
+        ("login-route", "login-username"),
+        ("security-route",),
+        ("login-workflow",),
+    ]
+    assert store.tasks[0].title == "Assess endpoint http://target.test/login [target-1]"
+    assert store.tasks[1].title == "Assess endpoint http://target.test/security [target-1]"
+    assert "login then logout" in store.tasks[2].title
+    assert all(task.target_scope == "subset" and task.target_ids == ["target-1"] for task in store.tasks)
+
+
+def test_normalized_route_preserves_service_scheme_and_drops_query():
+    http_route = mod._normalized_route("http://TARGET.test/login/?username=test")
+    https_route = mod._normalized_route("https://target.test/login")
+
+    assert http_route == ("http://target.test/login", "http://target.test/login")
+    assert https_route == ("https://target.test/login", "https://target.test/login")
+
+
+def test_coverage_route_grouping_does_not_expand_with_context_window():
+    manifest = {
+        "items": [
+            {
+                "id": f"endpoint-{index}",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": f"http://target.test/{index}",
+            }
+            for index in range(20)
+        ]
+    }
+
+    at_48k = mod._coverage_route_groups(manifest, prompt_token_limit=48_000)
+    at_200k = mod._coverage_route_groups(manifest, prompt_token_limit=200_000)
+
+    assert at_48k == at_200k
+    assert len(at_48k) == 20
+
+
+def test_create_tasks_binds_canonical_manifest_per_route_independent_of_context(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
         objective="Assess inventory",
@@ -961,19 +1043,17 @@ def test_create_tasks_binds_canonical_manifest_and_shards_for_48k_context(fake_m
     result = mod.build_create_tasks_tool(prompt_token_limit=48_000)(tasks=[{
         "title": "Assess inventory",
         "objective": "Assess every frozen inventory item",
-        "coverage": True,
+        "limits": {},
+        "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
     }])
 
-    assert json.loads(result)["created_count"] == 3
-    batches = [task for task in store.tasks if task.task_uid != "inventory-task"]
-    assert [len(task.acceptance.basis.item_ids) for task in batches] == [12, 12, 1]
-    assert [task.title for task in batches] == [
-        "Assess inventory (batch 1/3)",
-        "Assess inventory (batch 2/3)",
-        "Assess inventory (batch 3/3)",
-    ]
-    assert all(task.acceptance.basis.source_refs == (f"artifact:{manifest}",) for task in batches)
+    assert json.loads(result)["created_count"] == 25
+    route_tasks = [task for task in store.tasks if task.task_uid != "inventory-task"]
+    assert all(len(task.acceptance.basis.item_ids) == 1 for task in route_tasks)
+    assert route_tasks[0].title == "Assess endpoint http://target.test/0 [target-1]"
+    assert route_tasks[-1].title == "Assess endpoint http://target.test/24 [target-1]"
+    assert all(task.acceptance.basis.source_refs == (f"artifact:{manifest}",) for task in route_tasks)
 
 
 def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fake_memory_client):
@@ -1004,14 +1084,15 @@ def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fak
     first_payload = {
         "title": "Assess inventory",
         "objective": "Assess every frozen inventory item",
+        "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
-        "coverage": True,
         "criteria": [{"description": "Record every assigned disposition"}],
     }
     mod.create_tasks([first_payload])
-    first = store.tasks[0]
-    first = replace(first, status="partial_failure")
-    store.store_task("op1", first)
+    created = list(store.tasks)
+    first = replace(created[0], status="partial_failure")
+    for task in created:
+        store.store_task("op1", replace(task, status="partial_failure"))
     store.acceptance_results[first.task_uid] = [mod.AcceptanceResult(
         criterion_id=first.acceptance.criteria[0].id,
         status="satisfied",
@@ -1026,8 +1107,11 @@ def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fak
 
     result = mod.create_tasks([first_payload])
 
-    assert json.loads(result)["created_count"] == 1
-    assert store.tasks[-1].acceptance.basis.item_ids == ("endpoint-1", "endpoint-2")
+    assert json.loads(result)["created_count"] == 2
+    assert [task.acceptance.basis.item_ids for task in store.tasks[-2:]] == [
+        ("endpoint-1",),
+        ("endpoint-2",),
+    ]
 
 
 def test_bound_create_tasks_tool_allows_correction_then_only_one_success(fake_memory_client):
@@ -1067,6 +1151,7 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
     assert '"max_items"' in schema_text
     assert '"max_tests"' not in schema_text
     task_schema = schema["$defs"]["TaskProposal"]
+    assert "limits" in task_schema["required"]
     assert set(task_schema["properties"]) == {
         "title",
         "objective",
@@ -1074,7 +1159,6 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
         "methods",
         "limits",
         "snapshot_refs",
-        "coverage",
         "output_kind",
         "criteria",
         "target_ids",
@@ -1112,8 +1196,8 @@ def test_create_tasks_rejects_missing_or_incomplete_coverage_basis_atomically(fa
                     "title": "Invalid dependent coverage",
                     "objective": "Consume a missing inventory",
                     "basis_description": "Missing inventory",
+                    "limits": {},
                     "snapshot_refs": [f"artifact:{missing}"],
-                    "coverage": True,
                     "criteria": [
                         {"description": "Assess every item in the missing inventory"}
                     ],
@@ -1190,15 +1274,15 @@ def test_acceptance_basis_reference_resolution_rejects_invalid_sources(fake_memo
     )
     store.store_task("op1", producer)
 
-    with pytest.raises(ValueError, match="producer task is not done"):
+    with pytest.raises(ValueError, match="task is missing or not done"):
         mod.create_tasks(
             [
                 {
                     "title": "Coverage with failed producer",
                     "objective": "Consume inventory",
                     "basis_description": "Frozen inventory",
-                    "snapshot_refs": [f"artifact:{manifest}"],
-                    "coverage": True,
+                    "limits": {},
+                    "snapshot_refs": ["task:producer"],
                     "criteria": [
                         {"description": "Assess every frozen inventory item"}
                     ],
@@ -1225,39 +1309,15 @@ def test_bound_acceptance_validates_coverage_ledger_and_manifest_hash(fake_memor
     store.store_task("op1", task)
     acceptance_tool = mod.build_record_task_acceptance_tool(task.task_uid)
 
-    with pytest.raises(ValueError, match="Coverage ledger mismatch"):
-        acceptance_tool(
-            results=[
-                {
-                    "criterion_id": "test-inventory",
-                    "status": "satisfied",
-                    "summary": "Incomplete ledger",
-                    "evidence_refs": [f"artifact:{manifest}"],
-                    "coverage": [],
-                }
-            ]
-        )
-
     result = acceptance_tool(
-        results=[
-            {
-                "criterion_id": "test-inventory",
-                "status": "satisfied",
-                "summary": "Inventory assessed",
-                "evidence_refs": [f"artifact:{manifest}"],
-                "coverage": [
-                    {
-                        "item_id": "endpoint-1",
-                        "status": "assessed_negative",
-                        "evidence_refs": [f"artifact:{manifest}"],
-                    }
-                ],
-            }
-        ]
+        status="assessed_negative",
+        summary="Inventory assessed",
+        evidence_refs=[f"artifact:{manifest}"],
     )
 
     assert json.loads(result)["complete"] is True
     assert store.get_acceptance_results("op1", task.task_uid)[0].coverage[0].item_id == "endpoint-1"
+    assert store.get_acceptance_results("op1", task.task_uid)[0].coverage[0].status == "assessed_negative"
     assert store.get_tasks("op1")[0].evidence == [f"artifact:{manifest}"]
 
 
@@ -1297,21 +1357,9 @@ def test_bound_acceptance_rejects_changed_snapshot_and_wrong_evidence_kind(fake_
 
     with pytest.raises(ValueError, match="changed after task creation"):
         mod.build_record_task_acceptance_tool(task.task_uid)(
-            results=[
-                {
-                    "criterion_id": "test-inventory",
-                    "status": "satisfied",
-                    "summary": "Changed basis",
-                    "evidence_refs": [f"artifact:{manifest}"],
-                    "coverage": [
-                        {
-                            "item_id": "endpoint-1",
-                            "status": "satisfied",
-                            "evidence_refs": [f"artifact:{manifest}"],
-                        }
-                    ],
-                }
-            ]
+            status="satisfied",
+            summary="Changed basis",
+            evidence_refs=[f"artifact:{manifest}"],
         )
 
     observation_contract = mod.AcceptanceContract(
@@ -1341,14 +1389,9 @@ def test_bound_acceptance_rejects_changed_snapshot_and_wrong_evidence_kind(fake_
 
     with pytest.raises(ValueError, match="requires 1 observation"):
         mod.build_record_task_acceptance_tool(observation_task.task_uid)(
-            results=[
-                {
-                    "criterion_id": "observation",
-                    "status": "satisfied",
-                    "summary": "Wrong evidence kind",
-                    "evidence_refs": [f"artifact:{manifest}"],
-                }
-            ]
+            status="satisfied",
+            summary="Wrong evidence kind",
+            evidence_refs=[f"artifact:{manifest}"],
         )
 
 
@@ -1381,14 +1424,9 @@ def test_store_observation_reference_satisfies_bound_acceptance(fake_memory_clie
     observation = json.loads(mod.store_observation("The target identifies as PHP 8"))
     result = json.loads(
         mod.build_record_task_acceptance_tool(task.task_uid)(
-            results=[
-                {
-                    "criterion_id": "technology-identification",
-                    "status": "satisfied",
-                    "summary": "The response identifies PHP 8",
-                    "evidence_refs": [observation["memory_ref"]],
-                }
-            ]
+            status="satisfied",
+            summary="The response identifies PHP 8",
+            evidence_refs=[observation["memory_ref"]],
         )
     )
 
@@ -1488,14 +1526,9 @@ def test_inventory_requirement_ignores_non_manifest_when_valid_manifest_is_also_
     store.store_task("op1", task)
 
     result = mod.build_record_task_acceptance_tool(task.task_uid)(
-        results=[
-            {
-                "criterion_id": "inventory",
-                "status": "satisfied",
-                "summary": "Inventory and workflow evidence stored",
-                "evidence_refs": [f"artifact:{workflow_map}", f"artifact:{manifest}"],
-            }
-        ]
+        status="satisfied",
+        summary="Inventory and workflow evidence stored",
+        evidence_refs=[f"artifact:{workflow_map}", f"artifact:{manifest}"],
     )
 
     assert json.loads(result)["complete"] is True
@@ -1518,25 +1551,15 @@ def test_inventory_requirement_reports_contract_for_malformed_only_candidate(fak
 
     with pytest.raises(ValueError, match="Expected contract:.*schema_version"):
         mod.build_record_task_acceptance_tool(task.task_uid)(
-            results=[
-                {
-                    "criterion_id": "inventory",
-                    "status": "satisfied",
-                    "summary": "Wrong artifact type",
-                    "evidence_refs": [f"artifact:{workflow_map}"],
-                }
-            ]
+            status="satisfied",
+            summary="Wrong artifact type",
+            evidence_refs=[f"artifact:{workflow_map}"],
         )
     with pytest.raises(ValueError, match="received 0.*Expected contract"):
         mod.build_record_task_acceptance_tool(task.task_uid)(
-            results=[
-                {
-                    "criterion_id": "inventory",
-                    "status": "satisfied",
-                    "summary": "No artifact candidate",
-                    "evidence_refs": ["memory:m1"],
-                }
-            ]
+            status="satisfied",
+            summary="No artifact candidate",
+            evidence_refs=["memory:m1"],
         )
 
 
@@ -1602,14 +1625,9 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     )
 
     result = acceptance_tool(
-        results=[
-            {
-                "criterion_id": "endpoint:/login.php",
-                "status": "satisfied",
-                "summary": "Login form mapped",
-                "evidence_refs": [f"artifact:{manifest}"],
-            }
-        ],
+        status="satisfied",
+        summary="Login form mapped",
+        evidence_refs=[f"artifact:{manifest}"],
     )
 
     assert json.loads(result) == {
@@ -1630,19 +1648,14 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     assert published["metadata"]["task_uid"] == "task-1"
     assert store.get_acceptance_results("op1", "task-1")[0].summary == "Login form mapped"
     assert store.get_acceptance_results("op1", "other-active") == []
-    assert tool_schema["required"] == ["results"]
+    assert set(tool_schema["required"]) == {"status", "summary", "evidence_refs"}
     assert "task_uid" not in tool_schema["properties"]
     assert '"schema_version": 1' in tool_spec["description"]
     assert "Workflow maps, reports, and arbitrary JSON outputs are artifact evidence" in tool_spec["description"]
     replay = acceptance_tool(
-        results=[
-            {
-                "criterion_id": "endpoint:/login.php",
-                "status": "satisfied",
-                "summary": "Replay",
-                "evidence_refs": [f"artifact:{manifest}"],
-            }
-        ]
+        status="satisfied",
+        summary="Replay",
+        evidence_refs=[f"artifact:{manifest}"],
     )
     replay_payload = json.loads(replay)
     assert replay_payload["replayed"] is True
@@ -1650,26 +1663,17 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     assert replay_payload["memory_created"] is False
     assert len(_client.mem0.add_calls) == 1
 
-    with pytest.raises(ValueError, match="exactly match frozen criteria"):
+    with pytest.raises(ValueError, match="evidence_refs required"):
         acceptance_tool(
-            results=[
-                {
-                    "criterion_id": "endpoint:/other.php",
-                    "status": "satisfied",
-                    "summary": "Other mapped",
-                    "evidence_refs": ["memory:other"],
-                }
-            ],
+            status="satisfied",
+            summary="Other mapped",
+            evidence_refs=[],
         )
 
     with pytest.raises(ValueError, match="task_uid required when binding"):
         mod.build_record_task_acceptance_tool("")
-    with pytest.raises(ValueError, match="at least one"):
-        acceptance_tool(results=[])
     with pytest.raises(ValueError, match="Unknown task_uid"):
-        mod.build_record_task_acceptance_tool("missing")(
-            results=[store.get_acceptance_results("op1", "task-1")[0]],
-        )
+        mod.build_record_task_acceptance_tool("missing")
 
     pending = mod.Task(
         task_uid="task-pending",
@@ -1682,14 +1686,9 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     store.store_task("op1", pending)
     with pytest.raises(ValueError, match="active task"):
         mod.build_record_task_acceptance_tool("task-pending")(
-            results=[
-                {
-                    "criterion_id": "pending",
-                    "status": "excluded",
-                    "summary": "Not active",
-                    "evidence_refs": ["memory:pending"],
-                }
-            ],
+            status="excluded",
+            summary="Not active",
+            evidence_refs=["memory:pending"],
         )
 
 
@@ -1712,14 +1711,9 @@ def test_record_task_acceptance_warns_and_preserves_ledger_when_memory_publicati
     monkeypatch.setattr(client, "store_memory", Mock(side_effect=RuntimeError("memory backend unavailable")))
 
     result = mod.build_record_task_acceptance_tool(task.task_uid)(
-        results=[
-            {
-                "criterion_id": "inventory",
-                "status": "satisfied",
-                "summary": "Mapped the target surface",
-                "evidence_refs": [f"artifact:{manifest}"],
-            }
-        ]
+        status="satisfied",
+        summary="Mapped the target surface",
+        evidence_refs=[f"artifact:{manifest}"],
     )
 
     payload = json.loads(result)
@@ -1733,14 +1727,9 @@ def test_record_task_acceptance_warns_and_preserves_ledger_when_memory_publicati
     monkeypatch.setattr(client, "store_memory", original_store_memory)
     replay = json.loads(
         mod.build_record_task_acceptance_tool(task.task_uid)(
-            results=[
-                {
-                    "criterion_id": "inventory",
-                    "status": "satisfied",
-                    "summary": "Ignored immutable replay input",
-                    "evidence_refs": [f"artifact:{manifest}"],
-                }
-            ]
+            status="satisfied",
+            summary="Ignored immutable replay input",
+            evidence_refs=[f"artifact:{manifest}"],
         )
     )
 

@@ -1122,16 +1122,7 @@ def create_agent(
         )
         agent_hooks.append(failure_recovery_hook)
     if agent_type in {"task_creator", "task_executor"}:
-        max_task_creator_corrections = runtime.config_manager.getenv_int(
-            "CYBER_TASK_CREATOR_MAX_CORRECTIONS",
-            2,
-        )
-        agent_hooks.append(
-            TerminalToolHook(
-                agent_type,
-                max_task_creator_corrections=max_task_creator_corrections,
-            )
-        )
+        agent_hooks.append(TerminalToolHook(agent_type))
 
     agent_kwargs = {
         "model": model,

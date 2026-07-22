@@ -242,7 +242,7 @@ Prompt-window overflow and output exhaustion are separate conditions:
   classifies the incomplete response as ordinary truncation or a repetitive reasoning loop.
 
 Incomplete max-token responses are untrusted and are not compressed back into conversation history. JSON-producing
-roles retry from the original contract, task creators use their fresh bounded correction attempts, and task executors
+roles retry from the original contract, task creators use bounded turns in one retained conversation, and task executors
 retain completed tool interactions while discarding only the incomplete assistant tail. A task executor receives one
 controller-directed retry; repeated exhaustion becomes a task `partial_failure` rather than ending the operation.
 
@@ -412,7 +412,7 @@ Artifact references include immediate context for LLM comprehension:
 | `CYBER_TOOL_REPEAT_THRESHOLD`               | 3       | Reuse results after this many exact cycle repetitions; `0` disables the guard.            |
 | `CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH`        | 8       | Maximum number of calls in a detected repeating cycle; must be at least `1`.              |
 | `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS` | 2       | Recovery-policy violations allowed before the task executor is stopped; minimum `1`.      |
-| `CYBER_TASK_CREATOR_MAX_CORRECTIONS`        | 2       | Corrected task-creation calls allowed after the initial rejected call; minimum `0`.       |
+| `CYBER_TASK_CREATOR_MAX_CORRECTIONS`        | 4       | Retained task-creation correction turns after the initial rejected call; minimum `0`.     |
 
 The repeat guard is scoped to one agent invocation and detects exact contiguous cycles, including a single unchanged
 call or alternating calls such as `A, B, A, B, A, B`. It reuses the most recent completed result for the matching call

@@ -2,8 +2,13 @@
 
 ### Features
 
-- Infer task-proposal basis and evidence contracts in Python, bind canonical inventory snapshots, and split coverage
-  into model-context-aware frozen batches.
+- Require the compact task-proposal `limits` object, discard it for snapshot tasks, and retain task-creator reasoning
+  across four configurable correction turns so successive repairs preserve earlier schema fixes.
+- Compile canonical inventory snapshots into one task per target and normalized endpoint route, grouping known
+  parameter variants with their route independently of the model context-window size.
+- Bind task, criterion, and route coverage identities in Python so `record_task_acceptance` requires only a terminal
+  status, concrete summary, and durable evidence references.
+- Infer task-proposal basis and evidence contracts in Python and bind canonical inventory snapshots.
 - Re-evaluate a continuing phase once after bounded task creation cannot produce actionable work, then advance with a
   `partial_failure` result instead of stalling the operation.
 - Replace the nested task-creation payload with a flat `TaskProposal` schema that Python compiles into immutable
@@ -38,6 +43,8 @@
 
 ### Fixes
 
+- Prevent continuation task creators from bypassing endpoint-scoped coverage by omitting a model-selected coverage
+  flag, and close empty phases cleanly instead of terminating the operation when task creation produces no work.
 - Bound retained task-executor continuations after repeated text-only responses or excessive model calls, without
   allowing reasoning state or prior-cycle tool counts to bypass stall detection.
 - Classify output-token exhaustion separately from prompt overflow, detect repetitive reasoning loops, discard
@@ -45,7 +52,8 @@
 - Scope child-agent termination events to their own runs so only the operation controller can terminate an operation.
 - Require durable finding-validation data independently from task acceptance and keep report validation status,
   severity counts, completion state, and hypothetical attack paths consistent with canonical records.
-- Run task-creator corrections as fresh bounded attempts and bypass generic reasoning-loop repair for that role.
+- Bypass generic reasoning-loop repair for task creators and report rejected calls separately from exhausted
+  controller-owned correction turns.
 - Generate acceptance criterion IDs from task-proposal descriptions in Python instead of requiring task-creator models
   to invent identifiers before the acceptance contract exists.
 - Return durable `memory:<id>` references from `store_observation` so executors can satisfy typed observation evidence

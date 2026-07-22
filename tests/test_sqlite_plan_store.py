@@ -158,6 +158,8 @@ def test_sqlite_finding_ledger_operations(tmp_path):
     resolved = store.get_finding("op", "finding-1")
     assert resolved["validation_data"] == {"outcome": "confirmed"}
     assert resolved["resolution"] == "verified"
+    assert store.list_findings("op") == [resolved]
+    assert store.list_findings("other-operation") == []
 
 
 def test_sqlite_plan_store_multiple_tasks(tmp_path):
