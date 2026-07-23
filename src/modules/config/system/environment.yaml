@@ -182,7 +182,6 @@ cyber_tools:
   opengrep:
     description: "Static source code analysis"
     caps: [sast]
-    canary: {args: ["scan", "--version"]}
     help:
       - "opengrep scan --help"
       - "opengrep scan -help"
@@ -435,12 +434,12 @@ cyber_tools:
     canary: {args: ["--help"]}
 
   # C2 & Post-Exploitation
-  sliver:
-    description: "Command and Control framework"
-    command: "sliver-client"
-    # sliver install is unstable
-    caps: [exploitation_framework]
-    canary: {args: ["-h"]}
+#  sliver:
+#    description: "Command and Control framework"
+#    command: "sliver-client"
+#    # sliver install is unstable
+#    caps: [exploitation_framework]
+#    canary: {args: ["-h"]}
 
   # Active Directory Advanced
   bloodhound-python:

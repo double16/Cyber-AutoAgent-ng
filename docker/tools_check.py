@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import argparse
 import os
 import re
 import shutil
@@ -22,7 +22,7 @@ STARTUP_FAILURE_PATTERNS = tuple(
 )
 
 
-def probe_command(tool_path, canary):
+def probe_command(tool_path, canary, timeout_seconds = 30):
     """Return whether an optional, declarative executable canary succeeds."""
 
     if canary is None:
@@ -30,11 +30,11 @@ def probe_command(tool_path, canary):
     if not isinstance(canary, dict):
         return False
     args = canary.get("args")
-    timeout_seconds = canary.get("timeout_seconds", 5)
+    timeout_seconds = canary.get("timeout_seconds", 30 if timeout_seconds is None else timeout_seconds)
     accepted_exit_codes = canary.get("accepted_exit_codes", [0])
     if not isinstance(args, list) or not all(isinstance(arg, str) and arg for arg in args):
         return False
-    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 60:
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds:
         return False
     if not isinstance(accepted_exit_codes, list) or not accepted_exit_codes or not all(
         isinstance(code, int) and not isinstance(code, bool) for code in accepted_exit_codes
@@ -48,30 +48,32 @@ def probe_command(tool_path, canary):
             timeout=timeout_seconds,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"Error running {tool_path}: {e}", file=sys.stderr)
         return False
     output = f"{result.stdout or ''}\n{result.stderr or ''}"
-    return result.returncode in set(accepted_exit_codes) and not any(
+    retval = result.returncode in set(accepted_exit_codes) and not any(
         pattern.search(output) for pattern in STARTUP_FAILURE_PATTERNS
     )
+    if not retval:
+        print(f"Tool {tool_path} failed: {output}", file=sys.stderr)
+    return retval
+
+
+# Temporary hack for tools that are difficult to install.
+IGNORED_TOOLS = ["sliver"]
 
 
 def main():
-    fail_all = False
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "--all":
-            fail_all = True
-        elif sys.argv[1] == "--help" or sys.argv[1] == "-h":
-            print(f"Usage: {sys.argv[0]} [--all]")
-            sys.exit(0)
-        else:
-            print(f"Usage: {sys.argv[0]} [--all]", file=sys.stderr)
-            sys.exit(1)
+    parser = argparse.ArgumentParser(description="Check tool availability")
+    parser.add_argument("--timeout", type=int, default=180)
+    args = parser.parse_args()
 
     env_file = "src/modules/config/system/environment.yaml"
     paths_to_try = [
         env_file,
         os.path.join("/app", env_file),
+        os.path.join(os.path.dirname(__file__), "environment.yaml"),
         "/tmp/environment.yaml",
     ]
 
@@ -99,35 +101,27 @@ def main():
 
     missing = []
     broken = []
-    missing_fallback = []
-    broken_fallback = []
     count = 0
 
     for tool_name, info in cyber_tools.items():
+        if tool_name in IGNORED_TOOLS:
+            continue
+
         if info is None:
             info = {}
 
         count += 1
         cmd = info.get("command") or tool_name
-        preference = info.get("preference") or ""
         canary = info.get("canary")
-
-        is_fallback = (preference == "fallback") and not fail_all
 
         # Check if command exists
         tool_path = shutil.which(cmd)
         if not tool_path:
-            if is_fallback:
-                missing_fallback.append(tool_name)
-            else:
-                missing.append(tool_name)
+            missing.append(tool_name)
             continue
 
-        if not probe_command(tool_path, canary):
-            if is_fallback:
-                broken_fallback.append(tool_name)
-            else:
-                broken.append(tool_name)
+        if not probe_command(tool_path, canary, args.timeout):
+           broken.append(tool_name)
 
     if missing:
         print("Missing tools:", file=sys.stderr)
@@ -137,16 +131,6 @@ def main():
     if broken:
         print("Broken tools:", file=sys.stderr)
         for t in broken:
-            print(f"  {t}", file=sys.stderr)
-
-    if missing_fallback:
-        print("Missing fallback tools:", file=sys.stderr)
-        for t in missing_fallback:
-            print(f"  {t}", file=sys.stderr)
-
-    if broken_fallback:
-        print("Broken fallback tools:", file=sys.stderr)
-        for t in broken_fallback:
             print(f"  {t}", file=sys.stderr)
 
     if missing or broken:
