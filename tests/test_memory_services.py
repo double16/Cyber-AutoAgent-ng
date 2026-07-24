@@ -679,6 +679,48 @@ def test_task_proposal_requires_limits_field():
         mod.TaskProposal.model_validate(payload)
 
 
+def test_snapshot_task_proposal_requires_limits_field_before_discarding_it():
+    payload = task_proposal("Review", "Review stored evidence", evidence_kind="memory")
+    payload.update({"methods": [], "snapshot_refs": ["memory:m1"]})
+    payload.pop("limits")
+
+    with pytest.raises(ValueError, match="Field required"):
+        mod.TaskProposal.model_validate(payload)
+
+
+@pytest.mark.parametrize("field_name", ["methods", "snapshot_refs"])
+def test_task_proposal_requires_explicit_basis_arrays(field_name):
+    payload = task_proposal("Check", "Check target")
+    payload.pop(field_name)
+
+    with pytest.raises(ValueError, match="Field required"):
+        mod.TaskProposal.model_validate(payload)
+
+
+def test_task_proposal_list_reports_all_missing_fields_compactly():
+    proposals = [
+        {"title": "First", "objective": "Assess first", "criteria": [{"description": "Store first"}]},
+        {
+            "title": "Second",
+            "objective": "Assess second",
+            "limits": {},
+            "criteria": [{"description": "Store second"}],
+        },
+    ]
+
+    with pytest.raises(ValueError) as raised:
+        mod._create_tasks_from_proposals(proposals, prompt_token_limit=48_000)
+
+    message = str(raised.value)
+    assert "proposal[0].methods" in message
+    assert "proposal[0].limits" in message
+    assert "proposal[0].snapshot_refs" in message
+    assert "proposal[1].methods" in message
+    assert "proposal[1].snapshot_refs" in message
+    assert "errors.pydantic.dev" not in message
+    assert "input_value" not in message
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
@@ -807,7 +849,14 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
     task_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposal"]
     criterion_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposalCriterion"]
 
-    assert task_schema["required"] == ["title", "objective", "limits", "criteria"]
+    assert task_schema["required"] == [
+        "title",
+        "objective",
+        "methods",
+        "limits",
+        "snapshot_refs",
+        "criteria",
+    ]
     assert set(task_schema["properties"]) == {
         "title",
         "objective",
@@ -824,6 +873,44 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
         assert removed not in schema_text
     assert criterion_schema["required"] == ["description"]
     assert set(criterion_schema["properties"]) == {"description"}
+
+
+def test_inventory_manifest_reports_all_invalid_items_with_stable_digest(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test:8080",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test:8080", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    payload["items"] = [
+        {
+            "id": "filesystem-route",
+            "target_id": "target-1",
+            "kind": "endpoint",
+            "value": "http://target.test:8080/var/www/html/index.php",
+        },
+        {
+            "id": "wrong-port",
+            "target_id": "target-1",
+            "kind": "endpoint",
+            "value": "http://target.test:9090/login.php",
+        },
+    ]
+    manifest.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError) as raised:
+        mod._load_inventory_manifest(f"artifact:{manifest}")
+
+    message = str(raised.value)
+    assert "artifact_sha256=" in message
+    assert "filesystem-route" in message
+    assert "wrong-port" in message
+    assert "$.items[0].value" in message
+    assert "$.items[1].value" in message
 
 
 def test_create_tasks_generated_schema_accepts_proposal_and_rejects_legacy_contract():
@@ -961,6 +1048,7 @@ def test_create_tasks_accepts_mixed_procedure_and_snapshot_proposals(fake_memory
     snapshot = {
         "title": "Assess frozen route",
         "objective": "Assess the frozen route",
+        "methods": [],
         "limits": {"max_items": 20},
         "snapshot_refs": [f"artifact:{manifest}"],
         "output_kind": "inventory_manifest",
@@ -1052,6 +1140,7 @@ def test_create_tasks_freezes_valid_coverage_manifest(fake_memory_client):
                 "title": "Test frozen inventory",
                 "objective": "Assess the finite inventory",
                 "basis_description": "Frozen endpoint inventory",
+                "methods": [],
                 "limits": {},
                 "snapshot_refs": [f"artifact:{manifest}"],
                 "criteria": [
@@ -1119,6 +1208,7 @@ def test_create_tasks_groups_endpoint_parameter_and_trailing_slash_variants(fake
     mod.create_tasks([{
         "title": "Assess inventory",
         "objective": "Assess the frozen inventory",
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Record the assigned result"}],
@@ -1259,6 +1349,7 @@ def test_create_tasks_binds_canonical_manifest_per_route_independent_of_context(
     result = mod.build_create_tasks_tool(prompt_token_limit=48_000)(tasks=[{
         "title": "Assess inventory",
         "objective": "Assess every frozen inventory item",
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
@@ -1301,6 +1392,7 @@ def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fak
     first_payload = {
         "title": "Assess inventory",
         "objective": "Assess every frozen inventory item",
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Record every assigned disposition"}],
@@ -1361,6 +1453,7 @@ def test_create_tasks_coverage_deduplication_is_scoped_to_active_phase(fake_memo
     payload = {
         "title": "Assess inventory",
         "objective": "Assess every frozen inventory item",
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Record every assigned disposition"}],
@@ -1599,6 +1692,7 @@ def test_create_tasks_rejects_missing_or_incomplete_coverage_basis_atomically(fa
                     "title": "Invalid dependent coverage",
                     "objective": "Consume a missing inventory",
                     "basis_description": "Missing inventory",
+                    "methods": [],
                     "limits": {},
                     "snapshot_refs": [f"artifact:{missing}"],
                     "criteria": [
@@ -1684,6 +1778,7 @@ def test_acceptance_basis_reference_resolution_rejects_invalid_sources(fake_memo
                     "title": "Coverage with failed producer",
                     "objective": "Consume inventory",
                     "basis_description": "Frozen inventory",
+                    "methods": [],
                     "limits": {},
                     "snapshot_refs": ["task:producer"],
                     "criteria": [
@@ -2556,6 +2651,7 @@ def test_inventory_typed_fanout_and_unsupported_kind(fake_memory_client):
     result = json.loads(mod.create_tasks([{
         "title": "Assess inventory",
         "objective": "Assess the frozen inventory",
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Assess the assigned inventory unit"}],
@@ -2586,6 +2682,7 @@ def test_inventory_snapshot_fanout_deduplicates_staged_routes(fake_memory_client
     proposal = {
         "title": "Assess inventory",
         "objective": "Assess the frozen inventory",
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Assess the assigned inventory unit"}],
@@ -2611,6 +2708,7 @@ def test_inventory_snapshot_fanout_preserves_distinct_objectives(fake_memory_cli
     )
     manifest = _write_inventory_manifest()
     common = {
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "target_ids": ["target-1"],
@@ -2654,6 +2752,7 @@ def test_inventory_snapshot_fanout_preserves_distinct_acceptance_intent(fake_mem
     proposal = {
         "title": "Map trust boundaries",
         "objective": "Map the assigned endpoint's trust boundaries",
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Record session transition boundaries"}],
@@ -2688,6 +2787,7 @@ def test_exhausted_snapshot_with_gap_creates_inventory_refinement(fake_memory_cl
     proposal = {
         "title": "Assess inventory",
         "objective": "Assess the frozen inventory",
+        "methods": [],
         "limits": {},
         "snapshot_refs": [f"artifact:{manifest}"],
         "criteria": [{"description": "Assess the assigned inventory unit"}],

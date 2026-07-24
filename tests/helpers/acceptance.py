@@ -48,6 +48,7 @@ def task_proposal(
         "basis_description": "Bounded test procedure",
         "methods": ["test-fixture"],
         "limits": {"max_items": 1},
+        "snapshot_refs": [],
         "output_kind": "inventory_manifest" if evidence_kind == "inventory_manifest" else "artifact",
         "criteria": [{"description": criterion_description}],
         "target_ids": list(target_ids or []),

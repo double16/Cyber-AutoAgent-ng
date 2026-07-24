@@ -55,7 +55,7 @@ from modules.agents.run_policy import AgentRunPolicy
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import classify_and_discard_max_token_output
-from modules.handlers.operation_health import compute_operation_health
+from modules.handlers.operation_health import DEFAULT_INCOMPLETE_HEALTH_CAP, compute_operation_health
 from modules.handlers.utils import (
     get_tool_description,
     get_tool_name,
@@ -557,7 +557,19 @@ class MultiAgentWorkflowController:
             tasks,
             predictions=predictions,
             budget=budget_diagnostics,
+            incomplete_health_cap=self._incomplete_health_cap(),
         )
+
+    def _incomplete_health_cap(self) -> float:
+        """Return the configured ceiling shared by incomplete and budget-limited health."""
+
+        config_manager = self.runtime.config_manager
+        if config_manager:
+            return config_manager.getenv_float(
+                "CYBER_INCOMPLETE_HEALTH_CAP",
+                DEFAULT_INCOMPLETE_HEALTH_CAP,
+            )
+        return DEFAULT_INCOMPLETE_HEALTH_CAP
 
     def _current_phase_task_prediction(self, plan: OperationPlan) -> Optional[Dict[str, Any]]:
         """Predict current-phase fan-out from the preceding phase's frozen inventories."""
@@ -1257,7 +1269,7 @@ class MultiAgentWorkflowController:
         worker_contexts = []
         tool_outcomes: List[ToolOutcome] = []
         acceptance_failures = 0
-        acceptance_inputs: set[str] = set()
+        acceptance_failure_signatures: set[str] = set()
         failed_tool_inputs: Counter[tuple[str, str]] = Counter()
         recovery_used = False
         decision = WorkflowDecision(status="partial_failure", reason="Task executor did not run")
@@ -1276,7 +1288,7 @@ class MultiAgentWorkflowController:
         def track_acceptance_outcomes(
             outcomes: List[ToolOutcome],
         ) -> tuple[List[ToolOutcome], List[ToolOutcome], bool]:
-            """Track rejected acceptance payloads while retaining successful corrections."""
+            """Track rejected acceptance state while allowing changed artifact corrections."""
 
             nonlocal acceptance_failures
             acceptance_outcomes = [
@@ -1284,8 +1296,9 @@ class MultiAgentWorkflowController:
             ]
             failed_calls = [outcome for outcome in acceptance_outcomes if not outcome.success]
             successful_calls = [outcome for outcome in acceptance_outcomes if outcome.success]
-            repeated = any(outcome.input_summary in acceptance_inputs for outcome in failed_calls)
-            acceptance_inputs.update(outcome.input_summary for outcome in failed_calls)
+            signatures = [self._acceptance_failure_signature(outcome) for outcome in failed_calls]
+            repeated = any(signature in acceptance_failure_signatures for signature in signatures)
+            acceptance_failure_signatures.update(signatures)
             acceptance_failures += len(failed_calls)
             return failed_calls, successful_calls, repeated
 
@@ -1609,8 +1622,8 @@ Critic instructions: {decision.instructions}
             return "Use the canonical reference for the actual existing finding; do not invent a finding identifier"
         if "inventory manifest item" in normalized or "filesystem path" in normalized:
             return (
-                "Rewrite the identified invalid item value in the existing inventory artifact as a canonical target "
-                "URL, preserve the same artifact:artifacts/... reference, and retry only after validating the file"
+                "Repair every listed invalid item in the existing inventory artifact using canonical target URLs, "
+                "preserve the same artifact:artifacts/... reference, and retry only after validating the complete file"
             )
         if "schema_version" in normalized or "inventory manifest" in normalized:
             return (
@@ -1625,6 +1638,22 @@ Critic instructions: {decision.instructions}
         if "no acceptance result" in normalized:
             return "Complete the remaining assigned work and create its required durable evidence"
         return "Correct the rejected values using the registered schema and canonical enum values"
+
+    @staticmethod
+    def _acceptance_failure_signature(outcome: ToolOutcome) -> str:
+        """Identify an unchanged rejected artifact without blocking a repaired resubmission."""
+
+        output = str(outcome.output_summary or "")
+        artifact_digest = re.search(r"\bartifact_sha256=([0-9a-f]{64})\b", output, re.IGNORECASE)
+        if artifact_digest:
+            return f"inventory-artifact:{artifact_digest.group(1).lower()}"
+        return json.dumps(
+            {
+                "input": outcome.input_summary,
+                "error": output,
+            },
+            sort_keys=True,
+        )
 
     @staticmethod
     def _acceptance_outcome_replayed(outcome: ToolOutcome) -> bool:
@@ -2296,18 +2325,19 @@ Make exactly one successful `create_tasks` call. A rejected validation attempt d
 Python continues this conversation after a rejection, up to {max_corrections} correction(s). Preserve prior fixes and
 stop after this call.
 
-Every proposal MUST contain non-empty `title`, `objective`, a `limits` object, and exactly one `criteria` value. The
+Every proposal MUST contain non-empty `title`, `objective`, explicit `methods` and `snapshot_refs` arrays, a `limits`
+object, and exactly one `criteria` value. The
 criterion contains only a non-empty `description`. `basis_description` is optional and defaults to the objective.
 Python assigns active phase {phase.id} and pending status, infers target scope from `target_ids`, and compiles the full
 immutable acceptance contract. Never emit `acceptance`, `phase`, `status`, `target_scope`, task `evidence`, `context`,
 `stop_condition`, `gap_policy`, or unsupported top-level `description` fields.
 
 Acceptance basis rules:
-- For bounded procedure work, supply non-empty `methods` and one or more positive integer
+- For bounded procedure work, supply non-empty `methods`, `snapshot_refs: []`, and one or more positive integer
   `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
   stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
   inventory JSON; otherwise omit it and Python defaults to `artifact`.
-- For dependent snapshot work, supply canonical `snapshot_refs`, omit methods, and set `limits` to `{{}}`; Python
+- For dependent snapshot work, supply canonical `snapshot_refs`, set `methods: []` and `limits: {{}}`; Python
   silently discards limits and `output_kind` because they do not apply. When the reference
   resolves to an inventory manifest, Python automatically creates one task per target and normalized endpoint route,
   grouping that route's parameter/query entries with it. Referenced producer tasks must be done.
@@ -2339,18 +2369,23 @@ Procedure shape:
 ```json
 {{"tasks":[{{"title":"Cohesive actionable title","objective":"Action and target",
 "basis_description":"Bounded inventory procedure","methods":["crawl"],
-"limits":{{"max_requests":500,"max_depth":3}},"output_kind":"inventory_manifest",
+"limits":{{"max_requests":500,"max_depth":3}},"snapshot_refs":[],"output_kind":"inventory_manifest",
 "criteria":[{{"description":"Execute the declared procedure and store its finite manifest"}}],
 "target_ids":["target-1"]}}]}}
 ```
 
 Snapshot shape:
 ```json
-{{"tasks":[{{"title":"Assess frozen inventory","objective":"Assess each frozen inventory unit",
+{{"tasks":[{{"title":"Assess frozen inventory","objective":"Assess each frozen inventory unit","methods":[],
 "limits":{{}},"snapshot_refs":["artifact:artifacts/inventory.json"],
 "criteria":[{{"description":"Assess the assigned frozen inventory unit"}}],
 "target_ids":["target-1"]}}]}}
-```"""
+```
+
+Before calling the tool, verify every proposal against this checklist: all required fields are present; exactly one
+basis mode is selected; procedure bounds are finite positive integers; snapshot references are canonical; and moving
+inventory-wide scope is used only with a snapshot reference.
+"""
 
     def _task_creator_repair_prompt(self, failure_reason: str = "") -> str:
         """Return a compact correction turn for the retained task-creator conversation."""

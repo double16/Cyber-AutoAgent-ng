@@ -61,7 +61,18 @@ import boto3
 from mem0 import Memory as Mem0Memory
 from mem0 import MemoryClient
 from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
-from pydantic import AliasChoices, BaseModel, BeforeValidator, ConfigDict, Field, PositiveInt, conlist, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    TypeAdapter,
+    ValidationError,
+    conlist,
+    model_validator,
+)
 from strands import tool
 
 from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
@@ -2323,15 +2334,15 @@ class TaskProposal(_StrictTaskWireModel):
     title: str = Field(min_length=1)
     objective: str = Field(min_length=1)
     basis_description: Optional[str] = Field(default=None, description="Finite boundary; defaults to objective")
-    methods: List[str] = Field(default_factory=list, description="Procedure methods; omit for snapshot proposals")
+    methods: List[str] = Field(..., description="Procedure methods; use [] for snapshot proposals")
     limits: TaskProposalLimits = Field(
         ...,
         validation_alias=AliasChoices("limits", "limit"),
         description="Required object; procedure bounds are discarded when snapshot_refs are supplied",
     )
     snapshot_refs: List[str] = Field(
-        default_factory=list,
-        description="Existing task, memory, artifact, or finding references; snapshot proposals only",
+        ...,
+        description="Existing task, memory, artifact, or finding references; use [] for procedure proposals",
     )
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
     criteria: List[TaskProposalCriterion] = Field(min_length=1, max_length=1)
@@ -2345,8 +2356,9 @@ class TaskProposal(_StrictTaskWireModel):
         if not isinstance(value, dict) or not value.get("snapshot_refs"):
             return value
         normalized = dict(value)
-        normalized.pop("limit", None)
-        normalized["limits"] = {}
+        if "limit" in normalized or "limits" in normalized:
+            normalized.pop("limit", None)
+            normalized["limits"] = {}
         if "output_kind" in normalized:
             normalized.pop("output_kind")
             logger.info("Normalized inapplicable output_kind from snapshot task proposal")
@@ -2402,6 +2414,49 @@ class TaskProposal(_StrictTaskWireModel):
     @property
     def effective_basis_description(self) -> str:
         return (self.basis_description or self.objective).strip()
+
+
+_TASK_PROPOSAL_FIELD_CORRECTIONS = {
+    "title": ('non-empty string', '"title":"Assess login"'),
+    "objective": ('non-empty string', '"objective":"Test the assigned login route"'),
+    "basis_description": ('non-empty string when supplied', '"basis_description":"Bounded login assessment"'),
+    "methods": ('required array; non-empty for procedures and [] for snapshots', '"methods":["http testing"]'),
+    "limits": ('required object; positive bounds for procedures and {} for snapshots', '"limits":{"max_requests":50}'),
+    "snapshot_refs": (
+        'required array; [] for procedures or canonical references for snapshots',
+        '"snapshot_refs":["artifact:artifacts/inventory.json"]',
+    ),
+    "output_kind": ('artifact or inventory_manifest', '"output_kind":"artifact"'),
+    "criteria": ('array containing exactly one description object', '"criteria":[{"description":"Store evidence"}]'),
+    "target_ids": ('array of exact registered target IDs', '"target_ids":["target-1"]'),
+}
+
+
+def _compact_task_proposal_validation_error(error: ValidationError) -> str:
+    """Return one compact correction contract covering every invalid proposal field."""
+
+    diagnostics = []
+    for detail in error.errors(include_url=False, include_context=False, include_input=True):
+        location = list(detail.get("loc", ()))
+        proposal_index = location.pop(0) if location and isinstance(location[0], int) else "?"
+        field_path = ".".join(str(part) for part in location) or "proposal"
+        field_name = str(location[0]) if location else "proposal"
+        requirement, example = _TASK_PROPOSAL_FIELD_CORRECTIONS.get(
+            field_name,
+            (str(detail.get("msg", "invalid value")), "use the canonical create_tasks schema"),
+        )
+        received = detail.get("input")
+        received_shape = "missing" if detail.get("type") == "missing" else type(received).__name__
+        diagnostic = (
+            f"proposal[{proposal_index}].{field_path}: requires {requirement}; "
+            f"received={received_shape}; example={example}"
+        )
+        if diagnostic not in diagnostics:
+            diagnostics.append(diagnostic)
+    return "Task proposal validation failed: " + "; ".join(diagnostics)
+
+
+TaskProposalList = List[TaskProposal]
 
 
 def _get_active_plan() -> OperationPlan:
@@ -2660,46 +2715,66 @@ def _reconcile_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[s
 def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tuple[Dict[str, Any], str]:
     path = _artifact_path_from_ref(reference)
     try:
-        with open(path, "r", encoding="utf-8") as manifest_file:
-            manifest = json.load(manifest_file)
+        with open(path, "rb") as manifest_file:
+            raw_manifest = manifest_file.read()
+        manifest = json.loads(raw_manifest)
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"Invalid inventory manifest: {reference}") from error
-    if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema_version") != INVENTORY_MANIFEST_SCHEMA_VERSION
-    ):
+    canonical_input = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    artifact_digest = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
+    if not isinstance(manifest, dict):
         raise ValueError(
-            f"inventory manifest schema_version must be {INVENTORY_MANIFEST_SCHEMA_VERSION}"
+            f"inventory manifest validation failed artifact_sha256={artifact_digest}: root must be an object"
+        )
+    diagnostics = []
+    if manifest.get("schema_version") != INVENTORY_MANIFEST_SCHEMA_VERSION:
+        diagnostics.append(
+            f"inventory manifest schema_version must be {INVENTORY_MANIFEST_SCHEMA_VERSION} at $.schema_version"
         )
     items = manifest.get("items")
     gaps = manifest.get("unassessed_gaps")
     if not isinstance(items, list) or not items:
-        raise ValueError("inventory manifest items must be a non-empty list")
+        diagnostics.append("inventory manifest items must be a non-empty list at $.items")
     if not isinstance(gaps, list):
-        raise ValueError("inventory manifest unassessed_gaps must be a list")
+        diagnostics.append("inventory manifest unassessed_gaps must be a list at $.unassessed_gaps")
+    if diagnostics:
+        raise ValueError(
+            f"inventory manifest validation failed artifact_sha256={artifact_digest}: " + "; ".join(diagnostics)
+        )
     allowed_kinds = set(INVENTORY_MANIFEST_ITEM_KINDS)
     item_ids = []
     normalized_inventory = False
+    validated_items = []
     try:
         target_values = {target.target_id: target.value for target in _get_active_plan().targets}
     except Exception:
         target_values = {}
-    for item in items:
+    for item_index, item in enumerate(items):
         if not isinstance(item, dict):
-            raise ValueError("inventory manifest items must be objects")
+            diagnostics.append(f"inventory manifest items must be objects; invalid item at $.items[{item_index}]")
+            continue
         item_id = str(item.get("id", "")).strip()
         target_id = str(item.get("target_id", "")).strip()
         kind = str(item.get("kind", "")).strip()
         value = str(item.get("value", "")).strip()
         attributes = item.get("attributes", {})
         if not item_id or not target_id or not value or kind not in allowed_kinds:
-            raise ValueError("inventory manifest item requires id, target_id, supported kind, and value")
+            diagnostics.append(
+                f"inventory manifest item at $.items[{item_index}] requires id, target_id, supported kind, and value"
+            )
+            continue
         if not isinstance(attributes, dict):
-            raise ValueError("inventory manifest item attributes must be an object")
+            diagnostics.append(
+                f"inventory manifest item {item_id} field attributes at $.items[{item_index}].attributes "
+                "must be an object"
+            )
+            continue
         item_ids.append(item_id)
+        validated_items.append((item_index, item))
     if len(item_ids) != len(set(item_ids)):
-        raise ValueError("inventory manifest item ids must be unique")
-    for item in items:
+        diagnostics.append("inventory manifest item ids must be unique at $.items")
+    normalized_values = []
+    for item_index, item in validated_items:
         kind = str(item["kind"])
         if kind not in {"endpoint", "parameter"}:
             continue
@@ -2709,20 +2784,27 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
         try:
             normalized_value = _canonical_inventory_url(value, target_values.get(str(item["target_id"])))
         except ValueError as error:
-            raise ValueError(
-                f"inventory manifest item {item['id']} field value is invalid: {error}"
-            ) from error
+            diagnostics.append(
+                f"inventory manifest item {item['id']} field value at $.items[{item_index}].value is invalid: {error}"
+            )
+            continue
         if normalized_value != value:
-            item["value"] = normalized_value
-            normalized_inventory = True
+            normalized_values.append((item, normalized_value))
     try:
         valid_target_ids = {target.target_id for target in _get_active_plan().targets}
     except Exception:
         valid_target_ids = set()
-    manifest_target_ids = {str(item["target_id"]) for item in items}
+    manifest_target_ids = {str(item["target_id"]) for _item_index, item in validated_items}
     if valid_target_ids and not manifest_target_ids.issubset(valid_target_ids):
         invalid_target_ids = sorted(manifest_target_ids - valid_target_ids)
-        raise ValueError(f"inventory manifest contains unknown target IDs: {', '.join(invalid_target_ids)}")
+        diagnostics.append(f"inventory manifest contains unknown target IDs: {', '.join(invalid_target_ids)}")
+    if diagnostics:
+        raise ValueError(
+            f"inventory manifest validation failed artifact_sha256={artifact_digest}: " + "; ".join(diagnostics)
+        )
+    for item, normalized_value in normalized_values:
+        item["value"] = normalized_value
+        normalized_inventory = True
     if reconcile:
         manifest = _reconcile_inventory_manifest(path, manifest)
     elif normalized_inventory:
@@ -3150,12 +3232,13 @@ def _frozen_task_identity(
     )
 
 
-def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limit: int) -> str:
+def _create_tasks_from_proposals(tasks: TaskProposalList, *, prompt_token_limit: int) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
     Procedure example:
     {"tasks": [{"title": "Build surface inventory", "objective": "Map the assigned target",
     "basis_description": "Bounded crawl", "methods": ["crawl"], "limits": {"max_requests": 500},
+    "snapshot_refs": [],
     "output_kind": "inventory_manifest", "criteria": [{"description":
     "Execute the bounded procedure and store its manifest"}], "target_ids": ["target-1"]}]}
 
@@ -3166,7 +3249,10 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
 
     if not tasks:
         raise ValueError("must have at least one task")
-    proposals = [TaskProposal.model_validate(task) for task in tasks]
+    try:
+        proposals = TypeAdapter(TaskProposalList).validate_python(tasks)
+    except ValidationError as error:
+        raise ValueError(_compact_task_proposal_validation_error(error)) from error
 
     client = _ensure_memory_client()
     user_id = _user_id()
@@ -3359,17 +3445,18 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
 
 
 @tool
-def create_tasks(tasks: List[TaskProposal]) -> str:
+def create_tasks(tasks: TaskProposalList) -> str:
     """Create pending tasks from concise proposals.
 
     Procedure example:
     {"tasks": [{"title": "Build surface inventory", "objective": "Map the assigned target",
-    "methods": ["crawl"], "limits": {"max_requests": 500}, "output_kind": "inventory_manifest",
+    "methods": ["crawl"], "limits": {"max_requests": 500}, "snapshot_refs": [],
+    "output_kind": "inventory_manifest",
     "criteria": [{"description": "Store the finite inventory"}], "target_ids": ["target-1"]}]}
 
     Snapshot example:
     {"tasks": [{"title": "Assess frozen inventory", "objective": "Assess each frozen inventory unit",
-    "limits": {}, "snapshot_refs": ["artifact:artifacts/inventory.json"],
+    "methods": [], "limits": {}, "snapshot_refs": ["artifact:artifacts/inventory.json"],
     "criteria": [{"description": "Assess the assigned frozen inventory unit"}],
     "target_ids": ["target-1"]}]}
 
@@ -3388,7 +3475,7 @@ def build_create_tasks_tool(prompt_token_limit: int = 48_000) -> Any:
     completed = False
 
     @tool(name="create_tasks")
-    def create_tasks_once(tasks: List[TaskProposal]) -> str:
+    def create_tasks_once(tasks: TaskProposalList) -> str:
         """Create the active phase's durable tasks and stop after the first successful call."""
 
         nonlocal completed

@@ -776,6 +776,12 @@ The `.env.example` file contains detailed configuration options with inline comm
 
 See `.env.example` for complete configuration options and usage examples.
 
+### Workflow Health Configuration
+
+| Variable                       | Default | Description                                                                                                                   |
+|--------------------------------|---------|-------------------------------------------------------------------------------------------------------------------------------|
+| `CYBER_INCOMPLETE_HEALTH_CAP`  | `0.99`  | Shared score ceiling for incomplete coverage and hard budget-limit termination. Natural health penalties are applied first.   |
+
 ## Development & Testing
 
 ### Running Tests

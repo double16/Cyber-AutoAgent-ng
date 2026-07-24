@@ -89,14 +89,15 @@ def test_done_phase_with_unfinished_task_is_not_perfect_and_is_inconsistent():
 
     health = compute_operation_health(plan, [_task("pending", 1, "pending")])
 
-    assert health["score"] == 0.49
-    assert health["band"] == "poor"
+    assert health["score"] == 0.99
+    assert health["band"] == "excellent"
     assert health["phase_inconsistent"] is True
     assert health["deferred_count"] == 1
     assert health["completion_feasible"] is False
     assert health["unresolved_task_count"] == 1
     assert health["incomplete_phase_ids"] == [1]
     assert health["health_cap_reason"] == "incomplete_coverage"
+    assert health["health_cap"] == 0.99
 
 
 def test_current_phase_active_and_pending_tasks_are_score_neutral_without_coverage_cap():
@@ -125,7 +126,7 @@ def test_noncurrent_pending_task_still_triggers_incomplete_coverage_cap():
     )
     health = compute_operation_health(plan, [_task("pending", 1, "pending")])
 
-    assert health["score"] == 0.49
+    assert health["score"] > 0.49
     assert health["health_cap_reason"] == "incomplete_coverage"
 
 
@@ -293,7 +294,72 @@ def test_duration_budget_termination_caps_final_health_without_duration_reserve(
         budget={"termination_reason": "budget_limit", "termination_limit": "duration"},
     )
 
-    assert health["score"] == 0.49
-    assert health["band"] == "poor"
+    assert health["score"] == 0.99
+    assert health["band"] == "excellent"
+    assert health["health_cap"] == 0.99
     assert health["feasibility"]["termination_limit"] == "duration"
     assert "duration_headroom" not in health["feasibility"]
+
+
+def test_custom_health_cap_is_shared_by_incomplete_coverage_and_budget_limit():
+    plan = _plan(PlanPhase(id=1, title="Done", status="done"))
+    tasks = [_task("pending", 1, "pending")]
+
+    incomplete = compute_operation_health(plan, tasks, incomplete_health_cap=0.75)
+    budget_only = compute_operation_health(
+        plan,
+        [_task("done", 1, "done")],
+        budget={"termination_reason": "budget_limit", "termination_limit": "tokens"},
+        incomplete_health_cap=0.75,
+    )
+    combined = compute_operation_health(
+        plan,
+        tasks,
+        budget={"termination_reason": "budget_limit", "termination_limit": "tokens"},
+        incomplete_health_cap=0.75,
+    )
+
+    assert incomplete["score"] == 0.75
+    assert budget_only["score"] == 0.75
+    assert combined["score"] == 0.75
+    assert incomplete["health_cap"] == budget_only["health_cap"] == combined["health_cap"] == 0.75
+    assert combined["feasibility"]["termination_reason"] == "budget_limit"
+
+
+def test_health_cap_never_raises_a_naturally_low_failure_score():
+    health = compute_operation_health(
+        _plan(PlanPhase(id=1, title="Active", status="active")),
+        [_task("blocked", 1, "blocked")],
+        incomplete_health_cap=0.99,
+    )
+
+    assert health["score"] < 0.50
+    assert health["health_cap"] == 0.99
+
+
+def test_budget_infeasibility_penalty_precedes_shared_health_cap():
+    health = compute_operation_health(
+        _plan(PlanPhase(id=1, title="Done", status="done")),
+        [_task("done", 1, "done")],
+        budget={
+            "max_tokens": 5_000,
+            "used_tokens": 4_000,
+            "estimated_reporting_tokens": 2_000,
+            "termination_reason": "budget_limit",
+            "termination_limit": "tokens",
+        },
+        incomplete_health_cap=0.99,
+    )
+
+    assert health["score"] == 0.70
+    assert health["health_cap"] == 0.99
+
+
+def test_health_cap_normalizes_out_of_range_and_invalid_values():
+    plan = _plan(PlanPhase(id=1, title="Done", status="done"))
+    tasks = [_task("pending", 1, "pending")]
+
+    assert compute_operation_health(plan, tasks, incomplete_health_cap=-1)["health_cap"] == 0.0
+    assert compute_operation_health(plan, tasks, incomplete_health_cap=2)["health_cap"] == 1.0
+    assert compute_operation_health(plan, tasks, incomplete_health_cap="invalid")["health_cap"] == 0.99
+    assert compute_operation_health(plan, tasks, incomplete_health_cap=float("nan"))["health_cap"] == 0.99

@@ -451,18 +451,22 @@ def _plan():
     )
 
 
-def _runtime(progress=0, env_ints=None):
+def _runtime(progress=0, env_ints=None, env_floats=None):
     env_ints = {
         "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 0,
         **(env_ints or {}),
     }
+    env_floats = env_floats or {}
     return SimpleNamespace(
         config=SimpleNamespace(target="target", objective="assess", available_tools=[]),
         operation_id="OP_TEST",
         system_prompt="base prompt",
         task_capture_prompt="task capture prompt",
         termination_policy="",
-        config_manager=SimpleNamespace(getenv_int=lambda name, default=0: env_ints.get(name, default)),
+        config_manager=SimpleNamespace(
+            getenv_int=lambda name, default=0: env_ints.get(name, default),
+            getenv_float=lambda name, default=0.0: env_floats.get(name, default),
+        ),
         callback_handler=FakeCallbackHandler(progress=progress),
         trace_attributes={"operation.id": "OP_TEST"},
         core_tools_list=[
@@ -3161,6 +3165,41 @@ def test_task_acceptance_repair_guidance_is_prerequisite_aware(error, expected):
     assert expected in guidance
 
 
+def test_acceptance_failure_signature_tracks_inventory_artifact_state():
+    first = ToolOutcome(
+        sequence=1,
+        tool_use_id="first",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=True,
+        input_summary="same acceptance input",
+        output_summary=f"inventory manifest validation failed artifact_sha256={'a' * 64}: invalid route",
+    )
+    same_artifact = ToolOutcome(
+        sequence=2,
+        tool_use_id="same",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=True,
+        input_summary="changed acceptance summary",
+        output_summary=f"inventory manifest validation failed artifact_sha256={'a' * 64}: invalid route",
+    )
+    repaired_artifact = ToolOutcome(
+        sequence=3,
+        tool_use_id="repaired",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=True,
+        input_summary="same acceptance input",
+        output_summary=f"inventory manifest validation failed artifact_sha256={'b' * 64}: another route",
+    )
+
+    signature = MultiAgentWorkflowController._acceptance_failure_signature
+
+    assert signature(first) == signature(same_artifact)
+    assert signature(first) != signature(repaired_artifact)
+
+
 def test_task_creator_reassigns_new_future_phase_tasks_to_active_phase():
     plan = OperationPlan(
         objective="assess",
@@ -3215,7 +3254,7 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
 
     assert "Candidate optional tools" not in prompt
     assert "Your only action is one successful" in prompt
-    assert "Every proposal MUST contain non-empty `title`, `objective`, a `limits` object" in prompt
+    assert "Every proposal MUST contain non-empty `title`, `objective`, explicit `methods`" in prompt
     assert "unsupported top-level `description` fields" in prompt
     assert "Stop immediately" in prompt
     assert "Python assigns active phase 1" in prompt
@@ -4556,7 +4595,7 @@ def test_operation_health_provider_predicts_current_phase_from_inventory_fanout(
     )
     state = FakeState(plan, [inventory_task, route_task])
     state.acceptance_results[inventory_task.task_uid] = []
-    runtime = _runtime()
+    runtime = _runtime(env_floats={"CYBER_INCOMPLETE_HEALTH_CAP": 0.75})
     runtime.prompt_token_limit = 48_000
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
     monkeypatch.setattr(
@@ -4591,3 +4630,4 @@ def test_operation_health_provider_predicts_current_phase_from_inventory_fanout(
     assert health["prediction"]["expected_tasks"] == 2
     assert health["prediction"]["actual_tasks"] == 1
     assert health["prediction"]["coverage"] == 0.5
+    assert health["health_cap"] == 0.75

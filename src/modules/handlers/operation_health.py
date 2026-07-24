@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -32,8 +33,19 @@ COMPLETED_PHASE_WEIGHT = 1.0
 FUTURE_PHASE_WEIGHT = 0.25
 PREDICTION_PENALTY_WEIGHT = 0.20
 BUDGET_INFEASIBILITY_FACTOR = 0.70
-HARD_BUDGET_HEALTH_CAP = 0.49
-INCOMPLETE_COVERAGE_HEALTH_CAP = 0.49
+DEFAULT_INCOMPLETE_HEALTH_CAP = 0.99
+
+
+def _normalize_health_cap(value: Any) -> float:
+    """Return a finite shared health ceiling within the normalized score range."""
+
+    try:
+        cap = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_INCOMPLETE_HEALTH_CAP
+    if not math.isfinite(cap):
+        return DEFAULT_INCOMPLETE_HEALTH_CAP
+    return max(0.0, min(1.0, cap))
 
 
 def health_band(score: float) -> str:
@@ -147,6 +159,7 @@ def compute_operation_health(
     *,
     predictions: Optional[Mapping[int, Mapping[str, Any]]] = None,
     budget: Optional[Mapping[str, Any]] = None,
+    incomplete_health_cap: Any = DEFAULT_INCOMPLETE_HEALTH_CAP,
 ) -> Dict[str, Any]:
     """Compute a point-in-time operation health snapshot against an optimal score of one."""
 
@@ -158,6 +171,7 @@ def compute_operation_health(
         }
 
     predictions = predictions or {}
+    health_cap = _normalize_health_cap(incomplete_health_cap)
     tasks_by_phase: Dict[int, list[Task]] = {}
     for task in tasks:
         tasks_by_phase.setdefault(task.phase, []).append(task)
@@ -214,7 +228,7 @@ def compute_operation_health(
     termination_reason = str(budget_data.get("termination_reason") or "").strip() or None
     termination_limit = str(budget_data.get("termination_limit") or "").strip() or None
     if termination_reason == "budget_limit":
-        score = min(score, HARD_BUDGET_HEALTH_CAP)
+        score = min(score, health_cap)
     actionable_statuses = {"active", "pending"}
     unresolved_tasks = [task for task in tasks if str(task.status) in actionable_statuses]
     incomplete_phase_ids = sorted(
@@ -239,7 +253,7 @@ def compute_operation_health(
     }
     health_cap_reason = None
     if cap_incomplete_phase_ids or phase_inconsistent:
-        score = min(score, INCOMPLETE_COVERAGE_HEALTH_CAP)
+        score = min(score, health_cap)
         health_cap_reason = "incomplete_coverage"
     score = max(0.0, min(1.0, score))
     task_counts = Counter(str(task.status) for task in tasks)
@@ -262,6 +276,7 @@ def compute_operation_health(
         "unresolved_task_count": len(unresolved_tasks),
         "incomplete_phase_ids": incomplete_phase_ids,
         "health_cap_reason": health_cap_reason,
+        "health_cap": round(health_cap, 4),
         "prediction": selected_prediction or {"available": False},
         "feasibility": {
             "available": bool(max_tokens or max_cost or estimated_tokens or estimated_cost or termination_reason),
