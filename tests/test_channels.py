@@ -244,3 +244,35 @@ async def test_channel_reverse_send_status_and_reader_errors(monkeypatch):
     events = await mod.channel_poll("rev", timeout=0, max_events=10)
     assert any(ev.note and ev.note.startswith("output_reader_error") for ev in events.events)
 
+
+@pytest.mark.asyncio
+async def test_channel_send_normalizes_semantic_mode_aliases(monkeypatch):
+    class Writer:
+        def __init__(self):
+            self.payload = b""
+
+        def is_closing(self):
+            return False
+
+        def write(self, payload):
+            self.payload += payload
+
+        async def drain(self):
+            pass
+
+    manager = mod.ChannelManager()
+    channel = manager.add(mod.Channel(id="alias-channel", kind="reverse"))
+    writer = Writer()
+    channel._client_writer = writer
+    monkeypatch.setattr(mod, "_CHANNEL_MANAGER", manager)
+
+    sent = await mod.channel_send("alias-channel", "aGk=", mode="b64")
+
+    assert sent.bytes_sent == 2
+    assert writer.payload == b"hi"
+
+
+@pytest.mark.asyncio
+async def test_channel_send_rejects_unknown_semantic_mode():
+    with pytest.raises(ValueError, match="mode must be"):
+        await mod.channel_send("missing", "x", mode="hex")
