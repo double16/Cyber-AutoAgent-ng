@@ -1827,6 +1827,8 @@ def test_finalize_report_and_evaluation_runs_once(monkeypatch):
         "termination_reason": "complete",
         "termination_message": None,
         "incomplete_reason": None,
+        "unresolved_task_count": None,
+        "incomplete_phase_ids": [],
     }
     callback.trigger_evaluation_on_completion.assert_called_once()
     callback.emit_assessment_complete.assert_called_once()

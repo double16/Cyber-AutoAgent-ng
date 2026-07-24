@@ -2,6 +2,9 @@
 
 ### Features
 
+- Require planning actors and critics to produce semantically distinct, progressive phase objectives; preserve those
+  objectives during inventory fan-out; add shared semantic-enum normalization; and report token/cost completion
+  feasibility in operation health without reserving duration.
 - Add deterministic operation-health scoring to progress events, including inventory-based phase fan-out prediction,
   and show the compact score and band with a distinguishing stethoscope marker in interactive stream output, the
   persistent footer, and headless output.
@@ -53,6 +56,18 @@
 
 ### Fixes
 
+- Report terminal workflows as partial failures while actionable tasks remain, cap incomplete-coverage health in the
+  poor band without penalizing active or pending work in the current phase, prevent closure phases from masking
+  unfinished prior work, and provide item-specific retained-session recovery for invalid task-acceptance inventory
+  evidence.
+- Prevent evaluator-driven phase completion while active or pending tasks remain, keep incomplete prerequisite work
+  from making validation phases appear not applicable, and report findings separately from observations and other
+  evidence.
+- Preserve distinct coverage-task objectives and acceptance intent during exact inventory fan-out deduplication, while
+  continuing to collapse title-only duplicates within the same phase.
+- Close finding-validation tasks directly from durable validation records, advance no-op context reduction through
+  deterministic compaction stages, bind reconnaissance to controller-registered targets, and canonicalize malformed
+  inventory routes before task expansion.
 - Make the persisted task-acceptance ledger authoritative over earlier rejected submissions so corrected and replayed
   successful acceptance proceeds to evaluation instead of being downgraded to `partial_failure`.
 - Scope exact task and completed-coverage deduplication to the active phase, keep duplicate-only task creation

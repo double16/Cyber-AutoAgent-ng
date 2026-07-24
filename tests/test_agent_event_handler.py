@@ -125,6 +125,25 @@ def test_progress_update_includes_shared_operation_health():
     }
 
 
+def test_termination_event_includes_final_operation_health():
+    handler = make_handler()
+    handler.set_operation_health_provider(
+        lambda: {
+            "health_version": "1",
+            "status": "available",
+            "score": 0.49,
+            "band": "poor",
+            "unresolved_task_count": 2,
+        }
+    )
+
+    handler.emit_termination("partial_failure", "Two tasks remain")
+
+    event = next(event for event in handler._events if event["type"] == "termination_reason")
+    assert event["health"]["score"] == 0.49
+    assert event["health"]["unresolved_task_count"] == 2
+
+
 def test_progress_update_survives_operation_health_provider_failure():
     emitter = MagicMock()
     coordinator = OperationEventCoordinator("OP_TEST", emitter)

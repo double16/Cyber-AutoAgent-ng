@@ -1968,7 +1968,15 @@ def test_controller_closes_phase_but_preserves_pending_task_when_hard_budget_cap
     assert state.plan.phases[0].status == "partial_failure"
     assert state.tasks[0].status == "pending"
     assert not any(event["type"] in ("task_done", "task_deferred") for event in controller.runtime.callback_handler.events)
-    assert controller.runtime.callback_handler.termination_events[0][0] == "complete"
+    assert controller.runtime.callback_handler.termination_events[0][0] == "partial_failure"
+    coverage = next(
+        event
+        for event in controller.runtime.callback_handler.events
+        if event["type"] == "workflow_coverage_summary"
+    )
+    assert coverage["assessment_complete"] is False
+    assert coverage["actionable_task_count"] == 1
+    assert coverage["incomplete_phase_ids"] == [1]
 
 
 def test_phase_hard_cap_defers_active_task_without_running_worker_and_advances():
@@ -2203,6 +2211,8 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "scope, safety, operational-boundary, evidence, and validation constraints" in prompt
     assert "Do not treat phase goals, tool preferences, or generic advice as constraints" in prompt
     assert "findings-consolidation" in prompt
+    assert "coverage-closure" in prompt
+    assert "Documenting unassessed work is an output" in prompt
     assert "Use bounded criteria" in prompt
     assert "semantically distinct objective" in prompt
 
@@ -2227,6 +2237,8 @@ def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
 
     assert "findings-consolidation" in prompt
     assert "equivalent post-processing phase, regardless of its title" in prompt
+    assert "evidence-reconciliation" in prompt
+    assert "never treats a later reconciliation phase" in prompt
     assert "superficial rewording" in prompt
 
 
@@ -2661,7 +2673,7 @@ def test_controller_reopens_completed_plan_only_at_start():
     assert state.plan.phases[0].status == "done"
     assert state.plan.phases[1].status == "pending"
     assert state.plan.assessment_complete is True
-    assert controller.runtime.callback_handler.termination_events[0][0] == "complete"
+    assert controller.runtime.callback_handler.termination_events[0][0] == "partial_failure"
     first_plan_event = next(
         event
         for event in controller.runtime.callback_handler.events
@@ -2787,6 +2799,39 @@ def test_empty_final_validation_phase_requires_complete_predecessor_work():
     assert controller._can_complete_empty_validation_phase(plan, plan.phases[1]) is False
     summary = controller._workflow_coverage_summary(plan)
     assert summary[0]["status_reason"] == "Phase incomplete with 1 actionable task(s) remaining."
+
+
+def test_completed_closure_phase_reports_unresolved_prior_work_and_partial_termination():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Assess routes", status="partial_failure"),
+            PlanPhase(id=2, title="Coverage closure", status="done"),
+        ],
+        assessment_complete=False,
+    )
+    pending = Task(task_uid="pending", title="Pending", objective="assess route", phase=1, status="pending")
+    state = AdvancingFakeState(plan, tasks=[pending])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+    )
+
+    controller._emit_workflow_completion(plan)
+
+    coverage = next(
+        event
+        for event in controller.runtime.callback_handler.events
+        if event["type"] == "workflow_coverage_summary"
+    )
+    assert coverage["terminal_phase_completed_with_unresolved_prior_work"] is True
+    assert coverage["phases"][1]["terminal_phase_completed_with_unresolved_prior_work"] is True
+    assert coverage["phases"][1]["unresolved_prior_task_count"] == 1
+    assert controller.runtime.callback_handler.termination_events[0][0] == "partial_failure"
 
 
 def test_continuing_phase_with_task_history_rechecks_then_advances_on_creator_failure():
@@ -4339,7 +4384,7 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
 
     phase_one_done = store.mark_phase(activated_phase, 1, "done")
     finished_phase = store.mark_phase(phase_one_done, 2, "blocked")
-    assert finished_phase.assessment_complete is True
+    assert finished_phase.assessment_complete is False
     assert finished_phase.constraints == ["Use read-only validation"]
 
     generated_plan = store.create_plan_from_dict(
@@ -4362,6 +4407,8 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
     done_task = store.mark_task(store.activate_task(deferred_task), "partial_failure", "soft cap")
     assert done_task.status == "partial_failure"
     assert done_task.status_reason == "soft cap"
+    finished_phase = store.mark_phase(finished_phase, 2, "blocked")
+    assert finished_phase.assessment_complete is True
 
     with pytest.raises(ValueError, match="phase status"):
         store.mark_phase(activated_phase, 2, "active")

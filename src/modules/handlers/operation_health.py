@@ -33,6 +33,7 @@ FUTURE_PHASE_WEIGHT = 0.25
 PREDICTION_PENALTY_WEIGHT = 0.20
 BUDGET_INFEASIBILITY_FACTOR = 0.70
 HARD_BUDGET_HEALTH_CAP = 0.49
+INCOMPLETE_COVERAGE_HEALTH_CAP = 0.49
 
 
 def health_band(score: float) -> str:
@@ -53,12 +54,17 @@ def _task_weight(task: Task) -> int:
     return max(1, len(task.acceptance.basis.item_ids))
 
 
-def _task_quality(tasks: Sequence[Task]) -> float:
+def _task_quality(tasks: Sequence[Task], *, neutral_unfinished: bool = False) -> float:
     weighted_score = 0.0
     total_weight = 0
     for task in tasks:
         weight = _task_weight(task)
-        weighted_score += TASK_QUALITY.get(str(task.status), UNKNOWN_QUALITY) * weight
+        status = str(task.status)
+        quality = 1.0 if neutral_unfinished and status in {"active", "pending"} else TASK_QUALITY.get(
+            status,
+            UNKNOWN_QUALITY,
+        )
+        weighted_score += quality * weight
         total_weight += weight
     if total_weight <= 0:
         return EMPTY_ACTIVE_PHASE_TASK_QUALITY
@@ -113,7 +119,7 @@ def _phase_health(
         task_score = 1.0
         phase_score = 1.0
     else:
-        task_score = _task_quality(tasks)
+        task_score = _task_quality(tasks, neutral_unfinished=phase.id == current_phase)
         phase_status_score = PHASE_QUALITY.get(str(phase.status), UNKNOWN_QUALITY)
         phase_score = (0.75 * task_score) + (0.25 * phase_status_score)
 
@@ -209,6 +215,32 @@ def compute_operation_health(
     termination_limit = str(budget_data.get("termination_limit") or "").strip() or None
     if termination_reason == "budget_limit":
         score = min(score, HARD_BUDGET_HEALTH_CAP)
+    actionable_statuses = {"active", "pending"}
+    unresolved_tasks = [task for task in tasks if str(task.status) in actionable_statuses]
+    incomplete_phase_ids = sorted(
+        {int(task.phase) for task in unresolved_tasks}
+        | {int(task.phase) for task in tasks if str(task.status) in {"partial_failure", "blocked"}}
+        | {int(phase.id) for phase in plan.phases if phase.status in {"partial_failure", "blocked"}}
+    )
+    phase_inconsistent = any(bool(row["phase_inconsistent"]) for row in phase_rows)
+    completion_feasible = not incomplete_phase_ids and not phase_inconsistent
+    cap_incomplete_phase_ids = {
+        int(task.phase)
+        for task in unresolved_tasks
+        if int(task.phase) != int(plan.current_phase)
+    } | {
+        int(task.phase)
+        for task in tasks
+        if str(task.status) in {"partial_failure", "blocked"}
+    } | {
+        int(phase.id)
+        for phase in plan.phases
+        if phase.status in {"partial_failure", "blocked"}
+    }
+    health_cap_reason = None
+    if cap_incomplete_phase_ids or phase_inconsistent:
+        score = min(score, INCOMPLETE_COVERAGE_HEALTH_CAP)
+        health_cap_reason = "incomplete_coverage"
     score = max(0.0, min(1.0, score))
     task_counts = Counter(str(task.status) for task in tasks)
     current_row = next((row for row in phase_rows if row["phase_id"] == plan.current_phase), None)
@@ -225,7 +257,11 @@ def compute_operation_health(
         "task_status_counts": dict(sorted(task_counts.items())),
         "deferred_count": int(task_counts.get("pending", 0)),
         "failure_count": int(task_counts.get("partial_failure", 0) + task_counts.get("blocked", 0)),
-        "phase_inconsistent": any(bool(row["phase_inconsistent"]) for row in phase_rows),
+        "phase_inconsistent": phase_inconsistent,
+        "completion_feasible": completion_feasible,
+        "unresolved_task_count": len(unresolved_tasks),
+        "incomplete_phase_ids": incomplete_phase_ids,
+        "health_cap_reason": health_cap_reason,
         "prediction": selected_prediction or {"available": False},
         "feasibility": {
             "available": bool(max_tokens or max_cost or estimated_tokens or estimated_cost or termination_reason),

@@ -53,6 +53,8 @@ def _normalize_completion_status(value: Any) -> Dict[str, Any]:
             "termination_reason": "complete",
             "termination_message": None,
             "incomplete_reason": None,
+            "unresolved_task_count": 0,
+            "incomplete_phase_ids": [],
         }
 
     assessment_complete = bool(value.get("assessment_complete"))
@@ -60,6 +62,8 @@ def _normalize_completion_status(value: Any) -> Dict[str, Any]:
     termination_reason = value.get("termination_reason")
     termination_message = value.get("termination_message")
     incomplete_reason = value.get("incomplete_reason")
+    unresolved_task_count = value.get("unresolved_task_count")
+    incomplete_phase_ids = value.get("incomplete_phase_ids")
     if assessment_complete:
         incomplete_reason = None
     elif not incomplete_reason:
@@ -71,6 +75,8 @@ def _normalize_completion_status(value: Any) -> Dict[str, Any]:
         "termination_reason": str(termination_reason) if termination_reason is not None else None,
         "termination_message": str(termination_message) if termination_message is not None else None,
         "incomplete_reason": str(incomplete_reason) if incomplete_reason is not None else None,
+        "unresolved_task_count": max(0, int(unresolved_task_count or 0)),
+        "incomplete_phase_ids": [int(phase_id) for phase_id in (incomplete_phase_ids or [])],
     }
 
 
@@ -98,13 +104,22 @@ def _completion_status_notice(completion_status: Dict[str, Any]) -> str:
     reason = completion_status.get("termination_reason") or "unknown"
     message = completion_status.get("termination_message")
     incomplete_reason = completion_status.get("incomplete_reason") or "Workflow ended before assessment completion."
+    unresolved_task_count = int(completion_status.get("unresolved_task_count") or 0)
+    incomplete_phase_ids = completion_status.get("incomplete_phase_ids") or []
     message_line = f"> Termination message: {message}\n" if message else ""
+    coverage_line = ""
+    if unresolved_task_count:
+        phase_text = ", ".join(str(phase_id) for phase_id in incomplete_phase_ids) or "unknown"
+        coverage_line = (
+            f"> Unresolved actionable tasks: {unresolved_task_count} across phase(s) {phase_text}.\n"
+        )
     return (
         "> **Assessment Status: Incomplete**\n"
         ">\n"
         f"> {incomplete_reason}\n"
         f"> Termination reason: `{reason}`.\n"
         f"{message_line}"
+        f"{coverage_line}"
         "> Findings, observations, validation counts, and coverage in this report are partial. "
         "Do not interpret the absence of verified findings as absence of vulnerabilities.\n\n"
     )

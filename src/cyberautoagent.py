@@ -24,6 +24,7 @@ import base64
 import importlib
 import inspect
 import json
+import logging
 import os
 import signal
 import sys
@@ -880,12 +881,28 @@ def _build_report_completion_status(plan: Any, callback_handler: Any) -> dict[st
         incomplete_reason = (
             f"Workflow reached assessment_complete=true but termination_reason={termination_reason!r}."
         )
+    health_snapshot = None
+    health_provider = getattr(callback_handler, "operation_health_snapshot", None)
+    if callable(health_provider):
+        try:
+            health_snapshot = health_provider()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Unable to include operation health in report completion status",
+                exc_info=True,
+            )
     return {
         "assessment_complete": assessment_complete,
         "workflow_complete": workflow_complete,
         "termination_reason": termination_reason,
         "termination_message": termination_message,
         "incomplete_reason": incomplete_reason,
+        "unresolved_task_count": (
+            health_snapshot.get("unresolved_task_count") if isinstance(health_snapshot, dict) else None
+        ),
+        "incomplete_phase_ids": (
+            health_snapshot.get("incomplete_phase_ids") if isinstance(health_snapshot, dict) else []
+        ),
     }
 
 

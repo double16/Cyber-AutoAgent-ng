@@ -1958,20 +1958,93 @@ def test_inventory_requirement_reports_contract_for_malformed_only_candidate(fak
     )
     store.store_task("op1", task)
 
-    with pytest.raises(ValueError, match="Expected contract:.*schema_version"):
+    with pytest.raises(ValueError, match="schema_version must be 1.*preserve its artifact:artifacts/"):
         mod.build_record_task_acceptance_tool(task.task_uid)(
             status="satisfied",
             disposition="observation",
             summary="Wrong artifact type",
             evidence_refs=[f"artifact:{workflow_map}"],
         )
-    with pytest.raises(ValueError, match="received 0.*Expected contract"):
+    with pytest.raises(ValueError, match="received 0.*Required root fields"):
         mod.build_record_task_acceptance_tool(task.task_uid)(
             status="satisfied",
             disposition="observation",
             summary="No artifact candidate",
             evidence_refs=["memory:m1"],
         )
+
+
+def test_inventory_acceptance_identifies_invalid_item_and_canonicalizes_artifact_reference(fake_memory_client):
+    _client, store = fake_memory_client
+    root = Path(mod._operation_output_root())
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = root / "inventory_manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [{
+            "id": "bad-phpinfo",
+            "target_id": "target-1",
+            "kind": "endpoint",
+            "value": "http://target.test/var/www/html/phpinfo.php",
+            "attributes": {},
+        }],
+        "unassessed_gaps": [],
+    }))
+    task = mod.Task(
+        task_uid="invalid-item-inventory",
+        title="Invalid item inventory",
+        objective="Store a bounded inventory",
+        acceptance=make_acceptance("inventory"),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    tool = mod.build_record_task_acceptance_tool(task.task_uid)
+    with pytest.raises(ValueError, match="item bad-phpinfo field value.*filesystem path"):
+        tool(
+            status="satisfied",
+            disposition="observation",
+            summary="Inventory stored",
+            evidence_refs=[str(manifest)],
+        )
+
+    payload = json.loads(manifest.read_text())
+    payload["items"][0]["value"] = "http://target.test/phpinfo.php"
+    manifest.write_text(json.dumps(payload))
+    result = json.loads(tool(
+        status="satisfied",
+        disposition="observation",
+        summary="Inventory stored",
+        evidence_refs=[str(manifest)],
+    ))
+
+    assert result["complete"] is True
+    recorded = store.get_acceptance_results("op1", task.task_uid)[0]
+    assert recorded.evidence_refs == ("artifact:inventory_manifest.json",)
+
+
+def test_store_plan_does_not_complete_terminal_phases_with_actionable_tasks(fake_memory_client):
+    client, store = fake_memory_client
+    plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assess", status="partial_failure")],
+    )
+    store.store_task("op1", mod.Task(
+        task_uid="remaining",
+        title="Remaining",
+        objective="Assess remaining endpoint",
+        acceptance=make_acceptance(),
+        phase=1,
+        status="pending",
+    ))
+
+    result = client.store_plan(plan=plan, operation_id="op1")
+
+    assert plan.assessment_complete is False
+    assert "_reminder" not in result
 
 
 def test_create_tasks_rejects_unknown_target_ids(fake_memory_client):

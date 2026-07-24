@@ -89,9 +89,44 @@ def test_done_phase_with_unfinished_task_is_not_perfect_and_is_inconsistent():
 
     health = compute_operation_health(plan, [_task("pending", 1, "pending")])
 
-    assert health["score"] < 1.0
+    assert health["score"] == 0.49
+    assert health["band"] == "poor"
     assert health["phase_inconsistent"] is True
     assert health["deferred_count"] == 1
+    assert health["completion_feasible"] is False
+    assert health["unresolved_task_count"] == 1
+    assert health["incomplete_phase_ids"] == [1]
+    assert health["health_cap_reason"] == "incomplete_coverage"
+
+
+def test_current_phase_active_and_pending_tasks_are_score_neutral_without_coverage_cap():
+    plan = _plan(PlanPhase(id=1, title="Active", status="active"))
+    health = compute_operation_health(
+        plan,
+        [
+            _task("active", 1, "active"),
+            _task("pending", 1, "pending"),
+        ],
+    )
+
+    assert health["current_phase"]["task_score"] == 1.0
+    assert health["score"] > 0.49
+    assert health["health_cap_reason"] is None
+    assert health["completion_feasible"] is False
+    assert health["unresolved_task_count"] == 2
+    assert health["incomplete_phase_ids"] == [1]
+
+
+def test_noncurrent_pending_task_still_triggers_incomplete_coverage_cap():
+    plan = _plan(
+        PlanPhase(id=1, title="Prior", status="done"),
+        PlanPhase(id=2, title="Current", status="active"),
+        current_phase=2,
+    )
+    health = compute_operation_health(plan, [_task("pending", 1, "pending")])
+
+    assert health["score"] == 0.49
+    assert health["health_cap_reason"] == "incomplete_coverage"
 
 
 def test_failure_statuses_penalize_health_more_than_deferred_work():
@@ -105,6 +140,8 @@ def test_failure_statuses_penalize_health_more_than_deferred_work():
     assert blocked["score"] < pending["score"]
     assert partial["failure_count"] == 1
     assert blocked["failure_count"] == 1
+    assert partial["completion_feasible"] is False
+    assert blocked["completion_feasible"] is False
 
 
 def test_future_pending_phase_does_not_reduce_health():

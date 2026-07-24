@@ -2706,7 +2706,12 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
         value = str(item["value"])
         if kind == "parameter" and _normalized_route(value) is None:
             continue
-        normalized_value = _canonical_inventory_url(value, target_values.get(str(item["target_id"])))
+        try:
+            normalized_value = _canonical_inventory_url(value, target_values.get(str(item["target_id"])))
+        except ValueError as error:
+            raise ValueError(
+                f"inventory manifest item {item['id']} field value is invalid: {error}"
+            ) from error
         if normalized_value != value:
             item["value"] = normalized_value
             normalized_inventory = True
@@ -3470,7 +3475,9 @@ def _validate_acceptance_result_evidence(
                 raise ValueError(
                     f"Acceptance criterion {criterion.id} requires {requirement.min_count} "
                     f"inventory_manifest evidence reference(s); received {matching}.{diagnostic} "
-                    f"Expected contract: {inventory_manifest_contract_text()}"
+                    "Repair the identified item fields in the same artifact, preserve its artifact:artifacts/... "
+                    "reference, and resubmit. Required root fields: schema_version=1, non-empty items, and "
+                    "unassessed_gaps list."
                 )
             continue
         matching = sum(
@@ -3838,6 +3845,10 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     ) -> str:
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
+        evidence_refs = [
+            _canonical_evidence_reference(reference)
+            for reference in evidence_refs
+        ]
         evidence_refs = _bind_acceptance_finding_reference(normalized_uid, disposition, evidence_refs)
         coverage = tuple(
             CoverageResult(item_id=item_id, status=status, evidence_refs=tuple(evidence_refs))
@@ -4911,15 +4922,22 @@ class Mem0ServiceClient:
         Returns:
             Status result
         """
-        # Check if all phases complete and add workflow reminder
+        op_id = _operation_id(operation_id)
+
+        # Check if all phases and their actionable tasks are complete and add workflow reminder.
         all_done = all(p.status in TERMINAL_PLAN_STATUSES for p in plan.phases)
+        actionable_tasks = [
+            task
+            for task in _get_plan_store().get_tasks(op_id)
+            if task.status in {"active", "pending"}
+        ]
         add_completion_reminder = False
-        if all_done and not plan.assessment_complete:
+        if all_done and not actionable_tasks and not plan.assessment_complete:
             plan.assessment_complete = True
             add_completion_reminder = True
             logger.info("All phases complete - set assessment_complete=true")
-
-        op_id = _operation_id(operation_id)
+        elif actionable_tasks:
+            plan.assessment_complete = False
 
         result = {}
 

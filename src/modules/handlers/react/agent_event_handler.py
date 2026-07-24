@@ -699,6 +699,11 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         self.coordinator.set_operation_health_provider(provider)
 
+    def operation_health_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return the shared point-in-time operation health snapshot."""
+
+        return self.coordinator.operation_health_snapshot()
+
     def operation_health_budget_diagnostics(self) -> Dict[str, Any]:
         """Return token/cost feasibility inputs without reserving operation duration."""
 
@@ -790,19 +795,21 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self.emit_budget_progress_update(step="TERMINATED")
 
                 # Emit termination details
-                self.emit_ui_event(
-                    {
-                        "type": "termination_reason",
-                        "scope": "operation",
-                        "reason": reason,
-                        "message": message,
-                        "budget": {
-                            "maxDurationMinutes": self._budget_max_duration(),
-                            "maxTokens": self._budget_max_tokens(),
-                            "maxCost": self._budget_max_cost(),
-                        },
-                    }
-                )
+                termination_event = {
+                    "type": "termination_reason",
+                    "scope": "operation",
+                    "reason": reason,
+                    "message": message,
+                    "budget": {
+                        "maxDurationMinutes": self._budget_max_duration(),
+                        "maxTokens": self._budget_max_tokens(),
+                        "maxCost": self._budget_max_cost(),
+                    },
+                }
+                health = self.operation_health_snapshot()
+                if health is not None:
+                    termination_event["health"] = health
+                self.emit_ui_event(termination_event)
         except Exception as e:
             logger.debug("Failed to emit termination event: %s", e)
 
