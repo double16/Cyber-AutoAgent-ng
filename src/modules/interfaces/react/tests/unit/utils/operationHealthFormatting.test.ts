@@ -16,7 +16,7 @@ describe('operation health formatting', () => {
       band,
       emoji,
       color,
-      label: `🩺${emoji} ${percent}% ${String(band).toUpperCase()}`,
+      label: `🤍${emoji} ${percent}% ${String(band).toUpperCase()}`,
     });
   });
 
@@ -36,7 +36,7 @@ describe('operation health formatting', () => {
     expect(appendOperationHealth(
       '➡️ Budget 42% | Duration 8m 10s',
       { status: 'available', score: 0.82, band: 'good', failure_count: 4 },
-    )).toBe('➡️ Budget 42% | Duration 8m 10s | 🩺🟢 82% GOOD');
+    )).toBe('➡️ Budget 42% | Duration 8m 10s | 🤍🟢 82% GOOD');
   });
 
   it('leaves headless progress text unchanged when health is unavailable', () => {

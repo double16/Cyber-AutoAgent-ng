@@ -31,6 +31,8 @@ CURRENT_PHASE_WEIGHT = 1.25
 COMPLETED_PHASE_WEIGHT = 1.0
 FUTURE_PHASE_WEIGHT = 0.25
 PREDICTION_PENALTY_WEIGHT = 0.20
+BUDGET_INFEASIBILITY_FACTOR = 0.70
+HARD_BUDGET_HEALTH_CAP = 0.49
 
 
 def health_band(score: float) -> str:
@@ -138,6 +140,7 @@ def compute_operation_health(
     tasks: Sequence[Task],
     *,
     predictions: Optional[Mapping[int, Mapping[str, Any]]] = None,
+    budget: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute a point-in-time operation health snapshot against an optimal score of one."""
 
@@ -184,6 +187,29 @@ def compute_operation_health(
         }
 
     score = max(0.0, min(1.0, weighted_score / total_weight))
+    budget_data = budget or {}
+    max_tokens = budget_data.get("max_tokens")
+    max_cost = budget_data.get("max_cost")
+    used_tokens = max(0, int(budget_data.get("used_tokens", 0) or 0))
+    used_cost = max(0.0, float(budget_data.get("used_cost", 0.0) or 0.0))
+    estimated_tokens = max(0, int(budget_data.get("estimated_reporting_tokens", 0) or 0))
+    estimated_cost = max(0.0, float(budget_data.get("estimated_reporting_cost", 0.0) or 0.0))
+    token_headroom = max(0, int(max_tokens) - used_tokens) if isinstance(max_tokens, int) and max_tokens > 0 else None
+    cost_headroom = (
+        max(0.0, float(max_cost) - used_cost)
+        if isinstance(max_cost, (int, float)) and float(max_cost) > 0
+        else None
+    )
+    token_feasible = token_headroom is None or token_headroom >= estimated_tokens
+    cost_feasible = cost_headroom is None or cost_headroom >= estimated_cost
+    feasible = token_feasible and cost_feasible
+    if not feasible:
+        score *= BUDGET_INFEASIBILITY_FACTOR
+    termination_reason = str(budget_data.get("termination_reason") or "").strip() or None
+    termination_limit = str(budget_data.get("termination_limit") or "").strip() or None
+    if termination_reason == "budget_limit":
+        score = min(score, HARD_BUDGET_HEALTH_CAP)
+    score = max(0.0, min(1.0, score))
     task_counts = Counter(str(task.status) for task in tasks)
     current_row = next((row for row in phase_rows if row["phase_id"] == plan.current_phase), None)
     return {
@@ -201,4 +227,14 @@ def compute_operation_health(
         "failure_count": int(task_counts.get("partial_failure", 0) + task_counts.get("blocked", 0)),
         "phase_inconsistent": any(bool(row["phase_inconsistent"]) for row in phase_rows),
         "prediction": selected_prediction or {"available": False},
+        "feasibility": {
+            "available": bool(max_tokens or max_cost or estimated_tokens or estimated_cost or termination_reason),
+            "feasible": feasible,
+            "token_headroom": token_headroom,
+            "cost_headroom": round(cost_headroom, 6) if cost_headroom is not None else None,
+            "estimated_reporting_tokens": estimated_tokens,
+            "estimated_reporting_cost": round(estimated_cost, 6),
+            "termination_reason": termination_reason,
+            "termination_limit": termination_limit,
+        },
     }

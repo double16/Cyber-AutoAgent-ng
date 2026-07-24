@@ -699,6 +699,23 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         self.coordinator.set_operation_health_provider(provider)
 
+    def operation_health_budget_diagnostics(self) -> Dict[str, Any]:
+        """Return token/cost feasibility inputs without reserving operation duration."""
+
+        totals = self._operation_usage_totals()
+        estimate = self._report_budget_estimate()
+        termination_reason = self.coordinator.termination_reason if self.coordinator is not None else self._termination_reason
+        return {
+            "max_tokens": self._budget_max_tokens(),
+            "max_cost": self._budget_max_cost(),
+            "used_tokens": int(totals["input_tokens"]) + int(totals["output_tokens"]),
+            "used_cost": float(totals.get("cost", self._compute_total_cost_from_usage())),
+            "estimated_reporting_tokens": int(estimate.total_tokens),
+            "estimated_reporting_cost": float(estimate.cost),
+            "termination_reason": termination_reason,
+            "termination_limit": self._budget_limit_reason,
+        }
+
     def _metadata_from_agent(self, agent: Any) -> Dict[str, str]:
         """Return Cyber-AutoAgent event metadata attached to a Strands agent."""
         if not agent:
@@ -3241,13 +3258,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                 max_duration = self._budget_max_duration()
                 if isinstance(max_duration, int) and max_duration > 0:
                     if self._operation_elapsed_seconds() >= float(max_duration) * 60.0:
+                        self._budget_limit_reason = "duration"
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
                                 f"Duration limit reached: {max_duration}m",
                             )
                         self._budget_limit_reached = True
-                        self._budget_limit_reason = "duration"
                         return True
 
                 # Token cap
@@ -3256,13 +3273,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                     totals = self._budgeted_usage_totals()
                     total_tokens = int(totals["input_tokens"]) + int(totals["output_tokens"])
                     if total_tokens >= int(max_tokens):
+                        self._budget_limit_reason = "tokens"
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
                                 f"Token limit reached: {total_tokens}/{max_tokens}",
                             )
                         self._budget_limit_reached = True
-                        self._budget_limit_reason = "tokens"
                         return True
 
                 # Cost cap
@@ -3271,13 +3288,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                     totals = self._budgeted_usage_totals()
                     cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
                     if cost >= float(max_cost):
+                        self._budget_limit_reason = "cost"
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
                                 f"Cost limit reached: {cost:.4f}/{max_cost}",
                             )
                         self._budget_limit_reached = True
-                        self._budget_limit_reason = "cost"
                         return True
             except Exception:
                 # Never fail stop checks due to metric calculation errors

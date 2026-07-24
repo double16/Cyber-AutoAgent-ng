@@ -196,3 +196,67 @@ def test_invalid_prediction_is_ignored_and_health_bands_are_stable():
     assert health_band(0.75) == "good"
     assert health_band(0.50) == "degraded"
     assert health_band(0.49) == "poor"
+
+
+def test_health_reports_sufficient_reporting_budget_headroom():
+    health = compute_operation_health(
+        _plan(PlanPhase(id=1, title="Done", status="done")),
+        [_task("done", 1, "done")],
+        budget={
+            "max_tokens": 10_000,
+            "used_tokens": 4_000,
+            "estimated_reporting_tokens": 2_000,
+            "max_cost": 10.0,
+            "used_cost": 2.0,
+            "estimated_reporting_cost": 1.0,
+        },
+    )
+
+    assert health["score"] == 1.0
+    assert health["feasibility"]["feasible"] is True
+    assert health["feasibility"]["token_headroom"] == 6_000
+
+
+def test_health_penalizes_insufficient_reporting_token_or_cost_headroom():
+    plan = _plan(PlanPhase(id=1, title="Done", status="done"))
+    tasks = [_task("done", 1, "done")]
+
+    token_health = compute_operation_health(
+        plan,
+        tasks,
+        budget={"max_tokens": 5_000, "used_tokens": 4_000, "estimated_reporting_tokens": 2_000},
+    )
+    cost_health = compute_operation_health(
+        plan,
+        tasks,
+        budget={"max_cost": 2.0, "used_cost": 1.5, "estimated_reporting_cost": 1.0},
+    )
+
+    assert token_health["feasibility"]["feasible"] is False
+    assert cost_health["feasibility"]["feasible"] is False
+    assert token_health["score"] < 0.75
+    assert cost_health["score"] < 0.75
+
+
+def test_health_without_token_or_cost_budget_does_not_invent_a_reserve():
+    health = compute_operation_health(
+        _plan(PlanPhase(id=1, title="Done", status="done")),
+        [_task("done", 1, "done")],
+    )
+
+    assert health["score"] == 1.0
+    assert health["feasibility"]["available"] is False
+    assert health["feasibility"]["feasible"] is True
+
+
+def test_duration_budget_termination_caps_final_health_without_duration_reserve():
+    health = compute_operation_health(
+        _plan(PlanPhase(id=1, title="Done", status="done")),
+        [_task("done", 1, "done")],
+        budget={"termination_reason": "budget_limit", "termination_limit": "duration"},
+    )
+
+    assert health["score"] == 0.49
+    assert health["band"] == "poor"
+    assert health["feasibility"]["termination_limit"] == "duration"
+    assert "duration_headroom" not in health["feasibility"]

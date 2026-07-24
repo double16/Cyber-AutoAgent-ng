@@ -40,7 +40,7 @@ export const formatOperationHealth = (health: unknown): OperationHealthVisual | 
     band,
     emoji: visual.emoji,
     color: visual.color,
-    label: `🩺${visual.emoji} ${scorePercent}% ${band.toUpperCase()}`,
+    label: `🤍${visual.emoji} ${scorePercent}% ${band.toUpperCase()}`,
   };
 };
 

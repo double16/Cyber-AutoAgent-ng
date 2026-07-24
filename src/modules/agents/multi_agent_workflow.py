@@ -539,7 +539,23 @@ class MultiAgentWorkflowController:
             prediction = self._current_phase_task_prediction(plan)
             if prediction is not None:
                 predictions[int(prediction["target_phase"])] = prediction
-        return compute_operation_health(plan, tasks, predictions=predictions)
+        budget_diagnostics = None
+        diagnostics_provider = getattr(
+            self.runtime.callback_handler,
+            "operation_health_budget_diagnostics",
+            None,
+        )
+        if callable(diagnostics_provider):
+            try:
+                budget_diagnostics = diagnostics_provider()
+            except Exception:
+                logger.debug("Unable to collect operation health budget diagnostics", exc_info=True)
+        return compute_operation_health(
+            plan,
+            tasks,
+            predictions=predictions,
+            budget=budget_diagnostics,
+        )
 
     def _current_phase_task_prediction(self, plan: OperationPlan) -> Optional[Dict[str, Any]]:
         """Predict current-phase fan-out from the preceding phase's frozen inventories."""

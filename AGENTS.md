@@ -38,6 +38,11 @@
 - Use async/await for asynchronous operations
 - Use template literals for string concatenation
 
+## Design Choices
+- Fixed-enum tool schemas must advertise canonical values while pre-processing common semantic synonyms into those canonical values; unknown values remain invalid.
+- Reporting/evaluation budget reserves may reserve tokens and cost only. Duration/time must not be reserved for reporting or evaluation.
+- Budget of any kind may be exceeded while required reporting completes.
+
 ## Application Best Practices
 - Budget is reporting only after reporting or evaluation stages are reached.
 
@@ -49,3 +54,11 @@
 
 ## User Interface
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.
+
+## Cyber Operations Log Review
+- Read the session header and tail first to establish the operation ID, start/end time, final metrics, budget limits, termination reason, and `assessment_complete` event.
+- Use `rg -n` with narrow, case-insensitive patterns to locate phase transitions, task creation/evaluation, budget-limit events, `workflow_coverage_summary`, `progress_update`, and `assessment_complete`; avoid dumping the entire log because reasoning payloads can be very large.
+- Inspect targeted line-numbered ranges with `sed -n` around each phase transition and the final completion block. Preserve exact line numbers when reporting findings so conclusions are auditable.
+- Reconcile the plan with execution: compare planned phase count to applicable phases, phase statuses, task counts, and per-task status counts. Treat `not_applicable`, omitted inventory items, and `partial_failure` as explicit coverage results rather than assuming completion means exhaustive work.
+- Cross-check `workflow_coverage_summary` against final health. In particular, check `applicable_phase_count`, `phase_inconsistent`, failure counts, and the validation-candidate rationale; an excellent health score can coexist with a skipped phase or incomplete coverage.
+- Distinguish logical completion from resource termination. Compare elapsed duration with `maxDurationMinutes`, and inspect token/cost limits and `termination_reason`; `progressPercent` is budget/utilization progress, not phase completion.
