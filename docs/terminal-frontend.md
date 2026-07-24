@@ -62,8 +62,8 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 - `output`: User-visible text, including controller-owned plan creation and update snapshots
 - `reasoning`: Agent decision context
 - `metrics_update`: Operation-wide token, cost, duration, and budget progress, including reporting and evaluation usage
-- `progress_update`: Progress updates, including indexed final-report and Ragas metric stages and unindexed Ragas
-  preparation stages
+- `progress_update`: Progress updates with optional operation-health score/band, including indexed final-report and
+  Ragas metric stages and unindexed Ragas preparation stages; the latest valid health remains visible in the footer
 - `evaluation_step_complete`: Semantic completion status for a Ragas metric or preparation stage
 - `evaluation_complete`: Finalized assessment evaluation status and numeric scores
 - `assessment_complete`: Terminal lifecycle event emitted after report generation and any evaluation attempt

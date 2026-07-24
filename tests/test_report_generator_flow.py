@@ -96,6 +96,7 @@ def test_extract_text_from_result_empty():
 def test_report_category_helpers_cover_structured_and_free_form_artifacts():
     assert _has_artifact_reference({"artifacts": ["/tmp/control.txt"]}) is True
     assert _has_artifact_reference({"evidence": ["saved at artifacts/control.txt"]}) is True
+    assert _has_artifact_reference({"evidence": ["artifact:artifacts/control.txt"]}) is True
     assert _has_artifact_reference(["", "no path", None]) is False
     assert _has_artifact_reference(7) is False
 

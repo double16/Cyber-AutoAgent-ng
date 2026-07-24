@@ -122,8 +122,11 @@ flowchart LR
     E -->|cycle limit reached| F
 ```
 
-`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits executor attempts to produce a valid atomic ledger and defaults to three,
-with a minimum of one. Once that ledger exists, the evaluator's semantic verdict is terminal because the ledger cannot
+`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits executor attempts to produce a valid atomic ledger, defaults to three,
+and has a minimum of one.
+while `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` independently limits rejected acceptance repairs to two after the initial
+submission. Repairs retain the executor conversation and stop early when an equivalent rejected payload is repeated.
+Once that ledger exists, the evaluator's semantic verdict is terminal because the ledger cannot
 be revised. Python persists `done`, `partial_failure`, or `blocked` without replaying completed acceptance.
 
 Task creators stop within the Strands event loop after the first successful `create_tasks` mutation. Task executors
@@ -137,7 +140,9 @@ absolute controller-to-agent call ceiling bounds repeated invocations, while the
 calls and tool executions inside each invocation. Task-executor actor cycles allow 8 agent calls with 32 SDK turns per
 call, bounded tool-recovery runs allow 4 calls with 8 turns, and task creators allow 3 calls with 6 turns.
 No-action redirection prompts respect the role policy: roles that disallow text completion are instructed to call an
-outstanding required tool and are never offered a text-only final-answer path.
+outstanding required tool and are never offered a text-only final-answer path. Task executors instead receive a
+task-progress redirect because their required acceptance tool is a completion condition: they call the next tool needed
+for unmet criteria and durable evidence, then submit acceptance after its prerequisites are complete.
 
 Bounded procedure contracts declare whether their output is a generic artifact or a version-1 inventory manifest.
 Python rejects mismatched evidence requirements during task creation. Inventory executors receive the canonical JSON
@@ -146,7 +151,9 @@ artifact independently so an unrelated supporting file cannot invalidate a separ
 
 Each retained task executor also keeps a bounded controller-owned tool-outcome journal. A locally correctable failure
 permits prerequisite inspection or creation, independent work, alternative methods, and two changed retries by
-default. Identical failed calls are blocked, but recovery does not lock unrelated tools or durable evidence operations.
+default. Structured memory and acceptance validation errors enter the same correction path. Identical failed calls are
+blocked locally, and equivalent failures are counted across retained executor cycles so conversation boundaries cannot
+restart an unbounded loop. Recovery does not lock unrelated tools or durable evidence operations.
 Generic executable startup and dependency failures quarantine only that executable for the current operation; later
 task prompts omit it while capability-compatible commands remain available. An unresolved correction is
 deterministically `partial_failure`. Evaluators receive the authoritative outcome journal separately from the worker's
@@ -162,8 +169,12 @@ Task creation similarly has a deterministic tool-loop boundary. After an initial
 controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (four by
 default). Each turn ends after its first tool result; the initial prompt contains stable phase context and corrections
 contain only the prior validation error. Generic reasoning-loop repair is disabled for this role. Agents submit a flat
-`TaskProposal` whose `limits` object is always required. Python discards it for snapshot work, infers the basis,
-supplies procedure invariants, derives source references and target scope, and compiles the proposal before storage.
+`TaskProposal` whose `limits` object is always required. Python discards it and `output_kind` for snapshot work,
+infers the basis, supplies procedure invariants, derives source references and target scope, and compiles the proposal
+before storage. Inventory-wide moving collections are rejected as procedures and must use frozen snapshot references.
+Exact frozen-contract duplicates are skipped deterministically within the active phase; completed coverage from one
+phase does not suppress work against the same snapshot in a later phase. Unfinished coverage retries remain eligible,
+and duplicate-only calls retain the creator tool for a bounded corrected submission.
 
 Successful task acceptance populates task evidence with the validated immutable ledger references. Phase
 evaluators receive that canonical per-criterion ledger and may read only its resolved artifact paths, preventing stale

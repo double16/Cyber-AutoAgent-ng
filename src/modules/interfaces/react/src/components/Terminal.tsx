@@ -19,6 +19,10 @@ import { ByteBudgetRingBuffer } from '../utils/ByteBudgetRingBuffer.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import type { ThinkingContext, ThinkingStatus } from '../types/thinking.js';
+import {
+  formatOperationHealth,
+  type OperationHealthSnapshot,
+} from '../utils/operationHealthFormatting.js';
 
 // Exported helper: build a trimmed report preview to avoid storing huge content in memory
 export const buildTrimmedReportContent = (raw: string): string => {
@@ -219,6 +223,7 @@ interface TerminalProps {
   collapsed?: boolean;
   onEvent?: (event: any) => void;
   onMetricsUpdate?: (metrics: { tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number; progressPercent?: number }) => void;
+  onHealthUpdate?: (health: OperationHealthSnapshot) => void;
   onThinkingUpdate?: (status: ThinkingStatus) => void;
   animationsEnabled?: boolean;
   cleanupRef?: React.MutableRefObject<(() => void) | null>;
@@ -231,6 +236,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   collapsed = false,
   onEvent,
   onMetricsUpdate,
+  onHealthUpdate,
   onThinkingUpdate,
   animationsEnabled = true,
   cleanupRef
@@ -910,7 +916,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           evaluation_step_kind: event.evaluation_step_kind,
           evaluation_scope: event.evaluation_scope,
           evaluation_metric: event.evaluation_metric,
-          evaluation_step_label: event.evaluation_step_label
+          evaluation_step_label: event.evaluation_step_label,
+          health: event.health,
         } as DisplayStreamEvent;
 
         results.push(headerEvent);
@@ -1639,6 +1646,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     // Listen for events from Docker service
     const handleEvent = (rawEvent: any) => {
       const event = normalizeEvent(rawEvent);
+      if (event.type === 'progress_update' && formatOperationHealth(event.health)) {
+        onHealthUpdate?.(event.health as OperationHealthSnapshot);
+      }
       // Debug logging disabled for production use
       // console.error(`[DEBUG] UnconstrainedTerminal received event:`, {
       //   type: event.type,
@@ -1898,7 +1908,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       executionService.off('complete', handleComplete);
       executionService.off('stopped', handleStopped);
     };
-  }, [executionService, onEvent, onMetricsUpdate, onThinkingUpdate, sessionId, resetAllBuffers]); // Removed 'metrics' - not used in effect, was causing re-runs on every token update
+  }, [executionService, onEvent, onHealthUpdate, onMetricsUpdate, onThinkingUpdate, sessionId, resetAllBuffers]); // Removed 'metrics' - not used in effect, was causing re-runs on every token update
 
   if (collapsed) {
     return null;

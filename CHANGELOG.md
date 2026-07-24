@@ -2,6 +2,14 @@
 
 ### Features
 
+- Add deterministic operation-health scoring to progress events, including inventory-based phase fan-out prediction,
+  and show the compact score and band with a distinguishing stethoscope marker in interactive stream output, the
+  persistent footer, and headless output.
+- Canonicalize operation artifact evidence, expose ready-to-copy artifact references, reconcile HTML navigation into
+  finite inventories, fan out typed inventory units, and create bounded inventory-refinement work when a frozen
+  snapshot is exhausted with explicit gaps.
+- Require task acceptance to classify results as negative, observational, or finding-backed; publish deterministic
+  per-phase coverage summaries and mark empty final validation phases as `not_applicable`.
 - Add optional, shell-free executable canaries and operation-scoped runtime quarantine while keeping unprobed commands
   available and capability-compatible alternatives selectable.
 - Require the compact task-proposal `limits` object, discard it for snapshot tasks, and retain task-creator reasoning
@@ -45,6 +53,20 @@
 
 ### Fixes
 
+- Make the persisted task-acceptance ledger authoritative over earlier rejected submissions so corrected and replayed
+  successful acceptance proceeds to evaluation instead of being downgraded to `partial_failure`.
+- Scope exact task and completed-coverage deduplication to the active phase, keep duplicate-only task creation
+  correctable in its retained session, guide executors toward prerequisite work before terminal acceptance, and
+  normalize common semantic acceptance aliases before schema validation.
+- Normalize inapplicable snapshot proposal fields, reject moving inventory procedures, and skip exact duplicate task
+  contracts deterministically while preserving retries for unfinished coverage.
+- Require finding artifacts, return canonical finding and validation-task references, link findings to their source
+  tasks, and bind single-finding task acceptance without requiring the executor to reproduce generated identifiers.
+- Give required-tool roles an explicit first correction, compact unavailable-tool errors, and stop repeated structured
+  tool failures across retained executor cycles.
+- Bound rejected `record_task_acceptance` corrections in the retained executor conversation, stop repeated equivalent
+  submissions, require confirmed security behavior to reference a finding candidate, and verify canonical evidence
+  integrity before reporting.
 - Scope task-executor recovery to the failed invocation so missing prerequisites can be repaired and unrelated tools,
   artifacts, memories, and evidence operations remain usable; recognize timeouts only from structured process results.
 - Prevent continuation task creators from bypassing endpoint-scoped coverage by omitting a model-selected coverage

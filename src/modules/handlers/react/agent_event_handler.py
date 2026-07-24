@@ -17,7 +17,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from strands.handlers import PrintingCallbackHandler
 
@@ -117,6 +117,7 @@ class OperationEventCoordinator:
         self._report_observation_content_token_items: List[int] = []
         self._report_exact_counts = False
         self._report_steps_started = 0
+        self._operation_health_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
     def next_agent_run_id(self, agent_name: str) -> str:
         with self._lock:
@@ -125,8 +126,36 @@ class OperationEventCoordinator:
             return f"{safe_name}-{self._agent_sequence}"
 
     def emit(self, event: Dict[str, Any]) -> None:
+        enriched_event = dict(event)
+        if enriched_event.get("type") == "progress_update" and "health" not in enriched_event:
+            health = self.operation_health_snapshot()
+            if health is not None:
+                enriched_event["health"] = health
         with self._lock:
-            self.emitter.emit(event)
+            self.emitter.emit(enriched_event)
+
+    def set_operation_health_provider(
+        self,
+        provider: Optional[Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Set the shared best-effort health provider for operation progress events."""
+
+        with self._lock:
+            self._operation_health_provider = provider
+
+    def operation_health_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return a JSON-safe operation health snapshot without disrupting event emission."""
+
+        with self._lock:
+            provider = self._operation_health_provider
+        if provider is None:
+            return None
+        try:
+            snapshot = provider()
+        except Exception as error:
+            logger.debug("Unable to compute operation health: %s", error, exc_info=True)
+            return None
+        return dict(snapshot) if isinstance(snapshot, dict) else None
 
     def update_usage(self, handler_id: str, entry: _AgentUsageEntry) -> None:
         with self._lock:
@@ -661,6 +690,14 @@ class AgentEventHandler(PrintingCallbackHandler):
             logger.error(
                 f"Failed to emit event {event.get('type')}: {e}", exc_info=True
             )
+
+    def set_operation_health_provider(
+        self,
+        provider: Optional[Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Set the operation-wide health provider shared by every agent handler."""
+
+        self.coordinator.set_operation_health_provider(provider)
 
     def _metadata_from_agent(self, agent: Any) -> Dict[str, str]:
         """Return Cyber-AutoAgent event metadata attached to a Strands agent."""
@@ -3092,7 +3129,7 @@ class AgentEventHandler(PrintingCallbackHandler):
 
             eval_manager = EvaluationManager(
                 operation_id=self.operation_id,
-                emitter=self.emitter,
+                emitter=self.coordinator,
                 report_path=getattr(self, "_evaluation_report_path", None),
                 usage_callback=self._record_evaluation_usage,
                 progress_callback=self.emit_budget_progress_update,

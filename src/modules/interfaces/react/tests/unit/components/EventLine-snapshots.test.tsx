@@ -129,4 +129,23 @@ describe('EventLine snapshot-style rendering', () => {
     expect(output).toMatch(/ACTION\s+2/i);
     expect(output).toMatch(/PROGRESS\s+20%/i);
   });
+
+  it.each(widths)('renders only the compact operation health score and band (width=%s)', async (width) => {
+    const output = await renderEventLine(width as number, {
+      type: 'progress_update',
+      step: 20,
+      progressPercent: 20,
+      health: {
+        status: 'available',
+        score: 0.62,
+        band: 'degraded',
+        failure_count: 3,
+        prediction: { expected_tasks: 12 },
+      },
+    } as any);
+
+    expect(output).toContain('🩺🟡 62% DEGRADED');
+    expect(output).not.toContain('failure_count');
+    expect(output).not.toContain('expected_tasks');
+  });
 });

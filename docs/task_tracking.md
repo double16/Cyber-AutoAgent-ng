@@ -36,7 +36,8 @@ Agents may create follow-up work with `create_tasks` when their role permits it.
 
 The task creator receives a deterministic controller-owned prompt and a flat `TaskProposal` contract. A proposal
 contains its title, objective, required limits object, one concise criterion, and optional procedure, snapshot, and
-target fields. Snapshot proposals use `limits: {}`, which Python discards after validation. Python compiles the full
+target fields. For snapshot proposals, Python silently discards `limits` and `output_kind`; procedure methods remain
+invalid. Python compiles the full
 immutable acceptance contract, assigns pending status and the active phase, and infers target scope from `target_ids`.
 The controller permits a configurable number of corrected calls after an initial rejection (four by default) in the
 same retained conversation and stops the role when that allowance is exhausted. It never retries after tasks are
@@ -151,9 +152,14 @@ Inventory manifests use this shape:
 }
 ```
 
-Inventory item `kind` is one of `endpoint`, `parameter`, `workflow`, `service`, or `other`. Store item-specific data,
+Inventory item `kind` is one of `endpoint`, `parameter`, `workflow`, `service`, or `technology`. Store item-specific data,
 such as discovered parameters, in `attributes`. The executor receives this exact contract whenever a criterion
 requires `inventory_manifest`; ordinary JSON outputs must use the generic `artifact` evidence kind.
+
+Before an inventory is frozen, Python extracts same-scope navigation and form destinations from current-operation HTML
+artifacts and merges unambiguous missing routes. Fan-out then dispatches by kind: endpoints and their parameters share
+route tasks, workflows and services receive matching assessment tasks, and technologies receive component-validation
+tasks. An exhausted snapshot with explicit `unassessed_gaps` creates one bounded inventory-refinement task.
 
 ## Controller Loop
 
@@ -196,21 +202,34 @@ critic reviews. Setting it to `0` uses the initial builder output without critiq
 builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
 evaluator are not invoked for that task.
 
-Task execution cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three passes and has
-a minimum of one. The task-executor agent and conversation are retained when no valid complete acceptance ledger was
+Task execution cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three passes, has a
+minimum of one, and has
+an independent `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` allowance for terminal acceptance schema or evidence repairs.
+Acceptance evidence is stored as portable `artifact:artifacts/<file>` references, and every result declares whether
+it is negative, observational, a new finding candidate, or evidence for an existing finding. The task-executor agent
+and conversation are retained when no valid complete acceptance ledger was
 recorded. Once the atomic ledger passes structural validation, one short-lived semantic evaluator returns the terminal
 `done`, `partial_failure`, or `blocked` verdict; immutable acceptance results are not replayed through another pass.
 
 Correctable tool invocation failures receive one bounded recovery turn in the same retained executor conversation.
 The executor may inspect or create prerequisites, continue independent work, select another executable, and make a
 bounded number of corrected invocations. A correction must change the failed input; an identical failed call is blocked.
+Validation failures from structured memory and acceptance tools are correctable, but repeated equivalent failures are
+counted across retained executor cycles and terminate the task deterministically.
+Acceptance corrections identify prerequisites: executors create a finding before a candidate disposition, create
+durable evidence before citing it, or repair a malformed version-1 inventory before submitting changed acceptance.
+The persisted acceptance ledger is authoritative after each actor and recovery pass. A later complete or idempotently
+replayed acceptance supersedes earlier rejected attempts; repeated-rejection termination applies only while frozen
+criteria remain missing.
 Generic startup and dependency failures quarantine only the failed executable for the current operation. Other
 executables and durable operations remain available, but failed output cannot be cited as successful evidence.
 Recovery does not consume an actor/critic pass;
 if it remains unresolved, Python marks the task `partial_failure` without asking the evaluator to approve it. Evaluators
 receive controller-observed tool outcomes and treat them as authoritative over contradictory worker narration.
 
-Every `store_finding` call creates one narrow, same-phase `finding_validation` task. The linked task must call
+Every `store_finding` call requires at least one durable artifact reference and returns canonical `finding_ref` and
+`verification_task_ref` values. Python links the finding to the currently active source task and creates one narrow,
+same-phase `finding_validation` task. The linked task must call
 `record_finding_validation`; only an evaluator-approved confirmation is promoted to a verified finding. Failed or
 unfinished validations remain visible in the final report under **Findings Requiring Validation**. Evaluators and
 report agents can inspect operation artifacts with the read-only `read_artifact` tool, limited by
@@ -301,9 +320,10 @@ basis, source references, unique criteria, and evidence requirements. The rules 
 - create one task per cohesive actionable deliverable; Python expands inventory snapshots by target and normalized route
 - omit phase, status, task evidence, target scope, and the nested acceptance contract
 - provide exactly one criterion description; Python generates its ID and evidence requirement in the frozen contract
-- provide procedure methods and positive limits, or provide existing snapshot references
+- provide procedure methods and positive limits, or provide existing snapshot references; snapshot-only limits and
+  output kinds are ignored
 - omit `target_ids` for all targets or provide exact IDs for a subset
-- do not create duplicates
+- do not create duplicates; Python also skips proposals with an exact frozen contract match
 - do not reduce task coverage based only on likelihood or convenience
 - create prerequisite inventory work before dependent coverage tasks
 - create a follow-up task for discoveries outside an active task's frozen manifest
@@ -312,6 +332,9 @@ Snapshot references use explicit `task:<uid>`, `memory:<id>`, `artifact:<path>`,
 snapshot that resolves to a canonical inventory automatically becomes coverage work. For procedures, Python generates
 target and active-phase source references, injects fixed stopping and gap policies, defaults `output_kind` to
 `artifact`, and generates readable unique criterion IDs from descriptions.
+
+Inventory-wide or otherwise moving collections must first be frozen as canonical snapshot references. Procedure tasks
+may still use narrow, bounded methods alongside snapshot tasks in the same `create_tasks` submission.
 
 Set procedure `output_kind` to `inventory_manifest` only for a canonical versioned inventory. Snapshot work uses
 generic durable evidence, so assessed-negative coverage can be supported by an artifact or operation memory without
@@ -328,7 +351,9 @@ separate task. Stateful workflow entries remain individually bounded so browser 
 Python decides when any pending task becomes active.
 
 `create_tasks` returns structured JSON containing `complete`, `created_count`, and `duplicate_count`. It does not
-activate pending tasks or return active-task XML.
+activate pending tasks or return active-task XML. Exact task identities and completed snapshot item filtering are
+scoped to the active phase: reuse of one inventory in a later phase creates new work for that phase. A duplicate-only
+result does not close the retained creator tool, so a bounded correction can still create actionable tasks.
 
 Shell command arrays are fail-fast: sequential arrays stop at the first failed command, while parallel arrays finish
 already-started commands and return an error if any command failed. Every command retains its exit code, standard
@@ -359,10 +384,15 @@ executor copies that reference into `record_task_acceptance.evidence_refs`; arti
 observation requirement. Finding evidence remains separate. Python skips semantic evaluation while criterion IDs are missing and returns the
 exact missing IDs to the next executor cycle. The evaluator runs only after structural completeness and decides whether
 the referenced evidence actually supports each result; memory is required only by an explicit frozen evidence kind.
+Common semantic aliases such as `completed`, `no_finding`, `informational`, and `finding` are normalized to their
+canonical status or disposition before validation. Unknown values and invalid or nonexistent evidence references
+remain errors.
 
 The controller binds `record_task_acceptance` to the assigned task before creating its retained executor conversation.
-The model submits only `status`, `summary`, and `evidence_refs`; it cannot select, guess, or replace task, criterion, or
-coverage IDs. `create_tasks` remains
+The model submits `status`, `summary`, `disposition`, and `evidence_refs`; it cannot select, guess, or replace task,
+criterion, or coverage IDs. For `finding_candidate`, Python replaces a supplied placeholder with the sole finding
+created by that task. Multiple source-task findings require an unambiguous canonical reference, while
+`existing_finding` remains explicit. `create_tasks` remains
 limited to new follow-up work and never completes or records acceptance for the assigned task.
 
 `task_evaluator` returns:
@@ -404,6 +434,25 @@ Conversation pruning still protects useful evidence and memory context, but plan
 Tool events still flow through the React event handler. Task activation and task closure are Python workflow decisions rather than model tool calls.
 
 The UI should treat plan/task state as controller-owned state and tool events as supporting evidence.
+
+Every workflow `progress_update` may also include a versioned `health` snapshot. `progressPercent` continues to mean
+budget utilization; health measures the current plan, phase, and task state against an optimal successful operation.
+Successful work scores highest, active work has a small cost, pending/deferred work has a larger cost, and
+`partial_failure` or `blocked` work has the largest cost. A phase marked `done` cannot receive perfect health while it
+contains unfinished or failed tasks. Pending future phases do not count as failures.
+
+When the previous phase produced a valid inventory manifest, Python reuses the deterministic task fan-out grouping to
+predict the number of tasks expected in the current phase. Missing fan-out modestly reduces health after that phase is
+active. Prediction is telemetry only and never creates tasks or changes workflow state.
+
+The event carries diagnostic fields for logs and automation, while terminal interfaces deliberately render only the
+rounded score and band, for example `🩺🟢 82% GOOD`. The stethoscope distinguishes operation health from progress.
+Health bands are `excellent` (90–100%), `good` (75–89%), `degraded`
+(50–74%), and `poor` (below 50%). If plan state or health computation is unavailable, the progress event is still
+emitted and the interfaces omit the health indicator.
+
+The interactive terminal also retains the latest valid health snapshot in its footer. Completion does not erase that
+snapshot; it is cleared when a new operation starts.
 
 ## Implementation Components
 

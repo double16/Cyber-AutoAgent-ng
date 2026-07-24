@@ -79,32 +79,6 @@ def _write_environment(tmp_path, tools):
     (path / "environment.yaml").write_text(yaml.safe_dump({"cyber_tools": tools}), encoding="utf-8")
 
 
-def test_main_accepts_verified_unverified_and_missing_fallback_tools(monkeypatch, tmp_path, capsys):
-    module = _load_tools_check()
-    _write_environment(
-        tmp_path,
-        {
-            "verified": {"canary": {"args": ["--version"]}},
-            "unverified": {},
-            "fallback": {"preference": "fallback"},
-        },
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(module.sys, "argv", ["tools_check.py"])
-    monkeypatch.setattr(
-        module.shutil,
-        "which",
-        lambda command: None if command == "fallback" else f"/usr/bin/{command}",
-    )
-    monkeypatch.setattr(module, "probe_command", lambda path, canary: True)
-
-    module.main()
-
-    output = capsys.readouterr()
-    assert "3 tools" in output.out
-    assert "Missing fallback tools" in output.err
-
-
 def test_main_reports_required_missing_and_broken_tools(monkeypatch, tmp_path, capsys):
     module = _load_tools_check()
     _write_environment(
@@ -122,7 +96,7 @@ def test_main_reports_required_missing_and_broken_tools(monkeypatch, tmp_path, c
         "which",
         lambda command: None if command == "missing" else f"/usr/bin/{command}",
     )
-    monkeypatch.setattr(module, "probe_command", lambda path, canary: False)
+    monkeypatch.setattr(module, "probe_command", lambda path, canary, timeout: False)
 
     with pytest.raises(SystemExit, match="1"):
         module.main()
@@ -130,7 +104,6 @@ def test_main_reports_required_missing_and_broken_tools(monkeypatch, tmp_path, c
     error = capsys.readouterr().err
     assert "Missing tools" in error
     assert "Broken tools" in error
-    assert "Broken fallback tools" in error
 
 
 @pytest.mark.parametrize("argument", ["--help", "-h"])
@@ -141,15 +114,15 @@ def test_main_help_exits_successfully(monkeypatch, argument, capsys):
     with pytest.raises(SystemExit, match="0"):
         module.main()
 
-    assert "Usage:" in capsys.readouterr().out
+    assert "usage:" in capsys.readouterr().out
 
 
 def test_main_rejects_unknown_argument_and_missing_environment(monkeypatch, tmp_path, capsys):
     module = _load_tools_check()
     monkeypatch.setattr(module.sys, "argv", ["tools_check.py", "--unknown"])
-    with pytest.raises(SystemExit, match="1"):
+    with pytest.raises(SystemExit, match="2"):
         module.main()
-    assert "Usage:" in capsys.readouterr().err
+    assert "usage:" in capsys.readouterr().err
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(module.sys, "argv", ["tools_check.py"])

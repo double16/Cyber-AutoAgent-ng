@@ -206,6 +206,26 @@ def test_non_shell_correction_allows_independent_tools_and_requires_changed_inpu
     assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "correction"]
 
 
+def test_store_finding_missing_artifact_is_a_structured_correctable_failure():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=2)
+    failed_input = {"title": "Candidate", "artifacts": []}
+
+    hook._after_tool(
+        _after(
+            "failed",
+            "store_finding",
+            failed_input,
+            status="error",
+            text="At least one existing artifact is required",
+        )
+    )
+
+    assert hook.unresolved is True
+    identical = _before("identical", "store_finding", failed_input)
+    hook._before_tool(identical)
+    assert "change its input or method" in identical.cancel_tool
+
+
 def test_non_shell_failed_correction_exhausts_recovery():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"tasks": "not-a-list"}

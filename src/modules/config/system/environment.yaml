@@ -274,6 +274,10 @@ cyber_tools:
     description: "John the Ripper password cracker"
     caps: [password_cracking, crypto]
     canary: {args: ["-h"]}
+  openssl:
+    description: "OpenSSL cryptographic toolkit"
+    caps: [crypto]
+    canary: {args: ["-h"]}
 
   # Password brute forcing
   hydra:

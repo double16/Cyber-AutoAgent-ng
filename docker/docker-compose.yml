@@ -32,6 +32,7 @@ services:
       - CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS=${CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS:-}
       - CYBER_TOOL_RECOVERY_MAX_CORRECTIONS=${CYBER_TOOL_RECOVERY_MAX_CORRECTIONS:-}
       - CYBER_TASK_CREATOR_MAX_CORRECTIONS=${CYBER_TASK_CREATOR_MAX_CORRECTIONS:-}
+      - CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS=${CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS:-}
       - CYBER_RATE_LIMIT_TOKENS_PER_MIN=${CYBER_RATE_LIMIT_TOKENS_PER_MIN:-}
       - CYBER_RATE_LIMIT_REQ_PER_MIN=${CYBER_RATE_LIMIT_REQ_PER_MIN:-}
       - CYBER_RATE_LIMIT_MAX_CONCURRENT=${CYBER_RATE_LIMIT_MAX_CONCURRENT:-}
@@ -396,11 +397,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1250M
+          memory: 2048M
           cpus: '1.0'
         reservations:
-          memory: 768M
-          cpus: '0.1'
+          memory: 1500M
+          cpus: '0.5'
 
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3

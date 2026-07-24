@@ -58,6 +58,23 @@ _MUTATING_TOOLS = {
     "store_knowledge",
     "store_observation",
 }
+_STRUCTURED_CORRECTABLE_TOOLS = {
+    "record_finding_validation",
+    "store_finding",
+    "store_knowledge",
+    "store_observation",
+}
+_STRUCTURED_VALIDATION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bat least one\b.*\brequired\b",
+        r"\bdoes not exist\b",
+        r"\boutside the current operation\b",
+        r"\bunknown finding_uid\b",
+        r"\brequires?\b.*\b(?:artifact|evidence|reference|field|value)\b",
+        r"\bmust (?:be|contain|describe|include|use)\b",
+    )
+)
 _READ_ONLY_TOOLS = {"mem0_retrieve", "read_artifact", "tool_catalog"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 _SENSITIVE_KEYS = {"api_key", "authorization", "cookie", "password", "secret", "token"}
@@ -144,7 +161,11 @@ def is_correctable_tool_failure(tool_name: str, tool_input: Any, output: str) ->
 
     if _is_diagnostic_tool(tool_name, tool_input):
         return False
-    return any(pattern.search(output) for pattern in _CORRECTABLE_ERROR_PATTERNS)
+    if any(pattern.search(output) for pattern in _CORRECTABLE_ERROR_PATTERNS):
+        return True
+    return tool_name in _STRUCTURED_CORRECTABLE_TOOLS and any(
+        pattern.search(output) for pattern in _STRUCTURED_VALIDATION_PATTERNS
+    )
 
 
 def _shell_command_text(tool_input: Any) -> str:
@@ -370,7 +391,7 @@ class TaskFailureRecoveryHook(HookProvider):
             and tool_name == "shell"
             and any(pattern.search(output) for pattern in _STARTUP_FAILURE_PATTERNS)
         )
-        correctable = not success and (
+        correctable = tool_name != "record_task_acceptance" and not success and (
             startup_failure or is_correctable_tool_failure(tool_name, tool_input, output)
         )
         self.journal.append(

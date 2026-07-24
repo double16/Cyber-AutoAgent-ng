@@ -66,6 +66,7 @@ describe('useApplicationState', () => {
             hasUserDismissedInit: false,
             isTerminalVisible: false,
             activeOperation: null,
+            operationHealth: null,
             recentTargets: [],
             commandHistory: [],
             terminalDisplayHeight: 24,
@@ -149,6 +150,31 @@ describe('useApplicationState', () => {
             jest.advanceTimersByTime(150);
         });
         expect(hook.current.state.operationMetrics).toEqual({tokens: 10});
+
+        hook.unmount();
+    });
+
+    it('retains latest operation health through completion cleanup until a new operation starts', () => {
+        const hook = renderHook(() => useApplicationState());
+        const health = {status: 'available', score: 0.84, band: 'good'};
+
+        act(() => {
+            hook.current.actions.setActiveOperation({id: 'OP_1', status: 'running'} as any);
+            hook.current.actions.updateHealth(health);
+            hook.current.actions.setActiveOperation(null);
+        });
+
+        expect(hook.current.state.operationHealth).toEqual(health);
+
+        act(() => {
+            hook.current.actions.clearCompletedOperation();
+        });
+        expect(hook.current.state.operationHealth).toEqual(health);
+
+        act(() => {
+            hook.current.actions.setActiveOperation({id: 'OP_2', status: 'running'} as any);
+        });
+        expect(hook.current.state.operationHealth).toBeNull();
 
         hook.unmount();
     });

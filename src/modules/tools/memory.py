@@ -53,15 +53,15 @@ import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Tuple
-from urllib.parse import urlsplit, urlunsplit
+from html.parser import HTMLParser
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import boto3
 from mem0 import Memory as Mem0Memory
 from mem0 import MemoryClient
 from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator, AliasChoices
-from rapidfuzz import fuzz
+from pydantic import AliasChoices, BaseModel, BeforeValidator, ConfigDict, Field, PositiveInt, conlist, model_validator
 from strands import tool
 
 from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
@@ -81,7 +81,7 @@ _PLAN_STORE: Optional["PlanStore"] = None
 _FAISS_WRITE_LOCK = threading.Lock()
 
 
-PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
+PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
 TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
 TargetType = Literal["network", "network_range", "filesystem"]
 TargetScope = Literal["all", "subset"]
@@ -110,7 +110,67 @@ AcceptanceResultStatus = Literal[
     "excluded",
     "duplicate",
 ]
-TERMINAL_PLAN_STATUSES = ("done", "partial_failure", "blocked")
+AcceptanceDisposition = Literal[
+    "no_vulnerability",
+    "observation",
+    "finding_candidate",
+    "existing_finding",
+]
+
+
+def _normalize_acceptance_status_alias(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = re.sub(r"[-\s]+", "_", value.strip().lower())
+    aliases = {
+        "complete": "satisfied",
+        "completed": "satisfied",
+        "success": "satisfied",
+        "successful": "satisfied",
+        "negative": "assessed_negative",
+        "no_finding": "assessed_negative",
+        "no_vulnerability": "assessed_negative",
+        "not_vulnerable": "assessed_negative",
+        "unreachable": "inaccessible",
+        "not_accessible": "inaccessible",
+        "out_of_scope": "excluded",
+        "duplicated": "duplicate",
+    }
+    canonical = aliases.get(normalized, normalized)
+    if canonical != normalized:
+        logger.info("Normalized task acceptance status alias %s to %s", normalized, canonical)
+    return canonical
+
+
+def _normalize_acceptance_disposition_alias(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = re.sub(r"[-\s]+", "_", value.strip().lower())
+    aliases = {
+        "assessed_negative": "no_vulnerability",
+        "negative": "no_vulnerability",
+        "no_finding": "no_vulnerability",
+        "no_vuln": "no_vulnerability",
+        "not_vulnerable": "no_vulnerability",
+        "informational": "observation",
+        "finding": "finding_candidate",
+        "candidate": "finding_candidate",
+        "existing": "existing_finding",
+        "duplicate_finding": "existing_finding",
+    }
+    canonical = aliases.get(normalized, normalized)
+    if canonical != normalized:
+        logger.info("Normalized task acceptance disposition alias %s to %s", normalized, canonical)
+    return canonical
+
+
+NormalizedAcceptanceResultStatus = Annotated[AcceptanceResultStatus, BeforeValidator(_normalize_acceptance_status_alias)]
+NormalizedAcceptanceDisposition = Annotated[
+    AcceptanceDisposition,
+    BeforeValidator(_normalize_acceptance_disposition_alias),
+]
+NonEmptyArtifactRefs = conlist(str, min_length=1)
+TERMINAL_PLAN_STATUSES = ("done", "partial_failure", "blocked", "not_applicable")
 TERMINAL_ACCEPTANCE_STATUSES = (
     "satisfied",
     "assessed_negative",
@@ -133,7 +193,7 @@ class _MemoryStoreResult:
     memory_id: str
 
 INVENTORY_MANIFEST_SCHEMA_VERSION = 1
-INVENTORY_MANIFEST_ITEM_KINDS = ("endpoint", "parameter", "workflow", "service", "other")
+INVENTORY_MANIFEST_ITEM_KINDS = ("endpoint", "parameter", "workflow", "service", "technology")
 INVENTORY_MANIFEST_EXAMPLE = {
     "schema_version": INVENTORY_MANIFEST_SCHEMA_VERSION,
     "items": [
@@ -146,6 +206,11 @@ INVENTORY_MANIFEST_EXAMPLE = {
         }
     ],
     "unassessed_gaps": [],
+    "extraction": {
+        "source_artifact_count": 0,
+        "candidate_count": 0,
+        "added_count": 0,
+    },
 }
 
 
@@ -159,6 +224,7 @@ def inventory_manifest_contract_text() -> str:
         f"It must use this shape: {example}. schema_version must be {INVENTORY_MANIFEST_SCHEMA_VERSION}; "
         "items must be a non-empty list with unique IDs; every item requires non-empty id, target_id, value, "
         f"kind ({kinds}), and an optional attributes object; unassessed_gaps must be a list. "
+        "The extraction summary is controller-owned and may be omitted by the producer. "
         "Put item metadata such as parameters in attributes, not in a metadata field. Workflow maps, reports, "
         "and arbitrary JSON outputs are artifact evidence, not inventory_manifest evidence."
     )
@@ -575,6 +641,7 @@ class AcceptanceResult:
 
     criterion_id: str
     status: AcceptanceResultStatus
+    disposition: AcceptanceDisposition
     summary: str
     evidence_refs: Tuple[str, ...]
     coverage: Tuple[CoverageResult, ...] = ()
@@ -587,6 +654,13 @@ class AcceptanceResult:
             raise ValueError(
                 "acceptance result status must be one of: " + "|".join(TERMINAL_ACCEPTANCE_STATUSES)
             )
+        if self.disposition not in (
+            "no_vulnerability",
+            "observation",
+            "finding_candidate",
+            "existing_finding",
+        ):
+            raise ValueError("acceptance result disposition is invalid")
         summary = str(self.summary or "").strip()
         if not summary:
             raise ValueError("acceptance result summary required")
@@ -609,6 +683,7 @@ class AcceptanceResult:
         return AcceptanceResult(
             criterion_id=str(obj.get("criterion_id", "")),
             status=str(obj.get("status", "")),
+            disposition=str(obj.get("disposition", "")),
             summary=str(obj.get("summary", "")),
             evidence_refs=obj.get("evidence_refs", []),
             coverage=obj.get("coverage", []),
@@ -618,6 +693,7 @@ class AcceptanceResult:
         return {
             "criterion_id": self.criterion_id,
             "status": self.status,
+            "disposition": self.disposition,
             "summary": self.summary,
             "evidence_refs": list(self.evidence_refs),
             "coverage": [item.to_dict() for item in self.coverage],
@@ -763,8 +839,10 @@ class PlanPhase:
             raise ValueError("phase.id must be a positive int")
         if not isinstance(self.title, str) or not self.title.strip():
             raise ValueError("phase.title must be a non-empty string")
-        if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
-            raise ValueError("phase.status must be one of: active|pending|done|partial_failure|blocked")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "not_applicable"):
+            raise ValueError(
+                "phase.status must be one of: active|pending|done|partial_failure|blocked|not_applicable"
+            )
         if self.criteria is None:
             object.__setattr__(self, "criteria", "")  # type: ignore[misc]
         if not isinstance(self.criteria, str):
@@ -1030,6 +1108,7 @@ class PlanStore:
                         task_uid TEXT NOT NULL,
                         criterion_id TEXT NOT NULL,
                         status TEXT NOT NULL,
+                        disposition TEXT NOT NULL,
                         summary TEXT NOT NULL,
                         evidence_refs TEXT NOT NULL,
                         coverage TEXT NOT NULL,
@@ -1042,6 +1121,15 @@ class PlanStore:
                     "CREATE INDEX IF NOT EXISTS idx_acceptance_results_operation_id "
                     "ON task_acceptance_results(operation_id)"
                 )
+                acceptance_columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(task_acceptance_results)")
+                }
+                if "disposition" not in acceptance_columns:
+                    conn.execute(
+                        "ALTER TABLE task_acceptance_results ADD COLUMN disposition "
+                        "TEXT NOT NULL DEFAULT 'observation'"
+                    )
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS task_acceptance_memory_publications (
                         operation_id TEXT NOT NULL,
@@ -1210,8 +1298,9 @@ class PlanStore:
                 conn.executemany(
                     """
                     INSERT INTO task_acceptance_results (
-                        operation_id, task_uid, criterion_id, status, summary, evidence_refs, coverage, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        operation_id, task_uid, criterion_id, status, disposition, summary, evidence_refs, coverage,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -1219,6 +1308,7 @@ class PlanStore:
                             task_uid,
                             result.criterion_id,
                             result.status,
+                            result.disposition,
                             result.summary,
                             json.dumps(result.evidence_refs),
                             json.dumps([item.to_dict() for item in result.coverage]),
@@ -1234,7 +1324,7 @@ class PlanStore:
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 rows = conn.execute(
-                    "SELECT criterion_id, status, summary, evidence_refs, coverage "
+                    "SELECT criterion_id, status, disposition, summary, evidence_refs, coverage "
                     "FROM task_acceptance_results WHERE operation_id = ? AND task_uid = ? "
                     "ORDER BY criterion_id",
                     (operation_id, task_uid),
@@ -1243,9 +1333,10 @@ class PlanStore:
             AcceptanceResult(
                 criterion_id=row[0],
                 status=row[1],
-                summary=row[2],
-                evidence_refs=json.loads(row[3]),
-                coverage=json.loads(row[4]),
+                disposition=row[2],
+                summary=row[3],
+                evidence_refs=json.loads(row[4]),
+                coverage=json.loads(row[5]),
             )
             for row in rows
         ]
@@ -1374,6 +1465,28 @@ class PlanStore:
                         now,
                     ),
                 )
+
+    def link_finding_source_task(self, operation_id: str, finding_uid: str, task_uid: str) -> None:
+        """Durably associate an idempotent finding candidate with a source task."""
+
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
+                    (operation_id, finding_uid),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Unknown finding_uid for source-task link: {finding_uid}")
+                candidate_data = json.loads(row[0])
+                source_task_uids = list(candidate_data.get("source_task_uids", []))
+                if task_uid not in source_task_uids:
+                    source_task_uids.append(task_uid)
+                    candidate_data["source_task_uids"] = source_task_uids
+                    conn.execute(
+                        "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
+                        "WHERE operation_id = ? AND finding_uid = ?",
+                        (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                    )
 
     def store_finding_validation(
         self,
@@ -1625,6 +1738,13 @@ def _has_valid_proof_pack(finding: Any) -> bool:
                 stack.extend(e.values())
             else:
                 e_str = str(e)
+                if e_str.startswith(("artifact:", "artifact_id:")):
+                    try:
+                        _artifact_path_from_ref(e_str)
+                    except ValueError:
+                        pass
+                    else:
+                        return True
                 if os.path.exists(e_str):
                     return True
                 matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
@@ -1756,19 +1876,9 @@ def _operation_output_root() -> str:
 
 
 def _validated_artifact_paths(artifacts: Any, *, require_one: bool = False) -> List[str]:
-    root = _operation_output_root()
     validated: List[str] = []
     for raw_path in _normalize_evidence(artifacts):
-        candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
-        resolved = os.path.realpath(candidate)
-        if os.path.commonpath([root, resolved]) != root:
-            raise ValueError(
-                f"Artifact is outside the current operation output {root}: {raw_path}. "
-                "Use a path relative to the current operation output."
-            )
-        if not os.path.isfile(resolved):
-            raise ValueError(f"Artifact does not exist: {raw_path}")
-        validated.append(resolved)
+        validated.append(canonical_artifact_reference(raw_path))
     if require_one and not validated:
         raise ValueError("At least one existing artifact is required")
     return validated
@@ -1817,6 +1927,30 @@ def _finding_fingerprint(title: str, claim: str, target: str, technique: str) ->
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _active_finding_source_task_uid(store: Any, operation_id: str) -> str:
+    """Return the sole active non-verification task when a workflow executor owns the call."""
+
+    active = [
+        task
+        for task in store.get_tasks(operation_id)
+        if task.status == "active" and task.kind != "finding_validation"
+    ]
+    return active[0].task_uid if len(active) == 1 else ""
+
+
+def _finding_tool_result(finding_uid: str, verification_task_uid: str, status: str) -> str:
+    return json.dumps(
+        {
+            "finding_ref": f"finding:{finding_uid}",
+            "finding_uid": finding_uid,
+            "status": status,
+            "verification_task_ref": f"task:{verification_task_uid}",
+            "verification_task_uid": verification_task_uid,
+        },
+        sort_keys=True,
+    )
+
+
 @tool
 def store_finding(
     title: str,
@@ -1827,7 +1961,7 @@ def store_finding(
     expected_result: str,
     observed_result: str,
     reproduction_steps: List[str],
-    artifacts: Optional[List[str]] = None,
+    artifacts: NonEmptyArtifactRefs,
 ) -> str:
     """Submit one finding candidate and create its dedicated verification task.
 
@@ -1871,21 +2005,27 @@ def store_finding(
     )
     op_id = _operation_id()
     store = _get_plan_store()
+    source_task_uid = _active_finding_source_task_uid(store, op_id)
     existing = store.get_finding_by_fingerprint(op_id, fingerprint)
     if existing:
-        return json.dumps(
-            {
-                "finding_uid": existing["finding_uid"],
-                "verification_task_uid": existing["verification_task_uid"],
-                "status": existing.get("resolution") or "pending_validation",
-            },
-            sort_keys=True,
+        if source_task_uid:
+            store.link_finding_source_task(op_id, existing["finding_uid"], source_task_uid)
+            logger.info(
+                "Linked idempotent finding candidate %s to source task %s",
+                existing["finding_uid"],
+                source_task_uid,
+            )
+        return _finding_tool_result(
+            existing["finding_uid"],
+            existing["verification_task_uid"],
+            existing.get("resolution") or "pending_validation",
         )
 
     finding_uid = str(uuid.uuid4())
     task_uid = str(uuid.uuid4())
     candidate["finding_uid"] = finding_uid
     candidate["validation_status"] = "pending"
+    candidate["source_task_uids"] = [source_task_uid] if source_task_uid else []
     content = (
         f"[VULNERABILITY] {candidate['title']} [WHERE] {candidate['target']} "
         f"[IMPACT] {candidate['claim']} [EVIDENCE] {candidate['observed_result']} "
@@ -1929,10 +2069,7 @@ def store_finding(
     )
     store.store_finding_candidate(op_id, finding_uid, fingerprint, candidate, task_uid)
     _ensure_memory_client().store_task(task=task, user_id=_user_id())
-    return json.dumps(
-        {"finding_uid": finding_uid, "verification_task_uid": task_uid, "status": "pending_validation"},
-        sort_keys=True,
-    )
+    return _finding_tool_result(finding_uid, task_uid, "pending_validation")
 
 
 @tool
@@ -2097,6 +2234,21 @@ class TaskProposal(_StrictTaskWireModel):
     criteria: List[TaskProposalCriterion] = Field(min_length=1, max_length=1)
     target_ids: List[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_inapplicable_snapshot_fields(cls, value: Any) -> Any:
+        """Let an unambiguous snapshot reference own fields that cannot apply to it."""
+
+        if not isinstance(value, dict) or not value.get("snapshot_refs"):
+            return value
+        normalized = dict(value)
+        normalized.pop("limit", None)
+        normalized["limits"] = {}
+        if "output_kind" in normalized:
+            normalized.pop("output_kind")
+            logger.info("Normalized inapplicable output_kind from snapshot task proposal")
+        return normalized
+
     @model_validator(mode="after")
     def validate_proposal(self) -> "TaskProposal":
         if not self.title.strip():
@@ -2116,6 +2268,28 @@ class TaskProposal(_StrictTaskWireModel):
                 raise ValueError("proposal requires procedure methods or snapshot_refs")
             if not any(getattr(self.limits, key) is not None for key in DISCOVERY_PROCEDURE_LIMIT_KEYS):
                 raise ValueError("procedure proposal requires at least one discovery procedure limit")
+            moving_scope = " ".join(
+                [
+                    self.title,
+                    self.objective,
+                    self.effective_basis_description,
+                    *(criterion.description for criterion in self.criteria),
+                ]
+            )
+            consumes_inventory = re.search(
+                r"\b(?:all|every|remaining)\s+(?:identified\s+)?"
+                r"(?:endpoints?|parameters?|items?|workflows?|services?|technologies?)\b"
+                r"[^.]{0,160}\b(?:inventory|manifest)\b|"
+                r"\b(?:from|in|within)\s+(?:the\s+)?(?:initial\s+|frozen\s+)?"
+                r"(?:endpoint\s+)?(?:inventory|manifest)\b",
+                moving_scope,
+                re.IGNORECASE,
+            )
+            if consumes_inventory and self.output_kind != "inventory_manifest":
+                raise ValueError(
+                    "procedure proposal cannot consume an inventory-wide moving collection; use canonical "
+                    "snapshot_refs"
+                )
         return self
 
     @property
@@ -2182,21 +2356,172 @@ _RE_NUMERIC_ID = re.compile(r'(?<=/|=)\d+(?=$|/|&|\s)')
 
 
 def _artifact_path_from_ref(reference: str) -> str:
-    raw_path = reference.removeprefix("artifact:")
+    text = str(reference or "").strip()
+    if text.startswith("artifact_id:"):
+        artifact_id = text.split(":", 1)[1]
+        if not artifact_id or artifact_id != os.path.basename(artifact_id):
+            raise ValueError("artifact_id must contain one artifact filename")
+        text = f"artifact:artifacts/{artifact_id}"
+    raw_path = text.removeprefix("artifact:")
     root = _operation_output_root()
     candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
     resolved = os.path.realpath(candidate)
     if os.path.commonpath([root, resolved]) != root:
         raise ValueError(
             f"Artifact is outside the current operation output {root}: {reference}. "
-            "Use an artifact: path relative to the current operation output."
+            "Use a path relative to the current operation output with the artifact: prefix."
         )
     if not os.path.isfile(resolved):
         raise ValueError(f"Artifact does not exist: {reference}")
     return resolved
 
 
-def _load_inventory_manifest(reference: str) -> Tuple[Dict[str, Any], str]:
+def canonical_artifact_reference(reference: str) -> str:
+    """Return one current-operation artifact as a stable, portable reference."""
+
+    path = _artifact_path_from_ref(reference)
+    relative = os.path.relpath(path, _operation_output_root()).replace(os.sep, "/")
+    return f"artifact:{relative}"
+
+
+def _canonical_evidence_reference(reference: str) -> str:
+    text = str(reference or "").strip()
+    if text.startswith(("artifact:", "artifact_id:")) or os.path.isabs(text) or text.startswith("artifacts/"):
+        return canonical_artifact_reference(text)
+    if text.startswith(("memory:", "finding:")):
+        return text
+    raise ValueError(
+        "Acceptance evidence references must use artifact:, artifact_id:, memory:, or finding: prefixes"
+    )
+
+
+class _InventoryLinkParser(HTMLParser):
+    """Collect navigation and form destinations without treating static assets as endpoints."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.references: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        attribute_name = "href" if tag.lower() == "a" else "action" if tag.lower() == "form" else ""
+        if not attribute_name:
+            return
+        values = dict(attrs)
+        value = str(values.get(attribute_name) or "").strip()
+        if value:
+            self.references.append(value)
+
+
+def _inventory_target_bases() -> Dict[str, str]:
+    try:
+        targets = _get_active_plan().targets
+    except Exception:
+        return {}
+    bases = {}
+    for target in targets:
+        parsed = urlsplit(target.value)
+        if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
+            bases[target.target_id] = urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), "/", "", ""))
+    return bases
+
+
+def _deterministic_inventory_candidates() -> Tuple[List[Dict[str, Any]], int]:
+    """Extract normalized in-scope routes from current-operation HTML artifacts."""
+
+    bases = _inventory_target_bases()
+    if not bases:
+        return [], 0
+    artifact_dir = os.path.join(_operation_output_root(), "artifacts")
+    if not os.path.isdir(artifact_dir):
+        return [], 0
+    candidates: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    source_count = 0
+    for filename in sorted(os.listdir(artifact_dir))[:200]:
+        path = os.path.join(artifact_dir, filename)
+        if not os.path.isfile(path) or os.path.getsize(path) > 2_000_000:
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as artifact_file:
+                content = artifact_file.read()
+        except OSError:
+            continue
+        if "<a" not in content.lower() and "<form" not in content.lower():
+            continue
+        parser = _InventoryLinkParser()
+        try:
+            parser.feed(content)
+        except Exception:
+            continue
+        if not parser.references:
+            continue
+        source_count += 1
+        for target_id, base in bases.items():
+            base_parts = urlsplit(base)
+            for reference in parser.references:
+                if reference.startswith(("#", "javascript:", "mailto:", "tel:")):
+                    continue
+                absolute = urlsplit(urljoin(base, reference))
+                if absolute.scheme.lower() != base_parts.scheme or absolute.netloc.lower() != base_parts.netloc.lower():
+                    continue
+                path_value = re.sub(r"/{2,}", "/", absolute.path or "/")
+                query_pairs = parse_qsl(absolute.query, keep_blank_values=True)
+                query = "&".join(
+                    f"{name}={value}" if value else name
+                    for name, value in query_pairs
+                )
+                value = urlunsplit((absolute.scheme.lower(), absolute.netloc.lower(), path_value, query, ""))
+                route_key = urlunsplit((absolute.scheme.lower(), absolute.netloc.lower(), path_value.rstrip("/") or "/", "", ""))
+                attributes: Dict[str, Any] = {"discovered_by": "html_link_extraction"}
+                if query_pairs:
+                    attributes["query_parameters"] = sorted({name for name, _value in query_pairs})
+                candidates[(target_id, route_key)] = {
+                    "target_id": target_id,
+                    "kind": "endpoint",
+                    "value": value,
+                    "attributes": attributes,
+                }
+    return list(candidates.values()), source_count
+
+
+def _reconcile_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    candidates, source_count = _deterministic_inventory_candidates()
+    existing_routes = {
+        (str(item["target_id"]), (_normalized_route(str(item["value"])) or ("", ""))[0])
+        for item in manifest["items"]
+        if str(item.get("kind")) in {"endpoint", "parameter"}
+    }
+    added = 0
+    existing_ids = {str(item["id"]) for item in manifest["items"]}
+    for candidate in candidates:
+        route = _normalized_route(candidate["value"])
+        key = (candidate["target_id"], route[0] if route else "")
+        if not route or key in existing_routes:
+            continue
+        digest = hashlib.sha256(f"{key[0]}:{key[1]}".encode("utf-8")).hexdigest()[:12]
+        item_id = f"auto-endpoint-{digest}"
+        suffix = 2
+        while item_id in existing_ids:
+            item_id = f"auto-endpoint-{digest}-{suffix}"
+            suffix += 1
+        manifest["items"].append({"id": item_id, **candidate})
+        existing_ids.add(item_id)
+        existing_routes.add(key)
+        added += 1
+    manifest["extraction"] = {
+        "source_artifact_count": source_count,
+        "candidate_count": len(candidates),
+        "added_count": added,
+    }
+    if added:
+        temporary_path = f"{path}.{uuid.uuid4().hex}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as manifest_file:
+            json.dump(manifest, manifest_file, indent=2, sort_keys=True)
+            manifest_file.write("\n")
+        os.replace(temporary_path, path)
+    return manifest
+
+
+def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tuple[Dict[str, Any], str]:
     path = _artifact_path_from_ref(reference)
     try:
         with open(path, "r", encoding="utf-8") as manifest_file:
@@ -2241,6 +2566,8 @@ def _load_inventory_manifest(reference: str) -> Tuple[Dict[str, Any], str]:
     if valid_target_ids and not manifest_target_ids.issubset(valid_target_ids):
         invalid_target_ids = sorted(manifest_target_ids - valid_target_ids)
         raise ValueError(f"inventory manifest contains unknown target IDs: {', '.join(invalid_target_ids)}")
+    if reconcile:
+        manifest = _reconcile_inventory_manifest(path, manifest)
     canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -2437,7 +2764,7 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
 
 
 def _task_inventory_artifact_refs(task: Task) -> List[str]:
-    references = [f"artifact:{path}" for path in sorted(_task_evidence_artifact_paths(task))]
+    references = [canonical_artifact_reference(path) for path in sorted(_task_evidence_artifact_paths(task))]
     store = _get_plan_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
     results = list_results(task.task_uid) if callable(list_results) else store.get_acceptance_results(
@@ -2461,7 +2788,11 @@ def _resolve_proposal_snapshot_refs(proposal: TaskProposal, existing_tasks: List
     references = []
     for reference in proposal.snapshot_refs:
         if not reference.startswith("task:"):
-            references.append(reference)
+            references.append(
+                canonical_artifact_reference(reference)
+                if reference.startswith(("artifact:", "artifact_id:")) or os.path.isabs(reference)
+                else reference
+            )
             continue
         task_uid = reference.split(":", 1)[1]
         producer = next(
@@ -2517,37 +2848,56 @@ def _coverage_route_groups(
     manifest: Dict[str, Any],
     *,
     prompt_token_limit: int,
-) -> List[Tuple[str, str, List[str]]]:
-    """Group endpoint and parameter entries by route; keep other units isolated."""
+) -> List[Tuple[str, str, str, List[str]]]:
+    """Group typed inventory units without representing non-endpoints as routes."""
 
     char_cap = max(1_000, int(prompt_token_limit or 48_000) * 4 // 5)
     groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    endpoints_by_id = {
+        str(item["id"]): item
+        for item in manifest["items"]
+        if item["kind"] == "endpoint"
+    }
     for item in manifest["items"]:
         item_id = str(item["id"])
-        route = _normalized_route(str(item["value"])) if item["kind"] in {"endpoint", "parameter"} else None
-        if route is None:
-            group_key = (str(item["target_id"]), f"item:{item_id}")
-            label = str(item["value"])
-        else:
+        kind = str(item["kind"])
+        route = _normalized_route(str(item["value"])) if kind in {"endpoint", "parameter"} else None
+        if kind == "parameter" and route is None:
+            endpoint_id = str(item.get("attributes", {}).get("endpoint_id", ""))
+            endpoint = endpoints_by_id.get(endpoint_id)
+            route = _normalized_route(str(endpoint["value"])) if endpoint else None
+        if route is not None:
             route_key, label = route
             group_key = (str(item["target_id"]), f"route:{route_key}")
-        group = groups.setdefault(group_key, {"label": label, "ids": [], "chars": 0})
+            task_kind = "endpoint"
+        else:
+            group_key = (str(item["target_id"]), f"{kind}:{item_id}")
+            label = str(item["value"])
+            task_kind = kind
+        group = groups.setdefault(
+            group_key,
+            {"label": label, "kind": task_kind, "ids": [], "chars": 0},
+        )
         group["ids"].append(item_id)
         group["chars"] += len(json.dumps(item, sort_keys=True, separators=(",", ":")))
         if group["chars"] > char_cap:
             raise ValueError(f"Inventory route exceeds the resolved context safety limit: {group['label']}")
     return [
-        (target_id, str(group["label"]), list(group["ids"]))
+        (target_id, str(group["kind"]), str(group["label"]), list(group["ids"]))
         for (target_id, _group_key), group in groups.items()
     ]
 
 
-def _completed_coverage_item_ids(existing_tasks: List[Task], snapshot_hash: str) -> set[str]:
+def _completed_coverage_item_ids(existing_tasks: List[Task], snapshot_hash: str, phase: int) -> set[str]:
     completed: set[str] = set()
     store = _get_plan_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
     for task in existing_tasks:
-        if task.acceptance.mode != "coverage" or task.acceptance.basis.snapshot_hash != snapshot_hash:
+        if (
+            task.phase != phase
+            or task.acceptance.mode != "coverage"
+            or task.acceptance.basis.snapshot_hash != snapshot_hash
+        ):
             continue
         results = list_results(task.task_uid) if callable(list_results) else store.get_acceptance_results(
             _operation_id(), task.task_uid
@@ -2555,6 +2905,45 @@ def _completed_coverage_item_ids(existing_tasks: List[Task], snapshot_hash: str)
         for result in results:
             completed.update(item.item_id for item in result.coverage)
     return completed
+
+
+def _frozen_task_identity(
+    title: str,
+    objective: str,
+    acceptance: AcceptanceContract,
+    target_scope: TargetScope,
+    target_ids: List[str],
+    phase: int,
+) -> str:
+    """Return the deterministic work identity used to deduplicate compiled tasks."""
+
+    acceptance_identity: Dict[str, Any]
+    if acceptance.mode == "coverage":
+        acceptance_identity = {
+            "basis_kind": acceptance.basis.kind,
+            "item_ids": sorted(acceptance.basis.item_ids),
+            "snapshot_hash": acceptance.basis.snapshot_hash,
+            "source_refs": sorted(acceptance.basis.source_refs),
+            "criteria": [criterion.id for criterion in acceptance.criteria],
+        }
+    else:
+        acceptance_identity = {
+            "mode": acceptance.mode,
+            "basis": acceptance.basis.to_dict(),
+            "criteria": [criterion.to_dict() for criterion in acceptance.criteria],
+            "objective": objective.strip(),
+            "title": title.strip(),
+        }
+    return json.dumps(
+        {
+            "acceptance": acceptance_identity,
+            "target_ids": sorted(target_ids),
+            "target_scope": target_scope,
+            "phase": phase,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limit: int) -> str:
@@ -2584,6 +2973,8 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
     existing_tasks = _get_plan_store().get_tasks(op_id)
     staged_tasks: List[Task] = []
     duplicate_count = 0
+    snapshot_exhausted = False
+    unresolved_gaps: List[str] = []
 
     for proposal in proposals:
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
@@ -2602,9 +2993,23 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
         if acceptance.mode == "coverage":
             artifact_ref = next(ref for ref in acceptance.basis.source_refs if ref.startswith("artifact:"))
             manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
-            completed_ids = _completed_coverage_item_ids(existing_tasks, snapshot_hash)
+            completed_ids = _completed_coverage_item_ids(existing_tasks, snapshot_hash, current_phase)
             route_groups = []
-            for group_target_id, route_label, item_ids in _coverage_route_groups(
+            title_prefixes = {
+                "endpoint": "Assess endpoint",
+                "workflow": "Assess workflow",
+                "service": "Assess service",
+                "technology": "Validate technology",
+                "parameter": "Assess parameter",
+            }
+            objective_actions = {
+                "endpoint": "Perform hypothesis-driven security testing for",
+                "workflow": "Validate the security behavior and trust transitions of",
+                "service": "Assess the exposed service boundary for",
+                "technology": "Validate the identified component and version risk for",
+                "parameter": "Assess the input behavior of",
+            }
+            for group_target_id, group_kind, route_label, item_ids in _coverage_route_groups(
                 manifest,
                 prompt_token_limit=prompt_token_limit,
             ):
@@ -2623,39 +3028,84 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
                     criteria=acceptance.criteria,
                 )
                 route_groups.append((
-                    f"Assess endpoint {route_label} [{group_target_id}]",
-                    f"Perform hypothesis-driven security testing for {route_label} and its frozen inventory entries.",
+                    f"{title_prefixes[group_kind]} {route_label} [{group_target_id}]",
+                    f"{objective_actions[group_kind]} {route_label} and its frozen inventory entries.",
                     group_acceptance,
                     "subset",
                     [group_target_id],
                 ))
             acceptance_groups = route_groups
             if not acceptance_groups:
-                duplicate_count += 1
-                continue
-
-        # look for duplicate
-        duplicate_task = None
-        new_patterns = set(_extract_sensitive_patterns(title) + _extract_sensitive_patterns(objective))
-
-        if acceptance.mode != "coverage":
-            for et in [*existing_tasks, *staged_tasks]:
-                # If sensitive patterns (URLs/paths) are present, they must match exactly
-                et_patterns = set(_extract_sensitive_patterns(et.title) + _extract_sensitive_patterns(et.objective))
-                if new_patterns != et_patterns:
+                snapshot_exhausted = True
+                unresolved_gaps.extend(str(gap).strip() for gap in manifest["unassessed_gaps"] if str(gap).strip())
+                if unresolved_gaps:
+                    if any(
+                        task.title == "Refine exhausted inventory"
+                        and task.status in {"active", "pending"}
+                        for task in [*existing_tasks, *staged_tasks]
+                    ):
+                        duplicate_count += 1
+                        continue
+                    refinement_target_ids = target_ids or [target.target_id for target in plan.targets]
+                    refinement_acceptance = AcceptanceContract(
+                        mode="outcome",
+                        basis=AcceptanceBasis(
+                            kind="procedure",
+                            description="Resolve the explicit gaps in the exhausted frozen inventory",
+                            source_refs=[
+                                *(f"target:{target_id}" for target_id in refinement_target_ids),
+                                f"plan:phase-{current_phase}",
+                            ],
+                            procedure=DiscoveryProcedure(
+                                methods=["crawl", "targeted_discovery"],
+                                limits={"max_requests": 500, "max_depth": 4},
+                                stop_condition="first_limit_reached",
+                                gap_policy="record_unassessed",
+                                output_kind="inventory_manifest",
+                            ),
+                        ),
+                        criteria=[AcceptanceCriterion(
+                            id="refine-exhausted-inventory",
+                            description="Store a replacement finite inventory that addresses each explicit gap.",
+                            evidence_requirements=[EvidenceRequirement(kind="inventory_manifest", min_count=1)],
+                        )],
+                    )
+                    acceptance_groups = [(
+                        "Refine exhausted inventory",
+                        "Perform bounded follow-up discovery for these unresolved gaps: "
+                        + "; ".join(dict.fromkeys(unresolved_gaps)),
+                        refinement_acceptance,
+                        target_scope,
+                        target_ids,
+                    )]
+                else:
+                    duplicate_count += 1
                     continue
 
-                title_score = fuzz.ratio(et.title.lower(), title.lower())
-                objective_score = fuzz.ratio(et.objective.lower(), objective.lower())
-                if title_score >= 90 and objective_score >= 90:
-                    duplicate_task = et
-                    break
-
-        if duplicate_task:
-            duplicate_count += 1
-            continue
-
         for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
+            group_identity = _frozen_task_identity(
+                group_title,
+                group_objective,
+                group_acceptance,
+                group_target_scope,
+                group_target_ids,
+                current_phase,
+            )
+            if any(
+                _frozen_task_identity(
+                    task.title,
+                    task.objective,
+                    task.acceptance,
+                    task.target_scope,
+                    task.target_ids,
+                    task.phase,
+                ) == group_identity
+                for task in [*existing_tasks, *staged_tasks]
+                if task.status in {"active", "pending", "done"}
+            ):
+                duplicate_count += 1
+                logger.info("Skipped duplicate task proposal after frozen acceptance expansion: %s", group_title)
+                continue
             staged_tasks.append(Task(
                 task_uid=str(uuid.uuid4()),
                 title=group_title,
@@ -2671,10 +3121,15 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
     for task in staged_tasks:
         client.store_task(task=task, user_id=user_id)
 
-    return json.dumps(
-        {"complete": True, "created_count": len(staged_tasks), "duplicate_count": duplicate_count},
-        sort_keys=True,
-    )
+    response: Dict[str, Any] = {
+        "complete": True,
+        "created_count": len(staged_tasks),
+        "duplicate_count": duplicate_count,
+    }
+    if snapshot_exhausted:
+        response["snapshot_exhausted"] = True
+        response["unresolved_gaps"] = list(dict.fromkeys(unresolved_gaps))
+    return json.dumps(response, sort_keys=True)
 
 
 @tool
@@ -2686,8 +3141,15 @@ def create_tasks(tasks: List[TaskProposal]) -> str:
     "methods": ["crawl"], "limits": {"max_requests": 500}, "output_kind": "inventory_manifest",
     "criteria": [{"description": "Store the finite inventory"}], "target_ids": ["target-1"]}]}
 
+    Snapshot example:
+    {"tasks": [{"title": "Assess frozen inventory", "objective": "Assess each frozen inventory unit",
+    "limits": {}, "snapshot_refs": ["artifact:artifacts/inventory.json"],
+    "criteria": [{"description": "Assess the assigned frozen inventory unit"}],
+    "target_ids": ["target-1"]}]}
+
     Python infers the basis kind, defaults basis_description to objective, assigns phase and status, and compiles
     criterion IDs, evidence requirements, source references, route-scoped coverage tasks, and procedure policies.
+    Snapshot limits and output_kind are ignored because they do not apply.
     """
 
     prompt_token_limit = int((_MEMORY_CONFIG or {}).get("prompt_token_limit") or 48_000)
@@ -2707,7 +3169,8 @@ def build_create_tasks_tool(prompt_token_limit: int = 48_000) -> Any:
         if completed:
             raise ValueError("Task creation already completed for this role run")
         result = _create_tasks_from_proposals(tasks, prompt_token_limit=prompt_token_limit)
-        completed = True
+        if int(json.loads(result).get("created_count", 0)) > 0:
+            completed = True
         return result
 
     create_tasks_once.__name__ = "create_tasks"
@@ -2776,7 +3239,7 @@ def _validate_acceptance_result_evidence(
                 if not reference.startswith("artifact:"):
                     continue
                 try:
-                    _load_inventory_manifest(reference)
+                    _load_inventory_manifest(reference, reconcile=task.acceptance.basis.kind == "procedure")
                 except ValueError as error:
                     rejected.append(f"{reference}: {error}")
                 else:
@@ -2815,6 +3278,38 @@ def _validate_acceptance_result_evidence(
         raise ValueError(f"Coverage ledger mismatch; missing={missing}, unknown={unknown}")
 
 
+_CONFIRMED_SECURITY_CLAIM = re.compile(
+    r"\b(?:confirmed|demonstrated|verified|exploitable)\b.{0,80}"
+    r"\b(?:vulnerabilit|injection|execution|inclusion|bypass|impact|exposure)\b|"
+    r"\b(?:vulnerabilit|injection|execution|inclusion|bypass)\b.{0,80}"
+    r"\b(?:confirmed|demonstrated|verified|exploitable)\b",
+    re.IGNORECASE,
+)
+_NEGATED_SECURITY_CLAIM = re.compile(
+    r"\b(?:not|no|without|failed to|unable to)\b.{0,40}"
+    r"\b(?:confirm|demonstrat|verify|exploit|vulnerab)\w*\b",
+    re.IGNORECASE,
+)
+
+
+def _validate_acceptance_disposition(result: AcceptanceResult) -> None:
+    references = set(result.evidence_refs)
+    finding_refs = {reference for reference in references if reference.startswith("finding:")}
+    if result.disposition in {"finding_candidate", "existing_finding"}:
+        if not finding_refs:
+            raise ValueError(
+                f"Acceptance disposition {result.disposition} requires a finding:<id> evidence reference"
+            )
+        for reference in finding_refs:
+            _evidence_reference_kind(reference, "finding_candidate")
+        return
+    if _CONFIRMED_SECURITY_CLAIM.search(result.summary) and not _NEGATED_SECURITY_CLAIM.search(result.summary):
+        raise ValueError(
+            "Acceptance summaries that claim confirmed security behavior require finding_candidate or "
+            "existing_finding disposition and a finding:<id> reference"
+        )
+
+
 def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> str:
     """Persist acceptance results against the controller-selected task."""
     normalized_uid = str(task_uid or "").strip()
@@ -2822,7 +3317,28 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
         raise ValueError("task_uid required")
     if not results:
         raise ValueError("results requires at least one acceptance result")
-    normalized_results = [AcceptanceResult.from_obj(result) for result in results]
+    normalized_results = []
+    for raw_result in results:
+        result = AcceptanceResult.from_obj(raw_result)
+        canonical_evidence = tuple(_canonical_evidence_reference(reference) for reference in result.evidence_refs)
+        canonical_coverage = tuple(
+            CoverageResult(
+                item_id=item.item_id,
+                status=item.status,
+                evidence_refs=tuple(_canonical_evidence_reference(reference) for reference in item.evidence_refs),
+            )
+            for item in result.coverage
+        )
+        normalized_results.append(
+            AcceptanceResult(
+                criterion_id=result.criterion_id,
+                status=result.status,
+                disposition=result.disposition,
+                summary=result.summary,
+                evidence_refs=canonical_evidence,
+                coverage=canonical_coverage,
+            )
+        )
     if len({result.criterion_id for result in normalized_results}) != len(normalized_results):
         raise ValueError("results must contain unique criterion_id values")
 
@@ -2861,6 +3377,7 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
 
     criteria = {criterion.id: criterion for criterion in task.acceptance.criteria}
     for result in normalized_results:
+        _validate_acceptance_disposition(result)
         _validate_acceptance_result_evidence(task, criteria[result.criterion_id], result)
 
     store.store_acceptance_results(op_id, task.task_uid, normalized_results)
@@ -2931,9 +3448,9 @@ def _task_acceptance_memory_payload(
     evidence_refs: List[str] = []
     status_metadata = []
     for result in sorted(results, key=lambda item: item.criterion_id):
-        status_metadata.append(f"{result.criterion_id}:{result.status}")
+        status_metadata.append(f"{result.criterion_id}:{result.status}:{result.disposition}")
         section = (
-            f"Criterion {result.criterion_id} [{result.status}]: "
+            f"Criterion {result.criterion_id} [{result.status}; {result.disposition}]: "
             f"{_bounded_acceptance_memory_text(result.summary, TASK_ACCEPTANCE_MEMORY_SUMMARY_MAX_CHARS)}"
         )
         if result.coverage:
@@ -3023,6 +3540,51 @@ def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult])
     )
 
 
+def _source_task_finding_refs(task_uid: str) -> List[str]:
+    """Return canonical finding references durably linked to one executor task."""
+
+    store = _get_plan_store()
+    list_findings = getattr(store, "list_findings", None)
+    if not callable(list_findings):
+        return []
+    references = []
+    for record in list_findings(_operation_id()):
+        candidate_data = record.get("candidate_data", {}) if isinstance(record, dict) else {}
+        if task_uid in candidate_data.get("source_task_uids", []):
+            references.append(f"finding:{record['finding_uid']}")
+    return list(dict.fromkeys(references))
+
+
+def _bind_acceptance_finding_reference(
+    task_uid: str,
+    disposition: AcceptanceDisposition,
+    evidence_refs: List[str],
+) -> List[str]:
+    """Bind a candidate disposition to the current task's durable finding relation."""
+
+    if disposition != "finding_candidate":
+        return list(evidence_refs)
+    linked_refs = _source_task_finding_refs(task_uid)
+    if not linked_refs:
+        raise ValueError("Acceptance disposition finding_candidate requires a finding created by this task")
+    supplied_refs = [reference for reference in evidence_refs if str(reference).startswith("finding:")]
+    if len(linked_refs) == 1:
+        selected_ref = linked_refs[0]
+    else:
+        matching_refs = [reference for reference in supplied_refs if reference in linked_refs]
+        if len(set(matching_refs)) != 1:
+            raise ValueError(
+                "Acceptance disposition finding_candidate is ambiguous; use exactly one current-task reference: "
+                + ", ".join(linked_refs)
+            )
+        selected_ref = matching_refs[0]
+    normalized = [reference for reference in evidence_refs if not str(reference).startswith("finding:")]
+    normalized.append(selected_ref)
+    if supplied_refs != [selected_ref]:
+        logger.info("Auto-bound task acceptance to %s for task %s", selected_ref, task_uid)
+    return normalized
+
+
 def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None) -> Any:
     """Build a model-facing acceptance tool bound to one controller-selected task."""
 
@@ -3048,10 +3610,14 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
         coverage_item_ids = tuple(str(item["id"]) for item in manifest["items"])
 
     def record_task_acceptance(
-        status: AcceptanceResultStatus,
+        status: NormalizedAcceptanceResultStatus,
+        disposition: NormalizedAcceptanceDisposition,
         summary: str,
         evidence_refs: List[str],
     ) -> str:
+        status = _normalize_acceptance_status_alias(status)
+        disposition = _normalize_acceptance_disposition_alias(disposition)
+        evidence_refs = _bind_acceptance_finding_reference(normalized_uid, disposition, evidence_refs)
         coverage = tuple(
             CoverageResult(item_id=item_id, status=status, evidence_refs=tuple(evidence_refs))
             for item_id in coverage_item_ids
@@ -3059,6 +3625,7 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
         result = AcceptanceResult(
             criterion_id=criterion_id,
             status=status,
+            disposition=disposition,
             summary=summary,
             evidence_refs=tuple(evidence_refs),
             coverage=coverage,
@@ -3068,7 +3635,18 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     record_task_acceptance.__doc__ = f"""Record evidence-backed terminal results for the assigned task.
 
     Input shape: {{"status": "satisfied|assessed_negative|inaccessible|excluded|duplicate",
-    "summary": "Observed result", "evidence_refs": ["memory:<id>", "artifact:<path>"]}}
+    "disposition": "no_vulnerability|observation|finding_candidate|existing_finding",
+    "summary": "Observed result", "evidence_refs": ["memory:<id>",
+    "artifact:artifacts/<file>", "finding:<id>"]}}
+
+    Use finding_candidate or existing_finding whenever the summary claims confirmed security behavior. The controller
+    automatically binds finding_candidate to the sole finding created by this task. If the task created multiple
+    candidates, supply exactly one returned finding_ref. existing_finding always requires an explicit finding reference.
+    Use observation for useful non-finding results and no_vulnerability for negative results.
+
+    Common semantic aliases are normalized before validation, including completed to satisfied, no_finding to
+    assessed_negative/no_vulnerability, informational to observation, and finding to finding_candidate. Unknown values
+    remain invalid.
 
     Task identity, its single criterion, and frozen coverage item IDs are supplied by the workflow controller.
     Successfully recorded results are immutable. Their concrete summaries and evidence references are automatically

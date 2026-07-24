@@ -330,6 +330,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS`        | Repeated blocked recovery calls before stopping execution  | No (default: `2`, minimum `1`) |
 | `CYBER_TOOL_RECOVERY_MAX_CORRECTIONS`              | Changed retries allowed for one failed task invocation     | No (default: `2`, minimum `1`) |
 | `CYBER_TASK_CREATOR_MAX_CORRECTIONS`               | Retained correction turns after rejected task creation     | No (default: `4`, minimum `0`) |
+| `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS`            | Retained correction turns after rejected task acceptance   | No (default: `2`, minimum `0`) |
 | `AWS_ACCESS_KEY_ID`                                | AWS credentials for Bedrock                                | For Bedrock provider           |
 | `AWS_SECRET_ACCESS_KEY`                            | AWS credentials for Bedrock                                | For Bedrock provider           |
 | `AWS_REGION`                                       | AWS region (default: us-east-1)                            | For Bedrock provider           |

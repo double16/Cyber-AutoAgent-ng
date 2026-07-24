@@ -185,6 +185,47 @@ describe('Terminal event processing', () => {
         expect(cleanupRef.current).toBeNull();
     });
 
+    it('publishes only valid progress health snapshots to the application', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const onHealthUpdate = jest.fn();
+        const health = {status: 'available', score: 0.84, band: 'good', health_version: '1'};
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-health"
+                    terminalWidth={90}
+                    onHealthUpdate={onHealthUpdate}
+                    animationsEnabled={false}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'progress_update', step: 1, health});
+            service.emit('event', {
+                type: 'progress_update',
+                step: 2,
+                health: {status: 'unavailable', score: 0.7, band: 'degraded'},
+            });
+            service.emit('event', {
+                type: 'progress_update',
+                step: 3,
+                health: {status: 'available', score: 2, band: 'excellent'},
+            });
+            service.emit('event', {type: 'progress_update', step: 4});
+            await Promise.resolve();
+        });
+
+        expect(onHealthUpdate).toHaveBeenCalledTimes(1);
+        expect(onHealthUpdate).toHaveBeenCalledWith(health);
+
+        act(() => view.unmount());
+    });
+
     it('renders nothing when collapsed or without a service', async () => {
         const {Terminal} = await load();
         let view!: ReactTestRenderer;
@@ -347,6 +388,46 @@ describe('Terminal event processing', () => {
         const text = textFromTree(view.toJSON());
         expect(text).toContain('[PROGRESS 5%]');
         expect(text).toContain('curl http://example.com/ping');
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
+    it('preserves compact health data on progress events', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-health"
+                    terminalWidth={90}
+                    animationsEnabled={false}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {
+                type: 'progress_update',
+                step: 1,
+                progressPercent: 30,
+                health: {
+                    status: 'available',
+                    score: 0.82,
+                    band: 'good',
+                    failure_count: 2,
+                },
+            });
+            await Promise.resolve();
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('🩺🟢 82% GOOD');
+        expect(text).not.toContain('failure_count');
 
         act(() => {
             view.unmount();

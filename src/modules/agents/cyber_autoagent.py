@@ -727,6 +727,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         output_config={
             "base_dir": server_config.output.base_dir,
             "target_name": target_name,
+            "operation_path": paths.get("root"),
             "artifacts_path": paths.get("artifacts"),
             "tools_path": paths.get("tools"),
         },

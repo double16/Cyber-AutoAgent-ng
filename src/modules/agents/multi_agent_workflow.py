@@ -36,6 +36,7 @@ import logging
 import re
 import sys
 import uuid
+from collections import Counter
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional
@@ -54,6 +55,7 @@ from modules.agents.run_policy import AgentRunPolicy
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import classify_and_discard_max_token_output
+from modules.handlers.operation_health import compute_operation_health
 from modules.handlers.utils import (
     get_tool_description,
     get_tool_name,
@@ -71,6 +73,9 @@ from modules.tools.memory import (
     build_create_tasks_tool,
     build_record_task_acceptance_tool,
     _artifact_path_from_ref,
+    _coverage_route_groups,
+    _load_inventory_manifest,
+    canonical_artifact_reference,
     finalize_finding_validation,
     finding_validation_submitted,
     get_memory_client,
@@ -89,6 +94,7 @@ AgentExecutorSessionFactory = Callable[
     AbstractContextManager[AgentExecutorSession],
 ]
 CHECKPOINT_BANDS = (20, 40, 60, 80, 90)
+EVALUATOR_PLAN_STATUSES = ("done", "partial_failure", "blocked")
 WORKER_CONTEXT_LIMIT = 6000
 TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
     {
@@ -397,7 +403,7 @@ class WorkflowStateStore:
         ))
 
     def mark_task(self, task: Task, status: str, reason: str = "") -> Task:
-        if status not in TERMINAL_PLAN_STATUSES:
+        if status not in ("done", "partial_failure", "blocked"):
             raise ValueError(f"task status must be terminal, got {status}")
         return self.store_task(Task(
             task_uid=task.task_uid,
@@ -518,6 +524,78 @@ class MultiAgentWorkflowController:
         self._can_reopen_completed_plan = True
         self._crossed_checkpoints: set[int] = set()
         self._emitted_started_task_uids: set[str] = set()
+        self._health_prediction_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+        set_health_provider = getattr(self.runtime.callback_handler, "set_operation_health_provider", None)
+        if callable(set_health_provider):
+            set_health_provider(self._operation_health_snapshot)
+
+    def _operation_health_snapshot(self) -> Dict[str, Any]:
+        """Return current workflow health for progress-event enrichment."""
+
+        plan = self.state.get_plan()
+        tasks = self.state.list_tasks()
+        predictions: Dict[int, Dict[str, Any]] = {}
+        if plan is not None:
+            prediction = self._current_phase_task_prediction(plan)
+            if prediction is not None:
+                predictions[int(prediction["target_phase"])] = prediction
+        return compute_operation_health(plan, tasks, predictions=predictions)
+
+    def _current_phase_task_prediction(self, plan: OperationPlan) -> Optional[Dict[str, Any]]:
+        """Predict current-phase fan-out from the preceding phase's frozen inventories."""
+
+        current_phase = int(plan.current_phase)
+        if current_phase in self._health_prediction_cache:
+            return self._health_prediction_cache[current_phase]
+
+        ordered_phases = sorted(plan.phases, key=lambda item: item.id)
+        current_index = next(
+            (index for index, phase in enumerate(ordered_phases) if phase.id == current_phase),
+            None,
+        )
+        if current_index is None or current_index <= 0:
+            self._health_prediction_cache[current_phase] = None
+            return None
+
+        source_phase = ordered_phases[current_index - 1]
+        route_groups: set[tuple[str, str, str]] = set()
+        seen_references: set[str] = set()
+        for task in self.state.list_tasks(phase=source_phase.id, status=["done"]):
+            procedure = task.acceptance.basis.procedure
+            if procedure is None or procedure.output_kind != "inventory_manifest":
+                continue
+            evidence_refs = list(task.evidence)
+            try:
+                for result in self.state.list_task_acceptance_results(task.task_uid):
+                    evidence_refs.extend(result.evidence_refs)
+            except Exception:
+                logger.debug("Unable to read acceptance evidence for health prediction", exc_info=True)
+            for evidence_ref in evidence_refs:
+                try:
+                    reference = canonical_artifact_reference(evidence_ref)
+                    if reference in seen_references:
+                        continue
+                    manifest, _snapshot_hash = _load_inventory_manifest(reference)
+                    groups = _coverage_route_groups(
+                        manifest,
+                        prompt_token_limit=int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                seen_references.add(reference)
+                route_groups.update((target_id, kind, label) for target_id, kind, label, _item_ids in groups)
+
+        prediction = None
+        if route_groups:
+            prediction = {
+                "source_phase": source_phase.id,
+                "target_phase": current_phase,
+                "expected_tasks": len(route_groups),
+                "confidence": "high",
+                "basis": "inventory_manifest_fanout",
+            }
+        self._health_prediction_cache[current_phase] = prediction
+        return prediction
 
     def _log_workflow(self, message: str, *args) -> None:
         logger.info("WORKFLOW[%s]: " + message, self.runtime.operation_id, *args)
@@ -690,6 +768,12 @@ class MultiAgentWorkflowController:
             return max(0, config_manager.getenv_int("CYBER_TASK_CREATOR_MAX_CORRECTIONS", 4))
         return 4
 
+    def _task_acceptance_correction_count(self) -> int:
+        config_manager = self.runtime.config_manager
+        if config_manager:
+            return max(0, config_manager.getenv_int("CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS", 2))
+        return 2
+
     def run(self) -> None:
         self._log_workflow(
             "start max_iterations=%s json_retries=%s plan_refinement_iterations=%s "
@@ -797,7 +881,7 @@ class MultiAgentWorkflowController:
                     self._phase_label(phase),
                 )
                 previous_signature = self._plan_signature(plan)
-                updated_plan = self.state.mark_phase(plan, phase.id, "done")
+                updated_plan = self.state.mark_phase(plan, phase.id, "not_applicable")
                 self._emit_plan_output("updated", updated_plan, previous_signature)
                 if updated_plan.assessment_complete:
                     self._emit_workflow_completion(updated_plan)
@@ -879,7 +963,12 @@ class MultiAgentWorkflowController:
         if getattr(self.runtime.callback_handler, "termination_emitted", False):
             return
         phase_count = len(plan.phases)
+        coverage = self._workflow_coverage_summary(plan)
+        self._emit_workflow_event({"type": "workflow_coverage_summary", "phases": coverage})
+        partial_count = sum(phase.status == "partial_failure" for phase in plan.phases)
         message = f"Assessment complete: {phase_count} phase{'s' if phase_count != 1 else ''} evaluated"
+        if partial_count:
+            message += f"; {partial_count} partial"
         self._log_workflow(
             "emitting completion phase_count=%s statuses=%s",
             phase_count,
@@ -887,7 +976,35 @@ class MultiAgentWorkflowController:
         )
         self.runtime.callback_handler.emit_termination("complete", message)
 
-    TOOL_GUIDE_PROMPT = re.compile(r"<task_capture>.*</task_capture>|<tool_protocols>.*</tool_protocols>|<tools_and_capabilities>.*</tools_and_capabilities>", re.MULTILINE | re.DOTALL)
+    def _workflow_coverage_summary(self, plan: OperationPlan) -> List[Dict[str, Any]]:
+        """Return deterministic per-phase task and frozen-inventory coverage counts."""
+
+        rows = []
+        for phase in plan.phases:
+            tasks = self.state.list_tasks(phase=phase.id)
+            expected_items: set[str] = set()
+            assessed_items: set[str] = set()
+            for task in tasks:
+                expected_items.update(str(item_id) for item_id in task.acceptance.basis.item_ids)
+                for result in self.state.list_task_acceptance_results(task.task_uid):
+                    assessed_items.update(str(item.item_id) for item in result.coverage)
+            status_counts = Counter(task.status for task in tasks)
+            row: Dict[str, Any] = {
+                "phase_id": phase.id,
+                "title": phase.title,
+                "status": phase.status,
+                "task_count": len(tasks),
+                "task_status_counts": dict(sorted(status_counts.items())),
+                "inventory_item_count": len(expected_items),
+                "assessed_item_count": len(assessed_items),
+                "omitted_item_count": len(expected_items - assessed_items),
+            }
+            if phase.status == "not_applicable":
+                row["status_reason"] = "No finding candidates required validation."
+            rows.append(row)
+        return rows
+
+    TOOL_GUIDE_PROMPT = re.compile(r"<tools_and_capabilities>.*</tools_and_capabilities>", re.MULTILINE | re.DOTALL)
 
     def _remove_tool_guide_from_prompt(self, prompt: str) -> str:
         """Remove the tool guide from the prompt."""
@@ -1026,6 +1143,7 @@ class MultiAgentWorkflowController:
             terminal_after_required_tools=True,
             require_successful_required_tools=True,
             allow_text_final_after_tools=False,
+            actionless_mode="task_progress",
             max_actionless_calls=3,
             max_agent_calls=8,
             max_model_turns=32,
@@ -1038,6 +1156,7 @@ class MultiAgentWorkflowController:
             max_tool_calls=3,
             terminal_after_required_tools=False,
             allow_text_final_after_tools=False,
+            actionless_mode="task_progress",
             max_actionless_calls=3,
             max_agent_calls=4,
             max_model_turns=8,
@@ -1058,20 +1177,77 @@ class MultiAgentWorkflowController:
         system_prompt = self.runtime.system_prompt + "\n\n" + (self.runtime.task_capture_prompt or "")
         worker_contexts = []
         tool_outcomes: List[ToolOutcome] = []
+        acceptance_failures = 0
+        acceptance_inputs: set[str] = set()
+        failed_tool_inputs: Counter[tuple[str, str]] = Counter()
         recovery_used = False
         decision = WorkflowDecision(status="partial_failure", reason="Task executor did not run")
+
+        def repeated_correctable_failure(outcomes: List[ToolOutcome]) -> Optional[ToolOutcome]:
+            repeated = None
+            for outcome in outcomes:
+                if outcome.success or not outcome.correctable or outcome.tool_name == "record_task_acceptance":
+                    continue
+                key = (outcome.tool_name, outcome.input_summary)
+                failed_tool_inputs[key] += 1
+                if failed_tool_inputs[key] >= 2:
+                    repeated = outcome
+            return repeated
+
+        def track_acceptance_outcomes(
+            outcomes: List[ToolOutcome],
+        ) -> tuple[List[ToolOutcome], List[ToolOutcome], bool]:
+            """Track rejected acceptance payloads while retaining successful corrections."""
+
+            nonlocal acceptance_failures
+            acceptance_outcomes = [
+                outcome for outcome in outcomes if outcome.tool_name == "record_task_acceptance"
+            ]
+            failed_calls = [outcome for outcome in acceptance_outcomes if not outcome.success]
+            successful_calls = [outcome for outcome in acceptance_outcomes if outcome.success]
+            repeated = any(outcome.input_summary in acceptance_inputs for outcome in failed_calls)
+            acceptance_inputs.update(outcome.input_summary for outcome in failed_calls)
+            acceptance_failures += len(failed_calls)
+            return failed_calls, successful_calls, repeated
+
         with self._task_executor_session("task_executor", tools, system_prompt) as run_executor:
             actor_prompt = execution_prompt
-            for cycle in range(1, self.task_execution_cycles + 1):
+            maximum_actor_cycles = self.task_execution_cycles + self._task_acceptance_correction_count()
+            for cycle in range(1, maximum_actor_cycles + 1):
+                allowed_actor_cycles = self.task_execution_cycles + min(
+                    acceptance_failures,
+                    self._task_acceptance_correction_count(),
+                )
+                if cycle > allowed_actor_cycles:
+                    break
                 self._log_workflow(
                     "task actor cycle task=%s cycle=%s max_cycles=%s",
                     self._task_label(task),
                     cycle,
-                    self.task_execution_cycles,
+                    allowed_actor_cycles,
                 )
                 worker_result = run_executor(actor_prompt, task_policy)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
+                repeated_tool_failure = repeated_correctable_failure(cycle_result.outcomes)
+                failed_acceptance_calls, successful_acceptance_calls, repeated_acceptance = (
+                    track_acceptance_outcomes(cycle_result.outcomes)
+                )
+                if repeated_tool_failure is not None:
+                    decision = WorkflowDecision(
+                        status="partial_failure",
+                        reason=(
+                            f"{repeated_tool_failure.tool_name} repeated an equivalent rejected submission "
+                            "across the retained task-executor session."
+                        ),
+                    )
+                    self._log_workflow(
+                        "task structured correction repeated task=%s tool=%s cycle=%s",
+                        self._task_label(task),
+                        repeated_tool_failure.tool_name,
+                        cycle,
+                    )
+                    break
                 if cycle_result.max_tokens_exhausted:
                     self._validate_executor_follow_up_phases(
                         plan,
@@ -1106,6 +1282,28 @@ class MultiAgentWorkflowController:
                         run_executor(cycle_result.recovery_guidance, recovery_policy)
                     )
                     tool_outcomes.extend(recovery_result.outcomes)
+                    recovery_failed_acceptance, recovery_successful_acceptance, recovery_repeated_acceptance = (
+                        track_acceptance_outcomes(recovery_result.outcomes)
+                    )
+                    failed_acceptance_calls.extend(recovery_failed_acceptance)
+                    successful_acceptance_calls.extend(recovery_successful_acceptance)
+                    repeated_acceptance = repeated_acceptance or recovery_repeated_acceptance
+                    repeated_tool_failure = repeated_correctable_failure(recovery_result.outcomes)
+                    if repeated_tool_failure is not None:
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                f"{repeated_tool_failure.tool_name} repeated an equivalent rejected submission "
+                                "during bounded recovery."
+                            ),
+                        )
+                        self._log_workflow(
+                            "task recovery correction repeated task=%s tool=%s cycle=%s",
+                            self._task_label(task),
+                            repeated_tool_failure.tool_name,
+                            cycle,
+                        )
+                        break
                     if recovery_result.text:
                         cycle_result.text = "\n".join(filter(None, [cycle_result.text, recovery_result.text]))
                     cycle_result.recovery_required = recovery_result.recovery_required
@@ -1138,6 +1336,7 @@ class MultiAgentWorkflowController:
                     acceptance_results = self.state.list_task_acceptance_results(task.task_uid)
                     missing_criteria = self._missing_acceptance_criteria(task, acceptance_results)
                     validation_missing = not finding_validation_submitted(task)
+                    max_acceptance_attempts = 1 + self._task_acceptance_correction_count()
                     if validation_missing:
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -1152,24 +1351,20 @@ class MultiAgentWorkflowController:
                             self._task_label(task),
                             cycle,
                         )
-                    elif missing_criteria:
-                        missing_text = ", ".join(missing_criteria)
-                        decision = WorkflowDecision(
-                            status="partial_failure",
-                            reason=f"Acceptance manifest is incomplete; missing criteria: {missing_text}.",
-                            instructions=(
-                                "Complete and record evidence-backed terminal results for these frozen criterion IDs: "
-                                f"{missing_text}."
-                            ),
-                        )
-                        self._log_workflow(
-                            "task acceptance gate incomplete task=%s cycle=%s missing=%s",
-                            self._task_label(task),
-                            cycle,
-                            missing_text,
-                        )
-                    else:
+                    elif not missing_criteria:
                         acceptance_submitted = True
+                        if acceptance_failures:
+                            replayed = self._acceptance_outcome_replayed(
+                                successful_acceptance_calls[-1]
+                            ) if successful_acceptance_calls else False
+                            self._log_workflow(
+                                "task acceptance completed after rejected submissions task=%s cycle=%s "
+                                "failures=%s replayed=%s",
+                                self._task_label(task),
+                                cycle,
+                                acceptance_failures,
+                                replayed,
+                            )
                         decision = self._evaluate_task(
                             plan,
                             phase,
@@ -1177,6 +1372,62 @@ class MultiAgentWorkflowController:
                             combined_worker_context,
                             tool_outcomes,
                             acceptance_results,
+                        )
+                    elif repeated_acceptance:
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason="record_task_acceptance repeated an equivalent rejected submission.",
+                        )
+                        self._log_workflow(
+                            "task acceptance correction repeated task=%s cycle=%s",
+                            self._task_label(task),
+                            cycle,
+                        )
+                    elif acceptance_failures >= max_acceptance_attempts:
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                "record_task_acceptance exhausted its configured correction allowance "
+                                f"after {acceptance_failures} rejected call(s)."
+                            ),
+                        )
+                        self._log_workflow(
+                            "task acceptance corrections exhausted task=%s failures=%s",
+                            self._task_label(task),
+                            acceptance_failures,
+                        )
+                    else:
+                        missing_text = ", ".join(missing_criteria)
+                        acceptance_error = (
+                            failed_acceptance_calls[-1].output_summary
+                            if failed_acceptance_calls
+                            else "No acceptance result was recorded."
+                        )
+                        correction = json.dumps(
+                            {
+                                "tool": "record_task_acceptance",
+                                "error": acceptance_error,
+                                "remaining_corrections": max(
+                                    0,
+                                    1 + self._task_acceptance_correction_count() - acceptance_failures,
+                                ),
+                            },
+                            sort_keys=True,
+                        )
+                        repair_instruction = self._task_acceptance_repair_instruction(acceptance_error)
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=f"Acceptance manifest is incomplete; missing criteria: {missing_text}.",
+                            instructions=(
+                                f"{repair_instruction} Then make one changed record_task_acceptance submission. "
+                                f"Controller correction: {correction}"
+                            ),
+                        )
+                        self._log_workflow(
+                            "task acceptance gate incomplete task=%s cycle=%s missing=%s",
+                            self._task_label(task),
+                            cycle,
+                            missing_text,
                         )
                 if decision.status == "done":
                     self._log_workflow(
@@ -1193,6 +1444,14 @@ class MultiAgentWorkflowController:
                         decision.status,
                     )
                     break
+                acceptance_incomplete = bool(
+                    self._missing_acceptance_criteria(task, self.state.list_task_acceptance_results(task.task_uid))
+                )
+                if acceptance_incomplete and (
+                    repeated_acceptance
+                    or acceptance_failures >= 1 + self._task_acceptance_correction_count()
+                ):
+                    break
                 if cycle_result.recovery_required:
                     self._log_workflow(
                         "task executor recovery exhausted task=%s cycle=%s",
@@ -1200,7 +1459,11 @@ class MultiAgentWorkflowController:
                         cycle,
                     )
                     break
-                if cycle < self.task_execution_cycles:
+                allowed_actor_cycles = self.task_execution_cycles + min(
+                    acceptance_failures,
+                    self._task_acceptance_correction_count(),
+                )
+                if cycle < allowed_actor_cycles:
                     actor_prompt = self._task_executor_critic_guidance(
                         decision,
                         next_cycle=cycle + 1,
@@ -1231,7 +1494,7 @@ class MultiAgentWorkflowController:
     def _task_executor_critic_guidance(self, decision: WorkflowDecision, *, next_cycle: int) -> str:
         return f"""## Task Critic Guidance
 Continue the same assigned task in this existing conversation. This is actor cycle {next_cycle} of
-{self.task_execution_cycles}. Do not restart work that is already complete. Address the unmet criteria identified by
+the bounded execution and acceptance-correction allowance. Do not restart work that is already complete. Address the unmet criteria identified by
 the critic, use tools to make concrete progress, and store durable evidence for the next review.
 If the prior cycle contained a rejected tool call, use its registered input schema and controller guidance for bounded
 changed retries; never repeat identical input or assume a result from a rejected invocation.
@@ -1239,6 +1502,44 @@ changed retries; never repeat identical input or assume a result from a rejected
 Critic reason: {decision.reason}
 Critic instructions: {decision.instructions}
 """
+
+    @staticmethod
+    def _task_acceptance_repair_instruction(error: str) -> str:
+        """Return bounded prerequisite-aware guidance for a rejected acceptance submission."""
+
+        normalized = str(error or "").lower()
+        if "finding created by this task" in normalized:
+            return (
+                "Complete the finding prerequisite first: call store_finding and retain its returned canonical "
+                "finding reference"
+            )
+        if "ambiguous" in normalized and "finding" in normalized:
+            return "Select exactly one canonical current-task finding reference returned by store_finding"
+        if "existing_finding" in normalized:
+            return "Use the canonical reference for the actual existing finding; do not invent a finding identifier"
+        if "schema_version" in normalized or "inventory manifest" in normalized:
+            return (
+                "Repair or replace the referenced inventory artifact so it conforms to inventory manifest schema "
+                "version 1 before retrying acceptance"
+            )
+        if "evidence" in normalized or "memory:" in normalized or "artifact:" in normalized:
+            return (
+                "Create the required durable evidence first with the appropriate registered storage tool and use "
+                "the canonical reference it returns"
+            )
+        if "no acceptance result" in normalized:
+            return "Complete the remaining assigned work and create its required durable evidence"
+        return "Correct the rejected values using the registered schema and canonical enum values"
+
+    @staticmethod
+    def _acceptance_outcome_replayed(outcome: ToolOutcome) -> bool:
+        """Return whether a successful acceptance outcome was an idempotent replay."""
+
+        try:
+            payload = json.loads(outcome.output_summary)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and payload.get("complete") is True and payload.get("replayed") is True
 
     @staticmethod
     def _missing_acceptance_criteria(task: Task, results: List[Any]) -> List[str]:
@@ -1653,7 +1954,7 @@ Return exactly one decision for each candidate.
                 self._evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
             )
-            decision = self._decision_from_data(data, allowed=("continue", *TERMINAL_PLAN_STATUSES))
+            decision = self._decision_from_data(data, allowed=("continue", *EVALUATOR_PLAN_STATUSES))
         except WorkflowInvariantError as error:
             return WorkflowDecision(
                 status="partial_failure",
@@ -1685,7 +1986,7 @@ Return exactly one decision for each candidate.
             self._evaluator_tools(),
             self._phase_evaluator_system_prompt(),
         )
-        allowed = TERMINAL_PLAN_STATUSES if hard_cap is not None else ("continue", *TERMINAL_PLAN_STATUSES)
+        allowed = EVALUATOR_PLAN_STATUSES if hard_cap is not None else ("continue", *EVALUATOR_PLAN_STATUSES)
         decision = self._decision_from_data(data, allowed=allowed)
         self._log_workflow(
             "phase evaluator decision phase=%s status=%s reason=%s",
@@ -1796,6 +2097,7 @@ review existing memories. Return only the requested JSON decision."""
             terminal_after_required_tools=True,
             require_successful_required_tools=True,
             allow_text_final_after_tools=False,
+            actionless_mode="required_tool",
             max_actionless_calls=3,
             max_agent_calls=3,
             max_model_turns=6,
@@ -1822,7 +2124,7 @@ review existing memories. Return only the requested JSON decision."""
                 raw_result = creator_result.text if isinstance(creator_result, TaskExecutorCycleResult) else creator_result
                 if raw_result is not None and getattr(raw_result, "reason", "") == run_policy.terminal_reason:
                     failure_reason = "create_tasks succeeded but produced no new actionable tasks"
-                    break
+                    continue
         after_count = len(self.state.list_tasks(phase=phase.id))
         self._log_workflow(
             "task creator finished phase=%s after_count=%s delta=%s",
@@ -1875,14 +2177,15 @@ Acceptance basis rules:
   stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
   inventory JSON; otherwise omit it and Python defaults to `artifact`.
 - For dependent snapshot work, supply canonical `snapshot_refs`, omit methods, and set `limits` to `{{}}`; Python
-  silently discards limits because they do not apply. When the reference
+  silently discards limits and `output_kind` because they do not apply. When the reference
   resolves to an inventory manifest, Python automatically creates one task per target and normalized endpoint route,
   grouping that route's parameter/query entries with it. Referenced producer tasks must be done.
 - Never mix procedure fields with snapshot fields. Python infers the basis kind.
 - If the required snapshot does not exist, create a bounded procedure-based prerequisite inventory task in this
   active phase instead of creating dependent assessment tasks.
-- Do not use moving claims such as "all reachable", "all discovered", "across the application", or "key workflows"
-  in acceptance criteria. Refer to the declared procedure or frozen manifest items.
+- Do not use moving claims such as "all reachable", "all discovered", "all endpoints from the inventory", "across
+  the application", or "key workflows" in procedure objectives or acceptance criteria. Inventory-wide work requires
+  canonical `snapshot_refs`.
 - Python requires generic durable evidence for snapshot work, including negative coverage dispositions; findings are
   optional outputs and are never required to prove that an item was assessed.
 
@@ -1901,19 +2204,27 @@ Executable target registry:
 
 A list of tasks is required, including the case of one task being provided.
 
-Before calling, verify every object against this exact shape:
+Procedure shape:
 ```json
 {{"tasks":[{{"title":"Cohesive actionable title","objective":"Action and target",
 "basis_description":"Bounded inventory procedure","methods":["crawl"],
 "limits":{{"max_requests":500,"max_depth":3}},"output_kind":"inventory_manifest",
 "criteria":[{{"description":"Execute the declared procedure and store its finite manifest"}}],
 "target_ids":["target-1"]}}]}}
+```
+
+Snapshot shape:
+```json
+{{"tasks":[{{"title":"Assess frozen inventory","objective":"Assess each frozen inventory unit",
+"limits":{{}},"snapshot_refs":["artifact:artifacts/inventory.json"],
+"criteria":[{{"description":"Assess the assigned frozen inventory unit"}}],
+"target_ids":["target-1"]}}]}}
 ```"""
 
     def _task_creator_repair_prompt(self, failure_reason: str = "") -> str:
         """Return a compact correction turn for the retained task-creator conversation."""
 
-        return f"""The preceding `create_tasks` call was rejected.
+        return f"""The preceding `create_tasks` call was rejected or produced no new actionable task.
 Validation result: {failure_reason or "no actionable task was created"}
 Preserve every correction already made in this conversation. Change only the fields needed to resolve this validation
 result, then make exactly one corrected `create_tasks` call. Do not restart the proposal, repeat completed reasoning,
@@ -1931,6 +2242,16 @@ explain, execute, inspect, or gather evidence."""
             ]
             if failed_calls:
                 return failed_calls[-1].output_summary
+            unavailable_calls = [
+                outcome for outcome in result.outcomes
+                if not outcome.success and "unknown tool" in outcome.output_summary.lower()
+            ]
+            if unavailable_calls:
+                attempted = ", ".join(dict.fromkeys(outcome.tool_name for outcome in unavailable_calls))
+                return (
+                    f"Only create_tasks is registered for this role; unavailable tool call(s): {attempted}. "
+                    "Call create_tasks using its registered schema."
+                )
             result = result.text
         return str(
             getattr(result, "message", "")
@@ -2315,7 +2636,10 @@ The generated prompt must instruct the task-executor agent:
 - Store each security claim with `store_finding` and reusable lessons with `store_knowledge`, then stop with a brief
   summary once the assigned task is done, partial, or blocked.
 - Treat the task's acceptance contract as an immutable manifest. Address its single criterion, use batch operations
-  when useful, and call `record_task_acceptance` with one evidence-backed status, summary, and evidence_refs payload.
+  when useful, and call `record_task_acceptance` with one evidence-backed status, disposition, summary, and
+  evidence_refs payload. Confirmed security behavior must use finding_candidate or existing_finding disposition and
+  reference the finding returned by `store_finding`; negative and non-finding results use no_vulnerability or
+  observation.
   The controller has already bound the tool to the task, criterion, and coverage IDs, so do not supply or guess them.
   Never add criteria to the active task; create a
   separately contracted follow-up task for discoveries outside the frozen manifest.
@@ -2532,7 +2856,18 @@ not be duplicated. Every created task must be executable without violating any p
         for task in self.state.list_tasks():
             procedure = task.acceptance.basis.procedure
             if task.status == "done" and procedure is not None and procedure.output_kind == "inventory_manifest":
-                handles.append(f"- task:{task.task_uid} — {task.title}")
+                candidates = list(task.evidence)
+                for result in self.state.list_task_acceptance_results(task.task_uid):
+                    candidates.extend(result.evidence_refs)
+                references = []
+                for candidate in dict.fromkeys(candidates):
+                    try:
+                        reference = canonical_artifact_reference(candidate)
+                        _load_inventory_manifest(reference)
+                    except ValueError:
+                        continue
+                    references.append(reference)
+                handles.extend(f"- {reference} — {task.title}" for reference in references)
         return "\n".join(handles) or "- None"
 
     def _task_evaluator_prompt(
@@ -2733,7 +3068,9 @@ A finding submission creates a
 separate verification task, so do not validate that new task in this run. If new follow-up work is discovered, create
 pending tasks with their own acceptance contracts using `create_tasks`, but do not execute them in this run.
 `create_tasks` never completes, replaces, or records acceptance for the assigned task. For the
-assigned task, call `record_task_acceptance` with one terminal status, concrete summary, and evidence_refs list; this
+assigned task, call `record_task_acceptance` with one terminal status, disposition, concrete summary, and evidence_refs
+list. Confirmed security behavior requires finding_candidate or existing_finding disposition and a finding reference;
+negative and informational results use no_vulnerability or observation. This
 ledger does not replace storing substantive artifact evidence. Successful acceptance publishes the summary and
 evidence references as one operation observation for later tasks. The controller binds the tool to the assigned task,
 criterion, and coverage IDs; never guess or submit those IDs. End with a concise summary of completed work,

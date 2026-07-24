@@ -28,24 +28,39 @@ def test_terminal_tool_hook_stops_after_successful_task_creation():
     assert state[TERMINAL_TOOL_COMPLETED_STATE_KEY] == {"tool_name": "create_tasks"}
 
 
-def test_terminal_tool_hook_leaves_executor_completion_to_run_policy():
+def test_terminal_tool_hook_stops_after_successful_task_acceptance():
     event = _event("record_task_acceptance", '{"complete": true}')
 
     TerminalToolHook("task_executor")._after_tool(event)
 
-    assert event.invocation_state == {}
+    state = event.invocation_state["request_state"]
+    assert state["stop_event_loop"] is True
+    assert state[TERMINAL_TOOL_COMPLETED_STATE_KEY] == {"tool_name": "record_task_acceptance"}
 
 
 @pytest.mark.parametrize(
     ("payload", "status"),
-    [('{}', "success"), ('{"complete": true}', "error"), ("not-json", "success")],
+    [('{}', "success"), ("not-json", "success")],
 )
-def test_terminal_tool_hook_does_not_stop_incomplete_or_failed_results(payload, status):
+def test_terminal_tool_hook_does_not_stop_incomplete_success_results(payload, status):
     event = _event("record_task_acceptance", payload, status=status)
 
     TerminalToolHook("task_executor")._after_tool(event)
 
     assert event.invocation_state == {}
+
+
+def test_terminal_tool_hook_stops_failed_acceptance_for_controller_correction():
+    event = _event("record_task_acceptance", "validation error", status="error")
+
+    TerminalToolHook("task_executor")._after_tool(event)
+
+    state = event.invocation_state["request_state"]
+    assert state["stop_event_loop"] is True
+    assert state[TERMINAL_TOOL_REJECTED_STATE_KEY] == {
+        "tool_name": "record_task_acceptance",
+        "error": "validation error",
+    }
 
 
 def test_terminal_tool_hook_ignores_non_terminal_tool():

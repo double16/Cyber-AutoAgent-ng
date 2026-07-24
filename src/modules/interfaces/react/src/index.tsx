@@ -22,6 +22,7 @@ import { formatAutoRunTerminationEvent } from './utils/autoRunTerminationFormatt
 import { resolveRecordingMode } from './utils/recordingMode.js';
 import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
 import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
+import { appendOperationHealth } from './utils/operationHealthFormatting.js';
 
 const formatTaskScope = (event: any): string => {
   const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
@@ -443,17 +444,22 @@ const runAutoAssessment = async () => {
         else if (event.type === 'progress_update') {
           if (event.operation_stage === 'ragas_evaluation') {
             const message = formatAutoRunEvaluationEvent(event);
-            if (message) loggingService.info(message);
+            if (message) loggingService.info(appendOperationHealth(message, event.health));
           }
           else if (event.operation_stage === 'final_report') {
-            loggingService.info(formatAutoRunReportProgress(event));
+            loggingService.info(appendOperationHealth(formatAutoRunReportProgress(event), event.health));
           }
           else if (Number.isFinite(event.progressPercent)) {
             const etaSeconds = estimateEtaSeconds(event.duration, event.progressPercent);
             const etaText = etaSeconds !== null && etaSeconds > 0
               ? ` | ETA ${formatToolDuration(etaSeconds, false)}`
               : '';
-            loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}${etaText}`);
+            loggingService.info(
+              appendOperationHealth(
+                `➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}${etaText}`,
+                event.health
+              )
+            );
           }
         }
         else if (event.type === 'evaluation_step_complete' || event.type === 'evaluation_complete') {

@@ -24,11 +24,14 @@ class TerminalToolHook(HookProvider):
 
     def _after_tool(self, event: AfterToolCallEvent) -> None:
         tool_name = str(event.tool_use.get("name", ""))
-        expected_tool = {"task_creator": "create_tasks"}.get(self.agent_type)
+        expected_tool = {
+            "task_creator": "create_tasks",
+            "task_executor": "record_task_acceptance",
+        }.get(self.agent_type)
         if tool_name != expected_tool:
             return
         if not _result_success(event.result, event.exception):
-            self._record_task_creator_failure(event, tool_name)
+            self._record_terminal_failure(event, tool_name)
             return
         try:
             payload: Any = json.loads(_result_text(event.result))
@@ -41,8 +44,8 @@ class TerminalToolHook(HookProvider):
             request_state["stop_event_loop"] = True
             request_state[TERMINAL_TOOL_COMPLETED_STATE_KEY] = {"tool_name": tool_name}
 
-    def _record_task_creator_failure(self, event: AfterToolCallEvent, tool_name: str) -> None:
-        if self.agent_type != "task_creator":
+    def _record_terminal_failure(self, event: AfterToolCallEvent, tool_name: str) -> None:
+        if self.agent_type not in {"task_creator", "task_executor"}:
             return
         request_state = event.invocation_state.setdefault("request_state", {})
         if isinstance(request_state, dict):

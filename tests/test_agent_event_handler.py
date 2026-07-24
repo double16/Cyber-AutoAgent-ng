@@ -107,6 +107,39 @@ def event_types(handler):
     return [event["type"] for event in handler._events]
 
 
+def test_progress_update_includes_shared_operation_health():
+    emitter = MagicMock()
+    coordinator = OperationEventCoordinator("OP_TEST", emitter)
+    coordinator.set_operation_health_provider(
+        lambda: {"health_version": "1", "status": "available", "score": 0.82, "band": "good"}
+    )
+
+    coordinator.emit({"type": "progress_update", "step": 1})
+
+    event = emitter.emit.call_args.args[0]
+    assert event["health"] == {
+        "health_version": "1",
+        "status": "available",
+        "score": 0.82,
+        "band": "good",
+    }
+
+
+def test_progress_update_survives_operation_health_provider_failure():
+    emitter = MagicMock()
+    coordinator = OperationEventCoordinator("OP_TEST", emitter)
+
+    def fail_health():
+        raise RuntimeError("state unavailable")
+
+    coordinator.set_operation_health_provider(fail_health)
+    coordinator.emit({"type": "progress_update", "step": 1})
+
+    event = emitter.emit.call_args.args[0]
+    assert event["type"] == "progress_update"
+    assert "health" not in event
+
+
 def test_report_budget_estimator_zero_evidence_and_pricing_fallback(monkeypatch):
     monkeypatch.setattr(rb, "get_config_manager", Mock(side_effect=RuntimeError("no config")))
     coordinator = OperationEventCoordinator("OP_EST", MagicMock())

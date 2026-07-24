@@ -16,6 +16,8 @@ import * as path from 'path';
 import stripAnsi from 'strip-ansi';
 import { useConfig } from '../contexts/ConfigContext.js';
 import type { Config } from '../contexts/ConfigContext.js';
+import { formatOperationHealth } from '../utils/operationHealthFormatting.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
 let cachedProjectRoot: string | null | undefined;
@@ -50,7 +52,16 @@ const resolveProjectRoot = (): string | null => {
 // Extended event types for UI-specific events not covered by the core SDK events
 // These events are used for UI state management and display formatting
 export type AdditionalStreamEvent = 
-  | { type: 'progress_update'; step: number | string; progressPercent?: number; totalTools?: number; operation?: string; duration?: string; [key: string]: any }
+  | {
+      type: 'progress_update';
+      step: number | string;
+      progressPercent?: number;
+      totalTools?: number;
+      operation?: string;
+      duration?: string;
+      health?: OperationHealthSnapshot;
+      [key: string]: any;
+    }
   | { type: 'evaluation_step_complete'; status: 'completed' | 'skipped' | 'failed'; evaluation_step_kind: string; [key: string]: any }
   | { type: 'evaluation_complete'; status?: 'completed' | 'no_results' | 'failed'; scores?: Record<string, number>; [key: string]: any }
   | { type: 'reasoning'; content: string; [key: string]: any }
@@ -614,6 +625,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
     // =======================================================================
     case 'progress_update':
       let stepDisplay = '';
+      const healthVisual = formatOperationHealth((event as any).health);
 
       const eventAgent = (event as any)['agent_name'];
       const agentSubStep = (event as any)['agent_sub_step'];
@@ -667,6 +679,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
             <Text color="#89B4FA" bold>
               {stepDisplay}
             </Text>
+            {healthVisual && (
+              <Text color={healthVisual.color} bold>{` ${healthVisual.label}`}</Text>
+            )}
           </Box>
           <Text color="#45475A">{getDivider()}</Text>
           {/* If this is the FINAL REPORT and we have operation context, render the report inline.

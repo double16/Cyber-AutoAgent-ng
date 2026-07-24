@@ -60,6 +60,7 @@ class TestGetSystemPrompt:
         output_config = {
             "artifacts_path": "/custom/artifacts",
             "tools_path": "/custom/tools_path",
+            "operation_path": "/custom/operation_path",
             "base_dir": "/custom/output",
             "target_name": "test_target",
             "enable_unified_output": True,
@@ -75,6 +76,7 @@ class TestGetSystemPrompt:
 
         assert "/custom/artifacts" in prompt
         assert "/custom/tools_path" in prompt
+        assert "/custom/operation_path" in prompt
 
     def test_get_system_prompt_with_overlay_block(self, tmp_path):
         output_config = {"base_dir": str(tmp_path), "target_name": "test_target"}

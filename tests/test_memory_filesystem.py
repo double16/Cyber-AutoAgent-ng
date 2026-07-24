@@ -377,7 +377,7 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
         assert json.loads(create_new2) == {"complete": True, "created_count": 1, "duplicate_count": 1}
         assert "task[4]" in memory_tasks.list_uncompleted_tasks(memory)
 
-        # Fuzzy duplicate check
+        # Similar wording remains distinct without semantic guessing.
         create_fuzzy = memory.create_tasks(
             [
                 _task_create(memory,
@@ -390,8 +390,8 @@ def test_create_tasks_duplicates(tmp_path, monkeypatch):
             ]
         )
 
-        assert json.loads(create_fuzzy) == {"complete": True, "created_count": 0, "duplicate_count": 1}
-        assert "task[4]" in memory_tasks.list_uncompleted_tasks(memory)
+        assert json.loads(create_fuzzy) == {"complete": True, "created_count": 1, "duplicate_count": 0}
+        assert "task[5]" in memory_tasks.list_uncompleted_tasks(memory)
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -453,8 +453,8 @@ def test_store_plan_persistence(tmp_path, monkeypatch):
 
 
 @pytest.mark.ollama
-def test_create_tasks_more_fuzzy(tmp_path, monkeypatch):
-    """Test more fuzzy matching cases for task creation."""
+def test_create_tasks_does_not_deduplicate_by_fuzzy_similarity(tmp_path, monkeypatch):
+    """Keep distinct task text instead of guessing semantic equivalence."""
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-fuzzy-more")
@@ -482,7 +482,7 @@ def test_create_tasks_more_fuzzy(tmp_path, monkeypatch):
             _task_create(memory, title="SCAN FOR OPEN PORTS", objective="identify services on the target", phase=1,
                               status="pending")
         ])
-        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory)
+        assert "task[2]" in memory_tasks.list_uncompleted_tasks(memory)
 
         # 3. Minor typo/difference (within 90% threshold)
         # "Scan for open ports" (19 chars)
@@ -491,19 +491,19 @@ def test_create_tasks_more_fuzzy(tmp_path, monkeypatch):
             _task_create(memory, title="Scan for open port", objective="Identify service on the target", phase=1,
                               status="pending")
         ])
-        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory)
+        assert "task[3]" in memory_tasks.list_uncompleted_tasks(memory)
 
         # 4. Significant difference
         memory.create_tasks([
             _task_create(memory, title="Exploit vulnerability", objective="Gain access to the system", phase=1,
                               status="pending")
         ])
-        assert "task[2]" in memory_tasks.list_uncompleted_tasks(memory)
+        assert "task[4]" in memory_tasks.list_uncompleted_tasks(memory)
 
         # 5. Check SQLite task count for this operation
         op_id = "test-op-fuzzy-more"
         tasks = memory._PLAN_STORE.get_tasks(op_id)
-        assert len(tasks) == 2  # One original, one "Significant difference"
+        assert len(tasks) == 4
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -667,7 +667,7 @@ def test_create_tasks_sensitive_urls(tmp_path, monkeypatch):
 
 @pytest.mark.ollama
 def test_create_tasks_parameterized_urls(tmp_path, monkeypatch):
-    """Verify that tasks with different parameters in URLs are considered duplicates."""
+    """Verify that procedure tasks with different URL values remain distinct."""
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-urls")
@@ -704,7 +704,7 @@ def test_create_tasks_parameterized_urls(tmp_path, monkeypatch):
             )
         ])
 
-        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory), "Expected duplicate task for different parameter"
+        assert "task[2]" in memory_tasks.list_uncompleted_tasks(memory), "Expected a task for each parameter value"
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -713,7 +713,7 @@ def test_create_tasks_parameterized_urls(tmp_path, monkeypatch):
 
 @pytest.mark.ollama
 def test_create_tasks_parameterized_url_paths(tmp_path, monkeypatch):
-    """Verify that tasks with different parameters in URL paths are considered duplicates."""
+    """Verify that procedure tasks with different URL path values remain distinct."""
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-urls")
@@ -750,7 +750,7 @@ def test_create_tasks_parameterized_url_paths(tmp_path, monkeypatch):
             )
         ])
 
-        assert "task[1]" in memory_tasks.list_uncompleted_tasks(memory), "Expected duplicate task for different parameterized path"
+        assert "task[2]" in memory_tasks.list_uncompleted_tasks(memory), "Expected a task for each parameterized path"
 
     finally:
         memory._MEMORY_CLIENT = None
@@ -759,7 +759,7 @@ def test_create_tasks_parameterized_url_paths(tmp_path, monkeypatch):
 
 @pytest.mark.ollama
 def test_create_tasks_parameterized_urls_batched(tmp_path, monkeypatch):
-    """Verify that tasks with different parameters are considered duplicates submitted in the same tool call."""
+    """Verify that batched procedure tasks with different parameter values remain distinct."""
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-urls")
@@ -792,7 +792,7 @@ def test_create_tasks_parameterized_urls_batched(tmp_path, monkeypatch):
         ])
 
         tasks = memory_tasks.list_uncompleted_tasks(memory)
-        assert "task[1]" in tasks, "Expected ADD for first task, and DUPLICATE for different parameter"
+        assert "task[2]" in tasks, "Expected both parameter-specific procedure tasks"
         assert url1 in tasks, "Expected ADD for first task"
 
     finally:

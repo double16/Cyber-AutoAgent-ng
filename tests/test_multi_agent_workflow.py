@@ -19,6 +19,7 @@ from modules.agents.multi_agent_workflow import (
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import MaxTokenClassification
+from modules.handlers.tool_recovery import ToolOutcome
 from modules.tools.memory import (
     AcceptanceBasis,
     AcceptanceContract,
@@ -212,6 +213,7 @@ class FakeCallbackHandler:
         self.termination_events = []
         self.events = []
         self.timeline = []
+        self.operation_health_provider = None
 
     def has_reached_limit(self):
         return False
@@ -227,6 +229,9 @@ class FakeCallbackHandler:
     def emit_ui_event(self, event):
         self.events.append(event)
         self.timeline.append(("event", event))
+
+    def set_operation_health_provider(self, provider):
+        self.operation_health_provider = provider
 
 
 class FakeState:
@@ -268,6 +273,7 @@ class FakeState:
             AcceptanceResult(
                 criterion_id=criterion.id,
                 status="satisfied",
+                disposition="observation",
                 summary="Test criterion completed",
                 evidence_refs=["memory:test-evidence"],
             )
@@ -472,6 +478,7 @@ def _runtime(progress=0, env_ints=None):
 def test_plan_phase_accepts_partial_failure_and_blocked_statuses():
     assert PlanPhase(id=1, title="Phase", status="partial_failure").status == "partial_failure"
     assert PlanPhase(id=2, title="Phase", status="blocked").status == "blocked"
+    assert PlanPhase(id=3, title="Phase", status="not_applicable").status == "not_applicable"
 
 
 def test_pending_finding_validation_is_prioritized_and_events_include_scope():
@@ -963,7 +970,6 @@ def test_task_execution_approval_short_circuits_first_cycle():
         text_runner=text_runner,
         work_runner=work_runner,
     )
-
     controller._run_task(_plan(), _plan().phases[0], task)
 
     assert len(actor_calls) == 1
@@ -998,6 +1004,256 @@ def test_task_execution_persists_final_non_approval_and_clamps_cycle_count():
     assert len(actor_calls) == 1
     assert state.tasks[0].status == "blocked"
     assert state.tasks[0].status_reason == "credentials are unavailable"
+
+
+def test_acceptance_corrections_extend_same_executor_beyond_normal_cycle_limit():
+    runtime = _runtime(
+        env_ints={
+            "CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1,
+            "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 2,
+        }
+    )
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    actor_prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"accepted"}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_prompts.append(prompt)
+        call_number = len(actor_prompts)
+        if call_number < 3:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="rejected acceptance",
+                outcomes=[ToolOutcome(
+                    sequence=call_number,
+                    tool_use_id=f"acceptance-{call_number}",
+                    tool_name="record_task_acceptance",
+                    success=False,
+                    correctable=False,
+                    input_summary=f"payload-{call_number}",
+                    output_summary=f"field error {call_number}",
+                )],
+            )
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="observation",
+            summary="Accepted result",
+            evidence_refs=("memory:test-evidence",),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="accepted", outcomes=[])
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+    assert controller._task_acceptance_correction_count() == 2
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_prompts) == 3
+    assert "field error 1" in actor_prompts[1]
+    assert "field error 2" in actor_prompts[2]
+    assert state.tasks[0].status == "done"
+
+
+@pytest.mark.parametrize("replayed", [False, True])
+def test_complete_acceptance_supersedes_repeated_rejection_after_recovery(replayed):
+    runtime = _runtime(
+        env_ints={
+            "CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1,
+            "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 2,
+        }
+    )
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    executor_prompts = []
+    evaluator_prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        if role == "task_evaluator":
+            evaluator_prompts.append(prompt)
+            return '{"status":"done","reason":"durable acceptance approved"}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        executor_prompts.append(prompt)
+        if len(executor_prompts) <= 2:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="acceptance rejected",
+                outcomes=[ToolOutcome(
+                    sequence=len(executor_prompts),
+                    tool_use_id=f"acceptance-{len(executor_prompts)}",
+                    tool_name="record_task_acceptance",
+                    success=False,
+                    correctable=False,
+                    input_summary="same-rejected-payload",
+                    output_summary="finding prerequisite missing",
+                )],
+                recovery_required=len(executor_prompts) == 2,
+                recovery_guidance="create the finding prerequisite",
+            )
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="finding_candidate",
+            summary="Corrected acceptance",
+            evidence_refs=("finding:candidate-1",),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(
+            text="acceptance stored",
+            outcomes=[ToolOutcome(
+                sequence=3,
+                tool_use_id="acceptance-success",
+                tool_name="record_task_acceptance",
+                success=True,
+                correctable=False,
+                input_summary="corrected-payload",
+                output_summary=json.dumps({"complete": True, "replayed": replayed}),
+                recovery_role="correction",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(executor_prompts) == 3
+    assert executor_prompts[-1] == "create the finding prerequisite"
+    assert len(evaluator_prompts) == 1
+    assert state.tasks[0].status == "done"
+    assert state.tasks[0].status_reason == "durable acceptance approved"
+
+
+def test_repeated_acceptance_rejection_remains_terminal_while_ledger_is_incomplete():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    actor_prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        pytest.fail("an incomplete repeated acceptance must not reach the evaluator")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_prompts.append(prompt)
+        return workflow_mod.TaskExecutorCycleResult(
+            text="acceptance rejected",
+            outcomes=[ToolOutcome(
+                sequence=len(actor_prompts),
+                tool_use_id=f"acceptance-{len(actor_prompts)}",
+                tool_name="record_task_acceptance",
+                success=False,
+                correctable=False,
+                input_summary="same-rejected-payload",
+                output_summary="finding prerequisite missing",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_prompts) == 2
+    assert state.tasks[0].status == "partial_failure"
+    assert state.tasks[0].status_reason == "record_task_acceptance repeated an equivalent rejected submission."
+
+
+def test_complete_acceptance_does_not_bypass_finding_validation_gate(monkeypatch):
+    task = Task(
+        task_uid="verify-1",
+        title="Verify finding",
+        objective="verify",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(_plan(), tasks=[task])
+    monkeypatch.setattr(workflow_mod, "finding_validation_submitted", Mock(return_value=False))
+    monkeypatch.setattr(workflow_mod, "finalize_finding_validation", Mock(return_value=None))
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"verify","tools":[]}'
+        pytest.fail("finding validation must complete before semantic evaluation")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda role, prompt, tools, system_prompt, run_policy: "acceptance stored",
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert state.tasks[0].status == "partial_failure"
+    assert state.tasks[0].status_reason == "Finding validation was not recorded by record_finding_validation."
+
+
+def test_repeated_structured_failure_stops_across_retained_executor_cycles():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 3})
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    actor_prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_prompts.append(prompt)
+        return workflow_mod.TaskExecutorCycleResult(
+            text="finding rejected",
+            outcomes=[ToolOutcome(
+                sequence=len(actor_prompts),
+                tool_use_id=f"finding-{len(actor_prompts)}",
+                tool_name="store_finding",
+                success=False,
+                correctable=True,
+                input_summary='{"artifacts": []}',
+                output_summary="At least one existing artifact is required",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_prompts) == 2
+    assert state.tasks[0].status == "partial_failure"
+    assert "store_finding repeated an equivalent rejected submission" in state.tasks[0].status_reason
 
 
 def test_task_acceptance_gate_skips_evaluator_and_lists_missing_criteria():
@@ -2479,7 +2735,7 @@ def test_controller_completes_empty_final_validation_phase_without_task_creator(
 
     controller.run()
 
-    assert state.plan.phases[0].status == "done"
+    assert state.plan.phases[0].status == "not_applicable"
     assert state.plan.assessment_complete is True
 
 
@@ -2641,6 +2897,7 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
     assert '"title":"Cohesive actionable title"' in captured["prompt"]
     assert '"basis_kind"' not in captured["prompt"]
     assert '"output_kind":"inventory_manifest"' in captured["prompt"]
+    assert '"snapshot_refs":["artifact:artifacts/inventory.json"]' in captured["prompt"]
     assert "Canonical inventory manifest contract" in captured["prompt"]
     assert "Workflow maps, reports, and arbitrary JSON outputs are artifact evidence" in captured["prompt"]
     assert "unsupported top-level `description` fields" in captured["prompt"]
@@ -2650,6 +2907,34 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
     assert example_task["output_kind"] == "inventory_manifest"
     assert set(example_task["criteria"][0]) == {"description"}
     assert captured["call_count"] == 1
+
+
+def test_task_creator_failure_reason_names_only_registered_tool():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    result = workflow_mod.TaskExecutorCycleResult(
+        text="I need to inspect the artifact",
+        outcomes=[ToolOutcome(
+            sequence=1,
+            tool_use_id="shell-1",
+            tool_name="shell",
+            success=False,
+            correctable=False,
+            input_summary='{"command": "ls"}',
+            output_summary="Unknown tool: shell",
+        )],
+    )
+
+    reason = controller._task_creator_failure_reason(result)
+
+    assert reason == (
+        "Only create_tasks is registered for this role; unavailable tool call(s): shell. "
+        "Call create_tasks using its registered schema."
+    )
 
 
 def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
@@ -2673,7 +2958,7 @@ def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
     controller._create_tasks(_plan(), _plan().phases[0])
 
     assert len(prompts) == 2
-    assert "preceding `create_tasks` call was rejected" in prompts[1]
+    assert "preceding `create_tasks` call was rejected or produced no new actionable task" in prompts[1]
     assert "exactly one corrected `create_tasks` call" in prompts[1]
     assert "Preserve every correction already made" in prompts[1]
     assert "## Active Phase" not in prompts[1]
@@ -2762,7 +3047,7 @@ def test_task_creator_uses_configured_retained_correction_attempts():
     assert "Validation result" in prompts[1]
 
 
-def test_task_creator_duplicate_only_success_does_not_retry_completed_tool():
+def test_task_creator_duplicate_only_success_uses_bounded_retained_corrections():
     prompts = []
 
     def work_runner(role, prompt, tools, system_prompt, run_policy):
@@ -2780,9 +3065,27 @@ def test_task_creator_duplicate_only_success_does_not_retry_completed_tool():
 
     outcome = controller._create_tasks(_plan(), _plan().phases[0])
 
-    assert len(prompts) == 1
+    assert len(prompts) == 3
     assert outcome.created_count == 0
     assert "no new actionable tasks" in outcome.failure_reason
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ("requires a finding created by this task", "call store_finding"),
+        ("existing_finding requires a finding:<id>", "actual existing finding"),
+        ("finding candidate is ambiguous", "exactly one canonical current-task finding"),
+        ("inventory manifest schema_version must be 1", "schema version 1"),
+        ("invalid evidence reference memory:missing", "durable evidence first"),
+        ("No acceptance result was recorded.", "remaining assigned work"),
+        ("invalid disposition", "canonical enum values"),
+    ],
+)
+def test_task_acceptance_repair_guidance_is_prerequisite_aware(error, expected):
+    guidance = MultiAgentWorkflowController._task_acceptance_repair_instruction(error)
+
+    assert expected in guidance
 
 
 def test_task_creator_reassigns_new_future_phase_tasks_to_active_phase():
@@ -2950,6 +3253,7 @@ def test_phase_evaluator_uses_accepted_artifact_instead_of_predicted_task_eviden
         AcceptanceResult(
             criterion_id="mapped-artifact",
             status="satisfied",
+            disposition="observation",
             summary="Stored the accepted map",
             evidence_refs=["artifact:artifacts/accepted.json"],
         )
@@ -4146,3 +4450,69 @@ def test_memory_summary_returns_compact_memories_and_handles_errors():
 
     state.client = SimpleNamespace(list_memories=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("fail")))
     assert controller._memory_summary() == "memories[0]{id,memory}:"
+
+
+def test_operation_health_provider_predicts_current_phase_from_inventory_fanout(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Assessment", status="active"),
+        ],
+    )
+    inventory_task = Task(
+        task_uid="inventory",
+        title="Build inventory",
+        objective="Build a bounded inventory",
+        acceptance=_acceptance("inventory"),
+        phase=1,
+        status="done",
+        evidence=["artifact:artifacts/inventory.json"],
+    )
+    route_task = Task(
+        task_uid="route-1",
+        title="Assess route one",
+        objective="Assess one route",
+        acceptance=_artifact_acceptance("route-one"),
+        phase=2,
+        status="done",
+    )
+    state = FakeState(plan, [inventory_task, route_task])
+    state.acceptance_results[inventory_task.task_uid] = []
+    runtime = _runtime()
+    runtime.prompt_token_limit = 48_000
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    monkeypatch.setattr(
+        workflow_mod,
+        "_load_inventory_manifest",
+        lambda reference: ({"items": [{"id": "one"}, {"id": "two"}]}, "hash"),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "_coverage_route_groups",
+        lambda manifest, prompt_token_limit: [
+            ("target-1", "endpoint", "https://example.test/one", ["one"]),
+            ("target-1", "endpoint", "https://example.test/two", ["two"]),
+        ],
+    )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    health = runtime.callback_handler.operation_health_provider()
+
+    assert controller._current_phase_task_prediction(plan) == {
+        "source_phase": 1,
+        "target_phase": 2,
+        "expected_tasks": 2,
+        "confidence": "high",
+        "basis": "inventory_manifest_fanout",
+    }
+    assert health["prediction"]["expected_tasks"] == 2
+    assert health["prediction"]["actual_tasks"] == 1
+    assert health["prediction"]["coverage"] == 0.5

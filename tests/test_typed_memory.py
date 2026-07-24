@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.modules.handlers.utils import get_tool_spec
 from src.modules.tools.memory import (
     Task,
     finalize_finding_validation,
@@ -136,6 +137,15 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     artifact.write_text("HTTP 200 admin data", encoding="utf-8")
     plan_store = MagicMock()
     plan_store.get_finding_by_fingerprint.return_value = None
+    source_task = Task(
+        task_uid="source-task",
+        title="Assess admin",
+        objective="Assess admin authorization",
+        acceptance=make_acceptance("source").to_dict(),
+        phase=3,
+        status="active",
+    )
+    plan_store.get_tasks.return_value = [source_task]
     with (
         patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
         patch("src.modules.tools.memory._get_plan_current_phase", return_value=3),
@@ -162,8 +172,12 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     assert task.phase == 3
     assert task.kind == "finding_validation"
     assert task.reference_id == result["finding_uid"]
+    assert result["finding_ref"] == f"finding:{result['finding_uid']}"
+    assert result["verification_task_ref"] == f"task:{result['verification_task_uid']}"
     assert task.status == "pending"
     assert task.target_scope == "all"
+    candidate = plan_store.store_finding_candidate.call_args.args[3]
+    assert candidate["source_task_uids"] == [source_task.task_uid]
 
 
 def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Path):
@@ -175,6 +189,15 @@ def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Pat
         "verification_task_uid": "task-1",
         "resolution": None,
     }
+    source_task = Task(
+        task_uid="source-task",
+        title="Assess endpoint",
+        objective="Assess endpoint behavior",
+        acceptance=make_acceptance("source").to_dict(),
+        phase=1,
+        status="active",
+    )
+    plan_store.get_tasks.return_value = [source_task]
     with (
         patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
@@ -194,15 +217,26 @@ def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Pat
         )
 
     assert result == {
+        "finding_ref": "finding:finding-1",
         "finding_uid": "finding-1",
         "status": "pending_validation",
+        "verification_task_ref": "task:task-1",
         "verification_task_uid": "task-1",
     }
+    plan_store.link_finding_source_task.assert_called_once_with("test_op", "finding-1", source_task.task_uid)
     memory_client.store_task.assert_not_called()
+
+
+def test_store_finding_schema_requires_artifacts():
+    schema = get_tool_spec(store_finding)["inputSchema"]["json"]
+
+    assert "artifacts" in schema["required"]
 
 
 def test_store_finding_rejects_missing_artifact(memory_client, operation_ids, tmp_path: Path):
     with patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match="At least one existing artifact is required"):
+            store_finding("X", "Claim", "LOW", "/x", "test", "No access", "Access", ["Request /x"], [])
         with pytest.raises(ValueError, match="Artifact does not exist"):
             store_finding("X", "Claim", "LOW", "/x", "test", "No access", "Access", ["Request /x"], ["missing.txt"])
 
@@ -247,7 +281,7 @@ def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, o
     assert "evaluator review" in result
     validation = plan_store.store_finding_validation.call_args.args[2]
     assert validation["outcome"] == "confirmed"
-    assert validation["evidence_artifacts"] == [str(artifact)]
+    assert validation["evidence_artifacts"] == ["artifact:response.txt"]
 
 
 def test_differential_confirmation_requires_control(tmp_path: Path, operation_ids):

@@ -1065,6 +1065,7 @@ def test_retained_executor_cycle_stalls_with_sticky_reasoning_and_no_new_tools(m
             terminal_after_required_tools=True,
             require_successful_required_tools=True,
             allow_text_final_after_tools=False,
+            actionless_mode="task_progress",
             max_actionless_calls=3,
         ),
     )
@@ -1072,8 +1073,11 @@ def test_retained_executor_cycle_stalls_with_sticky_reasoning_and_no_new_tools(m
     assert result.reason == "stalled"
     assert result.message == "No actions taken after 3 attempts"
     assert len(agent.calls) == 3
-    assert "Call an available tool now" in agent.calls[1]
-    assert "Call record_task_acceptance now" in agent.calls[2]
+    assert "Call the next registered tool needed" in agent.calls[1]
+    assert "required completion tool(s) (record_task_acceptance) as completion conditions" in agent.calls[1]
+    assert "only after their prerequisite work and evidence are complete" in agent.calls[1]
+    assert "call the next registered tool" in agent.calls[2]
+    assert "required completion tool(s) (record_task_acceptance) only when their prerequisites" in agent.calls[2]
     assert "final answer" not in agent.calls[2]
     role_callback.emit_termination.assert_called_once_with("stalled", result.message)
 
@@ -1527,6 +1531,11 @@ def test_run_agent_returns_rejected_required_tool_error(monkeypatch):
 
     assert result.reason == "required_tool_rejected"
     assert result.message == "limits field required"
+
+
+def test_agent_run_policy_rejects_unknown_actionless_mode():
+    with pytest.raises(ValueError, match="actionless_mode must be"):
+        cyberautoagent.AgentRunPolicy(actionless_mode="guess")
 
 
 def test_extract_last_assistant_text_skips_tool_use_messages():

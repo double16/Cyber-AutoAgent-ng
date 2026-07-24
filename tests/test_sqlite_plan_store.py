@@ -147,10 +147,12 @@ def test_sqlite_plan_store_task_operations(tmp_path):
 def test_sqlite_finding_ledger_operations(tmp_path):
     store = PlanStore(str(tmp_path / "test.db"))
     store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
+    store.link_finding_source_task("op", "finding-1", "source-task")
+    store.link_finding_source_task("op", "finding-1", "source-task")
 
     record = store.get_finding_by_fingerprint("op", "fingerprint")
     assert record["finding_uid"] == "finding-1"
-    assert record["candidate_data"] == {"claim": "claim"}
+    assert record["candidate_data"] == {"claim": "claim", "source_task_uids": ["source-task"]}
 
     store.store_finding_validation("op", "finding-1", {"outcome": "confirmed"})
     store.resolve_finding("op", "finding-1", "verified")
@@ -202,6 +204,7 @@ def test_sqlite_plan_store_persists_acceptance_results_and_freezes_active_contra
             AcceptanceResult(
                 criterion_id="endpoint:/login.php",
                 status="assessed_negative",
+                disposition="no_vulnerability",
                 summary="No additional parameters were accepted",
                 evidence_refs=["artifact:login-negative.txt"],
                 coverage=[

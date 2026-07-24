@@ -499,9 +499,8 @@ class TestArtifactExternalization:
             result_text = event.result["content"][0]["text"]
 
             # Should contain artifact reference
-            assert "artifacts/" in result_text or ".log" in result_text, (
-                "Truncated result should reference artifact file"
-            )
+            assert "Artifact ref: artifact:" in result_text
+            assert str(tmp_path) not in result_text
             assert "chars" in result_text.lower(), (
                 "Should indicate character count"
             )

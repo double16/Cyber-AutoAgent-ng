@@ -4,6 +4,7 @@
  */
 
 import { Operation } from '../services/OperationManager.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 
 /**
  * Application state actions interface
@@ -17,6 +18,7 @@ export interface ApplicationActions {
   setCompletedOperation: (operation: Operation | null) => void;
   clearCompletedOperation: () => void;
   updateMetrics: (metrics: OperationMetrics | null) => void;
+  updateHealth: (health: OperationHealthSnapshot | null) => void;
   resetErrorCount: () => void;
   setStaticKey: (key: number) => void;
 }

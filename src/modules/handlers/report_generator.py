@@ -30,7 +30,7 @@ from modules.prompts.factory import (
     get_report_observation_system_prompt,
     safe_truncate,
 )
-from modules.tools.memory import Task, get_memory_client, memory_is_cross_operation
+from modules.tools.memory import Task, _artifact_path_from_ref, get_memory_client, memory_is_cross_operation
 
 logger = get_logger("Handlers.ReportGenerator")
 
@@ -38,7 +38,8 @@ MAX_REPORT_FINDINGS = int(os.getenv("CYBER_REPORT_MAX_FINDINGS", "200"))
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 _PAGE_BREAK = """\n<div class="page-break" style="page-break-before: always;"></div>\n\n"""
 _ARTIFACT_REFERENCE = re.compile(
-    r"(?:^|[\s\"'\[(])(?:/[^\s\"'\])]+|(?:artifacts?|outputs?)/[^\s\"'\])]+)",
+    r"(?:artifact:(?:artifacts/)?[^\s\"'\])]+|"
+    r"(?:^|[\s\"'\[(])(?:/[^\s\"'\])]+|(?:artifacts?|outputs?)/[^\s\"'\])]+))",
     re.IGNORECASE,
 )
 
@@ -482,7 +483,7 @@ and keep hypothetical impact out of verified risk counts and conclusions.
 {completion_guidance}
 
 Use the following data:
-{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'validation_failure_count', 'target_coverage', 'completion_status']})}
+{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'validation_failure_count', 'target_coverage', 'phase_coverage', 'completion_status']})}
 """
         report_step_index += 1
         _emit_report_progress(
@@ -728,7 +729,7 @@ Steps Executed: {steps_executed}
 {completion_guidance}
 
 Use the following data:
-{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'tools_summary', 'completion_status']})}
+{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'phase_coverage', 'tools_summary', 'completion_status']})}
 """
         report_step_index += 1
         _emit_report_progress(
@@ -1137,6 +1138,7 @@ def build_report_sections(
         operation_plan = memory_client.get_active_plan()
         task_records = memory_client.list_tasks()
         operation_tasks = []
+        phase_coverage_state: Dict[int, Dict[str, Any]] = {}
         for task in task_records:
             acceptance_results = memory_client.list_task_acceptance_results(task.task_uid)
             acceptance_results = acceptance_results if isinstance(acceptance_results, list) else []
@@ -1148,6 +1150,35 @@ def build_report_sections(
                 f"{task.to_toon(include_format=False)},acceptance={completed_count}/"
                 f"{len(task.acceptance.criteria)},manifest={task.acceptance.manifest_hash}"
             )
+            phase_state = phase_coverage_state.setdefault(
+                task.phase,
+                {"task_status_counts": Counter(), "expected_items": set(), "assessed_items": set()},
+            )
+            phase_state["task_status_counts"][task.status] += 1
+            phase_state["expected_items"].update(str(item_id) for item_id in task.acceptance.basis.item_ids)
+            for result in acceptance_results:
+                phase_state["assessed_items"].update(str(item.item_id) for item in result.coverage)
+
+        phase_coverage = []
+        for phase in operation_plan.phases if operation_plan else []:
+            phase_state = phase_coverage_state.get(
+                phase.id,
+                {"task_status_counts": Counter(), "expected_items": set(), "assessed_items": set()},
+            )
+            expected_items = phase_state["expected_items"]
+            assessed_items = phase_state["assessed_items"]
+            phase_row = {
+                "phase_id": phase.id,
+                "title": phase.title,
+                "status": phase.status,
+                "task_status_counts": dict(sorted(phase_state["task_status_counts"].items())),
+                "inventory_item_count": len(expected_items),
+                "assessed_item_count": len(assessed_items),
+                "omitted_item_count": len(expected_items - assessed_items),
+            }
+            if phase.status == "not_applicable":
+                phase_row["status_reason"] = "No finding candidates required validation."
+            phase_coverage.append(phase_row)
 
         # Process evidence entries - FILTER BY OPERATION_ID
         evidence_skipped = 0
@@ -1410,6 +1441,17 @@ def build_report_sections(
 
         # Build complete sections dictionary
         target_coverage = _format_target_coverage(operation_plan, task_records, evidence)
+        evidence_integrity_errors = []
+        for item in evidence:
+            for reference in sorted(_artifact_references(item)):
+                if not reference.startswith("artifact:"):
+                    continue
+                try:
+                    _artifact_path_from_ref(reference)
+                except ValueError as error:
+                    evidence_integrity_errors.append(
+                        {"evidence_id": item.get("id", ""), "reference": reference, "error": str(error)}
+                    )
         sections = {
             "operation_id": operation_id,
             "target": target,
@@ -1432,6 +1474,7 @@ def build_report_sections(
             "findings_table": findings_table,
             "summary_table": summary_table,
             "target_coverage": target_coverage,
+            "phase_coverage": phase_coverage,
             "analysis": report_content.get("analysis", ""),
             "immediate_recommendations": report_content.get("immediate", ""),
             "short_term_recommendations": report_content.get("short_term", ""),
@@ -1444,6 +1487,7 @@ def build_report_sections(
             "analysis_framework": domain_lens.get("framework", ""),
             "module": module,
             "evidence_count": len(evidence),
+            "evidence_integrity_errors": evidence_integrity_errors,
             "canonical_findings": canonical_findings,
             # Execution metrics for direct insertion into the template
             "main_model": f"{manager.get_provider()}/{manager.get_llm_config(manager.get_provider()).model_id}",

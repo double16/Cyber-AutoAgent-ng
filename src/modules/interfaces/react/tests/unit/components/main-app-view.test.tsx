@@ -20,8 +20,8 @@ jest.unstable_mockModule('../../../src/components/Header.js', () => ({
 }));
 
 jest.unstable_mockModule('../../../src/components/Footer.js', () => ({
-    Footer: ({operationName, connectionStatus, thinkingStatus}: any) => (
-        <footer>footer:{operationName}:{connectionStatus}:{thinkingStatus?.active ? `${thinkingStatus.context}:${thinkingStatus.taskTitle || ''}` : 'idle'}</footer>
+    Footer: ({operationName, connectionStatus, thinkingStatus, operationHealth}: any) => (
+        <footer>footer:{operationName}:{connectionStatus}:{thinkingStatus?.active ? `${thinkingStatus.context}:${thinkingStatus.taskTitle || ''}` : 'idle'}:{operationHealth?.band || 'no-health'}</footer>
     ),
 }));
 
@@ -32,7 +32,7 @@ jest.unstable_mockModule('../../../src/components/UnifiedInputPrompt.js', () => 
 }));
 
 jest.unstable_mockModule('../../../src/components/Terminal.js', () => ({
-    Terminal: ({onEvent, onMetricsUpdate, onThinkingUpdate, animationsEnabled}: any) => (
+    Terminal: ({onEvent, onMetricsUpdate, onHealthUpdate, onThinkingUpdate, animationsEnabled}: any) => (
         <>
             <button onClick={() => {
                 onEvent({type: 'task_started', title: 'Enumerate target'});
@@ -55,6 +55,9 @@ jest.unstable_mockModule('../../../src/components/Terminal.js', () => ({
                 onThinkingUpdate({active: false});
                 onMetricsUpdate({tokens: 10});
             }}>terminal:complete</button>
+            <button onClick={() => {
+                onHealthUpdate({status: 'available', score: 0.84, band: 'good'});
+            }}>terminal:health</button>
         </>
     ),
 }));
@@ -87,6 +90,7 @@ const createProps = (overrides: Record<string, any> = {}) => ({
     },
     actions: {
         updateMetrics: jest.fn(),
+        updateHealth: jest.fn(),
         ...overrides.actions,
     },
     currentTheme: {
@@ -147,9 +151,10 @@ describe('MainAppView', () => {
     it('renders modals and operation streams while forwarding lifecycle metrics', async () => {
         const {MainAppView} = await load();
         const updateMetrics = jest.fn();
+        const updateHealth = jest.fn();
         const onModalClose = jest.fn();
         const props = createProps({
-            actions: {updateMetrics},
+            actions: {updateMetrics, updateHealth},
             activeModal: ModalType.CONFIG,
             onModalClose,
             appState: {
@@ -185,6 +190,11 @@ describe('MainAppView', () => {
             view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:complete'))!.props.onClick();
         });
         expect(updateMetrics).toHaveBeenCalledWith({tokens: 10});
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:health'))!.props.onClick();
+        });
+        expect(updateHealth).toHaveBeenCalledWith({status: 'available', score: 0.84, band: 'good'});
         expect(textFromTree(view.toJSON())).toContain('footer::offline:idle');
 
         await act(async () => {

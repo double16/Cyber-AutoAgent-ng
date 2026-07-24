@@ -134,6 +134,43 @@ describe('header and footer components', () => {
         expect(frame).toContain('[ESC] Kill Switch');
     });
 
+    it('renders only valid health score and band prominently at narrow widths', async () => {
+        const {render, Footer} = await load();
+        const originalColumns = process.stdout.columns;
+
+        try {
+            Object.defineProperty(process.stdout, 'columns', {value: 40, configurable: true});
+            const frame = render(
+                <Footer
+                    deploymentMode="local-cli"
+                    isOperationRunning
+                    isInputPaused={false}
+                    operationHealth={{
+                        status: 'available',
+                        score: 0.84,
+                        band: 'good',
+                        task_counts: {failed: 2},
+                    }}
+                />
+            ).lastFrame();
+
+            expect(frame).toContain('🩺🟢 84% GOOD');
+            expect(frame).toContain('style="color:cyan;font-weight:bold"');
+            expect(frame).not.toContain('task_counts');
+
+            const invalidFrame = render(
+                <Footer
+                    isOperationRunning={false}
+                    isInputPaused={false}
+                    operationHealth={{status: 'unavailable', score: 0.84, band: 'good'}}
+                />
+            ).lastFrame();
+            expect(invalidFrame).not.toContain('🩺🟢 84% GOOD');
+        } finally {
+            Object.defineProperty(process.stdout, 'columns', {value: originalColumns, configurable: true});
+        }
+    });
+
     it('renders normal thinking details, task title, disabled fallback, and recording glyph', async () => {
         const {render, Footer} = await load();
 

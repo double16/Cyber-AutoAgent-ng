@@ -5,7 +5,7 @@ from typing import Any
 
 from strands import tool
 
-from modules.tools.memory import _operation_output_root
+from modules.tools.memory import _artifact_path_from_ref, _operation_output_root
 
 
 @tool
@@ -19,8 +19,11 @@ def read_artifact(path: str, start_line: int = 1, max_lines: int = 200) -> str:
     """
 
     root = _operation_output_root()
-    candidate = path if os.path.isabs(path) else os.path.join(root, path)
-    resolved = os.path.realpath(candidate)
+    if str(path).startswith(("artifact:", "artifact_id:")):
+        resolved = _artifact_path_from_ref(path)
+    else:
+        candidate = path if os.path.isabs(path) else os.path.join(root, path)
+        resolved = os.path.realpath(candidate)
     if os.path.commonpath([root, resolved]) != root:
         raise ValueError("Artifact path is outside the current operation output")
     if not os.path.isfile(resolved):
@@ -39,7 +42,7 @@ def read_artifact(path: str, start_line: int = 1, max_lines: int = 200) -> str:
                 lines.append(line.rstrip("\n"))
 
     payload: dict[str, Any] = {
-        "path": resolved,
+        "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
         "start_line": start_line,
         "end_line": start_line + len(lines) - 1 if lines else start_line - 1,
         "total_lines": total_lines,

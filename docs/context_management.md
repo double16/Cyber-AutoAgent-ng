@@ -414,6 +414,7 @@ Artifact references include immediate context for LLM comprehension:
 | `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS` | 2       | Repeated blocked recovery calls before the task executor is stopped; minimum `1`.         |
 | `CYBER_TOOL_RECOVERY_MAX_CORRECTIONS`       | 2       | Changed retries allowed for one failed task invocation; minimum `1`.                      |
 | `CYBER_TASK_CREATOR_MAX_CORRECTIONS`        | 4       | Retained task-creation correction turns after the initial rejected call; minimum `0`.     |
+| `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS`     | 2       | Retained acceptance correction turns after the initial rejected call; minimum `0`.        |
 
 The repeat guard is scoped to one agent invocation and detects exact contiguous cycles, including a single unchanged
 call or alternating calls such as `A, B, A, B, A, B`. It reuses the most recent completed result for the matching call

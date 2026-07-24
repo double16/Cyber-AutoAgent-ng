@@ -650,15 +650,50 @@ def run_agent_until_terminal_state(
                         else:
                             break
 
-                    current_message += (
-                        "**MANDATORY ACTION**: Call an available tool now to make concrete progress. "
-                        "Do not respond with analysis or a plan."
-                    )
+                    required_tools = ", ".join(sorted(run_policy.required_tool_names))
+                    if run_policy.actionless_mode == "task_progress":
+                        completion_instruction = (
+                            f"Treat the required completion tool(s) ({required_tools}) as completion conditions, not "
+                            "necessarily the next action. Use them only after their prerequisite work and evidence "
+                            "are complete."
+                            if required_tools
+                            else "Follow the controller's recovery guidance and stay within the assigned task."
+                        )
+                        current_message += (
+                            "**MANDATORY ACTION**: Continue the assigned task under its run policy. "
+                            "Call the next registered tool needed to satisfy an unmet acceptance criterion and "
+                            f"create durable evidence. {completion_instruction} "
+                            "Do not respond with analysis or a plan."
+                        )
+                    elif required_tools and not run_policy.allow_text_final_after_tools:
+                        current_message += (
+                            "**MANDATORY ACTION**: A text-only response cannot complete this role. "
+                            f"Call {required_tools} now using its registered schema. "
+                            "Do not call any tool that is not registered for this role."
+                        )
+                    else:
+                        current_message += (
+                            "**MANDATORY ACTION**: Call an available tool now to make concrete progress. "
+                            "Do not respond with analysis or a plan."
+                        )
                 else:
                     logger.warning(
                         "Attempting to redirect model again because no tool calls were detected in last execution loop."
                     )
-                    if not run_policy.allow_text_final_after_tools:
+                    if run_policy.actionless_mode == "task_progress":
+                        required_tools = ", ".join(sorted(run_policy.required_tool_names))
+                        completion_instruction = (
+                            f"Use the required completion tool(s) ({required_tools}) only when their prerequisites "
+                            "are complete."
+                            if required_tools
+                            else "Follow the controller's recovery guidance and stay within the assigned task."
+                        )
+                        current_message += (
+                            "**MANDATORY ACTION**: Resume the same assigned task and call the next registered tool "
+                            "that addresses its unmet acceptance criteria. Preserve completed work and durable "
+                            f"evidence. {completion_instruction} Do not provide more analysis."
+                        )
+                    elif not run_policy.allow_text_final_after_tools:
                         required_tools = ", ".join(sorted(run_policy.required_tool_names)) or "an available tool"
                         current_message += (
                             "**MANDATORY ACTION**: A text-only response cannot complete this role. "

@@ -155,7 +155,8 @@ Event types handled by interface:
 - `task_started` / `task_deferred` / `task_done`: Workflow lifecycle events; deferral keeps work pending for
   continuation, while completion includes finding-validation resolution
 - `reasoning`: Agent decision-making context
-- `progress_update`: Progress boundary; `step` is internal sequence metadata and `progressPercent` is budget usage
+- `progress_update`: Progress boundary; `step` is internal sequence metadata, `progressPercent` is budget usage, and
+  optional `health` supplies a compact colored workflow-health score and band in the stream and persistent footer
 - `metrics_update`: Token usage, costs and budget usage
 
 Typed memory tools are rendered according to their purpose. `store_finding` is shown as a candidate awaiting

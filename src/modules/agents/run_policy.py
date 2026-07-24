@@ -1,7 +1,10 @@
 """Agent run-loop completion policy."""
 
 from dataclasses import dataclass, field
-from typing import FrozenSet, Iterable
+from typing import FrozenSet, Iterable, Literal
+
+
+ActionlessMode = Literal["auto", "required_tool", "task_progress"]
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,7 @@ class AgentRunPolicy:
     max_agent_calls: int = 64
     max_model_turns: int = 64
     max_tool_calls: int = 0
+    actionless_mode: ActionlessMode = "auto"
     ignored_terminal_tool_names: FrozenSet[str] = field(default_factory=frozenset)
     terminal_reason: str = "agent_completed_required_tools"
     terminal_message: str = "Agent completed required tool calls"
@@ -40,6 +44,7 @@ class AgentRunPolicy:
         max_agent_calls: int = 64,
         max_model_turns: int = 64,
         max_tool_calls: int = 0,
+        actionless_mode: ActionlessMode = "auto",
         ignored_terminal_tool_names: Iterable[str] = frozenset(),
         terminal_reason: str = "agent_completed_required_tools",
         terminal_message: str = "Agent completed required tool calls",
@@ -54,6 +59,9 @@ class AgentRunPolicy:
         object.__setattr__(self, "max_agent_calls", max(1, int(max_agent_calls)))
         object.__setattr__(self, "max_model_turns", max(1, int(max_model_turns)))
         object.__setattr__(self, "max_tool_calls", max_tool_calls)
+        if actionless_mode not in {"auto", "required_tool", "task_progress"}:
+            raise ValueError("actionless_mode must be auto|required_tool|task_progress")
+        object.__setattr__(self, "actionless_mode", actionless_mode)
         object.__setattr__(self, "ignored_terminal_tool_names", frozenset(ignored_terminal_tool_names))
         object.__setattr__(self, "terminal_reason", terminal_reason)
         object.__setattr__(self, "terminal_message", terminal_message)

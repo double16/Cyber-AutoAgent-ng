@@ -20,6 +20,7 @@ import { ApplicationState } from '../hooks/useApplicationState.js';
 import { OperationHistoryEntry } from '../hooks/useOperationManager.js';
 import { ModalType } from '../hooks/useModalManager.js';
 import type { ThinkingStatus } from '../types/thinking.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 
 interface MainAppViewProps {
   appState: ApplicationState;
@@ -179,6 +180,10 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
     actionsRef.current.updateMetrics?.(metrics);
   }, []); // No dependencies - uses ref to prevent re-creation
 
+  const handleHealthUpdate = useCallback((health: OperationHealthSnapshot) => {
+    actionsRef.current.updateHealth?.(health);
+  }, []);
+
   const handleThinkingUpdate = useCallback((status: ThinkingStatus) => {
     setThinkingStatus(status);
   }, []);
@@ -327,6 +332,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
               collapsed={activeModal !== ModalType.NONE}
               onEvent={handleEvent}
               onMetricsUpdate={handleMetricsUpdate}
+              onHealthUpdate={handleHealthUpdate}
               onThinkingUpdate={handleThinkingUpdate}
               animationsEnabled={isAutoScrollEnabled && activeModal === ModalType.NONE}
               cleanupRef={terminalCleanupRef}
@@ -359,6 +365,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
           <Footer 
             model={appState.activeOperation?.model || ""}
             operationMetrics={appState.operationMetrics}
+            operationHealth={appState.operationHealth}
             connectionStatus={appState.isDockerServiceAvailable ? 'connected' : 'offline'}
             modelProvider={applicationConfig?.modelProvider}
             deploymentMode={applicationConfig?.deploymentMode}
