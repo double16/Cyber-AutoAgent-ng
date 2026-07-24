@@ -1452,6 +1452,13 @@ def build_report_sections(
                     evidence_integrity_errors.append(
                         {"evidence_id": item.get("id", ""), "reference": reference, "error": str(error)}
                     )
+        finding_count = sum(1 for item in evidence if item.get("category") == "finding")
+        observation_count = sum(
+            1 for item in evidence if item.get("category") in {"signal", "observation", "discovery"}
+        )
+        validation_failure_count = sum(
+            1 for item in evidence if item.get("category") == "validation_failure"
+        )
         sections = {
             "operation_id": operation_id,
             "target": target,
@@ -1480,9 +1487,9 @@ def build_report_sections(
             "short_term_recommendations": report_content.get("short_term", ""),
             "long_term_recommendations": report_content.get("long_term", ""),
             "raw_evidence": evidence,
-            "validation_failure_count": sum(
-                1 for item in evidence if item.get("category") == "validation_failure"
-            ),
+            "finding_count": finding_count,
+            "observation_count": observation_count,
+            "validation_failure_count": validation_failure_count,
             "tools_summary": tools_summary,
             "analysis_framework": domain_lens.get("framework", ""),
             "module": module,
@@ -1503,7 +1510,11 @@ def build_report_sections(
         }
 
         logger.info(
-            "Report sections built: %d findings (%d critical, %d high)",
+            "Report sections built: %d findings, %d observations, %d validation failures "
+            "(%d evidence items total; %d critical, %d high)",
+            finding_count,
+            observation_count,
+            validation_failure_count,
             len(evidence),
             severity_counts["critical"],
             severity_counts["high"],

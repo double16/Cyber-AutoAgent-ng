@@ -7,6 +7,10 @@ import pytest
 
 from src.modules.handlers.utils import get_tool_spec
 from src.modules.tools.memory import (
+    AcceptanceBasis,
+    AcceptanceContract,
+    AcceptanceCriterion,
+    EvidenceRequirement,
     Task,
     finalize_finding_validation,
     record_finding_validation,
@@ -262,13 +266,27 @@ def test_store_finding_rejects_assumed_observed_result(memory_client, operation_
 def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, operation_ids):
     artifact = tmp_path / "response.txt"
     artifact.write_text("HTTP 200", encoding="utf-8")
+    validation_acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
     task = Task(
-        "task-1", "Verify", "Verify claim", make_acceptance().to_dict(), 1, "active",
+        "task-1", "Verify", "Verify claim", validation_acceptance, 1, "active",
         kind="finding_validation", reference_id="finding-1"
     )
     plan_store = MagicMock()
     plan_store.get_finding.return_value = {"verification_task_uid": "task-1"}
     plan_store.get_tasks.return_value = [task]
+    acceptance_results = []
+    plan_store.get_acceptance_results.side_effect = lambda *_args: list(acceptance_results)
+    plan_store.store_acceptance_results.side_effect = (
+        lambda _op_id, _task_uid, results: acceptance_results.extend(results)
+    )
     with (
         patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
@@ -278,10 +296,13 @@ def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, o
             "finding-1", "confirmed", "Confirmed", ["Request target"], "direct", [str(artifact)]
         )
 
-    assert "evaluator review" in result
+    payload = json.loads(result)
+    assert payload["complete"] is True
+    assert payload["acceptance"]["complete"] is True
     validation = plan_store.store_finding_validation.call_args.args[2]
     assert validation["outcome"] == "confirmed"
     assert validation["evidence_artifacts"] == ["artifact:response.txt"]
+    assert acceptance_results[0].disposition == "existing_finding"
 
 
 def test_differential_confirmation_requires_control(tmp_path: Path, operation_ids):
@@ -298,6 +319,56 @@ def test_differential_confirmation_requires_control(tmp_path: Path, operation_id
             record_finding_validation(
                 "finding-1", "confirmed", "Confirmed", ["Test"], "differential", [str(artifact)]
             )
+
+
+def test_not_confirmed_validation_materializes_negative_acceptance(tmp_path: Path, operation_ids):
+    artifact = tmp_path / "negative-control.txt"
+    artifact.write_text("Behavior not reproduced", encoding="utf-8")
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    task = Task(
+        "task-1", "Verify", "Verify claim", acceptance, 1, "active",
+        kind="finding_validation", reference_id="finding-1",
+    )
+    stored_results = []
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {"verification_task_uid": "task-1"}
+    plan_store.get_tasks.return_value = [task]
+    plan_store.get_acceptance_results.side_effect = lambda *_args: list(stored_results)
+    plan_store.store_acceptance_results.side_effect = (
+        lambda _op_id, _task_uid, results: stored_results.extend(results)
+    )
+    with (
+        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry"),
+    ):
+        payload = json.loads(record_finding_validation(
+            "finding-1",
+            "not verified",
+            "Could not reproduce",
+            ["Replay request"],
+            "direct",
+            [str(artifact)],
+        ))
+
+    assert payload["outcome"] == "not_confirmed"
+    assert stored_results[0].status == "assessed_negative"
+    assert stored_results[0].disposition == "no_vulnerability"
+
+
+def test_finding_validation_schema_advertises_only_canonical_enum_values():
+    schema = get_tool_spec(record_finding_validation)["inputSchema"]["json"]
+
+    assert schema["properties"]["outcome"]["enum"] == ["confirmed", "not_confirmed"]
+    assert schema["properties"]["evidence_strategy"]["enum"] == ["direct", "differential"]
 
 
 def test_finalize_finding_validation_promotes_only_approved_confirmation(operation_ids):

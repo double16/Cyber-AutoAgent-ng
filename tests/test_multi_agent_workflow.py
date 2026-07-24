@@ -511,8 +511,7 @@ def test_pending_finding_validation_is_prioritized_and_events_include_scope():
     assert event["target_scope"] == "subset"
     assert event["target_ids"] == ["target-1"]
 
-    with pytest.raises(ValueError, match="phase.status"):
-        PlanPhase(id=3, title="Phase", status="complete")
+    assert PlanPhase(id=3, title="Phase", status="complete").status == "done"
 
 
 def test_extract_json_object_handles_fences_embedded_json_and_invalid_values():
@@ -928,7 +927,7 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert policies[0].required_tool_names == {"record_finding_validation", "record_task_acceptance"}
+    assert policies[0].required_tool_names == {"record_finding_validation"}
     finalize.assert_called_once_with(task, "done", "evidence approved")
     assert state.tasks[0].status == "done"
     assert state.tasks[0].status_reason == "evidence approved"
@@ -2007,7 +2006,7 @@ def test_phase_hard_cap_defers_active_task_without_running_worker_and_advances()
         controller.run()
 
     assert calls == ["phase_evaluator"]
-    assert state.plan.phases[0].status == "done"
+    assert state.plan.phases[0].status == "partial_failure"
     assert state.plan.phases[1].status == "active"
     assert next(task for task in state.tasks if task.task_uid == "active").status == "pending"
     assert next(task for task in state.tasks if task.task_uid == "pending").status == "pending"
@@ -2019,7 +2018,7 @@ def test_phase_hard_cap_defers_active_task_without_running_worker_and_advances()
         "status_reason": next(task for task in state.tasks if task.task_uid == "active").status_reason,
     }
     plan_event = controller.runtime.callback_handler.events[1]
-    assert "[done] 1. Recon" in plan_event["content"]
+    assert "[partial_failure] 1. Recon" in plan_event["content"]
     assert "[active] 2. Validate" in plan_event["content"]
     assert plan_event["metadata"] == {
         "source": "workflow",
@@ -2205,6 +2204,7 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "Do not treat phase goals, tool preferences, or generic advice as constraints" in prompt
     assert "findings-consolidation" in prompt
     assert "Use bounded criteria" in prompt
+    assert "semantically distinct objective" in prompt
 
 
 def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
@@ -2227,7 +2227,7 @@ def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
 
     assert "findings-consolidation" in prompt
     assert "equivalent post-processing phase, regardless of its title" in prompt
-    assert "bounded, measurable criteria" in prompt
+    assert "superficial rewording" in prompt
 
 
 def test_module_termination_policy_directs_plan_creation_and_review():
@@ -2759,6 +2759,34 @@ def test_empty_final_validation_phase_with_unresolved_finding_requires_tasks():
     )
 
     assert controller._can_complete_empty_validation_phase(plan, plan.phases[0]) is False
+
+
+def test_empty_final_validation_phase_requires_complete_predecessor_work():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Assess routes", status="partial_failure"),
+            PlanPhase(
+                id=2,
+                title="Impact Validation and Proof Generation",
+                status="active",
+                criteria="Validate findings with proof",
+            ),
+        ],
+    )
+    pending = Task(task_uid="pending", title="Pending", objective="assess route", phase=1, status="pending")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=AdvancingFakeState(plan, tasks=[pending]),
+        text_runner=lambda *_args: "{}",
+    )
+
+    assert controller._can_complete_empty_validation_phase(plan, plan.phases[1]) is False
+    summary = controller._workflow_coverage_summary(plan)
+    assert summary[0]["status_reason"] == "Phase incomplete with 1 actionable task(s) remaining."
 
 
 def test_continuing_phase_with_task_history_rechecks_then_advances_on_creator_failure():

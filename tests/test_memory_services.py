@@ -6,12 +6,44 @@ from unittest.mock import Mock
 
 from jsonschema import Draft202012Validator
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 import modules.tools as tools_module
 from modules.handlers.utils import get_tool_spec
 from modules.tools import memory as mod
 from tests.helpers import memory_tasks
 from tests.helpers.acceptance import acceptance_dict, make_acceptance, task_proposal
+
+
+@pytest.mark.parametrize(
+    ("adapter_type", "alias", "canonical"),
+    [
+        (mod.NormalizedAcceptanceResultStatus, "Completed", "satisfied"),
+        (mod.NormalizedAcceptanceDisposition, "no-finding", "no_vulnerability"),
+        (mod.NormalizedFindingValidationOutcome, "not verified", "not_confirmed"),
+        (mod.NormalizedEvidenceStrategy, "negative-control", "differential"),
+        (mod.NormalizedTaskStatus, "in progress", "active"),
+        (mod.NormalizedPlanStatus, "N-A", "not_applicable"),
+    ],
+)
+def test_shared_semantic_enum_normalization(adapter_type, alias, canonical):
+    assert TypeAdapter(adapter_type).validate_python(alias) == canonical
+
+
+@pytest.mark.parametrize(
+    "adapter_type",
+    [
+        mod.NormalizedAcceptanceResultStatus,
+        mod.NormalizedAcceptanceDisposition,
+        mod.NormalizedFindingValidationOutcome,
+        mod.NormalizedEvidenceStrategy,
+        mod.NormalizedTaskStatus,
+        mod.NormalizedPlanStatus,
+    ],
+)
+def test_shared_semantic_enum_normalization_keeps_unknown_values_invalid(adapter_type):
+    with pytest.raises(ValidationError):
+        TypeAdapter(adapter_type).validate_python("invented-state")
 
 
 class FakePlanStore:
@@ -1062,6 +1094,13 @@ def test_create_tasks_groups_endpoint_parameter_and_trailing_slash_variants(fake
                 "value": "http://target.test/login?username=test",
             },
             {
+                "id": "login-csrf",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "csrf_token",
+                "attributes": {"endpoint_id": "login-route"},
+            },
+            {
                 "id": "security-route",
                 "target_id": "target-1",
                 "kind": "endpoint",
@@ -1086,13 +1125,14 @@ def test_create_tasks_groups_endpoint_parameter_and_trailing_slash_variants(fake
     }])
 
     assert [task.acceptance.basis.item_ids for task in store.tasks] == [
-        ("login-route", "login-username"),
+        ("login-route", "login-username", "login-csrf"),
         ("security-route",),
         ("login-workflow",),
     ]
     assert store.tasks[0].title == "Assess endpoint http://target.test/login [target-1]"
     assert store.tasks[1].title == "Assess endpoint http://target.test/security [target-1]"
     assert "login then logout" in store.tasks[2].title
+    assert all(task.objective.startswith("Assess the frozen inventory") for task in store.tasks)
     assert all(task.target_scope == "subset" and task.target_ids == ["target-1"] for task in store.tasks)
 
 
@@ -1102,6 +1142,62 @@ def test_normalized_route_preserves_service_scheme_and_drops_query():
 
     assert http_route == ("http://target.test/login", "http://target.test/login")
     assert https_route == ("https://target.test/login", "https://target.test/login")
+
+
+def test_inventory_url_normalization_preserves_boundary_and_repairs_common_route_errors():
+    value = mod._canonical_inventory_url(
+        "http://host.docker.internal:4280/vulnerabilities/sqli/vulnerabilities/sqli/?id=1&&",
+        "http://host.docker.internal:4280",
+    )
+
+    assert value == "http://host.docker.internal:4280/vulnerabilities/sqli/?id=1"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("http://host.docker.internal:4220/login", "registered target"),
+        ("http://host.docker.internal:4280/etc/passwd", "filesystem path"),
+        ("/relative/path", "absolute HTTP"),
+    ],
+)
+def test_inventory_url_normalization_rejects_wrong_boundary_and_malformed_routes(value, message):
+    with pytest.raises(ValueError, match=message):
+        mod._canonical_inventory_url(value, "http://host.docker.internal:4280")
+
+
+def test_bound_executable_target_corrects_model_copied_port(monkeypatch):
+    plan = mod.OperationPlan(
+        objective="Test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assess", status="active")],
+        targets=[mod.OperationTarget(
+            target_id="target-1",
+            value="http://host.docker.internal:4280",
+            type="network",
+        )],
+    )
+    task = mod.Task(
+        task_uid="task-1",
+        title="Assess",
+        objective="Assess target",
+        acceptance=make_acceptance(),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    store = Mock()
+    store.get_tasks.return_value = [task]
+    monkeypatch.setattr(mod, "_get_active_plan", lambda: plan)
+    monkeypatch.setattr(mod, "_get_plan_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "operation")
+
+    assert (
+        mod.resolve_bound_executable_target("http://host.docker.internal:4220")
+        == "http://host.docker.internal:4280"
+    )
 
 
 def test_coverage_route_grouping_does_not_expand_with_context_window():
@@ -2427,6 +2523,80 @@ def test_inventory_snapshot_fanout_deduplicates_staged_routes(fake_memory_client
 
     assert result == {"complete": True, "created_count": 1, "duplicate_count": 1}
     assert len(store.tasks) == 1
+
+
+def test_inventory_snapshot_fanout_preserves_distinct_objectives(fake_memory_client, monkeypatch):
+    _client, store = fake_memory_client
+    logger_info = Mock()
+    monkeypatch.setattr(mod.logger, "info", logger_info)
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    common = {
+        "limits": {},
+        "snapshot_refs": [f"artifact:{manifest}"],
+        "target_ids": ["target-1"],
+    }
+    authentication = {
+        **common,
+        "title": "Authentication mapping",
+        "objective": "Map authentication and session management behavior",
+        "criteria": [{"description": "Map authentication entry points and session persistence"}],
+    }
+    authorization = {
+        **common,
+        "title": "Authorization mapping",
+        "objective": "Map authorization and role boundary behavior",
+        "criteria": [{"description": "Map roles and access-control boundaries"}],
+    }
+
+    result = json.loads(mod.create_tasks([authentication, authorization]))
+
+    assert result == {"complete": True, "created_count": 2, "duplicate_count": 0}
+    assert len(store.tasks) == 2
+    assert store.tasks[0].acceptance.basis.item_ids == store.tasks[1].acceptance.basis.item_ids
+    assert "authentication and session" in store.tasks[0].objective.lower()
+    assert "authorization and role" in store.tasks[1].objective.lower()
+    fanout_calls = [call for call in logger_info.call_args_list if "Task proposal fan-out" in call.args[0]]
+    assert len(fanout_calls) == 2
+    assert fanout_calls[0].args[1:] == (0, "Authentication mapping", authentication["objective"], 1, 1, 0)
+    assert fanout_calls[1].args[1:] == (1, "Authorization mapping", authorization["objective"], 1, 1, 0)
+
+
+def test_inventory_snapshot_fanout_preserves_distinct_acceptance_intent(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    proposal = {
+        "title": "Map trust boundaries",
+        "objective": "Map the assigned endpoint's trust boundaries",
+        "limits": {},
+        "snapshot_refs": [f"artifact:{manifest}"],
+        "criteria": [{"description": "Record session transition boundaries"}],
+        "target_ids": ["target-1"],
+    }
+    role_intent = {
+        **proposal,
+        "criteria": [{"description": "Record role-based access boundaries"}],
+    }
+
+    result = json.loads(mod.create_tasks([proposal, role_intent]))
+
+    assert result == {"complete": True, "created_count": 2, "duplicate_count": 0}
+    descriptions = [task.acceptance.criteria[0].description for task in store.tasks]
+    assert any("session transition boundaries" in description for description in descriptions)
+    assert any("role-based access boundaries" in description for description in descriptions)
 
 
 def test_exhausted_snapshot_with_gap_creates_inventory_refinement(fake_memory_client):

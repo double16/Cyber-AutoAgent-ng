@@ -208,6 +208,13 @@ def specialized_recon_orchestrator(
     if not target:
         raise ValueError("target is required")
 
+    try:
+        from modules.tools.memory import resolve_bound_executable_target
+
+        target = resolve_bound_executable_target(target)
+    except ImportError:
+        pass
+
     target = _normalize_target_endpoint(target)
     if not target:
         raise ValueError("target is required")

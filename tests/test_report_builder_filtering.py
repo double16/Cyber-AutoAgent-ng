@@ -148,14 +148,15 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
             f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 209251, "inputTokens": 208136, "outputTokens": 1115, "totalTokens": 209251, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.75, "duration": "20m 0s", "budget": {{ "maxDurationMinutes": 60, "maxTokens": null, "maxCost": null }}, "progress": 0.1, "progressPercent": 10, "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_171", "timestamp": "2026-01-26T21:29:49.060488"}}__CYBER_EVENT_END__\n')
             f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 235860, "inputTokens": 234695, "outputTokens": 1165, "totalTokens": 235860, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 2.10, "duration": "21m 0s", "budget": {{ "maxDurationMinutes": 60, "maxTokens": null, "maxCost": null }}, "progress": 0.15, "progressPercent": 15, "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_185", "timestamp": "2026-01-26T21:30:49.111082"}}__CYBER_EVENT_END__\n')
 
-        out = build_report_sections(
-            operation_id=op_id,
-            target="example.com",
-            objective="test",
-            module="web",
-            steps_executed=197,
-            tools_used=["shell", "shell", "python_repl", "shell", "python_repl"],
-        )
+        with patch("modules.handlers.report_generator.logger.info") as logger_info:
+            out = build_report_sections(
+                operation_id=op_id,
+                target="example.com",
+                objective="test",
+                module="web",
+                steps_executed=197,
+                tools_used=["shell", "shell", "python_repl", "shell", "python_repl"],
+            )
 
         assert out.get("operation_id") == op_id
         assert out.get("target") == "example.com"
@@ -163,7 +164,19 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert out.get("date")
         assert out.get("steps_executed") == 197
         assert out.get("severity_counts", {}) == {"critical": 1, "high": 1, "medium": 2, "low": 2, "info": 0}
+        assert out["finding_count"] == 6
+        assert out["observation_count"] == 5
         assert out["validation_failure_count"] == 4
+        logger_info.assert_any_call(
+            "Report sections built: %d findings, %d observations, %d validation failures "
+            "(%d evidence items total; %d critical, %d high)",
+            6,
+            5,
+            4,
+            15,
+            1,
+            1,
+        )
         assert out.get("critical_count") == 1
         assert out.get("high_count") == 1
         assert out.get("medium_count") == 2
@@ -339,6 +352,8 @@ def test_report_builder_includes_untagged_evidence(mock_client_cls):
     ), "Should include untagged evidence"
 
     assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    assert out["finding_count"] == 0
+    assert out["observation_count"] == 0
     assert out["validation_failure_count"] == 1
 
 
@@ -365,9 +380,10 @@ def test_report_builder_only_has_info_evidence(mock_client_cls):
         },
     ]
 
-    out = build_report_sections(
-        operation_id=op_id, target="example.com", objective="test"
-    )
+    with patch("modules.handlers.report_generator.logger.info") as logger_info:
+        out = build_report_sections(
+            operation_id=op_id, target="example.com", objective="test"
+        )
     assert len(out.get("raw_evidence")) == 3
     evidence_text = out.get("evidence_text", "")
     assert "/a" in evidence_text, "Expected matching observation from current operation"
@@ -375,3 +391,16 @@ def test_report_builder_only_has_info_evidence(mock_client_cls):
     assert "/c" in evidence_text, "Expected matching signal from current operation"
 
     assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    assert out["finding_count"] == 0
+    assert out["observation_count"] == 3
+    assert out["validation_failure_count"] == 0
+    logger_info.assert_any_call(
+        "Report sections built: %d findings, %d observations, %d validation failures "
+        "(%d evidence items total; %d critical, %d high)",
+        0,
+        3,
+        0,
+        3,
+        0,
+        0,
+    )

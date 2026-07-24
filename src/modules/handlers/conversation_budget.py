@@ -202,6 +202,71 @@ MAX_THRESHOLD_RATIO = 0.98  # Maximum threshold ratio (never exceed 98% of limit
 SMALL_CONVERSATION_THRESHOLD = 3  # Skip pruning for conversations with fewer messages
 # With preserve_first=1 and preserve_last=5, overlap is 6 messages
 PRESERVATION_OVERLAP_THRESHOLD = 6  # Expected overlap for early operations (first+last)
+STALE_TOOL_RESULT_THRESHOLD = 2000
+
+
+def _reduction_signature(messages: Sequence[Message]) -> tuple[int, int, tuple[str, ...]]:
+    """Return a stable progress signature for one reduction stage."""
+
+    serialized_sizes = []
+    identifiers = []
+    for index, message in enumerate(messages):
+        rendered = _json_to_compact_str(message)
+        serialized_sizes.append(len(rendered))
+        identifiers.append(str(message.get("id") or message.get("messageId") or index))
+    return len(messages), sum(serialized_sizes), tuple(identifiers)
+
+
+def _compact_stale_tool_outputs(agent: Agent, preserve_recent: int) -> int:
+    """Compact old tool results while retaining durable references and workflow state."""
+
+    messages = getattr(agent, "messages", None)
+    if not isinstance(messages, list):
+        return 0
+    stale_limit = max(0, len(messages) - max(1, preserve_recent))
+    compacted = 0
+    reference_pattern = re.compile(r"\b(?:artifact|artifact_id|memory|finding):[^\s\],}\\\"]+")
+    state_pattern = re.compile(
+        r'"(?:task_uid|criterion_id|status|disposition|complete|replayed|memory_published)"\s*:\s*'
+        r'(?:"[^\"]*"|true|false|null|-?\d+(?:\.\d+)?)'
+    )
+    for message in messages[:stale_limit]:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or "toolResult" not in block:
+                continue
+            tool_result = block.get("toolResult")
+            if not isinstance(tool_result, dict):
+                continue
+            result_content = tool_result.get("content", [])
+            rendered = _json_to_compact_str(result_content)
+            if len(rendered) <= STALE_TOOL_RESULT_THRESHOLD:
+                continue
+            searchable_chunks = []
+            for item in result_content if isinstance(result_content, list) else [result_content]:
+                if isinstance(item, dict) and "text" in item:
+                    searchable_chunks.append(str(item["text"]))
+                elif isinstance(item, dict) and "json" in item:
+                    searchable_chunks.append(json.dumps(item["json"], sort_keys=True, separators=(",", ":")))
+                else:
+                    searchable_chunks.append(str(item))
+            searchable = "\n".join(searchable_chunks)
+            references = list(dict.fromkeys(reference_pattern.findall(searchable)))
+            state = list(dict.fromkeys(state_pattern.findall(searchable)))
+            summary = {
+                "compacted": True,
+                "original_chars": len(rendered),
+                "status": tool_result.get("status"),
+                "references": references,
+                "workflow_state": state,
+            }
+            tool_result["content"] = [{"json": summary}]
+            compacted += 1
+    if compacted:
+        logger.info("Compacted %d stale tool result(s) while preserving references and workflow state", compacted)
+    return compacted
 
 
 def _record_context_reduction_event(
@@ -988,8 +1053,14 @@ class MappingConversationManager(SummarizingConversationManager):
         # Use estimation to measure reduction impact (not telemetry - see docstring)
         before_tokens = safe_estimate_tokens(agent)
         stage = "sliding"
+        exhausted = getattr(agent, "_context_reduction_exhausted", None)
+        if not isinstance(exhausted, set):
+            exhausted = set()
+        sliding_signature = _reduction_signature(agent.messages)
         sliding_overridden = "reduce_context" in vars(self._sliding)
-        if before_msgs > window_size + self.preserve_first or sliding_overridden:
+        if ("sliding", sliding_signature) in exhausted:
+            logger.debug("Skipping exhausted sliding reduction stage")
+        elif before_msgs > window_size + self.preserve_first or sliding_overridden:
             try:
                 self._sliding.reduce_context(agent, e, **kwargs)
             except ContextWindowOverflowException as overflow_exc:
@@ -1029,6 +1100,42 @@ class MappingConversationManager(SummarizingConversationManager):
             and after_tokens is not None
             and after_tokens < before_tokens
         )
+        if not changed:
+            exhausted.add((stage, sliding_signature))
+            setattr(agent, "_context_reduction_exhausted", exhausted)
+            compact_signature = _reduction_signature(agent.messages)
+            if ("tool_compaction", compact_signature) not in exhausted:
+                stage = "tool_compaction"
+                compacted_results = _compact_stale_tool_outputs(agent, self.preserve_last)
+                after_msgs = _count_agent_messages(agent)
+                after_tokens = safe_estimate_tokens(agent)
+                changed = compacted_results > 0
+                if not changed:
+                    exhausted.add((stage, compact_signature))
+            if not changed:
+                summarize_signature = _reduction_signature(agent.messages)
+                if ("summarizing", summarize_signature) not in exhausted:
+                    stage = "summarizing"
+                    try:
+                        super().reduce_context(agent, e, **kwargs)
+                    except ContextWindowOverflowException:
+                        logger.debug("Summarizing reduction stage exhausted")
+                    after_msgs = _count_agent_messages(agent)
+                    after_tokens = safe_estimate_tokens(agent)
+                    changed = after_msgs < before_msgs or (
+                        before_tokens is not None
+                        and after_tokens is not None
+                        and after_tokens < before_tokens
+                    )
+                    if not changed:
+                        exhausted.add((stage, summarize_signature))
+            if not changed and len(agent.messages) > self.preserve_first + self.preserve_last + 1:
+                stage = "forced_prune"
+                self._force_prune_oldest(agent, 1)
+                after_msgs = _count_agent_messages(agent)
+                after_tokens = safe_estimate_tokens(agent)
+                changed = after_msgs < before_msgs
+            setattr(agent, "_context_reduction_exhausted", exhausted)
         if changed:
             removed = max(0, before_msgs - after_msgs)
             logger.info(
@@ -1043,13 +1150,20 @@ class MappingConversationManager(SummarizingConversationManager):
         else:
             # SDK Contract: If reduction was not possible, raise exception
             # This allows caller to know context management is exhausted
-            logger.warning(
-                "Context reduction requested but no change detected for stage=%s "
-                "(before=%d, after=%d messages). Reduction may be exhausted.",
-                stage,
-                before_msgs,
-                after_msgs,
-            )
+            warning_key = _reduction_signature(agent.messages)
+            warned = getattr(agent, "_context_reduction_noop_warnings", set())
+            if not isinstance(warned, set):
+                warned = set()
+            if warning_key not in warned:
+                logger.warning(
+                    "Context reduction requested but no change detected for stage=%s "
+                    "(before=%d, after=%d messages). Reduction is exhausted.",
+                    stage,
+                    before_msgs,
+                    after_msgs,
+                )
+                warned.add(warning_key)
+                setattr(agent, "_context_reduction_noop_warnings", warned)
             # Check if we're truly exhausted (can't reduce further)
             total_preserved = self.preserve_first + self.preserve_last
             if after_msgs <= total_preserved + 1:

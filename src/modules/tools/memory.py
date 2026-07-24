@@ -68,6 +68,7 @@ from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
+from modules.tools.semantic_enum import normalize_semantic_enum
 
 # Set up logging
 logger = get_logger("Tools.Memory")
@@ -118,11 +119,24 @@ AcceptanceDisposition = Literal[
 ]
 
 
+def _normalize_semantic_enum(
+    value: Any,
+    *,
+    aliases: Dict[str, str],
+    field_name: str,
+) -> Any:
+    """Normalize a model-facing enum alias while keeping unknown values invalid."""
+
+    return normalize_semantic_enum(
+        value,
+        aliases=aliases,
+        field_name=field_name,
+        logger=logger,
+    )
+
+
 def _normalize_acceptance_status_alias(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    normalized = re.sub(r"[-\s]+", "_", value.strip().lower())
-    aliases = {
+    return _normalize_semantic_enum(value, aliases={
         "complete": "satisfied",
         "completed": "satisfied",
         "success": "satisfied",
@@ -135,18 +149,11 @@ def _normalize_acceptance_status_alias(value: Any) -> Any:
         "not_accessible": "inaccessible",
         "out_of_scope": "excluded",
         "duplicated": "duplicate",
-    }
-    canonical = aliases.get(normalized, normalized)
-    if canonical != normalized:
-        logger.info("Normalized task acceptance status alias %s to %s", normalized, canonical)
-    return canonical
+    }, field_name="acceptance_status")
 
 
 def _normalize_acceptance_disposition_alias(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    normalized = re.sub(r"[-\s]+", "_", value.strip().lower())
-    aliases = {
+    return _normalize_semantic_enum(value, aliases={
         "assessed_negative": "no_vulnerability",
         "negative": "no_vulnerability",
         "no_finding": "no_vulnerability",
@@ -157,11 +164,61 @@ def _normalize_acceptance_disposition_alias(value: Any) -> Any:
         "candidate": "finding_candidate",
         "existing": "existing_finding",
         "duplicate_finding": "existing_finding",
-    }
-    canonical = aliases.get(normalized, normalized)
-    if canonical != normalized:
-        logger.info("Normalized task acceptance disposition alias %s to %s", normalized, canonical)
-    return canonical
+    }, field_name="acceptance_disposition")
+
+
+def _normalize_finding_validation_outcome(value: Any) -> Any:
+    return _normalize_semantic_enum(value, aliases={
+        "verified": "confirmed",
+        "valid": "confirmed",
+        "reproduced": "confirmed",
+        "not_verified": "not_confirmed",
+        "unverified": "not_confirmed",
+        "invalid": "not_confirmed",
+        "not_reproduced": "not_confirmed",
+    }, field_name="finding_validation_outcome")
+
+
+def _normalize_evidence_strategy(value: Any) -> Any:
+    return _normalize_semantic_enum(value, aliases={
+        "single": "direct",
+        "primary": "direct",
+        "comparison": "differential",
+        "comparative": "differential",
+        "negative_control": "differential",
+    }, field_name="evidence_strategy")
+
+
+def _normalize_task_status(value: Any) -> Any:
+    return _normalize_semantic_enum(value, aliases={
+        "complete": "done",
+        "completed": "done",
+        "success": "done",
+        "successful": "done",
+        "partial": "partial_failure",
+        "failed_partial": "partial_failure",
+        "failed": "blocked",
+        "stalled": "blocked",
+        "in_progress": "active",
+        "queued": "pending",
+    }, field_name="task_status")
+
+
+def _normalize_plan_status(value: Any) -> Any:
+    return _normalize_semantic_enum(value, aliases={
+        "complete": "done",
+        "completed": "done",
+        "success": "done",
+        "partial": "partial_failure",
+        "failed_partial": "partial_failure",
+        "failed": "blocked",
+        "stalled": "blocked",
+        "in_progress": "active",
+        "queued": "pending",
+        "not_applicable": "not_applicable",
+        "n_a": "not_applicable",
+        "skipped": "not_applicable",
+    }, field_name="phase_status")
 
 
 NormalizedAcceptanceResultStatus = Annotated[AcceptanceResultStatus, BeforeValidator(_normalize_acceptance_status_alias)]
@@ -169,6 +226,16 @@ NormalizedAcceptanceDisposition = Annotated[
     AcceptanceDisposition,
     BeforeValidator(_normalize_acceptance_disposition_alias),
 ]
+NormalizedFindingValidationOutcome = Annotated[
+    Literal["confirmed", "not_confirmed"],
+    BeforeValidator(_normalize_finding_validation_outcome),
+]
+NormalizedEvidenceStrategy = Annotated[
+    Literal["direct", "differential"],
+    BeforeValidator(_normalize_evidence_strategy),
+]
+NormalizedTaskStatus = Annotated[TaskStatus, BeforeValidator(_normalize_task_status)]
+NormalizedPlanStatus = Annotated[PlanStatus, BeforeValidator(_normalize_plan_status)]
 NonEmptyArtifactRefs = conlist(str, min_length=1)
 TERMINAL_PLAN_STATUSES = ("done", "partial_failure", "blocked", "not_applicable")
 TERMINAL_ACCEPTANCE_STATUSES = (
@@ -609,10 +676,12 @@ class CoverageResult:
         item_id = str(self.item_id or "").strip()
         if not item_id:
             raise ValueError("coverage result item_id required")
-        if self.status not in TERMINAL_ACCEPTANCE_STATUSES:
+        normalized_status = _normalize_acceptance_status_alias(self.status)
+        if normalized_status not in TERMINAL_ACCEPTANCE_STATUSES:
             raise ValueError("coverage result status must be terminal")
         evidence_refs = _normalize_non_empty_strings(self.evidence_refs, "coverage result evidence_refs")
         object.__setattr__(self, "item_id", item_id)
+        object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "evidence_refs", evidence_refs)
 
     @staticmethod
@@ -650,11 +719,13 @@ class AcceptanceResult:
         criterion_id = re.sub(r"\s+", "-", str(self.criterion_id or "").strip().lower())
         if not criterion_id:
             raise ValueError("acceptance result criterion_id required")
-        if self.status not in TERMINAL_ACCEPTANCE_STATUSES:
+        normalized_status = _normalize_acceptance_status_alias(self.status)
+        normalized_disposition = _normalize_acceptance_disposition_alias(self.disposition)
+        if normalized_status not in TERMINAL_ACCEPTANCE_STATUSES:
             raise ValueError(
                 "acceptance result status must be one of: " + "|".join(TERMINAL_ACCEPTANCE_STATUSES)
             )
-        if self.disposition not in (
+        if normalized_disposition not in (
             "no_vulnerability",
             "observation",
             "finding_candidate",
@@ -670,6 +741,8 @@ class AcceptanceResult:
         if len(coverage_ids) != len(set(coverage_ids)):
             raise ValueError("coverage result item_id values must be unique")
         object.__setattr__(self, "criterion_id", criterion_id)
+        object.__setattr__(self, "status", normalized_status)
+        object.__setattr__(self, "disposition", normalized_disposition)
         object.__setattr__(self, "summary", summary)
         object.__setattr__(self, "evidence_refs", evidence_refs)
         object.__setattr__(self, "coverage", coverage)
@@ -730,6 +803,10 @@ class Task:
             raise ValueError("title must be a non-empty string")
         if not isinstance(self.objective, str) or not self.objective.strip():
             raise ValueError("objective must be a non-empty string")
+        normalized_status = _normalize_task_status(self.status)
+        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked"}:
+            raise ValueError("task status is invalid")
+        object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
@@ -839,10 +916,12 @@ class PlanPhase:
             raise ValueError("phase.id must be a positive int")
         if not isinstance(self.title, str) or not self.title.strip():
             raise ValueError("phase.title must be a non-empty string")
-        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "not_applicable"):
+        normalized_status = _normalize_plan_status(self.status)
+        if normalized_status not in ("active", "pending", "done", "partial_failure", "blocked", "not_applicable"):
             raise ValueError(
                 "phase.status must be one of: active|pending|done|partial_failure|blocked|not_applicable"
             )
+        object.__setattr__(self, "status", normalized_status)
         if self.criteria is None:
             object.__setattr__(self, "criteria", "")  # type: ignore[misc]
         if not isinstance(self.criteria, str):
@@ -2075,10 +2154,10 @@ def store_finding(
 @tool
 def record_finding_validation(
     finding_uid: str,
-    outcome: str,
+    outcome: NormalizedFindingValidationOutcome,
     summary: str,
     reproduction_steps: List[str],
-    evidence_strategy: str = "direct",
+    evidence_strategy: NormalizedEvidenceStrategy = "direct",
     evidence_artifacts: Optional[List[str]] = None,
     control_artifacts: Optional[List[str]] = None,
 ) -> str:
@@ -2093,16 +2172,11 @@ def record_finding_validation(
     if len(active) != 1 or active[0].task_uid != record["verification_task_uid"]:
         raise ValueError("Finding validation may only be recorded by its active verification task")
 
-    normalized_outcome = str(outcome).strip().lower()
-    # be lenient with outcome
-    if normalized_outcome in {"verified"}:
-        normalized_outcome = "confirmed"
-    if normalized_outcome in {"not_verified"}:
-        normalized_outcome = "not_confirmed"
+    normalized_outcome = _normalize_finding_validation_outcome(outcome)
     if normalized_outcome not in {"confirmed", "not_confirmed"}:
         raise ValueError("outcome must be confirmed or not_confirmed")
 
-    strategy = str(evidence_strategy).strip().lower()
+    strategy = _normalize_evidence_strategy(evidence_strategy)
     if strategy not in {"direct", "differential"}:
         raise ValueError("evidence_strategy must be direct or differential")
 
@@ -2125,7 +2199,26 @@ def record_finding_validation(
         raise ValueError("reproduction_steps requires at least one step")
     _store_memory_entry(validation["summary"], "finding_validation", validation)
     store.store_finding_validation(op_id, finding_uid, validation)
-    return "Finding validation recorded for evaluator review."
+    task = active[0]
+    criterion = task.acceptance.criteria[0]
+    acceptance_evidence = list(dict.fromkeys([*evidence, *controls, f"finding:{finding_uid}"]))
+    acceptance = AcceptanceResult(
+        criterion_id=criterion.id,
+        status="satisfied" if normalized_outcome == "confirmed" else "assessed_negative",
+        disposition="existing_finding" if normalized_outcome == "confirmed" else "no_vulnerability",
+        summary=validation["summary"],
+        evidence_refs=tuple(acceptance_evidence),
+    )
+    acceptance_response = json.loads(_record_task_acceptance(task.task_uid, [acceptance]))
+    return json.dumps(
+        {
+            "complete": True,
+            "finding_uid": finding_uid,
+            "outcome": normalized_outcome,
+            "acceptance": acceptance_response,
+        },
+        sort_keys=True,
+    )
 
 
 def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> Optional[str]:
@@ -2183,6 +2276,16 @@ def finding_validation_submitted(task: Task) -> bool:
         return True
     record = _get_plan_store().get_finding(_operation_id(), task.reference_id)
     return bool(record and record.get("validation_data"))
+
+
+def finding_validation_outcome(task: Task) -> Optional[str]:
+    """Return the durable outcome for a submitted finding-validation task."""
+
+    if task.kind != "finding_validation" or not task.reference_id:
+        return None
+    record = _get_plan_store().get_finding(_operation_id(), task.reference_id)
+    validation = record.get("validation_data") if record else None
+    return str(validation.get("outcome")) if isinstance(validation, dict) else None
 
 
 def get_plan() -> str:
@@ -2344,6 +2447,39 @@ def _validate_task_target_scope(
     if target_ids:
         return "subset", target_ids
     return "all", []
+
+
+def resolve_bound_executable_target(requested_target: str) -> str:
+    """Resolve a tool target from the active task's registered target boundary."""
+
+    requested = str(requested_target or "").strip()
+    try:
+        plan = _get_active_plan()
+        active = [task for task in _get_plan_store().get_tasks(_operation_id()) if task.status == "active"]
+    except Exception:
+        return requested
+    if len(active) != 1 or not plan.targets:
+        return requested
+    task = active[0]
+    selected = (
+        [target for target in plan.targets if target.target_id in set(task.target_ids)]
+        if task.target_scope == "subset"
+        else list(plan.targets)
+    )
+    if len(selected) == 1:
+        registered = selected[0].value
+        if requested and requested.rstrip("/") != registered.rstrip("/"):
+            logger.info(
+                "Canonicalized tool target task_uid=%s requested=%s registered=%s",
+                task.task_uid,
+                requested,
+                registered,
+            )
+        return registered
+    matching = [target.value for target in selected if target.value.rstrip("/") == requested.rstrip("/")]
+    if len(matching) == 1:
+        return matching[0]
+    raise ValueError("Tool target must match one executable target bound to the active task")
 
 
 _RE_URL_PATTERN = re.compile(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*')
@@ -2543,6 +2679,11 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
         raise ValueError("inventory manifest unassessed_gaps must be a list")
     allowed_kinds = set(INVENTORY_MANIFEST_ITEM_KINDS)
     item_ids = []
+    normalized_inventory = False
+    try:
+        target_values = {target.target_id: target.value for target in _get_active_plan().targets}
+    except Exception:
+        target_values = {}
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("inventory manifest items must be objects")
@@ -2558,6 +2699,17 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
         item_ids.append(item_id)
     if len(item_ids) != len(set(item_ids)):
         raise ValueError("inventory manifest item ids must be unique")
+    for item in items:
+        kind = str(item["kind"])
+        if kind not in {"endpoint", "parameter"}:
+            continue
+        value = str(item["value"])
+        if kind == "parameter" and _normalized_route(value) is None:
+            continue
+        normalized_value = _canonical_inventory_url(value, target_values.get(str(item["target_id"])))
+        if normalized_value != value:
+            item["value"] = normalized_value
+            normalized_inventory = True
     try:
         valid_target_ids = {target.target_id for target in _get_active_plan().targets}
     except Exception:
@@ -2568,8 +2720,50 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
         raise ValueError(f"inventory manifest contains unknown target IDs: {', '.join(invalid_target_ids)}")
     if reconcile:
         manifest = _reconcile_inventory_manifest(path, manifest)
+    elif normalized_inventory:
+        temporary_path = f"{path}.{uuid.uuid4().hex}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as manifest_file:
+            json.dump(manifest, manifest_file, indent=2, sort_keys=True)
+            manifest_file.write("\n")
+        os.replace(temporary_path, path)
     canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _collapse_duplicate_vulnerability_path(path: str) -> str:
+    segments = [segment for segment in path.split("/") if segment]
+    if segments.count("vulnerabilities") < 2:
+        return path
+    for width in range(1, len(segments) // 2 + 1):
+        for start in range(0, len(segments) - (2 * width) + 1):
+            if segments[start:start + width] == segments[start + width:start + (2 * width)]:
+                collapsed = segments[:start + width] + segments[start + (2 * width):]
+                return "/" + "/".join(collapsed) + ("/" if path.endswith("/") else "")
+    return path
+
+
+def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> str:
+    """Canonicalize one HTTP inventory route and enforce its registered service boundary."""
+
+    parsed = urlsplit(str(value or "").strip())
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"inventory endpoint must be an absolute HTTP(S) URL: {value}")
+    lowered_path = (parsed.path or "/").lower()
+    if re.match(r"^/(?:etc|var|home|root|users|proc|sys|dev)(?:/|$)", lowered_path) or re.match(
+        r"^/[a-z]:/", lowered_path
+    ):
+        raise ValueError(f"inventory endpoint resembles a filesystem path: {value}")
+    if registered_target:
+        boundary = urlsplit(registered_target)
+        if boundary.scheme.lower() in {"http", "https"} and boundary.netloc:
+            if parsed.scheme.lower() != boundary.scheme.lower() or parsed.netloc.lower() != boundary.netloc.lower():
+                raise ValueError(
+                    "inventory endpoint does not preserve the registered target scheme/host/port boundary"
+                )
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    path = _collapse_duplicate_vulnerability_path(path)
+    query = parsed.query.rstrip("&")
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, query, ""))
 
 
 def _task_evidence_artifact_paths(task: Task) -> set[str]:
@@ -2755,9 +2949,13 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
         )
         mode = "coverage" if _proposal_inventory_snapshot(proposal) is not None else "outcome"
         if mode == "coverage":
+            proposal_intent = "; ".join(criterion.description.strip() for criterion in proposal.criteria)
             criteria = [AcceptanceCriterion(
                 id="assess-the-assigned-endpoint",
-                description="Assess the assigned endpoint and record one evidence-backed terminal disposition.",
+                description=(
+                    "Assess the assigned endpoint and record one evidence-backed terminal disposition for this "
+                    f"proposal intent: {proposal_intent}"
+                ),
                 evidence_requirements=[EvidenceRequirement(kind="durable_evidence", min_count=1)],
             )]
     return AcceptanceContract(mode=mode, basis=basis, criteria=criteria)
@@ -2924,7 +3122,8 @@ def _frozen_task_identity(
             "item_ids": sorted(acceptance.basis.item_ids),
             "snapshot_hash": acceptance.basis.snapshot_hash,
             "source_refs": sorted(acceptance.basis.source_refs),
-            "criteria": [criterion.id for criterion in acceptance.criteria],
+            "criteria": [criterion.to_dict() for criterion in acceptance.criteria],
+            "objective": objective.strip(),
         }
     else:
         acceptance_identity = {
@@ -2976,10 +3175,12 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
     snapshot_exhausted = False
     unresolved_gaps: List[str] = []
 
-    for proposal in proposals:
+    for proposal_index, proposal in enumerate(proposals):
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
         title = proposal.title.strip()
         objective = proposal.objective.strip()
+        proposal_created_count = 0
+        proposal_duplicate_count = 0
         target_scope, target_ids = _validate_task_target_scope(
             target_ids=_normalize_target_ids(proposal.target_ids),
             plan=plan,
@@ -3002,13 +3203,6 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
                 "technology": "Validate technology",
                 "parameter": "Assess parameter",
             }
-            objective_actions = {
-                "endpoint": "Perform hypothesis-driven security testing for",
-                "workflow": "Validate the security behavior and trust transitions of",
-                "service": "Assess the exposed service boundary for",
-                "technology": "Validate the identified component and version risk for",
-                "parameter": "Assess the input behavior of",
-            }
             for group_target_id, group_kind, route_label, item_ids in _coverage_route_groups(
                 manifest,
                 prompt_token_limit=prompt_token_limit,
@@ -3029,7 +3223,7 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
                 )
                 route_groups.append((
                     f"{title_prefixes[group_kind]} {route_label} [{group_target_id}]",
-                    f"{objective_actions[group_kind]} {route_label} and its frozen inventory entries.",
+                    f"{objective.rstrip('.')} Scope this objective to {route_label} and its frozen inventory entries.",
                     group_acceptance,
                     "subset",
                     [group_target_id],
@@ -3045,6 +3239,13 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
                         for task in [*existing_tasks, *staged_tasks]
                     ):
                         duplicate_count += 1
+                        proposal_duplicate_count += 1
+                        logger.info(
+                            "Task proposal fan-out proposal_index=%d title=%s expanded_count=1 "
+                            "created_count=0 duplicate_count=1",
+                            proposal_index,
+                            title,
+                        )
                         continue
                     refinement_target_ids = target_ids or [target.target_id for target in plan.targets]
                     refinement_acceptance = AcceptanceContract(
@@ -3080,8 +3281,16 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
                     )]
                 else:
                     duplicate_count += 1
+                    proposal_duplicate_count += 1
+                    logger.info(
+                        "Task proposal fan-out proposal_index=%d title=%s expanded_count=0 "
+                        "created_count=0 duplicate_count=1",
+                        proposal_index,
+                        title,
+                    )
                     continue
 
+        proposal_expanded_count = len(acceptance_groups)
         for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
             group_identity = _frozen_task_identity(
                 group_title,
@@ -3104,6 +3313,7 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
                 if task.status in {"active", "pending", "done"}
             ):
                 duplicate_count += 1
+                proposal_duplicate_count += 1
                 logger.info("Skipped duplicate task proposal after frozen acceptance expansion: %s", group_title)
                 continue
             staged_tasks.append(Task(
@@ -3117,6 +3327,17 @@ def _create_tasks_from_proposals(tasks: List[TaskProposal], *, prompt_token_limi
                 target_scope=group_target_scope,
                 target_ids=group_target_ids,
             ))
+            proposal_created_count += 1
+        logger.info(
+            "Task proposal fan-out proposal_index=%d title=%s objective=%s expanded_count=%d "
+            "created_count=%d duplicate_count=%d",
+            proposal_index,
+            title,
+            objective,
+            proposal_expanded_count,
+            proposal_created_count,
+            proposal_duplicate_count,
+        )
 
     for task in staged_tasks:
         client.store_task(task=task, user_id=user_id)
@@ -3643,10 +3864,6 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     automatically binds finding_candidate to the sole finding created by this task. If the task created multiple
     candidates, supply exactly one returned finding_ref. existing_finding always requires an explicit finding reference.
     Use observation for useful non-finding results and no_vulnerability for negative results.
-
-    Common semantic aliases are normalized before validation, including completed to satisfied, no_finding to
-    assessed_negative/no_vulnerability, informational to observation, and finding to finding_candidate. Unknown values
-    remain invalid.
 
     Task identity, its single criterion, and frozen coverage item IDs are supplied by the workflow controller.
     Successfully recorded results are immutable. Their concrete summaries and evidence references are automatically
