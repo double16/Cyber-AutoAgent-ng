@@ -426,7 +426,7 @@ describe('Terminal event processing', () => {
         });
 
         const text = textFromTree(view.toJSON());
-        expect(text).toContain('🤍🟢 82% GOOD');
+        expect(text).toContain('💚 82% GOOD');
         expect(text).not.toContain('failure_count');
 
         act(() => {

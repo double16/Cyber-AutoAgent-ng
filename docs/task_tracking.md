@@ -446,7 +446,7 @@ predict the number of tasks expected in the current phase. Missing fan-out modes
 active. Prediction is telemetry only and never creates tasks or changes workflow state.
 
 The event carries diagnostic fields for logs and automation, while terminal interfaces deliberately render only the
-rounded score and band, for example `🤍️🟢 82% GOOD`. The stethoscope distinguishes operation health from progress.
+rounded score and band, for example `💚 82% GOOD`. The stethoscope distinguishes operation health from progress.
 Health bands are `excellent` (90–100%), `good` (75–89%), `degraded`
 (50–74%), and `poor` (below 50%). If plan state or health computation is unavailable, the progress event is still
 emitted and the interfaces omit the health indicator.

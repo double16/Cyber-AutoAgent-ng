@@ -4,10 +4,10 @@ import { appendOperationHealth, formatOperationHealth } from '../../../src/utils
 
 describe('operation health formatting', () => {
   it.each([
-    ['excellent', 0.946, 95, '🟢', 'green'],
-    ['good', 0.82, 82, '🟢', 'cyan'],
-    ['degraded', 0.615, 62, '🟡', 'yellow'],
-    ['poor', 0.2, 20, '🔴', 'red'],
+    ['excellent', 0.946, 95, '💚', 'green'],
+    ['good', 0.82, 82, '💚', 'cyan'],
+    ['degraded', 0.615, 62, '💛', 'yellow'],
+    ['poor', 0.2, 20, '♥️', 'red'],
   ])('formats %s health for terminal display', (band, score, percent, emoji, color) => {
     const visual = formatOperationHealth({ status: 'available', score, band });
 
@@ -16,7 +16,7 @@ describe('operation health formatting', () => {
       band,
       emoji,
       color,
-      label: `🤍${emoji} ${percent}% ${String(band).toUpperCase()}`,
+      label: `${emoji} ${percent}% ${String(band).toUpperCase()}`,
     });
   });
 
@@ -36,7 +36,7 @@ describe('operation health formatting', () => {
     expect(appendOperationHealth(
       '➡️ Budget 42% | Duration 8m 10s',
       { status: 'available', score: 0.82, band: 'good', failure_count: 4 },
-    )).toBe('➡️ Budget 42% | Duration 8m 10s | 🤍🟢 82% GOOD');
+    )).toBe('➡️ Budget 42% | Duration 8m 10s | 💚 82% GOOD');
   });
 
   it('leaves headless progress text unchanged when health is unavailable', () => {

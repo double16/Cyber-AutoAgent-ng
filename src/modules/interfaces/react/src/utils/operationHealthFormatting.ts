@@ -17,10 +17,10 @@ export interface OperationHealthVisual {
 }
 
 const BAND_VISUALS: Record<OperationHealthBand, { emoji: string; color: string }> = {
-  excellent: { emoji: '🟢', color: 'green' },
-  good: { emoji: '🟢', color: 'cyan' },
-  degraded: { emoji: '🟡', color: 'yellow' },
-  poor: { emoji: '🔴', color: 'red' },
+  excellent: { emoji: '💚', color: 'green' },
+  good: { emoji: '💚', color: 'cyan' },
+  degraded: { emoji: '💛', color: 'yellow' },
+  poor: { emoji: '♥️', color: 'red' },
 };
 
 export const formatOperationHealth = (health: unknown): OperationHealthVisual | null => {
@@ -40,7 +40,7 @@ export const formatOperationHealth = (health: unknown): OperationHealthVisual | 
     band,
     emoji: visual.emoji,
     color: visual.color,
-    label: `🤍${visual.emoji} ${scorePercent}% ${band.toUpperCase()}`,
+    label: `${visual.emoji} ${scorePercent}% ${band.toUpperCase()}`,
   };
 };
 

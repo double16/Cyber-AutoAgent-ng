@@ -154,7 +154,7 @@ describe('header and footer components', () => {
                 />
             ).lastFrame();
 
-            expect(frame).toContain('🤍🟢 84% GOOD');
+            expect(frame).toContain('💚 84% GOOD');
             expect(frame).toContain('style="color:cyan;font-weight:bold"');
             expect(frame).not.toContain('task_counts');
 
@@ -165,7 +165,7 @@ describe('header and footer components', () => {
                     operationHealth={{status: 'unavailable', score: 0.84, band: 'good'}}
                 />
             ).lastFrame();
-            expect(invalidFrame).not.toContain('🤍🟢 84% GOOD');
+            expect(invalidFrame).not.toContain('💚 84% GOOD');
         } finally {
             Object.defineProperty(process.stdout, 'columns', {value: originalColumns, configurable: true});
         }

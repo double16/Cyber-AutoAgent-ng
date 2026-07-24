@@ -144,7 +144,7 @@ describe('EventLine snapshot-style rendering', () => {
       },
     } as any);
 
-    expect(output).toContain('🤍🟡 62% DEGRADED');
+    expect(output).toContain('💛 62% DEGRADED');
     expect(output).not.toContain('failure_count');
     expect(output).not.toContain('expected_tasks');
   });
