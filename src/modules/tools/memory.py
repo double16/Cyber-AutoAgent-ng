@@ -2162,13 +2162,52 @@ def store_finding(
     return _finding_tool_result(finding_uid, task_uid, "pending_validation")
 
 
-@tool
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "finding_uid": {"type": "string", "description": "Finding candidate identifier."},
+                "outcome": {
+                    "type": "string",
+                    "enum": ["confirmed", "not_confirmed"],
+                    "description": "Validation outcome.",
+                },
+                "summary": {"type": "string", "description": "Validation summary."},
+                "reproduction_steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Steps used to validate the finding.",
+                },
+                "evidence_strategy": {
+                    "type": "string",
+                    "enum": ["direct", "differential"],
+                    "default": "direct",
+                    "description": "Evidence strategy used for validation.",
+                },
+                "evidence_artifacts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": None,
+                    "description": "Artifacts supporting the validation.",
+                },
+                "control_artifacts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": None,
+                    "description": "Negative-control artifacts for differential validation.",
+                },
+            },
+            "required": ["finding_uid", "outcome", "summary", "reproduction_steps"],
+        }
+    }
+)
 def record_finding_validation(
     finding_uid: str,
-    outcome: NormalizedFindingValidationOutcome,
+    outcome: str,
     summary: str,
     reproduction_steps: List[str],
-    evidence_strategy: NormalizedEvidenceStrategy = "direct",
+    evidence_strategy: str = "direct",
     evidence_artifacts: Optional[List[str]] = None,
     control_artifacts: Optional[List[str]] = None,
 ) -> str:
@@ -3278,7 +3317,13 @@ def _frozen_task_identity(
     )
 
 
-def _create_tasks_from_proposals(tasks: TaskProposalList, *, prompt_token_limit: int) -> str:
+def _create_tasks_from_proposals(
+    tasks: TaskProposalList,
+    *,
+    prompt_token_limit: int,
+    coverage_item_ids: Optional[set[str]] = None,
+    expected_snapshot_ref: Optional[str] = None,
+) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
     Procedure example:
@@ -3299,6 +3344,11 @@ def _create_tasks_from_proposals(tasks: TaskProposalList, *, prompt_token_limit:
         proposals = TypeAdapter(TaskProposalList).validate_python(tasks)
     except ValidationError as error:
         raise ValueError(_compact_task_proposal_validation_error(error)) from error
+    if coverage_item_ids is not None and len(proposals) != 1:
+        raise ValueError(
+            "controller-bound inventory batch requires exactly one snapshot proposal; "
+            "Python expands that proposal across every assigned route group"
+        )
 
     client = _ensure_memory_client()
     user_id = _user_id()
@@ -3326,10 +3376,17 @@ def _create_tasks_from_proposals(tasks: TaskProposalList, *, prompt_token_limit:
             _proposal_acceptance_contract(proposal, plan),
             [*existing_tasks, *staged_tasks],
         )
+        if coverage_item_ids is not None and acceptance.mode != "coverage":
+            raise ValueError("task-creation batch requires a snapshot-based proposal")
 
         acceptance_groups = [(title, objective, acceptance, target_scope, target_ids)]
         if acceptance.mode == "coverage":
             artifact_ref = next(ref for ref in acceptance.basis.source_refs if ref.startswith("artifact:"))
+            if expected_snapshot_ref is not None and artifact_ref != expected_snapshot_ref:
+                raise ValueError(
+                    "task-creation batch requires snapshot reference "
+                    f"{expected_snapshot_ref}; received {artifact_ref}"
+                )
             manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
             completed_ids = _completed_coverage_item_ids(existing_tasks, snapshot_hash, current_phase)
             route_groups = []
@@ -3344,6 +3401,15 @@ def _create_tasks_from_proposals(tasks: TaskProposalList, *, prompt_token_limit:
                 manifest,
                 prompt_token_limit=prompt_token_limit,
             ):
+                if coverage_item_ids is not None:
+                    group_ids = set(item_ids)
+                    if group_ids.isdisjoint(coverage_item_ids):
+                        continue
+                    if not group_ids.issubset(coverage_item_ids):
+                        raise ValueError(
+                            "task-creation batch split an atomic inventory route group: "
+                            f"{route_label}"
+                        )
                 remaining_ids = [item_id for item_id in item_ids if item_id not in completed_ids]
                 if not remaining_ids:
                     continue
@@ -3366,6 +3432,15 @@ def _create_tasks_from_proposals(tasks: TaskProposalList, *, prompt_token_limit:
                     [group_target_id],
                 ))
             acceptance_groups = route_groups
+            if not acceptance_groups and coverage_item_ids is not None:
+                snapshot_exhausted = True
+                logger.info(
+                    "Task proposal batch exhausted proposal_index=%d title=%s assigned_item_count=%d",
+                    proposal_index,
+                    title,
+                    len(coverage_item_ids),
+                )
+                continue
             if not acceptance_groups:
                 snapshot_exhausted = True
                 unresolved_gaps.extend(str(gap).strip() for gap in manifest["unassessed_gaps"] if str(gap).strip())
@@ -3515,7 +3590,12 @@ def create_tasks(tasks: TaskProposalList) -> str:
     return _create_tasks_from_proposals(tasks, prompt_token_limit=prompt_token_limit)
 
 
-def build_create_tasks_tool(prompt_token_limit: int = 48_000) -> Any:
+def build_create_tasks_tool(
+    prompt_token_limit: int = 48_000,
+    *,
+    coverage_item_ids: Optional[set[str]] = None,
+    expected_snapshot_ref: Optional[str] = None,
+) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
 
     completed = False
@@ -3527,7 +3607,12 @@ def build_create_tasks_tool(prompt_token_limit: int = 48_000) -> Any:
         nonlocal completed
         if completed:
             raise ValueError("Task creation already completed for this role run")
-        result = _create_tasks_from_proposals(tasks, prompt_token_limit=prompt_token_limit)
+        result = _create_tasks_from_proposals(
+            tasks,
+            prompt_token_limit=prompt_token_limit,
+            coverage_item_ids=coverage_item_ids,
+            expected_snapshot_ref=expected_snapshot_ref,
+        )
         if int(json.loads(result).get("created_count", 0)) > 0:
             completed = True
         return result
@@ -3977,8 +4062,8 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
         coverage_item_ids = tuple(str(item["id"]) for item in manifest["items"])
 
     def record_task_acceptance(
-        status: NormalizedAcceptanceResultStatus,
-        disposition: NormalizedAcceptanceDisposition,
+        status: str,
+        disposition: str,
         summary: str,
         evidence_refs: List[str],
     ) -> str:
@@ -4022,7 +4107,47 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
 
     Inventory artifact contract: {inventory_manifest_contract_text()}
     """
-    return tool(record_task_acceptance)
+    return tool(
+        record_task_acceptance,
+        inputSchema={
+            "json": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "satisfied",
+                            "assessed_negative",
+                            "inaccessible",
+                            "excluded",
+                            "duplicate",
+                        ],
+                        "description": "Terminal acceptance result status.",
+                    },
+                    "disposition": {
+                        "type": "string",
+                        "enum": [
+                            "no_vulnerability",
+                            "observation",
+                            "finding_candidate",
+                            "existing_finding",
+                        ],
+                        "description": "Security disposition of the accepted result.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Observed result.",
+                    },
+                    "evidence_refs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Artifact, memory, observation, or finding evidence references.",
+                    },
+                },
+                "required": ["status", "disposition", "summary", "evidence_refs"],
+            }
+        },
+    )
 
 
 def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:

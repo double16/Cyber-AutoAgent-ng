@@ -4,6 +4,8 @@ import sys
 import time
 import pytest
 
+from modules.handlers.utils import get_tool_spec
+
 MODULE_UNDER_TEST = "modules.tools.channels"
 
 mod = __import__(MODULE_UNDER_TEST, fromlist=["*"])
@@ -276,3 +278,15 @@ async def test_channel_send_normalizes_semantic_mode_aliases(monkeypatch):
 async def test_channel_send_rejects_unknown_semantic_mode():
     with pytest.raises(ValueError, match="mode must be"):
         await mod.channel_send("missing", "x", mode="hex")
+
+
+def test_channel_send_runtime_schema_accepts_aliases_and_advertises_canonical_values():
+    validated = mod.channel_send._metadata.validate_input({
+        "channel_id": "channel-1",
+        "data": "aGk=",
+        "mode": "b64",
+    })
+
+    assert validated["mode"] == "b64"
+    schema = get_tool_spec(mod.channel_send)["inputSchema"]["json"]
+    assert schema["properties"]["mode"]["enum"] == ["text", "base64"]

@@ -3,10 +3,10 @@ import asyncio
 import base64
 import logging
 import time
-from typing import Annotated, Dict, Optional, List, Literal
+from typing import Dict, Optional, List, Literal
 from dataclasses import dataclass, field
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, Field
 
 from modules.utils.pick_nic import pick_local_addr
 from modules.handlers.utils import b64
@@ -30,12 +30,6 @@ def _normalize_channel_send_mode(value):
         field_name="channel_send_mode",
         logger=logger,
     )
-
-
-ChannelSendMode = Annotated[
-    Literal["text", "base64"],
-    BeforeValidator(_normalize_channel_send_mode),
-]
 
 
 class PollEvent(BaseModel):
@@ -391,11 +385,33 @@ async def channel_poll(
     return PollResult(channel_id=ch.id, closed=ch.closed, events=events)
 
 
-@tool
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string", "description": "Channel identifier."},
+                "data": {"type": "string", "description": "Data, base64-encoded when mode is base64."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["text", "base64"],
+                    "default": "text",
+                    "description": "Encoding mode for data.",
+                },
+                "append_newline": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Append a newline in text mode.",
+                },
+            },
+            "required": ["channel_id", "data"],
+        }
+    }
+)
 async def channel_send(
         channel_id: str,
         data: str,
-        mode: ChannelSendMode = "text",
+        mode: str = "text",
         append_newline: bool = False,
 ) -> SendResult:
     """

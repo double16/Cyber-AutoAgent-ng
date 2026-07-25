@@ -371,6 +371,19 @@ def test_finding_validation_schema_advertises_only_canonical_enum_values():
     assert schema["properties"]["evidence_strategy"]["enum"] == ["direct", "differential"]
 
 
+def test_finding_validation_runtime_schema_accepts_aliases():
+    validated = record_finding_validation._metadata.validate_input({
+        "finding_uid": "finding-1",
+        "outcome": "verified",
+        "summary": "Confirmed",
+        "reproduction_steps": ["Replay request"],
+        "evidence_strategy": "negative-control",
+    })
+
+    assert validated["outcome"] == "verified"
+    assert validated["evidence_strategy"] == "negative-control"
+
+
 def test_finalize_finding_validation_promotes_only_approved_confirmation(operation_ids):
     task = Task(
         "task-1", "Verify", "Verify", make_acceptance().to_dict(), 1, "active",

@@ -1720,10 +1720,12 @@ def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
         messages=[{"role": "user", "content": [{"text": "assigned task"}]}],
     )
     calls = []
+    policies = []
     repeated = "I should repeat this analysis rather than call the required tool.\n" * 60
 
     def run_agent(**kwargs):
         calls.append(kwargs["current_message"])
+        policies.append(kwargs["run_policy"])
         if len(calls) == 1:
             agent.messages.append({"role": "assistant", "content": [{"text": repeated}]})
             raise MaxTokensReachedException("max_tokens")
@@ -1753,7 +1755,12 @@ def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
     assert "Successful tools already observed: shell" in calls[1]
     assert "Outstanding required tools: record_task_acceptance" in calls[1]
     assert repeated not in calls[1]
-    assert agent.messages == [{"role": "user", "content": [{"text": "assigned task"}]}]
+    assert "Controller-observed successful outcomes" in calls[1]
+    assert "Do not repeat any tool call already represented above" in calls[1]
+    assert policies[1].max_agent_calls == 1
+    assert policies[1].max_model_turns == 1
+    assert policies[1].max_tool_calls == 1
+    assert agent.messages == []
 
 
 def test_workflow_task_executor_propagates_second_max_tokens(monkeypatch):

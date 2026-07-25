@@ -11,6 +11,7 @@ from modules.agents import multi_agent_workflow as workflow_mod
 from modules.agents.cyber_autoagent import build_role_tools
 from modules.agents.multi_agent_workflow import (
     MultiAgentWorkflowController,
+    TaskCreationBatch,
     WorkflowInvariantError,
     WorkflowStateStore,
     extract_json_object,
@@ -2751,7 +2752,7 @@ def test_controller_completes_empty_final_validation_phase_without_task_creator(
 
     controller.run()
 
-    assert state.plan.phases[0].status == "not_applicable"
+    assert state.plan.phases[0].status == "done"
     assert state.plan.assessment_complete is True
 
 
@@ -2777,7 +2778,7 @@ def test_empty_final_validation_phase_with_unresolved_finding_requires_tasks():
     assert controller._can_complete_empty_validation_phase(plan, plan.phases[0]) is False
 
 
-def test_empty_final_validation_phase_requires_complete_predecessor_work():
+def test_empty_final_validation_phase_does_not_hide_incomplete_predecessor_work():
     plan = OperationPlan(
         objective="assess",
         current_phase=2,
@@ -2800,9 +2801,149 @@ def test_empty_final_validation_phase_requires_complete_predecessor_work():
         text_runner=lambda *_args: "{}",
     )
 
-    assert controller._can_complete_empty_validation_phase(plan, plan.phases[1]) is False
+    assert controller._can_complete_empty_validation_phase(plan, plan.phases[1]) is True
     summary = controller._workflow_coverage_summary(plan)
     assert summary[0]["status_reason"] == "Phase incomplete with 1 actionable task(s) remaining."
+
+
+def test_validation_phase_claims_existing_pending_verification_task_without_task_creator():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Assessment", status="partial_failure"),
+            PlanPhase(
+                id=2,
+                title="Impact Validation and Proof Generation",
+                status="active",
+                criteria="Validate findings with proof",
+            ),
+        ],
+    )
+    validation = Task(
+        task_uid="verify-1",
+        title="Verify finding: SQL injection",
+        objective="Verify finding",
+        phase=1,
+        status="pending",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = AdvancingFakeState(
+        plan,
+        tasks=[validation],
+        finding_records=[{
+            "finding_uid": "finding-1",
+            "verification_task_uid": "verify-1",
+            "resolution": None,
+        }],
+    )
+
+    def work_runner(*_args):
+        raise AssertionError("task creator must not run when a validation task already exists")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        work_runner=work_runner,
+        max_iterations=1,
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="iteration limit"):
+        controller.run()
+
+    claimed = state.list_tasks()[0]
+    assert claimed.phase == 2
+    assert claimed.status == "active"
+    reassigned = next(event for event in controller.runtime.callback_handler.events if event["type"] == "task_reassigned")
+    assert reassigned["source_phase"] == 1
+    assert reassigned["phase"] == 2
+
+
+def test_validation_phase_marks_missing_verification_task_partial_without_task_creator():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(
+            id=1,
+            title="Impact Validation and Proof Generation",
+            status="active",
+            criteria="Validate findings with proof",
+        )],
+    )
+    state = FakeState(plan, finding_records=[{
+        "finding_uid": "finding-1",
+        "verification_task_uid": "missing-task",
+        "resolution": None,
+    }])
+
+    def work_runner(*_args):
+        raise AssertionError("generic task creator must not replace a missing verification task")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        work_runner=work_runner,
+    )
+
+    controller.run()
+
+    assert state.plan.phases[0].status == "partial_failure"
+    assert state.plan.assessment_complete is True
+
+
+def test_validation_phase_with_terminal_history_marks_missing_verification_task_partial():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(
+            id=1,
+            title="Impact Validation and Proof Generation",
+            status="active",
+            criteria="Validate findings with proof",
+        )],
+    )
+    terminal_history = Task(
+        task_uid="old-validation",
+        title="Prior validation attempt",
+        objective="Validate an earlier candidate",
+        phase=1,
+        status="partial_failure",
+        kind="finding_validation",
+        reference_id="finding-old",
+    )
+    state = FakeState(
+        plan,
+        tasks=[terminal_history],
+        finding_records=[{
+            "finding_uid": "finding-1",
+            "verification_task_uid": "missing-task",
+            "resolution": None,
+        }],
+    )
+
+    def work_runner(*_args):
+        raise AssertionError("terminal validation history must not trigger generic task creation")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        work_runner=work_runner,
+    )
+
+    controller.run()
+
+    assert state.plan.phases[0].status == "partial_failure"
+    assert state.plan.assessment_complete is True
 
 
 def test_completed_closure_phase_reports_unresolved_prior_work_and_partial_termination():
@@ -2984,6 +3125,204 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
     assert example_task["output_kind"] == "inventory_manifest"
     assert set(example_task["criteria"][0]) == {"description"}
     assert captured["call_count"] == 1
+
+
+def test_task_creation_batches_use_resolved_context_and_preserve_atomic_groups(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Assess", status="active"),
+        ],
+    )
+    producer = Task(
+        task_uid="inventory",
+        title="Inventory",
+        objective="Produce inventory",
+        acceptance=_acceptance("inventory"),
+        evidence=["artifact:artifacts/inventory.json"],
+        phase=1,
+        status="done",
+    )
+    runtime = _runtime()
+    runtime.prompt_token_limit = 1_000
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, [producer]),
+        text_runner=lambda *_args: "{}",
+    )
+    groups = [
+        ("target-1", "endpoint", f"http://target.test/{index}-{'x' * 700}", [f"endpoint-{index}"])
+        for index in range(3)
+    ]
+    def canonical_artifact(reference):
+        if not reference.startswith("artifact:"):
+            raise ValueError("not an artifact")
+        return reference
+
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", canonical_artifact)
+    monkeypatch.setattr(workflow_mod, "_load_inventory_manifest", lambda _reference: ({"items": []}, "hash"))
+    monkeypatch.setattr(workflow_mod, "_coverage_route_groups", lambda *_args, **_kwargs: groups)
+
+    batches = controller._task_creation_batches(plan, plan.phases[1], "system")
+
+    assert len(batches) == 3
+    assert [batch.index for batch in batches] == [1, 2, 3]
+    assert all(batch.total == 3 for batch in batches)
+    assert all(len(batch.groups) == 1 for batch in batches)
+    assert set().union(*(batch.item_ids for batch in batches)) == {
+        "endpoint-0",
+        "endpoint-1",
+        "endpoint-2",
+    }
+
+
+def test_default_task_creation_batch_estimates_compact_fallback_prompt():
+    plan = _plan()
+    irrelevant = Task(
+        task_uid="old-terminal",
+        title="Large irrelevant prior task",
+        objective="old work",
+        phase=2,
+        status="done",
+    )
+    state = FakeState(plan, [irrelevant])
+    runtime = _runtime()
+    runtime.prompt_token_limit = 48_000
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+    )
+
+    batch = controller._task_creation_batches(plan, plan.phases[0], "system")[0]
+    prompt = controller._task_creator_prompt(plan, plan.phases[0], batch)
+
+    assert batch.estimated_input_tokens > 0
+    assert "task_phase_status_counts" in prompt
+    assert "Large irrelevant prior task" not in prompt
+    assert "Never emit `work_type`" in prompt
+
+
+def test_task_creator_uses_fresh_session_for_each_batch_and_retains_batch_corrections(monkeypatch):
+    state = FakeState(_plan())
+    runtime = _runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 1})
+    lifecycle = []
+    prompts = []
+    session_number = 0
+
+    @contextmanager
+    def session(role, tools, system_prompt):
+        nonlocal session_number
+        session_number += 1
+        current_session = session_number
+        lifecycle.append(("open", current_session))
+        calls = 0
+
+        def run(prompt, run_policy):
+            nonlocal calls
+            calls += 1
+            prompts.append((current_session, prompt))
+            if current_session == 1 and calls == 1:
+                return SimpleNamespace(reason="required_tool_rejected", message="schema rejected")
+            state.store_task(Task(
+                task_uid=f"created-{current_session}",
+                title=f"Created {current_session}",
+                objective="run",
+                phase=1,
+                status="pending",
+            ))
+            return SimpleNamespace(reason="task_creator_done")
+
+        try:
+            yield run
+        finally:
+            lifecycle.append(("close", current_session))
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        executor_session_factory=session,
+    )
+    batches = [
+        TaskCreationBatch(1, 2, "artifact:artifacts/inventory.json", ((
+            "target-1", "endpoint", "http://target.test/one", ("endpoint-1",)
+        ),), 500),
+        TaskCreationBatch(2, 2, "artifact:artifacts/inventory.json", ((
+            "target-1", "endpoint", "http://target.test/two", ("endpoint-2",)
+        ),), 500),
+    ]
+    monkeypatch.setattr(controller, "_task_creation_batches", lambda *_args: batches)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert lifecycle == [("open", 1), ("close", 1), ("open", 2), ("close", 2)]
+    assert [session_id for session_id, _prompt in prompts] == [1, 1, 2]
+    assert "Batch 1 of 2" in prompts[0][1]
+    assert "Submit exactly one snapshot proposal" in prompts[0][1]
+    assert "Validation result" in prompts[1][1]
+    assert "Batch 2 of 2" in prompts[2][1]
+    assert outcome.created_count == 2
+    assert outcome.attempts == 3
+    assert outcome.batch_count == 2
+    assert outcome.failed_batch_count == 0
+
+
+def test_task_creator_continues_after_one_batch_exhausts_corrections(monkeypatch):
+    state = FakeState(_plan())
+    runtime = _runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 0})
+    sessions = 0
+
+    @contextmanager
+    def session(role, tools, system_prompt):
+        nonlocal sessions
+        sessions += 1
+        current_session = sessions
+
+        def run(prompt, run_policy):
+            if current_session == 2:
+                state.store_task(Task(
+                    task_uid="second-batch",
+                    title="Second batch",
+                    objective="run",
+                    phase=1,
+                    status="pending",
+                ))
+            return SimpleNamespace(reason="task_creator_done")
+
+        yield run
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        executor_session_factory=session,
+    )
+    batches = [
+        TaskCreationBatch(1, 2, "artifact:artifacts/inventory.json", ((
+            "target-1", "endpoint", "http://target.test/one", ("endpoint-1",)
+        ),), 500),
+        TaskCreationBatch(2, 2, "artifact:artifacts/inventory.json", ((
+            "target-1", "endpoint", "http://target.test/two", ("endpoint-2",)
+        ),), 500),
+    ]
+    monkeypatch.setattr(controller, "_task_creation_batches", lambda *_args: batches)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert sessions == 2
+    assert outcome.created_count == 1
+    assert outcome.batch_count == 2
+    assert outcome.failed_batch_count == 1
+    assert "batch 1/2" in outcome.failure_reason
+    assert "endpoint-1" in outcome.failure_reason
 
 
 def test_task_creator_failure_reason_names_only_registered_tool():
@@ -3383,7 +3722,8 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
     phase_evaluator_prompt = prompts_and_objects[6][0]
     assert "## Plan\nplan_overview[1]" in builder_prompt
     assert "plan_phases[1]{id,title,status,criteria}:" in builder_prompt
-    assert "## Existing Tasks Across All Phases\ntask[1]" in creator_prompt
+    assert "## Existing Tasks Across All Phases\ntask_phase_status_counts[1]" in creator_prompt
+    assert "task_creation_relevant_tasks[1]" in creator_prompt
     assert "## Canonical task acceptance ledger\n[" in phase_evaluator_prompt
     assert '"manifest_hash"' in phase_evaluator_prompt
 

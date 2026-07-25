@@ -33,7 +33,7 @@ import time
 import traceback
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -87,6 +87,7 @@ from modules.handlers.max_token_recovery import (
     build_task_executor_max_token_prompt,
     classify_and_discard_max_token_output,
     is_repeated_max_token_pattern,
+    reset_agent_conversation_for_recovery,
 )
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.tool_repeat_guard import REPEATED_TOOL_LOOP_STATE_KEY
@@ -757,6 +758,7 @@ def run_workflow_agent_with_max_token_recovery(
     """Run a workflow role with one safe, controller-directed executor recovery."""
 
     current_prompt = prompt
+    current_run_policy = run_policy
     max_token_recovery_attempts = 0
     while True:
         try:
@@ -769,7 +771,7 @@ def run_workflow_agent_with_max_token_recovery(
                 operation_start=operation_start,
                 max_duration=max_duration,
                 logger=logger,
-                run_policy=run_policy,
+                run_policy=current_run_policy,
             )
         except MaxTokensReachedException as error:
             classification, removed = classify_and_discard_max_token_output(agent)
@@ -795,17 +797,31 @@ def run_workflow_agent_with_max_token_recovery(
             if not can_retry:
                 raise
 
+            reset_agent_conversation_for_recovery(agent)
+            if run_policy is not None:
+                current_run_policy = replace(
+                    run_policy,
+                    max_agent_calls=1,
+                    max_model_turns=1,
+                    max_tool_calls=1,
+                    max_actionless_calls=1,
+                    actionless_mode="required_tool",
+                )
+
             agent_callback = getattr(agent, "_cyber_callback_handler", None) or callback_handler
             journal = getattr(agent_callback, "tool_outcome_journal", None)
-            completed_tools = [
-                outcome.tool_name
-                for outcome in (journal.entries() if journal is not None else [])
+            journal_entries = journal.entries() if journal is not None else []
+            completed_tools = [outcome.tool_name for outcome in journal_entries if outcome.success]
+            completed_outcomes = [
+                f"{outcome.tool_name}: {outcome.output_summary[:1000]}"
+                for outcome in journal_entries
                 if outcome.success
-            ]
+            ][-8:]
             current_prompt = build_task_executor_max_token_prompt(
                 classification,
                 completed_tools=completed_tools,
                 required_tools=set(run_policy.required_tool_names) if run_policy else set(),
+                completed_outcomes=completed_outcomes,
             )
             max_token_recovery_attempts += 1
 

@@ -33,13 +33,14 @@ CLI can preserve its existing report generation and cleanup behavior.
 import inspect
 import json
 import logging
+import math
 import re
 import sys
 import uuid
 from collections import Counter
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from opentelemetry import context as otel_context
@@ -158,10 +159,27 @@ class TaskCreationOutcome:
     created_count: int
     attempts: int
     failure_reason: str = ""
+    batch_count: int = 1
+    failed_batch_count: int = 0
 
     @property
     def made_progress(self) -> bool:
         return self.created_count > 0
+
+
+@dataclass(frozen=True)
+class TaskCreationBatch:
+    """Controller-owned model input slice for deterministic task fan-out."""
+
+    index: int
+    total: int
+    snapshot_ref: Optional[str]
+    groups: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...]
+    estimated_input_tokens: int
+
+    @property
+    def item_ids(self) -> set[str]:
+        return {item_id for _target_id, _kind, _label, item_ids in self.groups for item_id in item_ids}
 
 
 def extract_json_object(text: str) -> Dict[str, Any]:
@@ -849,6 +867,8 @@ class MultiAgentWorkflowController:
                     return
                 phase = next(item for item in plan.phases if item.status == "active")
 
+            self._claim_finding_validation_tasks(phase)
+
             pending_count = len(self.state.list_tasks(phase=phase.id, status=["pending"]))
             active_count = len(self.state.list_tasks(phase=phase.id, status=["active"]))
             progress = float(self.runtime.callback_handler.get_budget_progress())
@@ -883,6 +903,28 @@ class MultiAgentWorkflowController:
                 continue
 
             pending_task = self._get_pending_task(phase.id)
+            before_count = len(self.state.list_tasks(phase=phase.id))
+            empty_validation_decision = (
+                self._empty_validation_phase_decision(plan, phase)
+                if pending_task is None
+                else None
+            )
+            if empty_validation_decision is not None:
+                validation_status, validation_reason = empty_validation_decision
+                self._log_workflow(
+                    "completing empty finding-validation phase=%s status=%s reason=%s",
+                    self._phase_label(phase),
+                    validation_status,
+                    self._short(validation_reason),
+                )
+                previous_signature = self._plan_signature(plan)
+                updated_plan = self.state.mark_phase(plan, phase.id, validation_status)
+                self._emit_plan_output("updated", updated_plan, previous_signature)
+                if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
+                    self._emit_workflow_completion(updated_plan)
+                    return
+                continue
+
             should_evaluate_phase = self._should_evaluate_phase(phase)
             if pending_task and not should_evaluate_phase:
                 self._log_workflow("activating pending task=%s phase=%s", self._task_label(pending_task), phase.id)
@@ -918,19 +960,6 @@ class MultiAgentWorkflowController:
                     continue
                 phase_continue_decision = decision
 
-            before_count = len(self.state.list_tasks(phase=phase.id))
-            if before_count == 0 and self._can_complete_empty_validation_phase(plan, phase):
-                self._log_workflow(
-                    "completing empty finding-validation phase=%s reason=no_pending_candidates",
-                    self._phase_label(phase),
-                )
-                previous_signature = self._plan_signature(plan)
-                updated_plan = self.state.mark_phase(plan, phase.id, "not_applicable")
-                self._emit_plan_output("updated", updated_plan, previous_signature)
-                if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
-                    self._emit_workflow_completion(updated_plan)
-                    return
-                continue
             self._log_workflow("creating tasks phase=%s existing_task_count=%s", self._phase_label(phase), before_count)
             creation = self._create_tasks(plan, phase)
             task = self._get_or_activate_task(phase.id)
@@ -988,6 +1017,13 @@ class MultiAgentWorkflowController:
     def _can_complete_empty_validation_phase(self, plan: OperationPlan, phase: PlanPhase) -> bool:
         """Return whether a final finding-validation phase has no unresolved candidates."""
 
+        decision = self._empty_validation_phase_decision(plan, phase)
+        return decision is not None and decision[0] in {"done", "not_applicable"}
+
+    @staticmethod
+    def _is_finding_validation_phase(plan: OperationPlan, phase: PlanPhase) -> bool:
+        """Return whether the final phase owns finding validation and proof work."""
+
         if phase.id != max(item.id for item in plan.phases):
             return False
         phase_text = f"{phase.title} {phase.criteria}".lower()
@@ -995,19 +1031,74 @@ class MultiAgentWorkflowController:
             return False
         if "validat" not in phase_text and "proof" not in phase_text:
             return False
-        preceding_phases = [item for item in plan.phases if item.id < phase.id]
-        if any(item.status not in {"done", "not_applicable"} for item in preceding_phases):
-            return False
-        if any(
-            self.state.list_tasks(phase=item.id, status=["active", "pending"])
-            for item in preceding_phases
-        ):
-            return False
+        return True
+
+    def _claim_finding_validation_tasks(self, phase: PlanPhase) -> None:
+        """Move actionable verification tasks into the active validation phase."""
+
+        plan = self.state.get_plan()
+        if plan is None or not self._is_finding_validation_phase(plan, phase):
+            return
+        for task in self.state.list_tasks(status=["active", "pending"]):
+            if task.kind != "finding_validation" or task.phase == phase.id:
+                continue
+            original_phase = task.phase
+            reassigned = self.state.reassign_task_phase(task, phase.id)
+            self._log_workflow(
+                "finding validation task reassigned task=%s source_phase=%s effective_phase=%s",
+                self._task_label(reassigned),
+                original_phase,
+                phase.id,
+            )
+            self._emit_workflow_event({
+                "type": "task_reassigned",
+                "task_uid": reassigned.task_uid,
+                "title": reassigned.title,
+                "status": reassigned.status,
+                "source_phase": original_phase,
+                "phase": phase.id,
+                "kind": reassigned.kind,
+                "reference_id": reassigned.reference_id,
+            })
+
+    def _empty_validation_phase_decision(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+    ) -> Optional[Tuple[str, str]]:
+        """Classify an empty final validation phase without generic task creation."""
+
+        if not self._is_finding_validation_phase(plan, phase):
+            return None
         list_records = getattr(self.state, "list_finding_records", None)
         if not callable(list_records):
-            return False
+            return None
         records = list_records()
-        return not any(not str(record.get("resolution") or "").strip() for record in records)
+        unresolved = [record for record in records if not str(record.get("resolution") or "").strip()]
+        if not unresolved:
+            if records:
+                return "done", "All stored finding candidates already have terminal validation resolutions."
+            return "not_applicable", "No finding candidates require validation."
+
+        tasks_by_uid = {task.task_uid: task for task in self.state.list_tasks()}
+        missing = []
+        unavailable = []
+        for record in unresolved:
+            verification_uid = str(record.get("verification_task_uid") or "").strip()
+            finding_uid = str(record.get("finding_uid") or "unknown")
+            task = tasks_by_uid.get(verification_uid)
+            if not verification_uid or task is None:
+                missing.append(finding_uid)
+            elif task.status not in {"active", "pending"}:
+                unavailable.append(f"{finding_uid}:{task.status}")
+        if missing or unavailable:
+            details = []
+            if missing:
+                details.append(f"missing verification task for finding(s) {', '.join(missing)}")
+            if unavailable:
+                details.append(f"non-actionable unresolved verification task(s) {', '.join(unavailable)}")
+            return "partial_failure", "; ".join(details)
+        return None
 
     def _emit_workflow_completion(self, plan: OperationPlan) -> None:
         """Notify consumers that Python workflow evaluation completed the operation."""
@@ -2246,19 +2337,11 @@ review existing memories. Return only the requested JSON decision."""
 
     def _create_tasks(self, plan: OperationPlan, phase: PlanPhase) -> TaskCreationOutcome:
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
-        prompt = self._task_creator_prompt(plan, phase)
-        tools = self._task_creator_tools()
         before_count = len(self.state.list_tasks(phase=phase.id))
-        before_task_uids = {task.task_uid for task in self.state.list_tasks()}
         before_actionable_count = len(
             self.state.list_tasks(phase=phase.id, status=["active", "pending"])
         )
-        self._log_workflow(
-            "task creator starting phase=%s tools=%s before_count=%s",
-            self._phase_label(phase),
-            ",".join(get_tool_name(tool) for tool in tools),
-            before_count,
-        )
+        batches = self._task_creation_batches(plan, phase, system_prompt)
         run_policy = AgentRunPolicy(
             required_tool_names={"create_tasks"},
             terminal_after_required_tools=True,
@@ -2271,46 +2354,229 @@ review existing memories. Return only the requested JSON decision."""
             terminal_reason="task_creator_done",
             terminal_message="Task creator completed after create_tasks",
         )
-        failure_reason = ""
+        failure_reasons = []
         attempts = 0
+        failed_batch_count = 0
         max_attempts = 1 + self._task_creator_correction_count()
-        previous_creator_result = None
-        with self._task_creator_session(tools, system_prompt) as run_creator:
-            for attempt in range(1, max_attempts + 1):
-                attempts = attempt
-                creator_result = None
-                rejected_proposals = self._task_creator_rejected_proposals(previous_creator_result)
-                attempt_prompt = (
-                    prompt
-                    if attempt == 1
-                    else self._task_creator_repair_prompt(failure_reason, rejected_proposals)
+        for batch in batches:
+            tools = self._task_creator_tools(batch)
+            prompt = self._task_creator_prompt(plan, phase, batch)
+            before_batch_uids = {task.task_uid for task in self.state.list_tasks()}
+            before_batch_actionable = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
+            self._log_workflow(
+                "task creator starting phase=%s batch=%s/%s estimated_input_tokens=%s "
+                "context_limit=%s route_group_count=%s item_count=%s tools=%s before_count=%s",
+                self._phase_label(phase),
+                batch.index,
+                batch.total,
+                batch.estimated_input_tokens,
+                int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000),
+                len(batch.groups),
+                len(batch.item_ids),
+                ",".join(get_tool_name(tool) for tool in tools),
+                before_count,
+            )
+            batch_failure_reason = ""
+            previous_creator_result = None
+            batch_attempts = 0
+            with self._task_creator_session(tools, system_prompt) as run_creator:
+                for attempt in range(1, max_attempts + 1):
+                    batch_attempts = attempt
+                    creator_result = None
+                    rejected_proposals = self._task_creator_rejected_proposals(previous_creator_result)
+                    attempt_prompt = (
+                        prompt
+                        if attempt == 1
+                        else self._task_creator_repair_prompt(batch_failure_reason, rejected_proposals)
+                    )
+                    try:
+                        creator_result = run_creator(attempt_prompt, run_policy)
+                        batch_failure_reason = self._task_creator_failure_reason(creator_result)
+                    except MaxTokensReachedException as error:
+                        batch_failure_reason = (
+                            f"task creator reached its model token limit: {self._short(error, 300)}"
+                        )
+                    previous_creator_result = creator_result
+                    self._reassign_new_task_creator_tasks_to_active_phase(phase, before_batch_uids)
+                    after_batch_actionable = len(
+                        self.state.list_tasks(phase=phase.id, status=["active", "pending"])
+                    )
+                    if after_batch_actionable > before_batch_actionable:
+                        batch_failure_reason = ""
+                        break
+                    raw_result = (
+                        creator_result.text if isinstance(creator_result, TaskExecutorCycleResult) else creator_result
+                    )
+                    if raw_result is not None and getattr(raw_result, "reason", "") == run_policy.terminal_reason:
+                        batch_failure_reason = "create_tasks succeeded but produced no new actionable tasks"
+                        continue
+            attempts += batch_attempts
+            after_batch_actionable = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
+            batch_created = max(0, after_batch_actionable - before_batch_actionable)
+            assigned_item_ids = self._task_creation_assigned_item_ids(phase.id, batch.snapshot_ref)
+            batch_complete = batch_created > 0 or bool(batch.item_ids and batch.item_ids <= assigned_item_ids)
+            missing_item_ids = sorted(batch.item_ids - assigned_item_ids)
+            if not batch_complete:
+                failed_batch_count += 1
+                failure_reasons.append(
+                    f"batch {batch.index}/{batch.total}: {batch_failure_reason}; "
+                    f"missing_item_ids={','.join(missing_item_ids[:20])}"
                 )
-                try:
-                    creator_result = run_creator(attempt_prompt, run_policy)
-                    failure_reason = self._task_creator_failure_reason(creator_result)
-                except MaxTokensReachedException as error:
-                    failure_reason = f"task creator reached its model token limit: {self._short(error, 300)}"
-                previous_creator_result = creator_result
-                self._reassign_new_task_creator_tasks_to_active_phase(phase, before_task_uids)
-                after_actionable_count = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
-                if after_actionable_count > before_actionable_count:
-                    break
-                raw_result = creator_result.text if isinstance(creator_result, TaskExecutorCycleResult) else creator_result
-                if raw_result is not None and getattr(raw_result, "reason", "") == run_policy.terminal_reason:
-                    failure_reason = "create_tasks succeeded but produced no new actionable tasks"
-                    continue
+            self._log_workflow(
+                "task creator batch finished phase=%s batch=%s/%s created_count=%s attempts=%s "
+                "missing_item_count=%s failure=%s",
+                phase.id,
+                batch.index,
+                batch.total,
+                batch_created,
+                batch_attempts,
+                len(missing_item_ids),
+                self._short(batch_failure_reason),
+            )
         after_count = len(self.state.list_tasks(phase=phase.id))
+        after_actionable_count = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
         self._log_workflow(
-            "task creator finished phase=%s after_count=%s delta=%s",
+            "task creator finished phase=%s after_count=%s delta=%s batches=%s failed_batches=%s",
             phase.id,
             after_count,
             after_count - before_count,
+            len(batches),
+            failed_batch_count,
         )
         return TaskCreationOutcome(
             created_count=max(0, after_actionable_count - before_actionable_count),
             attempts=attempts,
-            failure_reason=failure_reason,
+            failure_reason="; ".join(failure_reasons),
+            batch_count=len(batches),
+            failed_batch_count=failed_batch_count,
         )
+
+    def _task_creation_batches(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        system_prompt: str,
+    ) -> List[TaskCreationBatch]:
+        """Return deterministic model-input batches from the preceding phase's inventories."""
+
+        prior_phase_ids = [item.id for item in plan.phases if item.id < phase.id]
+        if not prior_phase_ids:
+            return [self._default_task_creation_batch(plan, phase, system_prompt)]
+        source_phase = max(prior_phase_ids)
+        snapshot_refs = []
+        for task in self.state.list_tasks(phase=source_phase):
+            procedure = task.acceptance.basis.procedure
+            if task.status != "done" or procedure is None or procedure.output_kind != "inventory_manifest":
+                continue
+            candidates = list(task.evidence)
+            for result in self.state.list_task_acceptance_results(task.task_uid):
+                candidates.extend(result.evidence_refs)
+            for candidate in candidates:
+                try:
+                    reference = canonical_artifact_reference(candidate)
+                    _load_inventory_manifest(reference)
+                except ValueError:
+                    continue
+                if reference not in snapshot_refs:
+                    snapshot_refs.append(reference)
+        if not snapshot_refs:
+            return [self._default_task_creation_batch(plan, phase, system_prompt)]
+
+        prompt_token_limit = int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)
+        prompt_char_limit = max(1_000, int(prompt_token_limit * 4 * 0.60))
+        raw_batches: List[Tuple[str, Tuple[Tuple[str, str, str, Tuple[str, ...]], ...], int]] = []
+        for snapshot_ref in snapshot_refs:
+            manifest, snapshot_hash = _load_inventory_manifest(snapshot_ref)
+            assigned_ids = {
+                item_id
+                for task in self.state.list_tasks(phase=phase.id)
+                if task.status in {"active", "pending", "done"}
+                and task.acceptance.basis.snapshot_hash == snapshot_hash
+                for item_id in task.acceptance.basis.item_ids
+            }
+            groups = [
+                (target_id, kind, label, tuple(item_ids))
+                for target_id, kind, label, item_ids in _coverage_route_groups(
+                    manifest,
+                    prompt_token_limit=prompt_token_limit,
+                )
+                if not set(item_ids).issubset(assigned_ids)
+            ]
+            if not groups:
+                continue
+            empty_batch = TaskCreationBatch(1, 1, snapshot_ref, (), 0)
+            base_prompt = self._task_creator_prompt(plan, phase, empty_batch)
+            base_chars = len(system_prompt) + len(base_prompt)
+            candidate_char_limit = max(1_000, prompt_char_limit - base_chars)
+            current: List[Tuple[str, str, str, Tuple[str, ...]]] = []
+            current_chars = 0
+            for group in groups:
+                group_chars = len(self._task_creation_batch_toon((group,)))
+                if current and current_chars + group_chars > candidate_char_limit:
+                    estimated = math.ceil((base_chars + current_chars) / 4)
+                    raw_batches.append((snapshot_ref, tuple(current), estimated))
+                    current = []
+                    current_chars = 0
+                current.append(group)
+                current_chars += group_chars
+            if current:
+                estimated = math.ceil((base_chars + current_chars) / 4)
+                raw_batches.append((snapshot_ref, tuple(current), estimated))
+        if not raw_batches:
+            return [self._default_task_creation_batch(plan, phase, system_prompt)]
+        total = len(raw_batches)
+        return [
+            TaskCreationBatch(index, total, snapshot_ref, groups, estimated)
+            for index, (snapshot_ref, groups, estimated) in enumerate(raw_batches, start=1)
+        ]
+
+    def _default_task_creation_batch(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        system_prompt: str,
+    ) -> TaskCreationBatch:
+        """Return one non-snapshot batch with a real prompt-size estimate."""
+
+        placeholder = TaskCreationBatch(1, 1, None, (), 0)
+        prompt = self._task_creator_prompt(plan, phase, placeholder)
+        return TaskCreationBatch(1, 1, None, (), math.ceil((len(system_prompt) + len(prompt)) / 4))
+
+    def _task_creation_assigned_item_ids(self, phase_id: int, snapshot_ref: Optional[str]) -> set[str]:
+        """Return durable non-failed coverage assigned to one batch snapshot."""
+
+        if not snapshot_ref:
+            return set()
+        try:
+            _manifest, snapshot_hash = _load_inventory_manifest(snapshot_ref)
+        except ValueError:
+            return set()
+        return {
+            item_id
+            for task in self.state.list_tasks(phase=phase_id)
+            if task.status in {"active", "pending", "done"}
+            and task.acceptance.basis.snapshot_hash == snapshot_hash
+            for item_id in task.acceptance.basis.item_ids
+        }
+
+    @staticmethod
+    def _task_creation_batch_toon(
+        groups: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...],
+    ) -> str:
+        lines = [f"creation_batch_items[{len(groups)}]{{target_id,kind,label,item_ids}}:"]
+        for target_id, kind, label, item_ids in groups:
+            lines.append(
+                "  "
+                + ",".join(
+                    (
+                        sanitize_toon_value(target_id),
+                        sanitize_toon_value(kind),
+                        sanitize_toon_value(label),
+                        sanitize_toon_value("|".join(item_ids)),
+                    )
+                )
+            )
+        return "\n".join(lines)
 
     def _reassign_new_task_creator_tasks_to_active_phase(self, phase: PlanPhase, before_task_uids: set[str]) -> None:
         """Keep task_creator output scoped to the active phase without changing existing queued work."""
@@ -2458,6 +2724,12 @@ inventory-wide scope is used only with a snapshot reference.
             if rejected_proposals
             else ""
         )
+        batch_repair = (
+            "Consolidate every prior snapshot proposal into exactly one snapshot proposal; Python performs the "
+            "route fan-out.\n"
+            if "requires exactly one snapshot proposal" in failure_reason
+            else ""
+        )
         return f"""The preceding `create_tasks` call was rejected or produced no new actionable task.
 Validation result: {failure_reason or "no actionable task was created"}
 Preserve every correction already made in this conversation and every valid proposal intent. Change only the fields
@@ -2465,6 +2737,9 @@ needed to resolve this validation result, then make exactly one corrected `creat
 proposals were mixed, split them into separate valid proposal objects. If a snapshot producer is not yet eligible,
 create only its bounded prerequisite and retain the dependent intent for the next task-creation pass; do not silently
 discard it. Do not restart the proposal, repeat completed reasoning, explain, execute, inspect, or gather evidence.
+Every `tasks[i]` must contain its own `objective` and `limits`. Never put `objective` beside `tasks`, and never emit
+`work_type`.
+{batch_repair}
 {proposal_context}"""
 
     def _task_creator_failure_reason(self, result: Any) -> str:
@@ -2554,10 +2829,14 @@ discard it. Do not restart the proposal, repeat completed reasoning, explain, ex
         with self.executor_session_factory("task_creator", tools, system_prompt) as run_creator:
             yield run_creator
 
-    def _task_creator_tools(self) -> List[Any]:
+    def _task_creator_tools(self, batch: Optional[TaskCreationBatch] = None) -> List[Any]:
         if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
             raise WorkflowInvariantError("create_tasks tool is required for task_creator")
-        return [build_create_tasks_tool(prompt_token_limit=getattr(self.runtime, "prompt_token_limit", 48_000))]
+        return [build_create_tasks_tool(
+            prompt_token_limit=getattr(self.runtime, "prompt_token_limit", 48_000),
+            coverage_item_ids=batch.item_ids if batch and batch.snapshot_ref else None,
+            expected_snapshot_ref=batch.snapshot_ref if batch else None,
+        )]
 
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
         pending = self.state.list_tasks(phase=phase.id, status=["pending", "active"])
@@ -3083,7 +3362,27 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
 Output only the revised task prompt:
 """
 
-    def _task_creator_prompt(self, plan: OperationPlan, phase: PlanPhase) -> str:
+    def _task_creator_prompt(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        batch: Optional[TaskCreationBatch] = None,
+    ) -> str:
+        if batch and batch.snapshot_ref:
+            existing_task_context = self._task_creator_batch_existing_task_context(phase, batch)
+            batch_context = f"""## Controller-Owned Creation Batch
+Batch {batch.index} of {batch.total}. The `create_tasks` tool is restricted to this exact snapshot and item set.
+Snapshot: {batch.snapshot_ref}
+Estimated input tokens: {batch.estimated_input_tokens}
+Resolved context window: {int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)}
+Create the active phase's work for every listed atomic route group and no work outside this batch.
+Submit exactly one snapshot proposal. Do not divide this batch into endpoint-category or vulnerability-class proposals;
+Python expands the single proposal into one route-scoped task for every listed group.
+{self._task_creation_batch_toon(batch.groups)}
+"""
+        else:
+            existing_task_context = self._task_creator_compact_existing_task_context(phase)
+            batch_context = ""
         return f"""Create durable task records for the assessment plan. Your only action is one successful
 `create_tasks` call. Do not execute, validate, scan, inspect, browse, shell out, or gather evidence. Stop immediately
 after the call succeeds.
@@ -3107,7 +3406,14 @@ phases into another generic assessment batch. Every created task must be executa
 {json.dumps(phase.to_dict(), indent=2, sort_keys=True)}
 
 ## Existing Tasks Across All Phases
-{Task.list_to_toon(self.state.list_tasks())}
+{existing_task_context}
+
+{batch_context}
+
+## Finding Validation Ownership
+{self._task_creator_finding_context()}
+Finding-verification tasks are created by `store_finding` and reassigned by Python. Never emit `work_type` or create a
+generic replacement for an existing verification task.
 
 ## Eligible Canonical Snapshot Handles
 {self._eligible_snapshot_handles()}
@@ -3116,6 +3422,75 @@ phases into another generic assessment batch. Every created task must be executa
 {self._memory_summary()}
 
 {self._task_creator_contract(plan, phase)}"""
+
+    def _task_creator_compact_existing_task_context(self, phase: PlanPhase) -> str:
+        """Return bounded task state without serializing the operation-wide task contracts."""
+
+        tasks = self.state.list_tasks()
+        counts = Counter((task.phase, str(task.status)) for task in tasks)
+        lines = [f"task_phase_status_counts[{len(counts)}]{{phase,status,count}}:"]
+        for (phase_id, status), count in sorted(counts.items()):
+            lines.append(f"  {phase_id},{sanitize_toon_value(status)},{count}")
+        relevant = [
+            task
+            for task in tasks
+            if task.phase == phase.id or task.kind == "finding_validation"
+        ]
+        lines.append(
+            f"task_creation_relevant_tasks[{len(relevant)}]"
+            "{task_uid,phase,title,status,kind,reference_id}:"
+        )
+        for task in relevant:
+            lines.append(
+                "  "
+                + ",".join((
+                    sanitize_toon_value(task.task_uid),
+                    sanitize_toon_value(task.phase),
+                    sanitize_toon_value(task.title),
+                    sanitize_toon_value(task.status),
+                    sanitize_toon_value(task.kind),
+                    sanitize_toon_value(task.reference_id),
+                ))
+            )
+        return "\n".join(lines)
+
+    def _task_creator_finding_context(self) -> str:
+        """Return compact canonical finding ownership for task-creation decisions."""
+
+        list_records = getattr(self.state, "list_finding_records", None)
+        if not callable(list_records):
+            return "finding_records[0]{finding_uid,title,resolution,verification_task_uid}:"
+        rows = []
+        for record in list_records():
+            candidate = record.get("candidate_data") if isinstance(record.get("candidate_data"), dict) else {}
+            rows.append((
+                str(record.get("finding_uid") or ""),
+                str(candidate.get("title") or ""),
+                str(record.get("resolution") or "pending"),
+                str(record.get("verification_task_uid") or ""),
+            ))
+        lines = [f"finding_records[{len(rows)}]{{finding_uid,title,resolution,verification_task_uid}}:"]
+        lines.extend("  " + ",".join(sanitize_toon_value(value) for value in row) for row in rows)
+        return "\n".join(lines)
+
+    def _task_creator_batch_existing_task_context(
+        self,
+        phase: PlanPhase,
+        batch: TaskCreationBatch,
+    ) -> str:
+        """Return compact task state relevant to one creation batch."""
+
+        counts = Counter((task.phase, str(task.status)) for task in self.state.list_tasks())
+        lines = [f"task_phase_status_counts[{len(counts)}]{{phase,status,count}}:"]
+        for (phase_id, status), count in sorted(counts.items()):
+            lines.append(f"  {phase_id},{sanitize_toon_value(status)},{count}")
+        matching = [
+            task
+            for task in self.state.list_tasks(phase=phase.id)
+            if set(task.acceptance.basis.item_ids) & batch.item_ids
+        ]
+        lines.append(Task.list_to_toon(matching))
+        return "\n".join(lines)
 
     def _eligible_snapshot_handles(self) -> str:
         handles = []

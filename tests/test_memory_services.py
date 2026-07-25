@@ -1444,6 +1444,162 @@ def test_create_tasks_binds_canonical_manifest_per_route_independent_of_context(
     assert all(task.acceptance.basis.source_refs == (canonical_manifest,) for task in route_tasks)
 
 
+def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "batched-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": f"endpoint-{index}",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": f"http://target.test/{index}",
+                "attributes": {},
+            }
+            for index in range(3)
+        ],
+        "unassessed_gaps": [],
+    }))
+    canonical_manifest = mod.canonical_artifact_reference(str(manifest))
+    create_tool = mod.build_create_tasks_tool(
+        prompt_token_limit=48_000,
+        coverage_item_ids={"endpoint-0", "endpoint-1"},
+        expected_snapshot_ref=canonical_manifest,
+    )
+
+    result = create_tool(tasks=[{
+        "title": "Assess inventory batch",
+        "objective": "Assess every assigned frozen inventory item",
+        "methods": [],
+        "limits": {},
+        "snapshot_refs": [canonical_manifest],
+        "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+    }])
+
+    assert json.loads(result)["created_count"] == 2
+    assert {
+        item_id
+        for task in store.tasks
+        for item_id in task.acceptance.basis.item_ids
+    } == {"endpoint-0", "endpoint-1"}
+
+
+def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "single-proposal-batch.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": "endpoint-0",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "http://target.test/one",
+                "attributes": {},
+            },
+            {
+                "id": "endpoint-1",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "http://target.test/two",
+                "attributes": {},
+            },
+        ],
+        "unassessed_gaps": [],
+    }))
+    canonical_manifest = mod.canonical_artifact_reference(str(manifest))
+    proposal = {
+        "title": "Assess inventory batch",
+        "objective": "Assess every assigned frozen inventory item",
+        "methods": [],
+        "limits": {},
+        "snapshot_refs": [canonical_manifest],
+        "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+    }
+    create_tool = mod.build_create_tasks_tool(
+        coverage_item_ids={"endpoint-0", "endpoint-1"},
+        expected_snapshot_ref=canonical_manifest,
+    )
+
+    with pytest.raises(ValueError, match="requires exactly one snapshot proposal"):
+        create_tool(tasks=[proposal, {**proposal, "title": "Second category"}])
+
+    assert store.tasks == []
+
+
+def test_bound_create_tasks_tool_rejects_wrong_snapshot_and_split_route(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "atomic-route-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": "endpoint-0",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "http://target.test/login.php",
+                "attributes": {},
+            },
+            {
+                "id": "parameter-0",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "username",
+                "attributes": {"endpoint_id": "endpoint-0"},
+            },
+        ],
+        "unassessed_gaps": [],
+    }))
+    canonical_manifest = mod.canonical_artifact_reference(str(manifest))
+    proposal = {
+        "title": "Assess inventory batch",
+        "objective": "Assess every assigned frozen inventory item",
+        "methods": [],
+        "limits": {},
+        "snapshot_refs": [canonical_manifest],
+        "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+    }
+
+    wrong_snapshot_tool = mod.build_create_tasks_tool(
+        coverage_item_ids={"endpoint-0", "parameter-0"},
+        expected_snapshot_ref="artifact:artifacts/other.json",
+    )
+    with pytest.raises(ValueError, match="requires snapshot reference"):
+        wrong_snapshot_tool(tasks=[proposal])
+
+    split_route_tool = mod.build_create_tasks_tool(
+        coverage_item_ids={"endpoint-0"},
+        expected_snapshot_ref=canonical_manifest,
+    )
+    with pytest.raises(ValueError, match="split an atomic inventory route group"):
+        split_route_tool(tasks=[proposal])
+
+
 def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
@@ -1653,6 +1809,44 @@ def test_bound_acceptance_tool_normalizes_aliases_before_validation(fake_memory_
     recorded = store.get_acceptance_results("op1", task.task_uid)[0]
     assert recorded.status == "assessed_negative"
     assert recorded.disposition == "no_vulnerability"
+
+
+def test_bound_acceptance_tool_runtime_schema_accepts_aliases_before_function_validation(fake_memory_client):
+    _client, store = fake_memory_client
+    task = mod.Task(
+        task_uid="runtime-alias-acceptance",
+        title="Runtime aliases",
+        objective="Record an assessment",
+        acceptance=make_acceptance("runtime-alias-outcome"),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+    acceptance_tool = mod.build_record_task_acceptance_tool(task.task_uid)
+
+    validated = acceptance_tool._metadata.validate_input({
+        "status": "completed",
+        "disposition": "assessed-negative",
+        "summary": "No vulnerability was demonstrated",
+        "evidence_refs": ["artifact:artifacts/result.txt"],
+    })
+
+    assert validated["status"] == "completed"
+    assert validated["disposition"] == "assessed-negative"
+    schema = get_tool_spec(acceptance_tool)["inputSchema"]["json"]
+    assert schema["properties"]["status"]["enum"] == [
+        "satisfied",
+        "assessed_negative",
+        "inaccessible",
+        "excluded",
+        "duplicate",
+    ]
+    assert schema["properties"]["disposition"]["enum"] == [
+        "no_vulnerability",
+        "observation",
+        "finding_candidate",
+        "existing_finding",
+    ]
 
 
 def test_acceptance_alias_normalizers_leave_unknown_values_for_strict_validation():
