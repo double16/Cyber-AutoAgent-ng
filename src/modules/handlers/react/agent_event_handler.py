@@ -705,18 +705,10 @@ class AgentEventHandler(PrintingCallbackHandler):
         return self.coordinator.operation_health_snapshot()
 
     def operation_health_budget_diagnostics(self) -> Dict[str, Any]:
-        """Return token/cost feasibility inputs without reserving operation duration."""
+        """Return assessment progress and terminal-budget inputs for operation health."""
 
-        totals = self._operation_usage_totals()
-        estimate = self._report_budget_estimate()
         termination_reason = self.coordinator.termination_reason if self.coordinator is not None else self._termination_reason
         return {
-            "max_tokens": self._budget_max_tokens(),
-            "max_cost": self._budget_max_cost(),
-            "used_tokens": int(totals["input_tokens"]) + int(totals["output_tokens"]),
-            "used_cost": float(totals.get("cost", self._compute_total_cost_from_usage())),
-            "estimated_reporting_tokens": int(estimate.total_tokens),
-            "estimated_reporting_cost": float(estimate.cost),
             "termination_reason": termination_reason,
             "termination_limit": self._budget_limit_reason,
             "progress_percent": self.get_budget_progress(),

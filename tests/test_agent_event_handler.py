@@ -161,8 +161,6 @@ def test_progress_update_survives_operation_health_provider_failure():
 
 def test_operation_health_budget_diagnostics_exposes_progress_and_assessment_stage():
     handler = make_handler()
-    handler._operation_usage_totals = lambda: {"input_tokens": 10, "output_tokens": 5, "cost": 0.0}
-    handler._report_budget_estimate = lambda: ReportBudgetEstimate(100, 50, 150, 0.0)
     handler.get_budget_progress = lambda: 42
 
     active = handler.operation_health_budget_diagnostics()
@@ -171,6 +169,8 @@ def test_operation_health_budget_diagnostics_exposes_progress_and_assessment_sta
 
     assert active["progress_percent"] == 42
     assert active["assessment_active"] is True
+    assert "estimated_reporting_tokens" not in active
+    assert "estimated_reporting_cost" not in active
     assert reporting["assessment_active"] is False
 
 

@@ -236,7 +236,7 @@ def test_invalid_prediction_is_ignored_and_health_bands_are_stable():
     assert health_band(0.49) == "poor"
 
 
-def test_health_reports_sufficient_reporting_budget_headroom():
+def test_health_ignores_reporting_budget_headroom():
     health = compute_operation_health(
         _plan(PlanPhase(id=1, title="Done", status="done")),
         [_task("done", 1, "done")],
@@ -252,10 +252,11 @@ def test_health_reports_sufficient_reporting_budget_headroom():
 
     assert health["score"] == 1.0
     assert health["feasibility"]["feasible"] is True
-    assert health["feasibility"]["token_headroom"] == 6_000
+    assert "token_headroom" not in health["feasibility"]
+    assert "estimated_reporting_tokens" not in health["feasibility"]
 
 
-def test_health_penalizes_insufficient_reporting_token_or_cost_headroom():
+def test_health_does_not_penalize_insufficient_reporting_token_or_cost_headroom():
     plan = _plan(PlanPhase(id=1, title="Done", status="done"))
     tasks = [_task("done", 1, "done")]
 
@@ -270,10 +271,10 @@ def test_health_penalizes_insufficient_reporting_token_or_cost_headroom():
         budget={"max_cost": 2.0, "used_cost": 1.5, "estimated_reporting_cost": 1.0},
     )
 
-    assert token_health["feasibility"]["feasible"] is False
-    assert cost_health["feasibility"]["feasible"] is False
-    assert token_health["score"] < 0.75
-    assert cost_health["score"] < 0.75
+    assert token_health["feasibility"]["feasible"] is True
+    assert cost_health["feasibility"]["feasible"] is True
+    assert token_health["score"] == 1.0
+    assert cost_health["score"] == 1.0
 
 
 def test_health_without_token_or_cost_budget_does_not_invent_a_reserve():
@@ -337,7 +338,7 @@ def test_health_cap_never_raises_a_naturally_low_failure_score():
     assert health["health_cap"] == 0.99
 
 
-def test_budget_infeasibility_penalty_precedes_shared_health_cap():
+def test_reporting_estimates_do_not_reduce_budget_limited_health():
     health = compute_operation_health(
         _plan(PlanPhase(id=1, title="Done", status="done")),
         [_task("done", 1, "done")],
@@ -351,7 +352,7 @@ def test_budget_infeasibility_penalty_precedes_shared_health_cap():
         incomplete_health_cap=0.99,
     )
 
-    assert health["score"] == 0.70
+    assert health["score"] == 0.99
     assert health["health_cap"] == 0.99
 
 
@@ -376,6 +377,8 @@ def test_phase_one_never_applies_coverage_feasibility_penalty():
     health = compute_operation_health(plan, tasks, budget={"progress_percent": 99})
 
     assert health["coverage_feasibility"]["available"] is True
+    assert health["coverage_feasibility"]["feasible"] is False
+    assert health["feasibility"]["feasible"] is False
     assert health["coverage_feasibility"]["phase_confidence"] == 0.0
     assert health["coverage_feasibility"]["shortfall"] == 0.99
     assert health["coverage_feasibility"]["penalty_fraction"] == 0.0
@@ -426,9 +429,11 @@ def test_coverage_feasibility_uses_quadratic_shortfall_with_half_maximum_reducti
     ample = compute_operation_health(plan, tasks, budget={"progress_percent": 25})
 
     assert partial["coverage_feasibility"]["shortfall"] == 0.5
+    assert partial["feasibility"]["feasible"] is False
     assert partial["coverage_feasibility"]["penalty_fraction"] == 0.125
     assert full["coverage_feasibility"]["penalty_fraction"] == 0.5
     assert ample["coverage_feasibility"]["penalty_fraction"] == 0.0
+    assert ample["feasibility"]["feasible"] is True
     assert full["score"] < partial["score"] < ample["score"]
 
 
@@ -480,6 +485,7 @@ def test_coverage_feasibility_is_unavailable_without_progress_or_work():
     )
 
     assert no_progress["coverage_feasibility"]["available"] is False
+    assert no_progress["feasibility"]["feasible"] is True
     assert no_work["coverage_feasibility"]["available"] is False
     assert reporting["coverage_feasibility"]["available"] is False
     assert reporting["coverage_feasibility"]["penalty_applied"] is False

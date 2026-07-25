@@ -32,7 +32,6 @@ CURRENT_PHASE_WEIGHT = 1.25
 COMPLETED_PHASE_WEIGHT = 1.0
 FUTURE_PHASE_WEIGHT = 0.25
 PREDICTION_PENALTY_WEIGHT = 0.20
-BUDGET_INFEASIBILITY_FACTOR = 0.70
 COVERAGE_FEASIBILITY_MAX_PENALTY = 0.50
 DEFAULT_INCOMPLETE_HEALTH_CAP = 0.99
 
@@ -166,6 +165,7 @@ def _coverage_feasibility(
 
     unavailable = {
         "available": False,
+        "feasible": True,
         "budget_remaining": None,
         "completed_work": 0,
         "remaining_work": 0,
@@ -225,6 +225,7 @@ def _coverage_feasibility(
     penalty_fraction = COVERAGE_FEASIBILITY_MAX_PENALTY * phase_confidence * (shortfall**2)
     return {
         "available": True,
+        "feasible": shortfall == 0.0,
         "budget_remaining": round(budget_remaining, 4),
         "completed_work": completed_work,
         "remaining_work": remaining_work,
@@ -291,23 +292,6 @@ def compute_operation_health(
 
     score = max(0.0, min(1.0, weighted_score / total_weight))
     budget_data = budget or {}
-    max_tokens = budget_data.get("max_tokens")
-    max_cost = budget_data.get("max_cost")
-    used_tokens = max(0, int(budget_data.get("used_tokens", 0) or 0))
-    used_cost = max(0.0, float(budget_data.get("used_cost", 0.0) or 0.0))
-    estimated_tokens = max(0, int(budget_data.get("estimated_reporting_tokens", 0) or 0))
-    estimated_cost = max(0.0, float(budget_data.get("estimated_reporting_cost", 0.0) or 0.0))
-    token_headroom = max(0, int(max_tokens) - used_tokens) if isinstance(max_tokens, int) and max_tokens > 0 else None
-    cost_headroom = (
-        max(0.0, float(max_cost) - used_cost)
-        if isinstance(max_cost, (int, float)) and float(max_cost) > 0
-        else None
-    )
-    token_feasible = token_headroom is None or token_headroom >= estimated_tokens
-    cost_feasible = cost_headroom is None or cost_headroom >= estimated_cost
-    feasible = token_feasible and cost_feasible
-    if not feasible:
-        score *= BUDGET_INFEASIBILITY_FACTOR
     current_row = next((row for row in phase_rows if row["phase_id"] == plan.current_phase), None)
     coverage_feasibility = _coverage_feasibility(
         plan,
@@ -372,12 +356,7 @@ def compute_operation_health(
         "prediction": selected_prediction or {"available": False},
         "coverage_feasibility": coverage_feasibility,
         "feasibility": {
-            "available": bool(max_tokens or max_cost or estimated_tokens or estimated_cost or termination_reason),
-            "feasible": feasible,
-            "token_headroom": token_headroom,
-            "cost_headroom": round(cost_headroom, 6) if cost_headroom is not None else None,
-            "estimated_reporting_tokens": estimated_tokens,
-            "estimated_reporting_cost": round(estimated_cost, 6),
+            **coverage_feasibility,
             "termination_reason": termination_reason,
             "termination_limit": termination_limit,
         },
