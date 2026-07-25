@@ -1,3 +1,4 @@
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -875,8 +876,10 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
     assert set(criterion_schema["properties"]) == {"description"}
 
 
-def test_inventory_manifest_reports_all_invalid_items_with_stable_digest(fake_memory_client):
+def test_inventory_manifest_filters_out_of_scope_items_before_validation(fake_memory_client, monkeypatch):
     _client, store = fake_memory_client
+    logger_info = Mock()
+    monkeypatch.setattr(mod.logger, "info", logger_info)
     store.plan = mod.OperationPlan(
         objective="Assess http://target.test:8080",
         current_phase=1,
@@ -894,23 +897,93 @@ def test_inventory_manifest_reports_all_invalid_items_with_stable_digest(fake_me
             "value": "http://target.test:8080/var/www/html/index.php",
         },
         {
-            "id": "wrong-port",
+            "id": "filesystem-route",
             "target_id": "target-1",
             "kind": "endpoint",
             "value": "http://target.test:9090/login.php",
+            "attributes": [],
+        },
+        {
+            "id": "external-parameter",
+            "target_id": "target-1",
+            "kind": "parameter",
+            "value": "https://outside.test/search?q=test",
         },
     ]
     manifest.write_text(json.dumps(payload))
 
-    with pytest.raises(ValueError) as raised:
+    loaded, digest = mod._load_inventory_manifest(f"artifact:{manifest}")
+
+    assert [item["value"] for item in loaded["items"]] == [
+        "http://target.test:8080/var/www/html/index.php"
+    ]
+    persisted = json.loads(manifest.read_text())
+    assert persisted == loaded
+    canonical = json.dumps(persisted, sort_keys=True, separators=(",", ":"))
+    assert digest == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    logger_info.assert_any_call(
+        "Removed out-of-scope inventory items reference=%s removed_count=%d",
+        "artifact:inventory.json",
+        2,
+    )
+
+
+def test_inventory_manifest_rejects_when_scope_filter_removes_every_item(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test:8080",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test:8080", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    payload["items"] = [{
+        "id": "external",
+        "target_id": "target-1",
+        "kind": "endpoint",
+        "value": "https://outside.test/login",
+    }]
+    manifest.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="items must be a non-empty list"):
         mod._load_inventory_manifest(f"artifact:{manifest}")
 
-    message = str(raised.value)
-    assert "artifact_sha256=" in message
-    assert "filesystem-route" in message
-    assert "wrong-port" in message
-    assert "$.items[0].value" in message
-    assert "$.items[1].value" in message
+    assert json.loads(manifest.read_text())["items"] == []
+
+
+@pytest.mark.parametrize(
+    ("item", "message"),
+    [
+        (
+            {"id": "malformed", "target_id": "target-1", "kind": "endpoint", "value": "/relative"},
+            "absolute HTTP",
+        ),
+        (
+            {"id": "unknown", "target_id": "target-2", "kind": "endpoint", "value": "https://outside.test"},
+            "unknown target IDs",
+        ),
+    ],
+)
+def test_inventory_manifest_does_not_filter_ambiguous_invalid_items(fake_memory_client, item, message):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    payload["items"] = [item]
+    manifest.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match=message):
+        mod._load_inventory_manifest(f"artifact:{manifest}")
+
+    assert json.loads(manifest.read_text())["items"] == [item]
 
 
 def test_create_tasks_generated_schema_accepts_proposal_and_rejects_legacy_contract():
@@ -1247,13 +1320,20 @@ def test_inventory_url_normalization_preserves_boundary_and_repairs_common_route
     ("value", "message"),
     [
         ("http://host.docker.internal:4220/login", "registered target"),
-        ("http://host.docker.internal:4280/etc/passwd", "filesystem path"),
         ("/relative/path", "absolute HTTP"),
+        ("file:///etc/passwd", "absolute HTTP"),
     ],
 )
 def test_inventory_url_normalization_rejects_wrong_boundary_and_malformed_routes(value, message):
     with pytest.raises(ValueError, match=message):
         mod._canonical_inventory_url(value, "http://host.docker.internal:4280")
+
+
+def test_inventory_url_normalization_accepts_target_bound_filesystem_looking_route():
+    assert mod._canonical_inventory_url(
+        "http://host.docker.internal:4280/etc/passwd",
+        "http://host.docker.internal:4280",
+    ) == "http://host.docker.internal:4280/etc/passwd"
 
 
 def test_bound_executable_target_corrects_model_copied_port(monkeypatch):
@@ -1990,7 +2070,23 @@ def test_evidence_reference_kind_validates_memory_findings_and_prefixes(fake_mem
 
 def test_inventory_requirement_ignores_non_manifest_when_valid_manifest_is_also_referenced(fake_memory_client):
     _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
     manifest = _write_inventory_manifest()
+    manifest_payload = json.loads(manifest.read_text())
+    manifest_payload["items"].append({
+        "id": "external-link",
+        "target_id": "target-1",
+        "kind": "endpoint",
+        "value": "https://outside.test/reference",
+        "attributes": {},
+    })
+    manifest.write_text(json.dumps(manifest_payload))
     workflow_map = Path(mod._operation_output_root()) / "workflow_map.json"
     workflow_map.write_text(json.dumps({"workflows": [{"name": "login"}]}))
     contract = mod.AcceptanceContract(
@@ -2036,9 +2132,10 @@ def test_inventory_requirement_ignores_non_manifest_when_valid_manifest_is_also_
     )
 
     assert json.loads(result)["complete"] is True
+    assert [item["id"] for item in json.loads(manifest.read_text())["items"]] == ["endpoint-1"]
 
 
-def test_inventory_requirement_reports_contract_for_malformed_only_candidate(fake_memory_client):
+def test_inventory_requirement_ignores_generic_artifact_without_manifest_candidate(fake_memory_client):
     _client, store = fake_memory_client
     workflow_map = Path(mod._operation_output_root()) / "workflow_map.json"
     workflow_map.parent.mkdir(parents=True, exist_ok=True)
@@ -2053,7 +2150,7 @@ def test_inventory_requirement_reports_contract_for_malformed_only_candidate(fak
     )
     store.store_task("op1", task)
 
-    with pytest.raises(ValueError, match="schema_version must be 1.*preserve its artifact:artifacts/"):
+    with pytest.raises(ValueError, match="received 0.*generic artifact evidence"):
         mod.build_record_task_acceptance_tool(task.task_uid)(
             status="satisfied",
             disposition="observation",
@@ -2069,7 +2166,7 @@ def test_inventory_requirement_reports_contract_for_malformed_only_candidate(fak
         )
 
 
-def test_inventory_acceptance_identifies_invalid_item_and_canonicalizes_artifact_reference(fake_memory_client):
+def test_inventory_acceptance_allows_target_bound_filesystem_looking_route(fake_memory_client):
     _client, store = fake_memory_client
     root = Path(mod._operation_output_root())
     root.mkdir(parents=True, exist_ok=True)
@@ -2096,17 +2193,6 @@ def test_inventory_acceptance_identifies_invalid_item_and_canonicalizes_artifact
     store.store_task("op1", task)
 
     tool = mod.build_record_task_acceptance_tool(task.task_uid)
-    with pytest.raises(ValueError, match="item bad-phpinfo field value.*filesystem path"):
-        tool(
-            status="satisfied",
-            disposition="observation",
-            summary="Inventory stored",
-            evidence_refs=[str(manifest)],
-        )
-
-    payload = json.loads(manifest.read_text())
-    payload["items"][0]["value"] = "http://target.test/phpinfo.php"
-    manifest.write_text(json.dumps(payload))
     result = json.loads(tool(
         status="satisfied",
         disposition="observation",

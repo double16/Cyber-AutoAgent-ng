@@ -244,13 +244,21 @@ class ToolOutcomeJournal:
         recovery_role: str = "normal",
     ) -> ToolOutcome:
         self._sequence += 1
+        redacted_input = _redacted_input(tool_input)
+        if tool_name == "create_tasks":
+            try:
+                input_summary = json.dumps(redacted_input, ensure_ascii=False, sort_keys=True)
+            except (TypeError, ValueError):
+                input_summary = str(redacted_input)
+        else:
+            input_summary = str(redacted_input)
         outcome = ToolOutcome(
             sequence=self._sequence,
             tool_use_id=_bounded_text(tool_use_id, 100),
             tool_name=_bounded_text(tool_name, 100),
             success=success,
             correctable=correctable,
-            input_summary=_bounded_text(_redacted_input(tool_input)),
+            input_summary=_bounded_text(input_summary, 6000 if tool_name == "create_tasks" else 500),
             output_summary=_bounded_text(output),
             recovery_role=recovery_role,
         )

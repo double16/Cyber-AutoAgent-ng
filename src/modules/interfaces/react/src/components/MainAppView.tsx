@@ -21,6 +21,7 @@ import { OperationHistoryEntry } from '../hooks/useOperationManager.js';
 import { ModalType } from '../hooks/useModalManager.js';
 import type { ThinkingStatus } from '../types/thinking.js';
 import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
+import { setOperationTerminalTitle } from '../utils/terminalTitle.js';
 
 interface MainAppViewProps {
   appState: ApplicationState;
@@ -155,6 +156,26 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
 
   // Once any operation completes or is stopped (ESC), suppress showing the header again
   const [hasAnyOperationEnded, setHasAnyOperationEnded] = useState(false);
+
+  useEffect(() => {
+    const operationRunning = appState.activeOperation?.status === 'running' && !hasAnyOperationEnded;
+    setOperationTerminalTitle(
+      operationRunning ? appState.operationHealth : null,
+      operationRunning ? appState.activeOperation?.target : null,
+      stdout,
+    );
+  }, [
+    appState.activeOperation?.status,
+    appState.activeOperation?.target,
+    appState.operationHealth,
+    hasAnyOperationEnded,
+    stdout,
+  ]);
+
+  useEffect(() => () => {
+    setOperationTerminalTitle(null, null, stdout);
+  }, [stdout]);
+
   const handleLifecycleEvent = useCallback((event: any) => {
     const type = event?.type;
     if (type === 'operation_complete' || type === 'stopped' || type === 'complete') {

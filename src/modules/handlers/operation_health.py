@@ -33,6 +33,7 @@ COMPLETED_PHASE_WEIGHT = 1.0
 FUTURE_PHASE_WEIGHT = 0.25
 PREDICTION_PENALTY_WEIGHT = 0.20
 BUDGET_INFEASIBILITY_FACTOR = 0.70
+COVERAGE_FEASIBILITY_MAX_PENALTY = 0.50
 DEFAULT_INCOMPLETE_HEALTH_CAP = 0.99
 
 
@@ -153,6 +154,88 @@ def _phase_health(
     }
 
 
+def _coverage_feasibility(
+    plan: OperationPlan,
+    tasks: Sequence[Task],
+    *,
+    prediction: Optional[Mapping[str, Any]],
+    progress_percent: Any,
+    assessment_active: bool,
+) -> Dict[str, Any]:
+    """Estimate whether remaining assessment coverage fits the remaining budget."""
+
+    unavailable = {
+        "available": False,
+        "budget_remaining": None,
+        "completed_work": 0,
+        "remaining_work": 0,
+        "required_budget_ratio": None,
+        "shortfall": None,
+        "phase_confidence": 0.0,
+        "penalty_fraction": 0.0,
+        "penalty_applied": False,
+    }
+    if not assessment_active:
+        return unavailable
+    try:
+        utilization = float(progress_percent) / 100.0
+    except (TypeError, ValueError):
+        return unavailable
+    if not math.isfinite(utilization):
+        return unavailable
+
+    applicable_phases = [
+        phase
+        for phase in sorted(plan.phases, key=lambda item: item.id)
+        if phase.status != "not_applicable"
+    ]
+    current_index = next(
+        (index for index, phase in enumerate(applicable_phases) if int(phase.id) == int(plan.current_phase)),
+        None,
+    )
+    if current_index is None:
+        return unavailable
+    phase_confidence = 0.0
+    if len(applicable_phases) > 1:
+        phase_confidence = current_index / (len(applicable_phases) - 1)
+
+    completed_work = 0
+    remaining_work = 0
+    for task in tasks:
+        weight = _task_weight(task)
+        if str(task.status) == "done":
+            completed_work += weight
+        else:
+            remaining_work += weight
+
+    if isinstance(prediction, Mapping) and prediction.get("available"):
+        expected_tasks = max(0, int(prediction.get("expected_tasks", 0) or 0))
+        actual_tasks = max(0, int(prediction.get("actual_tasks", 0) or 0))
+        remaining_work += max(0, expected_tasks - actual_tasks)
+
+    total_work = completed_work + remaining_work
+    if total_work <= 0:
+        return unavailable
+
+    budget_remaining = max(0.0, min(1.0, 1.0 - max(0.0, utilization)))
+    required_budget_ratio = remaining_work / total_work
+    shortfall = 0.0
+    if required_budget_ratio > 0:
+        shortfall = max(0.0, required_budget_ratio - budget_remaining) / required_budget_ratio
+    penalty_fraction = COVERAGE_FEASIBILITY_MAX_PENALTY * phase_confidence * (shortfall**2)
+    return {
+        "available": True,
+        "budget_remaining": round(budget_remaining, 4),
+        "completed_work": completed_work,
+        "remaining_work": remaining_work,
+        "required_budget_ratio": round(required_budget_ratio, 4),
+        "shortfall": round(shortfall, 4),
+        "phase_confidence": round(phase_confidence, 4),
+        "penalty_fraction": round(penalty_fraction, 4),
+        "penalty_applied": penalty_fraction > 0,
+    }
+
+
 def compute_operation_health(
     plan: Optional[OperationPlan],
     tasks: Sequence[Task],
@@ -225,6 +308,16 @@ def compute_operation_health(
     feasible = token_feasible and cost_feasible
     if not feasible:
         score *= BUDGET_INFEASIBILITY_FACTOR
+    current_row = next((row for row in phase_rows if row["phase_id"] == plan.current_phase), None)
+    coverage_feasibility = _coverage_feasibility(
+        plan,
+        tasks,
+        prediction=current_row.get("prediction") if current_row else None,
+        progress_percent=budget_data.get("progress_percent"),
+        assessment_active=bool(budget_data.get("assessment_active", True)),
+    )
+    if coverage_feasibility["penalty_applied"]:
+        score *= 1.0 - float(coverage_feasibility["penalty_fraction"])
     termination_reason = str(budget_data.get("termination_reason") or "").strip() or None
     termination_limit = str(budget_data.get("termination_limit") or "").strip() or None
     if termination_reason == "budget_limit":
@@ -257,7 +350,6 @@ def compute_operation_health(
         health_cap_reason = "incomplete_coverage"
     score = max(0.0, min(1.0, score))
     task_counts = Counter(str(task.status) for task in tasks)
-    current_row = next((row for row in phase_rows if row["phase_id"] == plan.current_phase), None)
     return {
         "health_version": HEALTH_VERSION,
         "status": "available",
@@ -278,6 +370,7 @@ def compute_operation_health(
         "health_cap_reason": health_cap_reason,
         "health_cap": round(health_cap, 4),
         "prediction": selected_prediction or {"available": False},
+        "coverage_feasibility": coverage_feasibility,
         "feasibility": {
             "available": bool(max_tokens or max_cost or estimated_tokens or estimated_cost or termination_reason),
             "feasible": feasible,

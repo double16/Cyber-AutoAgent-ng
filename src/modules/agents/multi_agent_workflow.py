@@ -527,6 +527,7 @@ class MultiAgentWorkflowController:
         self._crossed_checkpoints: set[int] = set()
         self._emitted_started_task_uids: set[str] = set()
         self._health_prediction_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+        self._last_assessment_health: Optional[Dict[str, Any]] = None
         set_health_provider = getattr(self.runtime.callback_handler, "set_operation_health_provider", None)
         if callable(set_health_provider):
             set_health_provider(self._operation_health_snapshot)
@@ -552,13 +553,19 @@ class MultiAgentWorkflowController:
                 budget_diagnostics = diagnostics_provider()
             except Exception:
                 logger.debug("Unable to collect operation health budget diagnostics", exc_info=True)
-        return compute_operation_health(
+        if budget_diagnostics and not bool(budget_diagnostics.get("assessment_active", True)):
+            if self._last_assessment_health is not None:
+                return dict(self._last_assessment_health)
+        health = compute_operation_health(
             plan,
             tasks,
             predictions=predictions,
             budget=budget_diagnostics,
             incomplete_health_cap=self._incomplete_health_cap(),
         )
+        if not budget_diagnostics or bool(budget_diagnostics.get("assessment_active", True)):
+            self._last_assessment_health = dict(health)
+        return health
 
     def _incomplete_health_cap(self) -> float:
         """Return the configured ceiling shared by incomplete and budget-limited health."""
@@ -2267,16 +2274,23 @@ review existing memories. Return only the requested JSON decision."""
         failure_reason = ""
         attempts = 0
         max_attempts = 1 + self._task_creator_correction_count()
+        previous_creator_result = None
         with self._task_creator_session(tools, system_prompt) as run_creator:
             for attempt in range(1, max_attempts + 1):
                 attempts = attempt
                 creator_result = None
-                attempt_prompt = prompt if attempt == 1 else self._task_creator_repair_prompt(failure_reason)
+                rejected_proposals = self._task_creator_rejected_proposals(previous_creator_result)
+                attempt_prompt = (
+                    prompt
+                    if attempt == 1
+                    else self._task_creator_repair_prompt(failure_reason, rejected_proposals)
+                )
                 try:
                     creator_result = run_creator(attempt_prompt, run_policy)
                     failure_reason = self._task_creator_failure_reason(creator_result)
                 except MaxTokensReachedException as error:
                     failure_reason = f"task creator reached its model token limit: {self._short(error, 300)}"
+                previous_creator_result = creator_result
                 self._reassign_new_task_creator_tasks_to_active_phase(phase, before_task_uids)
                 after_actionable_count = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
                 if after_actionable_count > before_actionable_count:
@@ -2350,6 +2364,12 @@ Acceptance basis rules:
 - Python requires generic durable evidence for snapshot work, including negative coverage dispositions; findings are
   optional outputs and are never required to prove that an item was assessed.
 
+Correction rules:
+- Preserve every valid proposal intent from a rejected submission; one invalid proposal must not erase the others.
+- Split mixed procedure and snapshot proposals into separate valid objects in the corrected call.
+- If a dependent snapshot producer is unavailable, create its bounded prerequisite and retain the dependent intent for
+  the next creation pass instead of silently dropping it.
+
 Canonical inventory manifest contract:
 {inventory_manifest_contract_text()}
 
@@ -2387,14 +2407,65 @@ basis mode is selected; procedure bounds are finite positive integers; snapshot 
 inventory-wide scope is used only with a snapshot reference.
 """
 
-    def _task_creator_repair_prompt(self, failure_reason: str = "") -> str:
+    @staticmethod
+    def _task_creator_rejected_proposals(result: Any) -> str:
+        """Extract a bounded proposal summary so corrections preserve rejected task intent."""
+
+        if not isinstance(result, TaskExecutorCycleResult):
+            return ""
+        failed = [
+            outcome
+            for outcome in result.outcomes
+            if outcome.tool_name == "create_tasks" and not outcome.success
+        ]
+        if not failed:
+            return ""
+        try:
+            payload = json.loads(failed[-1].input_summary)
+        except (TypeError, ValueError):
+            return ""
+        tasks = payload.get("tasks") if isinstance(payload, dict) else None
+        if not isinstance(tasks, list):
+            return ""
+        summary = []
+        for proposal in tasks:
+            if not isinstance(proposal, dict):
+                continue
+            summary.append(
+                {
+                    "title": str(proposal.get("title") or ""),
+                    "objective": str(proposal.get("objective") or ""),
+                    "basis_description": str(proposal.get("basis_description") or ""),
+                    "methods": proposal.get("methods") if isinstance(proposal.get("methods"), list) else [],
+                    "snapshot_refs": (
+                        proposal.get("snapshot_refs")
+                        if isinstance(proposal.get("snapshot_refs"), list)
+                        else []
+                    ),
+                }
+            )
+        return json.dumps(summary, ensure_ascii=False, sort_keys=True)[:6000]
+
+    def _task_creator_repair_prompt(
+        self,
+        failure_reason: str = "",
+        rejected_proposals: str = "",
+    ) -> str:
         """Return a compact correction turn for the retained task-creator conversation."""
 
+        proposal_context = (
+            f"\nPreserve these proposal intents unless a dependency is explicitly unavailable:\n{rejected_proposals}\n"
+            if rejected_proposals
+            else ""
+        )
         return f"""The preceding `create_tasks` call was rejected or produced no new actionable task.
 Validation result: {failure_reason or "no actionable task was created"}
-Preserve every correction already made in this conversation. Change only the fields needed to resolve this validation
-result, then make exactly one corrected `create_tasks` call. Do not restart the proposal, repeat completed reasoning,
-explain, execute, inspect, or gather evidence."""
+Preserve every correction already made in this conversation and every valid proposal intent. Change only the fields
+needed to resolve this validation result, then make exactly one corrected `create_tasks` call. If procedure and snapshot
+proposals were mixed, split them into separate valid proposal objects. If a snapshot producer is not yet eligible,
+create only its bounded prerequisite and retain the dependent intent for the next task-creation pass; do not silently
+discard it. Do not restart the proposal, repeat completed reasoning, explain, execute, inspect, or gather evidence.
+{proposal_context}"""
 
     def _task_creator_failure_reason(self, result: Any) -> str:
         """Return the most specific controller-observed task-creation failure."""
@@ -3263,12 +3334,16 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
             "finding reference; negative and informational results use no_vulnerability or observation."
         )
         return f"""## Task Executor Contract (Controller-owned)
-Execute only the assigned task objective. Treat plan constraints and module access, safety, execution, evidence, and
+Execute only the assigned task objective. The objective is one single assigned task unit named by the acceptance
+contract; do not broaden it. Treat plan constraints and module access, safety, execution, evidence, and
 prohibition policies as mandatory guardrails. Operate only on the assigned target scope; do not touch unrelated
 targets even if the operation objective mentions them. For assigned targets shaped as `scheme://host:port` or `host:port`, preserve
 that exact scheme, host, and port boundary; do not convert it to host-only form, run omitted-port/all-port discovery,
 or scan other ports on the same host. Port-specific checks are acceptable only for the exact assigned port, and
-scheme-appropriate service tooling is preferred. Do not continue into adjacent tasks or later phase objectives. Store
+scheme-appropriate service tooling is preferred. Do not turn one route, parameter group, or inventory item into a
+phase-wide scan, application-wide vulnerability sweep, or test of unrelated modules. Do not continue into adjacent
+tasks or later phase objectives. Once the assigned unit's criterion is evidenced, rejected, or blocked, stop; do not
+use remaining time to broaden scope. Store
 useful interim facts outside the acceptance ledger with `store_observation`, reusable lessons with `store_knowledge`,
 and each security claim with `store_finding`; reference durable artifact paths rather than pasting large outputs.
 When an acceptance criterion requires observation evidence, call `store_observation` and copy its returned

@@ -388,6 +388,13 @@ def generate_security_report(
             tools_used=tools_used,
         )
         sections["completion_status"] = completion_status
+        completion_status.update(
+            {
+                "total_task_count": int(sections.get("total_task_count", 0) or 0),
+                "completed_task_count": int(sections.get("completed_task_count", 0) or 0),
+                "task_status_counts": sections.get("task_status_counts", {}),
+            }
+        )
 
         # these values may have been updated when building the report section
         steps_executed = max(steps_executed, sections.get("steps_executed", 0))
@@ -497,8 +504,11 @@ Paths" section. Label every unsupported transition as a hypothesis, cite the ver
 and keep hypothetical impact out of verified risk counts and conclusions.
 {completion_guidance}
 
-Use the following data:
-{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'validation_failure_count', 'target_coverage', 'phase_coverage', 'completion_status']})}
+Use the following canonical data. Do not invent or recalculate counts:
+{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'verified_findings_total', 'validation_failure_count', 'target_coverage', 'phase_coverage', 'completion_status']})}
+
+For the verified-findings distribution, copy severity counts exactly. If verified_findings_total is zero, state that
+there are zero verified findings; never create a nonzero "No Verified Findings" category.
 """
         report_step_index += 1
         _emit_report_progress(
@@ -743,8 +753,8 @@ Operation ID: {operation_id}
 Steps Executed: {steps_executed}
 {completion_guidance}
 
-Use the following data:
-{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'phase_coverage', 'tools_summary', 'completion_status']})}
+Use the following canonical data. Do not invent or recalculate task counts:
+{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'task_status_counts', 'total_task_count', 'completed_task_count', 'phase_coverage', 'tools_summary', 'completion_status']})}
 """
         report_step_index += 1
         _emit_report_progress(
@@ -1119,6 +1129,7 @@ def build_report_sections(
         evidence = []
         operation_plan = None
         operation_tasks = []
+        task_status_counts: Counter[str] = Counter()
         if operation_id and len(operation_id) >= 11 and operation_id.startswith("OP_"):
             operation_date = f"{operation_id[3:7]}-{operation_id[7:9]}-{operation_id[9:11]}"
         else:
@@ -1155,6 +1166,7 @@ def build_report_sections(
         operation_tasks = []
         phase_coverage_state: Dict[int, Dict[str, Any]] = {}
         for task in task_records:
+            task_status_counts[str(task.status)] += 1
             acceptance_results = memory_client.list_task_acceptance_results(task.task_uid)
             acceptance_results = acceptance_results if isinstance(acceptance_results, list) else []
             completed_ids = {result.criterion_id for result in acceptance_results}
@@ -1194,6 +1206,9 @@ def build_report_sections(
             if phase.status == "not_applicable":
                 phase_row["status_reason"] = "No finding candidates required validation."
             phase_coverage.append(phase_row)
+
+        total_task_count = len(task_records)
+        completed_task_count = task_status_counts.get("done", 0)
 
         # Process evidence entries - FILTER BY OPERATION_ID
         evidence_skipped = 0
@@ -1325,6 +1340,7 @@ def build_report_sections(
                 and str(e.get("severity", "")).upper() == "INFO"
             ),
         }
+        verified_findings_total = sum(severity_counts.values())
 
         # Generate findings table (structured, deterministic)
         findings_table = generate_findings_summary_table(evidence)
@@ -1481,6 +1497,7 @@ def build_report_sections(
             "date": operation_date,
             "steps_executed": steps_executed,
             "severity_counts": severity_counts,
+            "verified_findings_total": verified_findings_total,
             "critical_count": severity_counts["critical"],
             "high_count": severity_counts["high"],
             "medium_count": severity_counts["medium"],
@@ -1492,6 +1509,9 @@ def build_report_sections(
                 "columns": Task.csv_format(),
                 "items": operation_tasks,
             },
+            "task_status_counts": dict(sorted(task_status_counts.items())),
+            "total_task_count": total_task_count,
+            "completed_task_count": completed_task_count,
             "evidence_text": evidence_text,
             "findings_table": findings_table,
             "summary_table": summary_table,

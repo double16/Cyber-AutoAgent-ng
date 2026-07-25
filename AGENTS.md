@@ -42,6 +42,7 @@
 - Fixed-enum tool schemas must advertise canonical values while pre-processing common semantic synonyms into those canonical values; unknown values remain invalid.
 - Reporting/evaluation budget reserves may reserve tokens and cost only. Duration/time must not be reserved for reporting or evaluation.
 - Budget of any kind may be exceeded while required reporting completes.
+- Planning and task fan-out are independent of operation budget constraints. Budgets govern execution, evaluation, and termination, not the number of planned task records; there should be no budget-aware scheduling.
 
 ## Application Best Practices
 - Budget is reporting only after reporting or evaluation stages are reached.

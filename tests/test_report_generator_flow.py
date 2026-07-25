@@ -265,6 +265,7 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
         "findings_table": "Findings table",
         "risk_assessment": "Risk assessment",
         "severity_counts": {"HIGH": 1},
+        "verified_findings_total": 1,
         "summary_table": "Summary table",
         "raw_evidence": [
             {
@@ -277,6 +278,9 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
         ],
         "operation_plan": {},
         "operation_tasks": [],
+        "task_status_counts": {"done": 2, "pending": 1},
+        "total_task_count": 3,
+        "completed_task_count": 2,
         "tools_summary": ""
     }
 
@@ -324,6 +328,9 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     report_json = json.loads((output_dir / "security_assessment_report.json").read_text())
     assert report_json["completion_status"]["assessment_complete"] is False
     assert report_json["completion_status"]["termination_reason"] == "stalled"
+    assert report_json["completion_status"]["total_task_count"] == 3
+    assert report_json["completion_status"]["completed_task_count"] == 2
+    assert report_json["completion_status"]["task_status_counts"] == {"done": 2, "pending": 1}
     assert (output_dir / "report_executive_summary.md").exists()
     assert (output_dir / "report_findings_header.md").exists()
     # finding_1_High_Finding.md

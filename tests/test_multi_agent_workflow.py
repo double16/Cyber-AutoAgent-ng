@@ -3014,6 +3014,56 @@ def test_task_creator_failure_reason_names_only_registered_tool():
     )
 
 
+def test_task_creator_repair_summary_preserves_rejected_proposal_intents():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    result = workflow_mod.TaskExecutorCycleResult(
+        text="rejected",
+        outcomes=[
+            ToolOutcome(
+                sequence=1,
+                tool_use_id="create-1",
+                tool_name="create_tasks",
+                success=False,
+                correctable=True,
+                input_summary=json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "title": "Compile inventory",
+                                "objective": "Compile the frozen endpoint inventory",
+                                "basis_description": "Phase 1 evidence",
+                                "methods": ["compile"],
+                                "snapshot_refs": [],
+                            },
+                            {
+                                "title": "Assess routes",
+                                "objective": "Assess each frozen route",
+                                "basis_description": "Compiled manifest",
+                                "methods": [],
+                                "snapshot_refs": ["artifact:artifacts/inventory.json"],
+                            },
+                        ]
+                    }
+                ),
+                output_summary="proposal must not mix procedure and snapshot fields",
+            )
+        ],
+    )
+
+    summary = controller._task_creator_rejected_proposals(result)
+    repair = controller._task_creator_repair_prompt("proposal must not mix procedure and snapshot fields", summary)
+
+    assert "Compile the frozen endpoint inventory" in repair
+    assert "Assess each frozen route" in repair
+    assert "split them into separate valid proposal objects" in repair
+    assert "do not silently" in repair
+
+
 def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
     state = FakeState(_plan())
     prompts = []
@@ -4631,3 +4681,39 @@ def test_operation_health_provider_predicts_current_phase_from_inventory_fanout(
     assert health["prediction"]["actual_tasks"] == 1
     assert health["prediction"]["coverage"] == 0.5
     assert health["health_cap"] == 0.75
+
+
+def test_operation_health_provider_freezes_last_assessment_health_during_reporting():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Assessment", status="active"),
+        ],
+    )
+    state = FakeState(
+        plan,
+        [
+            Task("done", "Done", "done", 1, "done"),
+            Task("pending", "Pending", "pending", 2, "pending"),
+        ],
+    )
+    runtime = _runtime()
+    diagnostics = {"progress_percent": 75, "assessment_active": True}
+    runtime.callback_handler.operation_health_budget_diagnostics = lambda: dict(diagnostics)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    assessment_health = runtime.callback_handler.operation_health_provider()
+    diagnostics.update({"progress_percent": 99, "assessment_active": False})
+    reporting_health = runtime.callback_handler.operation_health_provider()
+
+    assert assessment_health["coverage_feasibility"]["penalty_applied"] is True
+    assert reporting_health == assessment_health
+    assert controller._last_assessment_health == assessment_health

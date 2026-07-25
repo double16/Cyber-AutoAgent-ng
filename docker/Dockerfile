@@ -20,6 +20,9 @@ ENV UV_LINK_MODE=copy
 COPY docker/apt_proxy_configure.sh docker/apt_proxy_clean.sh /tmp/
 RUN /tmp/apt_proxy_configure.sh
 
+# Force bash as the default shell
+RUN ln -sf /bin/bash /bin/sh
+
 # Set working directory
 WORKDIR /app
 

@@ -8,6 +8,11 @@ import {ModalType} from '../../../src/hooks/useModalManager.js';
 const pauseMonitoring = jest.fn();
 const resumeMonitoring = jest.fn();
 const checkHealth = jest.fn();
+const setOperationTerminalTitle = jest.fn();
+
+jest.unstable_mockModule('../../../src/utils/terminalTitle.js', () => ({
+    setOperationTerminalTitle,
+}));
 
 jest.unstable_mockModule('../../../src/services/HealthMonitor.js', () => ({
     HealthMonitor: {
@@ -121,6 +126,7 @@ describe('MainAppView', () => {
         pauseMonitoring.mockClear();
         resumeMonitoring.mockClear();
         checkHealth.mockClear();
+        setOperationTerminalTitle.mockClear();
         delete (global as any).__inkInputHandler;
         delete process.env.CYBER_MAX_HISTORY_RENDERED;
     });
@@ -146,6 +152,41 @@ describe('MainAppView', () => {
             view.root.findByType('button').props.onClick();
         });
         expect(props.onInput).toHaveBeenCalledWith('scan example.com');
+    });
+
+    it('updates and resets the terminal title from operation health', async () => {
+        const {MainAppView} = await load();
+        const health = {status: 'available', score: 0.86, band: 'good'};
+        const props = createProps({
+            appState: {
+                activeOperation: {id: 'op-title', status: 'running', target: 'https://target.test'},
+                executionService: {name: 'service'},
+                operationHealth: health,
+            },
+        });
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(<MainAppView {...props as any}/>);
+            await Promise.resolve();
+        });
+        expect(setOperationTerminalTitle).toHaveBeenCalledWith(
+            health,
+            'https://target.test',
+            expect.anything(),
+        );
+
+        await act(async () => {
+            view.update(<MainAppView {...createProps({
+                appState: {
+                    activeOperation: {id: 'op-title', status: 'complete'},
+                    executionService: {name: 'service'},
+                    operationHealth: health,
+                },
+            }) as any}/>);
+            await Promise.resolve();
+        });
+        expect(setOperationTerminalTitle).toHaveBeenLastCalledWith(null, null, expect.anything());
     });
 
     it('renders modals and operation streams while forwarding lifecycle metrics', async () => {

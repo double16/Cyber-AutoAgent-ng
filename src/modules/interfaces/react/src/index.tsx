@@ -23,6 +23,7 @@ import { resolveRecordingMode } from './utils/recordingMode.js';
 import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
 import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
 import { appendOperationHealth } from './utils/operationHealthFormatting.js';
+import { setOperationTerminalTitle } from './utils/terminalTitle.js';
 
 const formatTaskScope = (event: any): string => {
   const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
@@ -208,6 +209,7 @@ const isRawModeSupported = process.stdin.isTTY;
 
 // Handle autoRun mode by bypassing React UI and executing directly
 const runAutoAssessment = async () => {
+  setOperationTerminalTitle(null, cli.flags.target);
   if (cli.flags.autoRun && cli.flags.target) {
     loggingService.info(`🔐 Starting assessment: ${cli.flags.module} → ${cli.flags.target}`);
     loggingService.info(`📌 Objective: ${cli.flags.objective || 'General security assessment'}`);
@@ -442,6 +444,7 @@ const runAutoAssessment = async () => {
             }
         }
         else if (event.type === 'progress_update') {
+          setOperationTerminalTitle(event.health, cli.flags.target);
           if (event.operation_stage === 'ragas_evaluation') {
             const message = formatAutoRunEvaluationEvent(event);
             if (message) loggingService.info(appendOperationHealth(message, event.health));

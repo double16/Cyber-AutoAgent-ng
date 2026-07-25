@@ -2567,6 +2567,26 @@ def _artifact_path_from_ref(reference: str) -> str:
     return resolved
 
 
+def _is_inventory_manifest_candidate(reference: str) -> bool:
+    """Identify artifacts that should receive inventory-manifest validation."""
+
+    if not reference.startswith("artifact:"):
+        return False
+    try:
+        path = _artifact_path_from_ref(reference)
+    except ValueError:
+        return False
+    basename = os.path.basename(path).lower()
+    if "inventory" in basename or "manifest" in basename:
+        return True
+    try:
+        with open(path, "r", encoding="utf-8") as artifact_file:
+            payload = json.load(artifact_file)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and bool({"schema_version", "items", "unassessed_gaps"} & payload.keys())
+
+
 def canonical_artifact_reference(reference: str) -> str:
     """Return one current-operation artifact as a stable, portable reference."""
 
@@ -2704,12 +2724,33 @@ def _reconcile_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[s
         "added_count": added,
     }
     if added:
-        temporary_path = f"{path}.{uuid.uuid4().hex}.tmp"
-        with open(temporary_path, "w", encoding="utf-8") as manifest_file:
-            json.dump(manifest, manifest_file, indent=2, sort_keys=True)
-            manifest_file.write("\n")
-        os.replace(temporary_path, path)
+        _write_inventory_manifest_atomically(path, manifest)
     return manifest
+
+
+def _write_inventory_manifest_atomically(path: str, manifest: Dict[str, Any]) -> None:
+    temporary_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, indent=2, sort_keys=True)
+        manifest_file.write("\n")
+    os.replace(temporary_path, path)
+
+
+def _is_out_of_scope_inventory_item(item: Any, target_values: Dict[str, str]) -> bool:
+    """Return whether one URL-bearing inventory item is outside its registered target boundary."""
+
+    if not isinstance(item, dict) or str(item.get("kind", "")).strip() not in {"endpoint", "parameter"}:
+        return False
+    parsed = urlsplit(str(item.get("value", "")).strip())
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return False
+    registered_target = target_values.get(str(item.get("target_id", "")).strip())
+    if not registered_target:
+        return False
+    boundary = urlsplit(registered_target)
+    if boundary.scheme.lower() not in {"http", "https"} or not boundary.netloc:
+        return False
+    return parsed.scheme.lower() != boundary.scheme.lower() or parsed.netloc.lower() != boundary.netloc.lower()
 
 
 def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tuple[Dict[str, Any], str]:
@@ -2720,18 +2761,36 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
         manifest = json.loads(raw_manifest)
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"Invalid inventory manifest: {reference}") from error
-    canonical_input = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-    artifact_digest = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
     if not isinstance(manifest, dict):
+        canonical_input = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        artifact_digest = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
         raise ValueError(
             f"inventory manifest validation failed artifact_sha256={artifact_digest}: root must be an object"
         )
+    try:
+        target_values = {target.target_id: target.value for target in _get_active_plan().targets}
+    except Exception:
+        target_values = {}
+    items = manifest.get("items")
+    if isinstance(items, list):
+        filtered_items = [item for item in items if not _is_out_of_scope_inventory_item(item, target_values)]
+        removed_count = len(items) - len(filtered_items)
+        if removed_count:
+            manifest["items"] = filtered_items
+            items = filtered_items
+            _write_inventory_manifest_atomically(path, manifest)
+            logger.info(
+                "Removed out-of-scope inventory items reference=%s removed_count=%d",
+                canonical_artifact_reference(reference),
+                removed_count,
+            )
+    canonical_input = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    artifact_digest = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
     diagnostics = []
     if manifest.get("schema_version") != INVENTORY_MANIFEST_SCHEMA_VERSION:
         diagnostics.append(
             f"inventory manifest schema_version must be {INVENTORY_MANIFEST_SCHEMA_VERSION} at $.schema_version"
         )
-    items = manifest.get("items")
     gaps = manifest.get("unassessed_gaps")
     if not isinstance(items, list) or not items:
         diagnostics.append("inventory manifest items must be a non-empty list at $.items")
@@ -2745,10 +2804,6 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
     item_ids = []
     normalized_inventory = False
     validated_items = []
-    try:
-        target_values = {target.target_id: target.value for target in _get_active_plan().targets}
-    except Exception:
-        target_values = {}
     for item_index, item in enumerate(items):
         if not isinstance(item, dict):
             diagnostics.append(f"inventory manifest items must be objects; invalid item at $.items[{item_index}]")
@@ -2808,11 +2863,7 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
     if reconcile:
         manifest = _reconcile_inventory_manifest(path, manifest)
     elif normalized_inventory:
-        temporary_path = f"{path}.{uuid.uuid4().hex}.tmp"
-        with open(temporary_path, "w", encoding="utf-8") as manifest_file:
-            json.dump(manifest, manifest_file, indent=2, sort_keys=True)
-            manifest_file.write("\n")
-        os.replace(temporary_path, path)
+        _write_inventory_manifest_atomically(path, manifest)
     canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -2835,11 +2886,6 @@ def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> st
     parsed = urlsplit(str(value or "").strip())
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"inventory endpoint must be an absolute HTTP(S) URL: {value}")
-    lowered_path = (parsed.path or "/").lower()
-    if re.match(r"^/(?:etc|var|home|root|users|proc|sys|dev)(?:/|$)", lowered_path) or re.match(
-        r"^/[a-z]:/", lowered_path
-    ):
-        raise ValueError(f"inventory endpoint resembles a filesystem path: {value}")
     if registered_target:
         boundary = urlsplit(registered_target)
         if boundary.scheme.lower() in {"http", "https"} and boundary.netloc:
@@ -3549,7 +3595,7 @@ def _validate_acceptance_result_evidence(
             matching = 0
             rejected = []
             for reference in references:
-                if not reference.startswith("artifact:"):
+                if not _is_inventory_manifest_candidate(reference):
                     continue
                 try:
                     _load_inventory_manifest(reference, reconcile=task.acceptance.basis.kind == "procedure")
@@ -3558,7 +3604,13 @@ def _validate_acceptance_result_evidence(
                 else:
                     matching += 1
             if matching < requirement.min_count:
-                diagnostic = f" Rejected candidates: {'; '.join(rejected)}." if rejected else ""
+                if rejected:
+                    diagnostic = f" Rejected candidates: {'; '.join(rejected)}."
+                else:
+                    diagnostic = (
+                        " No inventory-manifest candidate artifact reference was supplied; "
+                        "generic artifact evidence is not counted for this requirement."
+                    )
                 raise ValueError(
                     f"Acceptance criterion {criterion.id} requires {requirement.min_count} "
                     f"inventory_manifest evidence reference(s); received {matching}.{diagnostic} "

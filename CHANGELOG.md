@@ -2,44 +2,16 @@
 
 ### Features
 
-- Require planning actors and critics to produce semantically distinct, progressive phase objectives; preserve those
-  objectives during inventory fan-out; add shared semantic-enum normalization; and report token/cost completion
-  feasibility in operation health without reserving duration.
+- Show the latest operation health score, band, and entered target in the terminal title for interactive and headless TTY sessions.
 - Add deterministic operation-health scoring to progress events, including inventory-based phase fan-out prediction,
   and show the compact score and band with a distinguishing stethoscope marker in interactive stream output, the
   persistent footer, and headless output.
-- Canonicalize operation artifact evidence, expose ready-to-copy artifact references, reconcile HTML navigation into
-  finite inventories, fan out typed inventory units, and create bounded inventory-refinement work when a frozen
-  snapshot is exhausted with explicit gaps.
-- Require task acceptance to classify results as negative, observational, or finding-backed; publish deterministic
-  per-phase coverage summaries and mark empty final validation phases as `not_applicable`.
-- Add optional, shell-free executable canaries and operation-scoped runtime quarantine while keeping unprobed commands
-  available and capability-compatible alternatives selectable.
-- Require the compact task-proposal `limits` object, discard it for snapshot tasks, and retain task-creator reasoning
-  across four configurable correction turns so successive repairs preserve earlier schema fixes.
-- Compile canonical inventory snapshots into one task per target and normalized endpoint route, grouping known
-  parameter variants with their route independently of the model context-window size.
-- Bind task, criterion, and route coverage identities in Python so `record_task_acceptance` requires only a terminal
-  status, concrete summary, and durable evidence references.
-- Infer task-proposal basis and evidence contracts in Python and bind canonical inventory snapshots.
-- Re-evaluate a continuing phase once after bounded task creation cannot produce actionable work, then advance with a
-  `partial_failure` result instead of stalling the operation.
-- Replace the nested task-creation payload with a flat `TaskProposal` schema that Python compiles into immutable
-  acceptance contracts, including deterministic procedure policies, source references, output kinds, and target scope.
-- Add versioned finite inventory manifests, typed per-criterion evidence requirements, and exact coverage ledgers for
-  deterministic task acceptance.
-- Recover missing coverage prerequisites by creating a bounded inventory task in the active phase before dependent
-  coverage work.
-- Add immutable task acceptance manifests, per-criterion result ledgers, and deterministic completion gating while
-  retaining one executor for cohesive multi-item coverage tasks.
-- Use the operation output directory as the process working directory so relative files stay in its workspace.
+- Quarantine unavailable or broken shell commands per operation.
 - Present shell commands solely by capability and applicability, without ranking metadata.
 - Detect exact repeating tool-call cycles, reuse matching completed results, and gracefully stop an agent that ignores
   the cached-result guidance.
 - Add executable target registries and per-task target scopes so logical `--target` names can coexist with concrete
   URLs, hosts, CIDRs, and filesystem paths from the objective.
-- Add deterministic final-report target coverage showing task, verified-finding, and validation-failure counts by
-  executable target.
 - Rename the React terminal `/plugins` command to `/modules`.
 - Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation. Actor/critic refinement for improved quality.
 - Add interactive React terminal `continue` and `report` commands for previous operations.
@@ -56,73 +28,8 @@
 
 ### Fixes
 
-- Report terminal workflows as partial failures while actionable tasks remain, cap incomplete-coverage health in the
-  poor band without penalizing active or pending work in the current phase, prevent closure phases from masking
-  unfinished prior work, and provide item-specific retained-session recovery for invalid task-acceptance inventory
-  evidence.
-- Prevent evaluator-driven phase completion while active or pending tasks remain, keep incomplete prerequisite work
-  from making validation phases appear not applicable, and report findings separately from observations and other
-  evidence.
-- Preserve distinct coverage-task objectives and acceptance intent during exact inventory fan-out deduplication, while
-  continuing to collapse title-only duplicates within the same phase.
-- Close finding-validation tasks directly from durable validation records, advance no-op context reduction through
-  deterministic compaction stages, bind reconnaissance to controller-registered targets, and canonicalize malformed
-  inventory routes before task expansion.
-- Make the persisted task-acceptance ledger authoritative over earlier rejected submissions so corrected and replayed
-  successful acceptance proceeds to evaluation instead of being downgraded to `partial_failure`.
-- Scope exact task and completed-coverage deduplication to the active phase, keep duplicate-only task creation
-  correctable in its retained session, guide executors toward prerequisite work before terminal acceptance, and
-  normalize common semantic acceptance aliases before schema validation.
-- Normalize inapplicable snapshot proposal fields, reject moving inventory procedures, and skip exact duplicate task
-  contracts deterministically while preserving retries for unfinished coverage.
-- Require finding artifacts, return canonical finding and validation-task references, link findings to their source
-  tasks, and bind single-finding task acceptance without requiring the executor to reproduce generated identifiers.
-- Give required-tool roles an explicit first correction, compact unavailable-tool errors, and stop repeated structured
-  tool failures across retained executor cycles.
-- Bound rejected `record_task_acceptance` corrections in the retained executor conversation, stop repeated equivalent
-  submissions, require confirmed security behavior to reference a finding candidate, and verify canonical evidence
-  integrity before reporting.
-- Scope task-executor recovery to the failed invocation so missing prerequisites can be repaired and unrelated tools,
-  artifacts, memories, and evidence operations remain usable; recognize timeouts only from structured process results.
-- Prevent continuation task creators from bypassing endpoint-scoped coverage by omitting a model-selected coverage
-  flag, and close empty phases cleanly instead of terminating the operation when task creation produces no work.
-- Bound retained task-executor continuations after repeated text-only responses or excessive model calls, without
-  allowing reasoning state or prior-cycle tool counts to bypass stall detection.
-- Classify output-token exhaustion separately from prompt overflow, detect repetitive reasoning loops, discard
-  incomplete assistant claims, and recover through bounded role-specific workflow contracts.
-- Scope child-agent termination events to their own runs so only the operation controller can terminate an operation.
-- Require durable finding-validation data independently from task acceptance and keep report validation status,
-  severity counts, completion state, and hypothetical attack paths consistent with canonical records.
-- Bypass generic reasoning-loop repair for task creators and report rejected calls separately from exhausted
-  controller-owned correction turns.
-- Generate acceptance criterion IDs from task-proposal descriptions in Python instead of requiring task-creator models
-  to invent identifiers before the acceptance contract exists.
-- Return durable `memory:<id>` references from `store_observation` so executors can satisfy typed observation evidence
-  requirements in `record_task_acceptance`, including deduplicated observations and supported Mem0 response formats.
-- Remove conflicting legacy `create_tasks` and task-capture instructions for phase, status, evidence, target scope,
-  and nested acceptance fields that agents no longer control.
-- Publish completed task-acceptance summaries and evidence as replay-safe operation memories so later task prompts can
-  reuse accepted information without keeping the executor alive after its terminal acceptance call.
-- Stop task creators after their configured correction allowance instead of permitting unbounded rejected calls.
-- Propagate configured or detected context windows into every model and budget consumer, evaluate phases from canonical
-  accepted evidence, stop recovery violation spirals, and expose a strict controller-owned task-creation schema.
-- Keep failed diagnostic and preflight shell commands in outcome telemetry without incorrectly starting bounded task
-  failure recovery.
-- Publish the canonical inventory-manifest schema to task executors, distinguish inventory procedures from generic
-  artifact procedures, and avoid rejecting valid manifests when acceptance also references non-manifest artifacts.
-- Stop task creators after the first successful task mutation and task executors after complete acceptance recording,
-  without treating rejected terminal-tool calls as completion.
-- Reject coverage tasks whose frozen artifacts, producer tasks, memories, or findings are missing or incomplete, and
-  reject acceptance evidence that does not resolve within the current operation.
-- Bind `record_task_acceptance` to the controller-assigned task so executors cannot fail completion by guessing a task
-  UID or misuse `create_tasks` as a task-completion mechanism.
-- Prevent open-ended task criteria from expanding during execution by freezing finite inventory criteria and requiring
-  evidence-backed terminal results before semantic evaluation.
-- Prevent schema-invalid shell calls from trapping valid corrections, detect repeating policy-canceled calls without
-  caching their synthetic results, and distinguish non-executed tool calls in completion telemetry.
+- Use the operation output directory as the process working directory so relative files stay in its workspace.
 - Mark final reports incomplete when workflow completion gating has not passed, without clamping progress status.
-- Speed up `test_idor_specialist` by mocking `requests.request` in malformed-input coverage so tests do not perform real network calls.
-- Avoid real delays in `test_idor_specialist_evasion_flag` by monkeypatching `time.sleep` while still asserting sleep is invoked during evasion mode.
 - Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.
 - Stop active XBOW benchmark containers when the benchmark runner is interrupted with Ctrl-C.
 - Show final report progress labels as the React terminal thinking task title while reporting.

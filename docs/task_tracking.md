@@ -445,6 +445,12 @@ When the previous phase produced a valid inventory manifest, Python reuses the d
 predict the number of tasks expected in the current phase. Missing fan-out modestly reduces health after that phase is
 active. Prediction is telemetry only and never creates tasks or changes workflow state.
 
+Health also estimates whether the remaining assessment coverage fits the remaining budget reported by
+`progressPercent`. It compares inventory-weighted unfinished tasks and predicted fan-out with the remaining utilization
+budget. Phase 1 has no feasibility penalty; confidence rises by applicable phase position, and a quadratic shortfall
+can reduce health by at most 50% in the final phase. This affects health only—`progressPercent` remains unchanged—and
+the last assessment health is retained once reporting or evaluation begins.
+
 The event carries diagnostic fields for logs and automation, while terminal interfaces deliberately render only the
 rounded score and band, for example `💚 82% GOOD`. The stethoscope distinguishes operation health from progress.
 Health bands are `excellent` (90–100%), `good` (75–89%), `degraded`

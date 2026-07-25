@@ -159,6 +159,21 @@ def test_progress_update_survives_operation_health_provider_failure():
     assert "health" not in event
 
 
+def test_operation_health_budget_diagnostics_exposes_progress_and_assessment_stage():
+    handler = make_handler()
+    handler._operation_usage_totals = lambda: {"input_tokens": 10, "output_tokens": 5, "cost": 0.0}
+    handler._report_budget_estimate = lambda: ReportBudgetEstimate(100, 50, 150, 0.0)
+    handler.get_budget_progress = lambda: 42
+
+    active = handler.operation_health_budget_diagnostics()
+    handler._report_generated = True
+    reporting = handler.operation_health_budget_diagnostics()
+
+    assert active["progress_percent"] == 42
+    assert active["assessment_active"] is True
+    assert reporting["assessment_active"] is False
+
+
 def test_report_budget_estimator_zero_evidence_and_pricing_fallback(monkeypatch):
     monkeypatch.setattr(rb, "get_config_manager", Mock(side_effect=RuntimeError("no config")))
     coordinator = OperationEventCoordinator("OP_EST", MagicMock())

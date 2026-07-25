@@ -719,6 +719,8 @@ class AgentEventHandler(PrintingCallbackHandler):
             "estimated_reporting_cost": float(estimate.cost),
             "termination_reason": termination_reason,
             "termination_limit": self._budget_limit_reason,
+            "progress_percent": self.get_budget_progress(),
+            "assessment_active": not self._report_generated,
         }
 
     def _metadata_from_agent(self, agent: Any) -> Dict[str, str]:
