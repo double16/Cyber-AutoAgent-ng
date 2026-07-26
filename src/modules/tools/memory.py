@@ -2393,8 +2393,44 @@ class TaskProposal(_StrictTaskWireModel):
         """Let an unambiguous snapshot reference own fields that cannot apply to it."""
 
         if not isinstance(value, dict) or not value.get("snapshot_refs"):
-            return value
-        normalized = dict(value)
+            normalized = dict(value) if isinstance(value, dict) else value
+        else:
+            normalized = dict(value)
+        if not isinstance(normalized, dict):
+            return normalized
+
+        aliases = {
+            "limit": "limits",
+            "method": "methods",
+            "snapshot_ref": "snapshot_refs",
+            "criterion": "criteria",
+            "target_id": "target_ids",
+        }
+        for alias, canonical in aliases.items():
+            if alias in normalized and canonical not in normalized:
+                normalized[canonical] = normalized.pop(alias)
+                logger.info("Normalized task proposal field alias %s -> %s", alias, canonical)
+
+        output_aliases = {
+            "report": "artifact",
+            "evidence": "artifact",
+            "vulnerability_report": "artifact",
+            "inventory": "inventory_manifest",
+            "manifest": "inventory_manifest",
+        }
+        output_kind = normalized.get("output_kind")
+        if isinstance(output_kind, str):
+            canonical_output_kind = output_aliases.get(output_kind.strip().lower())
+            if canonical_output_kind is not None:
+                normalized["output_kind"] = canonical_output_kind
+                logger.info(
+                    "Normalized task proposal output_kind alias %s -> %s",
+                    output_kind,
+                    canonical_output_kind,
+                )
+
+        if not normalized.get("snapshot_refs"):
+            return normalized
         if "limit" in normalized or "limits" in normalized:
             normalized.pop("limit", None)
             normalized["limits"] = {}
@@ -2496,6 +2532,65 @@ def _compact_task_proposal_validation_error(error: ValidationError) -> str:
 
 
 TaskProposalList = List[TaskProposal]
+
+
+_TASK_PROPOSAL_INPUT_SCHEMA = {
+    "json": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/TaskProposal"},
+            }
+        },
+        "required": ["tasks"],
+        "$defs": {
+            "TaskProposal": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "title",
+                    "objective",
+                    "methods",
+                    "limits",
+                    "snapshot_refs",
+                    "criteria",
+                ],
+                "properties": {
+                    "title": {"type": "string", "minLength": 1},
+                    "objective": {"type": "string", "minLength": 1},
+                    "basis_description": {"type": ["string", "null"]},
+                    "methods": {"type": "array", "items": {"type": "string"}},
+                    "limits": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            key: {"type": "integer", "exclusiveMinimum": 0}
+                            for key in DISCOVERY_PROCEDURE_LIMIT_KEYS
+                        },
+                    },
+                    "snapshot_refs": {"type": "array", "items": {"type": "string"}},
+                    "output_kind": {"type": "string", "enum": ["artifact", "inventory_manifest"]},
+                    "criteria": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": {"$ref": "#/$defs/TaskProposalCriterion"},
+                    },
+                    "target_ids": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "TaskProposalCriterion": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["description"],
+                "properties": {"description": {"type": "string", "minLength": 1}},
+            },
+        },
+    }
+}
 
 
 def _get_active_plan() -> OperationPlan:
@@ -3565,7 +3660,7 @@ def _create_tasks_from_proposals(
     return json.dumps(response, sort_keys=True)
 
 
-@tool
+@tool(inputSchema=_TASK_PROPOSAL_INPUT_SCHEMA)
 def create_tasks(tasks: TaskProposalList) -> str:
     """Create pending tasks from concise proposals.
 
@@ -3600,7 +3695,7 @@ def build_create_tasks_tool(
 
     completed = False
 
-    @tool(name="create_tasks")
+    @tool(name="create_tasks", inputSchema=_TASK_PROPOSAL_INPUT_SCHEMA)
     def create_tasks_once(tasks: TaskProposalList) -> str:
         """Create the active phase's durable tasks and stop after the first successful call."""
 

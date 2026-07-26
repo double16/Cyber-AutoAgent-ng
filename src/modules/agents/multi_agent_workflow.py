@@ -2592,7 +2592,13 @@ review existing memories. Return only the requested JSON decision."""
                 phase.id,
             )
 
-    def _task_creator_contract(self, plan: OperationPlan, phase: PlanPhase) -> str:
+    def _task_creator_contract(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        *,
+        snapshot_only: bool = False,
+    ) -> str:
         """Return the controller-owned create_tasks payload contract."""
 
         max_corrections = self._task_creator_correction_count()
@@ -2600,6 +2606,39 @@ review existing memories. Return only the requested JSON decision."""
             f"- {target.target_id} [{target.type}]: {target.value}"
             for target in plan.targets
         ) or "- No executable targets resolved; omit target_ids."
+        procedure_rules = f"""- For bounded procedure work, supply non-empty `methods`, `snapshot_refs: []`, and one or more positive integer
+  `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
+  stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
+  inventory JSON; otherwise omit it and Python defaults to `artifact`.
+- Do not use moving claims such as "all reachable", "all discovered", "all endpoints from the inventory", "across
+  the application", or "key workflows" in procedure objectives or acceptance criteria. Inventory-wide work requires
+  canonical `snapshot_refs`.
+"""
+        snapshot_rules = """- For dependent snapshot work, supply canonical `snapshot_refs`, set `methods: []` and `limits: {{}}`; Python
+  silently discards limits and `output_kind` because they do not apply. When the reference resolves to an inventory
+  manifest, Python automatically creates one task per target and normalized endpoint route, grouping that route's
+  parameter/query entries with it. Referenced producer tasks must be done.
+- Never mix procedure fields with snapshot fields. Python infers the basis kind.
+- Python requires generic durable evidence for snapshot work, including negative coverage dispositions; findings are
+  optional outputs and are never required to prove that an item was assessed.
+"""
+        shape = (
+            '''Snapshot shape (use exactly this basis mode):
+```json
+{"tasks":[{"title":"Assess frozen inventory","objective":"Assess the assigned frozen inventory unit",
+"methods":[],"limits":{},"snapshot_refs":["artifact:artifacts/inventory.json"],
+"criteria":[{"description":"Assess the assigned frozen inventory unit"}],"target_ids":["target-1"]}]}
+```'''
+            if snapshot_only
+            else '''Procedure shape (use exactly this basis mode):
+```json
+{"tasks":[{"title":"Cohesive actionable title","objective":"Action and target",
+"basis_description":"Bounded inventory procedure","methods":["crawl"],
+"limits":{"max_requests":500,"max_depth":3},"snapshot_refs":[],"output_kind":"inventory_manifest",
+"criteria":[{"description":"Execute the declared procedure and store its finite manifest"}],
+"target_ids":["target-1"]}]}
+```'''
+        )
         return f"""## create_tasks Payload Contract (Non-negotiable)
 Make exactly one successful `create_tasks` call. A rejected validation attempt does not count as the successful call.
 Python continues this conversation after a rejection, up to {max_corrections} correction(s). Preserve prior fixes and
@@ -2613,22 +2652,9 @@ immutable acceptance contract. Never emit `acceptance`, `phase`, `status`, `targ
 `stop_condition`, `gap_policy`, or unsupported top-level `description` fields.
 
 Acceptance basis rules:
-- For bounded procedure work, supply non-empty `methods`, `snapshot_refs: []`, and one or more positive integer
-  `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
-  stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
-  inventory JSON; otherwise omit it and Python defaults to `artifact`.
-- For dependent snapshot work, supply canonical `snapshot_refs`, set `methods: []` and `limits: {{}}`; Python
-  silently discards limits and `output_kind` because they do not apply. When the reference
-  resolves to an inventory manifest, Python automatically creates one task per target and normalized endpoint route,
-  grouping that route's parameter/query entries with it. Referenced producer tasks must be done.
-- Never mix procedure fields with snapshot fields. Python infers the basis kind.
+{procedure_rules if not snapshot_only else snapshot_rules}
 - If the required snapshot does not exist, create a bounded procedure-based prerequisite inventory task in this
   active phase instead of creating dependent assessment tasks.
-- Do not use moving claims such as "all reachable", "all discovered", "all endpoints from the inventory", "across
-  the application", or "key workflows" in procedure objectives or acceptance criteria. Inventory-wide work requires
-  canonical `snapshot_refs`.
-- Python requires generic durable evidence for snapshot work, including negative coverage dispositions; findings are
-  optional outputs and are never required to prove that an item was assessed.
 
 Correction rules:
 - Preserve every valid proposal intent from a rejected submission; one invalid proposal must not erase the others.
@@ -2651,22 +2677,7 @@ Executable target registry:
 
 A list of tasks is required, including the case of one task being provided.
 
-Procedure shape:
-```json
-{{"tasks":[{{"title":"Cohesive actionable title","objective":"Action and target",
-"basis_description":"Bounded inventory procedure","methods":["crawl"],
-"limits":{{"max_requests":500,"max_depth":3}},"snapshot_refs":[],"output_kind":"inventory_manifest",
-"criteria":[{{"description":"Execute the declared procedure and store its finite manifest"}}],
-"target_ids":["target-1"]}}]}}
-```
-
-Snapshot shape:
-```json
-{{"tasks":[{{"title":"Assess frozen inventory","objective":"Assess each frozen inventory unit","methods":[],
-"limits":{{}},"snapshot_refs":["artifact:artifacts/inventory.json"],
-"criteria":[{{"description":"Assess the assigned frozen inventory unit"}}],
-"target_ids":["target-1"]}}]}}
-```
+{shape}
 
 Before calling the tool, verify every proposal against this checklist: all required fields are present; exactly one
 basis mode is selected; procedure bounds are finite positive integers; snapshot references are canonical; and moving
@@ -2699,18 +2710,23 @@ inventory-wide scope is used only with a snapshot reference.
                 continue
             summary.append(
                 {
+                    "payload": proposal,
                     "title": str(proposal.get("title") or ""),
                     "objective": str(proposal.get("objective") or ""),
                     "basis_description": str(proposal.get("basis_description") or ""),
                     "methods": proposal.get("methods") if isinstance(proposal.get("methods"), list) else [],
+                    "limits": proposal.get("limits") if isinstance(proposal.get("limits"), dict) else {},
                     "snapshot_refs": (
                         proposal.get("snapshot_refs")
                         if isinstance(proposal.get("snapshot_refs"), list)
                         else []
                     ),
+                    "output_kind": str(proposal.get("output_kind") or ""),
+                    "criteria": proposal.get("criteria") if isinstance(proposal.get("criteria"), list) else [],
+                    "target_ids": proposal.get("target_ids") if isinstance(proposal.get("target_ids"), list) else [],
                 }
             )
-        return json.dumps(summary, ensure_ascii=False, sort_keys=True)[:6000]
+        return json.dumps(summary, ensure_ascii=False, sort_keys=True)[:8000]
 
     def _task_creator_repair_prompt(
         self,
@@ -2738,7 +2754,8 @@ proposals were mixed, split them into separate valid proposal objects. If a snap
 create only its bounded prerequisite and retain the dependent intent for the next task-creation pass; do not silently
 discard it. Do not restart the proposal, repeat completed reasoning, explain, execute, inspect, or gather evidence.
 Every `tasks[i]` must contain its own `objective` and `limits`. Never put `objective` beside `tasks`, and never emit
-`work_type`.
+`work_type`. The only canonical `output_kind` values are `artifact` and `inventory_manifest`; map report-like
+deliverables to `artifact`. Do not invent missing objectives, methods, criteria, targets, or bounds.
 {batch_repair}
 {proposal_context}"""
 
@@ -3421,7 +3438,7 @@ generic replacement for an existing verification task.
 ## Memories
 {self._memory_summary()}
 
-{self._task_creator_contract(plan, phase)}"""
+{self._task_creator_contract(plan, phase, snapshot_only=bool(batch and batch.snapshot_ref))}"""
 
     def _task_creator_compact_existing_task_context(self, phase: PlanPhase) -> str:
         """Return bounded task state without serializing the operation-wide task contracts."""

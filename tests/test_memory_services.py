@@ -807,6 +807,38 @@ def test_task_proposal_normalizes_inapplicable_snapshot_fields():
     assert proposal.output_kind == "artifact"
 
 
+def test_task_proposal_normalizes_common_structural_and_output_aliases():
+    payload = task_proposal("Assess", "Assess the assigned route")
+    payload["method"] = payload.pop("methods")
+    payload["limit"] = payload.pop("limits")
+    payload["criterion"] = payload.pop("criteria")
+    payload["target_id"] = payload.pop("target_ids")
+    payload["output_kind"] = "vulnerability_report"
+
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.methods == ["test-fixture"]
+    assert proposal.limits.max_items == 1
+    assert proposal.criteria[0].description == "test-outcome"
+    assert proposal.target_ids == []
+    assert proposal.output_kind == "artifact"
+
+
+@pytest.mark.parametrize("output_kind", ["report", "evidence", "vulnerability_report"])
+def test_task_proposal_rejects_unknown_output_kind_alias(output_kind):
+    payload = task_proposal("Assess", "Assess the assigned route")
+    payload["output_kind"] = output_kind
+    assert mod.TaskProposal.model_validate(payload).output_kind == "artifact"
+
+
+def test_task_proposal_keeps_unknown_output_kind_invalid():
+    payload = task_proposal("Assess", "Assess the assigned route")
+    payload["output_kind"] = "finding_report_bundle"
+
+    with pytest.raises(ValueError, match="Input should be 'artifact' or 'inventory_manifest'"):
+        mod.TaskProposal.model_validate(payload)
+
+
 def test_task_proposal_rejects_inventory_wide_procedure_without_snapshot():
     payload = task_proposal(
         "SQL injection testing",

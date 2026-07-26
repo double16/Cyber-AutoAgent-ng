@@ -3115,7 +3115,7 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
     assert '"title":"Cohesive actionable title"' in captured["prompt"]
     assert '"basis_kind"' not in captured["prompt"]
     assert '"output_kind":"inventory_manifest"' in captured["prompt"]
-    assert '"snapshot_refs":["artifact:artifacts/inventory.json"]' in captured["prompt"]
+    assert '"snapshot_refs":[]' in captured["prompt"]
     assert "Canonical inventory manifest contract" in captured["prompt"]
     assert "Workflow maps, reports, and arbitrary JSON outputs are artifact evidence" in captured["prompt"]
     assert "unsupported top-level `description` fields" in captured["prompt"]
@@ -3377,14 +3377,21 @@ def test_task_creator_repair_summary_preserves_rejected_proposal_intents():
                                 "objective": "Compile the frozen endpoint inventory",
                                 "basis_description": "Phase 1 evidence",
                                 "methods": ["compile"],
+                                "limits": {"max_items": 20},
                                 "snapshot_refs": [],
+                                "output_kind": "inventory_manifest",
+                                "criteria": [{"description": "Store the finite manifest"}],
+                                "target_ids": ["target-1"],
                             },
                             {
                                 "title": "Assess routes",
                                 "objective": "Assess each frozen route",
                                 "basis_description": "Compiled manifest",
                                 "methods": [],
+                                "limits": {},
                                 "snapshot_refs": ["artifact:artifacts/inventory.json"],
+                                "criteria": [{"description": "Assess each route"}],
+                                "target_ids": ["target-1"],
                             },
                         ]
                     }
@@ -3399,6 +3406,9 @@ def test_task_creator_repair_summary_preserves_rejected_proposal_intents():
 
     assert "Compile the frozen endpoint inventory" in repair
     assert "Assess each frozen route" in repair
+    assert '"max_items": 20' in repair
+    assert '"output_kind": "inventory_manifest"' in repair
+    assert '"target_ids": ["target-1"]' in repair
     assert "split them into separate valid proposal objects" in repair
     assert "do not silently" in repair
 
