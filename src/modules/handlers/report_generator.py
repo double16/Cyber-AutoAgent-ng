@@ -1259,6 +1259,24 @@ def build_report_sections(
             }
 
             parsed_evidence = _parse_structured_evidence(memory_content)
+            if metadata.get("category") in {"finding", "finding_candidate", "validation_failure"}:
+                parsed_evidence = dict(parsed_evidence or {})
+                parsed_evidence.setdefault(
+                    "vulnerability",
+                    str(metadata.get("title") or metadata.get("vulnerability") or "").strip(),
+                )
+                parsed_evidence.setdefault(
+                    "where",
+                    str(
+                        metadata.get("target")
+                        or metadata.get("location")
+                        or metadata.get("where")
+                        or ""
+                    ).strip(),
+                )
+                parsed_evidence = {
+                    key: value for key, value in parsed_evidence.items() if str(value).strip()
+                }
 
             # Normalize report categories without modifying the stored memory.
             stored_category = metadata.get("category")
@@ -1285,7 +1303,11 @@ def build_report_sections(
                     if category == "validation_failure"
                     else "INFO"
                 )
-                conf = str(metadata.get("confidence", ""))
+                conf = str(
+                    metadata.get("confidence")
+                    or parsed_evidence.get("confidence")
+                    or ("N/A" if category == "finding" else "")
+                )
                 item.update(
                     {
                         "category": category,

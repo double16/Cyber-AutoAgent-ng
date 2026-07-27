@@ -256,6 +256,47 @@ def test_inventory_manifest_rejects_malformed_shapes(fake_memory_client, payload
         mod._load_inventory_manifest(f"artifact:{path}")
 
 
+def test_inventory_manifest_infers_missing_schema_version_for_compatible_shape(fake_memory_client, monkeypatch):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    logger_info = Mock()
+    monkeypatch.setattr(mod.logger, "info", logger_info)
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    del payload["schema_version"]
+    manifest.write_text(json.dumps(payload))
+
+    loaded, _digest = mod._load_inventory_manifest(f"artifact:{manifest}")
+
+    assert loaded["schema_version"] == 1
+    assert json.loads(manifest.read_text())["schema_version"] == 1
+    logger_info.assert_any_call(
+        "Inferred inventory manifest schema_version=%s reference=%s",
+        1,
+        "artifact:inventory.json",
+    )
+
+
+def test_inventory_manifest_missing_schema_version_keeps_structural_errors(fake_memory_client):
+    del fake_memory_client
+    path = Path(mod._operation_output_root()) / "missing-schema-invalid.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"items": [], "unassessed_gaps": []}
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="items must be a non-empty list") as error:
+        mod._load_inventory_manifest(f"artifact:{path}")
+
+    assert "schema_version" not in str(error.value)
+    assert "schema_version" not in json.loads(path.read_text())
+
+
 def test_memory_dataclasses_validation_and_formatting():
     task = mod.Task.from_obj(
         {
@@ -566,6 +607,12 @@ def test_task_proposal_defaults_basis_description_to_objective():
     proposal = mod.TaskProposal.model_validate(payload)
 
     assert proposal.effective_basis_description == "Check target"
+
+
+@pytest.mark.parametrize("reference", ["shell:curl https://target.test", "tooluse_123", "https://target.test"])
+def test_canonical_evidence_reference_rejects_non_durable_references(reference):
+    with pytest.raises(ValueError, match="Acceptance evidence references must use"):
+        mod._canonical_evidence_reference(reference)
 
 
 def test_task_proposal_defaults_procedure_output_to_artifact():
@@ -906,6 +953,9 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
         assert removed not in schema_text
     assert criterion_schema["required"] == ["description"]
     assert set(criterion_schema["properties"]) == {"description"}
+    assert task_schema["examples"][0]["methods"] == []
+    assert task_schema["examples"][0]["limits"] == {}
+    assert task_schema["examples"][1]["limits"]["max_requests"] == 500
 
 
 def test_inventory_manifest_filters_out_of_scope_items_before_validation(fake_memory_client, monkeypatch):
@@ -921,6 +971,7 @@ def test_inventory_manifest_filters_out_of_scope_items_before_validation(fake_me
     )
     manifest = _write_inventory_manifest()
     payload = json.loads(manifest.read_text())
+    del payload["schema_version"]
     payload["items"] = [
         {
             "id": "filesystem-route",
@@ -951,12 +1002,18 @@ def test_inventory_manifest_filters_out_of_scope_items_before_validation(fake_me
     ]
     persisted = json.loads(manifest.read_text())
     assert persisted == loaded
+    assert persisted["schema_version"] == 1
     canonical = json.dumps(persisted, sort_keys=True, separators=(",", ":"))
     assert digest == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     logger_info.assert_any_call(
         "Removed out-of-scope inventory items reference=%s removed_count=%d",
         "artifact:inventory.json",
         2,
+    )
+    logger_info.assert_any_call(
+        "Inferred inventory manifest schema_version=%s reference=%s",
+        1,
+        "artifact:inventory.json",
     )
 
 
@@ -1327,6 +1384,11 @@ def test_create_tasks_groups_endpoint_parameter_and_trailing_slash_variants(fake
     assert store.tasks[0].title == "Assess endpoint http://target.test/login [target-1]"
     assert store.tasks[1].title == "Assess endpoint http://target.test/security [target-1]"
     assert "login then logout" in store.tasks[2].title
+    assert [task.acceptance.criteria[0].id for task in store.tasks] == [
+        "assess-the-assigned-endpoint",
+        "assess-the-assigned-endpoint",
+        "assess-the-assigned-workflow",
+    ]
     assert all(task.objective.startswith("Assess the frozen inventory") for task in store.tasks)
     assert all(task.target_scope == "subset" and task.target_ids == ["target-1"] for task in store.tasks)
 
@@ -1337,6 +1399,24 @@ def test_normalized_route_preserves_service_scheme_and_drops_query():
 
     assert http_route == ("http://target.test/login", "http://target.test/login")
     assert https_route == ("https://target.test/login", "https://target.test/login")
+
+
+@pytest.mark.parametrize(
+    ("group_kind", "criterion_id"),
+    [
+        ("endpoint", "assess-the-assigned-endpoint"),
+        ("workflow", "assess-the-assigned-workflow"),
+        ("service", "assess-the-assigned-service"),
+        ("technology", "validate-the-assigned-technology"),
+        ("source_file", "inspect-the-assigned-resource"),
+    ],
+)
+def test_coverage_acceptance_criterion_matches_compiled_work_kind(group_kind, criterion_id):
+    criterion = mod._coverage_acceptance_criterion(group_kind, "Map authentication boundaries")
+
+    assert criterion.id == criterion_id
+    assert "Map authentication boundaries" in criterion.description
+    assert criterion.evidence_requirements[0].kind == "durable_evidence"
 
 
 def test_inventory_url_normalization_preserves_boundary_and_repairs_common_route_errors():
@@ -2544,6 +2624,10 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     assert "task_uid" not in tool_schema["properties"]
     assert '"schema_version": 1' in tool_spec["description"]
     assert "Workflow maps, reports, and arbitrary JSON outputs are artifact evidence" in tool_spec["description"]
+    assert "Frozen criterion: endpoint:/login.php" in tool_spec["description"]
+    assert "Required evidence: inventory_manifest>=1" in tool_spec["description"]
+    assert "Concrete observed result for" in tool_schema["properties"]["summary"]["description"]
+    assert "raw commands, URLs, tool IDs" in tool_schema["properties"]["evidence_refs"]["description"]
     replay = acceptance_tool(
         status="satisfied",
         disposition="observation",

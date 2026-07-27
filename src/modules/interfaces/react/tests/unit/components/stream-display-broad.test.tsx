@@ -319,6 +319,47 @@ describe('StreamDisplay broad event rendering', () => {
     expect(longOutput).toContain('line 49');
   });
 
+  it('renders workflow activity lifecycle without an inline spinner', async () => {
+    const { StreamDisplay, render } = await load();
+    const started = {
+      type: 'workflow_activity',
+      role: 'task_creator',
+      action: 'task_create_prompt',
+      status: 'started',
+      attempt: 1,
+      attempt_total: 2,
+      cycle: 1,
+      cycle_total: 3,
+    };
+    const view = render(<StreamDisplay events={[started] as any} animationsEnabled={false} />);
+
+    expect(view.lastFrame()).not.toContain('spinner:dots');
+    expect(view.lastFrame()).toContain('started');
+    expect(view.lastFrame()).toContain('[cycle 1/3]');
+
+    view.rerender(<StreamDisplay events={[started, {
+      ...started,
+      status: 'completed',
+    }] as any} animationsEnabled={false} />);
+    const completedFrame = view.lastFrame() || '';
+    expect(completedFrame).not.toContain('spinner:dots');
+    expect(completedFrame).toContain('completed');
+  });
+
+  it('includes termination reason and message in the terminated progress header', async () => {
+    const { StreamDisplay, render } = await load();
+    const frame = render(<StreamDisplay events={[
+      { type: 'progress_update', step: 'TERMINATED' },
+      {
+        type: 'termination_reason',
+        reason: 'stalled',
+        message: 'Task executor stopped after bounded recovery',
+      },
+    ] as any} animationsEnabled={false} />).lastFrame() || '';
+
+    expect(frame).toContain('[TERMINATED: stalled] Task executor stopped after bounded recovery');
+  });
+
   it('renders long static history through append-style output', async () => {
     const { StaticStreamDisplay, render } = await load();
     const events = Array.from({ length: 540 }, (_, index) => ({

@@ -1032,13 +1032,31 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             parsed.get("vulnerability")
             or safe_truncate(str(top.get("content", "")), 60)
         ).strip()
-        where = (parsed.get("where") or "").strip()
+        top_metadata = top.get("metadata", {}) if isinstance(top.get("metadata"), dict) else {}
+        where = str(
+            parsed.get("where")
+            or top.get("location")
+            or top.get("target")
+            or top_metadata.get("target")
+            or top_metadata.get("location")
+            or top_metadata.get("where")
+            or ""
+        ).strip()
         if not where:
             # Derive primary location across the group if available
             wheres = []
             for it in items:
                 p = it.get("parsed", {}) if isinstance(it.get("parsed"), dict) else {}
-                w = (p.get("where") or "").strip()
+                metadata = it.get("metadata", {}) if isinstance(it.get("metadata"), dict) else {}
+                w = str(
+                    p.get("where")
+                    or it.get("location")
+                    or it.get("target")
+                    or metadata.get("target")
+                    or metadata.get("location")
+                    or metadata.get("where")
+                    or ""
+                ).strip()
                 if w:
                     wheres.append(w)
             where = (
@@ -1067,7 +1085,7 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             else:
                 conf_str = f"{cmin:.1f}%–{cmax:.1f}%"
         else:
-            conf_str = "-"
+            conf_str = "N/A"
 
         # Build anchor link to detailed heading: "#### 1. {vuln} - {where}"
         heading_text = (

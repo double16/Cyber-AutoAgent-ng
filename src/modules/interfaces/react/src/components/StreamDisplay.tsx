@@ -93,7 +93,7 @@ export type AdditionalStreamEvent =
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
-  | { type: 'workflow_activity'; content?: string; activity?: string; action?: string; role?: string; status?: string; phase_id?: number; phase_title?: string; task_uid?: string; task_title?: string; attempt?: number; attempt_total?: number; iteration?: number; iteration_total?: number; [key: string]: any }
+  | { type: 'workflow_activity'; content?: string; activity?: string; action?: string; role?: string; status?: string; phase_id?: number; phase_title?: string; task_uid?: string; task_title?: string; attempt?: number; attempt_total?: number; cycle?: number; cycle_total?: number; iteration?: number; iteration_total?: number; [key: string]: any }
   | { type: 'task_started'; task_uid?: string; title?: string; status?: string; task_kind?: string; reference_id?: string; [key: string]: any }
   | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; finding_resolution?: string; [key: string]: any }
   | { type: 'task_deferred'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; [key: string]: any }
@@ -110,6 +110,26 @@ const formatTaskScope = (event: any): string => {
   const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
   if (!scope || scope === 'all') return '';
   return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
+
+const flattenDisplayEvents = (events: DisplayStreamEvent[]): DisplayStreamEvent[] => events.flatMap(event =>
+  event.type === 'batch' && Array.isArray(event.events) ? flattenDisplayEvents(event.events) : [event]
+);
+
+type TerminationDetail = { reason?: string; message?: string };
+
+const latestTerminationDetail = (events: DisplayStreamEvent[]): TerminationDetail | null => {
+  const termination = [...flattenDisplayEvents(events)]
+    .reverse()
+    .find(event => event.type === 'termination_reason');
+  if (!termination) return null;
+  const reason = typeof (termination as any).reason === 'string'
+    ? (termination as any).reason.trim()
+    : '';
+  const message = typeof (termination as any).message === 'string'
+    ? (termination as any).message.trim()
+    : '';
+  return reason || message ? { reason: reason || undefined, message: message || undefined } : null;
 };
 
 interface StreamDisplayProps {
@@ -542,6 +562,7 @@ interface EventLineProps {
   // rendered only in the dynamic StreamDisplay (which can react to late-arriving
   // report_content and assessment_complete events).
   enableInlineReportView?: boolean;
+  terminationDetail?: TerminationDetail | null;
 }
 
 export const EventLine: React.FC<EventLineProps> = React.memo(({
@@ -554,6 +575,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
   projectRoot,
   configOverride,
   enableInlineReportView = true,
+  terminationDetail,
 }) => {
   const { config } = useConfig();
   const effectiveConfig = configOverride ?? config;
@@ -654,8 +676,11 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       } else if (event.step === "FINAL REPORT") {
         stepDisplay = "[FINAL REPORT]";
       } else if (typeof event.step === 'string' && String(event.step).toUpperCase() === 'TERMINATED') {
-        // Clean termination header without confusing progress values
-        stepDisplay = "[TERMINATED]";
+        // Pair the progress header with the later termination payload so failures are visible
+        // even when the terminal detail is rendered separately in the event stream.
+        const reason = terminationDetail?.reason;
+        const message = terminationDetail?.message;
+        stepDisplay = `[TERMINATED${reason ? `: ${reason}` : ''}]${message ? ` ${message}` : ''}`;
       } else if (eventAgent && agentSubStep) {
         const agentName = String(eventAgent).toUpperCase().replaceAll('_', ' ');
         const agentTotal = (event as any)['agent_total_actions'] ?? agentSubStep;
@@ -713,7 +738,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       }
       const title = String((event as any).title || 'Finding').replace(/^Verify finding:\s*/i, '').trim();
       return (
-        <Box marginLeft={2}>
+        <Box>
           <Text color="yellow">{`VERIFYING FINDING ${title}${formatTaskScope(event)}`}</Text>
         </Box>
       );
@@ -725,14 +750,30 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       const phase = (event as any).phase_id != null ? ` phase ${(event as any).phase_id}` : '';
       const task = String((event as any).task_title || '').trim();
       const taskSuffix = task ? `: ${task}` : '';
-      const attempt = (event as any).attempt != null && (event as any).attempt_total != null
+      const cycle = (event as any).cycle != null && (event as any).cycle_total != null
+        ? ` [cycle ${(event as any).cycle}/${(event as any).cycle_total}]`
+        : '';
+      const attempt = !cycle && (event as any).attempt != null && (event as any).attempt_total != null
         ? ` [${(event as any).attempt}/${(event as any).attempt_total}]`
         : '';
-      const icon = status === 'completed' ? '✓' : status === 'failed' ? '⚠' : '…';
-      const color = status === 'completed' ? 'green' : status === 'failed' ? 'yellow' : 'cyan';
+      const icon = ['completed', 'success', 'done'].includes(status)
+        ? '✓'
+        : ['failed', 'error', 'blocked', 'partial_failure'].includes(status)
+          ? '⚠'
+          : ['cancelled', 'canceled', 'skipped', 'terminated', 'not_applicable'].includes(status)
+            ? '■'
+            : null;
+      const color = ['completed', 'success', 'done'].includes(status)
+        ? 'green'
+        : ['failed', 'error', 'blocked', 'partial_failure', 'cancelled', 'canceled', 'skipped', 'terminated', 'not_applicable'].includes(status)
+          ? 'yellow'
+          : 'cyan';
       return (
-        <Box marginLeft={2}>
-          <Text color={color}>{`${icon} ${action}${phase}${taskSuffix}${attempt} ${status}`}</Text>
+        <Box>
+          <Text color={color}>
+            {icon ? icon : ' '}
+          {` ${action}${phase}${taskSuffix}${cycle || attempt} ${status}`}
+          </Text>
         </Box>
       );
     }
@@ -748,7 +789,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         const label = verified ? 'FINDING VERIFIED' : 'FINDING REQUIRES VALIDATION';
         const detail = statusReason ? `: ${statusReason}` : '';
         return (
-          <Box marginLeft={2}>
+          <Box>
             <Text color={verified ? 'green' : 'yellow'}>
               {`${label}${findingTitle ? ` ${findingTitle}` : ''}${detail}`}
             </Text>
@@ -764,7 +805,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       const detail = statusReason ? `: ${statusReason}` : '';
       const color = status === 'blocked' || status === 'partial_failure' ? 'yellow' : 'green';
       return (
-        <Box marginLeft={2}>
+        <Box>
           <Text color={color}>{`${label}${suffix}${detail}`}</Text>
         </Box>
       );
@@ -776,7 +817,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       const suffix = title ? ` ${title}` : '';
       const detail = statusReason ? `: ${statusReason}` : '';
       return (
-        <Box marginLeft={2}>
+        <Box>
           <Text color="yellow">{`TASK DEFERRED${suffix}${detail}`}</Text>
         </Box>
       );
@@ -2447,6 +2488,7 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   
   // Group consecutive reasoning events to prevent multiple labels
   const displayGroups = React.useMemo(() => computeDisplayGroups(events), [events]);
+  const terminationDetail = React.useMemo(() => latestTerminationDetail(events), [events]);
   
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
@@ -2585,6 +2627,7 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
                 reportPath={reportDetails.path}
                 reportFallbackContent={reportDetails.content}
                 projectRoot={projectRoot}
+                terminationDetail={terminationDetail}
                 enableInlineReportView={true}
               />
           ));
@@ -2616,6 +2659,7 @@ export const StaticStreamDisplay: React.FC<{
     return `event-seq-${eventSeqRef.current++}`;
   }, []);
   const groups = React.useMemo(() => computeDisplayGroups(events), [events]);
+  const terminationDetail = React.useMemo(() => latestTerminationDetail(events), [events]);
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
   // Resolve output base directory from config for consistent path mapping
@@ -2741,6 +2785,7 @@ export const StaticStreamDisplay: React.FC<{
                 reportPath={reportDetails.path}
                 reportFallbackContent={reportDetails.content}
                 projectRoot={projectRoot}
+                terminationDetail={terminationDetail}
                 // Disable InlineReportViewer here; the dynamic StreamDisplay path will
                 // render the inline preview once the report is fully available.
                 enableInlineReportView={false}
@@ -2751,7 +2796,15 @@ export const StaticStreamDisplay: React.FC<{
       }
     });
     return out;
-  }, [groups, operationContext, reportDetails.path, reportDetails.content, projectRoot, stableEventKey]);
+  }, [
+    groups,
+    operationContext,
+    reportDetails.path,
+    reportDetails.content,
+    projectRoot,
+    stableEventKey,
+    terminationDetail,
+  ]);
 
   return (
     <Static key={items[0]?.key ?? 'empty'} items={items}>

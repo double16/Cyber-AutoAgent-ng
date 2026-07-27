@@ -9,8 +9,8 @@ The controller deliberately owns plan, phase, and task mutation in Python. Role
 agents are short-lived and scoped to one narrow objective. They return structured
 JSON decisions or execute the task prompt they were given; they do not decide
 which phase is active, activate tasks, close tasks, or mark the assessment
-complete. The only normal exception is task creation: task creator and executor
-roles may call ``create_tasks`` so newly discovered work can be persisted.
+complete. The task-creator role may call ``create_tasks`` so Python can persist
+planned work; ordinary executors report newly discovered work through evidence and memory tools.
 
 The workflow is:
 
@@ -349,8 +349,15 @@ class WorkflowStateStore:
         for phase in plan.phases:
             if phase.status not in TERMINAL_PLAN_STATUSES:
                 return self.activate_phase(plan, phase.id)
-        plan.assessment_complete = not self.list_tasks(status=["active", "pending"])
+        plan.assessment_complete = self._assessment_is_complete(plan)
         return self.store_plan(plan)
+
+    def _assessment_is_complete(self, plan: OperationPlan) -> bool:
+        """Return whether every phase and task reached a successful terminal state."""
+
+        phases_complete = all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
+        tasks_complete = all(task.status == "done" for task in self.list_tasks())
+        return phases_complete and tasks_complete
 
     def activate_phase(self, plan: OperationPlan, phase_id: int) -> OperationPlan:
         phases = []
@@ -373,6 +380,47 @@ class WorkflowStateStore:
     def mark_phase(self, plan: OperationPlan, phase_id: int, status: str) -> OperationPlan:
         if status not in TERMINAL_PLAN_STATUSES:
             raise ValueError(f"phase status must be terminal, got {status}")
+        if status in {"done", "not_applicable"}:
+            phase_tasks = self.list_tasks(phase=phase_id)
+            blocking_tasks = [
+                task
+                for task in self.list_tasks(status=["active", "pending"])
+                if task.phase <= phase_id
+            ]
+            failed_tasks = [task for task in phase_tasks if task.status in {"partial_failure", "blocked"}]
+            prior_incomplete_phases = [
+                phase
+                for phase in plan.phases
+                if phase.id < phase_id and phase.status in {"partial_failure", "blocked"}
+            ]
+            phase_has_work = bool(phase_tasks)
+            if (
+                blocking_tasks
+                or failed_tasks
+                or (status == "not_applicable" and (phase_has_work or prior_incomplete_phases))
+            ):
+                blocking_counts = Counter(task.phase for task in blocking_tasks)
+                failed_counts = Counter(task.status for task in failed_tasks)
+                if any(task.status == "blocked" for task in failed_tasks):
+                    effective_status = "blocked"
+                elif blocking_tasks or failed_tasks or prior_incomplete_phases:
+                    effective_status = "partial_failure"
+                else:
+                    effective_status = "done"
+                logger.info(
+                    "Overriding successful phase closure phase=%s requested=%s effective=%s "
+                    "blocking_tasks=%s blocking_phases=%s failed_task_statuses=%s "
+                    "prior_incomplete_phases=%s phase_has_work=%s",
+                    phase_id,
+                    status,
+                    effective_status,
+                    len(blocking_tasks),
+                    dict(sorted(blocking_counts.items())),
+                    dict(sorted(failed_counts.items())),
+                    [phase.id for phase in prior_incomplete_phases],
+                    phase_has_work,
+                )
+                status = effective_status
         phases = [
             PlanPhase(
                 id=phase.id,
@@ -393,7 +441,6 @@ class WorkflowStateStore:
                 )
                 for phase in phases
             ]
-        actionable_tasks = self.list_tasks(status=["active", "pending"])
         return self.store_plan(OperationPlan(
             objective=plan.objective,
             current_phase=next_phase.id if next_phase else phase_id,
@@ -401,7 +448,15 @@ class WorkflowStateStore:
             phases=phases,
             constraints=plan.constraints,
             targets=plan.targets,
-            assessment_complete=next_phase is None and not actionable_tasks,
+            assessment_complete=self._assessment_is_complete(OperationPlan(
+                objective=plan.objective,
+                current_phase=next_phase.id if next_phase else phase_id,
+                total_phases=len(phases),
+                phases=phases,
+                constraints=plan.constraints,
+                targets=plan.targets,
+                created_at=plan.created_at,
+            )),
             created_at=plan.created_at,
         ))
 
@@ -829,6 +884,12 @@ class MultiAgentWorkflowController:
             return max(0, config_manager.getenv_int("CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS", 2))
         return 2
 
+    def _task_endpoint_evidence_correction_count(self) -> int:
+        config_manager = self.runtime.config_manager
+        if config_manager:
+            return max(0, config_manager.getenv_int("CYBER_ENDPOINT_EVIDENCE_MAX_CORRECTIONS", 1))
+        return 1
+
     def run(self) -> None:
         self._log_workflow(
             "start max_iterations=%s json_retries=%s plan_refinement_iterations=%s "
@@ -1109,30 +1170,48 @@ class MultiAgentWorkflowController:
         coverage = self._workflow_coverage_summary(plan)
         actionable = self.state.list_tasks(status=["active", "pending"])
         actionable_counts = Counter(task.status for task in actionable)
-        actionable_phase_ids = sorted({task.phase for task in actionable})
+        incomplete_phase_ids = sorted({
+            *{task.phase for task in actionable},
+            *{
+                task.phase
+                for task in self.state.list_tasks()
+                if task.status in {"partial_failure", "blocked"}
+            },
+            *{
+                phase.id
+                for phase in plan.phases
+                if phase.status in {"partial_failure", "blocked"}
+            },
+        })
         final_phase_id = max(phase.id for phase in plan.phases)
         terminal_phase_with_unresolved_prior_work = any(task.phase < final_phase_id for task in actionable)
         self._emit_workflow_event({
             "type": "workflow_coverage_summary",
             "phases": coverage,
-            "assessment_complete": not actionable and self._all_phases_terminal(plan),
+            "assessment_complete": self._assessment_is_complete(plan),
             "actionable_task_count": len(actionable),
             "actionable_task_status_counts": dict(sorted(actionable_counts.items())),
-            "incomplete_phase_ids": actionable_phase_ids,
+            "incomplete_phase_ids": incomplete_phase_ids,
             "terminal_phase_completed_with_unresolved_prior_work": terminal_phase_with_unresolved_prior_work,
         })
         partial_count = sum(phase.status == "partial_failure" for phase in plan.phases)
-        assessment_complete = not actionable and self._all_phases_terminal(plan)
+        assessment_complete = self._assessment_is_complete(plan)
         message = f"Assessment complete: {phase_count} phase{'s' if phase_count != 1 else ''} evaluated"
         if partial_count:
             message += f"; {partial_count} partial"
         reason = "complete"
         if not assessment_complete:
             reason = "partial_failure"
-            message = (
-                f"Assessment incomplete: {len(actionable)} actionable task(s) remain across phase(s) "
-                f"{', '.join(str(phase_id) for phase_id in actionable_phase_ids)}"
-            )
+            if actionable:
+                message = (
+                    f"Assessment incomplete: {len(actionable)} actionable task(s) remain across phase(s) "
+                    f"{', '.join(str(phase_id) for phase_id in incomplete_phase_ids)}"
+                )
+            else:
+                message = (
+                    "Assessment incomplete: terminal task or phase failures remain in phase(s) "
+                    f"{', '.join(str(phase_id) for phase_id in incomplete_phase_ids) or 'none'}"
+                )
         self._log_workflow(
             "emitting completion phase_count=%s statuses=%s reason=%s actionable=%s",
             phase_count,
@@ -1147,6 +1226,14 @@ class MultiAgentWorkflowController:
         """Return whether plan execution has classified every phase terminally."""
 
         return all(phase.status in TERMINAL_PLAN_STATUSES for phase in plan.phases)
+
+    def _assessment_is_complete(self, plan: OperationPlan) -> bool:
+        """Return whether all planned work completed successfully."""
+
+        return (
+            all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
+            and all(task.status == "done" for task in self.state.list_tasks())
+        )
 
     def _workflow_coverage_summary(self, plan: OperationPlan) -> List[Dict[str, Any]]:
         """Return deterministic per-phase task and frozen-inventory coverage counts."""
@@ -1286,7 +1373,7 @@ class MultiAgentWorkflowController:
         tools = build_role_tools(
             self.runtime,
             selected_optional_tool_names=selected_tools if isinstance(selected_tools, list) else [],
-            include_create_tasks=True,
+            include_create_tasks=False,
         )
         tools = [tool for tool in tools if get_tool_name(tool) != "record_task_acceptance"]
         tools.append(build_record_task_acceptance_tool(task.task_uid, task))
@@ -1296,6 +1383,16 @@ class MultiAgentWorkflowController:
             + "\n\n## Frozen Task Acceptance Contract (Controller-owned)\n"
             + json.dumps(task.acceptance.to_dict(), indent=2, sort_keys=True)
         )
+        evidence_refs = list(task.evidence)
+        for result in self.state.list_task_acceptance_results(task.task_uid):
+            evidence_refs.extend(result.evidence_refs)
+        canonical_refs = sorted({str(reference) for reference in evidence_refs if str(reference).strip()})
+        if canonical_refs:
+            execution_prompt += (
+                "\n\n## Existing Durable Evidence References\n"
+                "These references are available for this task; do not replace them with raw tool commands:\n"
+                + "\n".join(f"- {reference}" for reference in canonical_refs)
+            )
         execution_prompt += self._inventory_manifest_evidence_prompt(task)
         selected_memory_context = self._selected_memory_context(prompt_spec.get("memory_ids"))
         if selected_memory_context:
@@ -1336,7 +1433,6 @@ class MultiAgentWorkflowController:
             max_actionless_calls=3,
             max_agent_calls=8,
             max_model_turns=32,
-            ignored_terminal_tool_names={"create_tasks"},
             terminal_reason="task_executor_done",
             terminal_message="Task executor completed after tool use",
         )
@@ -1349,7 +1445,6 @@ class MultiAgentWorkflowController:
             max_actionless_calls=3,
             max_agent_calls=4,
             max_model_turns=8,
-            ignored_terminal_tool_names={"create_tasks"},
             terminal_reason="task_executor_recovery_done",
             terminal_message="Task executor recovery completed after bounded tool use",
         )
@@ -1363,13 +1458,17 @@ class MultiAgentWorkflowController:
             existing.task_uid
             for existing in self.state.list_tasks()
         }
-        system_prompt = self.runtime.system_prompt + "\n\n" + (self.runtime.task_capture_prompt or "")
+        system_prompt = self.runtime.system_prompt  # + "\n\n" + (self.runtime.task_capture_prompt or "")
         worker_contexts = []
         tool_outcomes: List[ToolOutcome] = []
         acceptance_failures = 0
         acceptance_failure_signatures: set[str] = set()
         failed_tool_inputs: Counter[tuple[str, str]] = Counter()
         recovery_used = False
+        endpoint_evidence_recoveries = 0
+        previous_progress_signature: Optional[str] = None
+        acceptance_correction_limit = self._task_acceptance_correction_count()
+        endpoint_evidence_correction_limit = self._task_endpoint_evidence_correction_count()
         decision = WorkflowDecision(status="partial_failure", reason="Task executor did not run")
 
         def repeated_correctable_failure(outcomes: List[ToolOutcome]) -> Optional[ToolOutcome]:
@@ -1402,12 +1501,16 @@ class MultiAgentWorkflowController:
 
         with self._task_executor_session("task_executor", tools, system_prompt) as run_executor:
             actor_prompt = execution_prompt
-            maximum_actor_cycles = self.task_execution_cycles + self._task_acceptance_correction_count()
+            maximum_actor_cycles = (
+                self.task_execution_cycles
+                + acceptance_correction_limit
+                + endpoint_evidence_correction_limit
+            )
             for cycle in range(1, maximum_actor_cycles + 1):
                 allowed_actor_cycles = self.task_execution_cycles + min(
                     acceptance_failures,
-                    self._task_acceptance_correction_count(),
-                )
+                    acceptance_correction_limit,
+                ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit)
                 if cycle > allowed_actor_cycles:
                     break
                 self._log_workflow(
@@ -1472,6 +1575,7 @@ class MultiAgentWorkflowController:
                         run_executor(cycle_result.recovery_guidance, recovery_policy)
                     )
                     tool_outcomes.extend(recovery_result.outcomes)
+                    cycle_result.outcomes.extend(recovery_result.outcomes)
                     recovery_failed_acceptance, recovery_successful_acceptance, recovery_repeated_acceptance = (
                         track_acceptance_outcomes(recovery_result.outcomes)
                     )
@@ -1542,38 +1646,83 @@ class MultiAgentWorkflowController:
                             cycle,
                         )
                     elif not missing_criteria:
-                        acceptance_submitted = True
-                        if acceptance_failures:
-                            replayed = self._acceptance_outcome_replayed(
-                                successful_acceptance_calls[-1]
-                            ) if successful_acceptance_calls else False
-                            self._log_workflow(
-                                "task acceptance completed after rejected submissions task=%s cycle=%s "
-                                "failures=%s replayed=%s",
-                                self._task_label(task),
-                                cycle,
-                                acceptance_failures,
-                                replayed,
-                            )
-                        validation_outcome = finding_validation_outcome(task)
-                        if validation_outcome in {"confirmed", "not_confirmed"}:
-                            decision = WorkflowDecision(
-                                status="done",
-                                reason=(
-                                    "Independent finding validation confirmed the candidate."
-                                    if validation_outcome == "confirmed"
-                                    else "Independent finding validation did not confirm the candidate."
-                                ),
-                            )
+                        binding_failure = self._endpoint_evidence_guard(
+                            task,
+                            acceptance_results,
+                            tool_outcomes,
+                        )
+                        if binding_failure:
+                            max_endpoint_recoveries = endpoint_evidence_correction_limit
+                            if (
+                                self._endpoint_evidence_failure_recoverable(binding_failure)
+                                and endpoint_evidence_recoveries < max_endpoint_recoveries
+                            ):
+                                endpoint_evidence_recoveries += 1
+                                decision = WorkflowDecision(
+                                    status="partial_failure",
+                                    reason=binding_failure,
+                                    instructions=self._endpoint_evidence_recovery_instruction(
+                                        task,
+                                        binding_failure,
+                                        self._artifact_refs_from_tool_outcomes(tool_outcomes),
+                                        endpoint_evidence_recoveries,
+                                        max_endpoint_recoveries,
+                                    ),
+                                )
+                                self._log_workflow(
+                                    "task endpoint evidence recovery requested task=%s cycle=%s "
+                                    "attempt=%s max=%s reason=%s",
+                                    self._task_label(task),
+                                    cycle,
+                                    endpoint_evidence_recoveries,
+                                    max_endpoint_recoveries,
+                                    self._short(binding_failure),
+                                )
+                            else:
+                                acceptance_submitted = True
+                                decision = WorkflowDecision(
+                                    status="partial_failure",
+                                    reason=binding_failure,
+                                )
+                                self._log_workflow(
+                                    "task endpoint evidence rejected terminally task=%s cycle=%s reason=%s",
+                                    self._task_label(task),
+                                    cycle,
+                                    self._short(binding_failure),
+                                )
                         else:
-                            decision = self._evaluate_task(
-                                plan,
-                                phase,
-                                task,
-                                combined_worker_context,
-                                tool_outcomes,
-                                acceptance_results,
-                            )
+                            acceptance_submitted = True
+                            if acceptance_failures:
+                                replayed = self._acceptance_outcome_replayed(
+                                    successful_acceptance_calls[-1]
+                                ) if successful_acceptance_calls else False
+                                self._log_workflow(
+                                    "task acceptance completed after rejected submissions task=%s cycle=%s "
+                                    "failures=%s replayed=%s",
+                                    self._task_label(task),
+                                    cycle,
+                                    acceptance_failures,
+                                    replayed,
+                                )
+                            validation_outcome = finding_validation_outcome(task)
+                            if validation_outcome in {"confirmed", "not_confirmed"}:
+                                decision = WorkflowDecision(
+                                    status="done",
+                                    reason=(
+                                        "Independent finding validation confirmed the candidate."
+                                        if validation_outcome == "confirmed"
+                                        else "Independent finding validation did not confirm the candidate."
+                                    ),
+                                )
+                            else:
+                                decision = self._evaluate_task(
+                                    plan,
+                                    phase,
+                                    task,
+                                    combined_worker_context,
+                                    tool_outcomes,
+                                    acceptance_results,
+                                )
                     elif repeated_acceptance:
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -1608,6 +1757,7 @@ class MultiAgentWorkflowController:
                             {
                                 "tool": "record_task_acceptance",
                                 "error": acceptance_error,
+                                "available_artifact_refs": self._artifact_refs_from_tool_outcomes(tool_outcomes),
                                 "remaining_corrections": max(
                                     0,
                                     1 + self._task_acceptance_correction_count() - acceptance_failures,
@@ -1660,10 +1810,28 @@ class MultiAgentWorkflowController:
                         cycle,
                     )
                     break
+                progress_signature = self._task_cycle_progress_signature(
+                    cycle_result.outcomes,
+                    self.state.list_task_acceptance_results(task.task_uid),
+                )
+                if progress_signature == previous_progress_signature:
+                    decision = WorkflowDecision(
+                        status="partial_failure",
+                        reason=(
+                            "Task executor made no durable or tool-state progress after controller correction."
+                        ),
+                    )
+                    self._log_workflow(
+                        "task correction made no progress task=%s cycle=%s",
+                        self._task_label(task),
+                        cycle,
+                    )
+                    break
+                previous_progress_signature = progress_signature
                 allowed_actor_cycles = self.task_execution_cycles + min(
                     acceptance_failures,
-                    self._task_acceptance_correction_count(),
-                )
+                    acceptance_correction_limit,
+                ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit)
                 if cycle < allowed_actor_cycles:
                     actor_prompt = self._task_executor_critic_guidance(
                         decision,
@@ -1728,6 +1896,13 @@ Critic instructions: {decision.instructions}
                 "Repair the referenced inventory artifact in place so it conforms to inventory manifest schema "
                 "version 1, preserve the same artifact:artifacts/... reference, and validate it before retrying"
             )
+        if "evidence references must use" in normalized or "evidence reference" in normalized:
+            return (
+                "Raw shell commands, tool IDs, URLs, and inline output are not evidence references. Save the "
+                "current task output with the appropriate artifact or observation tool (create the durable evidence "
+                "first), then use only the returned "
+                "artifact:, artifact_id:, memory:, or finding: reference"
+            )
         if "evidence" in normalized or "memory:" in normalized or "artifact:" in normalized:
             return (
                 "Create the required durable evidence first with the appropriate registered storage tool and use "
@@ -1762,6 +1937,35 @@ Critic instructions: {decision.instructions}
         except (TypeError, ValueError):
             return False
         return isinstance(payload, dict) and payload.get("complete") is True and payload.get("replayed") is True
+
+    @staticmethod
+    def _task_cycle_progress_signature(outcomes: List[ToolOutcome], acceptance_results: List[Any]) -> str:
+        """Describe controller-observed progress without relying on model prose."""
+
+        result_rows = []
+        for result in acceptance_results:
+            result_rows.append(
+                {
+                    "criterion_id": str(getattr(result, "criterion_id", "")),
+                    "status": str(getattr(result, "status", "")),
+                    "disposition": str(getattr(result, "disposition", "")),
+                    "evidence_refs": sorted(str(ref) for ref in getattr(result, "evidence_refs", ())),
+                }
+            )
+        outcome_rows = [
+            {
+                "tool": outcome.tool_name,
+                "success": outcome.success,
+                "input": outcome.input_summary,
+                "output": outcome.output_summary,
+            }
+            for outcome in outcomes
+        ]
+        return json.dumps(
+            {"acceptance": result_rows, "outcomes": outcome_rows},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _missing_acceptance_criteria(task: Task, results: List[Any]) -> List[str]:
@@ -1989,6 +2193,8 @@ Return exactly one decision for each candidate.
         *,
         attempt: int,
         attempt_total: int,
+        cycle: Optional[int] = None,
+        cycle_total: Optional[int] = None,
         activity: Optional[str] = None,
         action: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
@@ -2022,6 +2228,9 @@ Return exactly one decision for each candidate.
             "attempt": attempt,
             "attempt_total": attempt_total,
         }
+        if cycle is not None and cycle_total is not None:
+            payload["cycle"] = cycle
+            payload["cycle_total"] = cycle_total
         trace_attributes = getattr(self.runtime, "trace_attributes", None)
         if isinstance(trace_attributes, dict):
             context = {
@@ -2037,12 +2246,15 @@ Return exactly one decision for each candidate.
 
     def _build_task_prompt(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> Dict[str, Any]:
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
+        cycle_total = max(1, self.task_prompt_refinement_iterations)
         try:
             prompt_spec = self._run_json_text_agent(
                 "task_prompt_builder",
                 self._task_prompt_builder_prompt(plan, phase, task),
                 [],  # no tools
                 system_prompt,
+                cycle=1,
+                cycle_total=cycle_total,
             )
             prompt_spec = self._normalize_task_prompt_spec(prompt_spec, task)
             for iteration in range(1, self.task_prompt_refinement_iterations + 1):
@@ -2052,6 +2264,8 @@ Return exactly one decision for each candidate.
                     [],
                     system_prompt,
                     data_validator=self._validate_task_prompt_critique,
+                    cycle=iteration,
+                    cycle_total=cycle_total,
                 )
                 if critique["approved"]:
                     self._log_workflow(
@@ -2082,6 +2296,8 @@ Return exactly one decision for each candidate.
                     self._task_prompt_revision_prompt(plan, phase, task, prompt_spec, critique["feedback"]),
                     [],
                     system_prompt,
+                    cycle=iteration + 1,
+                    cycle_total=cycle_total,
                 )
                 prompt_spec = self._normalize_task_prompt_spec(prompt_spec, task)
         except WorkflowInvariantError as error:
@@ -2182,6 +2398,14 @@ Return exactly one decision for each candidate.
         tool_outcomes: Optional[List[ToolOutcome]] = None,
         acceptance_results: Optional[List[Any]] = None,
     ) -> WorkflowDecision:
+        binding_failure = self._endpoint_evidence_guard(task, acceptance_results or [], tool_outcomes or [])
+        if binding_failure:
+            self._log_workflow(
+                "task evidence binding rejected task=%s reason=%s",
+                self._task_label(task),
+                self._short(binding_failure),
+            )
+            return WorkflowDecision(status="partial_failure", reason=binding_failure)
         data = self._run_json_text_agent(
             "task_evaluator",
             self._task_evaluator_prompt(
@@ -2203,6 +2427,64 @@ Return exactly one decision for each candidate.
             self._short(decision.reason),
         )
         return decision
+
+    def _endpoint_evidence_guard(
+        self,
+        task: Task,
+        acceptance_results: List[Any],
+        tool_outcomes: List[ToolOutcome],
+    ) -> str:
+        """Reject obviously cross-task evidence before semantic evaluation."""
+
+        if task.kind == "finding_validation" or task.acceptance.mode != "coverage":
+            return ""
+        title = str(task.title or "")
+        if not title.lower().startswith("assess endpoint "):
+            return ""
+        evidence_refs = [
+            reference
+            for result in acceptance_results
+            for reference in result.evidence_refs
+        ]
+        inventory_refs = [
+            reference for reference in evidence_refs
+            if "inventory" in str(reference).rsplit("/", 1)[-1].lower()
+            or "manifest" in str(reference).rsplit("/", 1)[-1].lower()
+        ]
+        if inventory_refs:
+            return (
+                "Endpoint task used inventory/manifest evidence instead of route-specific evidence: "
+                + ", ".join(sorted(set(inventory_refs)))
+            )
+        if not evidence_refs:
+            return "Endpoint task has no durable evidence reference"
+        return ""
+
+    @staticmethod
+    def _endpoint_evidence_failure_recoverable(reason: str) -> bool:
+        normalized = str(reason or "").lower()
+        return "inventory/manifest evidence" in normalized or "no durable evidence" in normalized
+
+    @staticmethod
+    def _endpoint_evidence_recovery_instruction(
+        task: Task,
+        reason: str,
+        artifact_refs: List[str],
+        attempt: int,
+        maximum: int,
+    ) -> str:
+        title = str(task.title or "")
+        endpoint = title[len("Assess endpoint "):].strip() if title.lower().startswith("assess endpoint ") else title
+        refs = ", ".join(artifact_refs) if artifact_refs else "none"
+        return (
+            "Endpoint evidence recovery is required before acceptance can be evaluated. "
+            f"The assigned endpoint is {endpoint}. The controller rejected the previous evidence because: {reason}. "
+            f"Existing canonical artifact references: {refs}. This is recovery attempt {attempt} of {maximum}. "
+            "Continue the same task; do not repeat the rejected record_task_acceptance call. "
+            "Obtain or preserve a route-specific response for the assigned endpoint and save any inline tool output "
+            "as an artifact. Then submit one changed record_task_acceptance call using only artifact:, artifact_id:, "
+            "memory:, or finding: references. Inventory or manifest evidence alone cannot satisfy this endpoint task."
+        )
 
     def _evaluate_phase(self, plan: OperationPlan, phase: PlanPhase) -> WorkflowDecision:
         return self._evaluate_phase_with_policy(plan, phase)
@@ -2287,25 +2569,53 @@ Return exactly one decision for each candidate.
 
         if decision.status not in {"done", "not_applicable"}:
             return decision
-        actionable = self.state.list_tasks(phase=phase.id, status=["active", "pending"])
-        if not actionable:
+        actionable = [
+            task
+            for task in self.state.list_tasks(status=["active", "pending"])
+            if task.phase <= phase.id
+        ]
+        phase_failures = [
+            task
+            for task in self.state.list_tasks(phase=phase.id)
+            if task.status in {"partial_failure", "blocked"}
+        ]
+        prior_incomplete_phases = [
+            item
+            for item in self.state.get_plan().phases
+            if item.id < phase.id and item.status in {"partial_failure", "blocked"}
+        ]
+        phase_tasks = self.state.list_tasks(phase=phase.id)
+        phase_has_work = bool(phase_tasks)
+        if not actionable and not phase_failures and not (
+            decision.status == "not_applicable" and (phase_has_work or prior_incomplete_phases)
+        ):
             return decision
         status_counts = Counter(task.status for task in actionable)
         remaining = len(actionable)
+        failure_counts = Counter(task.status for task in phase_failures)
+        if failure_counts.get("blocked", 0):
+            effective_status = "blocked"
+        elif actionable or phase_failures or prior_incomplete_phases:
+            effective_status = "partial_failure"
+        else:
+            effective_status = "done"
         reason = (
             f"{decision.reason} Requested status {decision.status} was overridden because {context} left "
-            f"{remaining} actionable task(s) remaining "
-            f"(active={status_counts.get('active', 0)}, pending={status_counts.get('pending', 0)})."
+            f"{remaining} actionable task(s) remaining in phase {phase.id} or an earlier phase "
+            f"(active={status_counts.get('active', 0)}, pending={status_counts.get('pending', 0)}), "
+            f"with terminal task failures={dict(sorted(failure_counts.items()))} and "
+            f"prior incomplete phases={[item.id for item in prior_incomplete_phases]}; "
+            f"phase_has_work={phase_has_work}."
         ).strip()
         self._log_workflow(
-            "overriding terminal phase decision phase=%s requested=%s effective=partial_failure "
-            "remaining=%s context=%s",
+            "overriding terminal phase decision phase=%s requested=%s effective=%s remaining=%s context=%s",
             self._phase_label(phase),
             decision.status,
+            effective_status,
             remaining,
             context,
         )
-        return WorkflowDecision(status="partial_failure", reason=reason)
+        return WorkflowDecision(status=effective_status, reason=reason)
 
     @staticmethod
     def _phase_budget_cap(plan: OperationPlan, phase: PlanPhase) -> float:
@@ -2985,6 +3295,8 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
         tools: List[Any],
         system_prompt: str,
         data_validator: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cycle: Optional[int] = None,
+        cycle_total: Optional[int] = None,
     ) -> Dict[str, Any]:
         current_prompt = prompt
         last_response = ""
@@ -2997,6 +3309,8 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
                 "started",
                 attempt=activity_attempt,
                 attempt_total=activity_total,
+                cycle=cycle,
+                cycle_total=cycle_total,
             )
             self._log_workflow("json agent role=%s attempt=%s max_retries=%s", role, attempt + 1, self.json_retries)
             try:
@@ -3007,6 +3321,8 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
                     "failed",
                     attempt=activity_attempt,
                     attempt_total=activity_total,
+                    cycle=cycle,
+                    cycle_total=cycle_total,
                 )
                 last_error = error
                 classification = getattr(error, "max_token_classification", None)
@@ -3032,6 +3348,8 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
                     "completed",
                     attempt=activity_attempt,
                     attempt_total=activity_total,
+                    cycle=cycle,
+                    cycle_total=cycle_total,
                 )
                 self._log_workflow("json agent role=%s success keys=%s", role, ",".join(sorted(data.keys())))
                 return data
@@ -3041,6 +3359,8 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
                     "failed",
                     attempt=activity_attempt,
                     attempt_total=activity_total,
+                    cycle=cycle,
+                    cycle_total=cycle_total,
                 )
                 last_error = error
                 if attempt >= self.json_retries:
@@ -3102,11 +3422,14 @@ Original prompt:
 
     def _create_plan_data(self) -> Dict[str, Any]:
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
+        cycle_total = max(1, self.plan_refinement_iterations)
         plan_data = self._run_json_text_agent(
             "plan_creator",
             self._plan_creator_prompt(),
             [],
             system_prompt,
+            cycle=1,
+            cycle_total=cycle_total,
         )
         for iteration in range(1, self.plan_refinement_iterations + 1):
             critique = self._run_json_text_agent(
@@ -3115,6 +3438,8 @@ Original prompt:
                 [],
                 system_prompt,
                 data_validator=self._validate_plan_critique,
+                cycle=iteration,
+                cycle_total=cycle_total,
             )
             if critique["approved"]:
                 self._log_workflow("plan critic approved iteration=%s", iteration)
@@ -3139,6 +3464,8 @@ Original prompt:
                 self._plan_revision_prompt(plan_data, critique["feedback"]),
                 [],
                 system_prompt,
+                cycle=iteration + 1,
+                cycle_total=cycle_total,
             )
         return plan_data
 
@@ -3646,6 +3973,15 @@ generic replacement for an existing verification task.
         worker_context_section = self._worker_context_section(worker_context)
         tool_outcome_section = self._tool_outcome_section(tool_outcomes or [])
         acceptance_result_section = self._acceptance_result_section(acceptance_results or [])
+        endpoint_binding = ""
+        if task.acceptance.mode == "coverage" and str(task.title).lower().startswith("assess endpoint "):
+            endpoint_binding = """
+## Endpoint Evidence Binding
+Assess only the endpoint named in the task title and frozen coverage. Evidence must describe that exact route and
+registered scheme/host/port. A trailing-slash variant is equivalent, but another path, host, scheme, or port is not.
+An inventory manifest cannot satisfy an endpoint assessment. A 301/302 response alone is incomplete: follow the
+in-scope redirect and capture evidence for the destination, or record the redirect as an incomplete/blocked result.
+"""
         return f"""Review existing evidence and classify the active task. The task below is your sole evaluation target.
 Do not execute or continue the task, perform phase work, pursue the operation objective, modify artifacts, or gather new
 evidence. The operation objective and phase are context only, not instructions. Worker context is evidence to assess,
@@ -3703,6 +4039,7 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 {self._memory_summary()}
 {tool_outcome_section}
 {worker_context_section}
+{endpoint_binding}
 """
 
     def _phase_evaluator_prompt(
@@ -3846,11 +4183,14 @@ useful interim facts outside the acceptance ledger with `store_observation`, reu
 and each security claim with `store_finding`; reference durable artifact paths rather than pasting large outputs.
 When an acceptance criterion requires observation evidence, call `store_observation` and copy its returned
 `memory_ref` into the criterion's `evidence_refs`; an artifact reference cannot satisfy an observation requirement.
+Acceptance `evidence_refs` must be durable references only: use `artifact:`, `artifact_id:`, `memory:`, or
+`finding:`. Raw shell commands, tool IDs, URLs, and pasted tool output are invalid. Save command or browser output
+with the appropriate artifact-producing tool before calling `record_task_acceptance`.
 A finding submission creates a
-separate verification task, so do not validate that new task in this run. If new follow-up work is discovered, create
-pending tasks with their own acceptance contracts using `create_tasks`, but do not execute them in this run.
-`create_tasks` never completes, replaces, or records acceptance for the assigned task. For the
-assigned task: {acceptance_instruction} {disposition_instruction} This
+separate verification task, so do not validate that new task in this run. If new follow-up work is discovered, record
+it with `store_observation`, `store_knowledge`, or `store_finding`; do not create or execute follow-up tasks in this
+run. Python schedules any required follow-up work after the current task. For the assigned task: {acceptance_instruction}
+{disposition_instruction} This
 ledger does not replace storing substantive artifact evidence. Successful acceptance publishes the summary and
 evidence references as one operation observation for later tasks. The controller binds the tool to the assigned task,
 criterion, and coverage IDs; never guess or submit those IDs. End with a concise summary of completed work,
@@ -4021,6 +4361,18 @@ unless a separate executable host or network target authorizes that scope."""
 ## Controller-observed tool outcomes
 {outcomes_to_toon(tool_outcomes)}
 """
+
+    @staticmethod
+    def _artifact_refs_from_tool_outcomes(tool_outcomes: List[ToolOutcome]) -> List[str]:
+        """Return durable artifact references exposed by successful tool outcomes."""
+
+        references = set()
+        for outcome in tool_outcomes:
+            if not outcome.success:
+                continue
+            text = " ".join((str(outcome.input_summary or ""), str(outcome.output_summary or "")))
+            references.update(re.findall(r"(?:artifact|artifact_id):[^\s\\\]\}\)\"']+", text))
+        return sorted(references)
 
     @staticmethod
     def _acceptance_result_section(results: List[Any]) -> str:

@@ -50,6 +50,32 @@ const DEFAULT_FINAL_REPORT_EVENT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_REASONING_BUFFER_CHARS = 120000;
 const JSON_ESTIMATE_LIMIT = 64 * 1024 * 1024;
 
+const WORKFLOW_ACTIVITY_TERMINAL_STATUSES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
+  'skipped',
+  'terminated',
+  'done',
+  'success',
+  'error',
+  'partial_failure',
+  'blocked',
+  'not_applicable',
+]);
+
+const workflowActivityKey = (event: any): string => JSON.stringify([
+  event?.role ?? event?.action ?? event?.activity ?? 'workflow',
+  event?.phase_id ?? null,
+  event?.task_uid ?? event?.task_title ?? null,
+  event?.batch_index ?? null,
+  event?.attempt ?? null,
+]);
+
+const isWorkflowActivityTerminal = (event: any): boolean =>
+  WORKFLOW_ACTIVITY_TERMINAL_STATUSES.has(String(event?.status || '').trim().toLowerCase());
+
 const estimateJsonBytes = (value: unknown, maxBytes = JSON_ESTIMATE_LIMIT): number => {
   try {
     const seen = new WeakSet<object>();
@@ -324,6 +350,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   // Keep a ref in sync with activeThinking to avoid setState race conditions
   const activeThinkingRef = useRef(false);
   useEffect(() => { activeThinkingRef.current = activeThinking; }, [activeThinking]);
+  const workflowActivityKeysRef = useRef<Set<string>>(new Set());
   const setThinkingActive = useCallback((value: boolean) => {
     activeThinkingRef.current = value;
     setActiveThinking(value);
@@ -484,7 +511,10 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     });
   }
 
-  function deactivateThinking() {
+  function deactivateThinking(force = false) {
+    if (!force && workflowActivityKeysRef.current.size > 0) {
+      return;
+    }
     setThinkingActive(false);
     onThinkingUpdate?.({ active: false });
   }
@@ -624,6 +654,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     lastReasoningTextRef.current = null;
     completionPhaseActiveRef.current = false;
     hasSeenOperationActivityRef.current = false;
+    workflowActivityKeysRef.current.clear();
     setCompletionPhaseEvents(null);
     perToolOutputSeenRef.current.clear();
     globalOutputSeenRef.current.clear();
@@ -840,6 +871,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     switch (event.type) {
       case 'operation_init':
         hasSeenOperationActivityRef.current = true;
+        workflowActivityKeysRef.current.clear();
         // Reset all dedup sets and internal refs at operation start
         perToolOutputSeenRef.current.clear();
         globalOutputSeenRef.current.clear();
@@ -873,7 +905,34 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     cancelDelayedThinking();
     activateThinking('waiting');
     seenThinkingThisPhaseRef.current = true;
-    break;
+        break;
+
+      case 'workflow_activity': {
+        const activityKey = workflowActivityKey(event);
+        const terminal = isWorkflowActivityTerminal(event);
+        const hadActiveWorkflowActivity = workflowActivityKeysRef.current.size > 0;
+        if (terminal) {
+          workflowActivityKeysRef.current.delete(activityKey);
+        } else {
+          workflowActivityKeysRef.current.add(activityKey);
+        }
+        results.push(event as DisplayStreamEvent);
+
+        if (!terminal) {
+          const label = String(event.label || event.action || event.activity || 'Workflow activity')
+            .replaceAll('_', ' ')
+            .trim();
+          const taskTitle = typeof event.task_title === 'string' ? event.task_title.trim() : '';
+          activateThinking(
+            'tool_preparation',
+            taskTitle ? `${label}: ${taskTitle}` : label,
+            event,
+          );
+        } else if (hadActiveWorkflowActivity && workflowActivityKeysRef.current.size === 0) {
+          deactivateThinking(true);
+        }
+        break;
+      }
 
       case 'progress_update':
         hasSeenOperationActivityRef.current = true;

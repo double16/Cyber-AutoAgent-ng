@@ -666,7 +666,11 @@ def test_controller_runs_existing_active_task_before_pending_task():
 
     assert calls[:3] == ["task_prompt_builder", "task_executor", "task_evaluator"]
     assert next(task for task in state.tasks if task.task_uid == "active").status == "done"
-    assert runtime.callback_handler.events[:2] == [
+    task_events = [
+        event for event in runtime.callback_handler.events
+        if event["type"] in {"task_started", "task_done"}
+    ]
+    assert task_events[:2] == [
         {"type": "task_started", "task_uid": "active", "title": "Active", "status": "active"},
         {
             "type": "task_done",
@@ -726,21 +730,186 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy(monkey
     assert "## Inventory Manifest Evidence Contract (Controller-owned)" in captured["prompt"]
     assert '"schema_version": 1' in captured["prompt"]
     assert "Execute only the assigned task objective" in captured["prompt"]
-    assert "pending tasks with their own acceptance contracts using `create_tasks`" in captured["prompt"]
+    assert "do not create or execute follow-up tasks" in captured["prompt"]
+    assert "Raw shell commands, tool IDs, URLs, and pasted tool output are invalid" in captured["prompt"]
     assert "call `record_task_acceptance` with one terminal status" in captured["prompt"]
     assert "Python owns task, phase, and operation state transitions" in captured["prompt"]
     assert "## Tool Selection Policy (Controller-owned)" in captured["prompt"]
     assert "Multiple methods with\noverlapping capabilities may be used" in captured["prompt"]
     assert "neither mandates use nor makes another selected method exclusive" in captured["prompt"]
     assert "module_probe" in captured["tools"]
-    assert "create_tasks" in captured["tools"]
+    assert "create_tasks" not in captured["tools"]
     assert "record_task_acceptance" in captured["tools"]
-    assert captured["system_prompt"] == "base prompt\n\ntask capture prompt"
+    assert captured["system_prompt"] == "base prompt"
     assert captured["policy"].min_tool_calls == 1
     assert captured["policy"].terminal_after_required_tools is True
     assert captured["policy"].allow_text_final_after_tools is False
-    assert captured["policy"].ignored_terminal_tool_names == frozenset({"create_tasks"})
+    assert captured["policy"].ignored_terminal_tool_names == frozenset()
     assert captured["policy"].terminal_reason == "task_executor_done"
+
+
+def test_task_executor_contract_disables_follow_up_task_creation():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = TaskModel(
+        task_uid="endpoint",
+        title="Assess endpoint http://target.test/login",
+        objective="Assess login",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+    )
+
+    contract = controller._task_executor_contract(task)
+
+    assert "do not create or execute follow-up tasks" in contract
+    assert "create_tasks" not in contract
+
+
+def test_endpoint_evidence_guard_rejects_inventory_manifest():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = TaskModel(
+        task_uid="endpoint",
+        title="Assess endpoint http://target.test/login [target-1]",
+        objective="Assess login",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(kind="snapshot", description="route", source_refs=["memory:inventory"], item_ids=["endpoint-1"]),
+            criteria=[AcceptanceCriterion(
+                id="criterion",
+                description="Assess route",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    result = AcceptanceResult(
+        criterion_id="criterion",
+        status="satisfied",
+        disposition="observation",
+        summary="assessed",
+        evidence_refs=("artifact:artifacts/inventory_manifest.json",),
+    )
+
+    reason = controller._endpoint_evidence_guard(task, [result], [])
+
+    assert "inventory/manifest evidence" in reason
+
+
+def test_endpoint_evidence_inventory_rejection_is_recoverable():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    reason = "Endpoint task used inventory/manifest evidence instead of route-specific evidence: artifact:inventory_manifest.json"
+
+    assert controller._endpoint_evidence_failure_recoverable(reason) is True
+    instruction = controller._endpoint_evidence_recovery_instruction(
+        TaskModel(
+            task_uid="endpoint",
+            title="Assess endpoint http://target.test/login",
+            objective="Assess",
+            acceptance=_artifact_acceptance(),
+            phase=1,
+            status="active",
+        ),
+        reason,
+        ["artifact:artifacts/login_response.txt"],
+        1,
+        1,
+    )
+    assert "do not repeat the rejected record_task_acceptance call" in instruction
+    assert "artifact:artifacts/login_response.txt" in instruction
+    assert "http://target.test/login" in instruction
+
+
+def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation():
+    runtime = _runtime(
+        env_ints={
+            "CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2,
+            "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 0,
+            "CYBER_ENDPOINT_EVIDENCE_MAX_CORRECTIONS": 1,
+        }
+    )
+    task = TaskModel(
+        task_uid="endpoint",
+        title="Assess endpoint http://target.test/login [target-1]",
+        objective="Assess login",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="route",
+                source_refs=["memory:inventory"],
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="criterion",
+                description="Assess route",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id="criterion",
+        status="satisfied",
+        disposition="observation",
+        summary="assessed",
+        evidence_refs=("artifact:artifacts/inventory_manifest.json",),
+    )]
+    actor_prompts = []
+    evaluator_calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute endpoint","tools":[]}'
+        if role == "task_evaluator":
+            evaluator_calls.append(prompt)
+            return '{"status":"done","reason":"route evidence approved"}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_prompts.append(prompt)
+        if len(actor_prompts) == 2:
+            state.acceptance_results[task.task_uid] = [AcceptanceResult(
+                criterion_id="criterion",
+                status="satisfied",
+                disposition="observation",
+                summary="route response saved",
+                evidence_refs=("artifact:artifacts/login_response.txt",),
+            )]
+        return "route evidence"
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_prompts) == 2
+    assert "Endpoint evidence recovery is required" in actor_prompts[1]
+    assert evaluator_calls
+    assert state.tasks[0].status == "done"
 
 
 def test_inventory_manifest_prompt_is_omitted_for_generic_artifact_task():
@@ -904,7 +1073,7 @@ def test_task_execution_finalizes_after_semantic_review_of_atomic_acceptance():
     assert actor_prompts[0].startswith("execute active")
     assert "Cycle 1: actor result 1" in evaluator_prompts[0]
     assert lifecycle == [
-        ("created", "task_executor", "base prompt\n\ntask capture prompt"),
+        ("created", "task_executor", "base prompt"),
         ("cleaned", "task_executor"),
     ]
     assert state.tasks[0].status == "partial_failure"
@@ -2452,6 +2621,20 @@ def test_plan_critic_rejection_runs_revision_and_persists_only_revision():
     assert len(plan_events) == 1
     assert "Add durable evidence criteria" in calls[2][1]
     assert "Apply feedback only when it is consistent" in calls[2][1]
+    activities = [
+        event for event in controller.runtime.callback_handler.events
+        if event.get("type") == "workflow_activity"
+    ]
+    assert [(event["role"], event["cycle"], event["cycle_total"]) for event in activities] == [
+        ("plan_creator", 1, 2),
+        ("plan_creator", 1, 2),
+        ("plan_critic", 1, 2),
+        ("plan_critic", 1, 2),
+        ("plan_creator", 2, 2),
+        ("plan_creator", 2, 2),
+        ("plan_critic", 2, 2),
+        ("plan_critic", 2, 2),
+    ]
 
 
 def test_plan_refinement_stops_after_later_approval():
@@ -3015,6 +3198,162 @@ def test_completed_closure_phase_reports_unresolved_prior_work_and_partial_termi
     assert coverage["phases"][1]["terminal_phase_completed_with_unresolved_prior_work"] is True
     assert coverage["phases"][1]["unresolved_prior_task_count"] == 1
     assert controller.runtime.callback_handler.termination_events[0][0] == "partial_failure"
+
+
+def test_phase_terminal_guard_rejects_done_when_prior_phase_has_actionable_tasks():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Assess routes", status="partial_failure"),
+            PlanPhase(id=2, title="Coverage closure", status="active"),
+        ],
+    )
+    pending = Task(task_uid="pending", title="Pending", objective="assess route", phase=1, status="pending")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[pending]),
+        text_runner=lambda *_args: "{}",
+    )
+
+    decision = controller._guard_phase_terminal_decision(
+        plan.phases[1],
+        workflow_mod.WorkflowDecision(status="done", reason="closure complete"),
+        context="phase evaluation",
+    )
+
+    assert decision.status == "partial_failure"
+    assert "earlier phase" in decision.reason
+    assert "pending=1" in decision.reason
+
+
+def test_phase_terminal_guard_allows_done_when_prior_work_is_terminal():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Assess routes", status="done"),
+            PlanPhase(id=2, title="Coverage closure", status="active"),
+        ],
+    )
+    completed = Task(task_uid="done", title="Done", objective="assess route", phase=1, status="done")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[completed]),
+        text_runner=lambda *_args: "{}",
+    )
+    requested = workflow_mod.WorkflowDecision(status="done", reason="closure complete")
+
+    assert controller._guard_phase_terminal_decision(
+        plan.phases[1], requested, context="phase evaluation"
+    ) == requested
+
+
+def test_phase_terminal_guard_rejects_done_when_phase_has_terminal_task_failure():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Assess routes", status="active")],
+    )
+    failed = Task(
+        task_uid="failed",
+        title="Failed",
+        objective="assess route",
+        phase=1,
+        status="partial_failure",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[failed]),
+        text_runner=lambda *_args: "{}",
+    )
+
+    decision = controller._guard_phase_terminal_decision(
+        plan.phases[0],
+        workflow_mod.WorkflowDecision(status="done", reason="closure complete"),
+        context="phase evaluation",
+    )
+
+    assert decision.status == "partial_failure"
+    assert "terminal task failures" in decision.reason
+
+
+def test_phase_terminal_guard_converts_not_applicable_to_done_when_phase_has_completed_work():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Assess routes", status="active")],
+    )
+    completed = Task(task_uid="done", title="Done", objective="assess route", phase=1, status="done")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[completed]),
+        text_runner=lambda *_args: "{}",
+    )
+
+    decision = controller._guard_phase_terminal_decision(
+        plan.phases[0],
+        workflow_mod.WorkflowDecision(status="not_applicable", reason="no work"),
+        context="phase evaluation",
+    )
+
+    assert decision.status == "done"
+
+
+def test_task_cycle_progress_signature_changes_only_with_controller_observed_progress():
+    acceptance = AcceptanceResult(
+        criterion_id="criterion",
+        status="satisfied",
+        disposition="observation",
+        summary="done",
+        evidence_refs=("artifact:artifacts/first.txt",),
+    )
+    first = ToolOutcome(1, "tool-1", "shell", True, False, "curl /first", "HTTP 200")
+    changed = ToolOutcome(2, "tool-2", "shell", True, False, "curl /second", "HTTP 404")
+
+    signature = MultiAgentWorkflowController._task_cycle_progress_signature([first], [acceptance])
+
+    assert signature == MultiAgentWorkflowController._task_cycle_progress_signature([first], [acceptance])
+    assert signature != MultiAgentWorkflowController._task_cycle_progress_signature([changed], [acceptance])
+
+
+def test_task_correction_stops_after_repeated_no_progress_cycle():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2})
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    actor_prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_prompts.append(prompt)
+        return workflow_mod.TaskExecutorCycleResult(text="same reasoning", outcomes=[])
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_prompts) == 2
+    assert state.tasks[0].status == "partial_failure"
+    assert "no durable or tool-state progress" in state.tasks[0].status_reason
 
 
 def test_continuing_phase_with_task_history_rechecks_then_advances_on_creator_failure():
@@ -4560,6 +4899,16 @@ def test_task_prompt_critic_approves_initial_draft():
     assert all(call[3] == "base prompt" for call in calls)
     assert "Proposed task prompt draft" in calls[1][1]
     assert "approved execution" in calls[1][1]
+    activities = [
+        event for event in controller.runtime.callback_handler.events
+        if event.get("type") == "workflow_activity"
+    ]
+    assert [(event["role"], event["cycle"], event["cycle_total"]) for event in activities] == [
+        ("task_prompt_builder", 1, 1),
+        ("task_prompt_builder", 1, 1),
+        ("task_prompt_critic", 1, 1),
+        ("task_prompt_critic", 1, 1),
+    ]
 
 
 def test_task_prompt_critic_rejection_runs_revision_until_approved():
@@ -4604,6 +4953,20 @@ def test_task_prompt_critic_rejection_runs_revision_until_approved():
     ]
     assert "Add the relevant validation tool" in calls[2][1]
     assert "Apply feedback only when it is consistent" in calls[2][1]
+    activities = [
+        event for event in controller.runtime.callback_handler.events
+        if event.get("type") == "workflow_activity"
+    ]
+    assert [(event["role"], event["cycle"], event["cycle_total"]) for event in activities] == [
+        ("task_prompt_builder", 1, 3),
+        ("task_prompt_builder", 1, 3),
+        ("task_prompt_critic", 1, 3),
+        ("task_prompt_critic", 1, 3),
+        ("task_prompt_builder", 2, 3),
+        ("task_prompt_builder", 2, 3),
+        ("task_prompt_critic", 2, 3),
+        ("task_prompt_critic", 2, 3),
+    ]
 
 
 def test_task_prompt_final_rejection_marks_task_partial_failure_without_execution():
@@ -4884,8 +5247,9 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
     done_task = store.mark_task(store.activate_task(deferred_task), "partial_failure", "soft cap")
     assert done_task.status == "partial_failure"
     assert done_task.status_reason == "soft cap"
-    finished_phase = store.mark_phase(finished_phase, 2, "blocked")
-    assert finished_phase.assessment_complete is True
+    finished_phase = store.mark_phase(finished_phase, 2, "done")
+    assert finished_phase.phases[1].status == "partial_failure"
+    assert finished_phase.assessment_complete is False
 
     with pytest.raises(ValueError, match="phase status"):
         store.mark_phase(activated_phase, 2, "active")
@@ -4941,7 +5305,7 @@ def test_state_store_reopens_all_actionable_phases_in_plan_order(monkeypatch):
 
     assert advanced.current_phase == 3
     assert advanced.assessment_complete is False
-    assert [phase.status for phase in advanced.phases] == ["done", "done", "active"]
+    assert [phase.status for phase in advanced.phases] == ["done", "partial_failure", "active"]
 
 
 def test_state_store_does_not_reopen_completed_plan_without_actionable_work(monkeypatch):

@@ -38,6 +38,18 @@ describe('formatWorkflowActivityEvent', () => {
     })).toBe('🔄 task creation started');
   });
 
+  it('prefers actor/critic cycle counters over JSON retry attempts', () => {
+    expect(formatWorkflowActivityEvent({
+      type: 'workflow_activity',
+      label: 'Plan review',
+      status: 'started',
+      cycle: 2,
+      cycle_total: 3,
+      attempt: 1,
+      attempt_total: 2,
+    })).toBe('🔄 Plan review [cycle 2/3] started');
+  });
+
   it('ignores non-workflow events and does not include prompt content', () => {
     expect(formatWorkflowActivityEvent({type: 'reasoning', content: 'secret prompt'})).toBeNull();
     expect(formatWorkflowActivityEvent({

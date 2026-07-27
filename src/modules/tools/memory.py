@@ -2538,6 +2538,10 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
     "json": {
         "type": "object",
         "additionalProperties": False,
+        "description": (
+            "Submit complete task proposals using canonical field names. Every proposal requires methods, limits, "
+            "snapshot_refs, and exactly one criterion; snapshot proposals use methods=[] and limits={}."
+        ),
         "properties": {
             "tasks": {
                 "type": "array",
@@ -2550,6 +2554,28 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
             "TaskProposal": {
                 "type": "object",
                 "additionalProperties": False,
+                "examples": [
+                    {
+                        "title": "Assess frozen inventory",
+                        "objective": "Assess the assigned frozen inventory unit",
+                        "methods": [],
+                        "limits": {},
+                        "snapshot_refs": ["artifact:artifacts/inventory_manifest.json"],
+                        "criteria": [{"description": "Assess the assigned frozen inventory unit"}],
+                        "target_ids": ["target-1"],
+                    },
+                    {
+                        "title": "Build surface inventory",
+                        "objective": "Map the assigned target",
+                        "basis_description": "Bounded surface discovery",
+                        "methods": ["crawl"],
+                        "limits": {"max_requests": 500, "max_depth": 3},
+                        "snapshot_refs": [],
+                        "output_kind": "inventory_manifest",
+                        "criteria": [{"description": "Store the finite inventory manifest"}],
+                        "target_ids": ["target-1"],
+                    },
+                ],
                 "required": [
                     "title",
                     "objective",
@@ -2906,26 +2932,51 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
     except Exception:
         target_values = {}
     items = manifest.get("items")
+    normalized_root = False
+    removed_count = 0
     if isinstance(items, list):
         filtered_items = [item for item in items if not _is_out_of_scope_inventory_item(item, target_values)]
         removed_count = len(items) - len(filtered_items)
         if removed_count:
             manifest["items"] = filtered_items
             items = filtered_items
-            _write_inventory_manifest_atomically(path, manifest)
-            logger.info(
-                "Removed out-of-scope inventory items reference=%s removed_count=%d",
-                canonical_artifact_reference(reference),
-                removed_count,
-            )
+            normalized_root = True
+    gaps = manifest.get("unassessed_gaps")
+    missing_schema_version = "schema_version" not in manifest
+    compatibility_shape = (
+        isinstance(items, list)
+        and bool(items)
+        and isinstance(gaps, list)
+        and all(
+            isinstance(item, dict)
+            and all(bool(str(item.get(field) or "").strip()) for field in ("id", "target_id", "kind", "value"))
+            for item in items
+        )
+    )
+    if missing_schema_version and compatibility_shape:
+        manifest["schema_version"] = INVENTORY_MANIFEST_SCHEMA_VERSION
+        normalized_root = True
+    if normalized_root:
+        _write_inventory_manifest_atomically(path, manifest)
+    if removed_count:
+        logger.info(
+            "Removed out-of-scope inventory items reference=%s removed_count=%d",
+            canonical_artifact_reference(reference),
+            removed_count,
+        )
+    if missing_schema_version and compatibility_shape:
+        logger.info(
+            "Inferred inventory manifest schema_version=%s reference=%s",
+            INVENTORY_MANIFEST_SCHEMA_VERSION,
+            canonical_artifact_reference(reference),
+        )
     canonical_input = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     artifact_digest = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
     diagnostics = []
-    if manifest.get("schema_version") != INVENTORY_MANIFEST_SCHEMA_VERSION:
+    if not missing_schema_version and manifest.get("schema_version") != INVENTORY_MANIFEST_SCHEMA_VERSION:
         diagnostics.append(
             f"inventory manifest schema_version must be {INVENTORY_MANIFEST_SCHEMA_VERSION} at $.schema_version"
         )
-    gaps = manifest.get("unassessed_gaps")
     if not isinstance(items, list) or not items:
         diagnostics.append("inventory manifest items must be a non-empty list at $.items")
     if not isinstance(gaps, list):
@@ -3228,6 +3279,48 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
     return AcceptanceContract(mode=mode, basis=basis, criteria=criteria)
 
 
+def _coverage_acceptance_criterion(group_kind: str, proposal_intent: str) -> AcceptanceCriterion:
+    """Return the controller-owned criterion for one compiled inventory work unit."""
+
+    criterion_types = {
+        "endpoint": (
+            "assess-the-assigned-endpoint",
+            "Assess the assigned endpoint and record one evidence-backed terminal disposition",
+        ),
+        "parameter": (
+            "assess-the-assigned-parameter",
+            "Assess the assigned parameter and record one evidence-backed terminal disposition",
+        ),
+        "workflow": (
+            "assess-the-assigned-workflow",
+            "Assess the assigned workflow and record one evidence-backed terminal disposition",
+        ),
+        "service": (
+            "assess-the-assigned-service",
+            "Assess the assigned service and record one evidence-backed terminal disposition",
+        ),
+        "technology": (
+            "validate-the-assigned-technology",
+            "Validate the assigned technology observation and record one evidence-backed terminal disposition",
+        ),
+    }
+    criterion_id, description = criterion_types.get(
+        group_kind,
+        (
+            "inspect-the-assigned-resource",
+            "Inspect the assigned inventory resource and record one evidence-backed terminal disposition",
+        ),
+    )
+    intent = str(proposal_intent or "").strip()
+    if intent:
+        description = f"{description} for this proposal intent: {intent}"
+    return AcceptanceCriterion(
+        id=criterion_id,
+        description=description,
+        evidence_requirements=[EvidenceRequirement(kind="durable_evidence", min_count=1)],
+    )
+
+
 def _task_inventory_artifact_refs(task: Task) -> List[str]:
     references = [canonical_artifact_reference(path) for path in sorted(_task_evidence_artifact_paths(task))]
     store = _get_plan_store()
@@ -3492,6 +3585,9 @@ def _create_tasks_from_proposals(
                 "technology": "Validate technology",
                 "parameter": "Assess parameter",
             }
+            proposal_intent = "; ".join(
+                criterion.description.strip() for criterion in proposal.criteria
+            )
             for group_target_id, group_kind, route_label, item_ids in _coverage_route_groups(
                 manifest,
                 prompt_token_limit=prompt_token_limit,
@@ -3517,7 +3613,7 @@ def _create_tasks_from_proposals(
                         snapshot_hash=acceptance.basis.snapshot_hash,
                         item_ids=remaining_ids,
                     ),
-                    criteria=acceptance.criteria,
+                    criteria=[_coverage_acceptance_criterion(group_kind, proposal_intent)],
                 )
                 route_groups.append((
                     f"{title_prefixes[group_kind]} {route_label} [{group_target_id}]",
@@ -4148,6 +4244,39 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     if len(task.acceptance.criteria) != 1:
         raise ValueError("record_task_acceptance requires exactly one frozen criterion")
     criterion_id = task.acceptance.criteria[0].id
+    criterion = task.acceptance.criteria[0]
+    required_evidence = ", ".join(
+        f"{requirement.kind}>={requirement.min_count}"
+        for requirement in criterion.evidence_requirements
+    ) or "none"
+    assigned_scope = ", ".join(task.target_ids) if task.target_ids else task.target_scope
+    evidence_example_by_kind = {
+        "inventory_manifest": "artifact:artifacts/inventory_manifest.json",
+        "artifact": "artifact:artifacts/task-result.txt",
+        "durable_evidence": "artifact:artifacts/task-result.txt",
+        "memory": "memory:<returned-memory-id>",
+        "observation": "memory:<returned-observation-id>",
+        "finding_candidate": "finding:<returned-finding-id>",
+        "verified_finding": "finding:<verified-finding-id>",
+    }
+    primary_evidence_kind = (
+        criterion.evidence_requirements[0].kind if criterion.evidence_requirements else "durable_evidence"
+    )
+    example_disposition = (
+        "finding_candidate"
+        if primary_evidence_kind == "finding_candidate"
+        else "existing_finding"
+        if primary_evidence_kind == "verified_finding"
+        else "observation"
+    )
+    task_specific_example = {
+        "status": "satisfied",
+        "disposition": example_disposition,
+        "summary": f"Concrete terminal result for {task.title}",
+        "evidence_refs": [
+            evidence_example_by_kind.get(primary_evidence_kind, "artifact:artifacts/task-result.txt")
+        ],
+    }
     coverage_item_ids = task.acceptance.basis.item_ids
     if task.acceptance.mode == "coverage" and not coverage_item_ids:
         artifact_ref = next(
@@ -4185,6 +4314,11 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
 
     record_task_acceptance.__doc__ = f"""Record evidence-backed terminal results for the assigned task.
 
+    Bound task: {task.title}
+    Assigned scope: {assigned_scope}
+    Frozen criterion: {criterion.id} — {criterion.description}
+    Required evidence: {required_evidence}
+
     Input shape: {{"status": "satisfied|assessed_negative|inaccessible|excluded|duplicate",
     "disposition": "no_vulnerability|observation|finding_candidate|existing_finding",
     "summary": "Observed result", "evidence_refs": ["memory:<id>",
@@ -4201,6 +4335,8 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     the acceptance ledger.
 
     Inventory artifact contract: {inventory_manifest_contract_text()}
+
+    Valid payload example for this bound task: {json.dumps(task_specific_example, sort_keys=True)}
     """
     return tool(
         record_task_acceptance,
@@ -4217,7 +4353,10 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
                             "excluded",
                             "duplicate",
                         ],
-                        "description": "Terminal acceptance result status.",
+                        "description": (
+                            f"Terminal result for frozen criterion {criterion.id}. "
+                            "Use only a canonical advertised value."
+                        ),
                     },
                     "disposition": {
                         "type": "string",
@@ -4227,16 +4366,22 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
                             "finding_candidate",
                             "existing_finding",
                         ],
-                        "description": "Security disposition of the accepted result.",
+                        "description": (
+                            "Security disposition. Confirmed security behavior requires finding_candidate or "
+                            "existing_finding; negative and informational results use no_vulnerability or observation."
+                        ),
                     },
                     "summary": {
                         "type": "string",
-                        "description": "Observed result.",
+                        "description": f"Concrete observed result for: {criterion.description}",
                     },
                     "evidence_refs": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Artifact, memory, observation, or finding evidence references.",
+                        "description": (
+                            f"Durable references satisfying {required_evidence}. Use artifact:, memory:, or finding:; "
+                            "raw commands, URLs, tool IDs, and inline output are invalid."
+                        ),
                     },
                 },
                 "required": ["status", "disposition", "summary", "evidence_refs"],
@@ -5283,19 +5428,18 @@ class Mem0ServiceClient:
         """
         op_id = _operation_id(operation_id)
 
-        # Check if all phases and their actionable tasks are complete and add workflow reminder.
-        all_done = all(p.status in TERMINAL_PLAN_STATUSES for p in plan.phases)
-        actionable_tasks = [
-            task
-            for task in _get_plan_store().get_tasks(op_id)
-            if task.status in {"active", "pending"}
-        ]
+        # Only successful phase and task states may complete an assessment.  Terminal failures are
+        # retained for reporting, but must not be converted into a completed operation.
+        tasks = _get_plan_store().get_tasks(op_id)
+        all_done = all(p.status in {"done", "not_applicable"} for p in plan.phases)
+        all_tasks_done = all(task.status == "done" for task in tasks)
+        actionable_tasks = [task for task in tasks if task.status in {"active", "pending"}]
         add_completion_reminder = False
-        if all_done and not actionable_tasks and not plan.assessment_complete:
+        if all_done and all_tasks_done and not plan.assessment_complete:
             plan.assessment_complete = True
             add_completion_reminder = True
             logger.info("All phases complete - set assessment_complete=true")
-        elif actionable_tasks:
+        elif actionable_tasks or not all_done or not all_tasks_done:
             plan.assessment_complete = False
 
         result = {}

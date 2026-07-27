@@ -5,9 +5,12 @@ export const formatWorkflowActivityEvent = (event: any): string | null => {
   const status = String(event.status || 'started');
   const phase = event.phase_id != null ? ` phase ${event.phase_id}` : '';
   const task = event.task_title ? `: ${event.task_title}` : '';
-  const attempt = event.attempt != null && event.attempt_total != null
+  const cycle = event.cycle != null && event.cycle_total != null
+    ? ` [cycle ${event.cycle}/${event.cycle_total}]`
+    : '';
+  const attempt = !cycle && event.attempt != null && event.attempt_total != null
     ? ` [${event.attempt}/${event.attempt_total}]`
     : '';
   const icon = status === 'completed' ? '✅' : status === 'failed' ? '⚠️' : '🔄';
-  return `${icon} ${label}${phase}${task}${attempt} ${status}`;
+  return `${icon} ${label}${phase}${task}${cycle || attempt} ${status}`;
 };
