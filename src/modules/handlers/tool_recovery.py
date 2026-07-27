@@ -49,6 +49,9 @@ _PREREQUISITE_FAILURE_PATTERNS = tuple(
 )
 _HTTP_STATUS_LINE_PATTERN = re.compile(r"\bHTTP/\d(?:\.\d)?\s+([1-5]\d{2})\b", re.IGNORECASE)
 _CURL_WRITE_OUT_STATUS_PATTERN = re.compile(r"(?m)^\s*(?:http_code=|status=)?([1-5]\d{2})(?:\s|$)")
+_REDIRECT_BODY_FAILURE_PATTERN = re.compile(
+    r"(?:response\.)?body.*(?:unavailable|not available).*redirect|redirect responses?", re.IGNORECASE
+)
 
 _MUTATING_TOOLS = {
     "create_tasks",
@@ -161,6 +164,10 @@ def is_correctable_tool_failure(tool_name: str, tool_input: Any, output: str) ->
 
     if _is_diagnostic_tool(tool_name, tool_input):
         return False
+    if tool_name in {"read_artifact", "http_request"}:
+        return True
+    if _REDIRECT_BODY_FAILURE_PATTERN.search(output):
+        return True
     if any(pattern.search(output) for pattern in _CORRECTABLE_ERROR_PATTERNS):
         return True
     return tool_name in _STRUCTURED_CORRECTABLE_TOOLS and any(
@@ -302,6 +309,7 @@ class TaskFailureRecoveryHook(HookProvider):
         self._correction_attempts = 0
         self._policy_violations = 0
         self._recovery_roles: Dict[str, str] = {}
+        self._artifact_retry_used = False
 
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(BeforeToolCallEvent, self._before_tool)
@@ -323,6 +331,23 @@ class TaskFailureRecoveryHook(HookProvider):
             )
             return
         if not self.unresolved:
+            return
+        if self.failure_category == "artifact_unavailable" and tool_name == "read_artifact":
+            if self._artifact_retry_used:
+                self._block(
+                    event,
+                    tool_id,
+                    "Artifact reading is unavailable for this task. Use an existing durable reference or collect "
+                    "bounded alternate evidence; do not call read_artifact again.",
+                )
+                return
+        if self.failure_category == "redirect_response_unavailable" and tool_name == self.failed_tool_name:
+            self._block(
+                event,
+                tool_id,
+                "The redirect response body is unavailable. Use the resolved URL or an HTTP request instead of "
+                "repeating this browser-body call.",
+            )
             return
         if tool_name == self.failed_tool_name and _input_fingerprint(tool_input) == self.failed_input_fingerprint:
             self._block(event, tool_id, "Do not repeat the identical failed invocation; change its input or method.")
@@ -426,6 +451,8 @@ class TaskFailureRecoveryHook(HookProvider):
                 self.unresolved = False
                 self.exhausted = False
                 self._policy_violations = 0
+            elif self.failure_category == "artifact_unavailable":
+                self._artifact_retry_used = True
             elif self._correction_attempts >= self.max_corrections:
                 self.exhausted = True
                 self._stop_event_loop(event, "correction_failed")
@@ -453,23 +480,64 @@ class TaskFailureRecoveryHook(HookProvider):
             self.failed_output = _bounded_text(output)
             self._correction_attempts = 0
             self._policy_violations = 0
+            self._artifact_retry_used = False
 
     @staticmethod
     def _failure_category(tool_name: str, tool_input: Any, output: str) -> str:
+        if tool_name == "read_artifact":
+            return "artifact_unavailable"
+        if _REDIRECT_BODY_FAILURE_PATTERN.search(output):
+            return "redirect_response_unavailable"
+        if tool_name == "http_request":
+            return "repeated_http_failure"
         if tool_name == "shell" and any(pattern.search(output) for pattern in _STARTUP_FAILURE_PATTERNS):
             return "startup_failure"
         if tool_name == "shell" and any(pattern.search(output) for pattern in _PREREQUISITE_FAILURE_PATTERNS):
             return "missing_prerequisite"
+        if tool_name == "shell":
+            return "repeated_shell_failure"
         return "invalid_invocation"
 
     def recovery_guidance(self, tool_catalog_context: str = "") -> str:
-        guidance = (
-            "A tool invocation failed and needs bounded correction. Do not claim output from the failed call. "
-            "You may inspect or create missing prerequisites, use a different method, continue independent work, "
-            f"or make up to {self.max_corrections} changed retries of the failed invocation. "
-            f"Failure category: {self.failure_category}. Failed tool: {self.failed_tool_name}. "
-            f"Error: {self.failed_output}"
-        )
+        if self.failure_category == "artifact_unavailable":
+            guidance = (
+                "An artifact could not be read. Make at most one changed read_artifact call using a canonical "
+                "artifact: reference. If it still fails, do not read that artifact again; use an existing durable "
+                "reference or capture bounded alternate evidence before recording acceptance. "
+                f"Failed artifact read: {self.failed_output}"
+            )
+        elif self.failure_category == "redirect_response_unavailable":
+            guidance = (
+                "A redirect response has no readable body. Do not repeat the browser-body call. Use the resolved "
+                "URL or an HTTP request to capture the redirect status, location, and final response as evidence. "
+                f"Failed tool: {self.failed_tool_name}. Error: {self.failed_output}"
+            )
+        elif self.failure_category == "repeated_http_failure":
+            guidance = (
+                "The HTTP request failed. Do not repeat the identical request. Use one corrected URL/route or a "
+                "different registered HTTP-capable method, then continue only with evidence from the changed call. "
+                f"Error: {self.failed_output}"
+            )
+        elif self.failure_category == "repeated_shell_failure":
+            guidance = (
+                "The shell command failed. Do not repeat the identical command. Use one corrected command or a "
+                "capability-compatible registered tool, then continue only with observed output from that changed "
+                f"action. Failed tool: {self.failed_tool_name}. Error: {self.failed_output}"
+            )
+        elif self.failure_category in {"startup_failure", "missing_prerequisite"}:
+            guidance = (
+                "The shell invocation cannot proceed as issued. Do not repeat the identical command. Use one "
+                "corrected command or a capability-compatible registered tool, then continue only with its observed "
+                f"output. Error: {self.failed_output}"
+            )
+        else:
+            guidance = (
+                "A tool invocation failed and needs bounded correction. Do not claim output from the failed call. "
+                "You may inspect or create missing prerequisites, use a different method, continue independent work, "
+                f"or make up to {self.max_corrections} changed retries of the failed invocation. "
+                f"Failure category: {self.failure_category}. Failed tool: {self.failed_tool_name}. "
+                f"Error: {self.failed_output}"
+            )
         tool_catalog_context = str(tool_catalog_context or "").strip()
         if not tool_catalog_context:
             return guidance

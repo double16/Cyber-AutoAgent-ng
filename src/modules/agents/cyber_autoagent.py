@@ -82,7 +82,6 @@ from modules.handlers.utils import (
     tool_append_description,
     tool_rename,
 )
-from modules.prompts import get_task_capture_prompt
 from modules.tools.artifact import read_artifact
 from modules.tools.browser import (
     browser_evaluate_js,
@@ -153,7 +152,6 @@ class AgentRuntimeResources:
     tool_executor: ConcurrentToolExecutor
     system_prompt_payload: Any
     system_prompt: str
-    task_capture_prompt: str
     hooks: List[HookProvider]
     conversation_manager: MappingConversationManager
     sdk_context_manager: Optional[str]
@@ -1045,7 +1043,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         tool_executor=tool_executor,
         system_prompt_payload=system_prompt_payload,
         system_prompt=system_prompt,
-        task_capture_prompt=get_task_capture_prompt(),
         hooks=hooks,
         conversation_manager=conversation_manager,
         sdk_context_manager=sdk_context_manager,

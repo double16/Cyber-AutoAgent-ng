@@ -569,6 +569,7 @@ class MultiAgentWorkflowController:
         text_runner: Optional[AgentTextRunner] = None,
         work_runner: Optional[AgentWorkRunner] = None,
         executor_session_factory: Optional[AgentExecutorSessionFactory] = None,
+        operation_targets: Optional[List[OperationTarget]] = None,
         max_iterations: int = sys.maxsize,
     ):
         """
@@ -583,7 +584,7 @@ class MultiAgentWorkflowController:
         """
         self.runtime = runtime
         self.budget = budget
-        self.operation_targets = resolve_operation_targets(
+        self.operation_targets = operation_targets if operation_targets is not None else resolve_operation_targets(
             getattr(runtime.config, "target", ""),
             getattr(runtime.config, "objective", ""),
         )
@@ -1435,6 +1436,12 @@ class MultiAgentWorkflowController:
             max_model_turns=32,
             terminal_reason="task_executor_done",
             terminal_message="Task executor completed after tool use",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Call record_finding_validation with the independent validation outcome."
+                if task.kind == "finding_validation"
+                else "Call record_task_acceptance with canonical durable evidence references."
+            ),
         )
         recovery_policy = AgentRunPolicy(
             min_tool_calls=1,
@@ -1447,6 +1454,12 @@ class MultiAgentWorkflowController:
             max_model_turns=8,
             terminal_reason="task_executor_recovery_done",
             terminal_message="Task executor recovery completed after bounded tool use",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Call record_finding_validation with the independent validation outcome."
+                if task.kind == "finding_validation"
+                else "Call record_task_acceptance with canonical durable evidence references."
+            ),
         )
         self._log_workflow(
             "task executor policy task=%s min_tool_calls=%s ignored_tools=%s",
@@ -1458,7 +1471,7 @@ class MultiAgentWorkflowController:
             existing.task_uid
             for existing in self.state.list_tasks()
         }
-        system_prompt = self.runtime.system_prompt  # + "\n\n" + (self.runtime.task_capture_prompt or "")
+        system_prompt = self.runtime.system_prompt
         worker_contexts = []
         tool_outcomes: List[ToolOutcome] = []
         acceptance_failures = 0
@@ -1900,8 +1913,8 @@ Critic instructions: {decision.instructions}
             return (
                 "Raw shell commands, tool IDs, URLs, and inline output are not evidence references. Save the "
                 "current task output with the appropriate artifact or observation tool (create the durable evidence "
-                "first), then use only the returned "
-                "artifact:, artifact_id:, memory:, or finding: reference"
+                "first), then use exactly one canonical reference: artifact:artifacts/<file>, artifact_id:<id>, "
+                "memory:<id>, or finding:<id>. Example: artifact:artifacts/http_response.txt"
             )
         if "evidence" in normalized or "memory:" in normalized or "artifact:" in normalized:
             return (
@@ -2722,7 +2735,7 @@ review existing memories. Return only the requested JSON decision."""
         failed_batch_count = 0
         max_attempts = 1 + self._task_creator_correction_count()
         for batch in batches:
-            tools = self._task_creator_tools(batch)
+            tools = self._task_creator_tools(phase, batch)
             prompt = self._task_creator_prompt(plan, phase, batch)
             before_batch_uids = {task.task_uid for task in self.state.list_tasks()}
             before_batch_actionable = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
@@ -3007,7 +3020,9 @@ review existing memories. Return only the requested JSON decision."""
         snapshot_rules = """- For dependent snapshot work, supply canonical `snapshot_refs`, set `methods: []` and `limits: {{}}`; Python
   silently discards limits and `output_kind` because they do not apply. When the reference resolves to an inventory
   manifest, Python automatically creates one task per target and normalized endpoint route, grouping that route's
-  parameter/query entries with it. Referenced producer tasks must be done.
+  parameter/query entries with it. Each expanded task is bound to the active phase title and objective; the proposal
+  must describe that phase-specific work rather than generic endpoint assessment. Referenced producer tasks must be
+  done.
 - Never mix procedure fields with snapshot fields. Python infers the basis kind.
 - Python requires generic durable evidence for snapshot work, including negative coverage dispositions; findings are
   optional outputs and are never required to prove that an item was assessed.
@@ -3236,13 +3251,19 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
         with self.executor_session_factory("task_creator", tools, system_prompt) as run_creator:
             yield run_creator
 
-    def _task_creator_tools(self, batch: Optional[TaskCreationBatch] = None) -> List[Any]:
+    def _task_creator_tools(
+        self,
+        phase: Optional[PlanPhase] = None,
+        batch: Optional[TaskCreationBatch] = None,
+    ) -> List[Any]:
         if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
             raise WorkflowInvariantError("create_tasks tool is required for task_creator")
         return [build_create_tasks_tool(
             prompt_token_limit=getattr(self.runtime, "prompt_token_limit", 48_000),
             coverage_item_ids=batch.item_ids if batch and batch.snapshot_ref else None,
             expected_snapshot_ref=batch.snapshot_ref if batch else None,
+            phase_title=phase.title if phase else "",
+            phase_objective=phase.criteria if phase else "",
         )]
 
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
@@ -3828,6 +3849,8 @@ Resolved context window: {int(getattr(self.runtime, "prompt_token_limit", 48_000
 Create the active phase's work for every listed atomic route group and no work outside this batch.
 Submit exactly one snapshot proposal. Do not divide this batch into endpoint-category or vulnerability-class proposals;
 Python expands the single proposal into one route-scoped task for every listed group.
+The proposal objective and criterion must describe the active phase's distinct work. Do not use generic "assess
+endpoint" or "assess frozen inventory" wording.
 {self._task_creation_batch_toon(batch.groups)}
 """
         else:

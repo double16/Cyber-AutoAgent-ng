@@ -202,6 +202,17 @@ cyber-react \
 | `--mcp-conns` '[...]'             | None      | Configure MCP Tools                                                                |
 | `--bug-bounty-header NAME=VALUE`  | None      | Add a marker header to authorized bug bounty traffic; repeat for multiple headers  |
 
+### Target Preflight Validation
+
+Before a new assessment starts, Cyber-AutoAgent validates every executable target resolved from the target and
+objective. Hostnames use the system resolver, including sources such as `/etc/hosts`; IP addresses and CIDRs require a
+route; explicit `host:port` and `scheme://host:port` targets require a TCP connection; and local filesystem paths must
+exist and be readable. CIDRs are never connection-scanned during preflight, URLs without an explicit port do not infer
+one, and target types without a safe deterministic check are skipped.
+
+The terminal reports one `PREFLIGHT PASS`, `PREFLIGHT FAIL`, or `PREFLIGHT SKIP` result per resolved target. Any failed
+check stops the assessment before agents or tools start. Report-only runs do not repeat target preflight validation.
+
 ### Bug Bounty Traffic Markers
 
 Some programs require marker headers on every request. Configure them once so the agent applies them to the shared browser context and includes them in prompts for HTTP/MCP/tool usage:

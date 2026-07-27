@@ -145,8 +145,30 @@ def build_task_executor_max_token_prompt(
     completed_tools: list[str],
     required_tools: set[str],
     completed_outcomes: list[str] | None = None,
+    task_objective: str = "",
+    latest_tool_outcome: str = "",
+    next_required_action: str = "",
 ) -> str:
     """Build a controller-owned recovery prompt containing no truncated claims."""
+
+    if task_objective and classification.kind == "reasoning_loop":
+        action = next_required_action or (
+            f"Call {sorted(required_tools)[0]} with the required evidence." if required_tools else "Call one next registered tool."
+        )
+        outcome = latest_tool_outcome or "No completed tool outcome is available."
+        cause = (
+            "repetitive reasoning was detected"
+            if classification.kind == "reasoning_loop"
+            else "the output-generation limit was reached"
+        )
+        return f"""## Controller Max-Token Recovery
+The incomplete response was discarded because {cause}.
+Task objective: {task_objective}
+Latest tool outcome: {outcome}
+Next required action: {action}
+
+Do not restate the plan, reconstruct the discarded response, or repeat prior reasoning. Take only the next required action now.
+"""
 
     completed = set(completed_tools)
     outstanding = sorted(required_tools - completed)

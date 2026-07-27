@@ -129,6 +129,48 @@ def test_executor_recovery_prompt_uses_only_controller_state():
     assert "Repeat this sufficiently" not in prompt
 
 
+def test_executor_reasoning_loop_recovery_prompt_is_compact_and_task_bounded():
+    classification = classify_max_token_output("Repeat this sufficiently detailed statement now.\n" * 60)
+
+    prompt = build_task_executor_max_token_prompt(
+        classification,
+        completed_tools=["shell", "memory"],
+        required_tools={"record_task_acceptance", "memory"},
+        completed_outcomes=["shell: a very long prior result that must not be replayed"],
+        task_objective="Map authentication behavior for the assigned /login route.",
+        latest_tool_outcome="http_request: observed a 200 response from /login.",
+        next_required_action="Call record_task_acceptance with canonical durable evidence references.",
+    )
+
+    assert "Task objective: Map authentication behavior for the assigned /login route." in prompt
+    assert "Latest tool outcome: http_request: observed a 200 response from /login." in prompt
+    assert "Next required action: Call record_task_acceptance" in prompt
+    assert "Successful tools already observed" not in prompt
+    assert "Controller-observed successful outcomes" not in prompt
+    assert "very long prior result" not in prompt
+
+
+def test_executor_output_truncation_recovery_keeps_controller_history():
+    classification = classify_max_token_output(
+        "\n".join(f"Distinct line {index} with unique task detail." for index in range(60))
+    )
+
+    prompt = build_task_executor_max_token_prompt(
+        classification,
+        completed_tools=["shell"],
+        required_tools={"record_task_acceptance"},
+        completed_outcomes=["shell: HTTP/1.1 200 OK"],
+        task_objective="This compact task context only applies to reasoning-loop recovery.",
+        latest_tool_outcome="shell: ignored for output truncation",
+        next_required_action="ignored for output truncation",
+    )
+
+    assert classification.kind == "output_truncation"
+    assert "Successful tools already observed: shell" in prompt
+    assert "Controller-observed successful outcomes" in prompt
+    assert "Task objective:" not in prompt
+
+
 def test_agent_repair_hook_does_not_retry_max_tokens_stop():
     hook = AgentRepairHook()
     event = SimpleNamespace(

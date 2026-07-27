@@ -31,6 +31,8 @@ class AgentRunPolicy:
     ignored_terminal_tool_names: FrozenSet[str] = field(default_factory=frozenset)
     terminal_reason: str = "agent_completed_required_tools"
     terminal_message: str = "Agent completed required tool calls"
+    recovery_objective: str = ""
+    recovery_next_action: str = ""
 
     def __init__(
         self,
@@ -48,6 +50,8 @@ class AgentRunPolicy:
         ignored_terminal_tool_names: Iterable[str] = frozenset(),
         terminal_reason: str = "agent_completed_required_tools",
         terminal_message: str = "Agent completed required tool calls",
+        recovery_objective: str = "",
+        recovery_next_action: str = "",
     ):
         object.__setattr__(self, "min_tool_calls", min_tool_calls)
         object.__setattr__(self, "required_tool_names", frozenset(required_tool_names))
@@ -65,3 +69,5 @@ class AgentRunPolicy:
         object.__setattr__(self, "ignored_terminal_tool_names", frozenset(ignored_terminal_tool_names))
         object.__setattr__(self, "terminal_reason", terminal_reason)
         object.__setattr__(self, "terminal_message", terminal_message)
+        object.__setattr__(self, "recovery_objective", str(recovery_objective or ""))
+        object.__setattr__(self, "recovery_next_action", str(recovery_next_action or ""))

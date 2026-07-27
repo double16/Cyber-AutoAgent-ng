@@ -31,6 +31,27 @@ def restore_working_directory_after_test():
     os.chdir(original_cwd)
 
 
+@pytest.fixture(autouse=True)
+def bypass_live_target_preflight(monkeypatch):
+    """Keep CLI integration tests deterministic and free of host-network dependencies."""
+
+    def successful_preflight(*, logical_target, objective, operation_id, logger, **_kwargs):
+        targets = cyberautoagent.resolve_operation_targets(logical_target, objective)
+        results = [
+            cyberautoagent.TargetValidationResult(
+                target.target_id,
+                target.value,
+                target.type,
+                "pass",
+                ("test_bypass",),
+            )
+            for target in targets
+        ]
+        return targets, results
+
+    monkeypatch.setattr(cyberautoagent, "run_target_preflight", successful_preflight)
+
+
 class TestCLIArguments:
     """Test command-line argument parsing"""
 
@@ -1740,6 +1761,8 @@ def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
         run_policy=cyberautoagent.AgentRunPolicy(
             required_tool_names={"record_task_acceptance"},
             terminal_after_required_tools=True,
+            recovery_objective="Map authentication behavior for the assigned /login route.",
+            recovery_next_action="Call record_task_acceptance with canonical durable evidence references.",
         ),
         callback_handler=callback,
         initial_prompt="initial",
@@ -1752,11 +1775,12 @@ def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
     assert result.reason == "task_executor_done"
     assert len(calls) == 2
     assert "repetitive reasoning was detected" in calls[1]
-    assert "Successful tools already observed: shell" in calls[1]
-    assert "Outstanding required tools: record_task_acceptance" in calls[1]
+    assert "Task objective: Map authentication behavior for the assigned /login route." in calls[1]
+    assert "Latest tool outcome: shell: 200 OK" in calls[1]
+    assert "Next required action: Call record_task_acceptance" in calls[1]
     assert repeated not in calls[1]
-    assert "Controller-observed successful outcomes" in calls[1]
-    assert "Do not repeat any tool call already represented above" in calls[1]
+    assert "Controller-observed successful outcomes" not in calls[1]
+    assert "Do not repeat any tool call already represented above" not in calls[1]
     assert policies[1].max_agent_calls == 1
     assert policies[1].max_model_turns == 1
     assert policies[1].max_tool_calls == 1
@@ -2160,6 +2184,46 @@ def test_cli_main_runs_workflow_controller(monkeypatch, tmp_path):
     agent.cleanup.assert_not_called()
     expected_cwd = tmp_path / "example.com" / os.environ["CYBER_OPERATION_ID"]
     assert Path.cwd() == expected_cwd
+
+
+def test_cli_main_preflight_failure_stops_before_environment_or_workflow(monkeypatch, tmp_path):
+    callback = CliCallback()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, CallableCliAgent(), callback)
+    failure = cyberautoagent.TargetValidationResult(
+        "target-1",
+        "missing.test",
+        "network",
+        "fail",
+        ("resolve",),
+        "name not found",
+    )
+    monkeypatch.setattr(
+        cyberautoagent,
+        "run_target_preflight",
+        Mock(return_value=([cyberautoagent.OperationTarget("target-1", "missing.test", "network")], [failure])),
+    )
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "missing.test",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cyberautoagent.main()
+
+    assert exc_info.value.code == 2
+    cyberautoagent.auto_setup.assert_not_called()
+    config_manager.workflow.run.assert_not_called()
 
 
 def test_cli_main_workflow_runner_creates_role_agent(monkeypatch, tmp_path):

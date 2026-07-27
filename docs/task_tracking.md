@@ -468,7 +468,6 @@ snapshot; it is cleared when a new operation starts.
 | Agent runtime resources      | `src/modules/agents/cyber_autoagent.py`          | Shared memory, handlers, hooks, tool lists, prompt payloads       |
 | Plan/task models and storage | `src/modules/tools/memory.py`                    | SQLite persistence and `TaskProposal` compilation                 |
 | Base prompt                  | `src/modules/prompts/templates/system_prompt.md` | Methodology, evidence discipline                                  |
-| Task Capture                 | `src/modules/prompts/templates/task_capture.md`  | Task creation guidance                                            |
 | Prompt factory               | `src/modules/prompts/factory.py`                 | Memory guidance and prompt assembly                               |
 | CLI entry point              | `src/cyberautoagent.py`                          | Runtime setup, fatal failure handling, report generation, cleanup |
 

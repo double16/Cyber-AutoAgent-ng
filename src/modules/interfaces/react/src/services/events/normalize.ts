@@ -176,6 +176,21 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
   }
 
   switch (e.type) {
+    case 'preflight_check': {
+      const checks = Array.isArray(e.checks) ? e.checks.map(String) : [];
+      const resolvedAddresses = Array.isArray(e.resolved_addresses)
+        ? e.resolved_addresses.map(String)
+        : [];
+      return {
+        ...e,
+        status: String(e.status || 'skip').toLowerCase(),
+        target: String(e.target || ''),
+        target_type: String(e.target_type || ''),
+        checks,
+        resolved_addresses: resolvedAddresses,
+      };
+    }
+
     case 'specialist_start': {
       // Normalize specialist start payload fields (snake_case -> camelCase)
       const specialist = (e.specialist || e.name || '').toString() || 'validation';

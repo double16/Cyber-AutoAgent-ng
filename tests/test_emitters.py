@@ -77,6 +77,15 @@ def test_emitter_always_json_format():
 
     events = [
         {"type": "operation_init", "operation_id": "test-123", "target": "example.com"},
+        {
+            "type": "preflight_check",
+            "operation_id": "test-123",
+            "target_id": "target-1",
+            "target": "example.com",
+            "target_type": "network",
+            "status": "pass",
+            "checks": ["resolve"],
+        },
         {"type": "progress_update", "step": 1, "progressPercent": 40},
         {"type": "reasoning", "content": "Analyzing"},
         {"type": "tool_start", "tool_name": "nmap"},

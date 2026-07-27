@@ -432,6 +432,11 @@ const runAutoAssessment = async () => {
           const message = formatWorkflowActivityEvent(event);
           if (message) loggingService.info(message);
         }
+        else if (event.type === 'preflight_check') {
+          const status = String(event.status || 'skip').toUpperCase();
+          const reason = event.reason ? `: ${event.reason}` : '';
+          loggingService.info(`🎯 Target preflight ${status} ${event.target || 'unknown target'}${reason}`);
+        }
         else if (event.type === 'output' && event.content) {
           loggingService.info(event.content);
         }

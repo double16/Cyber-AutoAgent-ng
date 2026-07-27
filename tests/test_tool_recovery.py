@@ -206,6 +206,77 @@ def test_non_shell_correction_allows_independent_tools_and_requires_changed_inpu
     assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "correction"]
 
 
+def test_read_artifact_failure_allows_one_changed_retry_then_requires_alternate_evidence():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
+    failed_input = {"path": "artifact:artifacts/missing.txt"}
+    hook._after_tool(_after("failed", "read_artifact", failed_input, status="error", text="Artifact does not exist"))
+
+    assert hook.failure_category == "artifact_unavailable"
+    assert "at most one changed read_artifact call" in hook.recovery_guidance()
+    retry_input = {"path": "artifact:artifacts/renamed.txt"}
+    retry = _before("retry", "read_artifact", retry_input)
+    hook._before_tool(retry)
+    assert retry.cancel_tool is False
+    hook._after_tool(_after("retry", "read_artifact", retry_input, status="error", text="Artifact does not exist"))
+
+    blocked = _before("blocked", "read_artifact", {"path": "artifact:artifacts/other.txt"})
+    hook._before_tool(blocked)
+    assert "do not call read_artifact again" in blocked.cancel_tool
+    alternate = _before("alternate", "http_request", {"url": "http://target/evidence"})
+    hook._before_tool(alternate)
+    assert alternate.cancel_tool is False
+    hook._after_tool(_after("alternate", "http_request", alternate.tool_use["input"], status="success", text="200 OK"))
+    assert hook.unresolved is False
+
+
+def test_redirect_body_failure_blocks_repeated_browser_body_call_and_allows_http_fallback():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
+    failed_input = {"url": "http://target/redirect"}
+    hook._after_tool(
+        _after(
+            "failed",
+            "browser_get_page_html",
+            failed_input,
+            status="error",
+            text="Response.body: Response body is unavailable for redirect responses",
+        )
+    )
+
+    assert hook.failure_category == "redirect_response_unavailable"
+    repeated = _before("repeated", "browser_get_page_html", {"url": "http://target/final"})
+    hook._before_tool(repeated)
+    assert "Use the resolved URL or an HTTP request" in repeated.cancel_tool
+    fallback = _before("fallback", "http_request", {"url": "http://target/redirect"})
+    hook._before_tool(fallback)
+    assert fallback.cancel_tool is False
+    hook._after_tool(_after("fallback", "http_request", fallback.tool_use["input"], status="success", text="302 Location: /final"))
+    assert hook.unresolved is False
+
+
+def test_http_failure_requires_changed_request_or_alternate_method():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
+    failed_input = {"url": "http://target/invalid"}
+    hook._after_tool(_after("failed", "http_request", failed_input, status="error", text="connection refused"))
+
+    assert hook.failure_category == "repeated_http_failure"
+    assert "Do not repeat the identical request" in hook.recovery_guidance()
+    identical = _before("identical", "http_request", failed_input)
+    hook._before_tool(identical)
+    assert "identical failed invocation" in identical.cancel_tool
+
+
+def test_shell_failure_requires_changed_command_or_capability_alternate():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
+    failed_input = {"command": "curl --bad-option http://target"}
+    hook._after_tool(_after("failed", "shell", failed_input, status="error", text="invalid option --bad-option"))
+
+    assert hook.failure_category == "repeated_shell_failure"
+    assert "Do not repeat the identical command" in hook.recovery_guidance()
+    identical = _before("identical", "shell", failed_input)
+    hook._before_tool(identical)
+    assert "identical failed invocation" in identical.cancel_tool
+
+
 def test_store_finding_missing_artifact_is_a_structured_correctable_failure():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=2)
     failed_input = {"title": "Candidate", "artifacts": []}

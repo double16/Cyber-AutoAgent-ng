@@ -83,6 +83,7 @@ from modules.config.types import (
     get_default_base_dir,
 )
 from modules.handlers.base import BudgetLimitReached, is_docker
+from modules.handlers.events import EventEmitter, get_emitter
 from modules.handlers.max_token_recovery import (
     build_task_executor_max_token_prompt,
     classify_and_discard_max_token_output,
@@ -107,10 +108,11 @@ from modules.handlers.terminal_tool import (
     TERMINAL_TOOL_REJECTED_STATE_KEY,
 )
 from modules.tools import browser, channel_close_all
-from modules.tools.memory import get_memory_client
+from modules.tools.memory import OperationTarget, get_memory_client, resolve_operation_targets
 from modules.tools.oast import close_oast_providers
 from modules.tools.tool_catalog import get_shell_command_help_context
 from modules.utils.telemetry import flush_traces
+from modules.utils.target_validation import TargetValidationResult, TargetValidator, validate_operation_targets
 
 load_dotenv()
 
@@ -167,6 +169,34 @@ def detect_deployment_mode():
             return "compose"  # Local development with Langfuse
         else:
             return "cli"  # Pure Python CLI mode
+
+
+def run_target_preflight(
+    *,
+    logical_target: str,
+    objective: str,
+    operation_id: str,
+    logger: Any,
+    emitter: Optional[EventEmitter] = None,
+    validator: Optional[TargetValidator] = None,
+) -> tuple[list[OperationTarget], list[TargetValidationResult]]:
+    """Resolve, validate, emit, and log one preflight result per target."""
+
+    targets = resolve_operation_targets(logical_target, objective)
+    results = validate_operation_targets(targets, validator=validator)
+    event_emitter = emitter or get_emitter(operation_id=operation_id)
+    for result in results:
+        event_emitter.emit(result.to_event(operation_id))
+        log = logger.error if result.status == "fail" else logger.info
+        log(
+            "Target preflight %s: %s (%s) checks=%s%s",
+            result.status,
+            result.target,
+            result.target_type,
+            ",".join(result.checks) or "none",
+            f" reason={result.reason}" if result.reason else "",
+        )
+    return targets, results
 
 
 def setup_telemetry(logger):
@@ -817,11 +847,18 @@ def run_workflow_agent_with_max_token_recovery(
                 for outcome in journal_entries
                 if outcome.success
             ][-8:]
+            latest_outcome = ""
+            if journal_entries:
+                latest = journal_entries[-1]
+                latest_outcome = f"{latest.tool_name}: {latest.output_summary[:1000]}"
             current_prompt = build_task_executor_max_token_prompt(
                 classification,
                 completed_tools=completed_tools,
                 required_tools=set(run_policy.required_tool_names) if run_policy else set(),
                 completed_outcomes=completed_outcomes,
+                task_objective=run_policy.recovery_objective if run_policy else "",
+                latest_tool_outcome=latest_outcome,
+                next_required_action=run_policy.recovery_next_action if run_policy else "",
             )
             max_token_recovery_attempts += 1
 
@@ -1349,6 +1386,22 @@ def main():
     )
     logger = setup_logging(log_file=log_file, verbose=verbose_mode)
 
+    operation_targets: list[OperationTarget] = []
+    if not bool(args.report):
+        operation_targets, preflight_results = run_target_preflight(
+            logical_target=args.target,
+            objective=args.objective,
+            operation_id=operation_id,
+            logger=logger,
+        )
+        failed_preflight = [result for result in preflight_results if result.status == "fail"]
+        if failed_preflight:
+            failure_summary = "; ".join(
+                f"{result.target}: {result.reason}" for result in failed_preflight
+            )
+            print_status(f"Target preflight failed: {failure_summary}", "ERROR")
+            raise SystemExit(2)
+
     latest_pointer = update_latest_output_pointer(
         target_sanitized,
         operation_id,
@@ -1668,6 +1721,7 @@ def main():
                 budget=budget_cfg,
                 work_runner=workflow_work_runner,
                 executor_session_factory=workflow_executor_session,
+                operation_targets=operation_targets,
             )
 
             try:

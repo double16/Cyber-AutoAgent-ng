@@ -36,10 +36,8 @@ _LF_SEEDED_LOCK = threading.Lock()
 
 # Mapping local template filenames -> remote Langfuse prompt names
 LF_SYSTEM_PROMPT_NAME = "cyber/system/system_prompt"
-LF_TASK_CAPTURE_PROMPT_NAME = "cyber/system/task_capture"
 _LF_TEMPLATE_TO_NAME = {
     "system_prompt.md": LF_SYSTEM_PROMPT_NAME,
-    "task_capture.md": LF_TASK_CAPTURE_PROMPT_NAME,
     "tools_guide.md": "cyber/system/tools_guide",
     "report_generation_prompt.md": "cyber/report/report_generation_prompt",
     "report_agent_appendix_system_prompt.md": "cyber/report/report_agent_appendix_system_prompt",
@@ -557,14 +555,6 @@ def get_system_prompt(
         logger.warning("System prompt has unknown variables: %s ", ", ".join(missing_variables))
 
     return prompt
-
-
-def get_task_capture_prompt() -> str:
-    """Prompt for task worker agents to create new tasks."""
-    template = load_prompt_template("task_capture.md")
-    if template:
-        return template
-    return "Reflect on new tasks and call create_tasks()."
 
 
 def get_report_generation_prompt(

@@ -94,6 +94,7 @@ export type AdditionalStreamEvent =
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
   | { type: 'workflow_activity'; content?: string; activity?: string; action?: string; role?: string; status?: string; phase_id?: number; phase_title?: string; task_uid?: string; task_title?: string; attempt?: number; attempt_total?: number; cycle?: number; cycle_total?: number; iteration?: number; iteration_total?: number; [key: string]: any }
+  | { type: 'preflight_check'; operation_id?: string; target_id?: string; target?: string; target_type?: string; status: 'pass' | 'fail' | 'skip'; checks?: string[]; reason?: string; resolved_addresses?: string[]; [key: string]: any }
   | { type: 'task_started'; task_uid?: string; title?: string; status?: string; task_kind?: string; reference_id?: string; [key: string]: any }
   | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; finding_resolution?: string; [key: string]: any }
   | { type: 'task_deferred'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; [key: string]: any }
@@ -740,6 +741,25 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       return (
         <Box>
           <Text color="yellow">{`VERIFYING FINDING ${title}${formatTaskScope(event)}`}</Text>
+        </Box>
+      );
+    }
+
+    case 'preflight_check': {
+      const status = String((event as any).status || 'skip').toLowerCase();
+      const target = String((event as any).target || 'unknown target');
+      const targetType = String((event as any).target_type || 'unknown');
+      const checks = Array.isArray((event as any).checks) ? (event as any).checks.join(', ') : '';
+      const reason = String((event as any).reason || '').trim();
+      const icon = status === 'pass' ? '✓' : status === 'fail' ? '✗' : '■';
+      const color = status === 'pass' ? 'green' : status === 'fail' ? 'red' : 'yellow';
+      const checkSuffix = checks ? ` [${checks}]` : '';
+      const reasonSuffix = reason ? `: ${reason}` : '';
+      return (
+        <Box>
+          <Text color={color}>
+            {`${icon} 🎯 ${status.toUpperCase()} ${target} (${targetType})${checkSuffix}${reasonSuffix}`}
+          </Text>
         </Box>
       );
     }

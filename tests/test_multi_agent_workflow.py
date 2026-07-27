@@ -462,7 +462,6 @@ def _runtime(progress=0, env_ints=None, env_floats=None):
         config=SimpleNamespace(target="target", objective="assess", available_tools=[]),
         operation_id="OP_TEST",
         system_prompt="base prompt",
-        task_capture_prompt="task capture prompt",
         termination_policy="",
         config_manager=SimpleNamespace(
             getenv_int=lambda name, default=0: env_ints.get(name, default),

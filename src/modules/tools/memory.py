@@ -1656,8 +1656,11 @@ def _normalize_target_ids(value: Any) -> List[str]:
 
 _RE_CIDR_TARGET = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b")
 _RE_IP_TARGET = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-_RE_HOST_PORT_TARGET = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}:\d{1,5}\b")
+_RE_HOST_PORT_TARGET = re.compile(
+    r"(?<![a-zA-Z0-9.:-])(?:\[[0-9A-Fa-f:.%]+\]|(?:[a-zA-Z0-9-]+\.)*[a-zA-Z0-9-]+):\d{1,5}\b"
+)
 _RE_FQDN_TARGET = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
+_RE_IPV6_TARGET = re.compile(r"(?<!\S)(?=[0-9A-Fa-f:]*:)[0-9A-Fa-f:]+(?:/\d{1,3})?(?=$|\s|[,;)])")
 _RE_QUOTED_PATH_TARGET = re.compile(r'["\']((?:/|\./|\.\./)[^"\']+)["\']')
 _RE_BARE_TARGET_CONTEXT = re.compile(
     r"\b(?:target|host|endpoint|system|against|assess|scan|test|verify)\s+([a-zA-Z0-9][a-zA-Z0-9_.-]+)\b",
@@ -1666,9 +1669,11 @@ _RE_BARE_TARGET_CONTEXT = re.compile(
 
 
 def _classify_target_literal(value: str, *, allow_bare_hostname: bool = False) -> Optional[TargetType]:
-    stripped = value.strip().strip(".,;:)")
+    stripped = value.strip().strip(".,;)")
     if not stripped:
         return None
+    if stripped.startswith(("/", "./", "../")):
+        return "filesystem"
     if os.path.exists(os.path.expanduser(stripped)):
         return "filesystem"
     try:
@@ -1684,7 +1689,7 @@ def _classify_target_literal(value: str, *, allow_bare_hostname: bool = False) -
 
 
 def _canonical_target_value(value: str, target_type: TargetType) -> str:
-    stripped = value.strip().strip(".,;:)")
+    stripped = value.strip().strip(".,;)")
     if target_type == "filesystem":
         return os.path.realpath(os.path.expanduser(stripped))
     return stripped
@@ -1692,7 +1697,14 @@ def _canonical_target_value(value: str, target_type: TargetType) -> str:
 
 def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source: str) -> List[Tuple[str, str]]:
     candidates: List[Tuple[str, str]] = []
-    for pattern in (_RE_URL_PATTERN, _RE_CIDR_TARGET, _RE_IP_TARGET, _RE_HOST_PORT_TARGET, _RE_FQDN_TARGET):
+    for pattern in (
+        _RE_URL_PATTERN,
+        _RE_CIDR_TARGET,
+        _RE_HOST_PORT_TARGET,
+        _RE_IP_TARGET,
+        _RE_IPV6_TARGET,
+        _RE_FQDN_TARGET,
+    ):
         candidates.extend((match.group(0), source) for match in pattern.finditer(text or ""))
     candidates.extend((match.group(0), source) for match in _RE_PATH_PATTERN.finditer(text or ""))
     candidates.extend((match.group(1), source) for match in _RE_QUOTED_PATH_TARGET.finditer(text or ""))
@@ -2755,15 +2767,26 @@ def canonical_artifact_reference(reference: str) -> str:
     return f"artifact:{relative}"
 
 
+_CANONICAL_ACCEPTANCE_EVIDENCE_HELP = (
+    "Acceptance evidence references must use one of: artifact:artifacts/<file>, artifact_id:<id>, memory:<id>, "
+    "or finding:<id>. Raw URLs, shell commands, tool IDs, and inline output are invalid. "
+    "Example: artifact:artifacts/http_response.txt"
+)
+
+
+def _acceptance_evidence_reference_error() -> ValueError:
+    """Return the shared correction-ready acceptance evidence error."""
+
+    return ValueError(_CANONICAL_ACCEPTANCE_EVIDENCE_HELP)
+
+
 def _canonical_evidence_reference(reference: str) -> str:
     text = str(reference or "").strip()
     if text.startswith(("artifact:", "artifact_id:")) or os.path.isabs(text) or text.startswith("artifacts/"):
         return canonical_artifact_reference(text)
     if text.startswith(("memory:", "finding:")):
         return text
-    raise ValueError(
-        "Acceptance evidence references must use artifact:, artifact_id:, memory:, or finding: prefixes"
-    )
+    raise _acceptance_evidence_reference_error()
 
 
 class _InventoryLinkParser(HTMLParser):
@@ -3321,6 +3344,67 @@ def _coverage_acceptance_criterion(group_kind: str, proposal_intent: str) -> Acc
     )
 
 
+def _phase_specific_coverage_criterion(
+    group_kind: str,
+    proposal_intent: str,
+    phase_title: str,
+    phase_objective: str,
+    route_label: str,
+    item_ids: List[str],
+) -> AcceptanceCriterion:
+    """Bind every expanded route task to its active phase's distinct work."""
+
+    criterion = _coverage_acceptance_criterion(group_kind, proposal_intent)
+    phase_label = str(phase_title or "active phase").strip()
+    phase_work = _route_scoped_phase_objective(phase_objective)
+    if not phase_work:
+        return criterion
+    item_scope = ", ".join(sorted(str(item_id) for item_id in item_ids))
+    return AcceptanceCriterion(
+        id=criterion.id,
+        description=(
+            f"For phase '{phase_label}', assigned route {route_label}, and frozen item IDs {item_scope}: "
+            f"{phase_work}. {criterion.description} for this assigned route only."
+        ),
+        evidence_requirements=criterion.evidence_requirements,
+    )
+
+
+_INVENTORY_WIDE_PHASE_SCOPE_PATTERNS = (
+    re.compile(r"\b(?:all|every)\s+(?:discovered\s+)?(?:entities|endpoints|items|routes|workflows)\b", re.I),
+    re.compile(r"\b(?:across|throughout)\s+(?:the\s+)?(?:baseline\s+)?(?:inventory|application)\b", re.I),
+    re.compile(r"\b(?:the\s+)?entire\s+(?:baseline\s+)?(?:inventory|application)\b", re.I),
+    re.compile(r"\bfrom\s+the\s+baseline\s+inventory\b", re.I),
+)
+
+
+def _route_scoped_phase_objective(phase_objective: str) -> str:
+    """Remove inventory-wide completion claims while retaining phase-specific semantics."""
+
+    scoped = str(phase_objective or "").strip()
+    for pattern in _INVENTORY_WIDE_PHASE_SCOPE_PATTERNS:
+        scoped = pattern.sub("", scoped)
+    scoped = re.sub(r"\s+", " ", scoped)
+    scoped = re.sub(r"\bmap\s+for\b", "Map", scoped, flags=re.I)
+    scoped = re.sub(r"\b(?:for|of|in|to)\s*(?=[,.;:]|$)", "", scoped, flags=re.I)
+    scoped = re.sub(r"\s+([,.;:])", r"\1", scoped).strip(" ,.;:")
+    return scoped
+
+
+def _is_generic_snapshot_proposal(proposal: TaskProposal) -> bool:
+    """Return whether a proposal omits any phase-specific snapshot-work intent."""
+
+    objective = re.sub(r"\s+", " ", proposal.objective.strip().lower())
+    criterion = re.sub(r"\s+", " ", proposal.criteria[0].description.strip().lower())
+    generic_values = {
+        "assess frozen inventory",
+        "assess each frozen inventory unit",
+        "assess the assigned frozen inventory unit",
+        "assess the assigned endpoint",
+    }
+    return objective in generic_values or criterion in generic_values
+
+
 def _task_inventory_artifact_refs(task: Task) -> List[str]:
     references = [canonical_artifact_reference(path) for path in sorted(_task_evidence_artifact_paths(task))]
     store = _get_plan_store()
@@ -3511,6 +3595,8 @@ def _create_tasks_from_proposals(
     prompt_token_limit: int,
     coverage_item_ids: Optional[set[str]] = None,
     expected_snapshot_ref: Optional[str] = None,
+    phase_title: str = "",
+    phase_objective: str = "",
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
@@ -3566,6 +3652,11 @@ def _create_tasks_from_proposals(
         )
         if coverage_item_ids is not None and acceptance.mode != "coverage":
             raise ValueError("task-creation batch requires a snapshot-based proposal")
+        if coverage_item_ids is not None and phase_objective and _is_generic_snapshot_proposal(proposal):
+            raise ValueError(
+                "snapshot proposal must describe the active phase's distinct objective; "
+                "generic endpoint assessment is not allowed"
+            )
 
         acceptance_groups = [(title, objective, acceptance, target_scope, target_ids)]
         if acceptance.mode == "coverage":
@@ -3613,11 +3704,31 @@ def _create_tasks_from_proposals(
                         snapshot_hash=acceptance.basis.snapshot_hash,
                         item_ids=remaining_ids,
                     ),
-                    criteria=[_coverage_acceptance_criterion(group_kind, proposal_intent)],
+                    criteria=[_phase_specific_coverage_criterion(
+                        group_kind,
+                        proposal_intent,
+                        phase_title,
+                        phase_objective,
+                        route_label,
+                        remaining_ids,
+                    )],
                 )
+                phase_label = str(phase_title or title).strip()
+                phase_work = _route_scoped_phase_objective(phase_objective) or objective.strip()
+                group_title = f"{title_prefixes[group_kind]} {route_label} [{group_target_id}]"
+                group_objective = (
+                    f"{objective.rstrip('.')} Scope this objective to {route_label} and its frozen inventory entries."
+                )
+                if phase_title or phase_objective:
+                    group_title = f"{phase_label}: {group_title}"
+                    group_objective = (
+                        f"For assigned route {route_label} and frozen item IDs {', '.join(remaining_ids)}, "
+                        f"perform this phase-specific work: {phase_work.rstrip('.')}. "
+                        "Produce an evidence-backed terminal disposition for this assigned route only."
+                    )
                 route_groups.append((
-                    f"{title_prefixes[group_kind]} {route_label} [{group_target_id}]",
-                    f"{objective.rstrip('.')} Scope this objective to {route_label} and its frozen inventory entries.",
+                    group_title,
+                    group_objective,
                     group_acceptance,
                     "subset",
                     [group_target_id],
@@ -3786,6 +3897,8 @@ def build_create_tasks_tool(
     *,
     coverage_item_ids: Optional[set[str]] = None,
     expected_snapshot_ref: Optional[str] = None,
+    phase_title: str = "",
+    phase_objective: str = "",
 ) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
 
@@ -3803,6 +3916,8 @@ def build_create_tasks_tool(
             prompt_token_limit=prompt_token_limit,
             coverage_item_ids=coverage_item_ids,
             expected_snapshot_ref=expected_snapshot_ref,
+            phase_title=phase_title,
+            phase_objective=phase_objective,
         )
         if int(json.loads(result).get("created_count", 0)) > 0:
             completed = True
@@ -3843,7 +3958,7 @@ def _evidence_reference_kind(reference: str, expected_kind: EvidenceRequirementK
         if expected_kind in {"finding_candidate", "durable_evidence"}:
             return True
         return expected_kind == "verified_finding" and record.get("resolution") == "verified"
-    raise ValueError("Acceptance evidence references must use artifact:, memory:, or finding: prefixes")
+    raise _acceptance_evidence_reference_error()
 
 
 def _validate_acceptance_result_evidence(
@@ -3865,7 +3980,7 @@ def _validate_acceptance_result_evidence(
             if _get_plan_store().get_finding(_operation_id(), finding_uid) is None:
                 raise ValueError(f"Acceptance evidence finding does not exist: {reference}")
         else:
-            raise ValueError("Acceptance evidence references must use artifact:, memory:, or finding: prefixes")
+            raise _acceptance_evidence_reference_error()
     for requirement in criterion.evidence_requirements:
         if requirement.kind == "inventory_manifest":
             matching = 0
@@ -4323,6 +4438,9 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     "disposition": "no_vulnerability|observation|finding_candidate|existing_finding",
     "summary": "Observed result", "evidence_refs": ["memory:<id>",
     "artifact:artifacts/<file>", "finding:<id>"]}}
+
+    Canonical evidence_refs syntax: artifact:artifacts/<file>, artifact_id:<id>, memory:<id>, or finding:<id>.
+    Raw URLs, shell commands, tool IDs, and inline output are invalid. Example: artifact:artifacts/http_response.txt.
 
     Use finding_candidate or existing_finding whenever the summary claims confirmed security behavior. The controller
     automatically binds finding_candidate to the sole finding created by this task. If the task created multiple

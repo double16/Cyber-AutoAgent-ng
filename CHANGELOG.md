@@ -2,6 +2,8 @@
 
 ### Features
 
+- Validate resolved hosts, IPs, explicit TCP services, CIDRs, and local filesystem targets before assessment startup,
+  and emit a pass/fail/skip preflight event for every target.
 - Show the latest operation health score, band, and entered target in the terminal title for interactive and headless TTY sessions.
 - Add deterministic operation-health scoring to progress events, including inventory-based phase fan-out prediction,
   and show the compact score and band with a distinguishing stethoscope marker in interactive stream output, the

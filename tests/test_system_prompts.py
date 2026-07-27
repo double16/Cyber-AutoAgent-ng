@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from modules.config.types import BudgetConfig
-from modules.prompts import get_system_prompt, load_prompt_template, get_task_capture_prompt
+from modules.prompts import get_system_prompt, load_prompt_template
 
 real_load_prompt_template = load_prompt_template
 
@@ -149,11 +149,6 @@ class TestGetSystemPrompt:
 
         assert "test objective" not in prompt_local
         assert "test objective" not in prompt_remote
-
-    def test_get_task_capture_basic(self):
-        prompt = get_task_capture_prompt()
-
-        assert "Task Capture Pass" in prompt
 
     def test_tools_guide_permits_overlapping_applicable_methods(self):
         prompt = load_prompt_template("tools_guide.md")

@@ -924,6 +924,30 @@ def test_resolve_operation_targets_falls_back_to_logical_bare_target():
     assert targets[0].source == "logical_target_fallback"
 
 
+def test_resolve_operation_targets_keeps_missing_path_as_filesystem(tmp_path):
+    missing = tmp_path / "missing-target"
+
+    targets = mod.resolve_operation_targets(str(missing), "Security assessment")
+
+    assert len(targets) == 1
+    assert targets[0].value == str(missing)
+    assert targets[0].type == "filesystem"
+
+
+def test_resolve_operation_targets_preserves_explicit_ip_service_boundary():
+    targets = mod.resolve_operation_targets("assessment", "Assess 192.0.2.10:8443")
+
+    assert [target.value for target in targets] == ["192.0.2.10:8443"]
+    assert [target.type for target in targets] == ["network"]
+
+
+def test_resolve_operation_targets_extracts_ipv6_host_and_network():
+    targets = mod.resolve_operation_targets("assessment", "Assess 2001:db8::10 and 2001:db8:1::/64")
+
+    assert [target.value for target in targets] == ["2001:db8::10", "2001:db8:1::/64"]
+    assert [target.type for target in targets] == ["network", "network_range"]
+
+
 def test_create_tasks_tool_schema_is_flat_and_controller_owned():
     tool_spec = get_tool_spec(mod.create_tasks)
     task_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposal"]
@@ -1419,6 +1443,53 @@ def test_coverage_acceptance_criterion_matches_compiled_work_kind(group_kind, cr
     assert criterion.evidence_requirements[0].kind == "durable_evidence"
 
 
+def test_route_scoped_phase_objective_removes_inventory_wide_wording():
+    scoped = mod._route_scoped_phase_objective(
+        "Map authentication and authorization boundaries across the baseline inventory."
+    )
+
+    assert scoped == "Map authentication and authorization boundaries"
+    assert "inventory" not in scoped.lower()
+
+
+def test_route_scoped_phase_objective_removes_dangling_inventory_scope_preposition():
+    scoped = mod._route_scoped_phase_objective(
+        "Map all endpoints across the baseline inventory for authorization boundaries."
+    )
+
+    assert scoped == "Map authorization boundaries"
+
+
+def test_phase_specific_coverage_criterion_binds_route_and_frozen_items():
+    criterion = mod._phase_specific_coverage_criterion(
+        "endpoint",
+        "Map route authentication behavior",
+        "Authentication and Authorization Mapping",
+        "Map authentication and authorization boundaries across the baseline inventory.",
+        "http://target.test/login",
+        ["endpoint-1", "parameter-1"],
+    )
+
+    assert "Authentication and Authorization Mapping" in criterion.description
+    assert "assigned route http://target.test/login" in criterion.description
+    assert "endpoint-1, parameter-1" in criterion.description
+    assert "Map authentication and authorization boundaries" in criterion.description
+    assert "baseline inventory" not in criterion.description.lower()
+    assert "this assigned route only" in criterion.description
+
+
+def test_acceptance_evidence_error_advertises_canonical_reference_syntax():
+    with pytest.raises(ValueError) as exc_info:
+        mod._canonical_evidence_reference("https://target.test/login")
+
+    message = str(exc_info.value)
+    assert "artifact:artifacts/<file>" in message
+    assert "artifact_id:<id>" in message
+    assert "memory:<id>" in message
+    assert "finding:<id>" in message
+    assert "Raw URLs" in message
+
+
 def test_inventory_url_normalization_preserves_boundary_and_repairs_common_route_errors():
     value = mod._canonical_inventory_url(
         "http://host.docker.internal:4280/vulnerabilities/sqli/vulnerabilities/sqli/?id=1&&",
@@ -1586,6 +1657,8 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
         prompt_token_limit=48_000,
         coverage_item_ids={"endpoint-0", "endpoint-1"},
         expected_snapshot_ref=canonical_manifest,
+        phase_title="Trust Boundary & Workflow Mapping",
+        phase_objective="Map authentication mechanisms and authorization boundaries across the baseline inventory.",
     )
 
     result = create_tool(tasks=[{
@@ -1603,6 +1676,11 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
         for task in store.tasks
         for item_id in task.acceptance.basis.item_ids
     } == {"endpoint-0", "endpoint-1"}
+    assert all(task.title.startswith("Trust Boundary & Workflow Mapping: Assess endpoint") for task in store.tasks)
+    assert all("Map authentication mechanisms" in task.objective for task in store.tasks)
+    assert all("Trust Boundary & Workflow Mapping" in task.acceptance.criteria[0].description for task in store.tasks)
+    assert all("baseline inventory" not in task.objective.lower() for task in store.tasks)
+    assert all("baseline inventory" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
 
 
 def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(fake_memory_client):
@@ -1648,7 +1726,17 @@ def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(
     create_tool = mod.build_create_tasks_tool(
         coverage_item_ids={"endpoint-0", "endpoint-1"},
         expected_snapshot_ref=canonical_manifest,
+        phase_title="Trust Boundary & Workflow Mapping",
+        phase_objective="Map authentication mechanisms, authorization boundaries, and critical workflows",
     )
+
+    generic_proposal = {
+        **proposal,
+        "objective": "Assess the assigned endpoint",
+        "criteria": [{"description": "Assess the assigned endpoint"}],
+    }
+    with pytest.raises(ValueError, match="generic endpoint assessment"):
+        create_tool(tasks=[generic_proposal])
 
     with pytest.raises(ValueError, match="requires exactly one snapshot proposal"):
         create_tool(tasks=[proposal, {**proposal, "title": "Second category"}])
