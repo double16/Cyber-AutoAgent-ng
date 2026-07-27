@@ -263,7 +263,7 @@ def test_store_finding_rejects_assumed_observed_result(memory_client, operation_
             )
 
 
-def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, operation_ids):
+def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, operation_ids, memory_client):
     artifact = tmp_path / "response.txt"
     artifact.write_text("HTTP 200", encoding="utf-8")
     validation_acceptance = AcceptanceContract(
@@ -321,7 +321,7 @@ def test_differential_confirmation_requires_control(tmp_path: Path, operation_id
             )
 
 
-def test_not_confirmed_validation_materializes_negative_acceptance(tmp_path: Path, operation_ids):
+def test_not_confirmed_validation_materializes_negative_acceptance(tmp_path: Path, operation_ids, memory_client):
     artifact = tmp_path / "negative-control.txt"
     artifact.write_text("Behavior not reproduced", encoding="utf-8")
     acceptance = AcceptanceContract(
