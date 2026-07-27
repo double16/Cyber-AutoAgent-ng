@@ -21,6 +21,7 @@ import { installAutoRunInterruptFallback } from './utils/autoRunInterrupt.js';
 import { formatAutoRunTerminationEvent } from './utils/autoRunTerminationFormatting.js';
 import { resolveRecordingMode } from './utils/recordingMode.js';
 import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
+import { formatWorkflowActivityEvent } from './utils/workflowActivityFormatting.js';
 import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
 import { appendOperationHealth } from './utils/operationHealthFormatting.js';
 import { setOperationTerminalTitle } from './utils/terminalTitle.js';
@@ -426,6 +427,10 @@ const runAutoAssessment = async () => {
         const memoryEventMessage = formatAutoRunMemoryEvent(event);
         if (memoryEventMessage) {
           loggingService.info(memoryEventMessage);
+        }
+        else if (event.type === 'workflow_activity') {
+          const message = formatWorkflowActivityEvent(event);
+          if (message) loggingService.info(message);
         }
         else if (event.type === 'output' && event.content) {
           loggingService.info(event.content);

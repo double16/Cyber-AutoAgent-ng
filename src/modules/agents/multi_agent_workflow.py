@@ -1982,6 +1982,59 @@ Return exactly one decision for each candidate.
         except Exception:
             logger.debug("Failed to emit workflow event: %s", event.get("type"), exc_info=True)
 
+    def _emit_workflow_activity(
+        self,
+        role: str,
+        status: str,
+        *,
+        attempt: int,
+        attempt_total: int,
+        activity: Optional[str] = None,
+        action: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Emit concise lifecycle visibility for controller-owned role prompts."""
+
+        role_defaults = {
+            "plan_creator": ("planning", "create_plan", "Plan creation"),
+            "plan_critic": ("planning", "plan_critic", "Plan review"),
+            "task_prompt_builder": ("prompt_building", "task_prompt_builder", "Task prompt building"),
+            "task_prompt_critic": ("prompt_building", "task_prompt_critic", "Task prompt review"),
+            "task_evaluator": ("evaluation", "task_evaluator", "Task evaluation"),
+            "phase_evaluator": ("evaluation", "phase_evaluator", "Phase evaluation"),
+            "task_phase_classifier": ("evaluation", "task_phase_classifier", "Task phase classification"),
+            "task_creator": ("task_creation", "task_create_prompt", "Task creation"),
+        }
+        default_activity, default_action, label = role_defaults.get(
+            role,
+            ("workflow", role, role.replace("_", " ")),
+        )
+        activity = activity or default_activity
+        action = action or default_action
+        payload: Dict[str, Any] = {
+            "type": "workflow_activity",
+            "content": f"{label} {status}",
+            "activity": activity,
+            "action": action,
+            "role": role,
+            "label": label,
+            "status": status,
+            "attempt": attempt,
+            "attempt_total": attempt_total,
+        }
+        trace_attributes = getattr(self.runtime, "trace_attributes", None)
+        if isinstance(trace_attributes, dict):
+            context = {
+                "phase_id": trace_attributes.get("workflow.phase.id"),
+                "phase_title": trace_attributes.get("workflow.phase.title"),
+                "task_uid": trace_attributes.get("workflow.task.uid"),
+                "task_title": trace_attributes.get("workflow.task.title"),
+                **(context or {}),
+            }
+        if context:
+            payload.update({key: value for key, value in context.items() if value is not None})
+        self._emit_workflow_event(payload)
+
     def _build_task_prompt(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> Dict[str, Any]:
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
         try:
@@ -2389,10 +2442,37 @@ review existing memories. Return only the requested JSON decision."""
                         if attempt == 1
                         else self._task_creator_repair_prompt(batch_failure_reason, rejected_proposals)
                     )
+                    activity_context = {
+                        "phase_id": phase.id,
+                        "phase_title": self._short(phase.title, 160),
+                        "batch_index": batch.index,
+                        "batch_total": batch.total,
+                    }
+                    self._emit_workflow_activity(
+                        "task_creator",
+                        "started",
+                        attempt=attempt,
+                        attempt_total=max_attempts,
+                        context=activity_context,
+                    )
                     try:
                         creator_result = run_creator(attempt_prompt, run_policy)
+                        self._emit_workflow_activity(
+                            "task_creator",
+                            "completed",
+                            attempt=attempt,
+                            attempt_total=max_attempts,
+                            context=activity_context,
+                        )
                         batch_failure_reason = self._task_creator_failure_reason(creator_result)
                     except MaxTokensReachedException as error:
+                        self._emit_workflow_activity(
+                            "task_creator",
+                            "failed",
+                            attempt=attempt,
+                            attempt_total=max_attempts,
+                            context=activity_context,
+                        )
                         batch_failure_reason = (
                             f"task creator reached its model token limit: {self._short(error, 300)}"
                         )
@@ -2910,10 +2990,24 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
         last_response = ""
         last_error: Optional[Exception] = None
         for attempt in range(self.json_retries + 1):
+            activity_attempt = attempt + 1
+            activity_total = self.json_retries + 1
+            self._emit_workflow_activity(
+                role,
+                "started",
+                attempt=activity_attempt,
+                attempt_total=activity_total,
+            )
             self._log_workflow("json agent role=%s attempt=%s max_retries=%s", role, attempt + 1, self.json_retries)
             try:
                 response = self.text_runner(role, current_prompt, tools, system_prompt)
             except MaxTokensReachedException as error:
+                self._emit_workflow_activity(
+                    role,
+                    "failed",
+                    attempt=activity_attempt,
+                    attempt_total=activity_total,
+                )
                 last_error = error
                 classification = getattr(error, "max_token_classification", None)
                 kind = getattr(classification, "kind", "output_truncation")
@@ -2933,9 +3027,21 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
                 data = extract_json_object(response)
                 if data_validator:
                     data_validator(data)
+                self._emit_workflow_activity(
+                    role,
+                    "completed",
+                    attempt=activity_attempt,
+                    attempt_total=activity_total,
+                )
                 self._log_workflow("json agent role=%s success keys=%s", role, ",".join(sorted(data.keys())))
                 return data
             except (json.JSONDecodeError, ValueError) as error:
+                self._emit_workflow_activity(
+                    role,
+                    "failed",
+                    attempt=activity_attempt,
+                    attempt_total=activity_total,
+                )
                 last_error = error
                 if attempt >= self.json_retries:
                     break

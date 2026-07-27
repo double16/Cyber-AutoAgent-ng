@@ -93,6 +93,8 @@ export enum EventType {
   REASONING = 'reasoning',
   /** Progress update with percentage of budget used */
   PROGRESS_UPDATE = 'progress_update',
+  /** Controller-owned planning, prompt-building, and evaluation activity */
+  WORKFLOW_ACTIVITY = 'workflow_activity',
   
   // =============================================================================
   // SPECIALIZED TOOL EVENTS - Specific security assessment tools

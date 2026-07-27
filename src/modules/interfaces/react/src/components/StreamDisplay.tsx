@@ -93,6 +93,7 @@ export type AdditionalStreamEvent =
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
+  | { type: 'workflow_activity'; content?: string; activity?: string; action?: string; role?: string; status?: string; phase_id?: number; phase_title?: string; task_uid?: string; task_title?: string; attempt?: number; attempt_total?: number; iteration?: number; iteration_total?: number; [key: string]: any }
   | { type: 'task_started'; task_uid?: string; title?: string; status?: string; task_kind?: string; reference_id?: string; [key: string]: any }
   | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; finding_resolution?: string; [key: string]: any }
   | { type: 'task_deferred'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; [key: string]: any }
@@ -714,6 +715,24 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       return (
         <Box marginLeft={2}>
           <Text color="yellow">{`VERIFYING FINDING ${title}${formatTaskScope(event)}`}</Text>
+        </Box>
+      );
+    }
+
+    case 'workflow_activity': {
+      const status = String((event as any).status || 'started').toLowerCase();
+      const action = String((event as any).label || (event as any).action || (event as any).activity || 'workflow').replaceAll('_', ' ');
+      const phase = (event as any).phase_id != null ? ` phase ${(event as any).phase_id}` : '';
+      const task = String((event as any).task_title || '').trim();
+      const taskSuffix = task ? `: ${task}` : '';
+      const attempt = (event as any).attempt != null && (event as any).attempt_total != null
+        ? ` [${(event as any).attempt}/${(event as any).attempt_total}]`
+        : '';
+      const icon = status === 'completed' ? '✓' : status === 'failed' ? '⚠' : '…';
+      const color = status === 'completed' ? 'green' : status === 'failed' ? 'yellow' : 'cyan';
+      return (
+        <Box marginLeft={2}>
+          <Text color={color}>{`${icon} ${action}${phase}${taskSuffix}${attempt} ${status}`}</Text>
         </Box>
       );
     }

@@ -567,6 +567,27 @@ def test_json_agent_retries_fresh_after_reasoning_loop():
     assert prompts[1].endswith("original\n")
 
 
+def test_json_agent_emits_workflow_activity_lifecycle_events():
+    runtime = _runtime()
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: '{"status":"done"}',
+    )
+
+    controller._run_json_text_agent("task_evaluator", "original", [], "system")
+
+    activities = [event for event in runtime.callback_handler.events if event["type"] == "workflow_activity"]
+    assert [(event["status"], event["action"]) for event in activities] == [
+        ("started", "task_evaluator"),
+        ("completed", "task_evaluator"),
+    ]
+    assert activities[0]["activity"] == "evaluation"
+    assert activities[0]["label"] == "Task evaluation"
+    assert "original" not in activities[0]["content"]
+
+
 def test_json_agent_stops_at_configured_limit_after_max_tokens():
     def text_runner(role, prompt, tools, system_prompt):
         raise MaxTokensReachedException("max_tokens")
@@ -2030,7 +2051,10 @@ def test_phase_hard_cap_defers_active_task_without_running_worker_and_advances()
         "status": "pending",
         "status_reason": next(task for task in state.tasks if task.task_uid == "active").status_reason,
     }
-    plan_event = controller.runtime.callback_handler.events[1]
+    plan_event = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "output" and event.get("metadata", {}).get("kind") == "plan"
+    )
     assert "[partial_failure] 1. Recon" in plan_event["content"]
     assert "[active] 2. Validate" in plan_event["content"]
     assert plan_event["metadata"] == {
@@ -2376,7 +2400,11 @@ def test_plan_critic_approval_skips_revision_and_persists_draft_once():
     assert all(call[2] == [] for call in calls)
     assert all(call[3] == "base prompt" for call in calls)
     assert plan.objective == "draft"
-    assert len(controller.runtime.callback_handler.events) == 1
+    plan_events = [
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "output" and event.get("metadata", {}).get("kind") == "plan"
+    ]
+    assert len(plan_events) == 1
     assert "Proposed plan draft" in calls[1][1]
     assert '"title": "Recon"' in calls[1][1]
 
@@ -2417,7 +2445,11 @@ def test_plan_critic_rejection_runs_revision_and_persists_only_revision():
     assert [role for role, _prompt in calls] == ["plan_creator", "plan_critic", "plan_creator", "plan_critic"]
     assert plan.objective == "revised"
     assert plan.phases[0].title == "Evidence-backed recon"
-    assert len(controller.runtime.callback_handler.events) == 1
+    plan_events = [
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "output" and event.get("metadata", {}).get("kind") == "plan"
+    ]
+    assert len(plan_events) == 1
     assert "Add durable evidence criteria" in calls[2][1]
     assert "Apply feedback only when it is consistent" in calls[2][1]
 
@@ -2483,7 +2515,10 @@ def test_plan_refinement_fails_when_final_critic_rejects():
 
     assert calls == ["plan_creator", "plan_critic", "plan_creator", "plan_critic"]
     assert state.plan is None
-    assert controller.runtime.callback_handler.events == []
+    assert not any(
+        event["type"] == "output" and event.get("metadata", {}).get("kind") == "plan"
+        for event in controller.runtime.callback_handler.events
+    )
 
 
 @pytest.mark.parametrize(
@@ -2516,7 +2551,10 @@ def test_invalid_plan_critic_contract_retries_without_persisting(critique):
 
     assert calls == ["plan_creator", "plan_critic", "plan_critic"]
     assert state.plan is None
-    assert controller.runtime.callback_handler.events == []
+    assert not any(
+        event["type"] == "output" and event.get("metadata", {}).get("kind") == "plan"
+        for event in controller.runtime.callback_handler.events
+    )
 
 
 def test_controller_creates_plan_when_missing():
