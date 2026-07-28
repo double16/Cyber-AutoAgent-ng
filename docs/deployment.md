@@ -287,13 +287,18 @@ safe_max = model_output_limit * 0.5
 
 ### Token Limit Resolution
 
-Token limits use **five-tier precedence**:
+Context-window limits use the existing provider-aware precedence:
 
 1. **Explicit override** - `CYBER_PROMPT_LIMIT_FORCE` environment variable
-2. **Context window maximum** - `CYBER_CONTEXT_LIMIT`, if defined, limits the following
-3. **Models.dev API** - Authoritative registry (preferred)
-4. **Fallback mappings** - `CYBER_CONTEXT_WINDOW_FALLBACKS` (JSON)
-5. **Provider defaults** - Safe defaults per provider
+2. **Ollama configuration or runtime detection** - `OLLAMA_CONTEXT_LENGTH`, model metadata, or the loaded model
+3. **Models.dev/static model registry** - Authoritative known-model data
+4. **LiteLLM provider detection** - Remote-provider model metadata
+5. **Context window maximum** - `CYBER_CONTEXT_LIMIT`, used as a clamp or configured fallback
+6. **Provider defaults** - Conservative final resolution
+
+The resolved value is written to the Strands model's `context_window_limit` and reused for prompt budgeting and
+conversation compression. Ollama also receives the same value as `num_ctx`. Values such as 48,000 are configuration or
+detection results, not application defaults. Startup fails when no positive context window can be resolved.
 
 **Example fallback configuration:**
 ```bash
@@ -305,46 +310,53 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 
 ### Environment Variables
 
-| Variable                          | Description                                         | Required                      |
-|-----------------------------------|-----------------------------------------------------|-------------------------------|
-| `CYBER_AGENT_PROVIDER`            | Provider choice (bedrock/ollama/litellm)            | No (auto-detected)            |
-| `CYBER_AGENT_LLM_MODEL`           | Main LLM model ID                                   | Yes                           |
-| `CYBER_AGENT_EMBEDDING_MODEL`     | Embedding model ID                                  | No (provider default)         |
-| `REASONING_EFFORT`                | Reasoning effort (low/medium/high)                  | No (default: medium)          |
-| `MAX_TOKENS`                      | Override LLM max (output) tokens                    | No (models.dev default)       |
-| `CYBER_AGENT_SWARM_MODEL`         | Swarm tool LLM model ID                             | No                            |
-| `CYBER_AGENT_SWARM_MAX_TOKENS`    | Override specialist max tokens                      | No (models.dev default)       |
-| `MAX_TOKENS_LIMIT`                | Override LLM output token upper bound               | No (12,000 default)           |
-| `MAX_TOKENS_REASONING_LIMIT`      | Override LLM output token upper bound (reasoning)   | No (32,000 default)           |
-| `CYBER_CONTEXT_LIMIT`             | Limit detected prompt tokens                        | No (auto-detected)            |
-| `CYBER_PROMPT_LIMIT_FORCE`        | Force prompt token limit                            | No (auto-detected)            |
-| `CYBER_SDK_CONTEXT_MANAGER`       | Strands context facade (`auto`, `agentic`, `false`) | No (default: `false`)         |
-| `AWS_ACCESS_KEY_ID`               | AWS credentials for Bedrock                         | For Bedrock provider          |
-| `AWS_SECRET_ACCESS_KEY`           | AWS credentials for Bedrock                         | For Bedrock provider          |
-| `AWS_REGION`                      | AWS region (default: us-east-1)                     | For Bedrock provider          |
-| `OLLAMA_HOST`                     | Ollama API endpoint                                 | For Ollama provider           |
-| `OLLAMA_CONTEXT_LENGTH`           | Ollama model context length                         | No, Ollama default            |
-| `OLLAMA_TIMEOUT`                  | Ollama API timeout in seconds                       | No (default: 120)             |
-| `OLLAMA_KEEP_ALIVE`               | Ollama model keep alive                             | No (default: 30m)             |
-| `AZURE_API_KEY`                   | Azure OpenAI API key                                | For Azure/LiteLLM             |
-| `AZURE_API_BASE`                  | Azure endpoint URL                                  | For Azure/LiteLLM             |
-| `AZURE_API_VERSION`               | Azure API version                                   | For Azure/LiteLLM             |
-| `MEM0_API_KEY`                    | Mem0 Platform API key                               | For cloud memory backend      |
-| `MEM0_LLM_MODEL`                  | Memory system LLM                                   | No (auto-aligned)             |
-| `OPENSEARCH_HOST`                 | OpenSearch endpoint                                 | For OpenSearch memory backend |
-| `LANGFUSE_HOST`                   | Langfuse observability endpoint                     | For observability             |
-| `LANGFUSE_PUBLIC_KEY`             | Langfuse API public key                             | For observability             |
-| `LANGFUSE_SECRET_KEY`             | Langfuse API secret key                             | For observability             |
-| `ENABLE_AUTO_EVALUATION`          | Enable automatic Ragas evaluation                   | For evaluation                |
-| `CYBER_RATE_LIMIT_REQ_PER_MIN`    | Limit model requests per minute                     | No (no limit)                 |
-| `CYBER_RATE_LIMIT_TOKENS_PER_MIN` | Limit model tokens per minute                       | No (no limit)                 |
-| `CYBER_RATE_LIMIT_MAX_CONCURRENT` | Limit model concurrent requests                     | No (Ollama defaults to 1)     |
-| `CYBER_HEAP_MONITOR_AUTOSTART`    | Auto-start heap monitor thread (`0` disables)       | No (default: 1)               |
-| `CYBER_AGENT_PRICING_INPUT`       | Model price per 1M input tokens                     | No (defaults to models.dev)   |
-| `CYBER_AGENT_PRICING_OUTPUT`      | Model price per 1M output tokens                    | No (defaults to models.dev)   |
-| `CYBER_AGENT_PRICING_CACHE_READ`  | Model price per 1M cache read tokens                | No (defaults to models.dev)   |
-| `CYBER_AGENT_PRICING_CACHE_WRITE` | Model price per 1M cache write tokens               | No (defaults to models.dev)   |
-| `CYBER_SDK_ENABLE_STREAMING`      | Enable/disable model streaming.                     | No (defaults to `false`)      |
+| Variable                                           | Description                                                | Required                       |
+|----------------------------------------------------|------------------------------------------------------------|--------------------------------|
+| `CYBER_AGENT_PROVIDER`                             | Provider choice (bedrock/ollama/litellm)                   | No (auto-detected)             |
+| `CYBER_AGENT_LLM_MODEL`                            | Main LLM model ID                                          | Yes                            |
+| `CYBER_AGENT_EMBEDDING_MODEL`                      | Embedding model ID                                         | No (provider default)          |
+| `REASONING_EFFORT`                                 | Reasoning effort (low/medium/high)                         | No (default: medium)           |
+| `MAX_TOKENS`                                       | Override LLM max (output) tokens                           | No (models.dev default)        |
+| `CYBER_AGENT_SWARM_MODEL`                          | Swarm tool LLM model ID                                    | No                             |
+| `CYBER_AGENT_SWARM_MAX_TOKENS`                     | Override specialist max tokens                             | No (models.dev default)        |
+| `MAX_TOKENS_LIMIT`                                 | Override LLM output token upper bound                      | No (12,000 default)            |
+| `MAX_TOKENS_REASONING_LIMIT`                       | Override LLM output token upper bound (reasoning)          | No (32,000 default)            |
+| `CYBER_CONTEXT_LIMIT`                              | Limit detected prompt tokens                               | No (auto-detected)             |
+| `CYBER_PROMPT_LIMIT_FORCE`                         | Force prompt token limit                                   | No (auto-detected)             |
+| `CYBER_SDK_CONTEXT_MANAGER`                        | Strands context facade (`auto`, `agentic`, `false`)        | No (default: `false`)          |
+| `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `3`)              |
+| `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `2`)              |
+| `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum executor/evaluator passes per task                 | No (default: `3`, minimum `1`) |
+| `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS`        | Repeated blocked recovery calls before stopping execution  | No (default: `2`, minimum `1`) |
+| `CYBER_TOOL_RECOVERY_MAX_CORRECTIONS`              | Changed retries allowed for one failed task invocation     | No (default: `2`, minimum `1`) |
+| `CYBER_TASK_CREATOR_MAX_CORRECTIONS`               | Retained correction turns after rejected task creation     | No (default: `4`, minimum `0`) |
+| `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS`            | Retained correction turns after rejected task acceptance   | No (default: `2`, minimum `0`) |
+| `AWS_ACCESS_KEY_ID`                                | AWS credentials for Bedrock                                | For Bedrock provider           |
+| `AWS_SECRET_ACCESS_KEY`                            | AWS credentials for Bedrock                                | For Bedrock provider           |
+| `AWS_REGION`                                       | AWS region (default: us-east-1)                            | For Bedrock provider           |
+| `OLLAMA_HOST`                                      | Ollama API endpoint                                        | For Ollama provider            |
+| `OLLAMA_CONTEXT_LENGTH`                            | Ollama model context length                                | No, Ollama default             |
+| `OLLAMA_TIMEOUT`                                   | Ollama API timeout in seconds                              | No (default: 120)              |
+| `OLLAMA_KEEP_ALIVE`                                | Ollama model keep alive                                    | No (default: 30m)              |
+| `AZURE_API_KEY`                                    | Azure OpenAI API key                                       | For Azure/LiteLLM              |
+| `AZURE_API_BASE`                                   | Azure endpoint URL                                         | For Azure/LiteLLM              |
+| `AZURE_API_VERSION`                                | Azure API version                                          | For Azure/LiteLLM              |
+| `MEM0_API_KEY`                                     | Mem0 Platform API key                                      | For cloud memory backend       |
+| `MEM0_LLM_MODEL`                                   | Memory system LLM                                          | No (auto-aligned)              |
+| `OPENSEARCH_HOST`                                  | OpenSearch endpoint                                        | For OpenSearch memory backend  |
+| `LANGFUSE_HOST`                                    | Langfuse observability endpoint                            | For observability              |
+| `LANGFUSE_PUBLIC_KEY`                              | Langfuse API public key                                    | For observability              |
+| `LANGFUSE_SECRET_KEY`                              | Langfuse API secret key                                    | For observability              |
+| `ENABLE_AUTO_EVALUATION`                           | Enable automatic Ragas evaluation                          | For evaluation                 |
+| `CYBER_RATE_LIMIT_REQ_PER_MIN`                     | Limit model requests per minute                            | No (no limit)                  |
+| `CYBER_RATE_LIMIT_TOKENS_PER_MIN`                  | Limit model tokens per minute                              | No (no limit)                  |
+| `CYBER_RATE_LIMIT_MAX_CONCURRENT`                  | Limit model concurrent requests                            | No (Ollama defaults to 1)      |
+| `CYBER_HEAP_MONITOR_AUTOSTART`                     | Auto-start heap monitor thread (`0` disables)              | No (default: 1)                |
+| `CYBER_AGENT_PRICING_INPUT`                        | Model price per 1M input tokens                            | No (defaults to models.dev)    |
+| `CYBER_AGENT_PRICING_OUTPUT`                       | Model price per 1M output tokens                           | No (defaults to models.dev)    |
+| `CYBER_AGENT_PRICING_CACHE_READ`                   | Model price per 1M cache read tokens                       | No (defaults to models.dev)    |
+| `CYBER_AGENT_PRICING_CACHE_WRITE`                  | Model price per 1M cache write tokens                      | No (defaults to models.dev)    |
+| `CYBER_SDK_ENABLE_STREAMING`                       | Enable/disable model streaming.                            | No (defaults to `false`)       |
 
 ### Kubernetes Deployment
 

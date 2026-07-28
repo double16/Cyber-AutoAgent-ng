@@ -57,7 +57,7 @@ class _FakeAgent:
 
 def test_get_cyber_tools_loads_environment_yaml(monkeypatch, tmp_path):
     cyber_tools = {
-        "httpx": {"description": "HTTP probing", "caps": ["web_recon"], "preference": "preferred"},
+        "httpx": {"description": "HTTP probing", "caps": ["web_recon"]},
     }
     _write_env(tmp_path, cyber_tools)
     _patch_environment_file(monkeypatch, tmp_path)
@@ -66,47 +66,42 @@ def test_get_cyber_tools_loads_environment_yaml(monkeypatch, tmp_path):
     assert loaded["httpx"]["description"] == "HTTP probing"
 
 
-def test_get_cyber_tools_by_caps_filters_by_available_and_groups_by_cap_and_preference(monkeypatch, tmp_path):
+def test_get_cyber_tools_by_caps_filters_by_available_and_groups_by_capability(monkeypatch, tmp_path):
     cyber_tools = {
-        "httpx": {"description": "HTTP probing", "caps": ["web_recon"], "preference": "preferred"},
-        "katana": {"description": "Crawler", "caps": ["web_crawling"], "preference": "fallback"},
-        "missingtool": {"description": "Nope", "caps": ["web_recon"], "preference": "preferred"},
+        "httpx": {"description": "HTTP probing", "caps": ["web_recon"]},
+        "katana": {"description": "Crawler", "caps": ["web_crawling"]},
+        "missingtool": {"description": "Nope", "caps": ["web_recon"]},
     }
     _write_env(tmp_path, cyber_tools)
     _patch_environment_file(monkeypatch, tmp_path)
 
     res = tc.get_cyber_tools_by_caps(available=["httpx", "katana"])
-    assert res["web_recon"]["preferred"] == ["httpx"]
-    assert res["web_crawling"]["fallback"] == ["katana"]
+    assert res["web_recon"] == ["httpx"]
+    assert res["web_crawling"] == ["katana"]
 
 
-def test_get_cyber_tools_by_caps_coerces_caps_string_and_normalizes_preference(monkeypatch, tmp_path):
+def test_get_cyber_tools_by_caps_coerces_caps_string_and_combines_commands(monkeypatch, tmp_path):
     cyber_tools = {
-        "t1": {"caps": "web_recon", "preference": " Preferred "},
-        "t2": {"caps": ["web_recon"], "preference": "fallback"},
-        "t3": {"caps": ["web_recon"], "preference": ""},  # should not crash; becomes fallback
+        "t1": {"caps": "web_recon"},
+        "t2": {"caps": ["web_recon"]},
+        "t3": {"caps": ["web_recon"]},
     }
     _write_env(tmp_path, cyber_tools)
     _patch_environment_file(monkeypatch, tmp_path)
 
     res = tc.get_cyber_tools_by_caps(available=["t1", "t2", "t3"])
-    assert "web_recon" in res
-    assert "preferred" in res["web_recon"]
-    assert "fallback" in res["web_recon"]
-    assert "t1" in res["web_recon"]["preferred"]
-    assert "t2" in res["web_recon"]["fallback"]
-    assert "t3" in res["web_recon"]["fallback"]
+    assert res["web_recon"] == ["t1", "t2", "t3"]
 
 
 def test_get_cyber_tools_by_caps_uses_command_override(monkeypatch, tmp_path):
     cyber_tools = {
-        "theharvester": {"command": "theHarvester", "caps": ["osint"], "preference": "preferred"},
+        "theharvester": {"command": "theHarvester", "caps": ["osint"]},
     }
     _write_env(tmp_path, cyber_tools)
     _patch_environment_file(monkeypatch, tmp_path)
 
     res = tc.get_cyber_tools_by_caps(available=["theharvester"])
-    assert res["osint"]["preferred"] == ["theHarvester"]
+    assert res["osint"] == ["theHarvester"]
 
 
 def test_get_shell_command_specs_returns_compact_installed_command_metadata(monkeypatch, tmp_path):
@@ -115,36 +110,32 @@ def test_get_shell_command_specs_returns_compact_installed_command_metadata(monk
             "command": "theHarvester",
             "description": "Collect public sources",
             "caps": "osint",
-            "preference": " Preferred ",
         },
-        "fallback": {
-            "description": "Fallback scanner",
+        "scanner": {
+            "description": "Validation scanner",
             "caps": ["scan", "validation"],
         },
     }
     _write_env(tmp_path, cyber_tools)
     _patch_environment_file(monkeypatch, tmp_path)
 
-    specs = tc.get_shell_command_specs(["theharvester", "fallback", "missing"])
+    specs = tc.get_shell_command_specs(["theharvester", "scanner", "missing"])
 
     assert specs == [
         {
             "command": "theHarvester",
             "description": "Collect public sources",
             "capabilities": ["osint"],
-            "shell_preference": "preferred",
         },
         {
-            "command": "fallback",
-            "description": "Fallback scanner",
+            "command": "scanner",
+            "description": "Validation scanner",
             "capabilities": ["scan", "validation"],
-            "shell_preference": "fallback",
         },
         {
             "command": "missing",
             "description": "",
             "capabilities": [],
-            "shell_preference": "fallback",
         },
     ]
 
@@ -164,11 +155,27 @@ def test_get_shell_command_specs_deduplicates_command_overrides_and_skips_empty_
     assert [spec["command"] for spec in specs] == ["shared"]
 
 
-def test_curl_is_configured_as_native_http_request_fallback():
+def test_curl_is_configured_as_shell_command():
     curl = tc._get_cyber_tools()["curl"]
 
-    assert curl["preference"] == "fallback"
     assert "HTTP client for" in curl["description"]
+
+
+def test_remove_command_and_find_capability_alternatives(monkeypatch, tmp_path):
+    _write_env(
+        tmp_path,
+        {
+            "dirsearch": {"caps": ["web_fuzzing"]},
+            "ffuf": {"caps": ["web_fuzzing"]},
+            "curl": {"caps": ["http_client"]},
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+    available = ["dirsearch", "ffuf", "curl"]
+
+    assert tc.get_shell_command_alternatives("dirsearch", available) == ["ffuf"]
+    assert tc.remove_shell_command(available, "dirsearch") == ["dirsearch"]
+    assert available == ["ffuf", "curl"]
 
 
 def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeypatch):
@@ -177,13 +184,13 @@ def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeyp
     def fake_run(cmd, capture_output, text, timeout):
         calls.append(cmd)
         # First attempt: foo --help returns short -> should continue
-        if cmd == "foo -help":
+        if cmd == ["foo", "-help"]:
             return SimpleNamespace(stdout="x", stderr="")
         # Second attempt: --help returns short -> should continue
-        if cmd == "foo --help":
+        if cmd == ["foo", "--help"]:
             return SimpleNamespace(stdout="x", stderr="")
         # Third attempt: -h returns long -> should return it
-        if cmd == "foo -h":
+        if cmd == ["foo", "-h"]:
             return SimpleNamespace(stdout="A" * 40, stderr="")
         return SimpleNamespace(stdout="", stderr="")
 
@@ -191,15 +198,71 @@ def test_get_shell_command_help_tries_help_flags_and_returns_long_output(monkeyp
 
     out = tc._get_shell_command_help("foo", "[]")
     assert len(out) >= 40
-    assert calls[0] == "foo --help"
-    assert calls[1] == "foo -h"
+    assert calls[0] == ["foo", "--help"]
+    assert calls[1] == ["foo", "-h"]
 
     calls = []
     out = tc._get_shell_command_help("foo", '["foo -help", ""]')
     assert len(out) >= 40
-    assert calls[0] == "foo -help"
-    assert calls[1] == "foo --help"
-    assert calls[2] == "foo -h"
+    assert calls[0] == ["foo", "-help"]
+    assert calls[1] == ["foo", "--help"]
+    assert calls[2] == ["foo", "-h"]
+
+
+def test_get_shell_command_help_context_returns_full_help_for_available_command(monkeypatch, tmp_path):
+    _write_env(
+        tmp_path,
+        {
+            "feroxbuster": {
+                "description": "Directory brute forcing",
+                "caps": ["web_content_discovery"],
+                "help": ["feroxbuster --help"],
+            }
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        tc,
+        "_get_shell_command_help",
+        lambda cmd, help_commands: "Usage: feroxbuster\n  -w, --wordlist <FILE>\n  -u, --url <URL>",
+    )
+
+    context = tc.get_shell_command_help_context("feroxbuster", ["feroxbuster"])
+
+    assert "command: feroxbuster" in context
+    assert "capabilities: web_content_discovery" in context
+    assert "Directory brute forcing" in context
+    assert "-w, --wordlist <FILE>" in context
+
+
+def test_get_shell_command_help_context_uses_command_override_and_omits_missing_or_diagnostic(
+    monkeypatch,
+    tmp_path,
+):
+    _write_env(
+        tmp_path,
+        {
+            "theharvester": {
+                "command": "theHarvester",
+                "description": "OSINT",
+                "help": ["theHarvester --help"],
+            }
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: "Usage: theHarvester --help")
+
+    assert "command: theHarvester" in tc.get_shell_command_help_context("theHarvester", ["theharvester"])
+    assert tc.get_shell_command_help_context("missing", ["theharvester"]) == ""
+    assert tc.get_shell_command_help_context("find", ["find"]) == ""
+
+
+def test_get_shell_command_help_context_omits_command_when_help_is_unavailable(monkeypatch, tmp_path):
+    _write_env(tmp_path, {"httpx": {"description": "HTTP probing"}})
+    _patch_environment_file(monkeypatch, tmp_path)
+    monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: "")
+
+    assert tc.get_shell_command_help_context("httpx", ["httpx"]) == ""
 
 
 def test_tool_catalog_wrapper_lists_agent_tools_and_schemas(monkeypatch, tmp_path):
@@ -267,7 +330,6 @@ def test_tool_catalog_wrapper_includes_shell_commands_and_handles_missing_cyber_
         "httpx": {
             "description": "HTTP probing",
             "caps": ["web_recon", "http_client"],
-            "preference": "preferred",
         }
     }
     _write_env(tmp_path, cyber_tools)
@@ -288,9 +350,8 @@ def test_tool_catalog_wrapper_includes_shell_commands_and_handles_missing_cyber_
     # httpx entry includes configured fields
     assert "command: httpx" in text
     assert "capabilities: web_recon, http_client" in text
-    assert "shell_preference: preferred" in text
-    assert "Native agent tools take precedence" in text
-    assert "supplemental command-line programs" in text
+    assert "command-line programs invoked through the **shell** tool" in text
+    assert "Native agent tools take precedence" not in text
     assert "HELP(httpx)" in text
 
     # grep entry does not exist in cyber_tools but should still render without crashing
@@ -305,7 +366,6 @@ def test_tool_catalog_wrapper_hides_shell_commands_when_shell_tool_missing(monke
             "httpx": {
                 "description": "HTTP probing",
                 "caps": ["web_recon"],
-                "preference": "preferred",
             }
         },
     )
@@ -323,7 +383,7 @@ def test_tool_catalog_wrapper_hides_shell_commands_when_shell_tool_missing(monke
 
 def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch, tmp_path):
     _patch_strands_tool_decorator(monkeypatch)
-    _write_env(tmp_path, cyber_tools={"httpx": {"description": "HTTP probing", "caps": ["web_recon"], "preference": "preferred"}})
+    _write_env(tmp_path, cyber_tools={"httpx": {"description": "HTTP probing", "caps": ["web_recon"]}})
     _patch_environment_file(monkeypatch, tmp_path)
 
     monkeypatch.setattr(tc, "_get_shell_command_help", lambda cmd, help_commands: "")

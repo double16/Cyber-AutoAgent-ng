@@ -1,27 +1,205 @@
-import shlex
-from typing import Union, List, Dict, Any, Optional
-import os
-
-from strands import tool
-from strands_tools.shell import shell as shell_original
 
 #
 # We are overriding the shell tool because models aren't very good at following input schemas.
 #
 
+import json
+import logging
+import os
+import shlex
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+
+from strands import tool
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_text(value: Any) -> str:
+    """Normalize subprocess output values to text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value.decode("latin-1", errors="ignore")
+    return str(value)
+
+
+def validate_command(command: Union[str, Dict]) -> Tuple[str, Dict]:
+    """Validate and normalize command input."""
+    if isinstance(command, str):
+        return command, {}
+    elif isinstance(command, dict):
+        cmd = command.get("command")
+        if not cmd or not isinstance(cmd, str):
+            raise ValueError("Command object must contain a 'command' string")
+        return cmd, command
+    else:
+        raise ValueError("Command must be string or dict")
+
+
+class CommandExecutor:
+    """Handles execution of shell commands with timeout."""
+
+    def __init__(self, timeout: int = None) -> None:
+        self.timeout = int(os.environ.get("SHELL_DEFAULT_TIMEOUT", "900")) if timeout is None else timeout
+
+    def execute(self, command: str, cwd: str) -> Tuple[int, str, str]:
+        """Execute command with timeout support."""
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            timeout_error = f"Command timed out after {self.timeout} seconds"
+            stderr = _safe_text(error.stderr)
+            if stderr:
+                timeout_error = f"{stderr}\n{timeout_error}"
+            return 124, _safe_text(error.stdout or error.output), timeout_error
+        return completed.returncode, completed.stdout, completed.stderr
+
+
+def execute_single_command(
+        command: Union[str, Dict], work_dir: str, timeout: int
+) -> Dict[str, Any]:
+    """Execute a single command and return its results."""
+    cmd_str = str(command)
+
+    try:
+        cmd_str, cmd_opts = validate_command(command)
+        executor = CommandExecutor(timeout=timeout)
+        exit_code, output, error = executor.execute(cmd_str, work_dir)
+
+        result = {
+            "command": cmd_str,
+            "exit_code": exit_code,
+            "output": output,
+            "error": error,
+            "status": "success" if exit_code == 0 else "error",
+        }
+
+        if cmd_opts:
+            result["options"] = cmd_opts
+
+        return result
+
+    except Exception as e:
+        return {
+            "command": cmd_str,
+            "exit_code": 1,
+            "output": "",
+            "error": str(e),
+            "status": "error",
+        }
+
+
+class CommandContext:
+    """Maintains command execution context including working directory."""
+
+    def __init__(self, base_dir: str) -> None:
+        self.base_dir = os.path.abspath(base_dir)
+        self.current_dir = self.base_dir
+        self._dir_stack: List[str] = []
+
+    def push_dir(self) -> None:
+        """Save current directory to stack."""
+        self._dir_stack.append(self.current_dir)
+
+    def pop_dir(self) -> None:
+        """Restore previous directory from stack."""
+        if self._dir_stack:
+            self.current_dir = self._dir_stack.pop()
+
+    def update_dir(self, command: str) -> None:
+        """Update current directory based on cd command."""
+        if command.strip().startswith("cd "):
+            new_dir = command.split("cd ", 1)[1].strip()
+            if new_dir.startswith("/"):
+                # Absolute path
+                self.current_dir = os.path.abspath(new_dir)
+            else:
+                # Relative path
+                self.current_dir = os.path.abspath(os.path.join(self.current_dir, new_dir))
+
+
+def execute_commands(
+        commands: List[Union[str, Dict]],
+        parallel: bool,
+        ignore_errors: bool,
+        work_dir: str,
+        timeout: int,
+) -> List[Dict[str, Any]]:
+    """Execute multiple commands either sequentially or in parallel."""
+    results = []
+    context = CommandContext(work_dir)
+
+    if parallel:
+        # For parallel execution, use the initial work_dir for all commands
+        with ThreadPoolExecutor() as executor:
+            future_to_index = {
+                executor.submit(execute_single_command, cmd, work_dir, timeout): index
+                for index, cmd in enumerate(commands)
+            }
+            ordered_results: List[Optional[Dict[str, Any]]] = [None] * len(future_to_index)
+
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                result = future.result()
+                ordered_results[index] = result
+            results.extend(result for result in ordered_results if result is not None)
+    else:
+        # For sequential execution, maintain directory context
+        for cmd in commands:
+            cmd_str = cmd if isinstance(cmd, str) else cmd.get("command", "")
+
+            # Execute in current context directory
+            result = execute_single_command(cmd, context.current_dir, timeout)
+            results.append(result)
+
+            # Update context if command was successful
+            if result["status"] == "success":
+                context.update_dir(cmd_str)
+
+            if not ignore_errors and result["status"] == "error":
+                break
+
+    return results
+
+
+def normalize_commands(
+        command: Union[str, List[Union[str, Dict[Any, Any]]], Dict[Any, Any]],
+) -> List[Union[str, Dict]]:
+    """Convert command input into a normalized list of commands."""
+    if isinstance(command, list):
+        return command
+    return [command]
+
+
 @tool
 def shell(
         command: Union[str, List[Union[str, Dict[str, Any]]]],
         parallel: bool = False,
-        ignore_errors: bool = False,
         timeout: Optional[int] = None,
         work_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Non-interactive shell for real-time command execution and interaction. Features:
+    """Non-interactive shell for command execution. Features:
 
     1. Selection Rules:
       • Purpose-built tool when scanning/enumerating many targets or endpoints.
-      • `curl` only for single requests, reproductions, or crafted edge-cases.
+      • `curl` supports single requests, reproductions, crafted edge-cases, and independent HTTP validation.
+        For presence or accessibility checks, capture status explicitly, for example:
+        `curl -sS -o /dev/null -w "%{http_code} %{url_effective}\n" <url>` or
+        `curl -sS -D - -o /dev/null <url>`. Avoid bare `curl -s <url>` as evidence because it may emit no useful
+        output.
       • `grep/sed/awk/jq` only for small transformations after purpose-built tools produce raw output.
 
     2. Command Formats:
@@ -41,13 +219,12 @@ def shell(
     3. Execution Modes:
        • Sequential (default): Commands run in order
        • Parallel: Multiple commands execute simultaneously
-       • Error Handling: Stop on error or continue with ignore_errors
+       • Error Handling: Sequential lists stop on failure; parallel lists fail if any command fails
 
     4. Best Practices:
        • Use command string for a single command, arrays for multiple commands
        • Set appropriate timeouts
        • Specify work_dir when needed
-       • Enable ignore_errors for resilient scripts
        • Use parallel execution for independent commands
        • Default timeout: 300s, heavy operations ≥600s.
        • On timeout → reduce scope, break into smaller operations
@@ -66,16 +243,12 @@ def shell(
     3. Parallel execution:
        {"command": ["task1", "task2"], "parallel": true}
 
-    4. With error handling:
-       {"command": ["risky-command"], "ignore_errors": true}
-
-    5. Custom directory:
+    4. Custom directory:
        {"command": "npm install", "work_dir": "/app/path"}
 
     Args:
         command: The shell command(s) to execute interactively. Can be a single command string or array of commands
         parallel: Whether to execute multiple commands in parallel (default: False)
-        ignore_errors: Continue execution even if some commands fail (default: False)
         timeout: Timeout in seconds for each command (default: 600)
         work_dir: Working directory for command execution (default: current)
 
@@ -105,10 +278,72 @@ def shell(
             timeout = timeout // 1000
         timeout = min(900, max(timeout, 30))
 
-    return shell_original(
-        command=command,
-        parallel=parallel,
-        ignore_errors=ignore_errors,
-        timeout=timeout,
-        work_dir=work_dir,
-    )
+    # Validate command parameter
+    if command is None:
+        return {
+            "status": "error",
+            "content": [{"text": "Command is required"}],
+        }
+
+    # Fix for array input: if the command is a string that looks like JSON array, parse it
+    if isinstance(command, str) and command.strip().startswith("[") and command.strip().endswith("]"):
+        try:
+            command = json.loads(command)
+        except json.JSONDecodeError:
+            # If it fails to parse, keep it as a string
+            pass
+
+    commands = normalize_commands(command)
+
+    # Set defaults for parameters
+    if timeout is None:
+        timeout = int(os.environ.get("SHELL_DEFAULT_TIMEOUT", "900"))
+    if work_dir is None:
+        # TODO: look for operation output path in env vars
+        work_dir = os.getcwd()
+
+    # Development mode check
+    STRANDS_BYPASS_TOOL_CONSENT = os.environ.get("BYPASS_TOOL_CONSENT", "").lower() == "true"
+
+    if not STRANDS_BYPASS_TOOL_CONSENT:
+        # TODO: Implement HITL tool consent
+        pass
+
+    try:
+        results = execute_commands(commands, parallel, False, work_dir, timeout)
+
+        # Process results for tool output
+        success_count = sum(1 for r in results if r["status"] == "success")
+        error_count = len(results) - success_count
+
+        content = []
+        for result in results:
+            content.append(
+                {
+                    "text": f"Command: {result['command']}\n"
+                            f"Status: {result['status']}\n"
+                            f"Exit Code: {result['exit_code']}\n"
+                            f"Output: {result['output']}\n"
+                            f"Error: {result['error']}"
+                }
+            )
+
+        content.insert(
+            0,
+            {
+                "text": f"Execution Summary:\n"
+                        f"Total commands: {len(results)}\n"
+                        f"Successful: {success_count}\n"
+                        f"Failed: {error_count}"
+            },
+        )
+
+        status: Literal["success", "error"] = "success" if error_count == 0 else "error"
+
+        return {"status": status, "content": content}
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "content": [{"text": f"Shell error: {str(e)}"}],
+        }

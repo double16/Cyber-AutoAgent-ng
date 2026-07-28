@@ -179,7 +179,7 @@ The compose stack automatically provides:
 - **Intelligent Tool Selection**: Automatically chooses appropriate security tools (nmap, sqlmap, nikto, etc.)
 - **Model Context Protocol (MCP)**: MCP support for local and remote, fine-grained tool selection
 - **Natural Language Reasoning**: Uses Strands framework with metacognitive architecture
-- **Evidence Collection**: Automatically stores findings with Mem0 memory (category="finding")
+- **Evidence Collection**: Stores observations and knowledge separately and verifies every finding in its own task
 - **Meta-Tool Creation**: Dynamically creates custom exploitation tools when needed
 - **Adaptive Execution**: Metacognitive assessment guides strategy based on confidence levels
 - **Assessment Reporting**: Generates comprehensive reports with findings and remediation
@@ -354,6 +354,10 @@ This architecture keeps phase/task state deterministic in Python while preservin
 2. Swarm deployment - when confidence <70% or need multiple perspectives (includes memory)
 3. Parallel shell execution - for rapid multi-command reconnaissance
 4. Meta-tool creation - only for novel exploits when existing tools fail
+
+Shell batches never mask command failures. Sequential batches stop at the first failure; parallel batches report an
+error when any command fails while preserving each command's output and exit code. Task executors get one bounded
+diagnostic-and-correction opportunity before the task is marked partially failed.
 
 ## Model Providers
 
@@ -772,6 +776,12 @@ The `.env.example` file contains detailed configuration options with inline comm
 
 See `.env.example` for complete configuration options and usage examples.
 
+### Workflow Health Configuration
+
+| Variable                       | Default | Description                                                                                                                   |
+|--------------------------------|---------|-------------------------------------------------------------------------------------------------------------------------------|
+| `CYBER_INCOMPLETE_HEALTH_CAP`  | `0.99`  | Shared score ceiling for incomplete coverage and hard budget-limit termination. Natural health penalties are applied first.   |
+
 ## Development & Testing
 
 ### Running Tests
@@ -848,6 +858,9 @@ cyber-autoagent/
 │           └── plan_store.db
 └── README.md                 # This file
 ```
+
+Each running operation uses its `outputs/<target>/OP_<id>/` directory as the process working directory, so relative
+artifact and tool paths stay inside that operation workspace.
 
 ### Key Files
 

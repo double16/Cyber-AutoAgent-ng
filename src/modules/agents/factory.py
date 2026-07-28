@@ -13,7 +13,11 @@ from strands.hooks import HookProvider
 from strands.agent.conversation_manager import ConversationManager
 
 from modules.config import get_config_manager
-from modules.config.models import create_strands_model, get_capabilities
+from modules.config.models import (
+    allows_reasoning_content_replay,
+    create_strands_model,
+    get_capabilities,
+)
 from modules.config.system import get_logger
 from modules.handlers.conversation_budget import get_shared_conversation_manager
 from modules.config.models.factory import _resolve_prompt_token_limit
@@ -201,7 +205,11 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
 
         try:
             caps = get_capabilities(provider, swarm_model_id)
-            allow_reasoning_content = bool(caps.supports_reasoning)
+            allow_reasoning_content = allows_reasoning_content_replay(
+                provider,
+                swarm_model_id,
+                caps,
+            )
         except Exception:
             allow_reasoning_content = False
 

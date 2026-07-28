@@ -274,6 +274,38 @@ def _resolve_prompt_token_limit(
     return None
 
 
+def require_prompt_token_limit(provider: str, model_id: Optional[str]) -> int:
+    """Return the resolved context window or fail before constructing an unbounded agent."""
+
+    limit = _resolve_prompt_token_limit(provider, model_id)
+    if not isinstance(limit, int) or limit <= 0:
+        raise ValueError(
+            f"Unable to determine context window for provider={provider} model={model_id}. "
+            "Configure CYBER_CONTEXT_LIMIT or CYBER_PROMPT_LIMIT_FORCE."
+        )
+    return limit
+
+
+def apply_model_context_window(model: Model, provider: str, model_id: str) -> int:
+    """Apply the already resolved context window to the provider model and Strands."""
+
+    limit = require_prompt_token_limit(provider, model_id)
+    update: Dict[str, Any] = {"context_window_limit": limit}
+    if provider == "ollama":
+        config = model.get_config()
+        options = dict(config.get("options") or {}) if isinstance(config, dict) else {}
+        options["num_ctx"] = limit
+        update["options"] = options
+    model.update_config(**update)
+    logger.info(
+        "Applied resolved context window=%d to provider=%s model=%s",
+        limit,
+        provider,
+        model_id,
+    )
+    return limit
+
+
 def _parse_context_window_fallbacks() -> Optional[List[Dict[str, List[str]]]]:
     """Parse context window fallbacks from environment or configuration.
 
@@ -915,6 +947,7 @@ def create_strands_model(
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
+        apply_model_context_window(model, provider, model_id)
         return model
 
     except Exception as e:

@@ -61,7 +61,7 @@ sequenceDiagram
         Tools-->>Agent: Scan results
         Strands->>Langfuse: Tool execution trace
         
-        Agent->>Tools: mem0_store(finding)
+        Agent->>Tools: store_finding(candidate)
         Tools-->>Agent: Memory stored
         Strands->>Langfuse: Memory operation
     end
@@ -183,6 +183,9 @@ LANGFUSE_SECRET_KEY=cyber-secret
 export LANGFUSE_ENCRYPTION_KEY=$(openssl rand -hex 32)
 export LANGFUSE_ADMIN_PASSWORD=$(openssl rand -base64 32)
 ```
+
+When remote observability is enabled but the Langfuse health check or OTLP exporter setup fails, the assessment
+continues with local Strands token and cost telemetry. A warning identifies the unavailable remote exporter.
 
 **Model Support:**
 - AWS Bedrock: `-e SERVER=remote` (default)

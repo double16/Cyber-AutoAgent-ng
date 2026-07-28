@@ -74,8 +74,10 @@ NON_EXECUTION_AGENT_ROLES = {
     "report_generation",
     "report_generator",
     "plan_creator",
+    "plan_critic",
     "task_creator",
     "task_prompt_builder",
+    "task_prompt_critic",
     "task_evaluator",
     "phase_evaluator",
 }
@@ -195,6 +197,7 @@ class CyberAgentEvaluator:
         emitter: EventEmitter,
         report_path: Optional[str] = None,
         usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        progress_callback: Optional[Callable[[], None]] = None,
     ):
         """Initialize evaluator with Langfuse and evaluation metrics."""
         self._emitter = emitter
@@ -204,6 +207,7 @@ class CyberAgentEvaluator:
         self._evaluation_step_total = 0
         self._current_evaluation_scope: Optional[str] = None
         self._usage_callback = usage_callback
+        self._progress_callback = progress_callback
         config_manager = get_config_manager()
         self.langfuse = Langfuse(
             public_key=config_manager.getenv("LANGFUSE_PUBLIC_KEY", "cyber-public"),
@@ -1195,6 +1199,18 @@ class CyberAgentEvaluator:
             self._emitter.emit(event)
         except Exception as error:
             logger.debug("Unable to emit evaluation step completion: %s", error)
+        else:
+            self._emit_budget_progress_update()
+
+    def _emit_budget_progress_update(self) -> None:
+        """Emit a generic budget progress snapshot through the owning callback handler."""
+        callback = self._progress_callback
+        if not callable(callback):
+            return
+        try:
+            callback()
+        except Exception as error:
+            logger.debug("Unable to emit budget progress snapshot: %s", error)
 
     def _emit_evaluation_preparation_progress(
         self, kind: str, status: str = "started"

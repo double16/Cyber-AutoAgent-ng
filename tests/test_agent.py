@@ -569,6 +569,45 @@ class TestCheckExistingMemories:
             mock_logger.debug.assert_called_once()
 
 
+def test_create_tool_repeat_guard_uses_threshold_and_max_cycle_configuration():
+    values = {
+        "CYBER_TOOL_REPEAT_THRESHOLD": 4,
+        "CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH": 6,
+    }
+    config_manager = SimpleNamespace(getenv_int=lambda name, default: values.get(name, default))
+    agent_logger = Mock()
+
+    guard = cyber_agent_module._create_tool_repeat_guard(config_manager, agent_logger)
+
+    assert guard.repeat_threshold == 4
+    assert guard.max_cycle_length == 6
+    assert guard.history_limit == 24
+    agent_logger.info.assert_called_once_with(
+        "Repeated tool-call guard threshold: %d; maximum cycle length: %d",
+        4,
+        6,
+    )
+
+
+def test_create_tool_repeat_guard_disable_switch_skips_cycle_configuration():
+    calls = []
+
+    def getenv_int(name, default):
+        calls.append((name, default))
+        return 0
+
+    agent_logger = Mock()
+
+    guard = cyber_agent_module._create_tool_repeat_guard(
+        SimpleNamespace(getenv_int=getenv_int),
+        agent_logger,
+    )
+
+    assert guard is None
+    assert [name for name, _default in calls] == ["CYBER_TOOL_REPEAT_THRESHOLD"]
+    agent_logger.info.assert_called_once_with("Repeated tool-call guard disabled")
+
+
 def test_create_agent_reuses_runtime_resources(monkeypatch):
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -588,7 +627,6 @@ def test_create_agent_reuses_runtime_resources(monkeypatch):
         tool_executor=object(),
         system_prompt_payload="system payload",
         system_prompt="system text",
-        task_capture_prompt="task capture",
         hooks=[],
         conversation_manager=conversation_manager,
         sdk_context_manager=None,
@@ -635,13 +673,15 @@ def test_create_agent_uses_role_specific_event_handler(monkeypatch):
         config=config,
         operation_id="OP_ROLE",
         server_config=SimpleNamespace(swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm-model"))),
-        config_manager=SimpleNamespace(getenv=lambda _name, default=None: default),
+        config_manager=SimpleNamespace(
+            getenv=lambda _name, default=None: default,
+            getenv_int=lambda _name, default=None: default,
+        ),
         callback_handler=root_handler,
         tools_list=[],
         tool_executor=object(),
         system_prompt_payload="system payload",
         system_prompt="system text",
-        task_capture_prompt="task capture",
         hooks=[],
         conversation_manager=object(),
         sdk_context_manager=None,
@@ -696,13 +736,15 @@ def test_create_agent_can_disable_tool_catalog_for_restricted_role(monkeypatch):
         config=config,
         operation_id="OP_TASK_CREATOR",
         server_config=SimpleNamespace(swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm-model"))),
-        config_manager=SimpleNamespace(getenv=lambda _name, default=None: default),
+        config_manager=SimpleNamespace(
+            getenv=lambda _name, default=None: default,
+            getenv_int=lambda _name, default=None: default,
+        ),
         callback_handler=root_handler,
         tools_list=[],
         tool_executor=object(),
         system_prompt_payload="system payload",
         system_prompt="system text",
-        task_capture_prompt="task capture",
         hooks=[],
         conversation_manager=object(),
         sdk_context_manager=None,
@@ -751,7 +793,6 @@ def test_create_agent_stateful_model_uses_runtime_handler_without_conversation_m
         tool_executor=object(),
         system_prompt_payload="system payload",
         system_prompt="system text",
-        task_capture_prompt="task capture",
         hooks=[],
         conversation_manager=object(),
         sdk_context_manager="auto",
@@ -770,6 +811,43 @@ def test_create_agent_stateful_model_uses_runtime_handler_without_conversation_m
     assert "conversation_manager" not in kwargs
     assert "context_manager" not in kwargs
     assert kwargs["callback_handler"] is callback_handler
+    assert agent._allow_reasoning_content is False
+
+
+def test_create_agent_disables_reasoning_replay_for_litellm_chat_completions(monkeypatch):
+    class FakeAgent:
+        def __init__(self):
+            self.tool_registry = Mock()
+
+    config = AgentConfig(target="example.com", objective="test", provider="litellm", model_id="openai/gpt-5")
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_LITELLM_REASONING",
+        server_config=SimpleNamespace(),
+        config_manager=SimpleNamespace(),
+        callback_handler=Mock(),
+        tools_list=[],
+        tool_executor=object(),
+        system_prompt_payload="system payload",
+        system_prompt="system text",
+        hooks=[],
+        conversation_manager=object(),
+        sdk_context_manager=None,
+        trace_attributes={"operation.id": "OP_LITELLM_REASONING"},
+        prompt_token_limit=0,
+    )
+
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(
+        cyber_agent_module,
+        "get_capabilities",
+        Mock(return_value=SimpleNamespace(supports_reasoning=True)),
+    )
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
+
+    agent = create_agent("example.com", "test", runtime_resources=runtime)
+
     assert agent._allow_reasoning_content is False
 
 
@@ -794,7 +872,6 @@ def test_create_agent_runtime_resources_applies_sdk_context_manager(monkeypatch)
         tool_executor=object(),
         system_prompt_payload="system payload",
         system_prompt="system text",
-        task_capture_prompt="task capture",
         hooks=[],
         conversation_manager=object(),
         sdk_context_manager="auto",

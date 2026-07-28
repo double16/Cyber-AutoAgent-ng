@@ -1,8 +1,19 @@
+import json
+from unittest.mock import MagicMock, patch
+
 import pytest
-import os
-from unittest.mock import patch, MagicMock
-from modules.handlers.report_generator import generate_security_report, _extract_text_from_result, build_report_sections
-from modules.tools.memory import clear_memory_client
+
+from modules.handlers.report_generator import (
+    _extract_text_from_result,
+    _format_target_coverage,
+    _ground_report_item,
+    _has_artifact_reference,
+    _normalize_report_category,
+    build_report_sections,
+    generate_security_report,
+)
+from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task, clear_memory_client
+from tests.helpers.acceptance import make_acceptance
 
 
 def test_extract_text_from_result():
@@ -29,6 +40,20 @@ def test_extract_text_from_result():
     assert lines[1] == "## Heading 2"
     assert lines[2] == "Some normal text"
     assert lines[3] == "### Heading 3 with spaces"
+
+
+def test_ground_report_item_rejects_invented_artifact_paths():
+    item = {
+        "title": "Verified issue",
+        "content": "Supported claim",
+        "severity": "HIGH",
+        "metadata": {"artifacts": ["/outputs/op/real.txt"]},
+    }
+
+    grounded = _ground_report_item("### Issue\nEvidence: /transcripts/invented.txt", item)
+
+    assert "/transcripts/invented.txt" not in grounded
+    assert "/outputs/op/real.txt" in grounded
 
 
 def test_extract_text_from_result_markdown_table():
@@ -68,17 +93,65 @@ def test_extract_text_from_result_empty():
     assert _extract_text_from_result(mock_result) == ""
 
 
+def test_report_category_helpers_cover_structured_and_free_form_artifacts():
+    assert _has_artifact_reference({"artifacts": ["/tmp/control.txt"]}) is True
+    assert _has_artifact_reference({"evidence": ["saved at artifacts/control.txt"]}) is True
+    assert _has_artifact_reference({"evidence": ["artifact:artifacts/control.txt"]}) is True
+    assert _has_artifact_reference(["", "no path", None]) is False
+    assert _has_artifact_reference(7) is False
+
+    assert _normalize_report_category("signal", {}, "", {}) == "observation"
+    assert _normalize_report_category("plan", {}, "", {}) == "plan"
+    assert _normalize_report_category(
+        "finding",
+        {"validation_status": "verified", "artifacts": ["/tmp/proof.txt"]},
+        "Negative control saved at /tmp/control.txt",
+        {},
+    ) == "finding"
+    assert _normalize_report_category(
+        "finding",
+        {"status": "verified", "proof_pack": "legacy"},
+        "Control case without an artifact",
+        {"evidence": "/tmp/proof.txt"},
+    ) == "validation_failure"
+
+
+def test_format_target_coverage_counts_scoped_tasks_and_report_items():
+    plan = OperationPlan(
+        objective="Assess targets",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[
+            OperationTarget(target_id="target-1", value="http://one.test", type="network"),
+            OperationTarget(target_id="target-2", value="http://two.test", type="network"),
+        ],
+    )
+    tasks = [
+        Task("task-1", "One", "Check one", make_acceptance("task-1"), 1, "done", target_scope="subset", target_ids=["target-1"]),
+        Task("task-2", "All", "Check all", make_acceptance("task-2"), 1, "done"),
+    ]
+    evidence = [
+        {"category": "finding", "metadata": {"target": "http://one.test"}, "content": "confirmed"},
+        {"category": "validation_failure", "metadata": {"target": "http://two.test"}, "content": "pending"},
+    ]
+
+    coverage = _format_target_coverage(plan, tasks, evidence)
+
+    assert "| target-1 | network | `http://one.test` | 2 | 1 | 0 |" in coverage
+    assert "| target-2 | network | `http://two.test` | 1 | 0 | 1 |" in coverage
+
+
 @pytest.fixture(autouse=True)
 def memory_client_clear():
     clear_memory_client()
 
 
 @patch("modules.handlers.report_generator.get_memory_client")
-@pytest.mark.skip(reason="Not sure we want to downgrade findings in this way")
-def test_report_builder_downgrade_logic(mock_get_client, tmp_path):
+def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     op_id = "OP_DOWNGRADE_TEST"
     output_dir = tmp_path / "outputs"
-    os.environ["CYBER_AGENT_OUTPUT_DIR"] = str(output_dir)
+    monkeypatch.setenv("CYBER_AGENT_OUTPUT_DIR", str(output_dir))
 
     # Mock list_memories to return findings with various validation statuses
     mock_client = mock_get_client.return_value
@@ -91,7 +164,8 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path):
                 "operation_id": op_id,
                 "severity": "CRITICAL",
                 "validation_status": "verified",
-                "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]}
+                "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]},
+                "negative_control_artifacts": [str(tmp_path / "negative-control.txt")],
             },
         },
         {
@@ -115,11 +189,31 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path):
                 "validation_status": "hypothesis"
             },
         },
+        {
+            "id": "4",
+            "memory": "[FINDING] Verified claim without a control [EVIDENCE] /tmp/proof.txt",
+            "metadata": {
+                "category": "finding",
+                "operation_id": op_id,
+                "severity": "HIGH",
+                "validation_status": "verified",
+                "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]},
+            },
+        },
+        {
+            "id": "5",
+            "memory": "[OBSERVATION] Endpoint /api/items returned 404",
+            "metadata": {
+                "category": "observation",
+                "operation_id": op_id,
+                "severity": "HIGH",
+            },
+        },
     ]
 
     # Create the proof file
-    proof_file = tmp_path / "proof.txt"
-    proof_file.write_text("proof")
+    (tmp_path / "proof.txt").write_text("proof")
+    (tmp_path / "negative-control.txt").write_text("control")
 
     # Run build_report_sections
     sections = build_report_sections(op_id, "example.com", "Test Objective")
@@ -130,13 +224,21 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path):
     item1 = next(e for e in evidence if e["id"] == "1")
     assert item1["category"] == "finding", "Item 1 should remain a finding"
 
-    # Check item 2: Should be downgraded to observation (unverified)
+    # Unverified claims remain visible as validation failures.
     item3 = next(e for e in evidence if e["id"] == "2")
-    assert item3["category"] == "observation", "Item 2 should be downgraded to observation (unverified)"
+    assert item3["category"] == "validation_failure"
 
     # Check item 3: Should be downgraded to observation (hypothesis)
     item4 = next(e for e in evidence if e["id"] == "3")
-    assert item4["category"] == "observation", "Item 3 should be downgraded to observation (hypothesis)"
+    assert item4["category"] == "validation_failure"
+
+    missing_control = next(e for e in evidence if e["id"] == "4")
+    assert missing_control["category"] == "validation_failure"
+    assert missing_control["severity"] == "HIGH"
+
+    endpoint_observation = next(e for e in evidence if e["id"] == "5")
+    assert endpoint_observation["category"] == "observation"
+    assert endpoint_observation["severity"] == "INFO"
 
 @patch("modules.handlers.report_generator.ReportGenerator")
 @patch("modules.handlers.report_generator.get_output_path")
@@ -163,6 +265,7 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
         "findings_table": "Findings table",
         "risk_assessment": "Risk assessment",
         "severity_counts": {"HIGH": 1},
+        "verified_findings_total": 1,
         "summary_table": "Summary table",
         "raw_evidence": [
             {
@@ -175,6 +278,9 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
         ],
         "operation_plan": {},
         "operation_tasks": [],
+        "task_status_counts": {"done": 2, "pending": 1},
+        "total_task_count": 3,
+        "completed_task_count": 2,
         "tools_summary": ""
     }
 
@@ -192,7 +298,17 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
         target=target,
         objective=objective,
         operation_id=operation_id,
-        config_params={"steps_executed": 5, "tools_used": ["nmap"]},
+        config_params={
+            "steps_executed": 5,
+            "tools_used": ["nmap"],
+            "completion_status": {
+                "assessment_complete": False,
+                "workflow_complete": False,
+                "termination_reason": "stalled",
+                "termination_message": "No actions taken after 25 attempts",
+                "incomplete_reason": "Workflow stalled before assessment_complete=true.",
+            },
+        },
         filename=str(report_file)
     )
 
@@ -201,15 +317,25 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     content = report_file.read_text()
     assert "# SECURITY ASSESSMENT REPORT" in content
     assert "## TABLE OF CONTENTS" in content
+    assert "**Assessment Status: Incomplete**" in content
+    assert "Termination reason: `stalled`." in content
+    assert "Do not interpret the absence of verified findings as absence of vulnerabilities." in content
     assert "## Section Content" in content
     assert f"Operation ID: {operation_id}" in content
 
     # Verify that intermediate files were created
     assert (output_dir / "security_assessment_report.json").exists()
+    report_json = json.loads((output_dir / "security_assessment_report.json").read_text())
+    assert report_json["completion_status"]["assessment_complete"] is False
+    assert report_json["completion_status"]["termination_reason"] == "stalled"
+    assert report_json["completion_status"]["total_task_count"] == 3
+    assert report_json["completion_status"]["completed_task_count"] == 2
+    assert report_json["completion_status"]["task_status_counts"] == {"done": 2, "pending": 1}
     assert (output_dir / "report_executive_summary.md").exists()
     assert (output_dir / "report_findings_header.md").exists()
     # finding_1_High_Finding.md
     assert (output_dir / "finding_1_High_Finding.md").exists()
+    assert (output_dir / "report_target_coverage.md").exists()
     assert (output_dir / "report_methodology.md").exists()
 
 @patch("modules.handlers.report_generator.build_report_sections")
@@ -363,7 +489,7 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
             {
                 "id": "o1",
                 "title": "Some Observation",
-                "severity": "INFO",
+                "severity": "HIGH",
                 "category": "observation",
                 "content": "Observation content"
             }
@@ -393,6 +519,68 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
     assert "Observation detail" in content
     assert (output_dir / "report_observations_header.md").exists()
     assert (output_dir / "observation_1_Some_Observation.md").exists()
+    assert not list(output_dir.glob("finding_*Some_Observation.md"))
+
+
+@patch("modules.handlers.report_generator.ReportGenerator")
+@patch("modules.handlers.report_generator.get_output_path")
+@patch("modules.handlers.report_generator.build_report_sections")
+@patch("modules.handlers.report_generator.get_config_manager")
+def test_generate_security_report_validation_failures(
+    mock_get_config, mock_build_sections, mock_get_output_path, mock_report_gen, tmp_path
+):
+    output_dir = tmp_path / "validation_output"
+    output_dir.mkdir()
+    mock_get_output_path.return_value = str(output_dir)
+    config = MagicMock()
+    config.get_provider.return_value = "test_provider"
+    config.get_llm_config.return_value.model_id = "test_model"
+    config.get_swarm_config.return_value.llm.model_id = "test_swarm_model"
+    mock_get_config.return_value = config
+    mock_build_sections.return_value = {
+        "evidence_count": 1,
+        "steps_executed": 1,
+        "overview": "Overview",
+        "findings_table": "",
+        "risk_assessment": "",
+        "severity_counts": {},
+        "validation_failure_count": 1,
+        "summary_table": "",
+        "raw_evidence": [
+            {
+                "id": "v1",
+                "title": "Possible authorization bypass",
+                "category": "validation_failure",
+                "content": "Admin data may be exposed",
+                "validation_status": "failed",
+                "metadata": {
+                    "claimed_severity": "HIGH",
+                    "validation_reason": "The response artifact contained a tool error",
+                },
+            }
+        ],
+        "operation_plan": {},
+        "operation_tasks": [],
+        "tools_summary": "",
+    }
+    agent = MagicMock()
+    mock_report_gen.create_report_agent.return_value = agent
+    agent.return_value.message = {"content": [{"text": "Generated section"}]}
+
+    report_file = tmp_path / "validation_report.md"
+    generate_security_report(
+        target="example.com",
+        objective="Test Objective",
+        operation_id="OP-VALIDATION",
+        config_params={},
+        filename=str(report_file),
+    )
+
+    content = report_file.read_text()
+    assert "FINDINGS REQUIRING VALIDATION" in content
+    assert "Possible authorization bypass" in content
+    assert "The response artifact contained a tool error" in content
+    assert "not confirmed vulnerabilities" in content
 
 if __name__ == "__main__":
     pytest.main([__file__])

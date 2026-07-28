@@ -177,6 +177,7 @@ def test_idor_specialist_path_id_mutation(monkeypatch):
 def test_idor_specialist_error_handling(monkeypatch):
     # Mocking something to raise an error inside the try-except block
     monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: 1 / 0)
+    monkeypatch.setattr(ids.requests, "request", lambda *args, **kwargs: FakeResponse("OK", 200))
 
     result_json = ids.idor_specialist(target_url="http://example.com")
     result = json.loads(result_json)
@@ -211,18 +212,27 @@ def test_idor_specialist_custom_test_values(monkeypatch):
 
 
 def test_idor_specialist_evasion_flag(monkeypatch):
+    sleep_calls = []
+
+    def fake_sleep(duration):
+        sleep_calls.append(duration)
+
     monkeypatch.setattr(ids.requests, "request", lambda *args, **kwargs: FakeResponse("OK", 200))
-    # We can't easily check for UA rotation without deeper mocking of requests.request, but we can check if it runs without error
+    monkeypatch.setattr(ids, "advanced_parameter_discovery", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ids.time, "sleep", fake_sleep)
+
     result = ids.idor_specialist(
         target_url="http://example.com/api",
         evasion=True,
         test_type="idor"
     )
     assert "findings" in json.loads(result)
+    assert sleep_calls
 
 
 def test_idor_specialist_comprehensive_flow(monkeypatch):
     monkeypatch.setattr(ids.requests, "request", lambda *args, **kwargs: FakeResponse("OK", 200))
+    monkeypatch.setattr(ids, "advanced_parameter_discovery", lambda *args, **kwargs: [])
 
     result_json = ids.idor_specialist(
         target_url="http://example.com/api?id=1",
@@ -376,7 +386,7 @@ def test_idor_specialist_graphql_mode(mock_request):
 
 
 @patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
-def test_idor_specialist_path_id_replay(mock_request):
+def test_idor_specialist_path_id_replay(mock_request, monkeypatch):
     # Mock baseline
     b = MagicMock()
     b.status_code = 200
@@ -393,6 +403,8 @@ def test_idor_specialist_path_id_replay(mock_request):
     alt.text = '{"id": 2}'
 
     mock_request.side_effect = [b, m, alt] + [b] * 100
+
+    monkeypatch.setattr(ids, "advanced_parameter_discovery", lambda *args, **kwargs: [])
 
     result_json = ids.idor_specialist(
         target_url="http://example.com/api/user/1",
@@ -427,12 +439,10 @@ def test_main_cli(mock_tool, monkeypatch):
 
 
 def test_perform_login_error_handling(monkeypatch):
-    import requests
-
     def fake_request(*args, **kwargs):
-        raise requests.exceptions.RequestException("Connection error")
+        raise Exception("Connection error")
 
-    monkeypatch.setattr(requests, "request", fake_request)
+    monkeypatch.setattr(ids.requests, "request", fake_request)
 
     cookies, headers = ids._perform_login("http://example.com/login", {}, verbose=True)
     assert cookies is None
@@ -449,15 +459,19 @@ def test_send_request_exception(mock_request):
 
 
 @patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
-def test_idor_specialist_baseline_failed(mock_request):
+def test_idor_specialist_baseline_failed(mock_request, monkeypatch):
     mock_request.return_value = None
+    monkeypatch.setattr(ids, "advanced_parameter_discovery", lambda *args, **kwargs: [])
 
     result_json = ids.idor_specialist(target_url="http://example.com", test_type="idor")
     result = json.loads(result_json)
     assert any(f["finding_type"] == "baseline_failed" for f in result["findings"])
 
 
-def test_idor_specialist_malformed_json_inputs():
+def test_idor_specialist_malformed_json_inputs(monkeypatch):
+    monkeypatch.setattr(ids.requests, "request", lambda *args, **kwargs: FakeResponse("OK", 200))
+    monkeypatch.setattr(ids, "advanced_parameter_discovery", lambda *args, **kwargs: [])
+
     # test_values malformed
     res = ids.idor_specialist(target_url="http://example.com", test_values="not json")
     assert "findings" in json.loads(res)

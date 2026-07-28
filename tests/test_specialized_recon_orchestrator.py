@@ -114,6 +114,41 @@ def test_target_normalization_domain_and_url_inputs(fake_subprocess, fake_reques
     assert out4["target"] == "example.com:8443"
 
 
+def test_orchestrator_uses_controller_bound_target_before_recon(monkeypatch):
+    import modules.tools.memory as memory
+
+    captured = {}
+    monkeypatch.setattr(
+        memory,
+        "resolve_bound_executable_target",
+        lambda _requested: "http://host.docker.internal:4280",
+    )
+    monkeypatch.setattr(
+        sro,
+        "_setup_specialized_tools",
+        lambda errors=None: {"success": True, "tools": [], "failed": []},
+    )
+    monkeypatch.setattr(sro, "_advanced_subdomain_enum", lambda target, errors=None: [])
+    def analyze_live_hosts(hosts, errors=None):
+        captured["hosts"] = hosts
+        return {"hosts": [], "technologies": []}
+
+    monkeypatch.setattr(sro, "_analyze_live_hosts", analyze_live_hosts)
+    monkeypatch.setattr(
+        sro,
+        "_deep_web_intelligence",
+        lambda live_hosts, errors=None: {"endpoints": [], "js_files": [], "parameters": []},
+    )
+    monkeypatch.setattr(sro, "_analyze_attack_surface", lambda results: results.get("intelligence", {}))
+    monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
+    monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
+
+    output = _as_json(sro.specialized_recon_orchestrator("http://host.docker.internal:4220", "fingerprint"))
+
+    assert output["target"] == "host.docker.internal:4280"
+    assert captured["hosts"] == ["host.docker.internal:4280"]
+
+
 def test_public_hostname_detection_rejects_non_public_hosts():
     public_hosts = [
         "example.com",

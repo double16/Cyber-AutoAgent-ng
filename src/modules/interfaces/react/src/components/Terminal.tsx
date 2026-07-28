@@ -19,6 +19,10 @@ import { ByteBudgetRingBuffer } from '../utils/ByteBudgetRingBuffer.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import type { ThinkingContext, ThinkingStatus } from '../types/thinking.js';
+import {
+  formatOperationHealth,
+  type OperationHealthSnapshot,
+} from '../utils/operationHealthFormatting.js';
 
 // Exported helper: build a trimmed report preview to avoid storing huge content in memory
 export const buildTrimmedReportContent = (raw: string): string => {
@@ -45,6 +49,32 @@ export const buildTrimmedReportContent = (raw: string): string => {
 const DEFAULT_FINAL_REPORT_EVENT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_REASONING_BUFFER_CHARS = 120000;
 const JSON_ESTIMATE_LIMIT = 64 * 1024 * 1024;
+
+const WORKFLOW_ACTIVITY_TERMINAL_STATUSES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
+  'skipped',
+  'terminated',
+  'done',
+  'success',
+  'error',
+  'partial_failure',
+  'blocked',
+  'not_applicable',
+]);
+
+const workflowActivityKey = (event: any): string => JSON.stringify([
+  event?.role ?? event?.action ?? event?.activity ?? 'workflow',
+  event?.phase_id ?? null,
+  event?.task_uid ?? event?.task_title ?? null,
+  event?.batch_index ?? null,
+  event?.attempt ?? null,
+]);
+
+const isWorkflowActivityTerminal = (event: any): boolean =>
+  WORKFLOW_ACTIVITY_TERMINAL_STATUSES.has(String(event?.status || '').trim().toLowerCase());
 
 const estimateJsonBytes = (value: unknown, maxBytes = JSON_ESTIMATE_LIMIT): number => {
   try {
@@ -219,6 +249,7 @@ interface TerminalProps {
   collapsed?: boolean;
   onEvent?: (event: any) => void;
   onMetricsUpdate?: (metrics: { tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number; progressPercent?: number }) => void;
+  onHealthUpdate?: (health: OperationHealthSnapshot) => void;
   onThinkingUpdate?: (status: ThinkingStatus) => void;
   animationsEnabled?: boolean;
   cleanupRef?: React.MutableRefObject<(() => void) | null>;
@@ -231,6 +262,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   collapsed = false,
   onEvent,
   onMetricsUpdate,
+  onHealthUpdate,
   onThinkingUpdate,
   animationsEnabled = true,
   cleanupRef
@@ -318,6 +350,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   // Keep a ref in sync with activeThinking to avoid setState race conditions
   const activeThinkingRef = useRef(false);
   useEffect(() => { activeThinkingRef.current = activeThinking; }, [activeThinking]);
+  const workflowActivityKeysRef = useRef<Set<string>>(new Set());
   const setThinkingActive = useCallback((value: boolean) => {
     activeThinkingRef.current = value;
     setActiveThinking(value);
@@ -478,7 +511,10 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     });
   }
 
-  function deactivateThinking() {
+  function deactivateThinking(force = false) {
+    if (!force && workflowActivityKeysRef.current.size > 0) {
+      return;
+    }
     setThinkingActive(false);
     onThinkingUpdate?.({ active: false });
   }
@@ -618,6 +654,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     lastReasoningTextRef.current = null;
     completionPhaseActiveRef.current = false;
     hasSeenOperationActivityRef.current = false;
+    workflowActivityKeysRef.current.clear();
     setCompletionPhaseEvents(null);
     perToolOutputSeenRef.current.clear();
     globalOutputSeenRef.current.clear();
@@ -834,6 +871,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     switch (event.type) {
       case 'operation_init':
         hasSeenOperationActivityRef.current = true;
+        workflowActivityKeysRef.current.clear();
         // Reset all dedup sets and internal refs at operation start
         perToolOutputSeenRef.current.clear();
         globalOutputSeenRef.current.clear();
@@ -867,7 +905,34 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     cancelDelayedThinking();
     activateThinking('waiting');
     seenThinkingThisPhaseRef.current = true;
-    break;
+        break;
+
+      case 'workflow_activity': {
+        const activityKey = workflowActivityKey(event);
+        const terminal = isWorkflowActivityTerminal(event);
+        const hadActiveWorkflowActivity = workflowActivityKeysRef.current.size > 0;
+        if (terminal) {
+          workflowActivityKeysRef.current.delete(activityKey);
+        } else {
+          workflowActivityKeysRef.current.add(activityKey);
+        }
+        results.push(event as DisplayStreamEvent);
+
+        if (!terminal) {
+          const label = String(event.label || event.action || event.activity || 'Workflow activity')
+            .replaceAll('_', ' ')
+            .trim();
+          const taskTitle = typeof event.task_title === 'string' ? event.task_title.trim() : '';
+          activateThinking(
+            'tool_preparation',
+            taskTitle ? `${label}: ${taskTitle}` : label,
+            event,
+          );
+        } else if (hadActiveWorkflowActivity && workflowActivityKeysRef.current.size === 0) {
+          deactivateThinking(true);
+        }
+        break;
+      }
 
       case 'progress_update':
         hasSeenOperationActivityRef.current = true;
@@ -910,7 +975,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           evaluation_step_kind: event.evaluation_step_kind,
           evaluation_scope: event.evaluation_scope,
           evaluation_metric: event.evaluation_metric,
-          evaluation_step_label: event.evaluation_step_label
+          evaluation_step_label: event.evaluation_step_label,
+          health: event.health,
         } as DisplayStreamEvent;
 
         results.push(headerEvent);
@@ -1456,6 +1522,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           agent_name: event.agent_name,
           agent_type: event.agent_type,
           parent_agent_run_id: event.parent_agent_run_id,
+          success: event.success,
+          outcome: event.outcome,
+          executed: event.executed,
           id: `tool_end_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           timestamp: new Date().toISOString(),
           sessionId: 'current'
@@ -1636,6 +1705,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     // Listen for events from Docker service
     const handleEvent = (rawEvent: any) => {
       const event = normalizeEvent(rawEvent);
+      if (event.type === 'progress_update' && formatOperationHealth(event.health)) {
+        onHealthUpdate?.(event.health as OperationHealthSnapshot);
+      }
       // Debug logging disabled for production use
       // console.error(`[DEBUG] UnconstrainedTerminal received event:`, {
       //   type: event.type,
@@ -1895,7 +1967,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       executionService.off('complete', handleComplete);
       executionService.off('stopped', handleStopped);
     };
-  }, [executionService, onEvent, onMetricsUpdate, onThinkingUpdate, sessionId, resetAllBuffers]); // Removed 'metrics' - not used in effect, was causing re-runs on every token update
+  }, [executionService, onEvent, onHealthUpdate, onMetricsUpdate, onThinkingUpdate, sessionId, resetAllBuffers]); // Removed 'metrics' - not used in effect, was causing re-runs on every token update
 
   if (collapsed) {
     return null;

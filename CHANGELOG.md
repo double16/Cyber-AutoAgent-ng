@@ -2,8 +2,20 @@
 
 ### Features
 
+- Validate resolved hosts, IPs, explicit TCP services, CIDRs, and local filesystem targets before assessment startup,
+  and emit a pass/fail/skip preflight event for every target.
+- Show the latest operation health score, band, and entered target in the terminal title for interactive and headless TTY sessions.
+- Add deterministic operation-health scoring to progress events, including inventory-based phase fan-out prediction,
+  and show the compact score and band with a distinguishing stethoscope marker in interactive stream output, the
+  persistent footer, and headless output.
+- Quarantine unavailable or broken shell commands per operation.
+- Present shell commands solely by capability and applicability, without ranking metadata.
+- Detect exact repeating tool-call cycles, reuse matching completed results, and gracefully stop an agent that ignores
+  the cached-result guidance.
+- Add executable target registries and per-task target scopes so logical `--target` names can coexist with concrete
+  URLs, hosts, CIDRs, and filesystem paths from the objective.
 - Rename the React terminal `/plugins` command to `/modules`.
-- Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation.
+- Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation. Actor/critic refinement for improved quality.
 - Add interactive React terminal `continue` and `report` commands for previous operations.
 - Add readline-style editing shortcuts to the React terminal command entry.
 - Move React thinking/spinner status into a persistent footer line above the existing metrics footer.
@@ -18,15 +30,14 @@
 
 ### Fixes
 
-- Reject unregistered agent tool calls instead of automatically executing them as shell commands.
+- Use the operation output directory as the process working directory so relative files stay in its workspace.
+- Mark final reports incomplete when workflow completion gating has not passed, without clamping progress status.
+- Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.
 - Stop active XBOW benchmark containers when the benchmark runner is interrupted with Ctrl-C.
 - Show final report progress labels as the React terminal thinking task title while reporting.
 - Skip public OSINT recon tools for non-public hostnames in `specialized_recon_orchestrator`.
 - Bound React inline final-report file reads to a preview so very large reports cannot spike heap on operation completion or exit.
-- Avoid LiteLLM async logging queue cross-event-loop errors when model calls run from thread-pool event loops.
-- Reserve estimated final-report token and cost budget during assessment so constrained runs stop early enough to generate reports.
 - Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.
-- Update the React footer connection indicator from deployment detection and color the status icon.
 - Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.
 
 ## v0.9.0

@@ -19,9 +19,36 @@ Usage:
 """
 
 import logging
+import os
 from typing import Dict
 
 _logger_registry: Dict[str, logging.Logger] = {}
+_RAW_DIAGNOSTIC_LOGGERS = (
+    "openai",
+    "httpx",
+    "httpcore",
+    "litellm",
+    "LiteLLM",
+    "strands.models",
+)
+
+
+def unsafe_diagnostic_logging_enabled() -> bool:
+    """Return whether raw provider and model diagnostics were explicitly enabled."""
+
+    return os.getenv("CYBER_UNSAFE_DIAGNOSTIC_LOGGING", "false").strip().lower() == "true"
+
+
+def configure_provider_diagnostic_logging(enable_debug: bool = False) -> None:
+    """Gate provider payload and schema logging behind the unsafe diagnostic flag."""
+
+    level = (
+        logging.DEBUG
+        if enable_debug and unsafe_diagnostic_logging_enabled()
+        else logging.WARNING
+    )
+    for logger_name in _RAW_DIAGNOSTIC_LOGGERS:
+        logging.getLogger(logger_name).setLevel(level)
 
 
 def get_logger(component_name: str) -> logging.Logger:
@@ -84,10 +111,8 @@ def configure_sdk_logging(enable_debug: bool = False) -> None:
     logging.getLogger("strands_tools").setLevel(log_level)
     logging.getLogger("strands_tools.swarm").setLevel(log_level)
 
-    # Silence verbose LiteLLM DEBUG logging
-    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
-    logging.getLogger("litellm").setLevel(logging.WARNING)
-    logging.getLogger("strands.models.litellm").setLevel(logging.INFO)
+    # Raw provider requests, system prompts, and tool schemas may contain secrets.
+    configure_provider_diagnostic_logging(enable_debug=enable_debug)
 
     logging.getLogger("modules.handlers").setLevel(log_level)
     logging.getLogger("modules.handlers.react").setLevel(log_level)

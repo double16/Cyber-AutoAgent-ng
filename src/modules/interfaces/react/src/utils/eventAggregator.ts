@@ -321,6 +321,9 @@ export class EventAggregator {
           type: 'tool_end',
           toolId: event.toolId,
           tool: event.toolName || 'unknown',
+          success: event.success,
+          outcome: event.outcome,
+          executed: event.executed,
           id: `tool_end_${Date.now()}`,
           timestamp: new Date().toISOString(),
           sessionId: 'current'

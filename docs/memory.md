@@ -10,6 +10,8 @@ Cyber-AutoAgent implements persistent memory using Mem0 with automatic reflectio
 - **Thread-Safe Writes**: SQLite and FAISS backends use locking for safe concurrent writes
 - **Category Validation**: Invalid categories are auto-corrected to prevent empty reports
 - **Status Validation**: Contradictory status fields are automatically reconciled
+- **Target Scoping**: Plans store executable target literals separately from the logical `--target` output label, and
+  tasks carry `all` or `subset` target scopes.
 
 ## Architecture
 
@@ -97,38 +99,68 @@ sequenceDiagram
 Evidence storage employs structured metadata for efficient retrieval and analysis:
 
 ```python
-# Finding storage with metadata
-mem0_store(
-    content="[WHAT] SQL injection [WHERE] /login [IMPACT] Auth bypass [EVIDENCE] payload",
-    metadata={
-        "category": "finding",
-        "severity": "CRITICAL",
-        "confidence": "95%",
-        "status": "verified"
-    }
+store_observation("The login endpoint returns a distinct error for unknown users")
+store_knowledge("Use a test/control request pair for behavioral security claims")
+store_finding(
+    title="SQL injection in login",
+    claim="The username parameter changes query behavior",
+    severity="CRITICAL",
+    target="/login",
+    technique="sql_injection",
+    expected_result="The payload is rejected",
+    observed_result="The response differs from the negative control",
+    reproduction_steps=["Send the control request", "Send the test payload"],
+    artifacts=["artifacts/login-test.txt", "artifacts/login-control.txt"],
 )
 ```
 
+Successful `record_task_acceptance` calls automatically publish one operation-scoped observation for the completed
+task. The observation contains concrete criterion statuses and summaries, direct evidence references, and bounded
+coverage aggregates. Metadata identifies `source=task_acceptance`, the task UID, phase, targets, acceptance manifest,
+and a replay-safe publication key. Later task-prompt-builders can select this memory when it applies to a new objective.
+Publication warnings do not invalidate the already persisted acceptance ledger; explicit `memory` or `observation`
+acceptance requirements still require their referenced evidence to exist before acceptance is recorded.
+
+`store_finding` requires at least one existing artifact path and an `observed_result` that describes concrete observed
+behavior. Assumptions, hypothetical findings, or unread output should be stored as observations or follow-up tasks
+instead of findings.
+
+## Target Registry and Task Scope
+
+The CLI `--target` value is always treated as the logical operation label used for output naming. The workflow builds an
+executable target registry from exact target literals in the objective first, including URLs, IP addresses, CIDR ranges,
+FQDNs, host:port values, and resolvable filesystem paths. If the objective contains no executable targets, the logical
+`--target` value is used as the fallback executable target.
+
+Tasks can cover all executable targets or a subset:
+
+```json
+{
+  "tasks": [
+    {
+      "title": "Enumerate login routes",
+      "objective": "Enumerate login routes on http://dvwa.local",
+      "target_scope": "subset",
+      "target_ids": ["target-1"]
+    }
+  ]
+}
+```
+
+`target_ids` must match the registry exactly. Placeholder or unknown IDs are rejected. Finding-verification tasks inherit
+the exact finding target when it matches the registry, and final reports include a deterministic Target Coverage section.
+
 ### Category Taxonomy
 
-**Report-Generating Categories** (appear in final reports):
-- **finding**: Exploited vulnerabilities, extracted data, confirmed security issues
-- **signal**: Security signals that warrant attention
-- **observation**: Reconnaissance data, failed attempts, recon findings
-- **discovery**: Techniques learned, patterns identified
+- **observation**: Operation-specific facts, reconnaissance, failed attempts, and informational behavior.
+- **knowledge**: Reusable techniques and lessons. Knowledge is retrievable but excluded from reports.
+- **finding_candidate**: A claim submitted through `store_finding`; it automatically creates one verification task.
+- **finding**: A candidate promoted only after its verification task and evaluator approve the evidence.
+- **validation_failure**: A claim that was rejected, not confirmed, incomplete, or still pending at report time.
 
-**Internal Categories** (not in reports):
-- **plan**: Strategic assessment roadmaps
-- **decision**: Tactical decisions and pivot reasoning
-
-**Category Decision Tree** (CRITICAL - wrong category = empty report):
-```
-Q: Did you EXPLOIT something or extract sensitive data?
-   YES → category="finding" (SQLi data dump, auth bypass, flag, RCE, creds)
-   NO  → Q: Did you CONFIRM a vulnerability exists?
-            YES → category="finding" (XSS fires, IDOR returns other user data)
-            NO  → category="observation" (recon, tech stack, failed attempts)
-```
+Legacy `signal` and `discovery` memories are read as observations. Legacy `decision` memories remain internally
+retrievable but are excluded from reports. New workflow decisions are stored in plans, tasks, evaluator results, and
+logs rather than semantic memory.
 
 **Severity Levels** (for findings):
 - **CRITICAL**: Remote code execution, authentication bypass, data breach
@@ -140,13 +172,16 @@ Q: Did you EXPLOIT something or extract sensitive data?
 
 ### Budget-Aware Phase Evaluation
 
-Plan evaluation is triggered by the Python workflow controller. Budget progress is a soft cap distributed across phases:
+Plan evaluation is triggered by the Python workflow controller. Budget progress is distributed across phases using
+mandatory caps:
 
 ```text
-soft_cap = phase_id / total_phases * 100
+phase_cap = phase_id / total_phases * 100
 ```
 
-When a phase reaches its soft cap and only pending work remains, the controller runs a `phase_evaluator` agent before activating more work. The evaluator returns `continue`, `done`, `partial_failure`, or `blocked`; Python stores the result and advances the plan when appropriate.
+When a phase reaches its cap, the controller stops its task work and runs `phase_evaluator` with terminal-only outcomes.
+Python stores `done`, `partial_failure`, or `blocked` and advances the plan. Separate 20%, 40%, 60%, 80%, and 90%
+checkpoints remain advisory below the phase cap and may return `continue`.
 
 ### Strategic Plan Management
 
@@ -155,6 +190,11 @@ Hierarchical planning with phase tracking is stored in SQLite by Python workflow
 ```python
 plan = {
     "objective": "Compromise web application",
+    "constraints": [
+        "Use only network-accessible target interfaces",
+        "Keep activity within the authorized target scope",
+        "Support findings with durable artifact evidence"
+    ],
     "current_phase": 1,
     "total_phases": 3,
     "phases": [
@@ -168,6 +208,7 @@ plan = {
 
 **Required Plan Fields:**
 - `objective`: Overall mission goal
+- `constraints`: Operation-wide guardrails inferred during plan generation from the objective and active prompts
 - `current_phase`: Active phase number
 - `total_phases`: Total number of phases
 - `phases`: List of phase objects with `id`, `title`, `status`, `criteria`
@@ -221,11 +262,13 @@ phase_decision = {"status": "partial_failure", "reason": "Soft budget reached; r
 
 ### Basic Operations
 ```python
-# Store finding with metadata
-mem0_store(
-    content="[WHAT] RCE [WHERE] /upload [IMPACT] Shell access [EVIDENCE] shell.php",
-    metadata={"category": "finding", "severity": "critical", "confidence": "98%"}
+# Store operation facts and reusable lessons. Keep memory_ref when the fact is acceptance evidence.
+observation = store_observation(
+    "The upload route accepts multipart requests",
+    artifacts=["artifacts/upload.txt"],
 )
+# {"stored": true, "created": true, "memory_ref": "memory:<id>"}
+store_knowledge("Validate upload execution with a harmless marker and a negative control")
 
 # Search memories  
 mem0_retrieve(query="SQL injection")
@@ -236,13 +279,17 @@ mem0_list()
 
 ### Advanced Operations
 
-Agents should use semantic memory tools for observations, findings, and evidence:
+Agents should use typed semantic memory tools:
 
 ```python
-mem0_store(
-    content="[WHAT] SQL injection hypothesis [WHERE] /login [EVIDENCE] /outputs/.../request.txt",
-    metadata={"category": "observation", "confidence": "65%"}
+store_observation(
+    "The login response changes for a quote character",
+    artifacts=["artifacts/login-response.txt"],
+    metadata={"confidence": "65%"},
 )
+
+# Pass the returned memory_ref in record_task_acceptance.evidence_refs when a
+# frozen criterion requires observation evidence. Artifact references remain artifact evidence.
 
 mem0_retrieve(query="authentication findings")
 mem0_list()
@@ -324,12 +371,9 @@ Structured finding format ensures consistent evidence collection:
 
 ### Metadata Standards
 
-**Required Fields:**
-- **category**: Taxonomy classification (finding, observation, discovery, signal) - **REQUIRED, missing category raises error**
-- **severity**: Risk level for findings (CRITICAL/HIGH/MEDIUM/LOW)
-- **confidence**: Assessment certainty (percentage, e.g., "85%")
-
-> **Note**: The `category` field is mandatory for store operations. Attempting to store without a category will raise a `ValueError` with guidance on proper categorization.
+Memory tools assign their category; agents do not provide it. `store_finding` requires severity, target, expected and
+observed behavior, reproduction steps, and a technique. A confirmed validation requires existing operation-scoped
+artifacts. Differential evidence also requires a negative-control artifact.
 
 **Optional Fields:**
 - **status**: Verification state (hypothesis, unverified, verified)
@@ -353,7 +397,7 @@ The memory system automatically validates and corrects inconsistent status field
 ### Plan Management
 
 **Lifecycle:**
-1. Python loads the current plan or runs `plan_creator` when none exists.
+1. Python loads the current plan or runs the configured `plan_creator`/`plan_critic` refinement cycle when none exists.
 2. Python ensures exactly one active phase.
 3. Python activates existing active tasks first, then pending tasks when budget policy allows.
 4. Evaluator agents return task/phase decisions.

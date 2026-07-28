@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import importlib
 import types
+
 import pytest
 
-import modules.handlers.agent_repair_hook as tcrh
+# Initialize the agent package before importing the hook, which imports its patches submodule.
+importlib.import_module("cyberautoagent")
+import modules.handlers.agent_repair_hook as tcrh  # noqa: E402
 
 
 class FakeCallbackHandler:

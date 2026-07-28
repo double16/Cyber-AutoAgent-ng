@@ -36,10 +36,8 @@ _LF_SEEDED_LOCK = threading.Lock()
 
 # Mapping local template filenames -> remote Langfuse prompt names
 LF_SYSTEM_PROMPT_NAME = "cyber/system/system_prompt"
-LF_TASK_CAPTURE_PROMPT_NAME = "cyber/system/task_capture"
 _LF_TEMPLATE_TO_NAME = {
     "system_prompt.md": LF_SYSTEM_PROMPT_NAME,
-    "task_capture.md": LF_TASK_CAPTURE_PROMPT_NAME,
     "tools_guide.md": "cyber/system/tools_guide",
     "report_generation_prompt.md": "cyber/report/report_generation_prompt",
     "report_agent_appendix_system_prompt.md": "cyber/report/report_agent_appendix_system_prompt",
@@ -505,9 +503,13 @@ def get_system_prompt(
     if isinstance(output_config, dict):
         artifacts_path = output_config.get("artifacts_path", "")
         tools_path = output_config.get("tools_path", "")
+        operation_path = output_config.get("operation_path", "")
 
         # Use absolute paths, LLMs can get confused with relative paths and prepend a false root
         path_lines = []
+        if isinstance(operation_path, str) and operation_path:
+            path_lines.append(f"**ROOT DIRECTORY**: `{operation_path}`")
+
         if isinstance(artifacts_path, str) and artifacts_path:
             path_lines.append(f"**ARTIFACTS DIRECTORY**: `{artifacts_path}`")
 
@@ -518,7 +520,6 @@ def get_system_prompt(
             operation_paths_block = "\n".join(path_lines)
 
     # Load Tools Guide
-    tools_guide_text = ""
     try:
         tools_guide_text = load_prompt_template("tools_guide.md")
     except Exception:
@@ -554,14 +555,6 @@ def get_system_prompt(
         logger.warning("System prompt has unknown variables: %s ", ", ".join(missing_variables))
 
     return prompt
-
-
-def get_task_capture_prompt() -> str:
-    """Prompt for task worker agents to create new tasks."""
-    template = load_prompt_template("task_capture.md")
-    if template:
-        return template
-    return "Reflect on new tasks and call create_tasks()."
 
 
 def get_report_generation_prompt(
@@ -1029,13 +1022,31 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             parsed.get("vulnerability")
             or safe_truncate(str(top.get("content", "")), 60)
         ).strip()
-        where = (parsed.get("where") or "").strip()
+        top_metadata = top.get("metadata", {}) if isinstance(top.get("metadata"), dict) else {}
+        where = str(
+            parsed.get("where")
+            or top.get("location")
+            or top.get("target")
+            or top_metadata.get("target")
+            or top_metadata.get("location")
+            or top_metadata.get("where")
+            or ""
+        ).strip()
         if not where:
             # Derive primary location across the group if available
             wheres = []
             for it in items:
                 p = it.get("parsed", {}) if isinstance(it.get("parsed"), dict) else {}
-                w = (p.get("where") or "").strip()
+                metadata = it.get("metadata", {}) if isinstance(it.get("metadata"), dict) else {}
+                w = str(
+                    p.get("where")
+                    or it.get("location")
+                    or it.get("target")
+                    or metadata.get("target")
+                    or metadata.get("location")
+                    or metadata.get("where")
+                    or ""
+                ).strip()
                 if w:
                     wheres.append(w)
             where = (
@@ -1064,7 +1075,7 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             else:
                 conf_str = f"{cmin:.1f}%–{cmax:.1f}%"
         else:
-            conf_str = "-"
+            conf_str = "N/A"
 
         # Build anchor link to detailed heading: "#### 1. {vuln} - {where}"
         heading_text = (

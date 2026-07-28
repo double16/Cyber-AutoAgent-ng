@@ -4,11 +4,9 @@ import re
 from typing import Any
 
 from strands.hooks import HookProvider, HookRegistry
-from strands.hooks.events import BeforeModelCallEvent, AfterModelCallEvent
-from strands.types.exceptions import MaxTokensReachedException
+from strands.hooks.events import AfterModelCallEvent, BeforeModelCallEvent, BeforeToolCallEvent
 
 from modules.config.system.logger import get_logger
-from modules.utils.text_reducer import reduce_lines_lossy, collapse_first_repeated_sequence
 
 from modules.agents.patches import _JSON_FENCE_RE, _JSON_BARE_RE, patch_ollama_model_json_toolcalls
 
@@ -18,7 +16,6 @@ logger = get_logger("Handlers.AgentRepairHook")
 _XML_TOOLCALL_RE = re.compile(r"<(?:function|parameter)=[^>]+>.*?</function>", re.DOTALL)
 
 _TOOL_CALLS_RETRY_STATE_KEY = "force_openai_toolcalls_retry"
-_REASONING_LOOP_RETRY_STATE_KEY = "reasoning_loop_retry"
 _JSON_TOOL_CALL_PATCH_ATTEMPT = False
 
 class AgentRepairHook(HookProvider):
@@ -28,9 +25,6 @@ class AgentRepairHook(HookProvider):
     retry once with an extra instruction to emit OpenAI-style tool_calls only.
 
     Case two:
-    Reasoning loop exceeds max tokens.
-
-    Case three:
     Ollama fails to parse tool_calls due to malformed JSON emitted by the model.
     Example: ollama._types.ResponseError: error parsing tool call: ... invalid character '}' after object key
     """
@@ -38,13 +32,47 @@ class AgentRepairHook(HookProvider):
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(AfterModelCallEvent, self.after_model_call_check)
         registry.add_callback(BeforeModelCallEvent, self.before_model_call_inject)
+        registry.add_callback(BeforeToolCallEvent, self.before_tool_call_repair)
         logger.debug("AgentRepairHook registered")
+
+    def before_tool_call_repair(self, event: BeforeToolCallEvent) -> None:
+        """Repair a model-emitted generic tool_use wrapper when its target is registered."""
+
+        tool_use = event.tool_use
+        if tool_use.get("name") != "tool_use":
+            return
+        wrapper_input = tool_use.get("input", {})
+        if not isinstance(wrapper_input, dict):
+            event.cancel_tool = "Generic tool_use wrappers are invalid; call an available tool directly."
+            return
+
+        nested_name = str(wrapper_input.get("tool_name") or wrapper_input.get("name") or "").strip()
+        nested_input = wrapper_input.get("parameters", wrapper_input.get("arguments", {}))
+        registry = getattr(getattr(event.agent, "tool_registry", None), "registry", {})
+        selected_tool = registry.get(nested_name) if isinstance(registry, dict) else None
+        if selected_tool is None or not isinstance(nested_input, dict):
+            available = ", ".join(sorted(registry)) if isinstance(registry, dict) else ""
+            event.cancel_tool = (
+                "Generic tool_use wrappers are invalid. Call a registered tool directly. "
+                f"Available tools: {available or 'none'}."
+            )
+            return
+
+        event.selected_tool = selected_tool
+        event.tool_use = {
+            **tool_use,
+            "name": nested_name,
+            "input": nested_input,
+        }
+        logger.warning("Repaired generic tool_use wrapper to registered tool %s", nested_name)
 
     def after_model_call_check(self, event: AfterModelCallEvent) -> None:
         """
         Runs after the model returns and before tools are processed.
         - If we detect XML-ish tool call markup, request a retry.
-        - If we detect reasoning loop exceeds max tokens, request a retry.
+
+        Output-token exhaustion deliberately propagates to the workflow controller. The
+        controller knows the role contract and can recover without trusting partial output.
         """
         global _JSON_TOOL_CALL_PATCH_ATTEMPT
         if event is None:
@@ -68,6 +96,7 @@ class AgentRepairHook(HookProvider):
                     or "invalid character" in error_str_l
                     or "parse tool call" in error_str_l
                     or "xml syntax error" in error_str_l
+                    # FIXME: The status code check is for Ollama tool call errors. It should include a condition identifying the source as Ollama in the event.exception.
                     or status_code == 500
                 ):
                     state = self._state_bag(event)
@@ -81,70 +110,8 @@ class AgentRepairHook(HookProvider):
                         )
                     return
 
-            max_tokens_reached = False
-            if event.stop_response is not None and event.stop_response.stop_reason == "max_tokens":
-                max_tokens_reached = True
-            elif event.exception is not None:
-                error_str = str(event.exception).lower()
-                if isinstance(event.exception,
-                              MaxTokensReachedException) or "maxtokensreached" in error_str or "max_tokens" in error_str:
-                    max_tokens_reached = True
-            if agent is not None and max_tokens_reached:
-                logger.info("Model input token limit reached, checking if this is a reasoning loop")
-                max_tokens_retry_count = getattr(agent, "_max_tokens_retry_count", 0)
-                if max_tokens_retry_count >= 2:
-                    logger.error("Too many attempts to continue from reasoning loop (%d)", max_tokens_retry_count)
-                else:
-                    # this _could_ be a reasoning loop, we need to check if reducing the text makes a noticeable difference
-
-                    # sometimes the max_tokens response includes the response, otherwise we'll look for reasoning text
-                    truncated_message = ""
-                    replace_last_message = False
-                    if event.stop_response is not None and \
-                            event.stop_response.stop_reason == "max_tokens" and \
-                            event.stop_response.message is not None and \
-                            len(event.stop_response.message.get("content", [])) > 0:
-                        truncated_message = "".join(
-                            [block.get("text", "") for block in event.stop_response.message.get("content", [])]
-                        ).strip()
-                        truncated_message_prefix = truncated_message[:1000]
-                        replace_last_message = truncated_message and len(agent.messages) > 0 and any(
-                            [block.get("text", "").startswith(truncated_message_prefix) for block in
-                             agent.messages[-1].get("content", [])])
-                    if not truncated_message and len(agent.messages) > 0 and \
-                            agent.messages[-1].get("role","") == "assistant":
-                        truncated_message = "".join(
-                            [block.get("text", "") for block in agent.messages[-1].get("content", [])]
-                        ).strip()
-                        replace_last_message = bool(truncated_message)
-                    if not truncated_message and callback_handler is not None:
-                        truncated_message = "".join(callback_handler.reasoning_buffer).strip()
-                        truncated_message_prefix = truncated_message[:1000]
-                        replace_last_message = truncated_message and len(agent.messages) > 0 and any(
-                            [block.get("text", "").startswith(truncated_message_prefix) for block in
-                             agent.messages[-1].get("content", [])])
-                    if truncated_message:
-                        reduced_text = reduce_lines_lossy(
-                            collapse_first_repeated_sequence(truncated_message),
-                            similarity_threshold=0.5, max_lines=40
-                        ).to_text().strip()
-                        setattr(agent, "_max_tokens_retry_count", max_tokens_retry_count + 1)
-                        state = self._state_bag(event)
-                        state[_REASONING_LOOP_RETRY_STATE_KEY] = (reduced_text, replace_last_message)
-                        event.retry = True
-                        logger.warning(
-                            "Model input token limit reached in step %s, retrying with reduced text",
-                            str(callback_handler.action_count) if callback_handler else "?"
-                        )
-                        return
-                    else:
-                        logger.warning("Reasoning text not found")
-
             if event.stop_response is None:
                 return
-
-            # successful model call, reset counter
-            setattr(agent, "_max_tokens_retry_count", 0)
 
             # Try to get assistant text in the most common ways.
             # Adjust these accessors if your event exposes different fields.
@@ -199,7 +166,6 @@ class AgentRepairHook(HookProvider):
             messages = getattr(agent, "messages", None)
             if not isinstance(messages, list):
                 return
-            callback_handler = getattr(agent, "callback_handler", None)
             state = self._state_bag(event)
 
             if state.get(_TOOL_CALLS_RETRY_STATE_KEY):
@@ -218,35 +184,6 @@ class AgentRepairHook(HookProvider):
                     )}]
                 })
                 logger.warning("Injected tool-call format correction into retry model call")
-                return
-
-            if state.get(_REASONING_LOOP_RETRY_STATE_KEY):
-                reduced_text, replace_last_message = state.pop(_REASONING_LOOP_RETRY_STATE_KEY, (None, None))
-
-                if reduced_text:
-                    reduced_message = {"role": "assistant", "content": [{"type": "text", "text": reduced_text}]}
-                    if replace_last_message:
-                        agent.messages[-1] = reduced_message
-                    else:
-                        agent.messages.append(reduced_message)
-                messages.append({
-                    "role": "system",
-                    "content": [{"type": "text", "text": (
-                        """You are continuing from a prior run that entered a repetitive reasoning loop.
-
-## CONSTRAINTS
-- Do NOT restate repeated points from the reduced notes.
-- Output must be structured, actionable, and short.
-- Avoid meta commentary about "looping" beyond what's required to recover.
-"""
-                    )}]
-                })
-                try:
-                    if callback_handler:
-                        callback_handler._emit_accumulated_reasoning(force=True)
-                except Exception:
-                    pass
-                logger.warning("Injected reduced text and prompt into retry model call")
                 return
 
         except Exception as e:

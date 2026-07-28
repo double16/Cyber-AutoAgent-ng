@@ -1,16 +1,15 @@
-**Workflow completion criteria**:
-1. Environment comprehensively mapped + context documented
-2. Budget ≥95%
-3. All discovery layers completed (or blocked by permissions)
+## Module completion criteria
 
-**Before claiming completion, MANDATORY**:
-1. "System role: [identified purpose]"
-2. "Critical assets: [list high-value targets]"
-3. "Security posture: [controls identified]"
-4. "Data landscape: [sensitive data locations]"
-5. "Recommendations: [next steps for follow-on operations]"
+Classify the phase against its own criteria and the following operation-level outcomes:
 
-**Completion is not ready when**:
-- Context incomplete + budget <95%
-- Major gaps in understanding (e.g., network topology unknown)
-- Critical assets not identified
+- The system role, granted identity and privilege, and access context are documented.
+- Applicable system, identity, network, application, data-location, security-control, trust, and business layers are
+  mapped, or each material gap has an artifact-backed scope, permission, or availability explanation.
+- Critical assets and data locations are cataloged without accessing sensitive content.
+- Contextual results are observations; any security finding is separately verified with reproducible evidence.
+- Recommended follow-on work identifies important unanswered questions without performing lateral movement.
+
+Use `done` only when the phase criteria and applicable mapping outcomes are evidence-backed. Use `partial_failure` when
+useful context exists but material mapping or evidence is incomplete. Use `blocked` only when a concrete access,
+permission, authorization, or environmental dependency prevents the phase work. Budget consumption alone is never a
+completion requirement.

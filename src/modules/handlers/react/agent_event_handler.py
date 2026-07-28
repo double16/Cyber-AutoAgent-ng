@@ -5,43 +5,44 @@ It is intentionally UI-agnostic: the React terminal is one consumer, but the
 event protocol is shared by CLI/logging/automation surfaces.
 """
 
+import asyncio
 import json
 import math
 import os
 import re
 import threading
 import time
-import asyncio
 import uuid
 from collections import OrderedDict
-from datetime import datetime
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
 from strands.handlers import PrintingCallbackHandler
 
-from ..base import BudgetLimitReached
-from ..events import EventEmitter, get_emitter
-from ..output_interceptor import (
-    get_buffered_output,
-    get_buffered_error_output,
-    set_tool_execution_state,
-)
-from .tool_emitters import ToolEventEmitter
 from modules.config.system.logger import get_logger
+from modules.handlers.utils import (
+    get_output_path,
+    sanitize_target_name,
+)
+
 from ...config import get_config_manager
 from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
 from ...config.types import DEFAULT_MAX_DURATION
-from ..conversation_budget import token_calc
 from ...utils.text_reducer import collapse_first_repeated_sequence
-
-from modules.handlers.utils import (
-    get_output_path,
-    sanitize_target_name,
+from ..base import BudgetLimitReached
+from ..conversation_budget import token_calc
+from ..events import EventEmitter, get_emitter
+from ..output_interceptor import (
+    get_buffered_error_output,
+    get_buffered_output,
+    set_tool_execution_state,
 )
+from ..tool_recovery import ToolOutcomeJournal
+from .tool_emitters import ToolEventEmitter
 
 logger = get_logger("Handlers.AgentEvent")
 
@@ -102,6 +103,7 @@ class OperationEventCoordinator:
         self._agent_sequence = 0
         self._termination_emitted = False
         self._termination_reason: Optional[str] = None
+        self._termination_message: Optional[str] = None
         self._report_generated = False
         self.memory_ops = 0
         self.evidence_count = 0
@@ -115,6 +117,7 @@ class OperationEventCoordinator:
         self._report_observation_content_token_items: List[int] = []
         self._report_exact_counts = False
         self._report_steps_started = 0
+        self._operation_health_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
     def next_agent_run_id(self, agent_name: str) -> str:
         with self._lock:
@@ -123,8 +126,36 @@ class OperationEventCoordinator:
             return f"{safe_name}-{self._agent_sequence}"
 
     def emit(self, event: Dict[str, Any]) -> None:
+        enriched_event = dict(event)
+        if enriched_event.get("type") == "progress_update" and "health" not in enriched_event:
+            health = self.operation_health_snapshot()
+            if health is not None:
+                enriched_event["health"] = health
         with self._lock:
-            self.emitter.emit(event)
+            self.emitter.emit(enriched_event)
+
+    def set_operation_health_provider(
+        self,
+        provider: Optional[Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Set the shared best-effort health provider for operation progress events."""
+
+        with self._lock:
+            self._operation_health_provider = provider
+
+    def operation_health_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return a JSON-safe operation health snapshot without disrupting event emission."""
+
+        with self._lock:
+            provider = self._operation_health_provider
+        if provider is None:
+            return None
+        try:
+            snapshot = provider()
+        except Exception as error:
+            logger.debug("Unable to compute operation health: %s", error, exc_info=True)
+            return None
+        return dict(snapshot) if isinstance(snapshot, dict) else None
 
     def update_usage(self, handler_id: str, entry: _AgentUsageEntry) -> None:
         with self._lock:
@@ -167,9 +198,8 @@ class OperationEventCoordinator:
                 return
 
             normalized_category = str(category or "").strip().lower()
-            normalized_severity = str(severity or "").strip().upper()
             content_tokens = token_calc(max(0, int(content_length or 0)), model_id=model_id)
-            if normalized_category == "finding" or normalized_severity in {"CRITICAL", "HIGH"}:
+            if normalized_category in {"finding", "finding_candidate", "validation_failure"}:
                 self.report_findings += 1
                 self.report_finding_content_tokens += content_tokens
                 self._report_finding_content_token_items.append(content_tokens)
@@ -318,12 +348,13 @@ class OperationEventCoordinator:
 
         return fallback_cost
 
-    def mark_termination(self, reason: str) -> bool:
+    def mark_termination(self, reason: str, message: Optional[str] = None) -> bool:
         with self._lock:
             if self._termination_emitted:
                 return False
             self._termination_emitted = True
             self._termination_reason = reason
+            self._termination_message = message
             return True
 
     @property
@@ -335,6 +366,11 @@ class OperationEventCoordinator:
     def termination_reason(self) -> Optional[str]:
         with self._lock:
             return self._termination_reason
+
+    @property
+    def termination_message(self) -> Optional[str]:
+        with self._lock:
+            return self._termination_message
 
 
 class AgentEventHandler(PrintingCallbackHandler):
@@ -488,6 +524,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         self.announced_tools = set()
         self.tool_input_buffer = {}
         self.tool_name_buffer = {}  # Map tool_id -> tool_name for correct attribution
+        self.tool_outcome_journal = ToolOutcomeJournal()
         self.tools_used = set()
         # Track per-tool usage counts for accurate reporting
         self.tool_counts = {}
@@ -537,6 +574,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         # Termination tracking (workflow completion, user abort, or budget limit)
         self._termination_emitted = False
         self._termination_reason: Optional[str] = None
+        self._termination_message: Optional[str] = None
         # Track python_repl preview emission per tool id to suppress generic completion
         self._python_preview_emitted = set()
 
@@ -653,6 +691,30 @@ class AgentEventHandler(PrintingCallbackHandler):
                 f"Failed to emit event {event.get('type')}: {e}", exc_info=True
             )
 
+    def set_operation_health_provider(
+        self,
+        provider: Optional[Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Set the operation-wide health provider shared by every agent handler."""
+
+        self.coordinator.set_operation_health_provider(provider)
+
+    def operation_health_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return the shared point-in-time operation health snapshot."""
+
+        return self.coordinator.operation_health_snapshot()
+
+    def operation_health_budget_diagnostics(self) -> Dict[str, Any]:
+        """Return assessment progress and terminal-budget inputs for operation health."""
+
+        termination_reason = self.coordinator.termination_reason if self.coordinator is not None else self._termination_reason
+        return {
+            "termination_reason": termination_reason,
+            "termination_limit": self._budget_limit_reason,
+            "progress_percent": self.get_budget_progress(),
+            "assessment_active": not self._report_generated,
+        }
+
     def _metadata_from_agent(self, agent: Any) -> Dict[str, str]:
         """Return Cyber-AutoAgent event metadata attached to a Strands agent."""
         if not agent:
@@ -685,15 +747,32 @@ class AgentEventHandler(PrintingCallbackHandler):
         """
         try:
             with self._state_lock:
+                if getattr(self, "parent_agent_run_id", None):
+                    if self._termination_emitted:
+                        return
+                    self._termination_emitted = True
+                    self._termination_reason = reason
+                    self._termination_message = message
+                    self.emit_ui_event(
+                        {
+                            "type": "agent_termination",
+                            "scope": "agent",
+                            "reason": reason,
+                            "message": message,
+                        }
+                    )
+                    return
                 coordinator = self.coordinator
-                if coordinator is not None and not coordinator.mark_termination(reason):
+                if coordinator is not None and not coordinator.mark_termination(reason, message):
                     self._termination_emitted = True
                     self._termination_reason = coordinator.termination_reason
+                    self._termination_message = coordinator.termination_message
                     return
                 if coordinator is None and self._termination_emitted:
                     return
                 self._termination_emitted = True
                 self._termination_reason = reason
+                self._termination_message = message
 
                 # Flush any accumulated reasoning so it doesn't appear after termination
                 try:
@@ -707,31 +786,44 @@ class AgentEventHandler(PrintingCallbackHandler):
                 except Exception:
                     pass
 
-                self.emit_ui_event(
-                    {
-                        "type": "progress_update",
-                        "step": "TERMINATED",
-                        "progressPercent": self.get_budget_progress(),
-                        "operation": self.operation_id,
-                        "duration": self._format_duration(self._operation_elapsed_seconds()),
-                    }
-                )
+                self.emit_budget_progress_update(step="TERMINATED")
 
                 # Emit termination details
-                self.emit_ui_event(
-                    {
-                        "type": "termination_reason",
-                        "reason": reason,
-                        "message": message,
-                        "budget": {
-                            "maxDurationMinutes": self._budget_max_duration(),
-                            "maxTokens": self._budget_max_tokens(),
-                            "maxCost": self._budget_max_cost(),
-                        },
-                    }
-                )
+                termination_event = {
+                    "type": "termination_reason",
+                    "scope": "operation",
+                    "reason": reason,
+                    "message": message,
+                    "budget": {
+                        "maxDurationMinutes": self._budget_max_duration(),
+                        "maxTokens": self._budget_max_tokens(),
+                        "maxCost": self._budget_max_cost(),
+                    },
+                }
+                health = self.operation_health_snapshot()
+                if health is not None:
+                    termination_event["health"] = health
+                self.emit_ui_event(termination_event)
         except Exception as e:
             logger.debug("Failed to emit termination event: %s", e)
+
+    def emit_budget_progress_update(
+        self,
+        *,
+        step: Any = None,
+        total_tools: Optional[int] = None,
+    ) -> None:
+        """Emit a generic budget progress snapshot for the current operation state."""
+        event = {
+            "type": "progress_update",
+            "step": self.action_count if step is None else step,
+            "progressPercent": self.get_budget_progress(),
+            "operation": self.operation_id,
+            "duration": self._format_duration(self._operation_elapsed_seconds()),
+        }
+        if total_tools is not None:
+            event["totalTools"] = total_tools
+        self.emit_ui_event(event)
 
     def _transform_sdk_event(self, kwargs: Dict[str, Any]) -> None:
         """Adapt SDK callbacks to UI events.
@@ -1616,42 +1708,50 @@ class AgentEventHandler(PrintingCallbackHandler):
         tool_input = self.tool_input_buffer.get(tool_use_id, {})
 
         success = status != "error"
+        outcome = str(tool_result_dict.get("_cyber_outcome") or ("success" if success else "error"))
+        executed = bool(tool_result_dict.get("_cyber_executed", True))
+        completion_metadata = {
+            "success": success,
+            "outcome": outcome,
+            "executed": executed,
+        }
 
         # Update live metrics for memory operations and evidence collection
         try:
-            if tool_name in {"mem0_store"} and success:
+            memory_tools = {
+                "store_observation",
+                "store_knowledge",
+                "store_finding",
+                "record_finding_validation",
+            }
+            if tool_name in memory_tools and success:
                 # Increment memory operation count on successful storage actions
                 if isinstance(tool_input, dict):
                     self.memory_ops += 1
-                    # Only count evidence for store actions with report-generating categories.
-                    # Categories per memory.py: finding, signal, observation, discovery
-                    if tool_name == "mem0_store":
-                        metadata = (
-                            tool_input.get("metadata", {})
-                            if isinstance(tool_input.get("metadata"), dict)
-                            else {}
-                        )
-                        category = str(metadata.get("category", "")).lower()
+                    # Only observations and finding candidates contribute evidence/report items.
+                    if tool_name in {"store_observation", "store_finding"}:
+                        category = "finding_candidate" if tool_name == "store_finding" else "observation"
+                        metadata = tool_input.get("metadata", {}) if isinstance(tool_input.get("metadata"), dict) else {}
                         severity = str(metadata.get("severity", "") or tool_input.get("severity", ""))
-                        content = tool_input.get("content") or tool_input.get("memory") or ""
-                        if category in ("finding", "signal", "observation", "discovery"):
-                            self.evidence_count += 1
-                            if self.coordinator is not None:
-                                self.coordinator.record_memory(
-                                    evidence=True,
-                                    category=category,
-                                    severity=severity,
-                                    content_length=len(str(content)),
-                                    model_id=self.model_id,
-                                )
-                        elif self.coordinator is not None:
+                        content = tool_input.get("content") or tool_input.get("claim") or ""
+                        self.evidence_count += 1
+                        if self.coordinator is not None:
                             self.coordinator.record_memory(
-                                evidence=False,
+                                evidence=True,
                                 category=category,
                                 severity=severity,
                                 content_length=len(str(content)),
                                 model_id=self.model_id,
                             )
+                    elif self.coordinator is not None:
+                        category = "knowledge" if tool_name == "store_knowledge" else "finding_validation"
+                        content = tool_input.get("content") or tool_input.get("summary") or ""
+                        self.coordinator.record_memory(
+                            evidence=False,
+                            category=category,
+                            content_length=len(str(content)),
+                            model_id=self.model_id,
+                        )
         except Exception:
             # Never allow metrics update errors to disrupt output
             pass
@@ -1666,7 +1766,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         _deferred_tool_end = {
             "tool_name": tool_name,
             "tool_id": tool_use_id,
-            "success": success,
+            **completion_metadata,
         }
         if duration is not None:
             _deferred_tool_end["duration"] = f"{duration:.2f}s"
@@ -1717,11 +1817,19 @@ class AgentEventHandler(PrintingCallbackHandler):
                 except Exception:
                     requested_timeout = None
 
+                exit_code = None
+                try:
+                    exit_match = re.search(r"(?im)^Exit Code:\s*(-?\d+)\s*$", error_text)
+                    if exit_match:
+                        exit_code = int(exit_match.group(1))
+                except (TypeError, ValueError):
+                    exit_code = None
+
                 # Emit a structured error event with guidance if this looks like a timeout
                 looks_like_timeout = (
-                    ("timed out" in clean_error.lower())
-                    or ("timeout" in clean_error.lower())
-                    or ("TimeoutExpired" in clean_error)
+                    exit_code == 124
+                    or bool(re.search(r"timed out after\s+\d+\s*seconds?", clean_error, re.IGNORECASE))
+                    or "TimeoutExpired" in clean_error
                 )
                 if looks_like_timeout:
                     friendly_msg_lines = [
@@ -1763,8 +1871,8 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self.emit_ui_event(
                     {
                         "type": "tool_invocation_end",
-                        "success": success,
                         "tool_name": tool_name,
+                        **completion_metadata,
                     }
                 )
                 # Emit tool_end after output and invocation_end
@@ -1826,8 +1934,8 @@ class AgentEventHandler(PrintingCallbackHandler):
                         self.emit_ui_event(
                             {
                                 "type": "tool_invocation_end",
-                                "success": success,
                                 "tool_name": tool_name,
+                                **completion_metadata,
                             }
                         )
                         self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
@@ -1849,8 +1957,8 @@ class AgentEventHandler(PrintingCallbackHandler):
             self.emit_ui_event(
                 {
                     "type": "tool_invocation_end",
-                    "success": success,
                     "tool_name": tool_name,
+                    **completion_metadata,
                 }
             )
             # Emit tool_end after output and invocation_end
@@ -1885,8 +1993,8 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         tool_inv_end_event = {
             "type": "tool_invocation_end",
-            "success": success,
             "tool_name": tool_name,
+            **completion_metadata,
         }
         self.emit_ui_event(tool_inv_end_event)
         # Emit tool_end after output and invocation_end
@@ -2280,17 +2388,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             pass
 
         try:
-            progress_percent = self.get_budget_progress()
-            self.emit_ui_event(
-                {
-                    "type": "progress_update",
-                    "step": self.action_count,
-                    "progressPercent": progress_percent,
-                    "operation": self.operation_id,
-                    "duration": self._format_duration(self._operation_elapsed_seconds()),
-                    "totalTools": len(self.tools_used),
-                }
-            )
+            self.emit_budget_progress_update(step=self.action_count, total_tools=len(self.tools_used))
 
             # This new action requires a reasoning emission (unless a pre-header flush already sufficed)
             if not flushed_here:
@@ -2823,14 +2921,24 @@ class AgentEventHandler(PrintingCallbackHandler):
 
     # Report generation methods
     def ensure_report_generated(
-        self, agent, target: str, objective: str, module: str = None
+        self,
+        agent,
+        target: str,
+        objective: str,
+        module: str = None,
+        completion_status: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Ensure report is generated only once."""
         if not self._report_generated:
-            self.generate_final_report(agent, target, objective, module)
+            self.generate_final_report(agent, target, objective, module, completion_status=completion_status)
 
     def generate_final_report(
-        self, agent, target: str, objective: str, module: str = None
+        self,
+        agent,
+        target: str,
+        objective: str,
+        module: str = None,
+        completion_status: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Generate final security assessment report.
 
@@ -2908,6 +3016,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "provider": provider,
                 "module": module,
                 "model_id": model_id,  # Pass main model for reports
+                "completion_status": completion_status,
             }
 
             target_name = sanitize_target_name(target)
@@ -2951,6 +3060,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             if report_content:
                 self._completed_report_path = report_path
                 self.emit_ui_event({"type": "report_content", "content": report_content})
+                self.emit_budget_progress_update()
 
                 # Also emit file path information for reference
                 self.emit_ui_event(
@@ -3037,9 +3147,10 @@ class AgentEventHandler(PrintingCallbackHandler):
 
             eval_manager = EvaluationManager(
                 operation_id=self.operation_id,
-                emitter=self.emitter,
+                emitter=self.coordinator,
                 report_path=getattr(self, "_evaluation_report_path", None),
                 usage_callback=self._record_evaluation_usage,
+                progress_callback=self.emit_budget_progress_update,
             )
 
             eval_manager.register_trace(
@@ -3086,6 +3197,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "average_score": average_score,
                     }
                 )
+                self.emit_budget_progress_update()
             else:
                 logger.warning("No evaluation results - check trace finding and metric evaluation")
                 self.emit_ui_event(
@@ -3100,6 +3212,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "message": "Evaluation produced no scores",
                     }
                 )
+                self.emit_budget_progress_update()
 
         except Exception as e:
             logger.warning("Evaluation failed but continuing operation: %s", str(e), exc_info=True)
@@ -3115,6 +3228,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "message": "Evaluation failed; see logs for details",
                 }
             )
+            self.emit_budget_progress_update()
 
     # Property methods for compatibility
     @property
@@ -3145,13 +3259,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                 max_duration = self._budget_max_duration()
                 if isinstance(max_duration, int) and max_duration > 0:
                     if self._operation_elapsed_seconds() >= float(max_duration) * 60.0:
+                        self._budget_limit_reason = "duration"
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
                                 f"Duration limit reached: {max_duration}m",
                             )
                         self._budget_limit_reached = True
-                        self._budget_limit_reason = "duration"
                         return True
 
                 # Token cap
@@ -3160,13 +3274,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                     totals = self._budgeted_usage_totals()
                     total_tokens = int(totals["input_tokens"]) + int(totals["output_tokens"])
                     if total_tokens >= int(max_tokens):
+                        self._budget_limit_reason = "tokens"
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
                                 f"Token limit reached: {total_tokens}/{max_tokens}",
                             )
                         self._budget_limit_reached = True
-                        self._budget_limit_reason = "tokens"
                         return True
 
                 # Cost cap
@@ -3175,13 +3289,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                     totals = self._budgeted_usage_totals()
                     cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
                     if cost >= float(max_cost):
+                        self._budget_limit_reason = "cost"
                         if not self._termination_emitted:
                             self.emit_termination(
                                 "budget_limit",
                                 f"Cost limit reached: {cost:.4f}/{max_cost}",
                             )
                         self._budget_limit_reached = True
-                        self._budget_limit_reason = "cost"
                         return True
             except Exception:
                 # Never fail stop checks due to metric calculation errors
@@ -3200,6 +3314,10 @@ class AgentEventHandler(PrintingCallbackHandler):
     @property
     def termination_reason(self) -> Optional[str]:
         return self._termination_reason
+
+    @property
+    def termination_message(self) -> Optional[str]:
+        return self._termination_message
 
     @property
     def report_generated(self) -> bool:

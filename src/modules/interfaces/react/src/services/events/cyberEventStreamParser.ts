@@ -114,9 +114,14 @@ function updateToolExecutionState(
     state.currentToolName = undefined;
 
     if (eventData.type === 'tool_end') {
+      const completion = eventData.success
+        ? `✓ ${eventData.tool_name}`
+        : eventData.executed === false
+          ? `○ ${eventData.tool_name} (${eventData.outcome === 'blocked' ? 'blocked' : 'input validation failed'})`
+          : `○ ${eventData.tool_name} (failed)`;
       emitEvent({
         type: 'output',
-        content: eventData.success ? `✓ ${eventData.tool_name}` : `○ ${eventData.tool_name}`,
+        content: completion,
         timestamp: Date.now(),
       });
     }
@@ -199,9 +204,10 @@ export function emitStatusEvents(
   const event = createParsedEvent(eventData);
 
   if (event.type === 'tool_discovery_start') {
+    const message = eventData.message || 'Loading cybersecurity assessment tools';
     emitEvent({
       type: 'output',
-      content: '◆ Loading cybersecurity assessment tools:',
+      content: `◆ ${message}`,
       timestamp: Date.now(),
     });
   } else if (event.type === 'tool_available') {
@@ -217,9 +223,10 @@ export function emitStatusEvents(
       timestamp: Date.now(),
     });
   } else if (event.type === 'environment_ready') {
+    const message = eventData.message || `Environment ready - ${eventData.tool_count} cybersecurity tools loaded`;
     emitEvent({
       type: 'output',
-      content: `◆ Environment ready - ${eventData.tool_count} cybersecurity tools loaded`,
+      content: `◆ ${message}`,
       timestamp: Date.now(),
     });
   } else if (event.type === 'operation_complete' || event.type === 'assessment_complete') {

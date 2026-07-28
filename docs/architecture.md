@@ -20,13 +20,36 @@ Long-lived autonomous conversations tend to accumulate stale assumptions, lose c
 
 The controller creates agents for specific jobs:
 
-- **plan_creator**: creates an initial high-level plan when none exists
-- **task_creator**: creates concrete current- and future-phase tasks from a deterministic controller prompt
+- **plan_creator**: creates or revises an initial high-level plan and infers operation-wide constraints
+- **plan_critic**: reviews an initial plan and either approves it or returns actionable revision feedback
+- **task_creator**: creates concrete current-phase tasks with finite acceptance contracts from a deterministic
+  controller prompt
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
-- **task_executor**: executes one active task objective
-- **task_evaluator**: returns task status: `done`, `partial_failure`, or `blocked`
+- **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
+- **task_executor**: executes one active task objective and retains its conversation across critic-guided passes
+- **task_evaluator**: reviews semantically complete acceptance ledgers and returns `done`, `partial_failure`, or `blocked`
 - **phase_evaluator**: returns phase status: `continue`, `done`, `partial_failure`, or `blocked`
+
+Module execution guidance supplies operation intent, explicit access boundaries, domain behavior, and evidence rules to
+planning and execution roles. The module termination policy is also supplied directly to plan creation, plan criticism,
+plan revision, and phase evaluation so required end states become measurable plan criteria. A controller-owned executor
+contract keeps individual workers scoped to one task regardless of module.
+
+Each task also has an immutable acceptance manifest. Procedure bases declare machine-readable limits and whether they
+produce a generic artifact or versioned inventory manifest; coverage bases freeze one inventory artifact and its hash.
+Executors submit an atomic evidence-backed result for every criterion and, for coverage work, one terminal disposition
+per manifest item. Python resolves typed artifact, memory, observation, and finding evidence before semantic
+evaluation. This preserves broad, cohesive work under one retained executor without allowing moving completion
+targets.
+
+```mermaid
+flowchart LR
+    M[Missing or invalid snapshot] --> R[Reject coverage task batch]
+    R --> P[Create bounded prerequisite inventory task]
+    P --> V[Validate and hash version-1 manifest]
+    V --> C[Create coverage tasks against frozen snapshot]
+```
 
 The swarm tool remains available as an execution capability, but it is no longer the top-level orchestration model.
 
@@ -44,7 +67,7 @@ graph TB
     F --> I[AI Models]
     
     G --> J[shell]
-    G --> K[mem0_store / mem0_retrieve]
+    G --> K[Typed memory tools / mem0_retrieve]
     G --> L[create_tasks when allowed]
     G --> M[Selected Module Tools]
     G --> N[Selected MCP Tools]
@@ -76,7 +99,98 @@ Plan/task state transitions are owned by Python workflow code. Agents can only a
 
 There is no agent-callable stop tool. When Python workflow evaluation determines the assessment is complete, the controller emits a `termination_reason` event with reason `complete`.
 
-There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task history, memory summaries, and selected optional tool candidates. Budget checkpoints are handled by Python control flow before pending task activation.
+Generated plan constraints are durable workflow guardrails. Task creation and prompt-building roles must honor them,
+and task/phase evaluators prevent successful completion when evidence shows a constraint violation.
+
+Initial plan generation uses a bounded actor/critic cycle before persistence. Critic approval immediately accepts the
+current draft; rejection sends feedback to `plan_creator` for revision. The
+`CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS` environment variable limits reviews and defaults to three. A rejection on
+the final configured review fails the workflow so an unapproved plan is never persisted or executed.
+
+Task prompt generation uses the same bounded pattern. `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` defaults to
+two critic reviews and accepts `0` to disable critique. A final rejection or invalid structured response after JSON
+retries marks only the active task `partial_failure`, without invoking its executor or evaluator.
+
+Task execution then uses a second bounded actor/critic loop:
+
+```mermaid
+flowchart LR
+    E[Retained task-executor] --> V[Fresh task-evaluator]
+    V -->|done| D[Persist done]
+    V -->|partial_failure or blocked| F[Persist final verdict]
+    E -->|no valid complete ledger; pass remains| E
+    E -->|cycle limit reached| F
+```
+
+`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits executor attempts to produce a valid atomic ledger, defaults to three,
+and has a minimum of one.
+while `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` independently limits rejected acceptance repairs to two after the initial
+submission. Repairs retain the executor conversation and stop early when an equivalent rejected payload is repeated.
+Once that ledger exists, the evaluator's semantic verdict is terminal because the ledger cannot
+be revised. Python persists `done`, `partial_failure`, or `blocked` without replaying completed acceptance.
+
+Task creators stop within the Strands event loop after the first successful `create_tasks` mutation. Task executors
+stop the same way after a complete `record_task_acceptance` result. Rejected calls do not set the success marker and
+remain correctable; role completion therefore depends on durable success rather than raw tool-call counts or a later
+text-only turn.
+
+Every role invocation also has deterministic safety bounds. Three consecutive responses without a new tool action stop
+a required-tool role as stalled, regardless of tool calls or reasoning emitted during an earlier actor cycle. An
+absolute controller-to-agent call ceiling bounds repeated invocations, while the Strands SDK `turns` limit bounds model
+calls and tool executions inside each invocation. Task-executor actor cycles allow 8 agent calls with 32 SDK turns per
+call, bounded tool-recovery runs allow 4 calls with 8 turns, and task creators allow 3 calls with 6 turns.
+No-action redirection prompts respect the role policy: roles that disallow text completion are instructed to call an
+outstanding required tool and are never offered a text-only final-answer path. Task executors instead receive a
+task-progress redirect because their required acceptance tool is a completion condition: they call the next tool needed
+for unmet criteria and durable evidence, then submit acceptance after its prerequisites are complete.
+
+Bounded procedure contracts declare whether their output is a generic artifact or a version-1 inventory manifest.
+Python rejects mismatched evidence requirements during task creation. Inventory executors receive the canonical JSON
+shape in both their task prompt and acceptance-tool description, and acceptance validation evaluates each referenced
+artifact independently so an unrelated supporting file cannot invalidate a separate valid inventory.
+
+Each retained task executor also keeps a bounded controller-owned tool-outcome journal. A locally correctable failure
+permits prerequisite inspection or creation, independent work, alternative methods, and two changed retries by
+default. Structured memory and acceptance validation errors enter the same correction path. Identical failed calls are
+blocked locally, and equivalent failures are counted across retained executor cycles so conversation boundaries cannot
+restart an unbounded loop. Recovery does not lock unrelated tools or durable evidence operations.
+Generic executable startup and dependency failures quarantine only that executable for the current operation; later
+task prompts omit it while capability-compatible commands remain available. An unresolved correction is
+deterministically `partial_failure`. Evaluators receive the authoritative outcome journal separately from the worker's
+final narrative and must prefer it when the two conflict. Failed diagnostic and preflight shell commands remain visible
+in the journal but do not start recovery.
+
+Shell-tool discovery first resolves each configured command on `PATH`. A tool may optionally declare a side-effect-free
+`canary` object with `args`, `timeout_seconds`, and `accepted_exit_codes`; successful canaries mark tools verified.
+Commands without a safe standalone canary remain available but unverified. The Docker tools-image verifier implements
+the same configuration contract independently and is not imported by application runtime code.
+
+Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
+controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (four by
+default). Each turn ends after its first tool result; the initial prompt contains stable phase context and corrections
+contain only the prior validation error. Generic reasoning-loop repair is disabled for this role. Agents submit a flat
+`TaskProposal` whose `limits` object is always required. Python discards it and `output_kind` for snapshot work,
+infers the basis, supplies procedure invariants, derives source references and target scope, and compiles the proposal
+before storage. Inventory-wide moving collections are rejected as procedures and must use frozen snapshot references.
+Exact frozen-contract duplicates are skipped deterministically within the active phase; completed coverage from one
+phase does not suppress work against the same snapshot in a later phase. Unfinished coverage retries remain eligible,
+and duplicate-only calls retain the creator tool for a bounded corrected submission.
+
+Successful task acceptance populates task evidence with the validated immutable ledger references. Phase
+evaluators receive that canonical per-criterion ledger and may read only its resolved artifact paths, preventing stale
+predicted filenames from overriding accepted evidence. Task creators use a closed flat schema with explicit limits,
+criterion descriptions, snapshot references, and target IDs. Python generates readable unique criterion IDs and
+evidence requirements and owns the remaining contract and lifecycle fields.
+
+Complete task acceptance also publishes one bounded operation observation containing the task objective, criterion
+statuses, concrete summaries, evidence references, and aggregate coverage counts. Publication is replay-safe and lets
+later task-prompt-builders select accepted information by memory ID. A memory-backend failure is reported in the tool
+result but does not invalidate the immutable acceptance ledger or add an undeclared evaluator requirement.
+
+There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt
+adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task
+history, memory summaries, and selected optional tool candidates. Python enforces proportional phase budget caps before
+task work and handles separate advisory checkpoints before pending task activation.
 
 ### Security Tool Access
 
@@ -148,7 +262,7 @@ flowchart TD
     D -->|Medium 50-80%| F[Deploy Swarm or Module Tool]
     D -->|Low <50%| G[Gather More Intelligence]
     
-    E --> H[mem0_store: Evidence]
+    E --> H[Typed memory: Evidence]
     F --> H
     G --> H
     
@@ -227,7 +341,7 @@ MCP Tools pre-configured:
 ```mermaid
 graph TB
     A[Agent Actions] --> B[Finding Discovered]
-    B --> C[mem0_store]
+    B --> C[store_finding / store_observation / store_knowledge]
     C --> D[Backend Selection]
 
     D --> E[Mem0 Platform<br/>MEM0_API_KEY]

@@ -116,56 +116,40 @@ describe('Specialist tool formatters', () => {
       expect(formatted).not.toContain('[{');
     });
 
-    it('still shows preview for store action', async () => {
+    it('shows previews for typed memory actions', async () => {
       const mod: any = await import('../../../src/utils/toolFormatters.js');
       const { toolFormatters } = mod;
 
-      const input = {
-        content: 'Important finding about SQLi'
-      };
-
-      const formatted = toolFormatters.mem0_store(input);
-
-      expect(formatted).toContain('storing memory');
-      expect(formatted).toContain('SQLi');
+      expect(toolFormatters.store_observation({content: 'Observed SQLi', artifacts: []}))
+        .toContain('Observed SQLi');
+      expect(toolFormatters.store_knowledge({content: 'Test with a control'}))
+        .toContain('storing knowledge');
     });
 
-    it('handles nested JSON with memory field', async () => {
+    it('formats finding candidates with verification language', async () => {
       const mod: any = await import('../../../src/utils/toolFormatters.js');
       const { toolFormatters } = mod;
 
-      const nestedResponse = JSON.stringify({
-        results: [{
-          memory: '[OBSERVATION] Direct curl requests to ripio.com return 403',
-          event: 'ADD'
-        }]
+      const formatted = toolFormatters.store_finding({
+        title: 'SQL injection',
+        severity: 'HIGH',
+        target: '/search',
+        artifacts: ['response.txt'],
       });
 
-      const input = {
-        content: nestedResponse
-      };
-
-      const formatted = toolFormatters.mem0_store(input);
-
-      expect(formatted).toContain('storing memory');
-      expect(formatted).toContain('content:');
-      expect(formatted).toContain('OBSERVATION');
-      expect(formatted).toContain('403');
+      expect(formatted).toContain('submitting finding for verification');
+      expect(formatted).toContain('severity: HIGH');
+      expect(formatted).toContain('1 artifact');
     });
 
-    it('handles malformed JSON gracefully', async () => {
+    it('handles missing typed memory input gracefully', async () => {
       const mod: any = await import('../../../src/utils/toolFormatters.js');
       const { toolFormatters } = mod;
 
-      const input = {
-        content: '{invalid json content...'
-      };
-
-      const formatted = toolFormatters.mem0_store(input);
-
-      // Should not crash, should show truncated original content
-      expect(formatted).toContain('storing memory');
-      expect(typeof formatted).toBe('string');
+      expect(toolFormatters.store_observation(null)).toContain('storing observation');
+      expect(toolFormatters.store_knowledge(undefined)).toContain('storing knowledge');
+      expect(toolFormatters.store_finding({})).toContain('severity: UNKNOWN');
+      expect(toolFormatters.record_finding_validation({})).toContain('outcome: unknown');
     });
 
   });

@@ -8,6 +8,11 @@ import {ModalType} from '../../../src/hooks/useModalManager.js';
 const pauseMonitoring = jest.fn();
 const resumeMonitoring = jest.fn();
 const checkHealth = jest.fn();
+const setOperationTerminalTitle = jest.fn();
+
+jest.unstable_mockModule('../../../src/utils/terminalTitle.js', () => ({
+    setOperationTerminalTitle,
+}));
 
 jest.unstable_mockModule('../../../src/services/HealthMonitor.js', () => ({
     HealthMonitor: {
@@ -20,8 +25,8 @@ jest.unstable_mockModule('../../../src/components/Header.js', () => ({
 }));
 
 jest.unstable_mockModule('../../../src/components/Footer.js', () => ({
-    Footer: ({operationName, connectionStatus, thinkingStatus}: any) => (
-        <footer>footer:{operationName}:{connectionStatus}:{thinkingStatus?.active ? `${thinkingStatus.context}:${thinkingStatus.taskTitle || ''}` : 'idle'}</footer>
+    Footer: ({operationName, connectionStatus, thinkingStatus, operationHealth}: any) => (
+        <footer>footer:{operationName}:{connectionStatus}:{thinkingStatus?.active ? `${thinkingStatus.context}:${thinkingStatus.taskTitle || ''}` : 'idle'}:{operationHealth?.band || 'no-health'}</footer>
     ),
 }));
 
@@ -32,7 +37,7 @@ jest.unstable_mockModule('../../../src/components/UnifiedInputPrompt.js', () => 
 }));
 
 jest.unstable_mockModule('../../../src/components/Terminal.js', () => ({
-    Terminal: ({onEvent, onMetricsUpdate, onThinkingUpdate, animationsEnabled}: any) => (
+    Terminal: ({onEvent, onMetricsUpdate, onHealthUpdate, onThinkingUpdate, animationsEnabled}: any) => (
         <>
             <button onClick={() => {
                 onEvent({type: 'task_started', title: 'Enumerate target'});
@@ -47,11 +52,17 @@ jest.unstable_mockModule('../../../src/components/Terminal.js', () => ({
                 onEvent({type: 'task_done', title: 'Late task title'});
             }}>terminal:task-done</button>
             <button onClick={() => {
+                onEvent({type: 'task_deferred', title: 'Late task title'});
+            }}>terminal:task-deferred</button>
+            <button onClick={() => {
                 onEvent({type: 'output'});
                 onEvent({type: 'operation_complete'});
                 onThinkingUpdate({active: false});
                 onMetricsUpdate({tokens: 10});
             }}>terminal:complete</button>
+            <button onClick={() => {
+                onHealthUpdate({status: 'available', score: 0.84, band: 'good'});
+            }}>terminal:health</button>
         </>
     ),
 }));
@@ -84,6 +95,7 @@ const createProps = (overrides: Record<string, any> = {}) => ({
     },
     actions: {
         updateMetrics: jest.fn(),
+        updateHealth: jest.fn(),
         ...overrides.actions,
     },
     currentTheme: {
@@ -114,6 +126,7 @@ describe('MainAppView', () => {
         pauseMonitoring.mockClear();
         resumeMonitoring.mockClear();
         checkHealth.mockClear();
+        setOperationTerminalTitle.mockClear();
         delete (global as any).__inkInputHandler;
         delete process.env.CYBER_MAX_HISTORY_RENDERED;
     });
@@ -141,12 +154,48 @@ describe('MainAppView', () => {
         expect(props.onInput).toHaveBeenCalledWith('scan example.com');
     });
 
+    it('updates and resets the terminal title from operation health', async () => {
+        const {MainAppView} = await load();
+        const health = {status: 'available', score: 0.86, band: 'good'};
+        const props = createProps({
+            appState: {
+                activeOperation: {id: 'op-title', status: 'running', target: 'https://target.test'},
+                executionService: {name: 'service'},
+                operationHealth: health,
+            },
+        });
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(<MainAppView {...props as any}/>);
+            await Promise.resolve();
+        });
+        expect(setOperationTerminalTitle).toHaveBeenCalledWith(
+            health,
+            'https://target.test',
+            expect.anything(),
+        );
+
+        await act(async () => {
+            view.update(<MainAppView {...createProps({
+                appState: {
+                    activeOperation: {id: 'op-title', status: 'complete'},
+                    executionService: {name: 'service'},
+                    operationHealth: health,
+                },
+            }) as any}/>);
+            await Promise.resolve();
+        });
+        expect(setOperationTerminalTitle).toHaveBeenLastCalledWith(null, null, expect.anything());
+    });
+
     it('renders modals and operation streams while forwarding lifecycle metrics', async () => {
         const {MainAppView} = await load();
         const updateMetrics = jest.fn();
+        const updateHealth = jest.fn();
         const onModalClose = jest.fn();
         const props = createProps({
-            actions: {updateMetrics},
+            actions: {updateMetrics, updateHealth},
             activeModal: ModalType.CONFIG,
             onModalClose,
             appState: {
@@ -182,6 +231,11 @@ describe('MainAppView', () => {
             view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:complete'))!.props.onClick();
         });
         expect(updateMetrics).toHaveBeenCalledWith({tokens: 10});
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:health'))!.props.onClick();
+        });
+        expect(updateHealth).toHaveBeenCalledWith({status: 'available', score: 0.84, band: 'good'});
         expect(textFromTree(view.toJSON())).toContain('footer::offline:idle');
 
         await act(async () => {
@@ -248,6 +302,16 @@ describe('MainAppView', () => {
         });
 
         expect(textFromTree(view.toJSON())).toContain('footer::connected:tool_execution:');
+        expect(textFromTree(view.toJSON())).not.toContain('Late task title');
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:late-task'))!.props.onClick();
+        });
+        expect(textFromTree(view.toJSON())).toContain('Late task title');
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:task-deferred'))!.props.onClick();
+        });
         expect(textFromTree(view.toJSON())).not.toContain('Late task title');
     });
 

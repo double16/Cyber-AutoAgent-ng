@@ -107,11 +107,8 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env*
+!.env.example
 .venv
 env/
 venv/
@@ -270,3 +267,7 @@ THIS IS _NOT_ THE TARGET.txt
 /benchmark_harness/validation-benchmarks/
 /benchmark_harness/results.csv
 config.*
+external_plugins/*/
+
+# working files
+runs.txt

@@ -11,6 +11,7 @@ import { Operation } from '../services/OperationManager.js';
 import { useDebouncedState } from './useDebouncedState.js';
 import { ExecutionService } from '../services/ExecutionService.js';
 import { appendCommandHistory, loadCommandHistory } from '../utils/commandHistory.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 
 // State shape definition
 export interface ApplicationState {
@@ -38,6 +39,7 @@ export interface ApplicationState {
   userHandoffActive: boolean;
   contextUsage: number;
   operationMetrics: any | null;
+  operationHealth: OperationHealthSnapshot | null;
   
   // Execution service - the active service instance for current operation
   executionService: ExecutionService | null;
@@ -72,6 +74,7 @@ export enum ActionType {
   UPDATE_OPERATION = 'UPDATE_OPERATION',
   SET_USER_HANDOFF = 'SET_USER_HANDOFF',
   UPDATE_METRICS = 'UPDATE_METRICS',
+  UPDATE_HEALTH = 'UPDATE_HEALTH',
   SET_EXECUTION_SERVICE = 'SET_EXECUTION_SERVICE',
   
   // Target management
@@ -105,6 +108,7 @@ type Action =
   | { type: ActionType.UPDATE_OPERATION; payload: Partial<Operation> }
   | { type: ActionType.SET_USER_HANDOFF; payload: boolean }
   | { type: ActionType.UPDATE_METRICS; payload: any }
+  | { type: ActionType.UPDATE_HEALTH; payload: OperationHealthSnapshot | null }
   | { type: ActionType.SET_EXECUTION_SERVICE; payload: ExecutionService | null }
   | { type: ActionType.ADD_RECENT_TARGET; payload: string }
   | { type: ActionType.PUSH_COMMAND_HISTORY; payload: string[] }
@@ -165,8 +169,16 @@ function applicationReducer(state: ApplicationState, action: Action): Applicatio
     case ActionType.CLEAR_COMPLETED_OPERATION:
       return { ...state, hasCompletedOperation: false };
       
-    case ActionType.SET_ACTIVE_OPERATION:
-      return { ...state, activeOperation: action.payload };
+    case ActionType.SET_ACTIVE_OPERATION: {
+      const currentOperationId = state.activeOperation?.id ?? null;
+      const nextOperationId = action.payload?.id ?? null;
+      const startsNewOperation = nextOperationId !== null && nextOperationId !== currentOperationId;
+      return {
+        ...state,
+        activeOperation: action.payload,
+        operationHealth: startsNewOperation ? null : state.operationHealth,
+      };
+    }
       
     case ActionType.UPDATE_OPERATION:
       if (!state.activeOperation) return state;
@@ -180,6 +192,9 @@ function applicationReducer(state: ApplicationState, action: Action): Applicatio
       
     case ActionType.UPDATE_METRICS:
       return { ...state, operationMetrics: action.payload };
+
+    case ActionType.UPDATE_HEALTH:
+      return { ...state, operationHealth: action.payload };
       
     case ActionType.SET_EXECUTION_SERVICE:
       return { ...state, executionService: action.payload };
@@ -232,6 +247,7 @@ function getInitialState(): ApplicationState {
     userHandoffActive: false,
     contextUsage: 0,
     operationMetrics: null,
+    operationHealth: null,
     executionService: null,
     recentTargets: [],
     commandHistory: loadCommandHistory(),
@@ -352,6 +368,10 @@ export function useApplicationState() {
       metricsTimeoutRef.current = null;
     }, 150);
   }, [setDebouncedMetrics]);
+
+  const updateHealth = useCallback((health: OperationHealthSnapshot | null) => {
+    dispatch({ type: ActionType.UPDATE_HEALTH, payload: health });
+  }, []);
   
   const addRecentTarget = (target: string) => {
     dispatch({ type: ActionType.ADD_RECENT_TARGET, payload: target });
@@ -406,6 +426,7 @@ export function useApplicationState() {
     updateOperation,
     setUserHandoff,
     updateMetrics,
+    updateHealth,
     addRecentTarget,
     pushCommandHistory,
     incrementErrorCount,
@@ -418,7 +439,7 @@ export function useApplicationState() {
     initializeApp, setConfigLoaded, setInitializationFlow, dismissInit,
     setTerminalVisible, refreshStatic, refreshStaticImmediate, setStaticNeedsRefresh, updateTerminalSize,
     setHasCompletedOperation, clearCompletedOperation,
-    setActiveOperation, updateOperation, setUserHandoff, updateMetrics,
+    setActiveOperation, updateOperation, setUserHandoff, updateMetrics, updateHealth,
     addRecentTarget, pushCommandHistory, incrementErrorCount, resetErrorCount, setDockerAvailable, 
     updateContextUsage, setExecutionService, registerCleanup
   ]);

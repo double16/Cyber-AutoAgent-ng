@@ -43,15 +43,20 @@ describe('toolFormatters source coverage', () => {
             .toContain('(+');
     });
 
-    it('formats mem0 and plan tools', () => {
+    it('formats memory retrieval, typed storage, and plan tools', () => {
         expect(toolFormatters.mem0_list({query: 'findings'})).toBe('list memories');
         expect(toolFormatters.mem0_retrieve({query: 'findings'})).toBe('retrieve memories');
-        expect(toolFormatters.mem0_store({
-            content: JSON.stringify({memory: 'Stored memory text'}),
-        })).toContain('Stored memory text');
-        expect(toolFormatters.mem0_store({
-            content: JSON.stringify({results: [{memory: 'First result memory'}]}),
-        })).toContain('First result memory');
+        expect(toolFormatters.store_observation({content: 'Observed 403', artifacts: ['403.txt']}))
+            .toContain('1 artifact');
+        expect(toolFormatters.store_knowledge({content: 'Use a negative control'}))
+            .toContain('storing knowledge');
+        expect(toolFormatters.store_finding({
+            title: 'SQL injection', severity: 'high', target: '/search', artifacts: [],
+        })).toContain('submitting finding for verification');
+        expect(toolFormatters.record_finding_validation({
+            finding_uid: '1234567890', outcome: 'not_confirmed', evidence_strategy: 'differential',
+            evidence_artifacts: ['response.txt'], control_artifacts: ['control.txt'], summary: 'Not reproducible',
+        })).toContain('finding: 12345678');
         expect(toolFormatters.mem0_get({query: {target: 'example.com'}})).toContain('target');
         expect(toolFormatters.mem0_get({query: '{bad json'})).toContain('{bad json');
 
@@ -70,11 +75,10 @@ plan_phases[4]{id,title,status,criteria}:
         expect(toolFormatters.shell({
             command: JSON.stringify([{command: 'whoami'}, {args: ['ls', '-la']}]),
             parallel: true,
-            ignore_errors: true,
             non_interactive: true,
             timeout: 30,
             cwd: '/tmp',
-        })).toBe('Commands: whoami | ls -la | parallel, ignore_errors, non_interactive | timeout: 30s | cwd: /tmp');
+        })).toBe('Commands: whoami | ls -la | parallel, non_interactive | timeout: 30s | cwd: /tmp');
 
         expect(toolFormatters.shell({command: {cmd: 'id'}})).toContain('id');
         expect(toolFormatters.shell({command: {value: 'hostname'}})).toContain('hostname');

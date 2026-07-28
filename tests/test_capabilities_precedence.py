@@ -4,11 +4,13 @@ import os
 from unittest.mock import patch, MagicMock
 
 from modules.config.models.capabilities import (
+    Capabilities,
     get_capabilities,
     get_model_input_limit,
     get_model_output_limit,
     get_model_pricing,
     ModelCapabilitiesResolver,
+    allows_reasoning_content_replay,
 )
 
 
@@ -54,6 +56,18 @@ class TestCapabilitiesPrecedence:
 
         del os.environ["CYBER_REASONING_DENY"]
         ModelCapabilitiesResolver.capabilities.cache_clear()
+
+    def test_litellm_reasoning_does_not_enable_chat_completion_replay(self):
+        caps = Capabilities(
+            supports_reasoning=True,
+            pass_reasoning_effort=True,
+            supports_tools=True,
+            supports_tool_choice=True,
+            supports_temperature=False,
+        )
+
+        assert allows_reasoning_content_replay("litellm", "openai/gpt-5", caps) is False
+        assert allows_reasoning_content_replay("bedrock", "claude-sonnet-4", caps) is True
 
 
 class TestTokenLimitPrecedence:

@@ -13,14 +13,14 @@ from strands import Agent
 from strands.handlers import PrintingCallbackHandler
 from strands.models import BedrockModel
 from strands.models.litellm import LiteLLMModel
-from strands_tools.editor import editor
-from modules.config.models.ollama import OllamaModel
 
-from modules.config.manager import get_config_manager
-from modules.config.models.factory import create_gemini_model, get_capabilities
-from modules.config.system.logger import get_logger
-from modules.agents.patches import ToolUseIdHook
 from modules import __version__
+from modules.agents.patches import ToolUseIdHook
+from modules.config.manager import get_config_manager
+from modules.config.models.factory import apply_model_context_window, create_gemini_model, get_capabilities
+from modules.config.models.ollama import OllamaModel
+from modules.config.system.logger import get_logger
+from modules.tools.artifact import create_bounded_artifact_reader
 
 logger = get_logger("Agents.ReportAgent")
 
@@ -144,6 +144,8 @@ class ReportGenerator:
             }
             model = LiteLLMModel(model_id=mid, params=params, client_args=client_args, stream=False)
 
+        apply_model_context_window(model, prov, mid)
+
         # Create agent with report-specific configuration
         trace_attrs = {
             # Core identification - CRITICAL for trace continuity
@@ -189,7 +191,7 @@ class ReportGenerator:
             model=model,
             name=f"Cyber-ReportGenerator {operation_id}",
             system_prompt=system_prompt,
-            tools=[editor],
+            tools=[create_bounded_artifact_reader()],
             trace_attributes=trace_attrs if operation_id else None,
             callback_handler=callback_handler or NoOpCallbackHandler(),
             hooks=[ToolUseIdHook()],

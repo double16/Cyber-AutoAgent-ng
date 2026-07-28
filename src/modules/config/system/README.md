@@ -51,6 +51,8 @@ Logging factory and SDK logging configuration.
 - Hierarchical logger names
 - SDK warning suppression
 - Configurable log levels
+- Structured operation events remain in operation logs while raw provider payloads are disabled by default
+  `CYBER_UNSAFE_DIAGNOSTIC_LOGGING=true` - Allows raw provider requests, full prompts, and tool schemas when verbose/debug logging is enabled. These records may contain sensitive operation data.
 
 ```python
 from modules.config.system.logger import get_logger

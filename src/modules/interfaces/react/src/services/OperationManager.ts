@@ -18,6 +18,8 @@ export interface Operation {
   status: 'running' | 'paused' | 'completed' | 'error' | 'cancelled';
   description: string;
   findings: number;
+  memoryOps: number;
+  evidence: number;
   logs: OperationLog[];
   cost: CostInfo;
   model: string;
@@ -257,6 +259,8 @@ export class OperationManager {
       status: 'running',
       description: 'Initializing operation...',
       findings: 0,
+      memoryOps: 0,
+      evidence: 0,
       logs: [],
       cost: {
         tokensUsed: 0,
@@ -441,6 +445,8 @@ export class OperationManager {
       target.status = op.status || target.status;
       target.description = op.description || target.description;
       target.findings = Math.max(op.findings, target.findings);
+      target.memoryOps = Math.max(op.memoryOps ?? 0, target.memoryOps ?? 0);
+      target.evidence = Math.max(op.evidence ?? 0, target.evidence ?? 0);
       target.logs = op.logs.length > target.logs.length ? op.logs : target.logs;
       this.operations.delete(oldId);
       if (this.currentOperation?.id === oldId) this.currentOperation = target;

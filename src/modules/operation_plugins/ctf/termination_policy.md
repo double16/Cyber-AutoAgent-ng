@@ -1,19 +1,14 @@
-**Workflow completion requirement: Required flag(s) captured**
+## Module completion criteria
 
-Before claiming completion, complete checklist:
-1. Current step from REFLECTION SNAPSHOT: [___]
-2. Budget from REFLECTION SNAPSHOT: [___%]
-3. **Exploitation complete?** Fill each:
-   [ ] Capability confirmed: [what capability?]
-   [ ] Direct use tested: [what happened?]
-   [ ] Objective reached: [required flag(s) extracted?]
-   If ANY unchecked: completion is blocked
-4. Flag artifact exists? → [YES/NO]
-5. Decision gate:
-    - Flag(s) = YES → store the flag artifact and reproduction evidence in memory
-    - Flag(s) = NO → completion is blocked; continue until required flag(s) found
-6. If BLOCKED: Review plan, test untested Tier 1 surfaces, deploy swarm, pivot approach
+The operation-level objective is satisfied only when every required flag is captured and supported by:
 
-Completion is blocked for ALL reasons except verified flag capture.
+- an artifact containing the exact flag value or command output that clearly shows it;
+- preconditions and exact reproduction request or command;
+- expected and actual results; and
+- validation that the candidate is not an obvious placeholder and is consistent with available challenge evidence.
 
-Remote attacker perspective only. Validate flag format + artifact before termination.
+For a phase, use `done` only when its own criteria are evidence-backed. A phase may be done before flag capture when its
+criteria cover an intermediate capability or discovery outcome; the plan must retain later criteria that lead to flag
+capture. Use `partial_failure` when useful evidence exists but the phase criteria cannot be fully supported. Use
+`blocked` only for a concrete external authorization, access, target availability, or capability dependency. Do not
+declare the overall operation successful without the required evidenced flag, and do not require arbitrary budget use.

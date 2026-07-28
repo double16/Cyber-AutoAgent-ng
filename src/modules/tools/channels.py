@@ -10,10 +10,26 @@ from pydantic import BaseModel, Field
 
 from modules.utils.pick_nic import pick_local_addr
 from modules.handlers.utils import b64
+from modules.tools.semantic_enum import normalize_semantic_enum
 
 from strands import tool
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_channel_send_mode(value):
+    return normalize_semantic_enum(
+        value,
+        aliases={
+            "plain": "text",
+            "plaintext": "text",
+            "utf8": "text",
+            "b64": "base64",
+            "base_64": "base64",
+        },
+        field_name="channel_send_mode",
+        logger=logger,
+    )
 
 
 class PollEvent(BaseModel):
@@ -369,11 +385,33 @@ async def channel_poll(
     return PollResult(channel_id=ch.id, closed=ch.closed, events=events)
 
 
-@tool
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string", "description": "Channel identifier."},
+                "data": {"type": "string", "description": "Data, base64-encoded when mode is base64."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["text", "base64"],
+                    "default": "text",
+                    "description": "Encoding mode for data.",
+                },
+                "append_newline": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Append a newline in text mode.",
+                },
+            },
+            "required": ["channel_id", "data"],
+        }
+    }
+)
 async def channel_send(
         channel_id: str,
         data: str,
-        mode: Literal["text", "base64"] = "text",
+        mode: str = "text",
         append_newline: bool = False,
 ) -> SendResult:
     """
@@ -382,6 +420,9 @@ async def channel_send(
     Args: channel_id, data, mode=text|base64, append_newline (text mode).
     Use after channel_status shows ready_for_send=true.
     """
+    mode = _normalize_channel_send_mode(mode)
+    if mode not in {"text", "base64"}:
+        raise ValueError("mode must be text or base64")
     ch = _mgr().get(channel_id)
     payload = base64.b64decode(data) if mode == "base64" else (
         (data + ("\n" if append_newline else "")).encode("utf-8")

@@ -18,7 +18,20 @@ import { formatDuration } from './utils/logger.js';
 import { formatDuration as formatToolDuration } from './utils/toolFormatters.js';
 import { formatAutoRunEvaluationEvent } from './utils/evaluationEventFormatting.js';
 import { installAutoRunInterruptFallback } from './utils/autoRunInterrupt.js';
+import { formatAutoRunTerminationEvent } from './utils/autoRunTerminationFormatting.js';
 import { resolveRecordingMode } from './utils/recordingMode.js';
+import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
+import { formatWorkflowActivityEvent } from './utils/workflowActivityFormatting.js';
+import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
+import { appendOperationHealth } from './utils/operationHealthFormatting.js';
+import { setOperationTerminalTitle } from './utils/terminalTitle.js';
+
+const formatTaskScope = (event: any): string => {
+  const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
+  const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
+  if (!scope || scope === 'all') return '';
+  return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
 
 // Check for --debug flag early (before meow parsing) to enable logging
 if (process.argv.includes('--debug') || process.argv.includes('-d')) {
@@ -197,6 +210,7 @@ const isRawModeSupported = process.stdin.isTTY;
 
 // Handle autoRun mode by bypassing React UI and executing directly
 const runAutoAssessment = async () => {
+  setOperationTerminalTitle(null, cli.flags.target);
   if (cli.flags.autoRun && cli.flags.target) {
     loggingService.info(`🔐 Starting assessment: ${cli.flags.module} → ${cli.flags.target}`);
     loggingService.info(`📌 Objective: ${cli.flags.objective || 'General security assessment'}`);
@@ -410,7 +424,20 @@ const runAutoAssessment = async () => {
       // In auto-run mode, listen to events and display them to console
       // This provides real-time progress visibility during assessment
       executionService.on('event', (event: any) => {
-        if (event.type === 'output' && event.content) {
+        const memoryEventMessage = formatAutoRunMemoryEvent(event);
+        if (memoryEventMessage) {
+          loggingService.info(memoryEventMessage);
+        }
+        else if (event.type === 'workflow_activity') {
+          const message = formatWorkflowActivityEvent(event);
+          if (message) loggingService.info(message);
+        }
+        else if (event.type === 'preflight_check') {
+          const status = String(event.status || 'skip').toUpperCase();
+          const reason = event.reason ? `: ${event.reason}` : '';
+          loggingService.info(`🎯 Target preflight ${status} ${event.target || 'unknown target'}${reason}`);
+        }
+        else if (event.type === 'output' && event.content) {
           loggingService.info(event.content);
         }
         else if (event.type === 'reasoning' && event.content) {
@@ -427,49 +454,64 @@ const runAutoAssessment = async () => {
             }
         }
         else if (event.type === 'progress_update') {
+          setOperationTerminalTitle(event.health, cli.flags.target);
           if (event.operation_stage === 'ragas_evaluation') {
             const message = formatAutoRunEvaluationEvent(event);
-            if (message) loggingService.info(message);
+            if (message) loggingService.info(appendOperationHealth(message, event.health));
           }
           else if (event.operation_stage === 'final_report') {
-            const reportIndex = Number(event.report_step_index);
-            const reportTotal = Number(event.report_step_total);
-            const reportLabel = typeof event.report_step_label === 'string' ? event.report_step_label : '';
-            const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
-              ? `${reportIndex}/${reportTotal}`
-              : 'report';
-            loggingService.info(`➡️ Final report ${progressLabel}${reportLabel ? `: ${reportLabel}` : ''}`);
+            loggingService.info(appendOperationHealth(formatAutoRunReportProgress(event), event.health));
           }
           else if (Number.isFinite(event.progressPercent)) {
             const etaSeconds = estimateEtaSeconds(event.duration, event.progressPercent);
             const etaText = etaSeconds !== null && etaSeconds > 0
               ? ` | ETA ${formatToolDuration(etaSeconds, false)}`
               : '';
-            loggingService.info(`➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}${etaText}`);
+            loggingService.info(
+              appendOperationHealth(
+                `➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}${etaText}`,
+                event.health
+              )
+            );
           }
         }
         else if (event.type === 'evaluation_step_complete' || event.type === 'evaluation_complete') {
           const message = formatAutoRunEvaluationEvent(event);
           if (message) loggingService.info(message);
         }
+        else if (event.type === 'termination_reason') {
+          const message = formatAutoRunTerminationEvent(event);
+          if (message) loggingService.info(message);
+        }
         else if (event.type === 'task_started') {
             lastTaskTitle = event.title;
-            loggingService.info(`🚀 Starting task ${event.title ? `"${event.title}"` : ''}`);
+            loggingService.info(`🚀 Starting task ${event.title ? `"${event.title}"` : ''}${formatTaskScope(event)}`);
         }
         else if (event.type === 'task_done') {
             const eventTitle = event.title || lastTaskTitle;
+            const reason = typeof event.status_reason === 'string' && event.status_reason.trim()
+              ? `: ${event.status_reason.trim()}`
+              : '';
             lastTaskTitle = "";
             switch (event.status) {
                 case 'partial_failure':
-                    loggingService.info(`⚠️ Task ${eventTitle ? `"${eventTitle}" ` : ''}failed`);
+                    loggingService.info(`⚠️ Task ${eventTitle ? `"${eventTitle}" ` : ''}failed${reason}`);
                     break;
                 case 'blocked':
-                    loggingService.info(`🧱 Task ${eventTitle ? `"${eventTitle}" ` : ''}blocked`);
+                    loggingService.info(`🧱 Task ${eventTitle ? `"${eventTitle}" ` : ''}blocked${reason}`);
                     break;
                 default:
-                    loggingService.info(`✓ Task ${eventTitle ? `"${eventTitle}" ` : ''}done`);
+                    loggingService.info(`✓ Task ${eventTitle ? `"${eventTitle}" ` : ''}done${reason}`);
                     break;
             }
+        }
+        else if (event.type === 'task_deferred') {
+            const eventTitle = event.title || lastTaskTitle;
+            const reason = typeof event.status_reason === 'string' && event.status_reason.trim()
+              ? `: ${event.status_reason.trim()}`
+              : '';
+            lastTaskTitle = "";
+            loggingService.info(`⏸ Task ${eventTitle ? `"${eventTitle}" ` : ''}deferred${reason}`);
         }
       });
 

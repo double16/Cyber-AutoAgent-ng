@@ -20,6 +20,8 @@ import { ApplicationState } from '../hooks/useApplicationState.js';
 import { OperationHistoryEntry } from '../hooks/useOperationManager.js';
 import { ModalType } from '../hooks/useModalManager.js';
 import type { ThinkingStatus } from '../types/thinking.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
+import { setOperationTerminalTitle } from '../utils/terminalTitle.js';
 
 interface MainAppViewProps {
   appState: ApplicationState;
@@ -43,6 +45,13 @@ interface MainAppViewProps {
   applicationConfig?: any; // Application configuration
   terminalCleanupRef?: React.MutableRefObject<(() => void) | null>;
 }
+
+const formatTaskScope = (event: any): string => {
+  const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
+  const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
+  if (!scope || scope === 'all') return '';
+  return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
 
 export const MainAppView: React.FC<MainAppViewProps> = ({
   appState,
@@ -133,8 +142,8 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
     const eventType = event?.type;
     if (eventType === 'task_started') {
       const title = typeof event?.title === 'string' ? event.title.trim() : '';
-      setCurrentTaskTitle(title || null);
-    } else if (eventType === 'task_done') {
+      setCurrentTaskTitle(title ? `${title}${formatTaskScope(event)}` : null);
+    } else if (eventType === 'task_done' || eventType === 'task_deferred') {
       setCurrentTaskTitle(null);
     }
     if (hasStreamBegunRef.current) return;
@@ -147,6 +156,26 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
 
   // Once any operation completes or is stopped (ESC), suppress showing the header again
   const [hasAnyOperationEnded, setHasAnyOperationEnded] = useState(false);
+
+  useEffect(() => {
+    const operationRunning = appState.activeOperation?.status === 'running' && !hasAnyOperationEnded;
+    setOperationTerminalTitle(
+      operationRunning ? appState.operationHealth : null,
+      operationRunning ? appState.activeOperation?.target : null,
+      stdout,
+    );
+  }, [
+    appState.activeOperation?.status,
+    appState.activeOperation?.target,
+    appState.operationHealth,
+    hasAnyOperationEnded,
+    stdout,
+  ]);
+
+  useEffect(() => () => {
+    setOperationTerminalTitle(null, null, stdout);
+  }, [stdout]);
+
   const handleLifecycleEvent = useCallback((event: any) => {
     const type = event?.type;
     if (type === 'operation_complete' || type === 'stopped' || type === 'complete') {
@@ -171,6 +200,10 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
   const handleMetricsUpdate = useCallback((metrics: any) => {
     actionsRef.current.updateMetrics?.(metrics);
   }, []); // No dependencies - uses ref to prevent re-creation
+
+  const handleHealthUpdate = useCallback((health: OperationHealthSnapshot) => {
+    actionsRef.current.updateHealth?.(health);
+  }, []);
 
   const handleThinkingUpdate = useCallback((status: ThinkingStatus) => {
     setThinkingStatus(status);
@@ -320,6 +353,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
               collapsed={activeModal !== ModalType.NONE}
               onEvent={handleEvent}
               onMetricsUpdate={handleMetricsUpdate}
+              onHealthUpdate={handleHealthUpdate}
               onThinkingUpdate={handleThinkingUpdate}
               animationsEnabled={isAutoScrollEnabled && activeModal === ModalType.NONE}
               cleanupRef={terminalCleanupRef}
@@ -352,6 +386,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
           <Footer 
             model={appState.activeOperation?.model || ""}
             operationMetrics={appState.operationMetrics}
+            operationHealth={appState.operationHealth}
             connectionStatus={appState.isDockerServiceAvailable ? 'connected' : 'offline'}
             modelProvider={applicationConfig?.modelProvider}
             deploymentMode={applicationConfig?.deploymentMode}

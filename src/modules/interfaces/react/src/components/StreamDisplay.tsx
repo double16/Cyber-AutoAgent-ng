@@ -16,6 +16,8 @@ import * as path from 'path';
 import stripAnsi from 'strip-ansi';
 import { useConfig } from '../contexts/ConfigContext.js';
 import type { Config } from '../contexts/ConfigContext.js';
+import { formatOperationHealth } from '../utils/operationHealthFormatting.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
 let cachedProjectRoot: string | null | undefined;
@@ -50,7 +52,16 @@ const resolveProjectRoot = (): string | null => {
 // Extended event types for UI-specific events not covered by the core SDK events
 // These events are used for UI state management and display formatting
 export type AdditionalStreamEvent = 
-  | { type: 'progress_update'; step: number | string; progressPercent?: number; totalTools?: number; operation?: string; duration?: string; [key: string]: any }
+  | {
+      type: 'progress_update';
+      step: number | string;
+      progressPercent?: number;
+      totalTools?: number;
+      operation?: string;
+      duration?: string;
+      health?: OperationHealthSnapshot;
+      [key: string]: any;
+    }
   | { type: 'evaluation_step_complete'; status: 'completed' | 'skipped' | 'failed'; evaluation_step_kind: string; [key: string]: any }
   | { type: 'evaluation_complete'; status?: 'completed' | 'no_results' | 'failed'; scores?: Record<string, number>; [key: string]: any }
   | { type: 'reasoning'; content: string; [key: string]: any }
@@ -82,8 +93,11 @@ export type AdditionalStreamEvent =
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
-  | { type: 'task_started'; task_uid?: string; title?: string; status?: string; [key: string]: any }
-  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; [key: string]: any }
+  | { type: 'workflow_activity'; content?: string; activity?: string; action?: string; role?: string; status?: string; phase_id?: number; phase_title?: string; task_uid?: string; task_title?: string; attempt?: number; attempt_total?: number; cycle?: number; cycle_total?: number; iteration?: number; iteration_total?: number; [key: string]: any }
+  | { type: 'preflight_check'; operation_id?: string; target_id?: string; target?: string; target_type?: string; status: 'pass' | 'fail' | 'skip'; checks?: string[]; reason?: string; resolved_addresses?: string[]; [key: string]: any }
+  | { type: 'task_started'; task_uid?: string; title?: string; status?: string; task_kind?: string; reference_id?: string; [key: string]: any }
+  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; finding_resolution?: string; [key: string]: any }
+  | { type: 'task_deferred'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; [key: string]: any }
   | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; message?: string; [key: string]: any };
 
 // Combined event type supporting both SDK-aligned and additional events
@@ -91,6 +105,33 @@ export type DisplayStreamEvent = StreamEvent | AdditionalStreamEvent;
 
 // Re-export StreamEvent type for backward compatibility
 export type { StreamEvent };
+
+const formatTaskScope = (event: any): string => {
+  const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
+  const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
+  if (!scope || scope === 'all') return '';
+  return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
+
+const flattenDisplayEvents = (events: DisplayStreamEvent[]): DisplayStreamEvent[] => events.flatMap(event =>
+  event.type === 'batch' && Array.isArray(event.events) ? flattenDisplayEvents(event.events) : [event]
+);
+
+type TerminationDetail = { reason?: string; message?: string };
+
+const latestTerminationDetail = (events: DisplayStreamEvent[]): TerminationDetail | null => {
+  const termination = [...flattenDisplayEvents(events)]
+    .reverse()
+    .find(event => event.type === 'termination_reason');
+  if (!termination) return null;
+  const reason = typeof (termination as any).reason === 'string'
+    ? (termination as any).reason.trim()
+    : '';
+  const message = typeof (termination as any).message === 'string'
+    ? (termination as any).message.trim()
+    : '';
+  return reason || message ? { reason: reason || undefined, message: message || undefined } : null;
+};
 
 interface StreamDisplayProps {
   events: DisplayStreamEvent[];
@@ -522,6 +563,7 @@ interface EventLineProps {
   // rendered only in the dynamic StreamDisplay (which can react to late-arriving
   // report_content and assessment_complete events).
   enableInlineReportView?: boolean;
+  terminationDetail?: TerminationDetail | null;
 }
 
 export const EventLine: React.FC<EventLineProps> = React.memo(({
@@ -534,6 +576,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
   projectRoot,
   configOverride,
   enableInlineReportView = true,
+  terminationDetail,
 }) => {
   const { config } = useConfig();
   const effectiveConfig = configOverride ?? config;
@@ -606,6 +649,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
     // =======================================================================
     case 'progress_update':
       let stepDisplay = '';
+      const healthVisual = formatOperationHealth((event as any).health);
 
       const eventAgent = (event as any)['agent_name'];
       const agentSubStep = (event as any)['agent_sub_step'];
@@ -624,15 +668,20 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         const reportIndex = Number((event as any)['report_step_index']);
         const reportTotal = Number((event as any)['report_step_total']);
         const reportLabel = String((event as any)['report_step_label'] || '').trim();
+        const reportKind = String((event as any)['report_step_kind'] || '').trim();
         const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
           ? `${reportIndex}/${reportTotal}`
           : 'REPORT';
-        stepDisplay = `[FINAL REPORT ${progressLabel}]${reportLabel ? ` ${reportLabel}` : ''}`;
+        const kindLabel = reportKind === 'validation_failure' ? ' [REQUIRES VALIDATION]' : '';
+        stepDisplay = `[FINAL REPORT ${progressLabel}]${kindLabel}${reportLabel ? ` ${reportLabel}` : ''}`;
       } else if (event.step === "FINAL REPORT") {
         stepDisplay = "[FINAL REPORT]";
       } else if (typeof event.step === 'string' && String(event.step).toUpperCase() === 'TERMINATED') {
-        // Clean termination header without confusing progress values
-        stepDisplay = "[TERMINATED]";
+        // Pair the progress header with the later termination payload so failures are visible
+        // even when the terminal detail is rendered separately in the event stream.
+        const reason = terminationDetail?.reason;
+        const message = terminationDetail?.message;
+        stepDisplay = `[TERMINATED${reason ? `: ${reason}` : ''}]${message ? ` ${message}` : ''}`;
       } else if (eventAgent && agentSubStep) {
         const agentName = String(eventAgent).toUpperCase().replaceAll('_', ' ');
         const agentTotal = (event as any)['agent_total_actions'] ?? agentSubStep;
@@ -657,6 +706,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
             <Text color="#89B4FA" bold>
               {stepDisplay}
             </Text>
+            {healthVisual && (
+              <Text color={healthVisual.color} bold>{` ${healthVisual.label}`}</Text>
+            )}
           </Box>
           <Text color="#45475A">{getDivider()}</Text>
           {/* If this is the FINAL REPORT and we have operation context, render the report inline.
@@ -682,11 +734,113 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       );
       
     case 'task_started': {
-      return null;
+      if (String((event as any).task_kind || '') !== 'finding_validation') {
+        return null;
+      }
+      const title = String((event as any).title || 'Finding').replace(/^Verify finding:\s*/i, '').trim();
+      return (
+        <Box>
+          <Text color="yellow">{`VERIFYING FINDING ${title}${formatTaskScope(event)}`}</Text>
+        </Box>
+      );
+    }
+
+    case 'preflight_check': {
+      const status = String((event as any).status || 'skip').toLowerCase();
+      const target = String((event as any).target || 'unknown target');
+      const targetType = String((event as any).target_type || 'unknown');
+      const checks = Array.isArray((event as any).checks) ? (event as any).checks.join(', ') : '';
+      const reason = String((event as any).reason || '').trim();
+      const icon = status === 'pass' ? '✓' : status === 'fail' ? '✗' : '■';
+      const color = status === 'pass' ? 'green' : status === 'fail' ? 'red' : 'yellow';
+      const checkSuffix = checks ? ` [${checks}]` : '';
+      const reasonSuffix = reason ? `: ${reason}` : '';
+      return (
+        <Box>
+          <Text color={color}>
+            {`${icon} 🎯 ${status.toUpperCase()} ${target} (${targetType})${checkSuffix}${reasonSuffix}`}
+          </Text>
+        </Box>
+      );
+    }
+
+    case 'workflow_activity': {
+      const status = String((event as any).status || 'started').toLowerCase();
+      const action = String((event as any).label || (event as any).action || (event as any).activity || 'workflow').replaceAll('_', ' ');
+      const phase = (event as any).phase_id != null ? ` phase ${(event as any).phase_id}` : '';
+      const task = String((event as any).task_title || '').trim();
+      const taskSuffix = task ? `: ${task}` : '';
+      const cycle = (event as any).cycle != null && (event as any).cycle_total != null
+        ? ` [cycle ${(event as any).cycle}/${(event as any).cycle_total}]`
+        : '';
+      const attempt = !cycle && (event as any).attempt != null && (event as any).attempt_total != null
+        ? ` [${(event as any).attempt}/${(event as any).attempt_total}]`
+        : '';
+      const icon = ['completed', 'success', 'done'].includes(status)
+        ? '✓'
+        : ['failed', 'error', 'blocked', 'partial_failure'].includes(status)
+          ? '⚠'
+          : ['cancelled', 'canceled', 'skipped', 'terminated', 'not_applicable'].includes(status)
+            ? '■'
+            : null;
+      const color = ['completed', 'success', 'done'].includes(status)
+        ? 'green'
+        : ['failed', 'error', 'blocked', 'partial_failure', 'cancelled', 'canceled', 'skipped', 'terminated', 'not_applicable'].includes(status)
+          ? 'yellow'
+          : 'cyan';
+      return (
+        <Box>
+          <Text color={color}>
+            {icon ? icon : ' '}
+          {` ${action}${phase}${taskSuffix}${cycle || attempt} ${status}`}
+          </Text>
+        </Box>
+      );
     }
 
     case 'task_done': {
-      return null;
+      const title = String((event as any).title || '').trim();
+      const status = String((event as any).status || 'done').trim().toLowerCase();
+      const statusReason = String((event as any).status_reason || '').trim();
+      const findingResolution = String((event as any).finding_resolution || '').trim();
+      if (findingResolution) {
+        const findingTitle = title.replace(/^Verify finding:\s*/i, '').trim();
+        const verified = findingResolution === 'verified';
+        const label = verified ? 'FINDING VERIFIED' : 'FINDING REQUIRES VALIDATION';
+        const detail = statusReason ? `: ${statusReason}` : '';
+        return (
+          <Box>
+            <Text color={verified ? 'green' : 'yellow'}>
+              {`${label}${findingTitle ? ` ${findingTitle}` : ''}${detail}`}
+            </Text>
+          </Box>
+        );
+      }
+      const label = status === 'partial_failure'
+        ? 'TASK PARTIAL FAILURE'
+        : status === 'blocked'
+          ? 'TASK BLOCKED'
+          : 'TASK DONE';
+      const suffix = title ? ` ${title}` : '';
+      const detail = statusReason ? `: ${statusReason}` : '';
+      const color = status === 'blocked' || status === 'partial_failure' ? 'yellow' : 'green';
+      return (
+        <Box>
+          <Text color={color}>{`${label}${suffix}${detail}`}</Text>
+        </Box>
+      );
+    }
+
+    case 'task_deferred': {
+      const title = String((event as any).title || '').trim();
+      const statusReason = String((event as any).status_reason || '').trim();
+      const suffix = title ? ` ${title}` : '';
+      const detail = statusReason ? `: ${statusReason}` : '';
+      return (
+        <Box>
+          <Text color="yellow">{`TASK DEFERRED${suffix}${detail}`}</Text>
+        </Box>
+      );
     }
 
     case 'thinking':
@@ -734,6 +888,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         case 'model_error':
           reasonLabel = 'MODEL ERROR';
           break;
+        case 'error':
+          reasonLabel = 'TERMINATION ERROR';
+          break;
         default:
           reasonLabel = 'TERMINATED';
       }
@@ -747,6 +904,15 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
           <Box flexDirection="column" marginTop={1} marginBottom={1}>
             <Box borderStyle="round" borderColor="green" paddingX={1}>
               <Text color="green" bold>{reasonLabel}: {sanitizedMessage || 'Assessment workflow completed.'}</Text>
+            </Box>
+          </Box>
+        );
+      }
+      if (reason === 'error') {
+        return (
+          <Box flexDirection="column" marginTop={1} marginBottom={1}>
+            <Box borderStyle="round" borderColor="red" paddingX={1}>
+              <Text color="red" bold>{reasonLabel}: {sanitizedMessage || 'Operation terminated due to an error.'}</Text>
             </Box>
           </Box>
         );
@@ -876,7 +1042,6 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
               </Box>
             </Box>
           );
-        case 'mem0_store':
         case 'mem0_get':
         case 'mem0_retrieve':
         case 'mem0_list': {
@@ -917,6 +1082,24 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
                   <Text dimColor>└─ </Text>
                 </Box>
               )}
+            </Box>
+          );
+        }
+
+        case 'store_observation':
+        case 'store_knowledge':
+        case 'store_finding':
+        case 'record_finding_validation': {
+          const preview = formatToolInput(event.tool_name, latestInput);
+          const color = event.tool_name === 'store_finding' || event.tool_name === 'record_finding_validation'
+            ? 'yellow'
+            : 'green';
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              <Text color={color} bold>tool: {event.tool_name}{agentContext}</Text>
+              <Box marginLeft={2}>
+                <Text dimColor>└─ {preview}</Text>
+              </Box>
             </Box>
           );
         }
@@ -2325,6 +2508,7 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   
   // Group consecutive reasoning events to prevent multiple labels
   const displayGroups = React.useMemo(() => computeDisplayGroups(events), [events]);
+  const terminationDetail = React.useMemo(() => latestTerminationDetail(events), [events]);
   
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
@@ -2463,6 +2647,7 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
                 reportPath={reportDetails.path}
                 reportFallbackContent={reportDetails.content}
                 projectRoot={projectRoot}
+                terminationDetail={terminationDetail}
                 enableInlineReportView={true}
               />
           ));
@@ -2494,6 +2679,7 @@ export const StaticStreamDisplay: React.FC<{
     return `event-seq-${eventSeqRef.current++}`;
   }, []);
   const groups = React.useMemo(() => computeDisplayGroups(events), [events]);
+  const terminationDetail = React.useMemo(() => latestTerminationDetail(events), [events]);
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
   // Resolve output base directory from config for consistent path mapping
@@ -2619,6 +2805,7 @@ export const StaticStreamDisplay: React.FC<{
                 reportPath={reportDetails.path}
                 reportFallbackContent={reportDetails.content}
                 projectRoot={projectRoot}
+                terminationDetail={terminationDetail}
                 // Disable InlineReportViewer here; the dynamic StreamDisplay path will
                 // render the inline preview once the report is fully available.
                 enableInlineReportView={false}
@@ -2629,7 +2816,15 @@ export const StaticStreamDisplay: React.FC<{
       }
     });
     return out;
-  }, [groups, operationContext, reportDetails.path, reportDetails.content, projectRoot, stableEventKey]);
+  }, [
+    groups,
+    operationContext,
+    reportDetails.path,
+    reportDetails.content,
+    projectRoot,
+    stableEventKey,
+    terminationDetail,
+  ]);
 
   return (
     <Static key={items[0]?.key ?? 'empty'} items={items}>

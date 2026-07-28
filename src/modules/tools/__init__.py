@@ -4,11 +4,15 @@ from modules.tools.memory import (
     Mem0ServiceClient,
     get_memory_client,
     initialize_memory_system,
-    mem0_store,
+    store_observation,
+    store_knowledge,
+    store_finding,
+    record_finding_validation,
     mem0_retrieve,
     mem0_list,
     create_tasks,
 )
+from modules.tools.artifact import read_artifact
 from modules.tools.browser import (
     initialize_browser,
     browser_goto_url,
@@ -41,7 +45,11 @@ from modules.tools.oast import (
 )
 
 __all__ = [
-    "mem0_store",
+    "store_observation",
+    "store_knowledge",
+    "store_finding",
+    "record_finding_validation",
+    "read_artifact",
     "mem0_retrieve",
     "mem0_list",
     "create_tasks",

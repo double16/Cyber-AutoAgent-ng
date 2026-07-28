@@ -56,6 +56,17 @@ class ToolRouterHook(HookProvider):
     def register_hooks(self, registry) -> None:  # type: ignore[no-untyped-def]
         registry.add_callback(AfterToolCallEvent, self._truncate_large_results_async)
 
+    def _artifact_reference(self, artifact_path: Path) -> str:
+        """Return a stable reference relative to the operation output directory."""
+
+        if self._artifact_dir is None:
+            raise ValueError("artifact directory is not configured")
+        try:
+            relative = artifact_path.resolve().relative_to(self._artifact_dir.resolve().parent)
+        except ValueError:
+            relative = artifact_path.name
+        return f"artifact:{relative.as_posix()}"
+
     async def _truncate_large_results_async(self, event) -> None:
         """Truncate large tool results and externalize to artifacts.
 
@@ -122,9 +133,10 @@ class ToolRouterHook(HookProvider):
                 artifact_path = self._persist_artifact(tool_name, payload_bytes, ext)
 
                 if artifact_path is not None:
-                    # use absolute paths, some models will hallucinate filesystem roots
+                    artifact_ref = self._artifact_reference(artifact_path)
                     summary_lines.append(
-                        f"[Tool output: {artifact_path.stat().st_size} bytes | File: {artifact_path}]"
+                        f"[Tool output: {artifact_path.stat().st_size} bytes | "
+                        f"Artifact ID: artifact_id:{artifact_path.name} | Artifact ref: {artifact_ref}]"
                     )
                     logger.debug("saved tool output file to %s", artifact_path)
                 else:
@@ -209,14 +221,15 @@ class ToolRouterHook(HookProvider):
                 snippet = text[:truncate_target]
 
                 if externalized and artifact_path is not None:
-                    # use absolute paths, some models will hallucinate filesystem roots
+                    artifact_ref = self._artifact_reference(artifact_path)
                     summary_lines.extend(
                         [
-                            f"[Tool output: {original_size:,} chars | Inline: {len(snippet):,} chars | Full: {artifact_path}]",
+                            f"[Tool output: {original_size:,} chars | Inline: {len(snippet):,} chars | "
+                            f"Artifact ID: artifact_id:{artifact_path.name} | Artifact ref: {artifact_ref}]",
                             "",
                             snippet,
                             "",
-                            f"[Complete output saved to: {artifact_path}]",
+                            f"[Complete output: {artifact_ref}]",
                         ]
                     )
                 else:

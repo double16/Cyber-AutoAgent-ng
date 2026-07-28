@@ -50,6 +50,7 @@ class OllamaModel(Model):
         """
 
         additional_args: dict[str, Any] | None
+        context_window_limit: int | None
         keep_alive: str | None
         max_tokens: int | None
         model_id: str

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Agent creation and management for Cyber-AutoAgent."""
 import fnmatch
+import importlib.util
 import json
 import logging
 import os
 import sys
 import warnings
-import importlib.util
 from dataclasses import dataclass, field
 from datetime import datetime
 from math import ceil
@@ -17,24 +17,20 @@ from strands import Agent
 from strands.hooks import HookProvider
 from strands.tools.executors import ConcurrentToolExecutor
 
+# These tools are modules, not functions, the following imports MUST import the module
+from strands_tools import (
+    environment,
+    http_request,
+    python_repl,
+)
+
 # These tools have the @tool decorator, the function is to be imported
 from strands_tools.editor import editor
 from strands_tools.load_tool import load_tool
-from modules.tools.swarm import swarm
-from modules.tools.web_search import web_search
-
-from modules.prompts import get_task_capture_prompt
-from modules.tools.shell import shell
 from strands_tools.sleep import sleep
 from strands_tools.tavily import tavily_search
 
-# These tools are modules, not functions, the following imports MUST import the module
-from strands_tools import (
-    http_request,
-    python_repl,
-    environment,
-)
-from modules import prompts, __version__
+from modules import __version__, prompts
 from modules.agents.factory import (
     AgentFactoryConfig,
     create_agent_with_stateful_retry,
@@ -49,23 +45,36 @@ from modules.config import (
     configure_sdk_logging,
     get_config_manager,
 )
-from modules.config.system.logger import get_logger
-from modules.config.models.factory import (
-    _resolve_prompt_token_limit, create_strands_model,
+from modules.config.models.capabilities import (
+    allows_reasoning_content_replay,
+    get_capabilities,
 )
+from modules.config.models.factory import (
+    require_prompt_token_limit,
+    create_strands_model,
+)
+from modules.config.system.logger import get_logger
+from modules.handlers.agent_repair_hook import AgentRepairHook
 from modules.handlers.conversation_budget import (
+    PRESERVE_FIRST_DEFAULT,
+    PRESERVE_LAST_DEFAULT,
+    LargeToolResultMapper,
     MappingConversationManager,
     PromptBudgetHook,
-    LargeToolResultMapper,
-    register_conversation_manager,
     _ensure_prompt_within_budget,
-    PRESERVE_LAST_DEFAULT,
-    PRESERVE_FIRST_DEFAULT,
+    register_conversation_manager,
 )
 from modules.handlers.react import AgentEventHandler
-from modules.handlers.agent_repair_hook import AgentRepairHook
+from modules.handlers.tool_recovery import TaskFailureRecoveryHook
+from modules.handlers.terminal_tool import TerminalToolHook
+from modules.handlers.tool_repeat_guard import (
+    DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
+    DEFAULT_TOOL_REPEAT_THRESHOLD,
+    ToolRepeatGuardHook,
+    normalize_tool_repeat_max_cycle_length,
+    normalize_tool_repeat_threshold,
+)
 from modules.handlers.tool_router import ToolRouterHook
-from modules.config.models.capabilities import get_capabilities
 from modules.handlers.utils import (
     get_tool_name,
     print_status,
@@ -73,44 +82,54 @@ from modules.handlers.utils import (
     tool_append_description,
     tool_rename,
 )
-
+from modules.tools.artifact import read_artifact
+from modules.tools.browser import (
+    browser_evaluate_js,
+    browser_get_cookies,
+    browser_get_page_html,
+    browser_goto_url,
+    browser_observe_page,
+    browser_perform_action,
+    browser_set_headers,
+    initialize_browser,
+)
+from modules.tools.channels import (
+    channel_close,
+    channel_create_forward,
+    channel_create_reverse,
+    channel_poll,
+    channel_send,
+    channel_status,
+)
 from modules.tools.mcp import (
     discover_mcp_tools,
 )
 from modules.tools.memory import (
+    create_tasks,
     get_memory_client,
     initialize_memory_system,
-    mem0_store,
-    mem0_retrieve,
     mem0_list,
-    create_tasks,
-)
-from modules.tools.browser import (
-    initialize_browser,
-    browser_goto_url,
-    browser_observe_page,
-    browser_get_page_html,
-    browser_set_headers,
-    browser_perform_action,
-    browser_evaluate_js,
-    browser_get_cookies,
-)
-from modules.tools.channels import (
-    channel_create_forward,
-    channel_create_reverse,
-    channel_send,
-    channel_poll,
-    channel_status,
-    channel_close,
+    mem0_retrieve,
+    record_finding_validation,
+    store_finding,
+    store_knowledge,
+    store_observation,
 )
 from modules.tools.oast import (
-    oast_health,
+    oast_clear_http_responses,
     oast_endpoints,
+    oast_health,
     oast_poll,
     oast_register_http_response,
-    oast_clear_http_responses,
 )
-from modules.tools.tool_catalog import tool_catalog_wrapper
+from modules.tools.shell import shell
+from modules.tools.swarm import swarm
+from modules.tools.tool_catalog import (
+    get_shell_command_alternatives,
+    remove_shell_command,
+    tool_catalog_wrapper,
+)
+from modules.tools.web_search import web_search
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -133,7 +152,6 @@ class AgentRuntimeResources:
     tool_executor: ConcurrentToolExecutor
     system_prompt_payload: Any
     system_prompt: str
-    task_capture_prompt: str
     hooks: List[HookProvider]
     conversation_manager: MappingConversationManager
     sdk_context_manager: Optional[str]
@@ -141,11 +159,39 @@ class AgentRuntimeResources:
     prompt_token_limit: int
     core_tools_list: List[Any] = field(default_factory=list)
     optional_tools_list: List[Any] = field(default_factory=list)
+    quarantined_shell_commands: set[str] = field(default_factory=set)
     termination_policy: str = ""
 
 
 def _tool_names(tools: List[Any]) -> set[str]:
     return {get_tool_name(tool) for tool in tools}
+
+
+def _create_tool_repeat_guard(config_manager: Any, agent_logger: logging.Logger) -> Optional[ToolRepeatGuardHook]:
+    """Build the configured repeat guard, or return None when disabled."""
+
+    repeat_threshold = normalize_tool_repeat_threshold(
+        config_manager.getenv_int(
+            "CYBER_TOOL_REPEAT_THRESHOLD",
+            DEFAULT_TOOL_REPEAT_THRESHOLD,
+        )
+    )
+    if repeat_threshold == 0:
+        agent_logger.info("Repeated tool-call guard disabled")
+        return None
+
+    repeat_max_cycle_length = normalize_tool_repeat_max_cycle_length(
+        config_manager.getenv_int(
+            "CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH",
+            DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
+        )
+    )
+    agent_logger.info(
+        "Repeated tool-call guard threshold: %d; maximum cycle length: %d",
+        repeat_threshold,
+        repeat_max_cycle_length,
+    )
+    return ToolRepeatGuardHook(repeat_threshold, repeat_max_cycle_length)
 
 
 def build_role_tools(
@@ -299,7 +345,7 @@ def create_agent_runtime_resources(
         logger.debug("Unable to set overlay environment context", exc_info=True)
 
     # Create agent with telemetry for token tracking
-    prompt_token_limit = _resolve_prompt_token_limit(
+    prompt_token_limit = require_prompt_token_limit(
         config.provider, config.model_id
     )
     logger.info("Prompt token limit (input tokens): %d", prompt_token_limit)
@@ -340,7 +386,10 @@ def create_agent_runtime_resources(
         artifacts_dir=os.getenv("CYBER_ARTIFACTS_DIR"),
     )
     initialize_memory_system(
-        memory_config, operation_id, target_name, has_existing_memories
+        {**memory_config, "prompt_token_limit": prompt_token_limit},
+        operation_id,
+        target_name,
+        has_existing_memories,
     )
     print_status(f"Memory system initialized for operation: {operation_id}", "SUCCESS")
 
@@ -487,14 +536,14 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     http_request_instructions = """
 - Purpose: Deterministic HTTP(S) requests for web page and API testing (including GraphQL/REST)
 - Validation: Save request/response transcript + negative/control case as artifacts, grep/sed to extract relevant data, store only file path in findings
-- Preference: preferred over `curl` for capability: http_client
+- Interoperability: May be selected or used alongside `curl`; overlapping HTTP clients are permitted
 - Managed endpoint keys are observations unless abuse/sensitive exposure demonstrated with artifacts
 """
     tool_append_description(http_request, http_request_instructions)
 
     python_repl_instructions = """
 - Usage: Rapid PoC prototyping, batch multiple tests. NO TIMEOUT (avoid >600s operations)
-- File writes: MUST use absolute paths from OPERATION ARTIFACTS DIRECTORY (relative paths write to project root)
+- File writes: MUST use absolute paths from OPERATION ARTIFACTS DIRECTORY (relative paths write to operation root)
 - Promotion trigger: POC works + logic needed >2 times → MUST promote via editor+load_tool to OPERATION TOOLS DIRECTORY
 - Results: Store all outputs as artifacts with descriptive names
 
@@ -556,9 +605,13 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         shell,
         editor,
         load_tool,
-        mem0_store,
+        store_observation,
+        store_knowledge,
+        store_finding,
+        record_finding_validation,
         mem0_retrieve,
         mem0_list,
+        read_artifact,
         create_tasks,
         sleep,
         python_repl,
@@ -672,6 +725,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         output_config={
             "base_dir": server_config.output.base_dir,
             "target_name": target_name,
+            "operation_path": paths.get("root"),
             "artifacts_path": paths.get("artifacts"),
             "tools_path": paths.get("tools"),
         },
@@ -800,6 +854,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     tool_call_repair_hook = AgentRepairHook()
 
+    tool_repeat_guard_hook = _create_tool_repeat_guard(config_manager, agent_logger)
+
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
 
     tool_router_hook = ToolRouterHook(
@@ -809,9 +865,18 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     ) if sdk_context_manager is None else None
 
     # hooks to include in agents, order is important
-    hooks: List[HookProvider] = list(filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
+    hooks: List[HookProvider] = list(
+        filter(
+            bool,
+            [tool_call_repair_hook, tool_repeat_guard_hook, tool_router_hook, react_hooks, prompt_budget_hook],
+        )
+    )
     subagent_hooks: List[HookProvider] = list(
-        filter(bool, [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]))
+        filter(
+            bool,
+            [tool_call_repair_hook, tool_repeat_guard_hook, tool_router_hook, react_hooks, prompt_budget_hook],
+        )
+    )
 
     # Update conversation window size and limits from SDK config
     try:
@@ -978,7 +1043,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         tool_executor=tool_executor,
         system_prompt_payload=system_prompt_payload,
         system_prompt=system_prompt,
-        task_capture_prompt=get_task_capture_prompt(),
         hooks=hooks,
         conversation_manager=conversation_manager,
         sdk_context_manager=sdk_context_manager,
@@ -1048,6 +1112,41 @@ def create_agent(
             start_metrics_thread=False,
         )
 
+    agent_hooks = list(runtime.hooks) if runtime.hooks else []
+    failure_recovery_hook = None
+    if agent_type == "task_executor" and isinstance(callback_handler, AgentEventHandler):
+        max_policy_violations = runtime.config_manager.getenv_int(
+            "CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS",
+            2,
+        )
+        max_corrections = runtime.config_manager.getenv_int(
+            "CYBER_TOOL_RECOVERY_MAX_CORRECTIONS",
+            2,
+        )
+        if config.available_tools is None:
+            config.available_tools = []
+
+        def quarantine_shell_command(executable: str) -> List[str]:
+            alternatives = get_shell_command_alternatives(executable, config.available_tools)
+            remove_shell_command(config.available_tools, executable)
+            agent_logger.warning(
+                "Quarantined unavailable shell executable '%s'; alternatives=%s",
+                executable,
+                ",".join(alternatives),
+            )
+            return alternatives
+
+        failure_recovery_hook = TaskFailureRecoveryHook(
+            callback_handler.tool_outcome_journal,
+            max_policy_violations=max_policy_violations,
+            max_corrections=max_corrections,
+            quarantine_callback=quarantine_shell_command,
+            quarantined_executables=runtime.quarantined_shell_commands,
+        )
+        agent_hooks.append(failure_recovery_hook)
+    if agent_type in {"task_creator", "task_executor"}:
+        agent_hooks.append(TerminalToolHook(agent_type))
+
     agent_kwargs = {
         "model": model,
         "name": name or f"Cyber-AutoAgent {config.op_id or runtime.operation_id}",
@@ -1055,7 +1154,7 @@ def create_agent(
         "tool_executor": runtime.tool_executor,
         "system_prompt": system_prompt if system_prompt is not None else runtime.system_prompt_payload,
         "callback_handler": callback_handler,
-        "hooks": runtime.hooks if runtime.hooks else None,
+        "hooks": agent_hooks or None,
         "load_tools_from_directory": tools is None,
         "trace_attributes": trace_attributes,
     }
@@ -1078,7 +1177,15 @@ def create_agent(
     # Allow reasoning deltas only when the provider/model supports them
     try:
         caps = get_capabilities(config.provider, config.model_id or "")
-        setattr(agent, "_allow_reasoning_content", bool(caps.supports_reasoning))
+        setattr(
+            agent,
+            "_allow_reasoning_content",
+            allows_reasoning_content_replay(
+                config.provider,
+                config.model_id or "",
+                caps,
+            ),
+        )
     except Exception:
         setattr(agent, "_allow_reasoning_content", False)
     if runtime.prompt_token_limit:
@@ -1087,6 +1194,8 @@ def create_agent(
         setattr(agent, "_cyber_agent_name", agent_kwargs["name"])
         setattr(agent, "_cyber_agent_type", agent_type or getattr(callback_handler, "agent_type", "agent"))
         setattr(agent, "_cyber_callback_handler", callback_handler)
+        if failure_recovery_hook is not None:
+            setattr(agent, "_cyber_failure_recovery_hook", failure_recovery_hook)
         if getattr(callback_handler, "agent_run_id", None):
             setattr(agent, "_cyber_agent_run_id", callback_handler.agent_run_id)
         if getattr(callback_handler, "parent_agent_run_id", None):

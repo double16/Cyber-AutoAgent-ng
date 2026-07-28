@@ -4,12 +4,16 @@ import threading
 import time
 from collections import OrderedDict
 from types import SimpleNamespace
-from unittest.mock import Mock, MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
 from modules.handlers.react import agent_event_handler as rb
-from modules.handlers.react.agent_event_handler import OperationEventCoordinator, AgentEventHandler, ReportBudgetEstimate
+from modules.handlers.react.agent_event_handler import (
+    AgentEventHandler,
+    OperationEventCoordinator,
+    ReportBudgetEstimate,
+)
 
 
 def make_handler():
@@ -103,6 +107,73 @@ def event_types(handler):
     return [event["type"] for event in handler._events]
 
 
+def test_progress_update_includes_shared_operation_health():
+    emitter = MagicMock()
+    coordinator = OperationEventCoordinator("OP_TEST", emitter)
+    coordinator.set_operation_health_provider(
+        lambda: {"health_version": "1", "status": "available", "score": 0.82, "band": "good"}
+    )
+
+    coordinator.emit({"type": "progress_update", "step": 1})
+
+    event = emitter.emit.call_args.args[0]
+    assert event["health"] == {
+        "health_version": "1",
+        "status": "available",
+        "score": 0.82,
+        "band": "good",
+    }
+
+
+def test_termination_event_includes_final_operation_health():
+    handler = make_handler()
+    handler.set_operation_health_provider(
+        lambda: {
+            "health_version": "1",
+            "status": "available",
+            "score": 0.49,
+            "band": "poor",
+            "unresolved_task_count": 2,
+        }
+    )
+
+    handler.emit_termination("partial_failure", "Two tasks remain")
+
+    event = next(event for event in handler._events if event["type"] == "termination_reason")
+    assert event["health"]["score"] == 0.49
+    assert event["health"]["unresolved_task_count"] == 2
+
+
+def test_progress_update_survives_operation_health_provider_failure():
+    emitter = MagicMock()
+    coordinator = OperationEventCoordinator("OP_TEST", emitter)
+
+    def fail_health():
+        raise RuntimeError("state unavailable")
+
+    coordinator.set_operation_health_provider(fail_health)
+    coordinator.emit({"type": "progress_update", "step": 1})
+
+    event = emitter.emit.call_args.args[0]
+    assert event["type"] == "progress_update"
+    assert "health" not in event
+
+
+def test_operation_health_budget_diagnostics_exposes_progress_and_assessment_stage():
+    handler = make_handler()
+    handler.get_budget_progress = lambda: 42
+
+    active = handler.operation_health_budget_diagnostics()
+    handler._report_generated = True
+    reporting = handler.operation_health_budget_diagnostics()
+
+    assert active["progress_percent"] == 42
+    assert active["assessment_active"] is True
+    assert "estimated_reporting_tokens" not in active
+    assert "estimated_reporting_cost" not in active
+    assert reporting["assessment_active"] is False
+
+
 def test_report_budget_estimator_zero_evidence_and_pricing_fallback(monkeypatch):
     monkeypatch.setattr(rb, "get_config_manager", Mock(side_effect=RuntimeError("no config")))
     coordinator = OperationEventCoordinator("OP_EST", MagicMock())
@@ -155,10 +226,10 @@ def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
         pricing_fallback={"input": 0.0, "output": 0.0},
     )
 
-    assert estimate.findings == 2
-    assert estimate.observations == 1
-    assert estimate.input_tokens == math.ceil((2500 + 1900 + 1825 + 1440 + 2200) * 1.15)
-    assert estimate.output_tokens == math.ceil((1500 + 1800 + 1800 + 900 + 1200) * 1.15)
+    assert estimate.findings == 1
+    assert estimate.observations == 2
+    assert estimate.input_tokens == math.ceil((2500 + 1900 + 1440 + 1425 + 2200) * 1.15)
+    assert estimate.output_tokens == math.ceil((1500 + 1800 + 900 + 900 + 1200) * 1.15)
     assert estimate.remaining_steps == 5
 
     coordinator.set_report_items(
@@ -201,6 +272,7 @@ def test_reasoning_termination_metrics_and_basic_helpers():
 
     handler._stop_metrics_thread.assert_not_called()
     assert event_types(handler).count("termination_reason") == 1
+    assert handler.termination_message == "done"
     assert handler._format_duration(65) == "1m 5s"
     assert handler._extract_code_from_input({"code": "print(1)"}) == "print(1)"
     assert handler._extract_code_from_input({"value": [1, 2]}).startswith("{")
@@ -272,8 +344,8 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
         }
     )
 
-    handler.tool_name_buffer["mem"] = "mem0_store"
-    handler.tool_input_buffer["mem"] = {"metadata": {"category": "finding"}}
+    handler.tool_name_buffer["mem"] = "store_finding"
+    handler.tool_input_buffer["mem"] = {"claim": "finding", "severity": "HIGH"}
     handler._process_tool_result_from_message(
         {"toolUseId": "mem", "status": "success", "content": [{"text": "stored"}]}
     )
@@ -284,6 +356,34 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert "task_started" not in types
     assert handler.memory_ops == 1
     assert handler.evidence_count == 1
+    assert handler.coordinator.report_findings == 1
+
+
+def test_shell_help_text_with_timeout_option_is_not_reported_as_timeout():
+    handler = make_handler()
+    handler.tool_name_buffer["help"] = "shell"
+
+    handler._process_tool_result_from_message(
+        {
+            "toolUseId": "help",
+            "status": "error",
+            "content": [
+                {
+                    "text": (
+                        "Command: scanner --help\nStatus: error\nExit Code: 1\n"
+                        "Output: --timeout request timeout\nError: missing required input"
+                    )
+                }
+            ],
+        }
+    )
+
+    timeout_events = [
+        event
+        for event in handler._events
+        if event["type"] == "error" and event.get("metadata", {}).get("type") == "timeout"
+    ]
+    assert timeout_events == []
 
 
 @pytest.mark.parametrize(
@@ -334,11 +434,11 @@ def test_non_task_state_tool_result_does_not_emit_task_lifecycle_events():
     assert "task_started" not in event_types(handler)
 
 
-def test_mem0_store_success_updates_report_estimate_without_memory_reads(monkeypatch):
+def test_store_observation_success_updates_report_estimate_without_memory_reads(monkeypatch):
     handler = make_handler()
     monkeypatch.setattr(rb, "token_calc", lambda chars, model_id=None: int(chars))
 
-    handler.tool_name_buffer["high_obs"] = "mem0_store"
+    handler.tool_name_buffer["high_obs"] = "store_observation"
     handler.tool_input_buffer["high_obs"] = {
         "content": "x" * 37,
         "metadata": {"category": "observation", "severity": "HIGH"},
@@ -349,9 +449,73 @@ def test_mem0_store_success_updates_report_estimate_without_memory_reads(monkeyp
 
     assert handler.memory_ops == 1
     assert handler.evidence_count == 1
-    assert handler.coordinator.report_findings == 1
+    assert handler.coordinator.report_findings == 0
+    assert handler.coordinator.report_observations == 1
+    assert handler.coordinator.report_observation_content_tokens == 37
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("store_knowledge", {"content": "Use a negative control"}),
+        (
+            "record_finding_validation",
+            {"finding_uid": "finding-1", "summary": "Direct evidence reproduced"},
+        ),
+    ],
+)
+def test_non_evidence_memory_tools_increment_only_memory_operations(tool_name, tool_input):
+    handler = make_handler()
+    handler.tool_name_buffer["memory"] = tool_name
+    handler.tool_input_buffer["memory"] = tool_input
+
+    handler._process_tool_result_from_message(
+        {"toolUseId": "memory", "status": "success", "content": [{"text": "stored"}]}
+    )
+
+    assert handler.memory_ops == 1
+    assert handler.evidence_count == 0
+    assert handler.coordinator.memory_ops == 1
+    assert handler.coordinator.evidence_count == 0
+    assert handler.coordinator.report_findings == 0
     assert handler.coordinator.report_observations == 0
-    assert handler.coordinator.report_finding_content_tokens == 37
+
+
+def test_failed_typed_memory_tool_does_not_increment_metrics():
+    handler = make_handler()
+    handler.tool_name_buffer["memory"] = "record_finding_validation"
+    handler.tool_input_buffer["memory"] = {"finding_uid": "missing", "summary": "failed"}
+
+    handler._process_tool_result_from_message(
+        {"toolUseId": "memory", "status": "error", "content": [{"text": "unknown finding"}]}
+    )
+
+    assert handler.memory_ops == 0
+    assert handler.evidence_count == 0
+    assert handler.coordinator.memory_ops == 0
+
+
+def test_tool_completion_preserves_execution_outcome_metadata():
+    handler = make_handler()
+    handler.tool_name_buffer["blocked"] = "shell"
+
+    handler._process_tool_result_from_message(
+        {
+            "toolUseId": "blocked",
+            "status": "error",
+            "content": [{"text": "blocked by recovery"}],
+            "_cyber_outcome": "blocked",
+            "_cyber_executed": False,
+        }
+    )
+
+    invocation_end = [event for event in handler._events if event["type"] == "tool_invocation_end"][-1]
+    tool_end = [event for event in handler._events if event["type"] == "tool_end"][-1]
+    assert invocation_end["success"] is False
+    assert invocation_end["outcome"] == "blocked"
+    assert invocation_end["executed"] is False
+    assert tool_end["outcome"] == "blocked"
+    assert tool_end["executed"] is False
 
 
 def test_python_repl_preview_and_empty_result_paths(monkeypatch):
@@ -880,6 +1044,17 @@ def test_concurrent_termination_emits_once():
     assert handler.termination_reason == "budget_limit"
 
 
+def test_child_termination_is_agent_scoped_and_does_not_end_operation():
+    handler = make_handler()
+    handler.parent_agent_run_id = "operation-controller-1"
+
+    handler.emit_termination("stalled", "No actions taken")
+
+    assert event_types(handler) == ["agent_termination"]
+    assert handler._events[0]["scope"] == "agent"
+    assert handler.coordinator.termination_reason is None
+
+
 def test_internal_step_and_event_defensive_paths(monkeypatch):
     handler = make_handler()
 
@@ -1003,6 +1178,7 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     )
     assert generated_calls
     assert generated_calls[0]["config_params"]["provider"] == "litellm"
+    assert generated_calls[0]["config_params"]["completion_status"] is None
     assert "assessment_complete" not in event_types(handler)
     handler.emitter = SimpleNamespace()
     handler._stop_metrics_thread = Mock()
@@ -1022,6 +1198,7 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
 
     def fake_generate_security_report(**kwargs):
         assert kwargs["config_params"]["tools_used"].count("shell") == 2
+        assert kwargs["config_params"]["completion_status"]["assessment_complete"] is False
         with open(kwargs["filename"], "w", encoding="utf-8") as report:
             report.write("# Report\nConfirmed finding")
 
@@ -1032,10 +1209,20 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
         target="example.com",
         objective="assess",
         module="web",
+        completion_status={
+            "assessment_complete": False,
+            "workflow_complete": False,
+            "termination_reason": "stalled",
+            "termination_message": "No actions taken",
+            "incomplete_reason": "Workflow stalled before assessment completion.",
+        },
     )
 
     types = event_types(handler)
     assert "report_content" in types
+    report_index = types.index("report_content")
+    assert handler._events[report_index + 1]["type"] == "progress_update"
+    assert handler._events[report_index + 1]["progressPercent"] == handler.get_budget_progress()
     assert "assessment_complete" not in types
     assert output_dir.joinpath("security_assessment_report.md").exists()
     handler.emit_assessment_complete()
@@ -1087,11 +1274,19 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
 
     class FakeEvaluationManager:
-        def __init__(self, operation_id, emitter, report_path=None, usage_callback=None):
+        def __init__(
+            self,
+            operation_id,
+            emitter,
+            report_path=None,
+            usage_callback=None,
+            progress_callback=None,
+        ):
             self.operation_id = operation_id
             self.emitter = emitter
             self.report_path = report_path
             self.usage_callback = usage_callback
+            self.progress_callback = progress_callback
 
         def register_trace(self, **kwargs):
             self.trace = kwargs
@@ -1112,7 +1307,10 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FakeEvaluationManager)
     handler.trigger_evaluation_on_completion()
     assert "evaluation_complete" in event_types(handler)
-    evaluation_event = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    evaluation_index = event_types(handler).index("evaluation_complete")
+    evaluation_event = handler._events[evaluation_index]
+    assert handler._events[evaluation_index + 1]["type"] == "progress_update"
+    assert handler._events[evaluation_index + 1]["progressPercent"] == handler.get_budget_progress()
     assert evaluation_event["status"] == "completed"
     assert evaluation_event["metrics_evaluated"] == 2
     assert evaluation_event["average_score"] == pytest.approx(0.7)
@@ -1130,7 +1328,9 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     handler = make_handler()
     monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", NoResultsEvaluationManager)
     handler.trigger_evaluation_on_completion()
-    no_results = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    no_results_index = event_types(handler).index("evaluation_complete")
+    no_results = handler._events[no_results_index]
+    assert handler._events[no_results_index + 1]["type"] == "progress_update"
     assert no_results["status"] == "no_results"
     assert no_results["success"] is False
 
@@ -1141,7 +1341,9 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     handler = make_handler()
     monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FailedEvaluationManager)
     handler.trigger_evaluation_on_completion()
-    failed = next(event for event in handler._events if event["type"] == "evaluation_complete")
+    failed_index = event_types(handler).index("evaluation_complete")
+    failed = handler._events[failed_index]
+    assert handler._events[failed_index + 1]["type"] == "progress_update"
     assert failed["status"] == "failed"
     assert failed["message"] == "Evaluation failed; see logs for details"
     # Budget-based stop check: simulate duration exceeded

@@ -360,6 +360,9 @@ RUN git clone --depth=1 --depth=1 https://github.com/s0md3v/Corsy.git /opt/corsy
 # Patch arjun when URL response is 400-500
 RUN find /usr/lib/python3 -path "*/arjun/__main__.py" -print0 | xargs -r0 sed -i 's/request.status_code/response_1.status_code/g'
 
+# Fixes for wpscan 2026-07-23
+RUN wpscan -h >/dev/null 2>&1 || gem install --version '<2.9' 'addressable'
+
 COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
 
@@ -376,18 +379,18 @@ RUN mkdir -p -m 0700 "/root/.ssh" && touch "/root/.ssh/config" && chmod 0600 "/r
     echo "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> "/home/cyberagent/.ssh/config"
 
 # Install Sliver (C2 Framework - Client only) - Optional, may fail on ARM64
-RUN mkdir -p /home/cyberagent/sliver && \
-    cd /home/cyberagent/sliver && \
-    apt update &&\
-    ( curl --silent https://sliver.sh/install | bash || true ) && \
-    chown -R cyberagent:cyberagent /home/cyberagent/sliver && \
-    apt clean && rm -rf /var/lib/apt/lists/*
+# RUN mkdir -p /home/cyberagent/sliver && \
+#     cd /home/cyberagent/sliver && \
+#     apt update &&\
+#     ( curl --silent https://sliver.sh/install | bash || true ) && \
+#     chown -R cyberagent:cyberagent /home/cyberagent/sliver && \
+#     apt clean && rm -rf /var/lib/apt/lists/*
 
 # Load amass data (optional)
 RUN amass -h || true
 
 # Validate expected tools are present in the PATH
-COPY docker/tools_check.py src/modules/config/system/environment.yaml /tmp
-RUN bash -o pipefail -c 'python3 /tmp/tools_check.py 2>&1 | tee /var/log/tools_check.log' && \
+COPY docker/tools_check.py src/modules/config/system/environment.yaml /usr/local/bin/
+RUN bash -o pipefail -c 'python3 /usr/local/bin/tools_check.py 2>&1 | tee /var/log/tools_check.log' && \
     /tmp/apt_proxy_clean.sh && \
     rm -rf /tmp/* /var/tmp/*

@@ -26,7 +26,7 @@ from strands.tools.registry import ToolRegistry
 
 from modules.config.models.dev_client import get_models_client
 from modules.config.models.factory import get_model_id_from_agent
-from modules.utils.text_reducer import reduce_lines_lossy, collapse_first_repeated_sequence
+from modules.handlers.max_token_recovery import classify_max_token_output
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ def _get_context_limit() -> int:
             return int(new_val)
         except ValueError:
             pass
-    return 100000  # Default
+    return 0
 
 CONTEXT_LIMIT = _get_context_limit()
 # Legacy alias for backward compatibility
@@ -202,6 +202,71 @@ MAX_THRESHOLD_RATIO = 0.98  # Maximum threshold ratio (never exceed 98% of limit
 SMALL_CONVERSATION_THRESHOLD = 3  # Skip pruning for conversations with fewer messages
 # With preserve_first=1 and preserve_last=5, overlap is 6 messages
 PRESERVATION_OVERLAP_THRESHOLD = 6  # Expected overlap for early operations (first+last)
+STALE_TOOL_RESULT_THRESHOLD = 2000
+
+
+def _reduction_signature(messages: Sequence[Message]) -> tuple[int, int, tuple[str, ...]]:
+    """Return a stable progress signature for one reduction stage."""
+
+    serialized_sizes = []
+    identifiers = []
+    for index, message in enumerate(messages):
+        rendered = _json_to_compact_str(message)
+        serialized_sizes.append(len(rendered))
+        identifiers.append(str(message.get("id") or message.get("messageId") or index))
+    return len(messages), sum(serialized_sizes), tuple(identifiers)
+
+
+def _compact_stale_tool_outputs(agent: Agent, preserve_recent: int) -> int:
+    """Compact old tool results while retaining durable references and workflow state."""
+
+    messages = getattr(agent, "messages", None)
+    if not isinstance(messages, list):
+        return 0
+    stale_limit = max(0, len(messages) - max(1, preserve_recent))
+    compacted = 0
+    reference_pattern = re.compile(r"\b(?:artifact|artifact_id|memory|finding):[^\s\],}\\\"]+")
+    state_pattern = re.compile(
+        r'"(?:task_uid|criterion_id|status|disposition|complete|replayed|memory_published)"\s*:\s*'
+        r'(?:"[^\"]*"|true|false|null|-?\d+(?:\.\d+)?)'
+    )
+    for message in messages[:stale_limit]:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or "toolResult" not in block:
+                continue
+            tool_result = block.get("toolResult")
+            if not isinstance(tool_result, dict):
+                continue
+            result_content = tool_result.get("content", [])
+            rendered = _json_to_compact_str(result_content)
+            if len(rendered) <= STALE_TOOL_RESULT_THRESHOLD:
+                continue
+            searchable_chunks = []
+            for item in result_content if isinstance(result_content, list) else [result_content]:
+                if isinstance(item, dict) and "text" in item:
+                    searchable_chunks.append(str(item["text"]))
+                elif isinstance(item, dict) and "json" in item:
+                    searchable_chunks.append(json.dumps(item["json"], sort_keys=True, separators=(",", ":")))
+                else:
+                    searchable_chunks.append(str(item))
+            searchable = "\n".join(searchable_chunks)
+            references = list(dict.fromkeys(reference_pattern.findall(searchable)))
+            state = list(dict.fromkeys(state_pattern.findall(searchable)))
+            summary = {
+                "compacted": True,
+                "original_chars": len(rendered),
+                "status": tool_result.get("status"),
+                "references": references,
+                "workflow_state": state,
+            }
+            tool_result["content"] = [{"json": summary}]
+            compacted += 1
+    if compacted:
+        logger.info("Compacted %d stale tool result(s) while preserving references and workflow state", compacted)
+    return compacted
 
 
 def _record_context_reduction_event(
@@ -957,29 +1022,26 @@ class MappingConversationManager(SummarizingConversationManager):
                         assistant_messages_tokens[-1],
                         avg_assistant_messages_tokens,
                     )
-                    truncated_message = "".join([block.get("text", "") for block in messages[-1].get("content", [])])
-                    reduced_text = reduce_lines_lossy(
-                        collapse_first_repeated_sequence(truncated_message),
-                        similarity_threshold=0.5
-                    ).to_text().strip()
-                    # Consider adding user instructions similar to the main agent loop to reduce the chance of another reasoning loop.
-                    reduced_message_content = [
-                        {
+                    incomplete_text = "".join(
+                        block.get("text", "")
+                        for block in messages[-1].get("content", [])
+                        if isinstance(block, dict)
+                    )
+                    classification = classify_max_token_output(incomplete_text)
+                    if classification.kind == "reasoning_loop":
+                        discarded_message_content = [{
                             "type": "text",
-                            "text": reduced_text
-                        }
-                    ]
-                    reduced_text_tokens = estimate_prompt_tokens(
-                        model_id,
-                        [{"role": "assistant", "content": reduced_message_content}],
-                        None, None, None)
-                    if reduced_text_tokens < avg_assistant_messages_tokens * 5:
+                            "text": (
+                                "[Controller note: An incomplete repetitive assistant response was discarded. "
+                                "No claims from it were retained.]"
+                            ),
+                        }]
                         logger.info(
-                            "Context reduced via reasoning loop compression, est tokens of last message %s->%s",
+                            "Context removed untrusted reasoning loop, est tokens=%s repetition_ratio=%.3f",
                             assistant_messages_tokens[-1],
-                            reduced_text_tokens,
+                            classification.repetition_ratio,
                         )
-                        messages[-1]["content"] = reduced_message_content
+                        messages[-1]["content"] = discarded_message_content
                         content_reduced = True
                         target_count = self.preserve_first + self.preserve_last
                         if len(messages) > target_count and len(messages) > self.preserve_first:
@@ -991,8 +1053,14 @@ class MappingConversationManager(SummarizingConversationManager):
         # Use estimation to measure reduction impact (not telemetry - see docstring)
         before_tokens = safe_estimate_tokens(agent)
         stage = "sliding"
+        exhausted = getattr(agent, "_context_reduction_exhausted", None)
+        if not isinstance(exhausted, set):
+            exhausted = set()
+        sliding_signature = _reduction_signature(agent.messages)
         sliding_overridden = "reduce_context" in vars(self._sliding)
-        if before_msgs > window_size + self.preserve_first or sliding_overridden:
+        if ("sliding", sliding_signature) in exhausted:
+            logger.debug("Skipping exhausted sliding reduction stage")
+        elif before_msgs > window_size + self.preserve_first or sliding_overridden:
             try:
                 self._sliding.reduce_context(agent, e, **kwargs)
             except ContextWindowOverflowException as overflow_exc:
@@ -1032,6 +1100,42 @@ class MappingConversationManager(SummarizingConversationManager):
             and after_tokens is not None
             and after_tokens < before_tokens
         )
+        if not changed:
+            exhausted.add((stage, sliding_signature))
+            setattr(agent, "_context_reduction_exhausted", exhausted)
+            compact_signature = _reduction_signature(agent.messages)
+            if ("tool_compaction", compact_signature) not in exhausted:
+                stage = "tool_compaction"
+                compacted_results = _compact_stale_tool_outputs(agent, self.preserve_last)
+                after_msgs = _count_agent_messages(agent)
+                after_tokens = safe_estimate_tokens(agent)
+                changed = compacted_results > 0
+                if not changed:
+                    exhausted.add((stage, compact_signature))
+            if not changed:
+                summarize_signature = _reduction_signature(agent.messages)
+                if ("summarizing", summarize_signature) not in exhausted:
+                    stage = "summarizing"
+                    try:
+                        super().reduce_context(agent, e, **kwargs)
+                    except ContextWindowOverflowException:
+                        logger.debug("Summarizing reduction stage exhausted")
+                    after_msgs = _count_agent_messages(agent)
+                    after_tokens = safe_estimate_tokens(agent)
+                    changed = after_msgs < before_msgs or (
+                        before_tokens is not None
+                        and after_tokens is not None
+                        and after_tokens < before_tokens
+                    )
+                    if not changed:
+                        exhausted.add((stage, summarize_signature))
+            if not changed and len(agent.messages) > self.preserve_first + self.preserve_last + 1:
+                stage = "forced_prune"
+                self._force_prune_oldest(agent, 1)
+                after_msgs = _count_agent_messages(agent)
+                after_tokens = safe_estimate_tokens(agent)
+                changed = after_msgs < before_msgs
+            setattr(agent, "_context_reduction_exhausted", exhausted)
         if changed:
             removed = max(0, before_msgs - after_msgs)
             logger.info(
@@ -1046,13 +1150,20 @@ class MappingConversationManager(SummarizingConversationManager):
         else:
             # SDK Contract: If reduction was not possible, raise exception
             # This allows caller to know context management is exhausted
-            logger.warning(
-                "Context reduction requested but no change detected for stage=%s "
-                "(before=%d, after=%d messages). Reduction may be exhausted.",
-                stage,
-                before_msgs,
-                after_msgs,
-            )
+            warning_key = _reduction_signature(agent.messages)
+            warned = getattr(agent, "_context_reduction_noop_warnings", set())
+            if not isinstance(warned, set):
+                warned = set()
+            if warning_key not in warned:
+                logger.warning(
+                    "Context reduction requested but no change detected for stage=%s "
+                    "(before=%d, after=%d messages). Reduction is exhausted.",
+                    stage,
+                    before_msgs,
+                    after_msgs,
+                )
+                warned.add(warning_key)
+                setattr(agent, "_context_reduction_noop_warnings", warned)
             # Check if we're truly exhausted (can't reduce further)
             total_preserved = self.preserve_first + self.preserve_last
             if after_msgs <= total_preserved + 1:
@@ -1231,6 +1342,11 @@ def _get_prompt_token_limit(agent: Agent) -> Optional[int]:
             return int(limit)
     except Exception:
         logger.debug("Invalid prompt token limit on agent", exc_info=True)
+    model_limit = getattr(getattr(agent, "model", None), "context_window_limit", None)
+    if isinstance(model_limit, (int, float)) and model_limit > 0:
+        resolved = int(model_limit)
+        setattr(agent, "_prompt_token_limit", resolved)
+        return resolved
     if PROMPT_TOKEN_FALLBACK_LIMIT > 0:
         setattr(agent, "_prompt_token_limit", PROMPT_TOKEN_FALLBACK_LIMIT)
         logger.warning(

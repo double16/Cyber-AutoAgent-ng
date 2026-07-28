@@ -107,9 +107,7 @@ class ToolRegistryStub:
         inputSchema={"json": {'properties': {
             'command': {'anyOf': [{'type': 'string'}, {'items': {'anyOf': [...]}, 'type': 'array'}],
                         'description': 'The shell command(s) to execute interactively. Can be a single command string or array of commands'},
-            'ignore_errors': {'default': False,
-                              'description': 'Continue execution even if some commands fail (default: False)',
-                              'type': 'boolean'}, 'non_interactive': {'default': False,
+            'non_interactive': {'default': False,
                                                                       'description': 'Run in non-interactive mode without user prompts (default: False)',
                                                                       'type': 'boolean'}, 'parallel': {'default': False,
                                                                                                        'description': 'Whether to execute multiple commands in parallel (default: False)',

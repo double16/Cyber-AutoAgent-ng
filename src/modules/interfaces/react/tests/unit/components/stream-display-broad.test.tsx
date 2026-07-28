@@ -82,7 +82,8 @@ describe('StreamDisplay broad event rendering', () => {
         operation_stage: 'final_report',
         report_step_index: 2,
         report_step_total: 5,
-        report_step_label: 'Finding: SQL injection'
+        report_step_kind: 'validation_failure',
+        report_step_label: 'Requires validation: SQL injection'
       },
       {
         type: 'progress_update',
@@ -100,8 +101,26 @@ describe('StreamDisplay broad event rendering', () => {
         evaluation_step_label: 'Report: Generate Reference Topics'
       },
       { type: 'task_started', title: 'Enumerate target' },
+      { type: 'task_started', title: 'Verify finding: IDOR', task_kind: 'finding_validation' },
       { type: 'thinking', context: 'reasoning', startTime: Date.now(), message: 'working' },
-      { type: 'task_done', title: 'Enumerate target' },
+      { type: 'task_deferred', title: 'Enumerate routes', status: 'pending', status_reason: 'Phase budget cap reached' },
+      { type: 'task_done', title: 'Enumerate target', status: 'blocked', status_reason: 'Needs credentials' },
+      {
+        type: 'task_done',
+        title: 'Verify finding: IDOR',
+        status: 'done',
+        status_reason: 'Direct evidence approved',
+        task_kind: 'finding_validation',
+        finding_resolution: 'verified'
+      },
+      {
+        type: 'task_done',
+        title: 'Verify finding: SQL injection',
+        status: 'partial_failure',
+        status_reason: 'Control request missing',
+        task_kind: 'finding_validation',
+        finding_resolution: 'validation_failure'
+      },
       { type: 'thinking_end' },
       { type: 'delayed_thinking_start' },
       { type: 'termination_reason', reason: 'complete', message: 'Assessment complete: 3 phases evaluated' },
@@ -109,6 +128,7 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'termination_reason', reason: 'max_tokens', message: 'Too many tokens' },
       { type: 'termination_reason', reason: 'rate_limited', message: 'Rate limited' },
       { type: 'termination_reason', reason: 'model_error', message: 'Model failed' },
+      { type: 'termination_reason', reason: 'error', message: 'Workflow iteration limit reached' },
       { type: 'termination_reason', reason: 'swarm_iteration_limit', message: 'swarm iteration limit' },
       { type: 'reasoning', content: 'I should inspect headers and forms' },
       { type: 'command', content: 'python scan.py' },
@@ -128,13 +148,20 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Event loop cycle started');
     expect(output).toContain('[PROGRESS 40% | 4 tools]');
     expect(output).toContain('[FINAL REPORT]');
-    expect(output).toContain('[FINAL REPORT 2/5] Finding: SQL injection');
+    expect(output).toContain('[FINAL REPORT 2/5] [REQUIRES VALIDATION] Requires validation: SQL injection');
     expect(output).toContain('[RAGAS EVALUATION 2/5] Operation: Evidence Quality');
     expect(output).toContain('[RAGAS EVALUATION PREPARING] Report: Generate Reference Topics');
+    expect(output).toContain('TASK BLOCKED Enumerate target: Needs credentials');
+    expect(output).toContain('TASK DEFERRED Enumerate routes: Phase budget cap reached');
+    expect(output).toContain('VERIFYING FINDING IDOR');
+    expect(output).toContain('FINDING VERIFIED IDOR: Direct evidence approved');
+    expect(output).toContain('FINDING REQUIRES VALIDATION SQL injection: Control request missing');
     expect(output).toContain('OPERATION COMPLETE');
     expect(output).toContain('Assessment complete: 3 phases evaluated');
     expect(output).toContain('NETWORK TIMEOUT');
     expect(output).toContain('TOKEN LIMIT');
+    expect(output).toContain('TERMINATION ERROR');
+    expect(output).toContain('Workflow iteration limit reached');
     expect(output).toContain('I should inspect');
     expect(output).toContain('python scan.py');
     expect(output).toContain('failed hard');
@@ -147,7 +174,10 @@ describe('StreamDisplay broad event rendering', () => {
     const { EventLine, render } = await load();
     const toolEvents: any[] = [
       { type: 'tool_start', tool_name: 'swarm', tool_input: { task: 'coordinate agents', agents: ['recon', 'web'] } },
-      { type: 'tool_start', tool_name: 'mem0_store', tool_input: { content: 'remember finding' } },
+      { type: 'tool_start', tool_name: 'store_observation', tool_input: { content: 'observed endpoint', artifacts: [] } },
+      { type: 'tool_start', tool_name: 'store_knowledge', tool_input: { content: 'reuse negative controls' } },
+      { type: 'tool_start', tool_name: 'store_finding', tool_input: { title: 'SQLi', severity: 'HIGH', target: '/search' } },
+      { type: 'tool_start', tool_name: 'record_finding_validation', tool_input: { finding_uid: 'abc', outcome: 'confirmed' } },
       { type: 'tool_start', tool_name: 'mem0_get', tool_input: { query: 'finding' } },
       { type: 'tool_start', tool_name: 'shell', tool_input: { command: 'nmap -sV example.com' } },
       { type: 'tool_start', tool_name: 'http_request', tool_input: { method: 'GET', url: 'https://example.com' } },
@@ -287,6 +317,47 @@ describe('StreamDisplay broad event rendering', () => {
     ).lastFrame();
     expect(longOutput).toContain('line 0');
     expect(longOutput).toContain('line 49');
+  });
+
+  it('renders workflow activity lifecycle without an inline spinner', async () => {
+    const { StreamDisplay, render } = await load();
+    const started = {
+      type: 'workflow_activity',
+      role: 'task_creator',
+      action: 'task_create_prompt',
+      status: 'started',
+      attempt: 1,
+      attempt_total: 2,
+      cycle: 1,
+      cycle_total: 3,
+    };
+    const view = render(<StreamDisplay events={[started] as any} animationsEnabled={false} />);
+
+    expect(view.lastFrame()).not.toContain('spinner:dots');
+    expect(view.lastFrame()).toContain('started');
+    expect(view.lastFrame()).toContain('[cycle 1/3]');
+
+    view.rerender(<StreamDisplay events={[started, {
+      ...started,
+      status: 'completed',
+    }] as any} animationsEnabled={false} />);
+    const completedFrame = view.lastFrame() || '';
+    expect(completedFrame).not.toContain('spinner:dots');
+    expect(completedFrame).toContain('completed');
+  });
+
+  it('includes termination reason and message in the terminated progress header', async () => {
+    const { StreamDisplay, render } = await load();
+    const frame = render(<StreamDisplay events={[
+      { type: 'progress_update', step: 'TERMINATED' },
+      {
+        type: 'termination_reason',
+        reason: 'stalled',
+        message: 'Task executor stopped after bounded recovery',
+      },
+    ] as any} animationsEnabled={false} />).lastFrame() || '';
+
+    expect(frame).toContain('[TERMINATED: stalled] Task executor stopped after bounded recovery');
   });
 
   it('renders long static history through append-style output', async () => {

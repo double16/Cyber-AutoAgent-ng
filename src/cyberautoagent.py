@@ -18,11 +18,13 @@ License: MIT
 """
 
 import argparse
-import json
 import asyncio
 import atexit
 import base64
 import importlib
+import inspect
+import json
+import logging
 import os
 import signal
 import sys
@@ -30,16 +32,22 @@ import threading
 import time
 import traceback
 import warnings
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import litellm
 import requests
 from botocore.exceptions import (
-    ReadTimeoutError as BotoReadTimeoutError,
-    EndpointConnectionError as BotoEndpointConnectionError,
     ConnectTimeoutError as BotoConnectTimeoutError,
+)
+from botocore.exceptions import (
+    EndpointConnectionError as BotoEndpointConnectionError,
+)
+from botocore.exceptions import (
+    ReadTimeoutError as BotoReadTimeoutError,
 )
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
@@ -47,36 +55,64 @@ from requests.exceptions import ReadTimeout as RequestsReadTimeout
 from strands.telemetry.config import StrandsTelemetry
 from strands.types.exceptions import MaxTokensReachedException
 
-import litellm
-
 from modules.agents.cyber_autoagent import (
     AgentConfig,
+    _ensure_prompt_within_budget,
     create_agent,
     create_agent_runtime_resources,
-    _ensure_prompt_within_budget,
 )
-from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+from modules.agents.multi_agent_workflow import (
+    MultiAgentWorkflowController,
+    TaskExecutorCycleResult,
+    WorkflowInvariantError,
+)
 from modules.agents.run_policy import AgentRunPolicy
-from modules.config.models.factory import get_model_timeout, configure_model_rate_limits
-from modules.config.system.environment import auto_setup, clean_operation_memory, setup_logging
 from modules.config.manager import get_config_manager
-from modules.config.types import get_default_base_dir, BudgetConfig, DEFAULT_MAX_DURATION
+from modules.config.models.factory import (  # noqa: F401
+    configure_model_rate_limits,
+    get_model_timeout,
+)
+from modules.config.system.environment import (
+    auto_setup,
+    clean_operation_memory,
+    setup_logging,
+)
+from modules.config.types import (
+    DEFAULT_MAX_DURATION,
+    BudgetConfig,
+    get_default_base_dir,
+)
 from modules.handlers.base import BudgetLimitReached, is_docker
+from modules.handlers.events import EventEmitter, get_emitter
+from modules.handlers.max_token_recovery import (
+    build_task_executor_max_token_prompt,
+    classify_and_discard_max_token_output,
+    is_repeated_max_token_pattern,
+    reset_agent_conversation_for_recovery,
+)
 from modules.handlers.react import AgentEventHandler
+from modules.handlers.tool_repeat_guard import REPEATED_TOOL_LOOP_STATE_KEY
 from modules.handlers.utils import (
     Colors,
+    dumpstacks,
     get_output_path,
     get_terminal_width,
     print_banner,
     print_section,
     print_status,
     sanitize_target_name,
-    dumpstacks,
     update_latest_output_pointer,
 )
+from modules.handlers.terminal_tool import (
+    TERMINAL_TOOL_COMPLETED_STATE_KEY,
+    TERMINAL_TOOL_REJECTED_STATE_KEY,
+)
 from modules.tools import browser, channel_close_all
+from modules.tools.memory import OperationTarget, get_memory_client, resolve_operation_targets
 from modules.tools.oast import close_oast_providers
+from modules.tools.tool_catalog import get_shell_command_help_context
 from modules.utils.telemetry import flush_traces
+from modules.utils.target_validation import TargetValidationResult, TargetValidator, validate_operation_targets
 
 load_dotenv()
 
@@ -90,6 +126,31 @@ def get_initial_prompt():  # noqa: D401
     return ""
 
 
+def _recovery_guidance_with_failed_command_help(recovery_hook: Any, available_tools: list[str]) -> str:
+    if not recovery_hook or not recovery_hook.unresolved:
+        return ""
+    return recovery_hook.recovery_guidance(
+        get_shell_command_help_context(
+            recovery_hook.failed_executable,
+            available_tools,
+        )
+    )
+
+
+def is_langfuse_available() -> bool:
+    """Return whether the configured Langfuse health endpoint is reachable."""
+
+    try:
+        if is_docker():
+            langfuse_host = os.getenv("LANGFUSE_HOST", "http://langfuse-web:3000")
+        else:
+            langfuse_host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+        response = requests.get(f"{langfuse_host}/api/public/health", timeout=2)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
 def detect_deployment_mode():
     """
     Detect deployment mode for appropriate observability defaults.
@@ -97,20 +158,6 @@ def detect_deployment_mode():
     Returns:
         str: 'cli' (Python CLI), 'container' (single container), or 'compose' (full stack)
     """
-
-    def is_langfuse_available():
-        """Check if Langfuse service is available."""
-        try:
-            if is_docker():
-                langfuse_host = os.getenv("LANGFUSE_HOST", "http://langfuse-web:3000")
-            else:
-                langfuse_host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
-            response = requests.get(
-                f"{langfuse_host}/api/public/health", timeout=2
-            )
-            return response.status_code == 200
-        except Exception:
-            return False
 
     if is_docker():
         if is_langfuse_available():
@@ -122,6 +169,34 @@ def detect_deployment_mode():
             return "compose"  # Local development with Langfuse
         else:
             return "cli"  # Pure Python CLI mode
+
+
+def run_target_preflight(
+    *,
+    logical_target: str,
+    objective: str,
+    operation_id: str,
+    logger: Any,
+    emitter: Optional[EventEmitter] = None,
+    validator: Optional[TargetValidator] = None,
+) -> tuple[list[OperationTarget], list[TargetValidationResult]]:
+    """Resolve, validate, emit, and log one preflight result per target."""
+
+    targets = resolve_operation_targets(logical_target, objective)
+    results = validate_operation_targets(targets, validator=validator)
+    event_emitter = emitter or get_emitter(operation_id=operation_id)
+    for result in results:
+        event_emitter.emit(result.to_event(operation_id))
+        log = logger.error if result.status == "fail" else logger.info
+        log(
+            "Target preflight %s: %s (%s) checks=%s%s",
+            result.status,
+            result.target,
+            result.target_type,
+            ",".join(result.checks) or "none",
+            f" reason={result.reason}" if result.reason else "",
+        )
+    return targets, results
 
 
 def setup_telemetry(logger):
@@ -178,13 +253,23 @@ def setup_telemetry(logger):
 
     if observability_enabled:
         logger.info("Remote observability enabled - configuring Langfuse export")
-
-        # Configure Langfuse connection parameters first
-        setup_langfuse_connection(logger, deployment_mode)
-
-        # Then setup OTLP exporter which will use the environment variables
-        telemetry.setup_otlp_exporter()
-        logger.info("OTLP exporter configured - traces will be exported to Langfuse")
+        if not is_langfuse_available():
+            logger.warning(
+                "Langfuse is unavailable; continuing with local telemetry only"
+            )
+        else:
+            try:
+                setup_langfuse_connection(logger, deployment_mode)
+                telemetry.setup_otlp_exporter()
+            except Exception as error:
+                logger.warning(
+                    "Unable to configure OTLP exporter; continuing with local telemetry only: %s",
+                    error,
+                )
+            else:
+                logger.info(
+                    "OTLP exporter configured - traces will be exported to Langfuse"
+                )
     else:
         logger.info("Remote observability disabled - metrics available locally only")
         logger.debug("Token counting and cost tracking enabled via local telemetry")
@@ -334,10 +419,25 @@ def extract_last_assistant_text(messages: Any) -> str:
     return ""
 
 
-def _required_tools_satisfied(callback_handler: Any, run_policy: AgentRunPolicy) -> bool:
-    """Return true when the callback has observed enough required tool calls."""
+def _tool_count_deltas(callback_handler: Any, baseline: Optional[dict[str, int]] = None) -> dict[str, int]:
+    """Return non-negative tool-call counts observed after a run-pass baseline."""
 
     tool_counts = getattr(callback_handler, "tool_counts", {}) or {}
+    baseline = baseline or {}
+    return {
+        name: max(0, int(count or 0) - int(baseline.get(name, 0) or 0))
+        for name, count in tool_counts.items()
+    }
+
+
+def _required_tools_satisfied(
+    callback_handler: Any,
+    run_policy: AgentRunPolicy,
+    baseline: Optional[dict[str, int]] = None,
+) -> bool:
+    """Return true when this run pass has observed enough required tool calls."""
+
+    tool_counts = _tool_count_deltas(callback_handler, baseline)
     tool_total_count = sum(
         count
         for name, count in tool_counts.items()
@@ -348,20 +448,49 @@ def _required_tools_satisfied(callback_handler: Any, run_policy: AgentRunPolicy)
     return all(int(tool_counts.get(name, 0) or 0) > 0 for name in run_policy.required_tool_names)
 
 
+def _successful_required_tools_satisfied(callback_handler: Any, run_policy: AgentRunPolicy, baseline: int) -> bool:
+    """Return true when every required tool has a successful controller-observed outcome."""
+
+    journal = getattr(callback_handler, "tool_outcome_journal", None)
+    if journal is None or not hasattr(journal, "since"):
+        return False
+    successful = {outcome.tool_name for outcome in journal.since(baseline) if outcome.success}
+    return run_policy.required_tool_names.issubset(successful)
+
+
 def _run_policy_allows_terminal_text(
     callback_handler: Any,
     run_policy: AgentRunPolicy,
     actionless_attempt_count: int,
+    baseline: Optional[dict[str, int]] = None,
 ) -> bool:
     """Return true when an actionless turn is a valid final response under policy."""
 
     if not run_policy.terminal_after_required_tools:
         return False
+    if run_policy.require_successful_required_tools:
+        return False
+    required_tools_satisfied = _required_tools_satisfied(callback_handler, run_policy, baseline)
+    if not required_tools_satisfied:
+        return False
     if not run_policy.allow_text_final_after_tools:
-        return False
-    if actionless_attempt_count <= run_policy.max_actionless_after_tools:
-        return False
-    return _required_tools_satisfied(callback_handler, run_policy)
+        return True
+    return actionless_attempt_count > run_policy.max_actionless_after_tools
+
+
+def _invoke_agent_with_turn_limit(agent: Any, message: str, max_model_turns: int) -> Any:
+    """Pass the SDK turn bound while remaining compatible with simple callable test doubles."""
+
+    try:
+        parameters = inspect.signature(agent).parameters.values()
+        supports_limits = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+            parameter.name == "limits" for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        supports_limits = True
+    if supports_limits:
+        return agent(message, limits={"turns": max_model_turns})
+    return agent(message)
 
 
 def run_agent_until_terminal_state(
@@ -381,10 +510,20 @@ def run_agent_until_terminal_state(
     run_policy = run_policy or AgentRunPolicy()
     initial_reasoning_retry = 2
     actionless_attempt_count = 0
+    agent_call_count = 0
     recoverable_attempt_count = 0
     agent_callback_handler = getattr(agent, "_cyber_callback_handler", None) or callback_handler
+    run_tool_count_baseline = dict(getattr(agent_callback_handler, "tool_counts", {}) or {})
+    outcome_journal = getattr(agent_callback_handler, "tool_outcome_journal", None)
+    outcome_baseline = outcome_journal.snapshot() if outcome_journal is not None else 0
 
     while not interrupted:
+        if agent_call_count >= run_policy.max_agent_calls:
+            termination_reason = f"Stopped after {agent_call_count} agent calls without reaching the role contract"
+            print_status(termination_reason, "WARNING")
+            if agent_callback_handler:
+                agent_callback_handler.emit_termination("stalled", termination_reason)
+            return AgentRunResult("stalled", termination_reason)
         last_tool_call_count = sum(agent_callback_handler.tool_counts.values(), start=0)
         try:
             print_status(
@@ -399,11 +538,73 @@ def run_agent_until_terminal_state(
                 agent.messages = []
             _ensure_prompt_within_budget(agent)
 
-            result = agent(current_message)
+            agent_call_count += 1
+            result = _invoke_agent_with_turn_limit(agent, current_message, run_policy.max_model_turns)
             recoverable_attempt_count = 0
 
             logger.debug("Agent result: %r", result)
             process_agent_metrics(agent_callback_handler, result)
+
+            stop_reason = str(getattr(result, "stop_reason", "") or "")
+            if stop_reason.startswith("limit_"):
+                termination_reason = f"Agent stopped at its configured SDK limit: {stop_reason}"
+                print_status(termination_reason, "WARNING")
+                if agent_callback_handler:
+                    agent_callback_handler.emit_termination("stalled", termination_reason)
+                return AgentRunResult("stalled", termination_reason)
+
+            result_state = getattr(result, "state", {})
+            terminal_tool_completed = (
+                result_state.get(TERMINAL_TOOL_COMPLETED_STATE_KEY)
+                if isinstance(result_state, dict)
+                else None
+            )
+            if run_policy.require_successful_required_tools and isinstance(terminal_tool_completed, dict):
+                completed_tool = str(terminal_tool_completed.get("tool_name", ""))
+                if completed_tool in run_policy.required_tool_names:
+                    return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+            if (
+                run_policy.require_successful_required_tools
+                and run_policy.terminal_after_required_tools
+                and _successful_required_tools_satisfied(agent_callback_handler, run_policy, outcome_baseline)
+            ):
+                return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+            terminal_tool_rejected = (
+                result_state.get(TERMINAL_TOOL_REJECTED_STATE_KEY)
+                if isinstance(result_state, dict)
+                else None
+            )
+            if isinstance(terminal_tool_rejected, dict):
+                return AgentRunResult(
+                    "required_tool_rejected",
+                    str(terminal_tool_rejected.get("error") or "Required tool call was rejected"),
+                )
+            repeated_tool_loop = (
+                result_state.get(REPEATED_TOOL_LOOP_STATE_KEY)
+                if isinstance(result_state, dict)
+                else None
+            )
+            if isinstance(repeated_tool_loop, dict):
+                tool_name = str(repeated_tool_loop.get("tool_name", "unknown"))
+                repeat_count = int(repeated_tool_loop.get("repeat_count", 0) or 0)
+                cycle_length = int(repeated_tool_loop.get("cycle_length", 1) or 1)
+                if cycle_length > 1:
+                    raw_tool_names = repeated_tool_loop.get("tool_names", [])
+                    tool_names = list(dict.fromkeys(
+                        str(item) for item in raw_tool_names if str(item).strip()
+                    )) if isinstance(raw_tool_names, list) else []
+                    tool_summary = f" involving {', '.join(tool_names)}" if tool_names else ""
+                    message = (
+                        f"Stopped agent after {repeat_count} repetitions of a {cycle_length}-call tool cycle"
+                        f"{tool_summary}; matching completed results were reused."
+                    )
+                else:
+                    message = (
+                        f"Stopped agent after {repeat_count} consecutive identical calls to {tool_name}; "
+                        "the latest completed result was reused."
+                    )
+                logger.warning(message)
+                return AgentRunResult("repeated_tool_loop", message)
 
             tool_total_count = sum(agent_callback_handler.tool_counts.values())
             if tool_total_count > last_tool_call_count:
@@ -416,7 +617,21 @@ def run_agent_until_terminal_state(
                     tool_total_count,
                 )
 
-            if _run_policy_allows_terminal_text(agent_callback_handler, run_policy, actionless_attempt_count):
+            run_tool_deltas = _tool_count_deltas(agent_callback_handler, run_tool_count_baseline)
+            run_tool_total = sum(
+                count
+                for name, count in run_tool_deltas.items()
+                if name not in run_policy.ignored_terminal_tool_names
+            )
+            if run_policy.max_tool_calls and run_tool_total >= run_policy.max_tool_calls:
+                return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+
+            if _run_policy_allows_terminal_text(
+                agent_callback_handler,
+                run_policy,
+                actionless_attempt_count,
+                run_tool_count_baseline,
+            ):
                 return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
 
             if agent_callback_handler and agent_callback_handler.should_stop():
@@ -425,19 +640,21 @@ def run_agent_until_terminal_state(
                     raise BudgetLimitReached("Budget limit reached")
                 return AgentRunResult("callback_stop", "Callback requested stop")
 
-            if sum(agent_callback_handler.tool_counts.values()) == 0:
-                if getattr(agent_callback_handler, "_emitted_any_reasoning", False):
-                    logger.debug("Initial reasoning observed with no tools yet; continuing one more cycle")
-                elif initial_reasoning_retry <= 0:
+            if actionless_attempt_count >= run_policy.max_actionless_calls:
+                termination_reason = f"No actions taken after {actionless_attempt_count} attempts"
+                if run_policy.required_tool_names or run_policy.min_tool_calls > 0:
+                    print_status(termination_reason, "WARNING")
+                    if agent_callback_handler:
+                        agent_callback_handler.emit_termination("stalled", termination_reason)
+                    return AgentRunResult("stalled", termination_reason)
+                print_status("No actions taken - completing", "SUCCESS")
+                return AgentRunResult("no_actions", termination_reason)
+
+            if sum(run_tool_deltas.values()) == 0:
+                if initial_reasoning_retry <= 0:
                     print_status("No actions taken - completing", "SUCCESS")
                     return AgentRunResult("no_actions", "No actions taken")
                 initial_reasoning_retry -= 1
-            elif actionless_attempt_count > 2:
-                termination_reason = f"No actions taken after {actionless_attempt_count} attempts"
-                print_status(termination_reason, "WARNING")
-                if agent_callback_handler:
-                    agent_callback_handler.emit_termination("stalled", termination_reason)
-                return AgentRunResult("stalled", termination_reason)
 
             elapsed = time.time() - operation_start
             if max_duration is not None and elapsed >= float(max_duration) * 60.0:
@@ -465,19 +682,61 @@ def run_agent_until_terminal_state(
                         else:
                             break
 
-                    current_message += (
-                        "**MANDATORY ACTION**: Take your time to decide which tool to call next. "
-                        "A tool MUST be called next to make progress."
-                    )
+                    required_tools = ", ".join(sorted(run_policy.required_tool_names))
+                    if run_policy.actionless_mode == "task_progress":
+                        completion_instruction = (
+                            f"Treat the required completion tool(s) ({required_tools}) as completion conditions, not "
+                            "necessarily the next action. Use them only after their prerequisite work and evidence "
+                            "are complete."
+                            if required_tools
+                            else "Follow the controller's recovery guidance and stay within the assigned task."
+                        )
+                        current_message += (
+                            "**MANDATORY ACTION**: Continue the assigned task under its run policy. "
+                            "Call the next registered tool needed to satisfy an unmet acceptance criterion and "
+                            f"create durable evidence. {completion_instruction} "
+                            "Do not respond with analysis or a plan."
+                        )
+                    elif required_tools and not run_policy.allow_text_final_after_tools:
+                        current_message += (
+                            "**MANDATORY ACTION**: A text-only response cannot complete this role. "
+                            f"Call {required_tools} now using its registered schema. "
+                            "Do not call any tool that is not registered for this role."
+                        )
+                    else:
+                        current_message += (
+                            "**MANDATORY ACTION**: Call an available tool now to make concrete progress. "
+                            "Do not respond with analysis or a plan."
+                        )
                 else:
                     logger.warning(
                         "Attempting to redirect model again because no tool calls were detected in last execution loop."
                     )
-                    current_message += (
-                        "**MANDATORY ACTION**: Continue only the assigned workflow role and make progress now. "
-                        "Call an available tool if tool progress is required; otherwise provide the final answer "
-                        "for this role."
-                    )
+                    if run_policy.actionless_mode == "task_progress":
+                        required_tools = ", ".join(sorted(run_policy.required_tool_names))
+                        completion_instruction = (
+                            f"Use the required completion tool(s) ({required_tools}) only when their prerequisites "
+                            "are complete."
+                            if required_tools
+                            else "Follow the controller's recovery guidance and stay within the assigned task."
+                        )
+                        current_message += (
+                            "**MANDATORY ACTION**: Resume the same assigned task and call the next registered tool "
+                            "that addresses its unmet acceptance criteria. Preserve completed work and durable "
+                            f"evidence. {completion_instruction} Do not provide more analysis."
+                        )
+                    elif not run_policy.allow_text_final_after_tools:
+                        required_tools = ", ".join(sorted(run_policy.required_tool_names)) or "an available tool"
+                        current_message += (
+                            "**MANDATORY ACTION**: A text-only response cannot complete this role. "
+                            f"Call {required_tools} now using its registered schema. Do not provide more analysis."
+                        )
+                    else:
+                        current_message += (
+                            "**MANDATORY ACTION**: Continue only the assigned workflow role and make progress now. "
+                            "Call an available tool if tool progress is required; otherwise provide the final answer "
+                            "for this role."
+                        )
 
         except StopIteration as error:
             logger.debug("Agent cycle completed: %s", str(error))
@@ -514,6 +773,96 @@ def run_agent_until_terminal_state(
     return AgentRunResult("interrupted", "")
 
 
+def run_workflow_agent_with_max_token_recovery(
+    *,
+    agent: Any,
+    prompt: str,
+    run_policy: Optional[AgentRunPolicy],
+    callback_handler: Any,
+    initial_prompt: str,
+    budget_cfg: BudgetConfig,
+    operation_start: float,
+    max_duration: int | None,
+    logger: Any,
+) -> AgentRunResult:
+    """Run a workflow role with one safe, controller-directed executor recovery."""
+
+    current_prompt = prompt
+    current_run_policy = run_policy
+    max_token_recovery_attempts = 0
+    while True:
+        try:
+            return run_agent_until_terminal_state(
+                agent=agent,
+                callback_handler=callback_handler,
+                current_message=current_prompt,
+                initial_prompt=initial_prompt,
+                budget_cfg=budget_cfg,
+                operation_start=operation_start,
+                max_duration=max_duration,
+                logger=logger,
+                run_policy=current_run_policy,
+            )
+        except MaxTokensReachedException as error:
+            classification, removed = classify_and_discard_max_token_output(agent)
+            setattr(error, "max_token_classification", classification)
+            repeated_pattern = is_repeated_max_token_pattern(agent, classification)
+            role = str(getattr(agent, "_cyber_agent_type", "unknown"))
+            output_limit = getattr(getattr(agent, "model", None), "_output_tokens", None)
+            can_retry = role == "task_executor" and max_token_recovery_attempts < 1 and not repeated_pattern
+            logger.warning(
+                "MAX_TOKEN_RECOVERY role=%s classification=%s repetition_ratio=%.3f "
+                "discarded_tokens=%s partial_removed=%s output_limit=%s attempt=%s "
+                "repeated_pattern=%s action=%s",
+                role,
+                classification.kind,
+                classification.repetition_ratio,
+                classification.discarded_tokens,
+                removed,
+                output_limit,
+                max_token_recovery_attempts + 1,
+                repeated_pattern,
+                "retry" if can_retry else "propagate",
+            )
+            if not can_retry:
+                raise
+
+            reset_agent_conversation_for_recovery(agent)
+            if run_policy is not None:
+                current_run_policy = replace(
+                    run_policy,
+                    max_agent_calls=1,
+                    max_model_turns=1,
+                    max_tool_calls=1,
+                    max_actionless_calls=1,
+                    actionless_mode="required_tool",
+                )
+
+            agent_callback = getattr(agent, "_cyber_callback_handler", None) or callback_handler
+            journal = getattr(agent_callback, "tool_outcome_journal", None)
+            journal_entries = journal.entries() if journal is not None else []
+            completed_tools = [outcome.tool_name for outcome in journal_entries if outcome.success]
+            completed_outcomes = [
+                f"{outcome.tool_name}: {outcome.output_summary[:1000]}"
+                for outcome in journal_entries
+                if outcome.success
+            ][-8:]
+            latest_outcome = ""
+            if journal_entries:
+                latest = journal_entries[-1]
+                latest_outcome = f"{latest.tool_name}: {latest.output_summary[:1000]}"
+            current_prompt = build_task_executor_max_token_prompt(
+                classification,
+                completed_tools=completed_tools,
+                required_tools=set(run_policy.required_tool_names) if run_policy else set(),
+                completed_outcomes=completed_outcomes,
+                task_objective=run_policy.recovery_objective if run_policy else "",
+                latest_tool_outcome=latest_outcome,
+                next_required_action=run_policy.recovery_next_action if run_policy else "",
+            )
+            max_token_recovery_attempts += 1
+
+
 def finalize_report_and_evaluation(
     *,
     agent: Any | None,
@@ -527,17 +876,87 @@ def finalize_report_and_evaluation(
     if not callback_handler:
         logger.warning("No callback_handler available for evaluation trigger")
         return
+    completion_status: dict[str, Any] | None = None
     try:
-        callback_handler.ensure_report_generated(agent, target, objective, module)
+        try:
+            plan = get_memory_client(silent=True).get_active_plan()
+        except Exception as error:
+            logger.warning("Unable to determine workflow completion before report generation: %s", error)
+            plan = None
+        completion_status = _build_report_completion_status(plan, callback_handler)
+        callback_handler.ensure_report_generated(
+            agent,
+            target,
+            objective,
+            module,
+            completion_status=completion_status,
+        )
         logger.info("Triggering evaluation on completion")
         callback_handler.trigger_evaluation_on_completion()
     except Exception as error:
         logger.warning("Error in final report/evaluation: %s", error)
     finally:
         try:
-            callback_handler.emit_assessment_complete()
+            if completion_status is None:
+                plan = get_memory_client(silent=True).get_active_plan()
+                completion_status = _build_report_completion_status(plan, callback_handler)
+            workflow_complete = bool(completion_status.get("workflow_complete"))
+            termination_complete = completion_status.get("termination_reason") == "complete"
+            if workflow_complete and termination_complete:
+                callback_handler.emit_assessment_complete()
+            else:
+                logger.info(
+                    "Skipping assessment_complete: workflow_complete=%s termination_reason=%s",
+                    workflow_complete,
+                    completion_status.get("termination_reason"),
+                )
         except Exception as error:
-            logger.warning("Unable to emit assessment completion: %s", error)
+            logger.warning("Unable to determine or emit assessment completion: %s", error)
+
+
+def _build_report_completion_status(plan: Any, callback_handler: Any) -> dict[str, Any]:
+    """Describe whether the final report is based on a completed workflow."""
+    coordinator = getattr(callback_handler, "coordinator", None)
+    termination_source = coordinator or callback_handler
+    termination_reason = getattr(termination_source, "termination_reason", None)
+    termination_message = getattr(termination_source, "termination_message", None)
+    workflow_complete = bool(plan and getattr(plan, "assessment_complete", False))
+    assessment_complete = workflow_complete and termination_reason == "complete"
+    if assessment_complete:
+        incomplete_reason = None
+    elif not workflow_complete and termination_reason:
+        incomplete_reason = (
+            f"Workflow ended with termination_reason={termination_reason!r} before assessment_complete=true."
+        )
+    elif not workflow_complete:
+        incomplete_reason = "Workflow ended before assessment_complete=true."
+    else:
+        incomplete_reason = (
+            f"Workflow reached assessment_complete=true but termination_reason={termination_reason!r}."
+        )
+    health_snapshot = None
+    health_provider = getattr(callback_handler, "operation_health_snapshot", None)
+    if callable(health_provider):
+        try:
+            health_snapshot = health_provider()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Unable to include operation health in report completion status",
+                exc_info=True,
+            )
+    return {
+        "assessment_complete": assessment_complete,
+        "workflow_complete": workflow_complete,
+        "termination_reason": termination_reason,
+        "termination_message": termination_message,
+        "incomplete_reason": incomplete_reason,
+        "unresolved_task_count": (
+            health_snapshot.get("unresolved_task_count") if isinstance(health_snapshot, dict) else None
+        ),
+        "incomplete_phase_ids": (
+            health_snapshot.get("incomplete_phase_ids") if isinstance(health_snapshot, dict) else []
+        ),
+    }
 
 
 def close_log_outputs() -> None:
@@ -967,6 +1386,22 @@ def main():
     )
     logger = setup_logging(log_file=log_file, verbose=verbose_mode)
 
+    operation_targets: list[OperationTarget] = []
+    if not bool(args.report):
+        operation_targets, preflight_results = run_target_preflight(
+            logical_target=args.target,
+            objective=args.objective,
+            operation_id=operation_id,
+            logger=logger,
+        )
+        failed_preflight = [result for result in preflight_results if result.status == "fail"]
+        if failed_preflight:
+            failure_summary = "; ".join(
+                f"{result.target}: {result.reason}" for result in failed_preflight
+            )
+            print_status(f"Target preflight failed: {failure_summary}", "ERROR")
+            raise SystemExit(2)
+
     latest_pointer = update_latest_output_pointer(
         target_sanitized,
         operation_id,
@@ -1087,6 +1522,9 @@ def main():
     output_base_path = get_output_path(
         target_sanitized, operation_id, "", server_config.output.base_dir
     )
+    # Keep relative tool paths inside the operation workspace.
+    os.makedirs(output_base_path, exist_ok=True, mode=0o775)
+    os.chdir(output_base_path)
 
     # Prepare path display based on environment
     if is_docker():
@@ -1162,6 +1600,37 @@ def main():
         callback_handler = runtime_resources.callback_handler
 
         if not bool(args.report):
+            def run_workflow_agent(
+                agent: Any,
+                prompt: str,
+                run_policy: Optional[AgentRunPolicy],
+            ) -> str:
+                try:
+                    message_start = len(agent.messages)
+                except (AttributeError, TypeError):
+                    message_start = 0
+                result = run_workflow_agent_with_max_token_recovery(
+                    agent=agent,
+                    prompt=prompt,
+                    run_policy=run_policy,
+                    callback_handler=callback_handler,
+                    initial_prompt=initial_prompt,
+                    budget_cfg=budget_cfg,
+                    operation_start=operation_start,
+                    max_duration=args.max_duration,
+                    logger=logger,
+                )
+                try:
+                    current_pass_messages = list(agent.messages)[message_start:]
+                except (AttributeError, TypeError):
+                    current_pass_messages = []
+                assistant_text = extract_last_assistant_text(current_pass_messages)
+                if assistant_text:
+                    return assistant_text
+                if run_policy and result.reason == run_policy.terminal_reason:
+                    return ""
+                return result.message or result.reason
+
             def workflow_work_runner(
                 role: str,
                 prompt: str,
@@ -1180,28 +1649,79 @@ def main():
                     agent_type=role,
                     include_tool_catalog=role != "task_creator",
                 )
-                result = run_agent_until_terminal_state(
-                    agent=agent,
-                    callback_handler=callback_handler,
-                    current_message=prompt,
-                    initial_prompt=initial_prompt,
-                    budget_cfg=budget_cfg,
-                    operation_start=operation_start,
-                    max_duration=args.max_duration,
-                    logger=logger,
-                    run_policy=run_policy,
+                try:
+                    return run_workflow_agent(agent, prompt, run_policy)
+                finally:
+                    try:
+                        agent.cleanup()
+                    except Exception as error:
+                        logger.warning("Unable to clean up role agent %s: %s", role, error)
+
+            @contextmanager
+            def workflow_executor_session(role: str, tools: list[Any], system_prompt: str):
+                agent = create_agent(
+                    target=args.target,
+                    objective=args.objective,
+                    config=config,
+                    runtime_resources=runtime_resources,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    name=f"Cyber-AutoAgent {operation_id} {role}",
+                    agent_type=role,
+                    include_tool_catalog=role != "task_creator",
                 )
-                assistant_text = extract_last_assistant_text(getattr(agent, "messages", []))
-                if assistant_text:
-                    return assistant_text
-                if run_policy and result.reason == run_policy.terminal_reason:
-                    return ""
-                return result.message or result.reason
+                try:
+                    callback = getattr(agent, "_cyber_callback_handler", None)
+                    recovery_hook = getattr(agent, "_cyber_failure_recovery_hook", None)
+
+                    def run_retained_executor(
+                        prompt: str,
+                        run_policy: Optional[AgentRunPolicy] = None,
+                    ) -> TaskExecutorCycleResult:
+                        journal = getattr(callback, "tool_outcome_journal", None)
+                        snapshot = journal.snapshot() if journal is not None else 0
+                        try:
+                            text = run_workflow_agent(agent, prompt, run_policy)
+                        except MaxTokensReachedException as error:
+                            classification = getattr(error, "max_token_classification", None)
+                            kind = getattr(classification, "kind", "output_truncation")
+                            outcomes = journal.since(snapshot) if journal is not None else []
+                            role_label = "Task creator" if role == "task_creator" else "Task executor"
+                            return TaskExecutorCycleResult(
+                                text="",
+                                outcomes=outcomes,
+                                max_tokens_exhausted=True,
+                                max_tokens_reason=(
+                                    f"{role_label} repeated the same reasoning loop after its bounded recovery."
+                                    if kind == "reasoning_loop"
+                                    else f"{role_label} reached its output-token limit after its bounded recovery."
+                                ),
+                            )
+                        outcomes = journal.since(snapshot) if journal is not None else []
+                        return TaskExecutorCycleResult(
+                            text=text,
+                            outcomes=outcomes,
+                            recovery_required=bool(recovery_hook and recovery_hook.unresolved),
+                            recovery_exhausted=bool(recovery_hook and recovery_hook.exhausted),
+                            recovery_guidance=_recovery_guidance_with_failed_command_help(
+                                recovery_hook,
+                                config.available_tools or [],
+                            ),
+                        )
+
+                    yield run_retained_executor
+                finally:
+                    try:
+                        agent.cleanup()
+                    except Exception as error:
+                        logger.warning("Unable to clean up role agent %s: %s", role, error)
 
             workflow = MultiAgentWorkflowController(
                 runtime=runtime_resources,
                 budget=budget_cfg,
                 work_runner=workflow_work_runner,
+                executor_session_factory=workflow_executor_session,
+                operation_targets=operation_targets,
             )
 
             try:
@@ -1209,6 +1729,11 @@ def main():
             except BudgetLimitReached:
                 print_status("Budget limit reached", "SUCCESS")
                 logger.debug("Budget limit reached - terminating gracefully")
+                if callback_handler and not callback_handler.termination_emitted:
+                    callback_handler.emit_termination(
+                        "budget_limit",
+                        "Operation budget limit reached. Switching to final report.",
+                    )
             except MaxTokensReachedException as error:
                 print_status("Token limit reached - generating final report", "WARNING")
                 logger.debug("Termination exception", exc_info=error)
@@ -1218,9 +1743,26 @@ def main():
                             "max_tokens",
                             "Model token limit reached. Switching to final report.",
                         )
-                        callback_handler.ensure_report_generated(None, args.target, args.objective, args.module)
+                        try:
+                            plan = get_memory_client(silent=True).get_active_plan()
+                        except Exception:
+                            plan = None
+                        callback_handler.ensure_report_generated(
+                            None,
+                            args.target,
+                            args.objective,
+                            args.module,
+                            completion_status=_build_report_completion_status(plan, callback_handler),
+                        )
                 except Exception as max_tokens_finish_error:
                     logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
+            except WorkflowInvariantError as error:
+                logger.exception("Workflow invariant error occurred", exc_info=error)
+                termination_reason = str(error)
+                print_status(f"Agent error: {termination_reason}", "ERROR")
+                if callback_handler:
+                    callback_handler.emit_termination("error", termination_reason)
+                raise
             except Exception as error:
                 logger.exception("Unexpected agent error occurred", exc_info=error)
                 termination_reason = str(error)
@@ -1358,7 +1900,7 @@ def main():
         termination_reason = str(e)
         print_status(f"\nOperation failed: {termination_reason}", "ERROR")
         try:
-            if callback_handler:
+            if callback_handler and not isinstance(e, WorkflowInvariantError):
                 callback_handler.emit_termination("error", termination_reason)
         except Exception:
             pass

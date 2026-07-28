@@ -14,7 +14,6 @@ This module is designed for maximum modularity and extensibility, allowing devel
 src/modules/prompts/
 ├── templates/
 │   ├── system_prompt.md
-│   ├── task_capture.md
 │   ├── tools_guide.md
 │   ├── report_agent_executive_system_prompt.md
 │   ├── report_agent_finding_system_prompt.md
@@ -40,7 +39,6 @@ This is the heart of the module. It contains the primary logic for prompt constr
 This directory stores the Markdown and text templates that form the building blocks of all prompts. Externalizing these templates allows for easy modification of the agent's behavior and report structure without touching Python code.
 
 - **`system_prompt.md`**: Defines the agent's core persona, high-level objectives, and rules of engagement.
-- **`task_capture.md`**: Defines the worker agent rules for creating new tasks.
 - **`tools_guide.md`**: Provides the agent with a general manual on how to use its built-in tools and capabilities effectively.
 - **`report_template.md`**: A structural template for the final Markdown report. It contains placeholders (e.g., `{target}`, `{findings_table}`) that are filled in by `factory.py`.
 - **`report_agent_system_prompt.md`**: A specialized system prompt that instructs an AI on how to act as a professional security analyst to write the final report based on the provided data.

@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 
 import atexit
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
-import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Any, List, Optional
 
 import yaml
 
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import print_status
-from modules.config.system.logger import get_logger, initialize_logger_factory
+from modules.config.system.logger import (
+    configure_provider_diagnostic_logging,
+    get_logger,
+    initialize_logger_factory,
+    unsafe_diagnostic_logging_enabled,
+)
 
 
 def clean_operation_memory(operation_id: str, target_name: str = None):
@@ -68,6 +75,93 @@ def clean_operation_memory(operation_id: str, target_name: str = None):
             print_status(f"Failed to clean {memory_path}: {e}", "ERROR")
     else:
         logger.debug("Memory path does not exist: %s", memory_path)
+
+
+_STARTUP_FAILURE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:module|package)notfounderror\b",
+        r"\bimporterror\b",
+        r"\bno module named\b",
+        r"\berror while loading shared libraries\b",
+        r"\b(?:shared object|dynamic library) .* (?:not found|cannot open)\b",
+        r"\btraceback \(most recent call last\)\b",
+    )
+)
+
+
+@dataclass(frozen=True)
+class ToolHealth:
+    """Result of deterministic executable discovery and optional startup verification."""
+
+    state: str
+    path: Optional[str]
+    reason: str = ""
+
+    @property
+    def available(self) -> bool:
+        return self.state in {"available_verified", "available_unverified"}
+
+
+def _bounded_probe_reason(value: Any, limit: int = 300) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _probe_config(canary: Any) -> tuple[list[str], int, set[int]]:
+    if not isinstance(canary, dict):
+        raise ValueError("canary must be an object")
+    args = canary.get("args")
+    if not isinstance(args, list) or not all(isinstance(arg, str) and arg for arg in args):
+        raise ValueError("canary.args must be a list of non-empty strings")
+    timeout_seconds = canary.get("timeout_seconds", 5)
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 60:
+        raise ValueError("canary.timeout_seconds must be an integer from 1 through 60")
+    exit_codes = canary.get("accepted_exit_codes", [0])
+    if not isinstance(exit_codes, list) or not exit_codes or not all(
+        isinstance(code, int) and not isinstance(code, bool) for code in exit_codes
+    ):
+        raise ValueError("canary.accepted_exit_codes must be a non-empty list of integers")
+    return args, timeout_seconds, set(exit_codes)
+
+
+def check_shell_command(command: str, canary: Any = None) -> ToolHealth:
+    """Resolve a command and optionally verify that it starts without generic dependency failures."""
+
+    tool_path = shutil.which(command)
+    if not tool_path:
+        return ToolHealth("missing", None, "executable not found in PATH")
+    if canary is None:
+        return ToolHealth("available_unverified", tool_path)
+    try:
+        args, timeout_seconds, accepted_exit_codes = _probe_config(canary)
+        result = subprocess.run(
+            [tool_path, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, ValueError) as error:
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(error))
+    except subprocess.TimeoutExpired:
+        return ToolHealth("broken", tool_path, "canary timed out")
+
+    output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+    startup_failure = next((pattern.pattern for pattern in _STARTUP_FAILURE_PATTERNS if pattern.search(output)), "")
+    if startup_failure:
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(output))
+    if result.returncode not in accepted_exit_codes:
+        reason = output or f"canary exited with code {result.returncode}"
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(reason))
+    return ToolHealth("available_verified", tool_path)
+
+
+def _get_shell_command_path(command: str, canary: Any = None) -> Optional[str]:
+    """Return the path for an available command, preserving the historical helper contract."""
+
+    health = check_shell_command(command, canary)
+    return health.path if health.available else None
 
 
 def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
@@ -153,8 +247,9 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
         description = tool_info.get("description", "")
         binary = tool_info.get("command", tool_name)
 
-        tool_path = shutil.which(binary)
-        is_available = tool_path is not None
+        health = check_shell_command(binary, tool_info.get("canary"))
+        tool_path = health.path
+        is_available = health.available
 
         if is_available:
             available_tools.append(tool_name)
@@ -167,13 +262,14 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
                 "tool_name": tool_name,
                 "description": description,
                 "status": "available",
+                "health": health.state,
                 "binary": binary,
                 "path": tool_path,
             }
             print(f"__CYBER_EVENT__{json.dumps(tool_event)}__CYBER_EVENT_END__")
         else:
             print_status(
-                f"○ {tool_name:<12} - {description} (not available)", "WARNING"
+                f"○ {tool_name:<12} - {description} ({health.state}: {health.reason})", "WARNING"
             )
 
             # Emit structured event for React UI
@@ -183,6 +279,8 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
                 "tool_name": tool_name,
                 "description": description,
                 "status": "unavailable",
+                "health": health.state,
+                "reason": health.reason,
                 "binary": binary,
                 "path": None,
             }
@@ -326,9 +424,15 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # File handler - log INFO and above to file
+    operation_file_level = (
+        logging.DEBUG
+        if verbose and unsafe_diagnostic_logging_enabled()
+        else logging.INFO
+    )
+
+    # Operation logs keep structured events plus INFO-and-above Python records.
     file_handler = logging.FileHandler(log_file, mode="a")
-    file_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    file_handler.setLevel(operation_file_level)
     file_handler.setFormatter(formatter)
 
     # Console handler - only show warnings and above unless verbose
@@ -350,11 +454,12 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
         logging.CRITICAL
     )  # Only show critical errors, not our expected StopIteration
 
-    # Capture all other loggers at INFO level to file
+    # Capture all other loggers at INFO level to file. Verbose mode may still
+    # enable component diagnostics elsewhere, but does not expand operation logs.
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     root_file_handler = logging.FileHandler(log_file, mode="a")
-    root_file_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    root_file_handler.setLevel(operation_file_level)
     root_file_handler.setFormatter(formatter)
     root_logger.addHandler(root_file_handler)
 
@@ -362,5 +467,6 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
     logging.getLogger("boto3").setLevel(logging.WARNING)
     logging.getLogger("botocore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    configure_provider_diagnostic_logging(enable_debug=verbose)
 
     return cyber_logger

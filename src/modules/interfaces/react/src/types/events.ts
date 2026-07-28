@@ -93,6 +93,10 @@ export enum EventType {
   REASONING = 'reasoning',
   /** Progress update with percentage of budget used */
   PROGRESS_UPDATE = 'progress_update',
+  /** Controller-owned planning, prompt-building, and evaluation activity */
+  WORKFLOW_ACTIVITY = 'workflow_activity',
+  /** Pre-operation validation result for one resolved target */
+  PREFLIGHT_CHECK = 'preflight_check',
   
   // =============================================================================
   // SPECIALIZED TOOL EVENTS - Specific security assessment tools
@@ -302,6 +306,12 @@ export interface ToolEvent extends BaseEvent {
   error?: string;
   /** Tool execution duration in milliseconds */
   duration?: number;
+  /** Backward-compatible success indicator */
+  success?: boolean;
+  /** Controller-observed completion classification */
+  outcome?: 'success' | 'error' | 'validation_error' | 'blocked';
+  /** Whether the selected tool reached execution */
+  executed?: boolean;
   /** Visual emphasis level for UI rendering */
   emphasis?: 'high' | 'medium' | 'low';
 }
@@ -401,6 +411,19 @@ export interface SystemEvent extends BaseEvent {
   details?: any;
 }
 
+/** Pre-operation validation result for one resolved executable target. */
+export interface PreflightCheckEvent extends BaseEvent {
+  type: EventType.PREFLIGHT_CHECK;
+  operation_id: string;
+  target_id: string;
+  target: string;
+  target_type: string;
+  status: 'pass' | 'fail' | 'skip';
+  checks: string[];
+  reason?: string;
+  resolved_addresses?: string[];
+}
+
 // Connection events
 export interface ConnectionEvent extends BaseEvent {
   type: EventType.CONNECTION_OPEN | EventType.CONNECTION_CLOSE | EventType.CONNECTION_ERROR;
@@ -488,6 +511,7 @@ export type StreamEvent =
   | MemoryEvent
   | ThinkEvent
   | SystemEvent
+  | PreflightCheckEvent
   | ConnectionEvent
   | AgentEvent
   | PythonSystemEvent

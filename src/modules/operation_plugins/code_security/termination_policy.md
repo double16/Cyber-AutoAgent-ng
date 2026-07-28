@@ -1,16 +1,15 @@
-**Workflow completion criteria**:
-1. All analysis layers complete + findings documented + remediation provided
-2. Budget ≥95%
+## Module completion criteria
 
-**Before claiming completion, MANDATORY**:
-1. "Files analyzed: [count]"
-2. "Vulnerabilities found: [count by severity]"
-3. "Dependencies scanned: [count with CVEs]"
-4. "Secrets detected: [count]"
-5. "Remediation guidance: [provided for all findings]"
+Classify the phase against its own criteria and the following operation-level outcomes:
 
-**Completion is not ready when**:
-- Analysis incomplete + budget <95%
-- Findings without file:line references
-- No remediation guidance provided
-- Dependency scan not performed
+- The authorized repository, languages, frameworks, dependency sources, and relevant attack surfaces are characterized.
+- Applicable dependency, secret, security-pattern, dataflow, and business-logic analysis is evidenced, or an explicit
+  artifact-backed reason explains why a layer does not apply or could not be completed.
+- Every reported vulnerability has an exact file and line, contextual exploitability analysis, impact, remediation,
+  validation status, and supporting artifact.
+- Tool matches and theoretical risks that were not contextually verified remain observations rather than findings.
+
+Use `done` only when the phase criteria and applicable outcomes above are evidence-backed. Use `partial_failure` when
+useful analysis exists but material coverage, validation, or remediation is missing. Use `blocked` only for a concrete
+external dependency, authorization limit, unavailable repository content, or capability that prevents the phase work.
+Budget consumption alone is never a completion requirement.

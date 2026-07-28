@@ -185,6 +185,47 @@ describe('Terminal event processing', () => {
         expect(cleanupRef.current).toBeNull();
     });
 
+    it('publishes only valid progress health snapshots to the application', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const onHealthUpdate = jest.fn();
+        const health = {status: 'available', score: 0.84, band: 'good', health_version: '1'};
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-health"
+                    terminalWidth={90}
+                    onHealthUpdate={onHealthUpdate}
+                    animationsEnabled={false}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'progress_update', step: 1, health});
+            service.emit('event', {
+                type: 'progress_update',
+                step: 2,
+                health: {status: 'unavailable', score: 0.7, band: 'degraded'},
+            });
+            service.emit('event', {
+                type: 'progress_update',
+                step: 3,
+                health: {status: 'available', score: 2, band: 'excellent'},
+            });
+            service.emit('event', {type: 'progress_update', step: 4});
+            await Promise.resolve();
+        });
+
+        expect(onHealthUpdate).toHaveBeenCalledTimes(1);
+        expect(onHealthUpdate).toHaveBeenCalledWith(health);
+
+        act(() => view.unmount());
+    });
+
     it('renders nothing when collapsed or without a service', async () => {
         const {Terminal} = await load();
         let view!: ReactTestRenderer;
@@ -353,6 +394,46 @@ describe('Terminal event processing', () => {
         });
     });
 
+    it('preserves compact health data on progress events', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-health"
+                    terminalWidth={90}
+                    animationsEnabled={false}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {
+                type: 'progress_update',
+                step: 1,
+                progressPercent: 30,
+                health: {
+                    status: 'available',
+                    score: 0.82,
+                    band: 'good',
+                    failure_count: 2,
+                },
+            });
+            await Promise.resolve();
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('💚 82% GOOD');
+        expect(text).not.toContain('failure_count');
+
+        act(() => {
+            view.unmount();
+        });
+    });
+
     it('bounds final report output events while the report cluster is active', async () => {
         process.env.CYBER_MAX_FINAL_REPORT_EVENTS = '3';
         const {Terminal} = await load();
@@ -515,6 +596,93 @@ describe('Terminal event processing', () => {
         act(() => {
             view.unmount();
         });
+    });
+
+    it('routes workflow activity lifecycle to the footer thinking status', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const onThinkingUpdate = jest.fn();
+        let view!: ReactTestRenderer;
+
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-workflow-activity-spinner"
+                    terminalWidth={90}
+                    onThinkingUpdate={onThinkingUpdate}
+                    animationsEnabled
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {
+                type: 'workflow_activity',
+                role: 'task_creator',
+                action: 'task_create_prompt',
+                label: 'Task creation',
+                status: 'started',
+                attempt: 1,
+                attempt_total: 2,
+            });
+            await Promise.resolve();
+        });
+
+        expect(onThinkingUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            active: true,
+            context: 'tool_preparation',
+            message: 'Task creation',
+        }));
+
+        await act(async () => {
+            service.emit('event', {
+                type: 'workflow_activity',
+                role: 'task_creator',
+                action: 'task_create_prompt',
+                label: 'Task creation',
+                status: 'completed',
+                attempt: 1,
+                attempt_total: 2,
+            });
+            await Promise.resolve();
+        });
+
+        expect(onThinkingUpdate).toHaveBeenLastCalledWith({active: false});
+        act(() => view.unmount());
+    });
+
+    it('keeps the footer active until all workflow activities terminate', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        const onThinkingUpdate = jest.fn();
+        let view!: ReactTestRenderer;
+
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal
+                    executionService={service as any}
+                    sessionId="run-workflow-activity-overlap"
+                    onThinkingUpdate={onThinkingUpdate}
+                />
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'workflow_activity', role: 'plan_creator', status: 'started', attempt: 1});
+            service.emit('event', {type: 'workflow_activity', role: 'plan_critic', status: 'started', attempt: 1});
+            service.emit('event', {type: 'workflow_activity', role: 'plan_creator', status: 'completed', attempt: 1});
+            await Promise.resolve();
+        });
+
+        expect(onThinkingUpdate).not.toHaveBeenLastCalledWith({active: false});
+
+        await act(async () => {
+            service.emit('event', {type: 'workflow_activity', role: 'plan_critic', status: 'failed', attempt: 1});
+            await Promise.resolve();
+        });
+        expect(onThinkingUpdate).toHaveBeenLastCalledWith({active: false});
+        act(() => view.unmount());
     });
 
     it('uses final report progress labels as thinking task titles', async () => {

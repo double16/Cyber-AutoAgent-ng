@@ -6,6 +6,10 @@ import { estimateEtaSeconds } from '../utils/duration.js';
 import { formatDuration } from '../utils/toolFormatters.js';
 import { ThinkingIndicator } from './ThinkingIndicator.js';
 import type { ThinkingStatus } from '../types/thinking.js';
+import {
+  formatOperationHealth,
+  type OperationHealthSnapshot,
+} from '../utils/operationHealthFormatting.js';
 
 interface FooterProps {
   model?: string;
@@ -20,6 +24,7 @@ interface FooterProps {
     evidence?: number;
     progressPercent?: number;
   };
+  operationHealth?: OperationHealthSnapshot | null;
   connectionStatus?: 'connected' | 'connecting' | 'error' | 'offline';
   modelProvider?: string;
   deploymentMode?: string;
@@ -35,6 +40,7 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   model,
   debugMode = false,
   operationMetrics,
+  operationHealth,
   connectionStatus = 'connected',
   modelProvider,
   deploymentMode,
@@ -74,10 +80,12 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   const hasDuration = !!operationMetrics?.duration && operationMetrics?.duration !== '0s';
   const etaSeconds = estimateEtaSeconds(operationMetrics?.duration, progressPercent);
   const hasMem = (operationMetrics?.memoryOps || 0) > 0;
+  const healthVisual = formatOperationHealth(operationHealth);
   // Build a single-line footer string and hard-truncate to terminal width to avoid Ink layout bugs
   const cols = Number.isFinite(process.stdout.columns) && process.stdout.columns ? Math.floor(process.stdout.columns) : 80;
   const left = deploymentMode || '';
   const rightParts: string[] = [];
+  if (healthVisual) rightParts.push(healthVisual.label);
   if (model) rightParts.push(model);
   if (progressPercent !== undefined) rightParts.push(`${progressPercent}% budget`);
   rightParts.push(`${totalTokens} tokens`, totalCost);
@@ -100,6 +108,13 @@ export const Footer: React.FC<FooterProps> = React.memo(({
     line = `${trimmedLeft}${spacer}${right}`.slice(0, textCols);
   }
 
+  const healthIndex = healthVisual ? line.indexOf(healthVisual.label) : -1;
+  const linePrefix = healthIndex >= 0 ? line.slice(0, healthIndex) : line;
+  const visibleHealthLabel = healthIndex >= 0
+    ? line.slice(healthIndex, healthIndex + healthVisual!.label.length)
+    : '';
+  const lineSuffix = healthIndex >= 0 ? line.slice(healthIndex + visibleHealthLabel.length) : '';
+
   const activeThinking = thinkingStatus?.active === true;
 
   return (
@@ -116,7 +131,13 @@ export const Footer: React.FC<FooterProps> = React.memo(({
       )}
       <Box>
         <Text color={connIcon.color}>{connIcon.icon}</Text>
-        <Text color={theme.muted}>{line ? ` ${line}` : ''}</Text>
+        <Text color={theme.muted}>
+          {line ? ` ${linePrefix}` : ''}
+          {visibleHealthLabel && (
+            <Text color={healthVisual!.color} bold>{visibleHealthLabel}</Text>
+          )}
+          {lineSuffix}
+        </Text>
       </Box>
     </Box>
   );

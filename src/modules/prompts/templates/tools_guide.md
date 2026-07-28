@@ -1,16 +1,14 @@
 <tool_protocols>
 **Tool Selection Hierarchy** (confidence-driven):
 1. **Tool discovery**: If uncertain which specialized tool exists or which args to use → call `tool_catalog` (fast) before choosing 2–6.
-2. Any confidence → Prefer a native agent tool that provides the required capability
-3. Shell command → Use only for a required capability absent from native tools, or after a concrete native-tool limitation
+2. Any confidence → Use any native tool, optional tool, or shell command applicable to the task
+3. Overlapping methods → Multiple applicable capabilities may be used for validation, reproduction, coverage, or convenience
 4. Low confidence (<50%) → Swarm for parallel capability exploration OR gather more data
 5. Novel exploit → Meta-tooling (editor + load_tool) when existing tools insufficient
 6. POC reuse → python_repl for prototype → if logic needed >2 times → editor+load_tool promotion
 
-**Core Rule**: Native agent tools > command-line programs > custom tools. A command's `shell_preference` ranks it only
-against other commands; it never ranks the command above a native tool. Use shell only when the command adds a
-capability required by the task that native tools lack, or after a native-tool attempt proves a concrete limitation.
-Familiarity or convenience is not a capability gap.
+**Core Rule**: Select and use capabilities based on task applicability. Overlap between native tools, optional tools,
+and shell commands is allowed and does not make any method exclusive.
 Save all artifacts to OPERATION ARTIFACTS DIRECTORY (path injected above).
 **Discovery Rule**: When choosing between tools or unsure what exists → `tool_catalog` first.
 

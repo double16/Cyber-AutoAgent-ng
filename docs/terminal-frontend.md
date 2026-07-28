@@ -56,14 +56,22 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Execution results
+- `task_started` / `task_deferred` / `task_done`: Workflow lifecycle events; deferred tasks return to the pending queue,
+  while completed finding-validation tasks include their candidate reference and final `verified` or
+  `validation_failure` resolution
 - `output`: User-visible text, including controller-owned plan creation and update snapshots
 - `reasoning`: Agent decision context
 - `metrics_update`: Operation-wide token, cost, duration, and budget progress, including reporting and evaluation usage
-- `progress_update`: Progress updates, including indexed final-report and Ragas metric stages and unindexed Ragas
-  preparation stages
+- `progress_update`: Progress updates with optional operation-health score/band, including indexed final-report and
+  Ragas metric stages and unindexed Ragas preparation stages; the latest valid health remains visible in the footer
 - `evaluation_step_complete`: Semantic completion status for a Ragas metric or preparation stage
 - `evaluation_complete`: Finalized assessment evaluation status and numeric scores
 - `assessment_complete`: Terminal lifecycle event emitted after report generation and any evaluation attempt
+
+The terminal gives `store_observation`, `store_knowledge`, `store_finding`, and `record_finding_validation` distinct
+summaries. Finding submission is displayed as pending verification, never as a confirmed vulnerability. Final-report
+progress with `report_step_kind=validation_failure` is labeled as requiring validation in interactive and auto-run
+output.
 
 When automatic evaluation is enabled, terminal event ordering is report events, Ragas evaluation progress and step
 results, `evaluation_complete`, and finally `assessment_complete`. An attempted evaluation emits
