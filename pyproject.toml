@@ -31,7 +31,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "strands-agents[ollama,otel,litellm]~=1.47.0",
     "strands-agents-tools~=0.8.3",
-    "mem0ai~=1.0.1",
+    "mem0ai~=2.0.14",
     "google-genai~=1.71.0",
     "litellm~=1.92.0",
     "fastapi~=0.136.3",
