@@ -344,7 +344,7 @@ async def test_create_response_does_not_wrap_list_when_response_format_not_eleme
 
 
 @pytest.mark.asyncio
-async def test_create_response_elements_model_but_invalid_json_list_does_not_change():
+async def test_create_response_elements_model_repairs_trailing_comma_list():
     content = """
     ```json
     [
@@ -358,11 +358,8 @@ async def test_create_response_elements_model_but_invalid_json_list_does_not_cha
     inner = _InnerLLM(resp)
     patch = LLMClientJSONResponsePatch(inner)
 
-    before = resp.choices[0].message.content
     await patch.create_response(
         messages=[{"role": "user", "content": "x"}],
         response_format=_ElementsModel,
     )
-    after = resp.choices[0].message.content
-
-    assert after == before
+    assert resp.choices[0].message.content == json.dumps({"elements": ["a", "b"]}, ensure_ascii=False)

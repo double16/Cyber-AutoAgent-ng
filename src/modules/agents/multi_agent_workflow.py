@@ -85,6 +85,7 @@ from modules.tools.memory import (
     resolve_operation_targets,
 )
 from modules.tools.tool_catalog import get_shell_command_help_context, get_shell_command_specs
+from modules.utils.json_repair import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -184,28 +185,7 @@ class TaskCreationBatch:
 
 def extract_json_object(text: str) -> Dict[str, Any]:
     """Parse a JSON object from an agent response."""
-
-    if not isinstance(text, str):
-        raise ValueError("agent response must be text")
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
-        stripped = re.sub(r"\s*```$", "", stripped)
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-        if not match:
-            logger.error(f"Invalid JSON from agent:\n{text}")
-            raise
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON from agent:\n{text}")
-            raise
-    if not isinstance(parsed, dict):
-        raise ValueError("agent response must be a JSON object")
-    return parsed
+    return parse_json_response(text, require_object=True)
 
 
 def extract_result_text(result: Any) -> str:

@@ -1,0 +1,53 @@
+import json
+
+import pytest
+
+from modules.utils.json_repair import parse_json_response, repair_json_text, strip_js_comments
+
+
+def test_parse_json_response_repairs_logged_embedded_quotes_and_invalid_apostrophe_escape():
+    response = r'''{
+      "status": "done",
+      "reason": "The artifact includes "schema_version": 1 and it\'s complete.",
+      "instructions": ""
+    }'''
+
+    assert parse_json_response(response, require_object=True) == {
+        "status": "done",
+        "reason": 'The artifact includes "schema_version": 1 and it\'s complete.',
+        "instructions": "",
+    }
+
+
+def test_repair_json_text_handles_comments_fences_prose_and_trailing_commas():
+    response = '''prefix
+    ```json
+    {
+      // keep this out of the payload
+      "url": "https://example.test//path",
+      "message": "/* literal */",
+      "items": [1, 2,],
+    }
+    ```
+    suffix'''
+
+    assert json.loads(repair_json_text(response)) == {
+        "url": "https://example.test//path",
+        "message": "/* literal */",
+        "items": [1, 2],
+    }
+
+
+def test_strip_js_comments_preserves_strings():
+    value = strip_js_comments('{"url":"https://example.test//path" /* comment */}')
+    assert json.loads(value) == {"url": "https://example.test//path"}
+
+
+def test_parse_json_response_rejects_non_object_when_requested():
+    with pytest.raises(ValueError, match="JSON object"):
+        parse_json_response("[1, 2]", require_object=True)
+
+
+def test_repair_json_text_serialization_can_escape_emoji():
+    parsed = parse_json_response('{"message":"😀"}')
+    assert json.dumps(parsed, ensure_ascii=True) == '{"message": "\\ud83d\\ude00"}'

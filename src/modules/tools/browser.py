@@ -16,6 +16,7 @@ from http.cookies import SimpleCookie
 from typing import Optional, Any, Union, get_origin, get_args
 from urllib.parse import urlparse, parse_qs
 from modules import __version__
+from modules.utils.json_repair import repair_json_text, strip_js_comments
 
 from playwright.async_api import (
     Page,
@@ -135,7 +136,7 @@ class LLMClientJSONResponsePatch(LLMClient):
 
         # Prefer a block that becomes valid JSON after comment stripping.
         for b in blocks:
-            candidate = self.strip_js_comments(b).strip()
+            candidate = repair_json_text(b)
             try:
                 json.loads(candidate)
                 return candidate
@@ -149,55 +150,7 @@ class LLMClientJSONResponsePatch(LLMClient):
         """
         Remove // and /* */ comments while preserving content inside strings.
         """
-        out: list[str] = []
-        i = 0
-        n = len(text)
-        in_str = False
-        str_ch = ""
-        esc = False
-
-        while i < n:
-            ch = text[i]
-
-            if in_str:
-                out.append(ch)
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == str_ch:
-                    in_str = False
-                    str_ch = ""
-                i += 1
-                continue
-
-            # start string?
-            if ch in ("'", '"'):
-                in_str = True
-                str_ch = ch
-                out.append(ch)
-                i += 1
-                continue
-
-            # line comment //
-            if ch == "/" and i + 1 < n and text[i + 1] == "/":
-                i += 2
-                while i < n and text[i] not in ("\n", "\r"):
-                    i += 1
-                continue
-
-            # block comment /* ... */
-            if ch == "/" and i + 1 < n and text[i + 1] == "*":
-                i += 2
-                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                    i += 1
-                i = min(i + 2, n)  # skip closing */
-                continue
-
-            out.append(ch)
-            i += 1
-
-        return "".join(out)
+        return strip_js_comments(text)
 
     def response_format_has_root_elements_model(self, response_format: Any) -> bool:
         """
@@ -273,7 +226,7 @@ class LLMClientJSONResponsePatch(LLMClient):
                 continue
 
             extracted = self.extract_json_block(content)
-            cleaned = self.strip_js_comments(extracted).strip()
+            cleaned = repair_json_text(extracted)
 
             # If it's valid JSON, replace content with a normalized JSON string
             try:
@@ -284,7 +237,7 @@ class LLMClientJSONResponsePatch(LLMClient):
                 # leave as-is if we can't safely make it valid JSON
                 continue
 
-            choice.message.content = json.dumps(obj, ensure_ascii=False)
+            choice.message.content = json.dumps(obj, ensure_ascii=True)
 
         return response
 
