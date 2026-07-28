@@ -2,6 +2,8 @@
 
 ### Features
 
+- Refine generated report sections with a configurable actor/critic cycle, retain the latest actor revision with prose
+  critic feedback when review remains unresolved, and add AI-generated-content disclaimers to final reports.
 - Validate resolved hosts, IPs, explicit TCP services, CIDRs, and local filesystem targets before assessment startup,
   and emit a pass/fail/skip preflight event for every target.
 - Show the latest operation health score, band, and entered target in the terminal title for interactive and headless TTY sessions.

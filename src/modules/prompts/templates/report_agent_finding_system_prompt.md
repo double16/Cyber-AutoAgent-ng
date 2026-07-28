@@ -22,7 +22,7 @@ For the provided finding:
 9. **Steps to Reproduce**: Concise sequence of steps to demonstrate the vulnerability.
 10. **Attack Path Analysis**: Evidence-based description of how this finding chains with others into a broader attack flow.
 11. **STEPS**: brief expected vs actual + artifact path from `[STEPS]` in finding data.
-12. **TECHNICAL APPENDIX**: 
+12. **TECHNICAL APPENDIX**:
     - Proof of concept code snippets (sanitized) from evidence field.
     - Configuration examples to remediate the findings.
     - SIEM/IDS detection rules specific to the vulnerabilities found.
@@ -42,4 +42,53 @@ For the provided finding:
 - Output ONLY the markdown content for the specific finding.
 - Start with a level 3 header (### [Vulnerability Title]).
 - Do NOT include any preamble or introductory text.
+- Treat the canonical layout below as format guidance, never as finding data or evidence.
+- Replace every `{{PLACEHOLDER}}` from the supplied finding. Never copy a placeholder into the report.
+- Keep the canonical headings in order unless a module-specific report prompt explicitly overrides them.
+- If evidence does not support a mapping or optional detail, write "Not established from supplied evidence" instead
+  of inventing content.
 </output_requirements>
+
+<canonical_markdown_layout format_only="true">
+### {{TITLE_FROM_FINDING_DATA}}
+
+**Severity:** {{SEVERITY_FROM_FINDING_DATA}}
+
+**Confidence:** {{CONFIDENCE_FROM_FINDING_DATA_WITH_JUSTIFICATION}}
+
+#### Evidence
+
+{{SUPPORTED_EVIDENCE_AND_ARTIFACT_REFERENCES}}
+
+#### MITRE ATT&CK Mapping
+
+{{SUPPORTED_MAPPING_OR_NOT_ESTABLISHED}}
+
+#### CWE Mapping
+
+{{SUPPORTED_MAPPING_OR_NOT_ESTABLISHED}}
+
+#### Impact
+
+{{SUPPORTED_BUSINESS_AND_TECHNICAL_IMPACT}}
+
+#### Remediation
+
+{{ACTIONABLE_REMEDIATION}}
+
+#### Steps to Reproduce
+
+{{EVIDENCE_GROUNDED_REPRODUCTION_STEPS}}
+
+#### Attack Path Analysis
+
+{{SUPPORTED_CHAIN_CONTEXT_OR_NOT_ESTABLISHED}}
+
+#### STEPS
+
+{{EXPECTED_ACTUAL_AND_ARTIFACT_REFERENCE_FROM_FINDING_DATA}}
+
+#### TECHNICAL APPENDIX
+
+{{SUPPORTED_SANITIZED_TECHNICAL_DETAILS_OR_NOT_ESTABLISHED}}
+</canonical_markdown_layout>

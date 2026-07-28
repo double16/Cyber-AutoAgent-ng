@@ -3017,6 +3017,11 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "module": module,
                 "model_id": model_id,  # Pass main model for reports
                 "completion_status": completion_status,
+                "budget": {
+                    "maxDurationMinutes": self._budget_max_duration(),
+                    "maxTokens": self._budget_max_tokens(),
+                    "maxCost": self._budget_max_cost(),
+                },
             }
 
             target_name = sanitize_target_name(target)

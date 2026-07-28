@@ -1179,6 +1179,11 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     assert generated_calls
     assert generated_calls[0]["config_params"]["provider"] == "litellm"
     assert generated_calls[0]["config_params"]["completion_status"] is None
+    assert generated_calls[0]["config_params"]["budget"] == {
+        "maxDurationMinutes": handler._budget_max_duration(),
+        "maxTokens": None,
+        "maxCost": None,
+    }
     assert "assessment_complete" not in event_types(handler)
     handler.emitter = SimpleNamespace()
     handler._stop_metrics_thread = Mock()

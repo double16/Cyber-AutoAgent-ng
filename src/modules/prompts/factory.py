@@ -41,9 +41,11 @@ _LF_TEMPLATE_TO_NAME = {
     "tools_guide.md": "cyber/system/tools_guide",
     "report_generation_prompt.md": "cyber/report/report_generation_prompt",
     "report_agent_appendix_system_prompt.md": "cyber/report/report_agent_appendix_system_prompt",
+    "report_agent_critic_system_prompt.md": "cyber/report/report_agent_critic_system_prompt",
     "report_agent_executive_system_prompt.md": "cyber/report/report_agent_executive_system_prompt",
     "report_agent_finding_system_prompt.md": "cyber/report/report_agent_finding_system_prompt",
     "report_agent_observation_system_prompt.md": "cyber/report/report_agent_observation_system_prompt",
+    "report_agent_next_steps_system_prompt.md": "cyber/report/report_agent_next_steps_system_prompt",
 }
 
 OVERLAY_FILENAME = "adaptive_prompt.json"
@@ -613,6 +615,22 @@ def get_report_appendix_system_prompt() -> str:
     if template:
         return template
     return "You are a technical documentation specialist. Focus on appendix and methodology."
+
+
+def get_report_critic_system_prompt() -> str:
+    """System prompt for report-section critic calls."""
+    template = load_prompt_template("report_agent_critic_system_prompt.md")
+    if template:
+        return template
+    return "Review report-section drafts for evidence grounding and return only the requested JSON object."
+
+
+def get_report_next_steps_system_prompt() -> str:
+    """System prompt for structured recommended-next-steps generation."""
+    template = load_prompt_template("report_agent_next_steps_system_prompt.md")
+    if template:
+        return template
+    return "Generate grounded recommended next steps as only the requested JSON object."
 
 
 class ModulePromptLoader:

@@ -4,11 +4,26 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from modules.handlers.report_generator import (
+    _append_artifact_evidence,
+    _append_inline_review_feedback,
+    _cleanup_report_agent,
+    _configured_nonnegative_int,
     _extract_text_from_result,
+    _format_artifact_excerpt,
+    _format_next_steps_appendix,
     _format_target_coverage,
     _ground_report_item,
     _has_artifact_reference,
+    _artifact_references,
     _normalize_report_category,
+    _normalize_budget_config,
+    _normalize_artifact_reference,
+    _parse_latest_operation_log,
+    _run_next_steps_refinement,
+    _run_report_refinement,
+    _select_artifact_excerpt,
+    _validate_report_critique,
+    _validate_next_steps,
     build_report_sections,
     generate_security_report,
 )
@@ -47,13 +62,114 @@ def test_ground_report_item_rejects_invented_artifact_paths():
         "title": "Verified issue",
         "content": "Supported claim",
         "severity": "HIGH",
-        "metadata": {"artifacts": ["/outputs/op/real.txt"]},
+        "metadata": {"artifacts": ["artifacts/op/real.txt"]},
     }
 
-    grounded = _ground_report_item("### Issue\nEvidence: /transcripts/invented.txt", item)
+    grounded = _ground_report_item("### Issue\nEvidence: artifacts/invented.txt", item)
 
-    assert "/transcripts/invented.txt" not in grounded
-    assert "/outputs/op/real.txt" in grounded
+    assert "artifacts/invented.txt" not in grounded
+    assert "artifact:artifacts/op/real.txt" in grounded
+    assert "### Issue" in grounded
+    assert "Unsupported artifact references were removed" in grounded
+
+
+def test_artifact_reference_parser_accepts_canonical_and_bare_paths_without_false_positives():
+    text = (
+        "Reference: `artifact:artifacts/positive_control.txt`, outputs/proof.log, "
+        "artifacts/secondary.txt and artifact_id:legacy.txt. "
+        "Artifact: label, // comment, /vulnerabilities/xss_s, and https://host/outputs/proof.log."
+    )
+
+    references = _artifact_references(text)
+
+    assert references == {
+        "artifact:artifacts/positive_control.txt",
+        "artifact:outputs/proof.log",
+        "artifact:artifacts/secondary.txt",
+        "artifact:artifacts/legacy.txt",
+    }
+    assert _has_artifact_reference(text)
+    assert _normalize_artifact_reference("`outputs/proof.log`,") == "artifact:outputs/proof.log"
+
+
+def test_grounding_normalizes_bare_reference_and_preserves_markdown_syntax():
+    item = {"metadata": {"artifacts": ["artifact:artifacts/proof.txt"]}}
+
+    grounded = _ground_report_item(
+        "### Finding\nReference: `artifacts/proof.txt`\nPHP comment: // keep this",
+        item,
+    )
+
+    assert "unsupported artifact reference removed" not in grounded
+    assert "`artifacts/proof.txt`" in grounded
+    assert "// keep this" in grounded
+
+
+def test_append_artifact_evidence_includes_relevant_sensitive_excerpt(monkeypatch, tmp_path):
+    artifact = tmp_path / "proof.txt"
+    artifact.write_text(
+        "unrelated header\n"
+        "HTTP/1.1 200 OK\n"
+        "<script>alert('XSS_PROVED')</script> Authorization: Bearer confidential-token\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "modules.handlers.report_generator._artifact_path_from_ref",
+        lambda _reference: str(artifact),
+    )
+    item = {
+        "title": "Stored XSS",
+        "content": "The stored script alert was reproduced.",
+        "metadata": {"artifacts": ["artifact:artifacts/proof.txt"]},
+    }
+
+    report = _append_artifact_evidence("### Stored XSS", item)
+
+    assert "#### Artifact Evidence Excerpts" in report
+    assert "artifact:artifacts/proof.txt" in report
+    assert "lines 1-3" in report
+    assert "Authorization: Bearer confidential-token" in report
+
+
+def test_append_artifact_evidence_ignores_target_paths_and_unreadable_artifacts(monkeypatch):
+    item = {
+        "content": "Affected endpoint /vulnerabilities/xss",
+        "metadata": {"artifacts": ["artifact:artifacts/missing.txt"]},
+    }
+    monkeypatch.setattr(
+        "modules.handlers.report_generator._artifact_path_from_ref",
+        lambda _reference: (_ for _ in ()).throw(ValueError("missing")),
+    )
+
+    assert _append_artifact_evidence("### Finding", item) == "### Finding"
+
+
+def test_artifact_excerpt_selection_handles_empty_long_and_unmatched_content(tmp_path):
+    empty_artifact = tmp_path / "empty.txt"
+    empty_artifact.write_text("\n\n", encoding="utf-8")
+    assert _select_artifact_excerpt(str(empty_artifact), {"proof"}) == []
+
+    artifact = tmp_path / "unmatched.txt"
+    artifact.write_text(
+        "\n" + "x" * 1100 + "\n" + "\n".join(f"ordinary line {index}" for index in range(20)),
+        encoding="utf-8",
+    )
+    excerpt = _select_artifact_excerpt(str(artifact), {"absent-keyword"}, max_lines=6)
+
+    assert len(excerpt) == 6
+    assert excerpt[0][0] == 2
+    assert excerpt[0][1].endswith("[line excerpt truncated]")
+
+
+def test_format_artifact_excerpt_reports_disjoint_line_ranges():
+    formatted = _format_artifact_excerpt(
+        "artifact:artifacts/proof.txt",
+        [(1, "first"), (2, "second"), (5, "fifth")],
+    )
+
+    assert "lines 1-2, 5" in formatted
+    assert "1: first" in formatted
+    assert "5: fifth" in formatted
 
 
 def test_extract_text_from_result_markdown_table():
@@ -91,6 +207,283 @@ def test_extract_text_from_result_empty():
     mock_result = MagicMock()
     mock_result.message = {}
     assert _extract_text_from_result(mock_result) == ""
+
+
+def _agent_result(text):
+    result = MagicMock()
+    result.message = {"content": [{"text": text}]}
+    return result
+
+
+def test_report_refinement_feeds_each_critic_rejection_back_to_actor():
+    actor = MagicMock(
+        side_effect=[
+            _agent_result("## Draft one"),
+            _agent_result("## Draft two"),
+            _agent_result("## Final draft"),
+        ]
+    )
+    critic = MagicMock(
+        side_effect=[
+            _agent_result(r'''```json
+            {"approved": false, "feedback": ["Fix the "risk" wording",],}
+            ```'''),
+            _agent_result('{"approved": false, "feedback": ["Cite the evidence artifact"]}'),
+        ]
+    )
+
+    content, final_critique = _run_report_refinement(
+        actor,
+        critic,
+        "Canonical source data",
+        "Executive summary",
+        "Executive section requirements",
+        refinement_cycles=2,
+        json_retries=1,
+    )
+
+    assert content == "## Final draft"
+    assert final_critique == {"approved": False, "feedback": ["Cite the evidence artifact"]}
+    assert actor.call_count == 3
+    assert critic.call_count == 2
+    assert "## Draft one" in actor.call_args_list[1].args[0]
+    assert 'Fix the \\"risk\\" wording' in actor.call_args_list[1].args[0]
+    assert "## Draft two" in actor.call_args_list[2].args[0]
+    assert "Cite the evidence artifact" in actor.call_args_list[2].args[0]
+
+
+def test_report_refinement_configuration_defaults_and_clamps_values():
+    config = MagicMock()
+    config.getenv_int.side_effect = [2, -3, "invalid"]
+
+    assert _configured_nonnegative_int(config, "SETTING", 7) == 2
+    assert _configured_nonnegative_int(config, "SETTING", 7) == 0
+    assert _configured_nonnegative_int(config, "SETTING", 7) == 7
+
+    config.getenv_int.side_effect = RuntimeError("unavailable")
+    assert _configured_nonnegative_int(config, "SETTING", 7) == 7
+
+
+def test_cleanup_report_agent_tolerates_cleanup_failure():
+    agent = MagicMock()
+    agent.cleanup.side_effect = RuntimeError("cleanup failed")
+
+    _cleanup_report_agent(None, "unused")
+    _cleanup_report_agent(agent, "test agent")
+
+    agent.cleanup.assert_called_once()
+
+@pytest.mark.parametrize(
+    ("critique", "error"),
+    [
+        ({"approved": "yes", "feedback": []}, "approved must be a boolean"),
+        ({"approved": False, "feedback": "revise"}, "feedback must be a list"),
+        ({"approved": True, "feedback": ["unneeded"]}, "must have empty feedback"),
+        ({"approved": False, "feedback": []}, "require feedback"),
+    ],
+)
+def test_validate_report_critique_rejects_invalid_schema(critique, error):
+    with pytest.raises(ValueError, match=error):
+        _validate_report_critique(critique)
+
+
+def test_report_refinement_stops_on_critic_approval():
+    actor = MagicMock(return_value=_agent_result("## Approved draft"))
+    critic = MagicMock(return_value=_agent_result('{"approved": true, "feedback": []}'))
+
+    content, final_critique = _run_report_refinement(
+        actor,
+        critic,
+        "Canonical source data",
+        "Finding: Example",
+        "Finding requirements",
+        refinement_cycles=2,
+        json_retries=1,
+    )
+
+    assert content == "## Approved draft"
+    assert final_critique is None
+    actor.assert_called_once()
+    critic.assert_called_once()
+
+
+def test_report_refinement_zero_cycles_runs_only_initial_actor():
+    actor = MagicMock(return_value=_agent_result("## Unreviewed draft"))
+
+    content, final_critique = _run_report_refinement(
+        actor,
+        None,
+        "Canonical source data",
+        "Assessment methodology",
+        "Methodology requirements",
+        refinement_cycles=0,
+        json_retries=1,
+    )
+
+    assert content == "## Unreviewed draft"
+    assert final_critique is None
+    actor.assert_called_once()
+
+
+def test_report_refinement_retries_invalid_critic_json_without_failing_report():
+    actor = MagicMock(side_effect=[_agent_result("Draft"), _agent_result("Revised draft")])
+    critic = MagicMock(side_effect=[_agent_result("not json"), _agent_result('{"approved": "yes"}')])
+
+    content, final_critique = _run_report_refinement(
+        actor,
+        critic,
+        "Canonical source data",
+        "Observation: Example",
+        "Observation requirements",
+        refinement_cycles=1,
+        json_retries=1,
+    )
+
+    assert content == "Revised draft"
+    assert final_critique == {
+        "approved": False,
+        "feedback": ["The report critic did not return a valid structured review after 2 attempt(s)."],
+    }
+    assert critic.call_count == 2
+    assert "could not be parsed" in critic.call_args_list[1].args[0]
+    assert final_critique["feedback"][0] in actor.call_args_list[1].args[0]
+
+
+def test_inline_report_review_note_keeps_feedback_in_originating_section():
+    note = _append_inline_review_feedback(
+        "### Latest actor report",
+        {"approved": False, "feedback": ["Verify the claimed impact"]},
+    )
+
+    assert note.startswith("### Latest actor report")
+    assert "**Further Review Required**" in note
+    assert "- Verify the claimed impact" in note
+    assert '"approved"' not in note
+    assert "```json" not in note
+
+
+def test_latest_operation_log_parser_uses_only_final_session(tmp_path):
+    old_metrics = {
+        "type": "metrics_update",
+        "metrics": {
+            "totalTokens": 9000,
+            "duration": "50m",
+            "budget": {"maxDurationMinutes": 60, "maxTokens": 10000, "maxCost": 5},
+        },
+    }
+    new_metrics = {
+        "type": "metrics_update",
+        "metrics": {
+            "inputTokens": 100,
+            "outputTokens": 50,
+            "totalTokens": 150,
+            "duration": "5m",
+            "cost": 0.25,
+            "budget": {"maxDurationMinutes": 30, "maxTokens": None, "maxCost": 1.5},
+        },
+    }
+    new_tool = {"type": "tool_start", "tool_name": "nmap"}
+    new_failure = {"type": "tool_end", "tool_name": "nmap", "outcome": "error"}
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-01 10:00:00",
+                event(old_metrics),
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-02 11:00:00",
+                "Operation OP_LATEST initiated",
+                event(new_metrics),
+                event(new_tool),
+                event(new_failure),
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["session_started"] == "2026-01-02 11:00:00"
+    assert parsed["operation_id"] == "OP_LATEST"
+    assert parsed["metrics"]["total_tokens"] == 150
+    assert parsed["metrics"]["duration"] == "5m"
+    assert parsed["configured_budget"] == {"duration": 30, "cost": 1.5}
+    assert parsed["tools_used"] == ["nmap"]
+    assert parsed["tool_failures"] == {"nmap:error": 1}
+
+
+def _next_steps_data(budgets):
+    return {
+        "coverage_gaps": ["One route remains unassessed"],
+        "recommended_next_steps": ["Assess the remaining route"],
+        "completion_criteria": ["Record a terminal result for every route"],
+        "budget_recommendations": [
+            {
+                "dimension": dimension,
+                "current": current,
+                "recommended": current * 2,
+                "rationale": "Estimated from the remaining coverage.",
+            }
+            for dimension, current in budgets.items()
+        ],
+        "agent_improvements": ["Improve route inventory tracking"],
+        "tooling_improvements": ["Capture structured scanner failures"],
+        "manual_investigations": ["Confirm business authorization expectations with the owner"],
+    }
+
+
+def test_next_steps_validation_allows_only_configured_budgets_and_requires_duration():
+    configured = _normalize_budget_config(
+        {"maxDurationMinutes": 60, "maxTokens": None, "maxCost": 4.0}
+    )
+    data = _next_steps_data(configured)
+
+    validated = _validate_next_steps(data, configured)
+    markdown = _format_next_steps_appendix(validated)
+
+    assert configured == {"duration": 60, "cost": 4.0}
+    assert "## APPENDIX B: RECOMMENDED NEXT STEPS" in markdown
+    assert "### Coverage Gaps" in markdown
+    assert "### Completion Criteria" in markdown
+    assert "| Duration (minutes) | 60 | 120 |" in markdown
+    assert "| Cost (USD) | 4.0 | 8.0 |" in markdown
+    assert "Token" not in markdown
+
+    invalid = _next_steps_data(configured)
+    invalid["budget_recommendations"].append(
+        {"dimension": "tokens", "current": 100, "recommended": 200, "rationale": "Not configured"}
+    )
+    with pytest.raises(ValueError, match="was not configured"):
+        _validate_next_steps(invalid, configured)
+
+    with pytest.raises(ValueError, match="duration budget is required"):
+        _validate_next_steps(_next_steps_data({}), {})
+
+
+def test_next_steps_final_rejection_keeps_latest_actor_data():
+    configured = {"duration": 60}
+    first = _next_steps_data(configured)
+    revised = _next_steps_data(configured)
+    revised["coverage_gaps"] = ["Revised latest coverage gap"]
+    actor = MagicMock(side_effect=[_agent_result(json.dumps(first)), _agent_result(json.dumps(revised))])
+    critic = MagicMock(
+        return_value=_agent_result('{"approved": false, "feedback": ["Clarify the coverage gap"]}')
+    )
+
+    data, critique = _run_next_steps_refinement(
+        actor,
+        critic,
+        "Source data",
+        "Requirements",
+        configured,
+        refinement_cycles=1,
+        json_retries=0,
+    )
+
+    assert data["coverage_gaps"] == ["Revised latest coverage gap"]
+    assert critique == {"approved": False, "feedback": ["Clarify the coverage gap"]}
+    assert "Clarify the coverage gap" in actor.call_args_list[1].args[0]
 
 
 def test_report_category_helpers_cover_structured_and_free_form_artifacts():
@@ -315,12 +708,25 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     # Verify report file exists and contains expected sections
     assert report_file.exists()
     content = report_file.read_text()
+    disclaimer = (
+        "> **AI-Generated Content Disclaimer:** This report was generated with artificial intelligence and may "
+        "contain errors, omissions, or hallucinations."
+    )
+    assert content.startswith(disclaimer)
+    assert content.rstrip().endswith(
+        "A qualified human should independently verify its findings and recommendations before relying on them."
+    )
+    assert content.count("AI-Generated Content Disclaimer") == 2
     assert "# SECURITY ASSESSMENT REPORT" in content
     assert "## TABLE OF CONTENTS" in content
     assert "**Assessment Status: Incomplete**" in content
     assert "Termination reason: `stalled`." in content
     assert "Do not interpret the absence of verified findings as absence of vulnerabilities." in content
     assert "## Section Content" in content
+    assert "**Further Review Required**" in content
+    assert "[Further Review Required](#further-review-required)" not in content
+    assert '"approved"' not in content
+    assert "```json" not in content
     assert f"Operation ID: {operation_id}" in content
 
     # Verify that intermediate files were created
@@ -337,6 +743,13 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     assert (output_dir / "finding_1_High_Finding.md").exists()
     assert (output_dir / "report_target_coverage.md").exists()
     assert (output_dir / "report_methodology.md").exists()
+    assert (output_dir / "report_recommended_next_steps.md").exists()
+    assert "## APPENDIX A: ASSESSMENT METHODOLOGY" in content
+    assert "## APPENDIX B: RECOMMENDED NEXT STEPS" in content
+    assert "### Coverage Gaps" in content
+    assert "### Completion Criteria" in content
+    assert "| Duration (minutes) | 60 | 60 |" in content
+    assert "AI-Generated Content Disclaimer" not in (output_dir / "report_methodology.md").read_text()
 
 @patch("modules.handlers.report_generator.build_report_sections")
 def test_generate_security_report_no_evidence(mock_build_sections, tmp_path):
@@ -380,6 +793,7 @@ def test_generate_security_report_emits_indexed_report_progress(
     mock_config.get_provider.return_value = "test_provider"
     mock_config.get_llm_config.return_value.model_id = "test_model"
     mock_config.get_swarm_config.return_value.llm.model_id = "test_swarm_model"
+    mock_config.getenv_int.side_effect = lambda name, default: 0 if name == "CYBER_REPORT_REFINEMENT_CYCLES" else default
     mock_get_config.return_value = mock_config
 
     mock_build_sections.return_value = {
@@ -418,11 +832,16 @@ def test_generate_security_report_emits_indexed_report_progress(
         "tools_summary": "",
     }
 
-    mock_agent = MagicMock()
     mock_result = MagicMock()
     mock_result.message = {"content": [{"text": "## Section Content\n"}]}
-    mock_agent.return_value = mock_result
-    mock_report_gen.create_report_agent.return_value = mock_agent
+    created_agents = []
+
+    def create_agent(**_kwargs):
+        agent = MagicMock(return_value=mock_result)
+        created_agents.append(agent)
+        return agent
+
+    mock_report_gen.create_report_agent.side_effect = create_agent
     callback_handler = MagicMock()
 
     generate_security_report(
@@ -440,20 +859,24 @@ def test_generate_security_report_emits_indexed_report_progress(
         if call.args[0].get("type") == "progress_update"
     ]
 
-    assert [event["report_step_index"] for event in progress_events] == [1, 2, 3, 4, 5]
-    assert {event["report_step_total"] for event in progress_events} == {5}
+    assert [event["report_step_index"] for event in progress_events] == [1, 2, 3, 4, 5, 6]
+    assert {event["report_step_total"] for event in progress_events} == {6}
     assert [event["report_step_kind"] for event in progress_events] == [
         "executive",
         "finding",
         "finding",
         "observation",
         "methodology",
+        "next_steps",
     ]
     assert all(event["operation_stage"] == "final_report" for event in progress_events)
     assert progress_events[1]["report_step_label"] == "Finding: High Finding"
     assert progress_events[3]["report_step_label"] == "Observation: Useful Observation"
     callback_handler.set_report_items.assert_called_once_with(mock_build_sections.return_value["raw_evidence"])
-    assert callback_handler.mark_report_step_started.call_count == 5
+    assert len(created_agents) == 6
+    assert len({id(agent) for agent in created_agents}) == 6
+    assert all(agent.cleanup.call_count == 1 for agent in created_agents)
+    assert callback_handler.mark_report_step_started.call_count == 6
     assert all(
         call.kwargs.get("callback_handler") is not callback_handler
         for call in mock_report_gen.create_report_agent.call_args_list
@@ -475,6 +898,9 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
     mock_config.get_provider.return_value = "test_provider"
     mock_config.get_llm_config.return_value.model_id = "test_model"
     mock_config.get_swarm_config.return_value.llm.model_id = "test_swarm_model"
+    mock_config.getenv_int.side_effect = (
+        lambda name, default: 0 if name == "CYBER_REPORT_REFINEMENT_CYCLES" else default
+    )
     mock_get_config.return_value = mock_config
 
     mock_build_sections.return_value = {
@@ -517,6 +943,7 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
     content = report_file.read_text()
     assert "OBSERVATIONS AND DISCOVERIES" in content
     assert "Observation detail" in content
+    assert "FURTHER REVIEW REQUIRED" not in content
     assert (output_dir / "report_observations_header.md").exists()
     assert (output_dir / "observation_1_Some_Observation.md").exists()
     assert not list(output_dir.glob("finding_*Some_Observation.md"))
