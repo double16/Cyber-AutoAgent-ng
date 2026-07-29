@@ -164,6 +164,23 @@ def test_sqlite_finding_ledger_operations(tmp_path):
     assert store.list_findings("other-operation") == []
 
 
+def test_sqlite_finding_ledger_persists_one_taxonomy_annotation(tmp_path):
+    store = PlanStore(str(tmp_path / "test.db"))
+    store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
+    annotation = {
+        "status": "completed",
+        "annotated_at": "2026-07-28T00:00:00+00:00",
+        "taxonomy": {"cwe": [{"id": "CWE-79"}], "mitre_attack": [], "provenance": {"version": "test"}},
+    }
+
+    assert store.update_finding_taxonomy_annotation("op", "finding-1", annotation) is True
+    assert store.update_finding_taxonomy_annotation("op", "finding-1", annotation) is False
+
+    candidate = store.get_finding("op", "finding-1")["candidate_data"]
+    assert candidate["taxonomy_annotation"] == annotation
+    assert candidate["taxonomy"]["cwe"][0]["id"] == "CWE-79"
+
+
 def test_sqlite_plan_store_multiple_tasks(tmp_path):
     db_path = str(tmp_path / "test.db")
     store = PlanStore(db_path)

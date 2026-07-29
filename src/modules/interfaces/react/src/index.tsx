@@ -501,7 +501,7 @@ const runAutoAssessment = async () => {
                     loggingService.info(`🧱 Task ${eventTitle ? `"${eventTitle}" ` : ''}blocked${reason}`);
                     break;
                 default:
-                    loggingService.info(`✓ Task ${eventTitle ? `"${eventTitle}" ` : ''}done${reason}`);
+                    loggingService.info(`✅ Task ${eventTitle ? `"${eventTitle}" ` : ''}done${reason}`);
                     break;
             }
         }
@@ -511,7 +511,7 @@ const runAutoAssessment = async () => {
               ? `: ${event.status_reason.trim()}`
               : '';
             lastTaskTitle = "";
-            loggingService.info(`⏸ Task ${eventTitle ? `"${eventTitle}" ` : ''}deferred${reason}`);
+            loggingService.info(`⏸️ Task ${eventTitle ? `"${eventTitle}" ` : ''}deferred${reason}`);
         }
       });
 

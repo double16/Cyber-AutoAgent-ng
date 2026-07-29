@@ -15,8 +15,8 @@ For the provided finding:
 3. **Confidence**: Percentage with brief justification.
 4. **Evidence**: Actual request/response or command output first.
    - For verified web/API claims, cite at least one HTTP transcript artifact path (do not embed full content).
-5. **MITRE ATT&CK**: Mapping of tactics and techniques (only from supported evidence).
-6. **CWE**: Common Weakness Enumeration reference (only from supported evidence).
+5. **MITRE ATT&CK Mapping**: Include the deterministic catalog mapping supplied by the caller, or state that it is not established.
+6. **CWE Mapping**: Include the deterministic catalog mapping supplied by the caller, or state that it is not established.
 7. **Impact**: 1–2 sentences on business risk and technical impact.
 8. **Remediation**: Specific, actionable steps (commands, configurations) to fix the issue.
 9. **Steps to Reproduce**: Concise sequence of steps to demonstrate the vulnerability.
@@ -62,11 +62,11 @@ For the provided finding:
 
 #### MITRE ATT&CK Mapping
 
-{{SUPPORTED_MAPPING_OR_NOT_ESTABLISHED}}
+{{DETERMINISTIC_MITRE_ATTACK_MAPPING_OR_NOT_ESTABLISHED}}
 
 #### CWE Mapping
 
-{{SUPPORTED_MAPPING_OR_NOT_ESTABLISHED}}
+{{DETERMINISTIC_CWE_MAPPING_OR_NOT_ESTABLISHED}}
 
 #### Impact
 

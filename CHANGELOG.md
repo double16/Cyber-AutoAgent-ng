@@ -2,6 +2,9 @@
 
 ### Features
 
+- Add a task-trace taxonomy annotator that catalog-validates and persists CWE and MITRE ATT&CK mappings after finding
+  capture, with bundled fallback taxonomy data, optional cached refreshes, confidence labels, executive-summary
+  coverage tables, and auditable catalog references.
 - Refine generated report sections with a configurable actor/critic cycle, retain the latest actor revision with prose
   critic feedback when review remains unresolved, and add AI-generated-content disclaimers to final reports.
 - Validate resolved hosts, IPs, explicit TCP services, CIDRs, and local filesystem targets before assessment startup,
@@ -32,6 +35,21 @@
 
 ### Fixes
 
+- Replace compound module phase names with distinct, industry-aligned capabilities for hypothesis generation,
+  vulnerability testing, exploit-chain analysis, finding validation, impact assessment, and coverage closure.
+- Generate canonical next-step guidance for incomplete operations when the Appendix B model output is invalid.
+- Prevent objective prose and remote exploit-path hints from being inferred as executable preflight targets.
+- Retry transient `httpx.ReadTimeout` failures through the shared model rate-limit backoff policy.
+- Clarify that concise plans should avoid redundant phases rather than minimize phase count, and add advisory module
+  minimum phase contracts to guide complete phase decomposition without enforcing a fixed plan shape.
+- Add module-specific advisory phase contracts for code security, context navigation, CTF, threat emulation, and web
+  reconnaissance planning.
+- Align CTF planning with inventory, hypothesis testing, and impact/flag-confirmation phases while preserving
+  evidence for each vulnerability-chain link and branch.
+- Harden model JSON parsing by preserving valid payloads, preventing malformed-response echoing during retries, and
+  rejecting unrecoverable truncated responses instead of accepting ambiguous repairs.
+- Restore canonical MITRE ATT&CK and CWE mapping headings in finding report prompts.
+- Update taxonomy refresh to use MITRE CWE's current XML ZIP feed, parse XML records, and report the actual failed source URL.
 - Use the operation output directory as the process working directory so relative files stay in its workspace.
 - Mark final reports incomplete when workflow completion gating has not passed, without clamping progress status.
 - Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import httpx
 from unittest.mock import Mock
 
 import modules.rate_limit.rate_limit as rl
@@ -184,6 +185,144 @@ async def test_patch_and_unpatch_stream(monkeypatch, inline_to_thread):
         assert DummyModel.stream is orig
     finally:
         rl.unpatch_model_provider_class(DummyModel)
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_read_timeout_and_emits_reason(monkeypatch, inline_to_thread, capsys):
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(rl.asyncio, "sleep", no_sleep)
+    cfg = types.RateLimitConfig(max_retries=1, retry_base_delay=0.0, retry_max_delay=0.0)
+    limiter = rl.ThreadSafeRateLimiter(cfg)
+    calls = {"count": 0}
+
+    class DummyModel:
+        async def stream(self, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise httpx.ReadTimeout("model response timed out")
+            yield {"ok": True}
+
+    try:
+        rl.patch_model_provider_class(DummyModel, limiter)
+        events = [event async for event in DummyModel().stream(messages=[])]
+    finally:
+        rl.unpatch_model_provider_class(DummyModel)
+
+    assert events == [{"ok": True}]
+    assert calls["count"] == 2
+    assert '"reason": "read_timeout"' in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_retry_unrelated_exception(monkeypatch, inline_to_thread):
+    cfg = types.RateLimitConfig(max_retries=3, retry_base_delay=0.0, retry_max_delay=0.0)
+    limiter = rl.ThreadSafeRateLimiter(cfg)
+    calls = {"count": 0}
+
+    class DummyModel:
+        async def stream(self, *args, **kwargs):
+            calls["count"] += 1
+            raise ValueError("invalid model response")
+            yield  # pragma: no cover
+
+    try:
+        rl.patch_model_provider_class(DummyModel, limiter)
+        with pytest.raises(ValueError, match="invalid model response"):
+            _ = [event async for event in DummyModel().stream(messages=[])]
+    finally:
+        rl.unpatch_model_provider_class(DummyModel)
+
+    assert calls["count"] == 1
+
+
+def test_generate_retries_read_timeout(monkeypatch):
+    monkeypatch.setattr(rl.time, "sleep", lambda _delay: None)
+    cfg = types.RateLimitConfig(max_retries=1, retry_base_delay=0.0, retry_max_delay=0.0)
+    limiter = rl.ThreadSafeRateLimiter(cfg)
+    calls = {"count": 0}
+
+    class DummyLC:
+        def generate(self, messages, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise httpx.ReadTimeout("model response timed out")
+            return {"ok": True}
+
+    try:
+        rl.patch_langchain_chat_class_generate(DummyLC, limiter)
+        assert DummyLC().generate([]) == {"ok": True}
+    finally:
+        rl.unpatch_langchain_chat_class_generate(DummyLC)
+
+    assert calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_agenerate_retries_read_timeout(monkeypatch, inline_to_thread):
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(rl.asyncio, "sleep", no_sleep)
+    cfg = types.RateLimitConfig(max_retries=1, retry_base_delay=0.0, retry_max_delay=0.0)
+    limiter = rl.ThreadSafeRateLimiter(cfg)
+    calls = {"count": 0}
+
+    class DummyLC:
+        async def agenerate(self, messages, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise httpx.ReadTimeout("model response timed out")
+            return {"ok": True}
+
+    try:
+        rl.patch_langchain_chat_class_generate(DummyLC, limiter)
+        assert await DummyLC().agenerate([]) == {"ok": True}
+    finally:
+        rl.unpatch_langchain_chat_class_generate(DummyLC)
+
+    assert calls["count"] == 2
+
+
+def test_read_timeout_is_raised_after_retry_budget(monkeypatch):
+    monkeypatch.setattr(rl.time, "sleep", lambda _delay: None)
+    limiter = rl.ThreadSafeRateLimiter(
+        types.RateLimitConfig(max_retries=1, retry_base_delay=0.0, retry_max_delay=0.0)
+    )
+
+    with pytest.raises(httpx.ReadTimeout):
+        limiter.handle_exception(httpx.ReadTimeout("model response timed out"), attempt=1)
+
+
+@pytest.mark.asyncio
+async def test_structured_output_retries_read_timeout(monkeypatch, inline_to_thread):
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(rl.asyncio, "sleep", no_sleep)
+    cfg = types.RateLimitConfig(max_retries=1, retry_base_delay=0.0, retry_max_delay=0.0)
+    limiter = rl.ThreadSafeRateLimiter(cfg)
+    calls = {"count": 0}
+
+    class DummyModel:
+        async def stream(self, *args, **kwargs):
+            yield {"stream": True}
+
+        async def structured_output(self, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise httpx.ReadTimeout("model response timed out")
+            yield {"ok": True}
+
+    try:
+        rl.patch_model_provider_class(DummyModel, limiter)
+        events = [event async for event in DummyModel().structured_output(dict, prompt=[])]
+    finally:
+        rl.unpatch_model_provider_class(DummyModel)
+
+    assert events == [{"ok": True}]
+    assert calls["count"] == 2
 
 
 @pytest.mark.asyncio

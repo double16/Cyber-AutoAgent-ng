@@ -328,6 +328,11 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `2`)              |
 | `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum executor/evaluator passes per task                 | No (default: `3`, minimum `1`) |
 | `CYBER_REPORT_REFINEMENT_CYCLES`                   | Critic-guided revision cycles per generated report section | No (default: `2`; `0` disables) |
+| `CYBER_TAXONOMY_CACHE_DIR`                         | Local cache directory for CWE and ATT&CK catalogs          | No (default: user cache directory) |
+| `CYBER_TAXONOMY_REFRESH_DAYS`                      | Days before cached taxonomy catalogs are refreshed         | No (default: `30`)              |
+| `CYBER_TAXONOMY_REFRESH`                           | Fetch current catalogs when the cache is stale             | No (default: `true`)            |
+| `CYBER_TAXONOMY_OFFLINE`                           | Disable taxonomy catalog network refreshes                 | No (default: `false`)           |
+| `CYBER_TAXONOMY_CATALOG_URL`                       | Optional normalized taxonomy catalog mirror                | No                              |
 | `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS`        | Repeated blocked recovery calls before stopping execution  | No (default: `2`, minimum `1`) |
 | `CYBER_TOOL_RECOVERY_MAX_CORRECTIONS`              | Changed retries allowed for one failed task invocation     | No (default: `2`, minimum `1`) |
 | `CYBER_TASK_CREATOR_MAX_CORRECTIONS`               | Retained correction turns after rejected task creation     | No (default: `4`, minimum `0`) |

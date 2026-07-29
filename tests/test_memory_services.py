@@ -916,6 +916,25 @@ def test_resolve_operation_targets_prefers_objective_literals_over_logical_targe
     assert all(target.source == "objective" for target in targets)
 
 
+def test_resolve_operation_targets_excludes_remote_path_hints_and_prose_from_ctf_objective():
+    objective = (
+        "Find and report the flag on the target services exposed at: host.docker.internal:32770. "
+        "Potential files on the target that contain the flag (retrieve contents via exploit): /FLAG.txt."
+    )
+
+    targets = mod.resolve_operation_targets("ctf", objective)
+
+    assert [(target.value, target.type) for target in targets] == [
+        ("host.docker.internal:32770", "network"),
+    ]
+
+
+def test_resolve_operation_targets_accepts_contextual_fqdn_objective_target():
+    targets = mod.resolve_operation_targets("assessment", "Assess demo.local for the authorized exercise.")
+
+    assert [(target.value, target.type) for target in targets] == [("demo.local", "network")]
+
+
 def test_resolve_operation_targets_falls_back_to_logical_bare_target():
     targets = mod.resolve_operation_targets("easypicking.htb", "Security assessment")
 

@@ -91,7 +91,7 @@ function updateToolExecutionState(
     if (eventData.type === 'tool_start') {
       emitEvent({
         type: 'output',
-        content: `◆ ${eventData.tool_name} ${JSON.stringify(eventData.tool_input)}`,
+        content: `🔧 ${eventData.tool_name} ${JSON.stringify(eventData.tool_input)}`,
         metadata: { syntheticToolStart: true },
         timestamp: Date.now(),
       });
@@ -115,10 +115,10 @@ function updateToolExecutionState(
 
     if (eventData.type === 'tool_end') {
       const completion = eventData.success
-        ? `✓ ${eventData.tool_name}`
+        ? `✅ ${eventData.tool_name}`
         : eventData.executed === false
-          ? `○ ${eventData.tool_name} (${eventData.outcome === 'blocked' ? 'blocked' : 'input validation failed'})`
-          : `○ ${eventData.tool_name} (failed)`;
+          ? `🚫 ${eventData.tool_name} (${eventData.outcome === 'blocked' ? 'blocked' : 'input validation failed'})`
+          : `❌ ${eventData.tool_name} (failed)`;
       emitEvent({
         type: 'output',
         content: completion,
@@ -207,26 +207,26 @@ export function emitStatusEvents(
     const message = eventData.message || 'Loading cybersecurity assessment tools';
     emitEvent({
       type: 'output',
-      content: `◆ ${message}`,
+      content: `🔎 ${message}`,
       timestamp: Date.now(),
     });
   } else if (event.type === 'tool_available') {
     emitEvent({
       type: 'output',
-      content: `  ✓ ${eventData.tool_name} (${eventData.description})`,
+      content: `  🔧 ${eventData.tool_name} (${eventData.description})`,
       timestamp: Date.now(),
     });
   } else if (event.type === 'tool_unavailable') {
     emitEvent({
       type: 'output',
-      content: `  ○ ${eventData.tool_name} (${eventData.description || ''}) - unavailable`,
+      content: `  ⛔ ${eventData.tool_name} (${eventData.description || ''}) - unavailable`,
       timestamp: Date.now(),
     });
   } else if (event.type === 'environment_ready') {
     const message = eventData.message || `Environment ready - ${eventData.tool_count} cybersecurity tools loaded`;
     emitEvent({
       type: 'output',
-      content: `◆ ${message}`,
+      content: `🟢 ${message}`,
       timestamp: Date.now(),
     });
   } else if (event.type === 'operation_complete' || event.type === 'assessment_complete') {

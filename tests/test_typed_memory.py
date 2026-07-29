@@ -235,6 +235,36 @@ def test_store_finding_schema_requires_artifacts():
     schema = get_tool_spec(store_finding)["inputSchema"]["json"]
 
     assert "artifacts" in schema["required"]
+    assert "cwe_mappings" not in schema["properties"]
+    assert "mitre_attack_mappings" not in schema["properties"]
+
+
+def test_store_finding_leaves_taxonomy_annotation_to_the_workflow(memory_client, operation_ids, tmp_path: Path):
+    artifact = tmp_path / "proof.txt"
+    artifact.write_text("Stored XSS proof", encoding="utf-8")
+    plan_store = MagicMock()
+    plan_store.get_finding_by_fingerprint.return_value = None
+    plan_store.get_tasks.return_value = []
+    with (
+        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_plan_current_phase", return_value=1),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        store_finding(
+            "Stored XSS",
+            "A script executes for another user",
+            "HIGH",
+            "https://target/comments",
+            "stored_xss",
+            "Input is encoded",
+            "The stored payload executed",
+            ["Submit payload", "Load the comment"],
+            [str(artifact)],
+        )
+
+    candidate = plan_store.store_finding_candidate.call_args.args[3]
+    assert "taxonomy" not in candidate
+    assert candidate["artifacts"] == ["artifact:proof.txt"]
 
 
 def test_store_finding_rejects_missing_artifact(memory_client, operation_ids, tmp_path: Path):
@@ -391,7 +421,11 @@ def test_finalize_finding_validation_promotes_only_approved_confirmation(operati
     )
     plan_store = MagicMock()
     plan_store.get_finding.return_value = {
-        "candidate_data": {"claim": "Confirmed claim", "severity": "HIGH"},
+        "candidate_data": {
+            "claim": "Confirmed claim",
+            "severity": "HIGH",
+            "taxonomy": {"cwe": [{"id": "CWE-79"}], "mitre_attack": [], "provenance": {}},
+        },
         "validation_data": {
             "outcome": "confirmed",
             "evidence_artifacts": ["/artifact"],
@@ -407,6 +441,7 @@ def test_finalize_finding_validation_promotes_only_approved_confirmation(operati
         resolution = finalize_finding_validation(task, "done", "Evidence approved")
 
     assert resolution == "verified"
+    assert store_entry.call_args.args[2]["taxonomy"]["cwe"][0]["id"] == "CWE-79"
     assert store_entry.call_args.args[1] == "finding"
     assert store_entry.call_args.args[2]["validation_status"] == "verified"
 
@@ -418,7 +453,11 @@ def test_finalize_rejected_confirmation_becomes_validation_failure(operation_ids
     )
     plan_store = MagicMock()
     plan_store.get_finding.return_value = {
-        "candidate_data": {"claim": "Unsupported claim", "severity": "CRITICAL"},
+        "candidate_data": {
+            "claim": "Unsupported claim",
+            "severity": "CRITICAL",
+            "taxonomy": {"cwe": [{"id": "CWE-79"}], "mitre_attack": [], "provenance": {}},
+        },
         "validation_data": {"outcome": "confirmed"},
         "resolution": None,
     }
@@ -429,6 +468,7 @@ def test_finalize_rejected_confirmation_becomes_validation_failure(operation_ids
         resolution = finalize_finding_validation(task, "partial_failure", "Artifact did not support the claim")
 
     assert resolution == "validation_failure"
+    assert store_entry.call_args.args[2]["taxonomy"]["cwe"][0]["id"] == "CWE-79"
     metadata = store_entry.call_args.args[2]
     assert metadata["claimed_severity"] == "CRITICAL"
     assert metadata["validation_reason"] == "Artifact did not support the claim"

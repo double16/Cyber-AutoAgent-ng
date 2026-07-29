@@ -96,8 +96,8 @@ describe('shared cyber event stream parsing behavior', () => {
     }));
 
     expect(emitted).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'output', content: '○ shell (blocked)' }),
-      expect.objectContaining({ type: 'output', content: '○ shell (failed)' }),
+      expect.objectContaining({ type: 'output', content: '🚫 shell (blocked)' }),
+      expect.objectContaining({ type: 'output', content: '❌ shell (failed)' }),
     ]));
   });
 
@@ -156,7 +156,7 @@ describe('shared cyber event stream parsing behavior', () => {
     expect(emitted).toEqual([
       expect.objectContaining({
         type: 'output',
-        content: '  ○ scanner () - unavailable',
+        content: '  ⛔ scanner () - unavailable',
       }),
       expect.objectContaining({
         type: 'tool_unavailable',

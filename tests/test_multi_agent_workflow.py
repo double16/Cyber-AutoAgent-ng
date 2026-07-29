@@ -284,6 +284,15 @@ class FakeState:
     def list_finding_records(self):
         return list(self.finding_records)
 
+    def update_finding_taxonomy_annotation(self, finding_uid, annotation):
+        for record in self.finding_records:
+            if record.get("finding_uid") == finding_uid:
+                candidate = record.setdefault("candidate_data", {})
+                candidate["taxonomy"] = annotation.get("taxonomy", {"cwe": [], "mitre_attack": []})
+                candidate["taxonomy_annotation"] = annotation
+                return True
+        raise ValueError("unknown finding")
+
     def activate_task(self, task):
         return self.store_task(Task(
             task_uid=task.task_uid,
@@ -585,6 +594,98 @@ def test_json_agent_emits_workflow_activity_lifecycle_events():
     assert activities[0]["activity"] == "evaluation"
     assert activities[0]["label"] == "Task evaluation"
     assert "original" not in activities[0]["content"]
+
+
+def test_taxonomy_annotator_runs_once_for_new_source_task_finding(monkeypatch):
+    runtime = _runtime()
+    seen_trace_attributes = []
+    calls = []
+
+    class Catalog:
+        def candidates(self, _finding, kind):
+            return [{"id": "CWE-79" if kind == "cwe" else "T1190", "name": "Candidate"}]
+
+    task = Task("task-1", "Assess", "Assess finding", 1, "active")
+    state = FakeState(
+        _plan(),
+        [task],
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "candidate_data": {
+                    "title": "Stored XSS",
+                    "claim": "Script executes",
+                    "technique": "xss",
+                    "artifacts": ["artifact:artifacts/proof.txt"],
+                    "source_task_uids": ["task-1"],
+                },
+            },
+            {
+                "finding_uid": "old-finding",
+                "candidate_data": {"source_task_uids": ["task-1"]},
+            },
+        ],
+    )
+
+    def text_runner(role, _prompt, tools, _system_prompt):
+        calls.append((role, tools))
+        seen_trace_attributes.append(dict(runtime.trace_attributes))
+        return '{"cwe": [{"id": "CWE-79", "confidence": 0.95, "rationale": "Artifact shows script execution", "evidence": ["artifact:artifacts/proof.txt"]}], "mitre_attack": []}'
+
+    monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
+    monkeypatch.setattr(
+        workflow_mod,
+        "validate_taxonomy_mappings",
+        lambda cwe, attack, artifacts: {"cwe": cwe, "mitre_attack": attack, "provenance": {"version": "test"}},
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    controller._annotate_new_findings_for_task(task, {"old-finding"})
+
+    assert calls[0][0] == "taxonomy_annotator"
+    assert len(calls[0][1]) == 1
+    assert seen_trace_attributes[0]["workflow.finding.uid"] == "finding-1"
+    assert seen_trace_attributes[0]["agent.role"] == "taxonomy_annotator"
+    assert state.finding_records[0]["candidate_data"]["taxonomy_annotation"]["status"] == "completed"
+    assert runtime.trace_attributes == {"operation.id": "OP_TEST"}
+
+
+def test_taxonomy_annotator_marks_failure_without_blocking_task(monkeypatch):
+    task = Task("task-1", "Assess", "Assess finding", 1, "active")
+    state = FakeState(
+        _plan(),
+        [task],
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "candidate_data": {
+                    "artifacts": ["artifact:artifacts/proof.txt"],
+                    "source_task_uids": ["task-1"],
+                },
+            }
+        ],
+    )
+
+    class Catalog:
+        def candidates(self, _finding, _kind):
+            return []
+
+    monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "not json",
+    )
+
+    controller._annotate_new_findings_for_task(task, set())
+
+    assert state.finding_records[0]["candidate_data"]["taxonomy_annotation"]["status"] == "failed"
 
 
 def test_json_agent_stops_at_configured_limit_after_max_tokens():
@@ -2412,6 +2513,18 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "Documenting unassessed work is an output" in prompt
     assert "Use bounded criteria" in prompt
     assert "semantically distinct objective" in prompt
+    assert "one dominant outcome" in prompt
+    assert "industry terminology" in prompt
+    assert "separates hypothesis generation" in prompt
+    assert "models exploit chains" in prompt
+    assert "Concise means avoiding" in prompt
+    assert "not minimizing the number of phases" in prompt
+    assert "recommended minimum phase contract" in prompt
+    assert "advisory, not a" in prompt
+    assert "required phase count" in prompt
+    assert "Merge adjacent recommendations only" in prompt
+    assert "Omit a recommendation only when it is" in prompt
+    assert "demonstrably inapplicable" in prompt
 
 
 def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
@@ -2437,6 +2550,10 @@ def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
     assert "evidence-reconciliation" in prompt
     assert "never treats a later reconciliation phase" in prompt
     assert "superficial rewording" in prompt
+    assert "recommended minimum phase contract" in prompt
+    assert "mandatory" in prompt
+    assert "merged criteria preserve every included capability" in prompt
+    assert "operational coverage phase is valid" in prompt
 
 
 def test_module_termination_policy_directs_plan_creation_and_review():
@@ -2484,6 +2601,30 @@ def test_planning_prompts_omit_empty_module_termination_policy_section():
     assert "Module Completion Policy" not in controller._plan_creator_prompt()
     assert "Module Completion Policy" not in controller._plan_critic_prompt(plan_data)
     assert "Module Completion Policy" not in controller._plan_revision_prompt(plan_data, ["revise"])
+
+
+def test_plan_revision_prompt_describes_advisory_phase_contract():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    plan_data = {
+        "objective": "assess",
+        "constraints": [],
+        "current_phase": 1,
+        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence"}],
+    }
+
+    prompt = controller._plan_revision_prompt(plan_data, ["Preserve testing coverage"])
+
+    assert "recommended minimum phase contract" in prompt
+    assert "advisory rather than a required phase count" in prompt
+    assert "merge only adjacent capabilities" in prompt
+    assert "document any omitted inapplicable capability" in prompt
+    assert "one dominant outcome" in prompt
+    assert "operational coverage-closure" in prompt
 
 
 def test_plan_refinement_defaults_to_two_and_negative_values_disable_it():
@@ -5102,6 +5243,7 @@ def test_json_text_agent_retries_invalid_json_by_default():
     assert prompt_spec["prompt"] == "fixed prompt"
     assert [role for role, _prompt in calls] == ["task_prompt_builder", "task_prompt_builder"]
     assert "previous response could not be parsed" in calls[1][1]
+    assert "not json" not in calls[1][1]
     assert "Original prompt:" in calls[1][1]
 
 

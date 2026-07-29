@@ -1592,6 +1592,34 @@ class PlanStore:
                     (json.dumps(validation_data), datetime.now().isoformat(), operation_id, finding_uid),
                 )
 
+    def update_finding_taxonomy_annotation(
+        self,
+        operation_id: str,
+        finding_uid: str,
+        annotation: Dict[str, Any],
+    ) -> bool:
+        """Atomically attach one taxonomy annotation to an unresolved finding candidate."""
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
+                    (operation_id, finding_uid),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Unknown finding_uid for taxonomy annotation: {finding_uid}")
+                candidate_data = json.loads(row[0])
+                existing = candidate_data.get("taxonomy_annotation")
+                if isinstance(existing, dict) and existing.get("status") == "completed":
+                    return False
+                candidate_data["taxonomy"] = annotation.get("taxonomy", {"cwe": [], "mitre_attack": []})
+                candidate_data["taxonomy_annotation"] = annotation
+                conn.execute(
+                    "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND finding_uid = ?",
+                    (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                )
+        return True
+
     def resolve_finding(self, operation_id: str, finding_uid: str, resolution: str) -> None:
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -1666,6 +1694,11 @@ _RE_BARE_TARGET_CONTEXT = re.compile(
     r"\b(?:target|host|endpoint|system|against|assess|scan|test|verify)\s+([a-zA-Z0-9][a-zA-Z0-9_.-]+)\b",
     re.IGNORECASE,
 )
+_RE_CONTEXTUAL_FQDN_TARGET = re.compile(
+    r"\b(?:target|host|endpoint|system|against|assess|scan|test|verify|at)\s+"
+    r"((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})\b",
+    re.IGNORECASE,
+)
 
 
 def _classify_target_literal(value: str, *, allow_bare_hostname: bool = False) -> Optional[TargetType]:
@@ -1697,18 +1730,23 @@ def _canonical_target_value(value: str, target_type: TargetType) -> str:
 
 def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source: str) -> List[Tuple[str, str]]:
     candidates: List[Tuple[str, str]] = []
-    for pattern in (
+    patterns = (
         _RE_URL_PATTERN,
         _RE_CIDR_TARGET,
         _RE_HOST_PORT_TARGET,
         _RE_IP_TARGET,
         _RE_IPV6_TARGET,
-        _RE_FQDN_TARGET,
-    ):
+    )
+    for pattern in patterns:
         candidates.extend((match.group(0), source) for match in pattern.finditer(text or ""))
-    candidates.extend((match.group(0), source) for match in _RE_PATH_PATTERN.finditer(text or ""))
-    candidates.extend((match.group(1), source) for match in _RE_QUOTED_PATH_TARGET.finditer(text or ""))
-    if allow_bare_hostname:
+
+    if source == "objective":
+        candidates.extend((match.group(1), source) for match in _RE_CONTEXTUAL_FQDN_TARGET.finditer(text or ""))
+    else:
+        candidates.extend((match.group(0), source) for match in _RE_FQDN_TARGET.finditer(text or ""))
+        candidates.extend((match.group(0), source) for match in _RE_PATH_PATTERN.finditer(text or ""))
+        candidates.extend((match.group(1), source) for match in _RE_QUOTED_PATH_TARGET.finditer(text or ""))
+    if allow_bare_hostname and source != "objective":
         candidates.extend((match.group(1), source) for match in _RE_BARE_TARGET_CONTEXT.finditer(text or ""))
     return candidates
 
@@ -1716,12 +1754,13 @@ def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source
 def resolve_operation_targets(logical_target: str, objective: str = "") -> List[OperationTarget]:
     """Resolve executable targets while keeping the CLI target as logical naming.
 
-    Objective literals win. If the objective has no executable target literals, the logical target is used as a
-    fallback and may be a bare hostname or path.
+    Objective network literals win. Paths in an objective are remote-resource hints, not local filesystem targets.
+    If the objective has no executable network literal, the logical target is used as a fallback and may be a bare
+    hostname or path.
     """
 
-    raw_candidates = _target_candidates_from_text(objective or "", allow_bare_hostname=True, source="objective")
-    has_objective_targets = any(_classify_target_literal(value, allow_bare_hostname=True) for value, _ in raw_candidates)
+    raw_candidates = _target_candidates_from_text(objective or "", allow_bare_hostname=False, source="objective")
+    has_objective_targets = any(_classify_target_literal(value) for value, _ in raw_candidates)
     if not has_objective_targets:
         raw_candidates = _target_candidates_from_text(
             logical_target or "",
@@ -1736,7 +1775,7 @@ def resolve_operation_targets(logical_target: str, objective: str = "") -> List[
     for value, source in raw_candidates:
         target_type = _classify_target_literal(
             value,
-            allow_bare_hostname=source == "logical_target_fallback" or source == "objective",
+            allow_bare_hostname=source == "logical_target_fallback",
         )
         if not target_type:
             continue
@@ -2068,7 +2107,8 @@ def store_finding(
     """Submit one finding candidate and create its dedicated verification task.
 
     This tool never creates a verified finding directly. Every distinct candidate is verified by a separate,
-    same-phase task before it can affect confirmed risk totals.
+    same-phase task before it can affect confirmed risk totals. Taxonomy classification is performed by a separate,
+    read-only workflow agent after this candidate is persisted.
     """
 
     candidate = {
@@ -5832,6 +5872,19 @@ class Mem0ServiceClient:
         """Return finding records for the current operation."""
 
         return _get_plan_store().list_findings(_operation_id())
+
+    def update_finding_taxonomy_annotation(
+        self,
+        finding_uid: str,
+        annotation: Dict[str, Any],
+    ) -> bool:
+        """Persist one controller-owned taxonomy annotation for a finding candidate."""
+
+        return _get_plan_store().update_finding_taxonomy_annotation(
+            _operation_id(),
+            finding_uid,
+            annotation,
+        )
 
     def get_memory_overview(self, user_id: Optional[str] = None) -> Dict:
         """Get an overview of stored memories."""

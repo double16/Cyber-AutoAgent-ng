@@ -64,3 +64,4 @@
 - Cross-check `workflow_coverage_summary` against final health. In particular, check `applicable_phase_count`, `phase_inconsistent`, failure counts, and the validation-candidate rationale; an excellent health score can coexist with a skipped phase or incomplete coverage.
 - Distinguish logical completion from resource termination. Compare elapsed duration with `maxDurationMinutes`, and inspect token/cost limits and `termination_reason`; `progressPercent` is budget/utilization progress, not phase completion.
 - Do not recommend changing task fan-out based on lack of budget. Lack of budget is for the user to control.
+- Broken or missing reconnaissance tools are acceptable, the operation will remove them from consideration, do not flag unless a tool attempts to use them.

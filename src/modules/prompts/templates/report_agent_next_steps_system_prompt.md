@@ -8,6 +8,7 @@ data supplied by the caller.
   further automation is unlikely to help.
 - Recommend a concrete duration budget for full coverage in every response.
 - Recommend token or cost budgets only when those dimensions appear in configured_budget.
+- Set each budget recommendation's `current` value to the configured limit, never elapsed utilization.
 - Treat budget projections as estimates and justify them using utilization and remaining coverage.
 - Do not promote unverified claims or invent evidence, task state, tool failures, or coverage.
 </requirements>

@@ -11,6 +11,7 @@ from modules.handlers.report_generator import (
     _extract_text_from_result,
     _format_artifact_excerpt,
     _format_next_steps_appendix,
+    _format_taxonomy_coverage_tables,
     _format_target_coverage,
     _ground_report_item,
     _has_artifact_reference,
@@ -18,6 +19,7 @@ from modules.handlers.report_generator import (
     _normalize_report_category,
     _normalize_budget_config,
     _normalize_artifact_reference,
+    _next_steps_fallback,
     _parse_latest_operation_log,
     _run_next_steps_refinement,
     _run_report_refinement,
@@ -170,6 +172,34 @@ def test_format_artifact_excerpt_reports_disjoint_line_ranges():
     assert "lines 1-2, 5" in formatted
     assert "1: first" in formatted
     assert "5: fifth" in formatted
+
+
+def test_taxonomy_coverage_tables_count_verified_findings_once_and_link_anchors():
+    taxonomy = {
+        "cwe": [
+            {"id": "CWE-79", "name": "XSS", "url": "https://cwe.test/79"},
+            {"id": "CWE-79", "name": "XSS", "url": "https://cwe.test/79"},
+        ],
+        "mitre_attack": [{"id": "T1190", "name": "Exploit Public-Facing Application", "url": "https://attack.test/T1190"}],
+    }
+    content = _format_taxonomy_coverage_tables(
+        [
+            {"id": "one", "anchor": "#finding-one", "title": "Stored XSS", "metadata": {"taxonomy": taxonomy}},
+            {"id": "two", "anchor": "#finding-two", "title": "Other XSS", "metadata": {"taxonomy": taxonomy}},
+        ]
+    )
+
+    assert "### CWE Coverage" in content
+    assert "| [CWE-79](https://cwe.test/79) | XSS | 2 |" in content
+    assert "[Stored XSS](#finding-one)" in content
+    assert "### MITRE ATT&CK Coverage" in content
+    assert "| [T1190](https://attack.test/T1190) | Exploit Public-Facing Application | 2 |" in content
+
+
+def test_taxonomy_coverage_tables_have_verified_empty_state():
+    content = _format_taxonomy_coverage_tables([])
+
+    assert content.count("No verified mappings were recorded.") == 2
 
 
 def test_extract_text_from_result_markdown_table():
@@ -450,6 +480,16 @@ def test_next_steps_validation_allows_only_configured_budgets_and_requires_durat
     assert "| Cost (USD) | 4.0 | 8.0 |" in markdown
     assert "Token" not in markdown
 
+    elapsed_current = _next_steps_data(configured)
+    elapsed_current["budget_recommendations"][0]["current"] = 17
+    normalized_elapsed = _validate_next_steps(elapsed_current, configured)
+    assert normalized_elapsed["budget_recommendations"][0]["current"] == 60
+
+    lower_than_configured = _next_steps_data(configured)
+    lower_than_configured["budget_recommendations"][0].update({"current": 17, "recommended": 30})
+    with pytest.raises(ValueError, match="cannot be lower"):
+        _validate_next_steps(lower_than_configured, configured)
+
     invalid = _next_steps_data(configured)
     invalid["budget_recommendations"].append(
         {"dimension": "tokens", "current": 100, "recommended": 200, "rationale": "Not configured"}
@@ -459,6 +499,43 @@ def test_next_steps_validation_allows_only_configured_budgets_and_requires_durat
 
     with pytest.raises(ValueError, match="duration budget is required"):
         _validate_next_steps(_next_steps_data({}), {})
+
+
+def test_next_steps_fallback_derives_guidance_from_incomplete_workflow():
+    source = {
+        "completion_status": {"assessment_complete": False},
+        "phase_coverage": [
+            {"phase_id": 1, "title": "Discovery", "status": "partial_failure", "task_status_counts": {"partial_failure": 1}},
+            {"phase_id": 3, "title": "Impact", "status": "blocked", "task_status_counts": {"partial_failure": 2}},
+        ],
+        "task_status_counts": {"done": 2, "partial_failure": 3},
+        "validation_candidates": [{"id": "candidate-1"}],
+        "latest_run": {"metrics": {"duration": "18m"}, "tool_failures": {"shell:error": 1}},
+    }
+
+    fallback = _next_steps_fallback({"duration": 60}, source, "invalid JSON")
+    markdown = _format_next_steps_appendix(fallback)
+
+    assert fallback["coverage_gaps"]
+    assert fallback["recommended_next_steps"]
+    assert fallback["completion_criteria"]
+    assert fallback["agent_improvements"]
+    assert fallback["tooling_improvements"]
+    assert "Phase 1 (Discovery) is partial failure" in markdown
+    assert "shell:error" in markdown
+    assert "Automated next-step generation returned invalid structured data" in markdown
+
+
+def test_next_steps_fallback_allows_empty_non_budget_lists_for_completed_workflow():
+    fallback = _next_steps_fallback(
+        {"duration": 60},
+        {"completion_status": {"assessment_complete": True}, "phase_coverage": []},
+        "invalid JSON",
+    )
+
+    assert fallback["coverage_gaps"] == []
+    assert fallback["recommended_next_steps"] == []
+    assert fallback["completion_criteria"] == []
 
 
 def test_next_steps_final_rejection_keeps_latest_actor_data():
@@ -477,6 +554,7 @@ def test_next_steps_final_rejection_keeps_latest_actor_data():
         "Source data",
         "Requirements",
         configured,
+        {},
         refinement_cycles=1,
         json_retries=0,
     )
@@ -484,6 +562,30 @@ def test_next_steps_final_rejection_keeps_latest_actor_data():
     assert data["coverage_gaps"] == ["Revised latest coverage gap"]
     assert critique == {"approved": False, "feedback": ["Clarify the coverage gap"]}
     assert "Clarify the coverage gap" in actor.call_args_list[1].args[0]
+
+
+def test_next_steps_refinement_uses_deterministic_fallback_without_critic():
+    actor = MagicMock(return_value=_agent_result("not JSON"))
+    critic = MagicMock()
+    source = {
+        "completion_status": {"assessment_complete": False},
+        "phase_coverage": [{"phase_id": 2, "title": "Validation", "status": "blocked"}],
+    }
+
+    data, critique = _run_next_steps_refinement(
+        actor,
+        critic,
+        "Source data",
+        "Requirements",
+        {"duration": 60},
+        source,
+        refinement_cycles=1,
+        json_retries=0,
+    )
+
+    assert data["coverage_gaps"]
+    assert critique is None
+    critic.assert_not_called()
 
 
 def test_report_category_helpers_cover_structured_and_free_form_artifacts():

@@ -879,9 +879,7 @@ def _validate_next_steps(data: Dict[str, Any], configured_budget: Dict[str, int 
             or recommended <= 0
         ):
             raise ValueError(f"{dimension} recommended budget must be positive and numeric")
-        if abs(float(current) - float(configured_budget[dimension])) > 0.000001:
-            raise ValueError(f"{dimension} current budget does not match the configured value")
-        if float(recommended) < float(current):
+        if float(recommended) < float(configured_budget[dimension]):
             raise ValueError(f"{dimension} recommended budget cannot be lower than the configured value")
         rationale = str(item.get("rationale") or "").strip()
         if not rationale:
@@ -890,7 +888,7 @@ def _validate_next_steps(data: Dict[str, Any], configured_budget: Dict[str, int 
         normalized_recommendations.append(
             {
                 "dimension": dimension,
-                "current": current,
+                "current": configured_budget[dimension],
                 "recommended": recommended,
                 "rationale": rationale,
             }
@@ -902,24 +900,113 @@ def _validate_next_steps(data: Dict[str, Any], configured_budget: Dict[str, int 
     return normalized
 
 
-def _next_steps_fallback(configured_budget: Dict[str, int | float]) -> Dict[str, Any]:
-    """Return a safe structured Appendix B when model JSON remains invalid."""
+def _next_steps_fallback(
+    configured_budget: Dict[str, int | float],
+    source: Dict[str, Any],
+    generation_error: str,
+) -> Dict[str, Any]:
+    """Build Appendix B guidance from canonical operation state after invalid model output."""
+    completion_status = source.get("completion_status", {})
+    completion_status = completion_status if isinstance(completion_status, dict) else {}
+    phase_coverage = source.get("phase_coverage", [])
+    phase_coverage = phase_coverage if isinstance(phase_coverage, list) else []
+    task_status_counts = source.get("task_status_counts", {})
+    task_status_counts = task_status_counts if isinstance(task_status_counts, dict) else {}
+    latest_run = source.get("latest_run", {})
+    latest_run = latest_run if isinstance(latest_run, dict) else {}
+    validation_candidates = source.get("validation_candidates", [])
+    validation_candidates = validation_candidates if isinstance(validation_candidates, list) else []
+
+    incomplete_phases = [
+        phase
+        for phase in phase_coverage
+        if isinstance(phase, dict) and str(phase.get("status") or "") not in {"done", "not_applicable"}
+    ]
+    incomplete = not bool(completion_status.get("assessment_complete")) or bool(incomplete_phases)
+    coverage_gaps: List[str] = []
+    recommended_next_steps: List[str] = []
+    completion_criteria: List[str] = []
+    agent_improvements: List[str] = []
+    tooling_improvements: List[str] = []
+    manual_investigations: List[str] = []
+
+    for phase in incomplete_phases:
+        phase_id = phase.get("phase_id", "unknown")
+        title = str(phase.get("title") or "Unnamed phase")
+        status = str(phase.get("status") or "incomplete").replace("_", " ")
+        counts = phase.get("task_status_counts", {})
+        counts = counts if isinstance(counts, dict) else {}
+        count_text = ", ".join(f"{value} {key}" for key, value in sorted(counts.items()))
+        suffix = f"; task outcomes: {count_text}" if count_text else ""
+        coverage_gaps.append(f"Phase {phase_id} ({title}) is {status}{suffix}.")
+
+    failed_tasks = sum(
+        int(value)
+        for key, value in task_status_counts.items()
+        if key in {"partial_failure", "failed", "blocked", "stalled"} and isinstance(value, int)
+    )
+    if incomplete:
+        phase_labels = ", ".join(
+            str(phase.get("phase_id", "unknown")) for phase in incomplete_phases
+        ) or "the incomplete workflow"
+        recommended_next_steps.append(
+            f"Resume assessment work for incomplete phase(s) {phase_labels} and record terminal outcomes for each "
+            "failed or blocked task."
+        )
+        completion_criteria.append(
+            "Complete or explicitly mark not applicable every planned phase and set assessment_complete=true only "
+            "after coverage closure."
+        )
+    if validation_candidates:
+        recommended_next_steps.append(
+            "Validate the remaining candidate claims with evidence before treating them as confirmed findings."
+        )
+        completion_criteria.append(
+            "Resolve every validation candidate as verified, rejected, or explicitly out of scope with recorded evidence."
+        )
+    if failed_tasks:
+        agent_improvements.append(
+            f"Improve task-execution recovery and handoff for the {failed_tasks} recorded failed, blocked, or partial task(s)."
+        )
+
+    tool_failures = latest_run.get("tool_failures", {})
+    tool_failures = tool_failures if isinstance(tool_failures, dict) else {}
+    if tool_failures:
+        failed_tools = ", ".join(sorted(str(tool) for tool in tool_failures))
+        tooling_improvements.append(
+            f"Resolve or replace the recorded tool failure(s): {failed_tools}."
+        )
+
+    metrics = latest_run.get("metrics", {})
+    metrics = metrics if isinstance(metrics, dict) else {}
+    duration = str(metrics.get("duration") or "the recorded operation duration")
+    budget_rationale = (
+        f"The operation used {duration} and ended with incomplete coverage; retain the configured limit "
+        "pending a human estimate for the remaining work."
+        if incomplete
+        else "No unresolved coverage was recorded; retain the configured limit."
+    )
+    budget_recommendations = [
+        {
+            "dimension": dimension,
+            "current": current,
+            "recommended": current,
+            "rationale": budget_rationale,
+        }
+        for dimension, current in configured_budget.items()
+    ]
     return {
-        "coverage_gaps": [],
-        "recommended_next_steps": [],
-        "completion_criteria": [],
-        "budget_recommendations": [
-            {
-                "dimension": dimension,
-                "current": current,
-                "recommended": current,
-                "rationale": "Retain the configured budget pending a human estimate of the unresolved coverage.",
-            }
-            for dimension, current in configured_budget.items()
-        ],
-        "agent_improvements": [],
-        "tooling_improvements": [],
-        "manual_investigations": [],
+        "coverage_gaps": coverage_gaps,
+        "recommended_next_steps": recommended_next_steps,
+        "completion_criteria": completion_criteria,
+        "budget_recommendations": budget_recommendations,
+        "agent_improvements": agent_improvements,
+        "tooling_improvements": tooling_improvements,
+        "manual_investigations": manual_investigations,
+        "_generation_note": (
+            "Automated next-step generation returned invalid structured data; this guidance was derived from "
+            f"canonical workflow status ({generation_error})."
+        ),
     }
 
 
@@ -927,16 +1014,19 @@ def _run_next_steps_actor(
     actor_agent: Any,
     prompt: str,
     configured_budget: Dict[str, int | float],
+    source: Dict[str, Any],
     json_retries: int,
-) -> Dict[str, Any]:
+) -> tuple[Dict[str, Any], bool]:
     """Run the Appendix B actor with tolerant JSON repair and validation retries."""
     current_prompt = prompt
+    last_error = "invalid model response"
     for attempt in range(json_retries + 1):
         try:
             response = _extract_text_from_result(actor_agent(current_prompt))
             parsed = parse_json_response(response, require_object=True)
-            return _validate_next_steps(parsed, configured_budget)
+            return _validate_next_steps(parsed, configured_budget), False
         except Exception as error:
+            last_error = str(error)
             logger.warning(
                 "Appendix B actor returned invalid JSON (attempt %s/%s): %s",
                 attempt + 1,
@@ -951,7 +1041,7 @@ Return only a valid JSON object matching the original schema and configured budg
 Original request:
 {prompt}
 """
-    return _next_steps_fallback(configured_budget)
+    return _next_steps_fallback(configured_budget, source, last_error), True
 
 
 def _run_next_steps_refinement(
@@ -960,12 +1050,15 @@ def _run_next_steps_refinement(
     source_prompt: str,
     section_requirements: str,
     configured_budget: Dict[str, int | float],
+    source: Dict[str, Any],
     refinement_cycles: int,
     json_retries: int,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Generate and critic-guided revise the structured Appendix B data."""
-    data = _run_next_steps_actor(actor_agent, source_prompt, configured_budget, json_retries)
-    if refinement_cycles == 0:
+    data, used_fallback = _run_next_steps_actor(
+        actor_agent, source_prompt, configured_budget, source, json_retries
+    )
+    if refinement_cycles == 0 or used_fallback:
         return data, None
 
     final_rejection = None
@@ -994,7 +1087,11 @@ Previous actor result:
 Critic feedback:
 {json.dumps(critique['feedback'], indent=2)}
 """
-        data = _run_next_steps_actor(actor_agent, revision_prompt, configured_budget, json_retries)
+        data, used_fallback = _run_next_steps_actor(
+            actor_agent, revision_prompt, configured_budget, source, json_retries
+        )
+        if used_fallback:
+            return data, None
         if cycle == refinement_cycles:
             final_rejection = critique
     return data, final_rejection
@@ -1032,6 +1129,74 @@ def _format_next_steps_appendix(data: Dict[str, Any]) -> str:
             _format_list_section("Manual Investigations", data["manual_investigations"]),
         ]
     )
+    generation_note = str(data.get("_generation_note") or "").strip()
+    if generation_note:
+        parts.append(f"\n> {generation_note}\n")
+    return "".join(parts)
+
+
+def _format_taxonomy_mappings(taxonomy: Dict[str, Any]) -> str:
+    """Render catalog-authoritative taxonomy mappings after report grounding."""
+    parts: List[str] = []
+    for label, key in (("MITRE ATT&CK", "mitre_attack"), ("CWE", "cwe")):
+        mappings = taxonomy.get(key, []) if isinstance(taxonomy, dict) else []
+        parts.append(f"#### {label} Mapping\n\n")
+        if not mappings:
+            parts.append("No mapping met the configured confidence threshold.\n\n")
+            continue
+        parts.append("| ID | Name | Confidence | Basis | Rationale | Evidence | Reference |\n|---|---|---|---|---|---|---|\n")
+        for item in mappings:
+            evidence = ", ".join(f"`{value}`" for value in item["evidence"]) or "Recorded metadata"
+            rationale = str(item["rationale"]).replace("|", "\\|").replace("\n", " ")
+            parts.append(
+                f"| {item['id']} | {item['name']} | {item['confidence_band']} ({item['confidence']:.2f}) | "
+                f"{item['basis']} | {rationale} | {evidence} | [Catalog]({item['url']}) |\n"
+            )
+        parts.append("\n")
+    provenance = taxonomy.get("provenance", {}) if isinstance(taxonomy, dict) else {}
+    if provenance:
+        parts.append(
+            f"> Taxonomy catalog: `{provenance.get('version', 'unknown')}` from `{provenance.get('source', 'unknown')}`.\n\n"
+        )
+    return "".join(parts)
+
+
+def _format_taxonomy_coverage_tables(findings: List[Dict[str, Any]]) -> str:
+    """Summarize catalog-validated mappings from verified findings for the executive summary."""
+    parts: List[str] = []
+    for heading, key in (("CWE Coverage", "cwe"), ("MITRE ATT&CK Coverage", "mitre_attack")):
+        aggregate: Dict[str, Dict[str, Any]] = {}
+        for finding in findings:
+            metadata = finding.get("metadata", {}) if isinstance(finding.get("metadata"), dict) else {}
+            taxonomy = metadata.get("taxonomy", {}) if isinstance(metadata.get("taxonomy"), dict) else {}
+            anchor = str(finding.get("anchor") or "").strip()
+            title = _report_item_title(finding, "Finding")
+            for mapping in taxonomy.get(key, []) if isinstance(taxonomy.get(key), list) else []:
+                if not isinstance(mapping, dict) or not mapping.get("id"):
+                    continue
+                identifier = str(mapping["id"])
+                row = aggregate.setdefault(
+                    identifier,
+                    {
+                        "name": str(mapping.get("name") or "Unknown"),
+                        "url": str(mapping.get("url") or ""),
+                        "findings": {},
+                    },
+                )
+                row["findings"][anchor or title] = (anchor, title)
+        parts.append(f"### {heading}\n\n")
+        if not aggregate:
+            parts.append("No verified mappings were recorded.\n\n")
+            continue
+        parts.append("| ID | Name | Verified Finding Count | Associated Findings |\n|---|---|---:|---|\n")
+        for identifier, row in sorted(aggregate.items()):
+            display_id = f"[{identifier}]({row['url']})" if row["url"] else identifier
+            associated = ", ".join(
+                f"[{title}]({anchor})" if anchor else title
+                for anchor, title in row["findings"].values()
+            )
+            parts.append(f"| {display_id} | {row['name']} | {len(row['findings'])} | {associated} |\n")
+        parts.append("\n")
     return "".join(parts)
 
 
@@ -1192,6 +1357,10 @@ def generate_security_report(
             for i, finding in enumerate(raw_findings)
             if finding.get("category") == "validation_failure"
         ]
+        taxonomy_coverage = _format_taxonomy_coverage_tables(
+            [finding for _index, finding in report_findings]
+        )
+        sections["taxonomy_coverage"] = taxonomy_coverage
         report_step_total = 3 + len(report_findings) + len(report_observations) + len(report_validation_failures)
         report_step_index = 0
 
@@ -1270,6 +1439,7 @@ there are zero verified findings; never create a nonzero "No Verified Findings" 
             _cleanup_report_agent(exec_critic, "report executive summary critic")
 
         if exec_content:
+            exec_content = exec_content.rstrip() + "\n\n" + taxonomy_coverage
             exec_content = _append_inline_review_feedback(exec_content, final_critique)
             # Add anchor for Table of Contents
             exec_content = "<a name=\"executive-summary\"></a>\n" + exec_content
@@ -1307,6 +1477,8 @@ there are zero verified findings; never create a nonzero "No Verified Findings" 
 Generate a detailed report for the following finding.
 Target: {target}
 {completion_guidance}
+Do not generate CWE or MITRE ATT&CK mapping sections. Stored catalog-validated mappings are rendered
+deterministically after your grounded narrative.
 Finding Data:
 {json.dumps(finding)}
 """
@@ -1354,6 +1526,13 @@ Finding Data:
                 _cleanup_report_agent(finding_critic, f"report finding {i + 1} critic")
             if finding_text:
                 finding_text = _ground_report_item(finding_text, finding)
+                metadata = finding.get("metadata", {}) if isinstance(finding.get("metadata"), dict) else {}
+                finding_text = (
+                    f"<a name=\"finding-{finding.get('id', i)}\"></a>\n"
+                    + finding_text.rstrip()
+                    + "\n\n"
+                    + _format_taxonomy_mappings(metadata.get("taxonomy", {}))
+                )
                 finding_text = _append_artifact_evidence(finding_text, finding)
                 finding_text = _append_inline_review_feedback(finding_text, final_critique)
                 finding_filename = f"finding_{i+1}_{sanitize_target_name(finding.get('title', 'finding')[:50])}.md"
@@ -1361,6 +1540,10 @@ Finding Data:
                 with open(finding_path, "w") as f:
                     f.write(_PAGE_BREAK + finding_text + "\n\n")
                 report_parts_files.append(finding_path)
+
+        # Persist enrichment results with the canonical report inputs for later audit or re-rendering.
+        with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
+            f.write(json.dumps(sections, indent=2, sort_keys=True))
 
         # Part 3: Findings Requiring Validation. This section is deterministic so an
         # unverified claim cannot gain invented evidence during report generation.
@@ -1393,6 +1576,8 @@ Finding Data:
                     f"**Available artifacts:**\n{artifact_lines}\n\n"
                     "**Required follow-up:** Reproduce this claim in a dedicated task and capture decisive direct "
                     "evidence or a test/control comparison before treating it as a vulnerability.\n"
+                    "\n"
+                    + _format_taxonomy_mappings(metadata.get("taxonomy", {}))
                 )
                 path = os.path.join(
                     output_path,
@@ -1654,6 +1839,7 @@ Return JSON exactly with these keys:
 
 Include exactly one budget recommendation for every dimension in configured_budget and no others. Duration is required
 and must always be recommended. Token and cost recommendations are forbidden unless present in configured_budget.
+For each budget recommendation, `current` is the configured limit from configured_budget, never elapsed utilization.
 Give concrete projected values for full coverage and label their rationales as estimates. Manual investigations must
 be work where more automated tooling is unlikely to resolve the missing business context, authorization, access, or
 human judgment. Coverage gaps and completion criteria must be concrete and measurable. Empty non-budget lists are
@@ -1678,6 +1864,7 @@ Canonical operation data:
                 next_steps_prompt,
                 next_steps_system_prompt,
                 configured_budget,
+                next_steps_source,
                 refinement_cycles,
                 json_retries,
             )
