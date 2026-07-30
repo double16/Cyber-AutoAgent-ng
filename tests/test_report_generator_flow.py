@@ -783,6 +783,45 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
             },
         },
         {
+            "id": "8",
+            "memory": "Task acceptance for the verified command injection finding.",
+            "metadata": {
+                "category": "observation",
+                "source": "task_acceptance",
+                "task_uid": "task-verified",
+                "operation_id": op_id,
+            },
+        },
+        {
+            "id": "9",
+            "memory": "Task acceptance for a finding that still requires validation.",
+            "metadata": {
+                "category": "observation",
+                "source": "task_acceptance",
+                "task_uid": "task-unverified",
+                "operation_id": op_id,
+            },
+        },
+        {
+            "id": "10",
+            "memory": "Interim observation from the same task as a verified finding.",
+            "metadata": {
+                "category": "observation",
+                "source": "store_observation",
+                "task_uid": "task-verified",
+                "operation_id": op_id,
+            },
+        },
+        {
+            "id": "11",
+            "memory": "Task acceptance without task provenance remains reportable.",
+            "metadata": {
+                "category": "observation",
+                "source": "task_acceptance",
+                "operation_id": op_id,
+            },
+        },
+        {
             "id": "6",
             "memory": "flag{wrong-format}",
             "metadata": {
@@ -816,6 +855,7 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
         {
             "finding_uid": "finding-1",
             "candidate_data": {
+                "source_task_uids": ["task-verified"],
                 "taxonomy": {
                     "cwe": [{"id": "CWE-78"}],
                     "mitre_attack": [{"id": "T1059.004"}],
@@ -823,7 +863,11 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
                 "taxonomy_annotation": {"status": "completed"},
                 "final_attack_enrichment": {"status": "completed"},
             },
-        }
+        },
+        {
+            "finding_uid": "finding-2",
+            "candidate_data": {"source_task_uids": ["task-unverified"]},
+        },
     ]
 
     # Create the proof file
@@ -856,6 +900,10 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     endpoint_observation = next(e for e in evidence if e["id"] == "5")
     assert endpoint_observation["category"] == "observation"
     assert endpoint_observation["severity"] == "INFO"
+    assert "8" not in {item["id"] for item in evidence}
+    assert next(item for item in evidence if item["id"] == "9")["category"] == "observation"
+    assert next(item for item in evidence if item["id"] == "10")["category"] == "observation"
+    assert next(item for item in evidence if item["id"] == "11")["category"] == "observation"
 
     rejected_objective = next(e for e in evidence if e["id"] == "6")
     confirmed_objective = next(e for e in evidence if e["id"] == "7")
@@ -1231,7 +1279,7 @@ def test_generate_security_report_validation_failures(
                     "candidate_value": "flag{wrong}",
                     "objective_type": "flag",
                     "confidence": 95,
-                    "validator": "validation_specialist",
+                    "validator": "task_evaluator",
                     "validation_reason": "Format mismatch",
                     "evidence_artifacts": ["artifact:flag.txt"],
                 },

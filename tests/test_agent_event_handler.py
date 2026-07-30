@@ -553,17 +553,17 @@ def test_constructor_adds_generic_agent_metadata_and_alias(monkeypatch):
         model_id="model",
         emitter=emitter,
         coordinator=coordinator,
-        agent_name="validation_specialist",
-        agent_type="validation_specialist",
+        agent_name="evidence_reviewer",
+        agent_type="evidence_reviewer",
         parent_agent_run_id="main-1",
         init_context={"budget": {"maxDurationMinutes": 60}},
     )
 
     assert AgentEventHandler is AgentEventHandler
-    assert handler.agent_name == "validation_specialist"
-    assert handler.agent_type == "validation_specialist"
+    assert handler.agent_name == "evidence_reviewer"
+    assert handler.agent_type == "evidence_reviewer"
     assert handler.parent_agent_run_id == "main-1"
-    assert any(event["type"] == "operation_init" and event["agent_name"] == "validation_specialist" for event in events)
+    assert any(event["type"] == "operation_init" and event["agent_name"] == "evidence_reviewer" for event in events)
 
 
 def test_callback_events_use_agent_attached_metadata(monkeypatch):
@@ -638,7 +638,7 @@ def test_operation_coordinator_aggregates_multiple_handlers(monkeypatch):
         emitter=emitter,
         coordinator=coordinator,
         agent_name="sub",
-        agent_type="validation_specialist",
+        agent_type="evidence_reviewer",
         parent_agent_run_id=main.agent_run_id,
         emit_operation_init=False,
         start_metrics_thread=False,
@@ -685,8 +685,8 @@ def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
         model_id="model",
         emitter=emitter,
         coordinator=coordinator,
-        agent_name="validation_specialist",
-        agent_type="validation_specialist",
+        agent_name="evidence_reviewer",
+        agent_type="evidence_reviewer",
         parent_agent_run_id=main.agent_run_id,
         emit_operation_init=False,
         start_metrics_thread=False,
@@ -707,7 +707,7 @@ def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
     progress_event = [event for event in events if event["type"] == "progress_update"][-1]
     metrics_event = [event for event in events if event["type"] == "metrics_update"][-1]
 
-    assert progress_event["agent_name"] == "validation_specialist"
+    assert progress_event["agent_name"] == "evidence_reviewer"
     assert progress_event["duration"] == "5m 0s"
     assert progress_event["progressPercent"] == 869
     assert metrics_event["metrics"]["inputTokens"] == 125

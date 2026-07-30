@@ -729,30 +729,45 @@ def test_task_proposal_limits_require_positive_value():
         mod.TaskProposal.model_validate(payload)
 
 
-def test_task_proposal_requires_limits_field():
+def test_task_proposal_defaults_omitted_limits():
     payload = task_proposal("Check", "Check target")
     payload.pop("limits")
 
-    with pytest.raises(ValueError, match="Field required"):
-        mod.TaskProposal.model_validate(payload)
+    proposal = mod.TaskProposal.model_validate(payload)
+    assert proposal.limits.max_requests == 50
+    assert proposal.limits.max_duration_minutes == 10
 
 
-def test_snapshot_task_proposal_requires_limits_field_before_discarding_it():
+def test_task_proposal_explicit_limits_override_defaults():
+    payload = task_proposal("Check", "Check target")
+    payload["limits"] = {"max_requests": 7}
+
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.limits.max_requests == 7
+    assert proposal.limits.max_duration_minutes is None
+
+
+def test_snapshot_task_proposal_discards_default_limits():
     payload = task_proposal("Review", "Review stored evidence", evidence_kind="memory")
     payload.update({"methods": [], "snapshot_refs": ["memory:m1"]})
     payload.pop("limits")
 
-    with pytest.raises(ValueError, match="Field required"):
-        mod.TaskProposal.model_validate(payload)
+    proposal = mod.TaskProposal.model_validate(payload)
+    assert proposal.limits.max_requests is None
+    assert proposal.limits.max_duration_minutes is None
 
 
 @pytest.mark.parametrize("field_name", ["methods", "snapshot_refs"])
-def test_task_proposal_requires_explicit_basis_arrays(field_name):
+def test_task_proposal_defaults_omitted_basis_arrays(field_name):
     payload = task_proposal("Check", "Check target")
+    if field_name == "methods":
+        payload["snapshot_refs"] = ["memory:m1"]
     payload.pop(field_name)
 
-    with pytest.raises(ValueError, match="Field required"):
-        mod.TaskProposal.model_validate(payload)
+    proposal = mod.TaskProposal.model_validate(payload)
+    assert proposal.methods == [] if field_name == "methods" else proposal.methods == ["test-fixture"]
+    assert proposal.snapshot_refs == ["memory:m1"] if field_name == "methods" else proposal.snapshot_refs == []
 
 
 def test_task_proposal_list_reports_all_missing_fields_compactly():
@@ -770,11 +785,7 @@ def test_task_proposal_list_reports_all_missing_fields_compactly():
         mod._create_tasks_from_proposals(proposals, prompt_token_limit=48_000)
 
     message = str(raised.value)
-    assert "proposal[0].methods" in message
-    assert "proposal[0].limits" in message
-    assert "proposal[0].snapshot_refs" in message
-    assert "proposal[1].methods" in message
-    assert "proposal[1].snapshot_refs" in message
+    assert "procedure methods or snapshot_refs" in message
     assert "errors.pydantic.dev" not in message
     assert "input_value" not in message
 
@@ -982,14 +993,7 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
     task_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposal"]
     criterion_schema = tool_spec["inputSchema"]["json"]["$defs"]["TaskProposalCriterion"]
 
-    assert task_schema["required"] == [
-        "title",
-        "objective",
-        "methods",
-        "limits",
-        "snapshot_refs",
-        "criteria",
-    ]
+    assert task_schema["required"] == ["title", "objective", "criteria"]
     assert set(task_schema["properties"]) == {
         "title",
         "objective",
@@ -2268,7 +2272,7 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
     assert '"max_items"' in schema_text
     assert '"max_tests"' not in schema_text
     task_schema = schema["$defs"]["TaskProposal"]
-    assert "limits" in task_schema["required"]
+    assert "limits" not in task_schema["required"]
     assert set(task_schema["properties"]) == {
         "title",
         "objective",
@@ -3497,7 +3501,10 @@ def test_acceptance_finding_auto_binding_rejects_missing_and_ambiguous_candidate
     store.store_task("op1", task)
     acceptance_tool = mod.build_record_task_acceptance_tool(task.task_uid)
 
-    with pytest.raises(ValueError, match="finding created by this task"):
+    with pytest.raises(
+        ValueError,
+        match=r"finding created by this task.*Call store_finding first.*finding:<id>.*record_task_acceptance",
+    ):
         acceptance_tool(
             status="satisfied",
             disposition="finding_candidate",

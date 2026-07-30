@@ -177,7 +177,7 @@ Prompt budget consider output tokens (#62)
 - add back erroneously removed `python_repl` and `sleep` tools
 - fix incorrect model parameters (i.e., max output tokens) when swarm model == main model
 - validate swarm agent model and fall back to primary model
-- fix broken tool calling (ollama, gemini) in report, validation_specialist agents
+- fix broken tool calling (ollama, gemini) in report and specialist agents
 - relax prompt optimizer validation for line count increase
 - minor efficiency updates
 

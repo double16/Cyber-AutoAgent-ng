@@ -550,7 +550,7 @@ def test_objective_validation_rejects_format_mismatch_without_changing_finding(
             95,
             "Candidate appeared in the response",
             [str(artifact)],
-            "validation_specialist",
+            "task_evaluator",
         ))
 
     assert result["requested_outcome"] == "confirmed"
@@ -609,11 +609,62 @@ def test_objective_validation_requires_eighty_percent_confidence(
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
         result = json.loads(record_objective_validation(
-            "c1", "confirmed", 79, "Low-confidence candidate", [str(artifact)], "validation_specialist"
+            "c1", "confirmed", 79, "Low-confidence candidate", [str(artifact)], "task_evaluator"
         ))
 
     assert result["outcome"] == "rejected"
     assert "confidence must be at least 80" in plan_store.store_objective_validation.call_args.args[2]["summary"]
+
+
+def test_objective_validation_rejects_candidate_absent_from_evidence(
+    memory_client,
+    operation_ids,
+    tmp_path: Path,
+):
+    artifact = tmp_path / "flag.txt"
+    artifact.write_text("response did not include the flag", encoding="utf-8")
+    task = Task(
+        "objective-task",
+        "Validate flag",
+        "Validate objective candidate",
+        AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(kind="snapshot", description="Flag", source_refs=["artifact:flag.txt"]),
+            criteria=[AcceptanceCriterion(
+                id="validate-objective:c1",
+                description="Validate flag",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+        5,
+        "active",
+        kind="objective_validation",
+        reference_id="c1",
+    )
+    plan_store = MagicMock()
+    plan_store.get_objective_candidate.return_value = {
+        "verification_task_uid": task.task_uid,
+        "candidate_data": {
+            "candidate_uid": "c1",
+            "objective_type": "flag",
+            "candidate_value": "FLAG{abc}",
+            "constraints": {"exact_length": 9, "format_template": "FLAG{...}"},
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    plan_store.get_acceptance_results.return_value = []
+    with (
+        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry"),
+    ):
+        result = json.loads(record_objective_validation(
+            "c1", "confirmed", 95, "Flag verified", [str(artifact)], "task_evaluator"
+        ))
+
+    assert result["outcome"] == "rejected"
+    validation = plan_store.store_objective_validation.call_args.args[2]
+    assert validation["constraint_failures"] == ["candidate value does not appear in the supplied evidence artifacts"]
 
 
 def test_objective_validation_accepts_valid_candidate(memory_client, operation_ids, tmp_path: Path):
@@ -655,7 +706,7 @@ def test_objective_validation_accepts_valid_candidate(memory_client, operation_i
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
         result = json.loads(record_objective_validation(
-            "c1", "verified", 80, "Valid flag", [str(artifact)], "validation_specialist"
+            "c1", "verified", 80, "Valid flag", [str(artifact)], "task_evaluator"
         ))
 
     assert result["outcome"] == "confirmed"

@@ -69,8 +69,7 @@ src/modules/operation_plugins/  (CYBER_PLUGIN_PATH, ~/.cyber-autoagent/modules/)
 │   ├── report_agent_appendix_system_prompt.md     # Report appendix guidance (additional sections can be specified)
 │   ├── report_agent_next_steps_system_prompt.md   # Structured Appendix B recommendations
 │   ├── module.yaml                                # Module configuration
-│   └── tools/                                     # Module-specific tools / specialist agents
-│       └── validation_specialist.py
+│   └── tools/                                     # Module-specific tools
 └── ctf/
     ├── execution_prompt.md
     ├── report_prompt.md
@@ -88,7 +87,7 @@ configuration:
 
 **Available Modules**:
 - **web**: Comprehensive web application and network security testing
-  - Includes the `validation_specialist` tool (invoked via `load_tool("validation_specialist")`) and can be extended with additional specialist agents following the same pattern.
+  - Finding validation is performed by the workflow's independent evidence-validation task.
 - **ctf**: CTF challenge solving with flag recognition and success detection
 
 ## Prompt Loading System

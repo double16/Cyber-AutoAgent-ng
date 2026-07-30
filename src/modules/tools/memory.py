@@ -833,6 +833,7 @@ class Task:
     reference_id: Optional[str] = None
     target_scope: TargetScope = "all"
     target_ids: List[str] = field(default_factory=list)
+    replacement_of: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -880,6 +881,7 @@ class Task:
             updated_at=obj.get("updated_at"),
             kind=str(obj.get("kind", "standard") or "standard"),
             reference_id=obj.get("reference_id"),
+            replacement_of=obj.get("replacement_of"),
             target_scope=str(obj.get("target_scope", "all") or "all"),
             target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
@@ -898,6 +900,7 @@ class Task:
             "updated_at": self.updated_at,
             "kind": self.kind,
             "reference_id": self.reference_id,
+            "replacement_of": self.replacement_of,
             "target_scope": self.target_scope,
             "target_ids": self.target_ids,
         })
@@ -910,7 +913,7 @@ class Task:
     def csv_format() -> str:
         return (
             "title,objective,acceptance_mode,acceptance_criteria,evidence,phase,status,status_reason,kind,"
-            "reference_id,target_scope,target_ids"
+            "reference_id,replacement_of,target_scope,target_ids"
         )
 
     def to_toon(self, include_format=True) -> str:
@@ -925,6 +928,7 @@ class Task:
         status_reason = sanitize_toon_value(self.status_reason)
         kind = sanitize_toon_value(self.kind)
         reference_id = sanitize_toon_value(self.reference_id)
+        replacement_of = sanitize_toon_value(self.replacement_of)
         target_ids = "|".join(sanitize_toon_value(target_id) for target_id in self.target_ids)
         lines = []
         if include_format:
@@ -932,7 +936,7 @@ class Task:
         lines.append(
             f"  {title},{objective},{acceptance_mode},{acceptance_criteria},{evidence},{self.phase},{status},"
             f"{status_reason},{kind},"
-            f"{reference_id},{self.target_scope},{target_ids}"
+            f"{reference_id},{replacement_of},{self.target_scope},{target_ids}"
         )
         return "\n".join(lines).strip()
 
@@ -2702,6 +2706,19 @@ def _objective_constraint_failures(candidate_value: str, constraints: Dict[str, 
     return failures
 
 
+def _objective_evidence_contains_candidate(candidate_value: str, evidence_artifacts: List[str]) -> bool:
+    """Return whether an objective candidate appears in at least one bounded text artifact."""
+
+    for artifact_ref in evidence_artifacts:
+        try:
+            with open(_artifact_path_from_ref(artifact_ref), "r", encoding="utf-8", errors="replace") as artifact_file:
+                if candidate_value in artifact_file.read(1_000_000):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 @tool(
     inputSchema={
         "json": {
@@ -2781,7 +2798,7 @@ def store_objective_candidate(
         objective=(
             f"Independently validate objective candidate {candidate_uid}. Confirm that the exact value appears in "
             "the supplied artifact, is reproducibly extracted, satisfies the recorded objective constraints, and "
-            "call record_objective_validation with the outcome. Use validation_specialist when available."
+            "call record_objective_validation with the outcome."
         ),
         acceptance=AcceptanceContract(
             mode="outcome",
@@ -2860,6 +2877,10 @@ def record_objective_validation(
     evidence = _validated_artifact_paths(evidence_artifacts, require_one=True)
     candidate = record["candidate_data"]
     failures = _objective_constraint_failures(candidate["candidate_value"], candidate.get("constraints", {}))
+    if normalized_outcome == "confirmed" and not _objective_evidence_contains_candidate(
+        candidate["candidate_value"], evidence
+    ):
+        failures.append("candidate value does not appear in the supplied evidence artifacts")
     if normalized_outcome == "confirmed" and confidence < 80:
         failures.append("confirmed objective confidence must be at least 80")
     effective_outcome = "rejected" if failures else normalized_outcome
@@ -3019,6 +3040,12 @@ class TaskProposalLimits(_StrictTaskWireModel):
     max_depth: Optional[PositiveInt] = None
 
 
+DEFAULT_TASK_PROPOSAL_LIMITS = {
+    "max_requests": 50,
+    "max_duration_minutes": 10,
+}
+
+
 class TaskProposalCriterion(_StrictTaskWireModel):
     description: str = Field(min_length=1, description="Finite result required from the declared basis")
 
@@ -3027,16 +3054,16 @@ class TaskProposal(_StrictTaskWireModel):
     """Small model-facing task proposal compiled into an immutable acceptance contract by Python."""
 
     title: str = Field(min_length=1)
-    objective: str = Field(min_length=1)
+    objective: str = Field(min_length=1, validation_alias=AliasChoices("objective", "description"))
     basis_description: Optional[str] = Field(default=None, description="Finite boundary; defaults to objective")
-    methods: List[str] = Field(..., description="Procedure methods; use [] for snapshot proposals")
+    methods: List[str] = Field(default_factory=list, description="Procedure methods; use [] for snapshot proposals")
     limits: TaskProposalLimits = Field(
-        ...,
+        default_factory=lambda: TaskProposalLimits(**DEFAULT_TASK_PROPOSAL_LIMITS),
         validation_alias=AliasChoices("limits", "limit"),
-        description="Required object; procedure bounds are discarded when snapshot_refs are supplied",
+        description="Optional procedure bounds; defaults to 50 requests and 10 minutes",
     )
     snapshot_refs: List[str] = Field(
-        ...,
+        default_factory=list,
         description="Existing task, memory, artifact, or finding references; use [] for procedure proposals",
     )
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
@@ -3087,9 +3114,8 @@ class TaskProposal(_StrictTaskWireModel):
 
         if not normalized.get("snapshot_refs"):
             return normalized
-        if "limit" in normalized or "limits" in normalized:
-            normalized.pop("limit", None)
-            normalized["limits"] = {}
+        normalized.pop("limit", None)
+        normalized["limits"] = {}
         if "output_kind" in normalized:
             normalized.pop("output_kind")
             logger.info("Normalized inapplicable output_kind from snapshot task proposal")
@@ -3195,8 +3221,8 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "description": (
-            "Submit complete task proposals using canonical field names. Every proposal requires methods, limits, "
-            "snapshot_refs, and exactly one criterion; snapshot proposals use methods=[] and limits={}."
+            "Submit task proposals using canonical field names. Methods and snapshot_refs default to [] and "
+            "procedure limits default to 50 requests and 10 minutes; snapshot proposals use limits={}."
         ),
         "properties": {
             "tasks": {
@@ -3232,28 +3258,22 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                         "target_ids": ["target-1"],
                     },
                 ],
-                "required": [
-                    "title",
-                    "objective",
-                    "methods",
-                    "limits",
-                    "snapshot_refs",
-                    "criteria",
-                ],
+                "required": ["title", "objective", "criteria"],
                 "properties": {
                     "title": {"type": "string", "minLength": 1},
                     "objective": {"type": "string", "minLength": 1},
                     "basis_description": {"type": ["string", "null"]},
-                    "methods": {"type": "array", "items": {"type": "string"}},
+                    "methods": {"type": "array", "items": {"type": "string"}, "default": []},
                     "limits": {
                         "type": "object",
                         "additionalProperties": False,
+                        "default": DEFAULT_TASK_PROPOSAL_LIMITS,
                         "properties": {
                             key: {"type": "integer", "exclusiveMinimum": 0}
                             for key in DISCOVERY_PROCEDURE_LIMIT_KEYS
                         },
                     },
-                    "snapshot_refs": {"type": "array", "items": {"type": "string"}},
+                    "snapshot_refs": {"type": "array", "items": {"type": "string"}, "default": []},
                     "output_kind": {"type": "string", "enum": ["artifact", "inventory_manifest"]},
                     "criteria": {
                         "type": "array",
@@ -5140,7 +5160,11 @@ def _bind_acceptance_finding_reference(
         return list(evidence_refs)
     linked_refs = _source_task_finding_refs(task_uid)
     if not linked_refs:
-        raise ValueError("Acceptance disposition finding_candidate requires a finding created by this task")
+        raise ValueError(
+            "Acceptance disposition finding_candidate requires a finding created by this task. "
+            "Call store_finding first, retain its returned canonical finding:<id> reference, "
+            "then retry record_task_acceptance."
+        )
     supplied_refs = [reference for reference in evidence_refs if str(reference).startswith("finding:")]
     if len(linked_refs) == 1:
         selected_ref = linked_refs[0]

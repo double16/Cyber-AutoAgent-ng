@@ -1479,7 +1479,9 @@ def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation():
     controller._run_task(_plan(), _plan().phases[0], task)
 
     assert len(actor_prompts) == 2
-    assert "Endpoint evidence recovery is required" in actor_prompts[1]
+    assert "Missing criterion:" in actor_prompts[1]
+    assert "Latest artifact/evidence:" in actor_prompts[1]
+    assert "Required tool call: record_task_acceptance" in actor_prompts[1]
     assert evaluator_calls
     assert state.tasks[0].status == "done"
 
@@ -1710,9 +1712,47 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
     }
 
 
+def test_finding_validation_contract_requires_claim_specific_evidence():
+    finding_validation = Task(
+        task_uid="verify-1",
+        title="Verify finding",
+        objective="verify",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    standard_task = Task(
+        task_uid="task-1",
+        title="Assess endpoint",
+        objective="assess",
+        phase=1,
+        status="active",
+    )
+
+    finding_contract = MultiAgentWorkflowController._task_executor_contract(finding_validation)
+    standard_contract = MultiAgentWorkflowController._task_executor_contract(standard_task)
+
+    assert "## Finding Validation Methodology" in finding_contract
+    assert "negative-control artifact" in finding_contract
+    assert "extracted data must appear in the response artifact" in finding_contract
+    assert "401 or 403 is evidence of blocking" in finding_contract
+    assert "## Finding Validation Methodology" not in standard_contract
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[finding_validation]),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    evaluator_prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], finding_validation)
+
+    assert "## Finding Validation Review" in evaluator_prompt
+    assert "401 or 403 is blocking evidence" in evaluator_prompt
+
+
 def test_objective_validation_task_requires_separate_record_tool_and_finalizes(monkeypatch):
     runtime = _runtime()
-    runtime.optional_tools_list.append(_tool("validation_specialist"))
     task = Task(
         task_uid="objective-verify-1",
         title="Validate flag",
@@ -1752,7 +1792,7 @@ def test_objective_validation_task_requires_separate_record_tool_and_finalizes(m
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert policies[0].required_tool_names == {"record_objective_validation", "validation_specialist"}
+    assert policies[0].required_tool_names == {"record_objective_validation"}
     finalize.assert_called_once_with(task, "done", "Independent validation did not confirm the candidate.")
     assert state.tasks[0].status == "done"
     assert runtime.callback_handler.events[-1]["finding_resolution"] == "objective_rejected"
@@ -1875,8 +1915,10 @@ def test_acceptance_corrections_extend_same_executor_beyond_normal_cycle_limit()
     controller._run_task(_plan(), _plan().phases[0], task)
 
     assert len(actor_prompts) == 3
-    assert "field error 1" in actor_prompts[1]
-    assert "field error 2" in actor_prompts[2]
+    assert "Missing criterion:" in actor_prompts[1]
+    assert "Required tool call: record_task_acceptance" in actor_prompts[1]
+    assert "Missing criterion:" in actor_prompts[2]
+    assert "Required tool call: record_task_acceptance" in actor_prompts[2]
     assert state.tasks[0].status == "done"
 
 
@@ -1954,6 +1996,135 @@ def test_complete_acceptance_supersedes_repeated_rejection_after_recovery(replay
     assert len(evaluator_prompts) == 1
     assert state.tasks[0].status == "done"
     assert state.tasks[0].status_reason == "durable acceptance approved"
+
+
+def test_evaluator_repairs_high_confidence_observation_by_creating_linked_finding():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1})
+    task = Task(task_uid="active", title="Active", objective="test injection", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    actor_prompts = []
+    evaluator_calls = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        nonlocal evaluator_calls
+        if role == "task_prompt_builder":
+            return '{"prompt":"test injection","tools":[]}'
+        if role == "task_evaluator":
+            evaluator_calls += 1
+            if evaluator_calls == 1:
+                return json.dumps({
+                    "status": "done",
+                    "reason": "The response artifact proves command injection.",
+                    "instructions": "",
+                    "finding_recommendation": {
+                        "required": True,
+                        "confidence": 0.96,
+                        "reason": "Artifact shows direct command execution and data disclosure.",
+                    },
+                })
+            assert "finding-1" in prompt
+            return '{"status":"done","reason":"linked finding recorded"}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_prompts.append(prompt)
+        if len(actor_prompts) == 1:
+            state.acceptance_results[task.task_uid] = [AcceptanceResult(
+                criterion_id=task.acceptance.criteria[0].id,
+                status="satisfied",
+                disposition="observation",
+                summary="Command injection retrieved protected data",
+                evidence_refs=("artifact:artifacts/command-injection.txt",),
+            )]
+            return workflow_mod.TaskExecutorCycleResult(
+                text="acceptance stored",
+                outcomes=[ToolOutcome(
+                    sequence=1,
+                    tool_use_id="evidence-capture",
+                    tool_name="shell",
+                    success=True,
+                    correctable=False,
+                    input_summary="capture response",
+                    output_summary="artifact:artifacts/command-injection.txt",
+                )],
+            )
+        state.finding_records.append({
+            "finding_uid": "finding-1",
+            "candidate_data": {"title": "Command injection", "source_task_uids": [task.task_uid]},
+            "resolution": None,
+        })
+        return workflow_mod.TaskExecutorCycleResult(
+            text="finding stored",
+            outcomes=[ToolOutcome(
+                sequence=2,
+                tool_use_id="finding-store",
+                tool_name="store_finding",
+                success=True,
+                correctable=False,
+                input_summary="artifact-backed finding",
+                output_summary="finding:finding-1",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_prompts) == 2
+    assert "Missing criterion: store the artifact-backed security finding" in actor_prompts[1]
+    assert "Required tool call: store_finding" in actor_prompts[1]
+    assert state.acceptance_results[task.task_uid][0].disposition == "observation"
+    assert state.tasks[0].status == "done"
+
+
+def test_evaluator_does_not_repair_low_confidence_observation_recommendation():
+    task = Task(task_uid="active", title="Active", objective="test behavior", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    acceptance_results = [AcceptanceResult(
+        criterion_id=task.acceptance.criteria[0].id,
+        status="satisfied",
+        disposition="observation",
+        summary="Potentially interesting response difference",
+        evidence_refs=("artifact:artifacts/response.txt",),
+    )]
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: json.dumps({
+            "status": "done",
+            "reason": "Observation is sufficiently recorded.",
+            "finding_recommendation": {"required": True, "confidence": 0.89, "reason": "Needs more proof."},
+        }),
+    )
+
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=acceptance_results)
+
+    assert decision.status == "done"
+    assert decision.finding_recommendation_required is False
+
+
+@pytest.mark.parametrize(
+    "recommendation",
+    [
+        [],
+        {"required": "yes", "confidence": 0.95, "reason": "claim"},
+        {"required": True, "confidence": 1.1, "reason": "claim"},
+        {"required": True, "confidence": 0.95, "reason": ""},
+    ],
+)
+def test_task_evaluator_rejects_malformed_finding_recommendations(recommendation):
+    with pytest.raises(workflow_mod.WorkflowInvariantError):
+        MultiAgentWorkflowController._finding_recommendation_from_evaluator({
+            "finding_recommendation": recommendation,
+        })
 
 
 def test_repeated_acceptance_rejection_remains_terminal_while_ledger_is_incomplete():
@@ -5768,6 +5939,71 @@ def test_task_prompt_final_rejection_marks_task_partial_failure_without_executio
         "status": "partial_failure",
         "status_reason": state.tasks[0].status_reason,
     }
+
+
+def test_task_prompt_repairable_rejection_runs_one_bounded_repair():
+    task = Task(task_uid="active", title="Active", objective="capture response evidence", phase=1, status="active")
+    calls = []
+    builders = iter([
+        '{"prompt":"discard response body","tools":[],"shell_commands":["id"]}',
+        '{"prompt":"capture response body with an explicit http URL","tools":[],"shell_commands":[]}',
+    ])
+    critics = iter([
+        '{"approved":false,"repairable":true,"feedback":["The response body is required for artifact evidence"]}',
+        '{"approved":true,"repairable":false,"feedback":[]}',
+    ])
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        if role == "task_prompt_builder":
+            return next(builders)
+        if role == "task_prompt_critic":
+            return next(critics)
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=text_runner,
+    )
+
+    prompt_spec = controller._build_task_prompt(_plan(), _plan().phases[0], task)
+
+    assert prompt_spec["prompt"] == "capture response body with an explicit http URL"
+    assert calls == ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_critic"]
+
+
+def test_task_prompt_repairable_rejection_queues_one_replacement_task():
+    task = Task(task_uid="active", title="Active", objective="capture response evidence", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        if role == "task_prompt_builder":
+            return '{"prompt":"unsafe","tools":[],"shell_commands":[]}'
+        if role == "task_prompt_critic":
+            return '{"approved":false,"repairable":true,"feedback":["Add an explicit URL scheme"]}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda *args: pytest.fail("task executor must not run"),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    replacement = next(candidate for candidate in state.tasks if candidate.replacement_of == "active")
+    assert state.tasks[0].status == "partial_failure"
+    assert replacement.status == "pending"
+    assert replacement.acceptance == task.acceptance
+    assert replacement.phase == task.phase
+    assert replacement.objective == task.objective
+    assert calls == ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_critic"]
 
 
 def test_invalid_task_prompt_critic_json_retries_then_marks_partial_failure():

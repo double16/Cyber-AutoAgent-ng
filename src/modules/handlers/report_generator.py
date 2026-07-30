@@ -428,6 +428,39 @@ def _normalize_report_category(
     return "validation_failure"
 
 
+def _reportable_finding_source_task_uids(
+    raw_memories: List[Dict[str, Any]],
+    finding_records_by_uid: Dict[str, Dict[str, Any]],
+    *,
+    operation_id: str,
+    cross_operation: bool,
+) -> set[str]:
+    """Return source tasks for findings that the report will present as verified findings."""
+
+    source_task_uids: set[str] = set()
+    for memory_item in raw_memories:
+        metadata = memory_item.get("metadata", {}) if isinstance(memory_item, dict) else {}
+        if not isinstance(metadata, dict) or metadata.get("category") != "finding":
+            continue
+        if not cross_operation:
+            item_operation_id = str(metadata.get("operation_id", ""))
+            if item_operation_id and item_operation_id != str(operation_id):
+                continue
+        parsed = _parse_structured_evidence(str(memory_item.get("memory", "")))
+        if _normalize_report_category("finding", metadata, str(memory_item.get("memory", "")), parsed) != "finding":
+            continue
+        record = finding_records_by_uid.get(str(metadata.get("finding_uid") or ""))
+        candidate = record.get("candidate_data", {}) if isinstance(record, dict) else {}
+        if not isinstance(candidate, dict):
+            continue
+        source_task_uids.update(
+            str(task_uid).strip()
+            for task_uid in candidate.get("source_task_uids", [])
+            if isinstance(task_uid, str) and task_uid.strip()
+        )
+    return source_task_uids
+
+
 def _emit_report_progress(
     callback_handler: Any,
     operation_id: str,
@@ -2468,6 +2501,14 @@ def build_report_sections(
             in {"objective_result", "objective_validation_failure"}
             and (item.get("metadata", {}) or {}).get("candidate_uid")
         }
+        reportable_finding_source_task_uids = _reportable_finding_source_task_uids(
+            raw_memories,
+            finding_records_by_uid,
+            operation_id=operation_id,
+            cross_operation=cross_operation,
+        )
+        suppressed_acceptance_observation_task_uids: set[str] = set()
+        suppressed_acceptance_observation_count = 0
 
         for memory_item in raw_memories:
             memory_content = memory_item.get("memory", "")
@@ -2495,6 +2536,16 @@ def build_report_sections(
                         f"Skipping evidence from different operation: {item_op_id} (current: {operation_id})")
                     evidence_skipped += 1
                     continue
+
+            task_uid = str(metadata.get("task_uid") or "").strip()
+            if (
+                metadata.get("category") == "observation"
+                and metadata.get("source") == "task_acceptance"
+                and task_uid in reportable_finding_source_task_uids
+            ):
+                suppressed_acceptance_observation_task_uids.add(task_uid)
+                suppressed_acceptance_observation_count += 1
+                continue
 
             # Build base evidence structure
             base_evidence = {
@@ -2592,6 +2643,12 @@ def build_report_sections(
             len(evidence),
             evidence_skipped
         )
+        if suppressed_acceptance_observation_task_uids:
+            logger.info(
+                "Suppressed %d task-acceptance observation(s) represented by reportable findings; task_uids=%s",
+                suppressed_acceptance_observation_count,
+                ",".join(sorted(suppressed_acceptance_observation_task_uids)),
+            )
 
         # If no evidence, let LLM handle empty evidence
         if not evidence:

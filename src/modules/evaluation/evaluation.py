@@ -67,7 +67,6 @@ DEFAULT_SECURITY_TOPICS = [
 EXECUTION_AGENT_ROLES = {
     "task_executor",
     "swarm_agent",
-    "validation_specialist",
 }
 NON_EXECUTION_AGENT_ROLES = {
     "operation_evaluation",

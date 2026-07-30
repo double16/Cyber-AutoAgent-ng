@@ -159,6 +159,8 @@ TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
         "tee",
         "timeout",
         "time",
+        "id",
+        "whoami",
     }
 )
 
@@ -170,12 +172,19 @@ class WorkflowInvariantError(RuntimeError):
 class TaskPromptBuildError(WorkflowInvariantError):
     """Raised when the workflow cannot build a usable task execution prompt."""
 
+    def __init__(self, message: str, *, repairable: bool = False, feedback: Optional[List[str]] = None):
+        super().__init__(message)
+        self.repairable = repairable
+        self.feedback = list(feedback or [])
+
 
 @dataclass
 class WorkflowDecision:
     status: str
     reason: str = ""
     instructions: str = ""
+    finding_recommendation_required: bool = False
+    finding_recommendation_reason: str = ""
 
 
 @dataclass
@@ -189,6 +198,9 @@ class TaskExecutorCycleResult:
     recovery_guidance: str = ""
     max_tokens_exhausted: bool = False
     max_tokens_reason: str = ""
+
+
+FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
 
 
 @dataclass(frozen=True)
@@ -514,6 +526,7 @@ class WorkflowStateStore:
             created_at=task.created_at,
             kind=task.kind,
             reference_id=task.reference_id,
+            replacement_of=task.replacement_of,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -533,6 +546,7 @@ class WorkflowStateStore:
             created_at=task.created_at,
             kind=task.kind,
             reference_id=task.reference_id,
+            replacement_of=task.replacement_of,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -552,6 +566,7 @@ class WorkflowStateStore:
             created_at=task.created_at,
             kind=task.kind,
             reference_id=task.reference_id,
+            replacement_of=task.replacement_of,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -571,6 +586,7 @@ class WorkflowStateStore:
             created_at=task.created_at,
             kind=task.kind,
             reference_id=task.reference_id,
+            replacement_of=task.replacement_of,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -1460,16 +1476,18 @@ class MultiAgentWorkflowController:
             )
             updated_task = self.state.mark_task(task, "partial_failure", reason)
             self._emit_task_done(updated_task)
+            if error.repairable:
+                replacement = self._create_prompt_replacement_task(task, error)
+                if replacement is not None:
+                    self._log_workflow(
+                        "task prompt replacement queued original=%s replacement=%s",
+                        self._task_label(task),
+                        self._task_label(replacement),
+                    )
             return
+
         selected_tools = prompt_spec.get("tools", [])
         selected_tools = list(selected_tools) if isinstance(selected_tools, list) else []
-        optional_tool_names = {get_tool_name(tool) for tool in self.runtime.optional_tools_list}
-        if (
-            task.kind == "objective_validation"
-            and "validation_specialist" in optional_tool_names
-            and "validation_specialist" not in selected_tools
-        ):
-            selected_tools.append("validation_specialist")
         tools = build_role_tools(
             self.runtime,
             selected_optional_tool_names=selected_tools,
@@ -1520,10 +1538,6 @@ class MultiAgentWorkflowController:
         )
         validation_tool = self._validation_tool_name(task)
         required_tools = {validation_tool} if validation_tool else {"record_task_acceptance"}
-        if task.kind == "objective_validation" and any(
-            get_tool_name(tool) == "validation_specialist" for tool in tools
-        ):
-            required_tools.add("validation_specialist")
         task_policy = AgentRunPolicy(
             min_tool_calls=1,
             required_tool_names=required_tools,
@@ -1567,10 +1581,7 @@ class MultiAgentWorkflowController:
             task_policy.min_tool_calls,
             ",".join(sorted(task_policy.ignored_terminal_tool_names)),
         )
-        existing_task_uids = {
-            existing.task_uid
-            for existing in self.state.list_tasks()
-        }
+        existing_task_uids = {existing.task_uid for existing in self.state.list_tasks()}
         system_prompt = self.runtime.system_prompt
         worker_contexts = []
         tool_outcomes: List[ToolOutcome] = []
@@ -1579,6 +1590,7 @@ class MultiAgentWorkflowController:
         failed_tool_inputs: Counter[tuple[str, str]] = Counter()
         recovery_used = False
         endpoint_evidence_recoveries = 0
+        finding_observation_repairs = 0
         previous_progress_signature: Optional[str] = None
         acceptance_correction_limit = self._task_acceptance_correction_count()
         endpoint_evidence_correction_limit = self._task_endpoint_evidence_correction_count()
@@ -1618,12 +1630,16 @@ class MultiAgentWorkflowController:
                 self.task_execution_cycles
                 + acceptance_correction_limit
                 + endpoint_evidence_correction_limit
+                + 1
             )
             for cycle in range(1, maximum_actor_cycles + 1):
                 allowed_actor_cycles = self.task_execution_cycles + min(
                     acceptance_failures,
                     acceptance_correction_limit,
-                ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit)
+                ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit) + min(
+                    finding_observation_repairs,
+                    1,
+                )
                 if cycle > allowed_actor_cycles:
                     break
                 self._log_workflow(
@@ -1725,6 +1741,8 @@ class MultiAgentWorkflowController:
                     worker_contexts.append(f"Cycle {cycle}: {worker_context}")
                 combined_worker_context = self._worker_context_summary("\n".join(worker_contexts))
                 acceptance_submitted = False
+                continuation_criteria: Optional[List[str]] = None
+                continuation_required_tool = ""
                 self._log_workflow(
                     "task worker context task=%s cycle=%s included=%s chars=%s",
                     self._task_label(task),
@@ -1837,6 +1855,28 @@ class MultiAgentWorkflowController:
                                     tool_outcomes,
                                     acceptance_results,
                                 )
+                                if decision.finding_recommendation_required:
+                                    if finding_observation_repairs < 1:
+                                        finding_observation_repairs += 1
+                                        acceptance_submitted = False
+                                        continuation_criteria = [
+                                            "store the artifact-backed security finding identified by the evaluator"
+                                        ]
+                                        continuation_required_tool = "store_finding"
+                                        self._log_workflow(
+                                            "task evaluator requested finding repair task=%s cycle=%s reason=%s",
+                                            self._task_label(task),
+                                            cycle,
+                                            self._short(decision.finding_recommendation_reason),
+                                        )
+                                    else:
+                                        decision = WorkflowDecision(
+                                            status="partial_failure",
+                                            reason=(
+                                                "Evaluator still requires an artifact-backed finding after the "
+                                                "bounded store_finding repair."
+                                            ),
+                                        )
                     elif repeated_acceptance:
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -1946,11 +1986,21 @@ class MultiAgentWorkflowController:
                 allowed_actor_cycles = self.task_execution_cycles + min(
                     acceptance_failures,
                     acceptance_correction_limit,
-                ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit)
+                ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit) + min(
+                    finding_observation_repairs,
+                    1,
+                )
                 if cycle < allowed_actor_cycles:
                     actor_prompt = self._task_executor_critic_guidance(
-                        decision,
+                        task,
+                        continuation_criteria
+                        or self._missing_acceptance_criteria(
+                            task,
+                            self.state.list_task_acceptance_results(task.task_uid),
+                        ),
+                        self._artifact_refs_from_tool_outcomes(tool_outcomes),
                         next_cycle=cycle + 1,
+                        required_tool=continuation_required_tool,
                     )
                     self._log_workflow(
                         "task critic requested continuation task=%s cycle=%s status=%s reason=%s",
@@ -2001,16 +2051,58 @@ class MultiAgentWorkflowController:
             return objective_validation_outcome(task)
         return None
 
-    def _task_executor_critic_guidance(self, decision: WorkflowDecision, *, next_cycle: int) -> str:
-        return f"""## Task Critic Guidance
-Continue the same assigned task in this existing conversation. This is actor cycle {next_cycle} of
-the bounded execution and acceptance-correction allowance. Do not restart work that is already complete. Address the unmet criteria identified by
-the critic, use tools to make concrete progress, and store durable evidence for the next review.
-If the prior cycle contained a rejected tool call, use its registered input schema and controller guidance for bounded
-changed retries; never repeat identical input or assume a result from a rejected invocation.
+    def _create_prompt_replacement_task(
+        self,
+        task: Task,
+        error: TaskPromptBuildError,
+    ) -> Optional[Task]:
+        """Keep a repairable prompt failure actionable with one pending replacement."""
 
-Critic reason: {decision.reason}
-Critic instructions: {decision.instructions}
+        existing = [candidate for candidate in self.state.list_tasks() if candidate.replacement_of == task.task_uid]
+        if existing:
+            return None
+        feedback = "; ".join(error.feedback) if error.feedback else str(error)
+        replacement = Task(
+            task_uid=str(uuid.uuid4()),
+            title=f"{task.title} (prompt repair)",
+            objective=task.objective,
+            acceptance=task.acceptance,
+            phase=task.phase,
+            status="pending",
+            status_reason=(
+                f"Replacement for {task.task_uid}; apply prompt critic repair: {self._short(feedback, 600)}"
+            ),
+            evidence=list(task.evidence),
+            kind=task.kind,
+            reference_id=task.reference_id,
+            replacement_of=task.task_uid,
+            target_scope=task.target_scope,
+            target_ids=list(task.target_ids),
+        )
+        return self.state.store_task(replacement)
+
+    def _task_executor_critic_guidance(
+        self,
+        task: Task,
+        missing_criteria: List[str],
+        artifact_refs: List[str],
+        *,
+        next_cycle: int,
+        required_tool: str = "",
+    ) -> str:
+        required_tool = required_tool or self._validation_tool_name(task) or "record_task_acceptance"
+        criteria = ", ".join(missing_criteria) or "the assigned acceptance contract"
+        latest_artifact = artifact_refs[-1] if artifact_refs else "No new canonical artifact reference is available."
+        return f"""## Compact Task Continuation
+Continue actor cycle {next_cycle} for the existing task. Do not replay prior reasoning, task history, or completed
+commands.
+
+Missing criterion: {criteria}
+Latest artifact/evidence: {latest_artifact}
+Required tool call: {required_tool}
+
+Use the latest evidence, make only the smallest required correction, and call the required tool once with the
+independent outcome. Do not broaden scope or add criteria.
 """
 
     @staticmethod
@@ -2417,6 +2509,8 @@ Return exactly one decision for each candidate.
     def _build_task_prompt(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> Dict[str, Any]:
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
         cycle_total = max(1, self.task_prompt_refinement_iterations)
+        repairable_failure = False
+        repair_context_feedback: List[str] = []
         try:
             prompt_spec = self._run_json_text_agent(
                 "task_prompt_builder",
@@ -2427,6 +2521,9 @@ Return exactly one decision for each candidate.
                 cycle_total=cycle_total,
             )
             prompt_spec = self._normalize_task_prompt_spec(prompt_spec, task)
+            repair_feedback: List[str] = []
+            repair_critique: Optional[Dict[str, Any]] = None
+            initial_repairable = False
             for iteration in range(1, self.task_prompt_refinement_iterations + 1):
                 critique = self._run_json_text_agent(
                     "task_prompt_critic",
@@ -2445,6 +2542,48 @@ Return exactly one decision for each candidate.
                     )
                     break
                 if iteration == self.task_prompt_refinement_iterations:
+                    initial_repairable = self._task_prompt_feedback_repairable(critique)
+                    repairable_failure = initial_repairable
+                    if initial_repairable:
+                        repair_feedback = critique["feedback"]
+                        repair_context_feedback = list(repair_feedback)
+                        self._log_workflow(
+                            "task prompt bounded repair task=%s iteration=%s feedback_count=%s",
+                            self._task_label(task),
+                            iteration,
+                            len(repair_feedback),
+                        )
+                        prompt_spec = self._run_json_text_agent(
+                            "task_prompt_builder",
+                            self._task_prompt_bounded_repair_prompt(
+                                plan, phase, task, prompt_spec, repair_feedback
+                            ),
+                            [],
+                            system_prompt,
+                            cycle=iteration + 1,
+                            cycle_total=cycle_total + 1,
+                        )
+                        prompt_spec = self._normalize_task_prompt_spec(
+                            self._filter_repairable_shell_selections(prompt_spec), task
+                        )
+                        repair_critique = self._run_json_text_agent(
+                            "task_prompt_critic",
+                            self._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
+                            [],
+                            system_prompt,
+                            data_validator=self._validate_task_prompt_critique,
+                            cycle=iteration + 1,
+                            cycle_total=cycle_total + 1,
+                        )
+                        if repair_critique["approved"]:
+                            self._log_workflow(
+                                "task prompt bounded repair approved task=%s iteration=%s",
+                                self._task_label(task),
+                                iteration,
+                            )
+                            break
+                        repair_feedback = repair_critique["feedback"]
+                        repair_context_feedback = list(repair_feedback)
                     self._log_workflow(
                         "task prompt critic rejected final task=%s iteration=%s feedback_count=%s",
                         self._task_label(task),
@@ -2453,7 +2592,11 @@ Return exactly one decision for each candidate.
                     )
                     raise TaskPromptBuildError(
                         f"Task prompt critic rejected the prompt after {iteration} review(s): "
-                        + "; ".join(critique["feedback"])
+                        + "; ".join(repair_feedback or critique["feedback"]),
+                        repairable=initial_repairable or self._task_prompt_feedback_repairable(
+                            repair_critique or critique
+                        ),
+                        feedback=repair_feedback or critique["feedback"],
                     )
                 self._log_workflow(
                     "task prompt critic requested revision task=%s iteration=%s feedback_count=%s",
@@ -2473,13 +2616,80 @@ Return exactly one decision for each candidate.
         except WorkflowInvariantError as error:
             if isinstance(error, TaskPromptBuildError):
                 raise
-            raise TaskPromptBuildError(str(error)) from error
+            raise TaskPromptBuildError(
+                str(error),
+                repairable=repairable_failure,
+                feedback=repair_context_feedback,
+            ) from error
         self._log_workflow(
             "task prompt spec role=task_prompt_builder task=%s keys=%s",
             self._task_label(task),
             ",".join(sorted(prompt_spec.keys())),
         )
         return prompt_spec
+
+    @staticmethod
+    def _task_prompt_feedback_repairable(critique: Dict[str, Any]) -> bool:
+        """Classify prompt feedback without allowing scope failures to reopen execution."""
+
+        explicit = critique.get("repairable")
+        if isinstance(explicit, bool):
+            return explicit
+        feedback = " ".join(str(item).lower() for item in critique.get("feedback", []))
+        if any(token in feedback for token in ("scope", "outside target", "broaden", "contradict")):
+            return False
+        return any(
+            token in feedback
+            for token in (
+                "url",
+                "protocol",
+                "scheme",
+                "response body",
+                "/dev/null",
+                "unavailable",
+                "shell",
+                "evidence",
+                "artifact",
+                "schema",
+            )
+        )
+
+    def _filter_repairable_shell_selections(self, prompt_spec: Dict[str, Any]) -> Dict[str, Any]:
+        """Drop unavailable shell selections during the one bounded repair pass."""
+
+        repaired = dict(prompt_spec)
+        available = {str(spec["command"]) for spec in self._available_shell_command_specs()}
+        selected = repaired.get("shell_commands", [])
+        if available and isinstance(selected, list):
+            repaired["shell_commands"] = [command for command in selected if command in available]
+        return repaired
+
+    def _task_prompt_bounded_repair_prompt(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        task: Task,
+        prompt_spec: Dict[str, Any],
+        feedback: List[str],
+    ) -> str:
+        return f"""Repair this task execution prompt exactly once using the critic feedback. Return only the normal
+JSON task prompt schema. Preserve the task objective, acceptance contract, target scope, and plan constraints.
+Use an explicit scheme in every URL. For status-only checks, discarding the body is allowed; for reflection,
+exploit, validation, or artifact evidence, capture headers and response body in durable artifacts. Remove unavailable
+shell command selections. Do not broaden scope or add criteria.
+
+## Task
+{json.dumps(task.to_dict(), indent=2, sort_keys=True)}
+
+## Draft
+{json.dumps(prompt_spec, indent=2, sort_keys=True)}
+
+## Critic feedback
+{json.dumps(feedback, indent=2)}
+
+Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [string],
+"shell_commands": [string]}}.
+"""
 
     def _normalize_task_prompt_spec(self, prompt_spec: Dict[str, Any], task: Task) -> Dict[str, Any]:
         """Validate and normalize the task prompt's unchanged JSON contract."""
@@ -2590,6 +2800,27 @@ Return exactly one decision for each candidate.
             self._task_evaluator_system_prompt(),
         )
         decision = self._decision_from_data(data, allowed=("done", "partial_failure", "blocked"))
+        recommendation = self._finding_recommendation_from_evaluator(data)
+        if (
+            recommendation is not None
+            and recommendation["required"]
+            and recommendation["confidence"] >= FINDING_OBSERVATION_REPAIR_CONFIDENCE
+            and self._has_artifact_backed_observation(acceptance_results or [])
+            and not self._task_has_linked_finding(task.task_uid)
+        ):
+            decision = WorkflowDecision(
+                status="partial_failure",
+                reason=(
+                    "Artifact-backed acceptance was recorded as an observation, but the evaluator identified a "
+                    "likely missing security finding."
+                ),
+                instructions=(
+                    "Call store_finding with the artifact-backed security claim. Do not alter the existing "
+                    "acceptance ledger."
+                ),
+                finding_recommendation_required=True,
+                finding_recommendation_reason=recommendation["reason"],
+            )
         self._log_workflow(
             "task evaluator decision task=%s status=%s reason=%s",
             self._task_label(task),
@@ -2597,6 +2828,78 @@ Return exactly one decision for each candidate.
             self._short(decision.reason),
         )
         return decision
+
+    @staticmethod
+    def _finding_recommendation_from_evaluator(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Validate the evaluator's optional, bounded finding-repair recommendation."""
+
+        recommendation = data.get("finding_recommendation")
+        if recommendation is None:
+            return None
+        if not isinstance(recommendation, dict):
+            raise WorkflowInvariantError("task evaluator finding_recommendation must be an object")
+        required = recommendation.get("required")
+        confidence = recommendation.get("confidence")
+        reason = recommendation.get("reason", "")
+        if not isinstance(required, bool):
+            raise WorkflowInvariantError("task evaluator finding_recommendation.required must be a boolean")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise WorkflowInvariantError("task evaluator finding_recommendation.confidence must be a number")
+        if not 0.0 <= float(confidence) <= 1.0:
+            raise WorkflowInvariantError(
+                "task evaluator finding_recommendation.confidence must be between 0.0 and 1.0"
+            )
+        if not isinstance(reason, str):
+            raise WorkflowInvariantError("task evaluator finding_recommendation.reason must be a string")
+        if required and not reason.strip():
+            raise WorkflowInvariantError("task evaluator finding_recommendation.reason is required when required=true")
+        return {"required": required, "confidence": float(confidence), "reason": reason.strip()}
+
+    @staticmethod
+    def _has_artifact_backed_observation(acceptance_results: List[Any]) -> bool:
+        """Return whether an observation disposition cites durable artifact evidence."""
+
+        return any(
+            str(getattr(result, "disposition", "")) == "observation"
+            and any(
+                str(reference).startswith(("artifact:", "artifact_id:"))
+                for reference in getattr(result, "evidence_refs", ())
+            )
+            for result in acceptance_results
+        )
+
+    def _task_has_linked_finding(self, task_uid: str) -> bool:
+        """Return whether the task has already created a durable finding candidate."""
+
+        for record in self.state.list_finding_records():
+            candidate_data = record.get("candidate_data", {}) if isinstance(record, dict) else {}
+            if task_uid in candidate_data.get("source_task_uids", []):
+                return True
+        return False
+
+    def _task_finding_summary(self, task_uid: str) -> str:
+        """Return compact finding records that were created by the evaluated task."""
+
+        rows = []
+        for record in self.state.list_finding_records():
+            if not isinstance(record, dict):
+                continue
+            candidate_data = record.get("candidate_data", {})
+            if task_uid not in candidate_data.get("source_task_uids", []):
+                continue
+            rows.append({
+                "finding_uid": str(record.get("finding_uid", "")),
+                "title": str(candidate_data.get("title", record.get("title", ""))),
+                "resolution": str(record.get("resolution", "candidate")),
+            })
+        if not rows:
+            return "task_findings[0]{finding_uid,title,resolution}:"
+        lines = [f"task_findings[{len(rows)}]{{finding_uid,title,resolution}}:"]
+        lines.extend(
+            "  " + ",".join(sanitize_toon_value(row[key]) for key in ("finding_uid", "title", "resolution"))
+            for row in rows
+        )
+        return "\n".join(lines)
 
     def _endpoint_evidence_guard(
         self,
@@ -4195,6 +4498,8 @@ Original prompt:
             raise ValueError(f"{role_label} feedback must be a list of non-empty strings")
         if not data["approved"] and not feedback:
             raise ValueError(f"{role_label} rejection requires feedback")
+        if "repairable" in data and not isinstance(data["repairable"], bool):
+            raise ValueError(f"{role_label} repairable must be a boolean when supplied")
 
     def _plan_creator_prompt(self) -> str:
         termination_policy_section = self._module_termination_policy_section()
@@ -4276,8 +4581,10 @@ Approve only when the draft:
   when it accounts for a bounded inventory and closes applicable assessment gaps; and
 - never treats a later reconciliation phase as satisfying unfinished tasks or criteria from an earlier phase.
 
-Return JSON exactly: {{"approved": bool, "feedback": [string]}}. When approved is true, feedback should be empty.
-When approved is false, provide concise, actionable feedback for every material issue.
+Return JSON exactly: {{"approved": bool, "repairable": bool, "feedback": [string]}}. When approved is true,
+repairable must be false and feedback should be empty. When approved is false, set repairable=true only when the
+controller can correct the issue without changing scope, objective, acceptance criteria, or authorization. Provide
+concise, actionable feedback for every material issue.
 
 ## Operation objective
 {self.runtime.config.objective}
@@ -4746,6 +5053,7 @@ generic replacement for an existing verification task.
         worker_context_section = self._worker_context_section(worker_context)
         tool_outcome_section = self._tool_outcome_section(tool_outcomes or [])
         acceptance_result_section = self._acceptance_result_section(acceptance_results or [])
+        current_task_findings = self._task_finding_summary(task.task_uid)
         endpoint_binding = ""
         if task.acceptance.mode == "coverage" and str(task.title).lower().startswith("assess endpoint "):
             endpoint_binding = """
@@ -4754,6 +5062,17 @@ Assess only the endpoint named in the task title and frozen coverage. Evidence m
 registered scheme/host/port. A trailing-slash variant is equivalent, but another path, host, scheme, or port is not.
 An inventory manifest cannot satisfy an endpoint assessment. A 301/302 response alone is incomplete: follow the
 in-scope redirect and capture evidence for the destination, or record the redirect as an incomplete/blocked result.
+"""
+        finding_validation_review = ""
+        if task.kind == "finding_validation":
+            finding_validation_review = """
+## Finding Validation Review
+For a confirmed finding, inspect the cited artifacts and require independent reproduction evidence for the claimed
+behavior. For a differential claim, require a meaningful application-content comparison against its negative control;
+status, size, WAF, CDN, redirect, or challenge differences alone are insufficient. For extraction claims, require the
+claimed data in the response artifact rather than only in a request or payload. For authorization-bypass claims, a
+401 or 403 is blocking evidence, not bypass evidence; require protected data or an equivalent authorization-sensitive
+success condition. Return partial_failure when these claim-specific requirements are not met.
 """
         return f"""Review existing evidence and classify the active task. The task below is your sole evaluation target.
 Do not execute or continue the task, perform phase work, pursue the operation objective, modify artifacts, or gather new
@@ -4766,7 +5085,13 @@ a failed or rejected invocation. A failed command may support an explicitly desc
 result, but it cannot be represented as successful execution. Claims derived from a correctable failure require a later
 successful corrected invocation. Bare `curl -s` output with no captured response status is not proof of absence.
 
-Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"instructions": string}}.
+Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"instructions": string,
+"finding_recommendation": {{"required": bool, "confidence": number, "reason": string}}}}.
+- Omit finding_recommendation unless an artifact-backed acceptance recorded as observation likely represents a missing
+  security finding. Set required=true only for direct, reproducible security-impacting behavior; hypotheses,
+  informational facts, expected behavior, and assessed-negative results are not findings. Confidence must be 0.0-1.0.
+- If a current-task finding is already listed below, do not recommend another one merely because acceptance remains an
+  immutable observation.
 - Use done only when every material part of the task objective is supported by durable evidence.
 - Python has already confirmed that every frozen acceptance criterion has a recorded terminal result. Review the
   semantic quality of those results and their evidence; do not add criteria or infer broader scope from phase context,
@@ -4796,6 +5121,9 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 ## Frozen acceptance results
 {acceptance_result_section}
 
+## Current-task findings
+{current_task_findings}
+
 ## Context only: operation objective
 {plan.objective}
 
@@ -4813,6 +5141,7 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 {tool_outcome_section}
 {worker_context_section}
 {endpoint_binding}
+{finding_validation_review}
 """
 
     def _phase_evaluator_prompt(
@@ -4942,6 +5271,18 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
             else "Confirmed security behavior requires finding_candidate or existing_finding disposition and a "
             "finding reference; negative and informational results use no_vulnerability or observation."
         )
+        finding_validation_methodology = (
+            "\n\n## Finding Validation Methodology\n"
+            "For a confirmed finding, independently reproduce the claimed behavior and preserve the response or "
+            "other direct evidence as an artifact. When the claim depends on a before/after change or causality, use "
+            "differential evidence with a negative-control artifact; a status, size, WAF, CDN, redirect, or challenge "
+            "difference alone is not proof of backend behavior. For data-extraction claims, the extracted data must "
+            "appear in the response artifact, not only in the request or payload. For authorization-bypass claims, "
+            "a 401 or 403 is evidence of blocking, not bypass; require protected data or an equivalent "
+            "authorization-sensitive success condition."
+            if task is not None and task.kind == "finding_validation"
+            else ""
+        )
         return f"""## Task Executor Contract (Controller-owned)
 Execute only the assigned task objective. The objective is one single assigned task unit named by the acceptance
 contract; do not broaden it. Treat plan constraints and module access, safety, execution, evidence, and
@@ -4969,7 +5310,7 @@ ledger does not replace storing substantive artifact evidence. Successful accept
 evidence references as one operation observation for later tasks. The controller binds the tool to the assigned task,
 criterion, and coverage IDs; never guess or submit those IDs. End with a concise summary of completed work,
 partial progress, or a concrete blocker. Python owns task, phase, and operation state transitions; never claim or
-perform them."""
+perform them.{finding_validation_methodology}"""
 
     @staticmethod
     def _tool_selection_policy() -> str:

@@ -30,9 +30,9 @@ confirmation. A vulnerability or intermediate capability is progress, not succes
   claim is reproducible. Submit exact flag candidates with `store_objective_candidate`; objective validation decides
   whether the operation objective is satisfied. Never reject or downgrade a confirmed vulnerability because its flag
   candidate is invalid.
-- Objective-validation tasks must use `validation_specialist` when available, then call
-  `record_objective_validation`. Confidence below 80%, format mismatch, length mismatch, or placeholder evidence leaves
-  the flag objective unsatisfied and requires a different flag candidate or an evidence-backed terminal constraint.
+- Objective-validation tasks must independently inspect the cited artifact, then call `record_objective_validation`.
+  Confidence below 80%, format mismatch, length mismatch, or placeholder evidence leaves the flag objective
+  unsatisfied and requires a different flag candidate or an evidence-backed terminal constraint.
 - Store failed attempts, surface mapping, constraints, and useful unconfirmed evidence with `store_observation`.
 - When the assigned task captures a required flag, store its evidence and report that result to the controller; do not
   claim or perform task, phase, or operation termination.
