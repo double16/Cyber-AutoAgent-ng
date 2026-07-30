@@ -13,6 +13,13 @@ long_term: Develop technique patterns for similar challenges, create automated d
 framework: CTF Assessment Methodology, Technical Proof-of-Concept
 </domain_lens>
 
+<validation_reporting_policy>
+Vulnerability validation and objective validation are independent. Count only verified vulnerability records as
+security findings. Report confirmed, rejected, and unresolved flag candidates in the objective-validation section; an
+invalid flag must not downgrade a verified vulnerability, and a verified vulnerability must not be described as
+successful flag capture.
+</validation_reporting_policy>
+
 <audience_adaptation>
 CTF reports serve specialized evaluators:
 - **Technical Reviewers**: Specific exploitation techniques, PoC reproducibility, artifact evidence

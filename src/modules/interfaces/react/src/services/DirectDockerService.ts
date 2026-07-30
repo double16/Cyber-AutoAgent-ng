@@ -126,6 +126,7 @@ export class DirectDockerService extends EventEmitter {
   private containerStream?: any;
   private isExecutionActive = false;
   private streamEventBuffer = '';
+  private discardingTruncatedEvent = false;
   private abortController?: AbortController;
   private activeExec?: Dockerode.Exec;
   private activeExecRunId?: string;
@@ -762,6 +763,7 @@ export class DirectDockerService extends EventEmitter {
         this.clearPendingTimers();
         // Clear stream buffer to prevent stale prompt detection
         this.streamEventBuffer = '';
+        this.discardingTruncatedEvent = false;
         this.releaseContainerStream(false);
         this.activeContainer = undefined;
         this.activeContainerOwner = false;
@@ -890,6 +892,7 @@ export class DirectDockerService extends EventEmitter {
           // Container completed successfully - ensure cleanup
           this.isExecutionActive = false;
           this.streamEventBuffer = '';
+          this.discardingTruncatedEvent = false;
         }
       });
     } catch (error) {
@@ -926,6 +929,8 @@ export class DirectDockerService extends EventEmitter {
     return {
       get streamEventBuffer() { return service.streamEventBuffer; },
       set streamEventBuffer(value: string) { service.streamEventBuffer = value; },
+      get discardingTruncatedEvent() { return service.discardingTruncatedEvent; },
+      set discardingTruncatedEvent(value: boolean | undefined) { service.discardingTruncatedEvent = value ?? false; },
       get inToolExecution() { return service.inToolExecution; },
       set inToolExecution(value: boolean) { service.inToolExecution = value; },
       get toolOutputBuffer() { return service.toolOutputBuffer; },
@@ -1284,6 +1289,7 @@ export class DirectDockerService extends EventEmitter {
     this.autoExecuteSent = false;
     this.seenOperationComplete = false;
     this.streamEventBuffer = '';
+    this.discardingTruncatedEvent = false;
     this.activeExecRunId = undefined;
   }
 
@@ -1417,6 +1423,7 @@ export class DirectDockerService extends EventEmitter {
     this.seenOperationComplete = false;
     // Clear any residual buffer so prompt detection is fresh
     this.streamEventBuffer = '';
+    this.discardingTruncatedEvent = false;
 
     // Don't send initial input - let the auto-response handler deal with prompts
 
@@ -1446,6 +1453,7 @@ export class DirectDockerService extends EventEmitter {
       this.activeExec = undefined;
       this.activeExecRunId = undefined;
       this.streamEventBuffer = '';
+      this.discardingTruncatedEvent = false;
       this.releaseContainerStream(false);
       this.activeContainer = undefined;
       this.activeContainerOwner = false;

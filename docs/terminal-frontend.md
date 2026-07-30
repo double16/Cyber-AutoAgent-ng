@@ -221,14 +221,24 @@ print(f"__CYBER_EVENT__{json.dumps(event)}__CYBER_EVENT_END__\n", end="", flush=
 
 ### Event Parsing
 
-Interface extracts events using pattern matching:
+The interface treats the stream as a chunked protocol. A structured frame may
+be split across multiple stdout chunks, so the parser retains incomplete frames
+until the closing marker arrives. If an incomplete frame exceeds the parser's
+buffer limit, it is discarded without attempting `JSON.parse` and the UI emits
+an `output truncated` notice before resynchronizing at the next frame.
+
+The local Python service parses structured events from stdout only. stderr is
+reserved for process diagnostics and is kept separate so diagnostic output
+cannot be interleaved into a JSON frame.
+
+For compatibility, the parser still uses the existing markers:
 ```typescript
-const eventPattern = /__CYBER_EVENT__(.*?)__CYBER_EVENT_END__/;
-const match = buffer.match(eventPattern);
-if (match) {
-  const event = JSON.parse(match[1]);
+const start = buffer.indexOf('__CYBER_EVENT__');
+const end = buffer.indexOf('__CYBER_EVENT_END__', start);
+if (start >= 0 && end >= 0) {
+  const event = JSON.parse(buffer.slice(start + '__CYBER_EVENT__'.length, end));
   processEvent(event);
-  buffer = buffer.slice(match.index + match[0].length);
+  buffer = buffer.slice(end + '__CYBER_EVENT_END__'.length);
 }
 ```
 

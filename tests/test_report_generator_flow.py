@@ -6,11 +6,13 @@ import pytest
 from modules.handlers.report_generator import (
     _append_artifact_evidence,
     _append_inline_review_feedback,
+    _apply_next_steps_budget_scope,
     _cleanup_report_agent,
     _configured_nonnegative_int,
     _extract_text_from_result,
     _format_artifact_excerpt,
     _format_next_steps_appendix,
+    _format_taxonomy_mappings,
     _format_taxonomy_coverage_tables,
     _format_target_coverage,
     _ground_report_item,
@@ -199,7 +201,45 @@ def test_taxonomy_coverage_tables_count_verified_findings_once_and_link_anchors(
 def test_taxonomy_coverage_tables_have_verified_empty_state():
     content = _format_taxonomy_coverage_tables([])
 
-    assert content.count("No verified mappings were recorded.") == 2
+    assert content.count("Taxonomy annotation was not attempted for verified findings") == 2
+
+
+def test_taxonomy_mapping_provenance_shows_active_source_and_configured_urls():
+    content = _format_taxonomy_mappings(
+        {
+            "cwe": [],
+            "mitre_attack": [],
+            "provenance": {
+                "source": "snapshot",
+                "version": "official-refresh",
+                "configured_refresh_urls": ["https://catalog.example/taxonomy.json"],
+            },
+        }
+    )
+
+    assert "source: `snapshot`; version: `official-refresh`" in content
+    assert "Configured refresh URL(s): `https://catalog.example/taxonomy.json`" in content
+
+
+def test_taxonomy_reporting_distinguishes_failed_and_completed_unmapped_annotations():
+    failed = _format_taxonomy_mappings(
+        {"cwe": [], "mitre_attack": []},
+        {"status": "failed", "error": "invalid taxonomy schema"},
+    )
+    completed = _format_taxonomy_coverage_tables(
+        [
+            {
+                "title": "Verified finding",
+                "metadata": {
+                    "taxonomy": {"cwe": [], "mitre_attack": []},
+                    "taxonomy_annotation": {"status": "completed"},
+                },
+            }
+        ]
+    )
+
+    assert failed.count("Taxonomy annotation failed: invalid taxonomy schema") == 2
+    assert completed.count("Taxonomy annotation completed, but no supported mappings were recorded.") == 2
 
 
 def test_extract_text_from_result_markdown_table():
@@ -526,6 +566,43 @@ def test_next_steps_fallback_derives_guidance_from_incomplete_workflow():
     assert "Automated next-step generation returned invalid structured data" in markdown
 
 
+def test_incomplete_next_steps_use_continuation_duration_budget_by_default():
+    configured = {"duration": 60, "cost": 4.0}
+    data = _next_steps_data(configured)
+    data["budget_recommendations"][0]["recommended"] = 120
+
+    normalized = _apply_next_steps_budget_scope(
+        data,
+        configured,
+        {
+            "completion_status": {"assessment_complete": False},
+            "phase_coverage": [{"phase_id": 1, "status": "partial_failure"}],
+        },
+    )
+
+    duration = normalized["budget_recommendations"][0]
+    assert duration["recommended"] == 60
+    assert "Continue the existing operation" in duration["rationale"]
+    assert "new-operation total" in duration["rationale"]
+
+
+def test_incomplete_next_steps_keep_new_operation_budget_when_rerun_is_explicit():
+    configured = {"duration": 60}
+    data = _next_steps_data(configured)
+    data["recommended_next_steps"] = ["Rerun as a new operation with a clean task plan"]
+    data["budget_recommendations"][0]["recommended"] = 120
+
+    normalized = _apply_next_steps_budget_scope(
+        data,
+        configured,
+        {"completion_status": {"assessment_complete": False}, "phase_coverage": []},
+    )
+
+    recommendation = normalized["budget_recommendations"][0]
+    assert recommendation["recommended"] == 120
+    assert "Start a new operation" in recommendation["rationale"]
+
+
 def test_next_steps_fallback_allows_empty_non_budget_lists_for_completed_workflow():
     fallback = _next_steps_fallback(
         {"duration": 60},
@@ -657,6 +734,7 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
             "metadata": {
                 "category": "finding",
                 "operation_id": op_id,
+                "finding_uid": "finding-1",
                 "severity": "CRITICAL",
                 "validation_status": "verified",
                 "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]},
@@ -704,6 +782,48 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
                 "severity": "HIGH",
             },
         },
+        {
+            "id": "6",
+            "memory": "flag{wrong-format}",
+            "metadata": {
+                "category": "objective_validation_failure",
+                "operation_id": op_id,
+                "candidate_uid": "candidate-1",
+                "candidate_value": "flag{wrong-format}",
+                "objective_type": "flag",
+                "validation_type": "objective",
+                "validation_status": "failed",
+                "validation_reason": "Candidate did not match the required flag format",
+                "confidence": 95,
+            },
+        },
+        {
+            "id": "7",
+            "memory": "FLAG{accepted}",
+            "metadata": {
+                "category": "objective_result",
+                "operation_id": op_id,
+                "candidate_uid": "candidate-2",
+                "candidate_value": "FLAG{accepted}",
+                "objective_type": "flag",
+                "validation_type": "objective",
+                "validation_status": "verified",
+                "confidence": 90,
+            },
+        },
+    ]
+    mock_client.list_finding_records.return_value = [
+        {
+            "finding_uid": "finding-1",
+            "candidate_data": {
+                "taxonomy": {
+                    "cwe": [{"id": "CWE-78"}],
+                    "mitre_attack": [{"id": "T1059.004"}],
+                },
+                "taxonomy_annotation": {"status": "completed"},
+                "final_attack_enrichment": {"status": "completed"},
+            },
+        }
     ]
 
     # Create the proof file
@@ -718,6 +838,8 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     # Check item 1: Should remain a finding
     item1 = next(e for e in evidence if e["id"] == "1")
     assert item1["category"] == "finding", "Item 1 should remain a finding"
+    assert item1["metadata"]["taxonomy"]["mitre_attack"] == [{"id": "T1059.004"}]
+    assert item1["metadata"]["final_attack_enrichment"]["status"] == "completed"
 
     # Unverified claims remain visible as validation failures.
     item3 = next(e for e in evidence if e["id"] == "2")
@@ -734,6 +856,15 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     endpoint_observation = next(e for e in evidence if e["id"] == "5")
     assert endpoint_observation["category"] == "observation"
     assert endpoint_observation["severity"] == "INFO"
+
+    rejected_objective = next(e for e in evidence if e["id"] == "6")
+    confirmed_objective = next(e for e in evidence if e["id"] == "7")
+    assert rejected_objective["category"] == "objective_validation_failure"
+    assert confirmed_objective["category"] == "objective_result"
+    assert sections["verified_findings_total"] == 1
+    assert sections["finding_validation_failure_count"] == 3
+    assert sections["objective_validation_failure_count"] == 1
+    assert sections["objective_validation_status"] == "verified"
 
 @patch("modules.handlers.report_generator.ReportGenerator")
 @patch("modules.handlers.report_generator.get_output_path")
@@ -1074,6 +1205,9 @@ def test_generate_security_report_validation_failures(
         "risk_assessment": "",
         "severity_counts": {},
         "validation_failure_count": 1,
+        "finding_validation_failure_count": 1,
+        "objective_validation_status": "failed",
+        "objective_validation_failure_count": 1,
         "summary_table": "",
         "raw_evidence": [
             {
@@ -1086,7 +1220,22 @@ def test_generate_security_report_validation_failures(
                     "claimed_severity": "HIGH",
                     "validation_reason": "The response artifact contained a tool error",
                 },
-            }
+            },
+            {
+                "id": "o1",
+                "content": "flag{wrong}",
+                "category": "objective_validation_failure",
+                "validation_type": "objective",
+                "validation_status": "failed",
+                "metadata": {
+                    "candidate_value": "flag{wrong}",
+                    "objective_type": "flag",
+                    "confidence": 95,
+                    "validator": "validation_specialist",
+                    "validation_reason": "Format mismatch",
+                    "evidence_artifacts": ["artifact:flag.txt"],
+                },
+            },
         ],
         "operation_plan": {},
         "operation_tasks": [],
@@ -1110,6 +1259,10 @@ def test_generate_security_report_validation_failures(
     assert "Possible authorization bypass" in content
     assert "The response artifact contained a tool error" in content
     assert "not confirmed vulnerabilities" in content
+    objective_content = (output_dir / "report_objective_validation.md").read_text()
+    assert "## OBJECTIVE VALIDATION" in objective_content
+    assert "Rejected or unresolved" in objective_content
+    assert "flag{wrong}" in objective_content
 
 if __name__ == "__main__":
     pytest.main([__file__])

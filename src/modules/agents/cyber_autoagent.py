@@ -111,7 +111,9 @@ from modules.tools.memory import (
     mem0_list,
     mem0_retrieve,
     record_finding_validation,
+    record_objective_validation,
     store_finding,
+    store_objective_candidate,
     store_knowledge,
     store_observation,
 )
@@ -609,6 +611,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         store_knowledge,
         store_finding,
         record_finding_validation,
+        store_objective_candidate,
+        record_objective_validation,
         mem0_retrieve,
         mem0_list,
         read_artifact,

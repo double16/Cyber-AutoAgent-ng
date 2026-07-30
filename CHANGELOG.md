@@ -2,6 +2,8 @@
 
 ### Features
 
+- Add a final ATT&CK enrichment pass that uses linked terminal task evidence, preserves first-pass CWE mappings,
+  persists retryable results, and overlays the merged taxonomy into final and report-only output.
 - Add a task-trace taxonomy annotator that catalog-validates and persists CWE and MITRE ATT&CK mappings after finding
   capture, with bundled fallback taxonomy data, optional cached refreshes, confidence labels, executive-summary
   coverage tables, and auditable catalog references.
@@ -35,6 +37,26 @@
 
 ### Fixes
 
+- Persist operation preflight resolution and route-check facts for taxonomy and later workflow policy checks, clarify
+  configured taxonomy refresh URLs in finding reports, and require a globally routable resolved target before T1190
+  can be recorded.
+- Run verified-finding taxonomy annotation once at terminal workflow completion before final ATT&CK enrichment,
+  use compact flattened TOON catalogs and complete mapping schemas, and feed rejected taxonomy responses back to the
+  annotator for targeted correction without inheriting assessment or module prompts.
+- Harden React terminal event framing against chunk-split and truncated JSON,
+  isolate Python stderr from structured stdout events, and show an `output truncated`
+  notice instead of attempting to parse discarded frames.
+- Make incomplete-operation report budgets recommend continuing the existing operation for missing tasks, unless the
+  report explicitly recommends a rerun as a new operation.
+- Use the shared workflow activity formatter in the React stream display while preserving status colors.
+- Normalize logged taxonomy response envelopes and add opt-in Ollama compatibility tests for taxonomy annotations.
+- Seed high-signal CWE candidates for path traversal, SSRF, XXE, CSRF, IDOR/BOLA, SSTI, unsafe deserialization,
+  file upload, open redirect, and common injection variants using industry terminology and aliases.
+- Seed SQL-injection and XSS taxonomy candidates deterministically and require exact artifact references and confidence
+  thresholds in annotator prompts.
+- Use short task-scoped ordinal acceptance criterion IDs so detailed acceptance descriptions do not confuse models.
+- Rank taxonomy candidates by high-signal technique aliases, retry schema and semantic annotation failures after
+  finding validation, and report annotation failures separately from unsupported mappings.
 - Replace compound module phase names with distinct, industry-aligned capabilities for hypothesis generation,
   vulnerability testing, exploit-chain analysis, finding validation, impact assessment, and coverage closure.
 - Generate canonical next-step guidance for incomplete operations when the Appendix B model output is invalid.

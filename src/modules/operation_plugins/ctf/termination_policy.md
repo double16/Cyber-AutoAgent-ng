@@ -16,7 +16,9 @@ requires a flag.
 3. **Exploit Testing** — Test prioritized hypotheses with expected and actual results, negative controls, and artifacts.
 4. **Exploit Chain Analysis** — Record each prerequisite, transition, required server-side acceptance, failed links,
    and alternative branches. Preserve failed links and alternative branches as evidence-backed observations. Mark this
-   phase `not_applicable` for a direct single-step flag path.
+   phase `not_applicable` for a direct single-step flag path or when no evidenced candidates can compose. This phase
+   analyzes existing candidates and relationships; it does not repeat exploit discovery or introduce unrelated pivots.
+   Create follow-on execution work only for a concrete, evidence-backed chain link that still requires validation.
 5. **Flag Retrieval and Confirmation** — Demonstrate the minimum authorized direct path or end-to-end chain to every
    required flag, capture exact reproducible evidence, and reject placeholders.
 6. **Coverage Closure** — Document unassessed or excluded inventory without replacing unfinished work with summary.
@@ -32,6 +34,12 @@ The operation-level objective is satisfied only when every required flag is capt
 - preconditions and exact reproduction request or command;
 - expected and actual results; and
 - validation that the candidate is not an obvious placeholder and is consistent with available challenge evidence.
+
+Vulnerability and objective validation are independent. A reproducible command injection, file read, authorization
+bypass, or other capability remains a verified finding when the extracted flag candidate is rejected. Conversely, a
+verified vulnerability is not proof that the flag objective is complete. Objective completion requires a separately
+verified objective candidate with confidence of at least 80%; rejected and inconclusive candidates require another
+candidate search unless a concrete terminal constraint is evidenced.
 
 For a phase, use `done` only when its own criteria are evidence-backed. A phase may be done before flag capture when its
 criteria cover an intermediate capability or discovery outcome; the plan must retain later criteria that lead to flag

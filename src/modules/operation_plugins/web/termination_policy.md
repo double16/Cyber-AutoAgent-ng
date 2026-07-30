@@ -15,7 +15,9 @@ inapplicable and document the reason.
    behavior, negative controls, reproducibility, and evidence-backed vulnerability candidates.
 4. **Exploit Chain Analysis** — Determine whether multiple weaknesses combine into a higher-impact attack path. Record
    prerequisites, transitions, failed links, alternative branches, and evidence for each link. Mark this phase
-   `not_applicable` when no meaningful relationship exists.
+   `not_applicable` when no evidenced candidates can compose into a meaningful relationship. Analyze existing candidates
+   rather than repeating vulnerability discovery or introducing unrelated pivots. Create follow-on execution work only
+   for a concrete, evidence-backed chain link that still requires validation.
 5. **Finding Validation** — Confirm or reject each vulnerability candidate or attack path using reproducible evidence,
    expected-versus-actual behavior, negative controls, scope, confidence, and artifact paths.
 6. **Impact Demonstration** — Safely demonstrate the minimum necessary security consequence required by the objective,

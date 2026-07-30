@@ -375,6 +375,10 @@ Memory tools assign their category; agents do not provide it. `store_finding` re
 observed behavior, reproduction steps, and a technique. A confirmed validation requires existing operation-scoped
 artifacts. Differential evidence also requires a negative-control artifact.
 
+Objective candidates, such as CTF flags, are not vulnerability findings. Store them with
+`store_objective_candidate`; their independent validation records use `validation_type="objective"` and do not affect
+finding verification or severity totals. Existing records without `validation_type` retain finding semantics.
+
 **Optional Fields:**
 - **status**: Verification state (hypothesis, unverified, verified)
 - **validation_status**: Submission state (hypothesis, unverified, verified)

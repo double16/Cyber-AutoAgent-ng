@@ -31,7 +31,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Literal, Set, Union
 
-DEFAULT_MAX_DURATION = 60
+DEFAULT_MAX_DURATION = 180
 
 
 def _run(

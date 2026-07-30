@@ -236,12 +236,17 @@ class FakeCallbackHandler:
 
 
 class FakeState:
-    def __init__(self, plan, tasks=None, acceptance_complete=True, finding_records=None):
+    def __init__(self, plan, tasks=None, acceptance_complete=True, finding_records=None, preflight_results=None):
         self.plan = plan
         self.tasks = list(tasks or [])
         self.acceptance_complete = acceptance_complete
         self.acceptance_results = {}
         self.finding_records = list(finding_records or [])
+        self.preflight_results = list(preflight_results or [{
+            "target_id": "target-1",
+            "resolved_addresses": ["198.51.100.10"],
+            "has_global_address": True,
+        }])
         self.client = SimpleNamespace(list_memories=lambda **kwargs: [])
 
     def get_plan(self):
@@ -284,6 +289,9 @@ class FakeState:
     def list_finding_records(self):
         return list(self.finding_records)
 
+    def list_preflight_results(self):
+        return list(self.preflight_results)
+
     def update_finding_taxonomy_annotation(self, finding_uid, annotation):
         for record in self.finding_records:
             if record.get("finding_uid") == finding_uid:
@@ -291,6 +299,26 @@ class FakeState:
                 candidate["taxonomy"] = annotation.get("taxonomy", {"cwe": [], "mitre_attack": []})
                 candidate["taxonomy_annotation"] = annotation
                 return True
+        raise ValueError("unknown finding")
+
+    def update_finding_attack_enrichment(self, finding_uid, enrichment):
+        for record in self.finding_records:
+            if record.get("finding_uid") != finding_uid:
+                continue
+            candidate = record.setdefault("candidate_data", {})
+            existing = candidate.get("final_attack_enrichment")
+            if isinstance(existing, dict) and existing.get("status") == "completed":
+                return False
+            candidate["final_attack_enrichment"] = enrichment
+            if enrichment.get("status") == "completed":
+                taxonomy = dict(candidate.get("taxonomy") or {"cwe": [], "mitre_attack": []})
+                mappings = [
+                    *list(taxonomy.get("mitre_attack") or []),
+                    *list(enrichment.get("taxonomy", {}).get("mitre_attack") or []),
+                ]
+                taxonomy["mitre_attack"] = list({item["id"]: item for item in mappings}.values())
+                candidate["taxonomy"] = taxonomy
+            return True
         raise ValueError("unknown finding")
 
     def activate_task(self, task):
@@ -494,6 +522,88 @@ def test_plan_phase_accepts_partial_failure_and_blocked_statuses():
     assert PlanPhase(id=3, title="Phase", status="not_applicable").status == "not_applicable"
 
 
+@pytest.mark.parametrize(
+    ("alias", "canonical"),
+    [
+        ("complete", "done"),
+        ("completed", "done"),
+        ("success", "done"),
+        ("successful", "done"),
+        ("failed", "partial_failure"),
+        ("failure", "partial_failure"),
+        ("error", "partial_failure"),
+    ],
+)
+def test_workflow_decision_status_aliases_normalize_to_canonical_values(alias, canonical):
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+
+    decision = controller._decision_from_data(
+        {"status": alias, "reason": "test"},
+        allowed=("done", "partial_failure", "blocked"),
+    )
+
+    assert decision.status == canonical
+
+
+def test_workflow_decision_status_normalizes_phase_continuation_aliases_only_when_allowed():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+
+    decision = controller._decision_from_data(
+        {"status": "in progress", "reason": "test"},
+        allowed=("continue", "done", "partial_failure", "blocked"),
+    )
+
+    assert decision.status == "continue"
+    with pytest.raises(WorkflowInvariantError, match="Invalid workflow decision status: continue"):
+        controller._decision_from_data(
+            {"status": "ongoing", "reason": "test"},
+            allowed=("done", "partial_failure", "blocked"),
+        )
+
+
+def test_workflow_decision_status_keeps_unknown_values_invalid():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="Invalid workflow decision status: finished_successfully"):
+        controller._decision_from_data(
+            {"status": "finished successfully", "reason": "test"},
+            allowed=("done", "partial_failure", "blocked"),
+        )
+
+
+def test_task_evaluator_completed_alias_does_not_abort_workflow():
+    plan = _plan()
+    task = Task("task-evaluator-alias", "Assess", "Assess the target", 1, "active")
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: '{"status":"completed","reason":"acceptance is supported"}',
+    )
+
+    decision = controller._evaluate_task(
+        plan,
+        plan.phases[0],
+        task,
+        acceptance_results=state.list_task_acceptance_results(task.task_uid),
+    )
+
+    assert decision.status == "done"
+
+
 def test_pending_finding_validation_is_prioritized_and_events_include_scope():
     plan = _plan()
     standard = Task("task-1", "Standard", "Do standard work", 1, "pending", created_at="1")
@@ -596,22 +706,28 @@ def test_json_agent_emits_workflow_activity_lifecycle_events():
     assert "original" not in activities[0]["content"]
 
 
-def test_taxonomy_annotator_runs_once_for_new_source_task_finding(monkeypatch):
+def test_taxonomy_annotator_runs_once_at_terminal_completion(monkeypatch):
     runtime = _runtime()
     seen_trace_attributes = []
     calls = []
 
     class Catalog:
-        def candidates(self, _finding, kind):
+        def candidates(self, _finding, kind, limit=12):
             return [{"id": "CWE-79" if kind == "cwe" else "T1190", "name": "Candidate"}]
 
-    task = Task("task-1", "Assess", "Assess finding", 1, "active")
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Validation", status="done")],
+        assessment_complete=True,
+    )
     state = FakeState(
-        _plan(),
-        [task],
+        plan,
         finding_records=[
             {
                 "finding_uid": "finding-1",
+                "resolution": "verified",
                 "candidate_data": {
                     "title": "Stored XSS",
                     "claim": "Script executes",
@@ -619,6 +735,8 @@ def test_taxonomy_annotator_runs_once_for_new_source_task_finding(monkeypatch):
                     "artifacts": ["artifact:artifacts/proof.txt"],
                     "source_task_uids": ["task-1"],
                 },
+                "verification_task_uid": "verify-finding-1",
+                "validation_data": {"outcome": "confirmed"},
             },
             {
                 "finding_uid": "old-finding",
@@ -627,17 +745,18 @@ def test_taxonomy_annotator_runs_once_for_new_source_task_finding(monkeypatch):
         ],
     )
 
-    def text_runner(role, _prompt, tools, _system_prompt):
-        calls.append((role, tools))
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append((role, prompt, tools, system_prompt))
         seen_trace_attributes.append(dict(runtime.trace_attributes))
         return '{"cwe": [{"id": "CWE-79", "confidence": 0.95, "rationale": "Artifact shows script execution", "evidence": ["artifact:artifacts/proof.txt"]}], "mitre_attack": []}'
 
     monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
-    monkeypatch.setattr(
-        workflow_mod,
-        "validate_taxonomy_mappings",
-        lambda cwe, attack, artifacts: {"cwe": cwe, "mitre_attack": attack, "provenance": {"version": "test"}},
-    )
+    def validate(cwe, attack, artifacts):
+        if not cwe[0].get("confidence"):
+            raise ValueError("cwe confidence must be a number from 0.0 to 1.0")
+        return {"cwe": cwe, "mitre_attack": attack, "provenance": {"version": "test"}}
+
+    monkeypatch.setattr(workflow_mod, "validate_taxonomy_mappings", validate)
     controller = MultiAgentWorkflowController(
         runtime=runtime,
         budget=BudgetConfig(max_duration_minutes=60),
@@ -645,34 +764,48 @@ def test_taxonomy_annotator_runs_once_for_new_source_task_finding(monkeypatch):
         text_runner=text_runner,
     )
 
-    controller._annotate_new_findings_for_task(task, {"old-finding"})
+    controller._annotate_verified_findings(plan)
+    controller._annotate_verified_findings(plan)
 
     assert calls[0][0] == "taxonomy_annotator"
-    assert len(calls[0][1]) == 1
+    assert len(calls) == 1
+    assert len(calls[0][2]) == 1
+    assert calls[0][3] == ""
+    assert "cwe[1]{id,name}:" in calls[0][1]
+    assert "mitre_attack[1]{id,name}:" in calls[0][1]
+    assert '"mitre_attack":[{"id":string,"confidence":number,"rationale":string,"evidence":[string]}]' in calls[0][1]
     assert seen_trace_attributes[0]["workflow.finding.uid"] == "finding-1"
     assert seen_trace_attributes[0]["agent.role"] == "taxonomy_annotator"
     assert state.finding_records[0]["candidate_data"]["taxonomy_annotation"]["status"] == "completed"
     assert runtime.trace_attributes == {"operation.id": "OP_TEST"}
 
 
-def test_taxonomy_annotator_marks_failure_without_blocking_task(monkeypatch):
-    task = Task("task-1", "Assess", "Assess finding", 1, "active")
+def test_taxonomy_annotator_marks_terminal_failure_without_blocking_completion(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Validation", status="done")],
+        assessment_complete=True,
+    )
     state = FakeState(
-        _plan(),
-        [task],
+        plan,
         finding_records=[
             {
                 "finding_uid": "finding-1",
+                "resolution": "verified",
                 "candidate_data": {
                     "artifacts": ["artifact:artifacts/proof.txt"],
                     "source_task_uids": ["task-1"],
                 },
+                "verification_task_uid": "verify-finding-1",
+                "validation_data": {"outcome": "confirmed"},
             }
         ],
     )
 
     class Catalog:
-        def candidates(self, _finding, _kind):
+        def candidates(self, _finding, _kind, limit=12):
             return []
 
     monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
@@ -683,9 +816,348 @@ def test_taxonomy_annotator_marks_failure_without_blocking_task(monkeypatch):
         text_runner=lambda *_args: "not json",
     )
 
-    controller._annotate_new_findings_for_task(task, set())
+    controller._annotate_verified_findings(plan)
 
     assert state.finding_records[0]["candidate_data"]["taxonomy_annotation"]["status"] == "failed"
+
+
+def test_final_attack_enrichment_runs_before_completion_and_preserves_cwe(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Validation", status="done")],
+        assessment_complete=True,
+    )
+    task = Task("task-1", "Exploit validation", "Confirm shell execution", 1, "done")
+    state = FakeState(
+        plan,
+        [task],
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "resolution": "verified",
+                "verification_task_uid": "verify-1",
+                "candidate_data": {
+                    "title": "Command injection",
+                    "claim": "Input reached a Unix shell",
+                    "source_task_uids": ["task-1"],
+                    "artifacts": ["artifact:artifacts/shell-proof.txt"],
+                    "taxonomy": {
+                        "cwe": [{"id": "CWE-78", "confidence": 0.95}],
+                        "mitre_attack": [],
+                    },
+                },
+                "validation_data": {"outcome": "confirmed"},
+            }
+        ],
+    )
+    state.acceptance_results["task-1"] = [
+        AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="existing_finding",
+            summary="The proof artifact records /bin/sh command execution.",
+            evidence_refs=("artifact:artifacts/shell-proof.txt", "finding:finding-1"),
+        )
+    ]
+    roles = []
+
+    class Catalog:
+        def candidates(self, _finding, kind, limit=12):
+            if kind == "cwe":
+                return [{"id": "CWE-78", "name": "OS Command Injection"}]
+            assert kind == "attack"
+            return [{"id": "T1059.004", "name": "Unix Shell"}]
+
+    def text_runner(role, prompt, _tools, system_prompt):
+        roles.append(role)
+        assert system_prompt == ""
+        if role == "taxonomy_annotator":
+            assert "cwe[1]{id,name}:" in prompt
+            return (
+                '{"cwe":[{"id":"CWE-78","confidence":0.95,'
+                '"rationale":"Observed command injection","evidence":["artifact:artifacts/shell-proof.txt"]}],'
+                '"mitre_attack":[]}'
+            )
+        assert role == "attack_enricher"
+        assert "The proof artifact records /bin/sh command execution." in prompt
+        assert "mitre_attack[1]{id,name}:" in prompt
+        return (
+            '{"mitre_attack":[{"id":"T1059.004","confidence":0.96,'
+            '"rationale":"Observed Unix shell execution","evidence":["artifact:artifacts/shell-proof.txt"]}]}'
+        )
+
+    def validate(cwe, attack, _evidence):
+        return {"cwe": cwe or [], "mitre_attack": attack or [], "provenance": {"version": "test"}}
+
+    monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
+    monkeypatch.setattr(workflow_mod, "validate_taxonomy_mappings", validate)
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0})
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    controller._emit_workflow_completion(plan)
+
+    candidate = state.finding_records[0]["candidate_data"]
+    assert roles == ["taxonomy_annotator", "attack_enricher"]
+    assert candidate["taxonomy"]["cwe"][0]["id"] == "CWE-78"
+    assert candidate["taxonomy"]["mitre_attack"][0]["id"] == "T1059.004"
+    assert candidate["final_attack_enrichment"]["status"] == "completed"
+    assert runtime.callback_handler.termination_events == [("complete", "Assessment complete: 1 phase evaluated")]
+
+
+def test_final_attack_enrichment_omits_unconfirmed_findings_and_waits_for_terminal_work(monkeypatch):
+    active_plan = _plan()
+    active_task = Task("task-1", "Active work", "Continue assessment", 1, "active")
+    state = FakeState(
+        active_plan,
+        [active_task],
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "resolution": "verified",
+                "candidate_data": {"artifacts": ["artifact:artifacts/proof.txt"]},
+            },
+            {
+                "finding_uid": "finding-2",
+                "resolution": "validation_failure",
+                "candidate_data": {"artifacts": ["artifact:artifacts/rejected.txt"]},
+            },
+        ],
+    )
+    calls = []
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: calls.append(args) or '{"mitre_attack":[]}',
+    )
+
+    controller._enrich_final_attack_mappings(active_plan)
+
+    assert calls == []
+    assert all("final_attack_enrichment" not in record["candidate_data"] for record in state.finding_records)
+
+
+def test_final_attack_enrichment_completes_without_model_when_no_durable_evidence():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Validation", status="done")],
+        assessment_complete=True,
+    )
+    state = FakeState(
+        plan,
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "resolution": "verified",
+                "candidate_data": {"claim": "Confirmed but no behavioral evidence"},
+            }
+        ],
+    )
+    calls = []
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: calls.append(args) or '{"mitre_attack":[]}',
+    )
+
+    controller._enrich_final_attack_mappings(plan)
+
+    enrichment = state.finding_records[0]["candidate_data"]["final_attack_enrichment"]
+    assert calls == []
+    assert enrichment["status"] == "completed"
+    assert enrichment["taxonomy"]["mitre_attack"] == []
+
+
+def test_attack_enrichment_response_normalizes_wrapper_and_rejects_cwe_output():
+    wrapped = {"taxonomy": {"mitre_attack": None}}
+
+    MultiAgentWorkflowController._validate_attack_enrichment_response(wrapped)
+
+    assert wrapped == {"mitre_attack": []}
+    with pytest.raises(ValueError, match="only mitre_attack"):
+        MultiAgentWorkflowController._validate_attack_enrichment_response(
+            {"cwe": [], "mitre_attack": []}
+        )
+
+
+def test_t1190_is_rejected_for_private_or_missing_preflight_context():
+    with pytest.raises(ValueError, match="T1190 is not eligible"):
+        MultiAgentWorkflowController._validate_attack_eligibility(
+            [{"id": "T1190"}],
+            {"T1190"},
+        )
+
+    MultiAgentWorkflowController._validate_attack_eligibility(
+        [{"id": "T1059.004"}],
+        {"T1190"},
+    )
+
+
+def test_final_attack_enrichment_retries_once_on_resume(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Validation", status="done")],
+        assessment_complete=True,
+    )
+    state = FakeState(
+        plan,
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "resolution": "verified",
+                "candidate_data": {"artifacts": ["artifact:artifacts/proof.txt"]},
+            }
+        ],
+    )
+    calls = []
+
+    class Catalog:
+        def candidates(self, _finding, _kind, limit=12):
+            return []
+
+    def text_runner(*_args):
+        calls.append("call")
+        if len(calls) == 1:
+            raise ValueError("temporary model failure")
+        return '{"mitre_attack":[]}'
+
+    monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
+    monkeypatch.setattr(
+        workflow_mod,
+        "validate_taxonomy_mappings",
+        lambda _cwe, attack, _evidence: {"cwe": [], "mitre_attack": attack, "provenance": {}},
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    controller._enrich_final_attack_mappings(plan)
+    assert state.finding_records[0]["candidate_data"]["final_attack_enrichment"]["status"] == "failed"
+    controller._enrich_final_attack_mappings(plan)
+    controller._enrich_final_attack_mappings(plan)
+
+    assert calls == ["call", "call"]
+    enrichment = state.finding_records[0]["candidate_data"]["final_attack_enrichment"]
+    assert enrichment["status"] == "completed"
+
+
+def test_taxonomy_annotator_retries_invalid_response_with_previous_result(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Validation", status="done")],
+        assessment_complete=True,
+    )
+    state = FakeState(
+        plan,
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "candidate_data": {
+                    "artifacts": ["artifact:artifacts/proof.txt"],
+                    "taxonomy_annotation": {"status": "failed", "schema_version": 1},
+                },
+                "verification_task_uid": "verify-finding-1",
+                "validation_data": {"outcome": "confirmed"},
+                "resolution": "verified",
+            }
+        ],
+    )
+
+    class Catalog:
+        def candidates(self, _finding, kind, limit=12):
+            return [{"id": "CWE-79" if kind == "cwe" else "T1190", "name": "Candidate"}]
+
+    responses = iter([
+        '{"findings":[{"classification":{"cwe":"CWE-79","mitre_attack":null}}]}',
+        '{"cwe":[{"id":"CWE-79","confidence":0.95,"rationale":"Proof","evidence":["artifact:artifacts/proof.txt"]}],"mitre_attack":[]}',
+    ])
+    monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
+    def validate(cwe, attack, artifacts):
+        if not cwe[0].get("confidence"):
+            raise ValueError("cwe confidence must be a number from 0.0 to 1.0")
+        return {"cwe": cwe, "mitre_attack": attack, "provenance": {"version": "test"}}
+
+    monkeypatch.setattr(workflow_mod, "validate_taxonomy_mappings", validate)
+    prompts = []
+
+    def text_runner(_role, prompt, _tools, _system_prompt):
+        prompts.append(prompt)
+        return next(responses)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    controller._annotate_verified_findings(plan)
+
+    annotation = state.finding_records[0]["candidate_data"]["taxonomy_annotation"]
+    assert annotation["status"] == "completed"
+    assert annotation["schema_version"] == 2
+    assert responses
+    assert "Previous response to correct:" in prompts[1]
+    assert '"cwe":"CWE-79"' in prompts[1]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"finding_id": "finding-1", "classification": {"cwe": ["CWE-78"], "mitre_attack": ["T1059.004"]}},
+        {
+            "finding_id": "finding-1",
+            "taxonomy_annotation": {
+                "cwe": [{"id": "CWE-78", "name": "OS Command Injection"}],
+                "mitre_attack": [{"id": "T1190", "name": "Exploit Public-Facing Application"}],
+            },
+        },
+    ],
+)
+def test_taxonomy_annotation_normalizes_logged_top_level_wrappers(response):
+    MultiAgentWorkflowController._validate_taxonomy_annotation_response(response)
+
+    assert set(response) == {"cwe", "mitre_attack"}
+    assert isinstance(response["cwe"], list)
+    assert isinstance(response["mitre_attack"], list)
+
+
+def test_taxonomy_annotation_logged_wrapper_still_requires_mapping_evidence(monkeypatch):
+    response = {
+        "finding_id": "finding-1",
+        "classification": {"cwe": ["CWE-78"], "mitre_attack": []},
+    }
+
+    monkeypatch.setattr(
+        workflow_mod,
+        "validate_taxonomy_mappings",
+        Mock(side_effect=ValueError("cwe confidence must be a number from 0.0 to 1.0")),
+    )
+
+    with pytest.raises(ValueError, match="cwe confidence"):
+        MultiAgentWorkflowController._validate_taxonomy_annotation_proposal(
+            response,
+            ["artifact:artifacts/command-injection.txt"],
+        )
+
+    assert response == {"cwe": [{"id": "CWE-78"}], "mitre_attack": []}
 
 
 def test_json_agent_stops_at_configured_limit_after_max_tokens():
@@ -1236,6 +1708,54 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
         "reference_id": "finding-1",
         "finding_resolution": "verified",
     }
+
+
+def test_objective_validation_task_requires_separate_record_tool_and_finalizes(monkeypatch):
+    runtime = _runtime()
+    runtime.optional_tools_list.append(_tool("validation_specialist"))
+    task = Task(
+        task_uid="objective-verify-1",
+        title="Validate flag",
+        objective="validate objective candidate",
+        phase=1,
+        status="active",
+        kind="objective_validation",
+        reference_id="candidate-1",
+    )
+    state = FakeState(_plan(), tasks=[task])
+    policies = []
+    finalize = Mock(return_value="objective_rejected")
+    monkeypatch.setattr(workflow_mod, "finalize_objective_validation", finalize)
+    monkeypatch.setattr(workflow_mod, "objective_validation_submitted", Mock(return_value=True))
+    monkeypatch.setattr(workflow_mod, "objective_validation_outcome", Mock(return_value="rejected"))
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"validate flag","tools":[]}'
+        raise AssertionError(role)
+
+    @contextmanager
+    def executor_session(role, tools, system_prompt):
+        def run(prompt, policy):
+            policies.append(policy)
+            return "objective validation submitted"
+
+        yield run
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        executor_session_factory=executor_session,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert policies[0].required_tool_names == {"record_objective_validation", "validation_specialist"}
+    finalize.assert_called_once_with(task, "done", "Independent validation did not confirm the candidate.")
+    assert state.tasks[0].status == "done"
+    assert runtime.callback_handler.events[-1]["finding_resolution"] == "objective_rejected"
 
 
 def test_task_execution_approval_short_circuits_first_cycle():
@@ -2397,6 +2917,83 @@ def test_phase_hard_cap_falls_back_to_partial_failure_for_nonterminal_evaluation
     assert state.tasks[0].status == "pending"
 
 
+@pytest.mark.parametrize("response", ["not json", '{"status":"invented","reason":"bad status"}'])
+def test_phase_evaluator_malformed_output_emits_deterministic_partial_failure_fallback(response):
+    plan = _plan()
+    state = FakeState(plan)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: response,
+    )
+
+    decision = controller._evaluate_phase_with_policy(plan, plan.phases[0])
+
+    assert decision.status == "partial_failure"
+    assert "could not be parsed" in decision.reason
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["phase_id"] == 1
+    assert event["status"] == "partial_failure"
+    assert event["error_type"] == "WorkflowInvariantError"
+    assert len(event["error_fingerprint"]) == 64
+
+
+def test_task_creator_prior_phase_context_exposes_terminal_results_without_full_contracts():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="done"),
+            PlanPhase(id=2, title="Exploit Chain Analysis", status="active"),
+        ],
+    )
+    prior = Task(
+        task_uid="prior",
+        title="Map login route",
+        objective="Enumerate the route",
+        phase=1,
+        status="partial_failure",
+        status_reason="POST /login requires a CSRF token",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[prior]),
+    )
+
+    context = controller._task_creator_compact_existing_task_context(plan.phases[1])
+
+    assert "prior_phase_terminal_tasks[1]" in context
+    assert "Map login route" in context
+    assert "POST /login requires a CSRF token" in context
+    assert "acceptance" not in context
+
+
+def test_acceptance_recovery_details_classify_evidence_and_artifact_repair():
+    digest = "a" * 64
+
+    details = MultiAgentWorkflowController._acceptance_recovery_details(
+        f"inventory manifest requires 2 artifact evidence artifact_sha256={digest}"
+    )
+
+    assert details == {
+        "code": "invalid_inventory_manifest",
+        "changed_submission_required": True,
+        "required_evidence": [{"kind": "artifact", "min_count": 2}],
+        "artifact_sha256": digest,
+    }
+
+
+def test_acceptance_recovery_details_default_to_schema_correction():
+    details = MultiAgentWorkflowController._acceptance_recovery_details("unknown enum value")
+
+    assert details["code"] == "invalid_payload"
+    assert details["required_evidence"] == []
+    assert details["artifact_sha256"] is None
+
+
 def test_advisory_checkpoint_can_continue_below_phase_hard_cap():
     plan = OperationPlan(
         objective="assess",
@@ -3338,6 +3935,35 @@ def test_completed_closure_phase_reports_unresolved_prior_work_and_partial_termi
     assert coverage["phases"][1]["terminal_phase_completed_with_unresolved_prior_work"] is True
     assert coverage["phases"][1]["unresolved_prior_task_count"] == 1
     assert controller.runtime.callback_handler.termination_events[0][0] == "partial_failure"
+
+
+def test_incomplete_message_separates_actionable_and_historical_failure_phases():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Hypotheses", status="partial_failure"),
+            PlanPhase(id=2, title="Testing", status="partial_failure"),
+            PlanPhase(id=3, title="Closure", status="partial_failure"),
+        ],
+        assessment_complete=False,
+    )
+    pending = Task(task_uid="pending", title="Pending", objective="resume", phase=1, status="pending")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[pending]),
+        text_runner=lambda *_args: "{}",
+    )
+
+    controller._emit_workflow_completion(plan)
+
+    message = controller.runtime.callback_handler.termination_events[0][1]
+    assert message == (
+        "Assessment incomplete: 1 actionable task(s) remain in phase(s) 1; "
+        "unresolved task or phase failures remain in phase(s) 2, 3"
+    )
 
 
 def test_phase_terminal_guard_rejects_done_when_prior_phase_has_actionable_tasks():
@@ -5205,7 +5831,7 @@ def test_controller_rejects_invalid_evaluator_status():
         if role == "task_prompt_builder":
             return '{"prompt":"execute"}'
         if role == "task_evaluator":
-            return '{"status":"complete","reason":"bad status"}'
+            return '{"status":"finished_successfully","reason":"bad status"}'
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -5299,7 +5925,7 @@ def test_json_text_agent_does_not_retry_valid_json_with_invalid_status():
 
     def text_runner(role, prompt, tools, system_prompt):
         calls.append(role)
-        return '{"status":"complete","reason":"bad status"}'
+        return '{"status":"finished_successfully","reason":"bad status"}'
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -5447,6 +6073,55 @@ def test_state_store_reopens_all_actionable_phases_in_plan_order(monkeypatch):
     assert advanced.current_phase == 3
     assert advanced.assessment_complete is False
     assert [phase.status for phase in advanced.phases] == ["done", "partial_failure", "active"]
+
+
+def test_state_store_ensures_active_phase_for_actionable_terminal_plan(monkeypatch):
+    stored = {
+        "plan": OperationPlan(
+            objective="assess",
+            current_phase=3,
+            total_phases=3,
+            phases=[
+                PlanPhase(id=1, title="Recon", status="done"),
+                PlanPhase(id=2, title="Validate", status="partial_failure"),
+                PlanPhase(id=3, title="Closure", status="partial_failure"),
+            ],
+            assessment_complete=False,
+        ),
+        "tasks": [
+            Task(
+                task_uid="pending",
+                title="Resume validation",
+                objective="resume",
+                phase=2,
+                status="pending",
+            )
+        ],
+    }
+
+    class Client:
+        def get_active_plan(self, operation_id=None):
+            return stored["plan"]
+
+        def store_plan(self, plan, operation_id=None):
+            stored["plan"] = plan
+
+        def list_tasks(self, phase=None, status=None):
+            tasks = stored["tasks"]
+            if phase is not None:
+                tasks = [task for task in tasks if task.phase == phase]
+            if status:
+                tasks = [task for task in tasks if task.status in status]
+            return tasks
+
+    monkeypatch.setattr(workflow_mod, "get_memory_client", lambda silent=True: Client())
+    store = WorkflowStateStore("OP_TEST")
+
+    resumed = store.ensure_active_phase(stored["plan"])
+
+    assert resumed.current_phase == 2
+    assert resumed.assessment_complete is False
+    assert [phase.status for phase in resumed.phases] == ["done", "active", "partial_failure"]
 
 
 def test_state_store_does_not_reopen_completed_plan_without_actionable_work(monkeypatch):

@@ -235,6 +235,12 @@ unfinished validations remain visible in the final report under **Findings Requi
 report agents can inspect operation artifacts with the read-only `read_artifact` tool, limited by
 `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation).
 
+Operation-objective candidates use a separate lifecycle. `store_objective_candidate` creates an
+`objective_validation` task, and `record_objective_validation` records confirmed, rejected, or inconclusive objective
+status with confidence and artifacts. Objective validation never changes a vulnerability finding's resolution. For
+flag objectives, Python also enforces objective-derived format and exact-length constraints and requires at least 80%
+confidence for confirmation. Reports show these results under **Objective Validation**, outside vulnerability counts.
+
 After creating or durably changing a plan, the controller also emits a standard `output` event containing the
 objective, current phase, and status of every phase. These snapshots appear in interactive and headless output.
 Unchanged plan reads do not emit an event, and display failures do not interrupt persistence or workflow execution.

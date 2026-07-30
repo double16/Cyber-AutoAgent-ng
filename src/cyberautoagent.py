@@ -1394,6 +1394,10 @@ def main():
             operation_id=operation_id,
             logger=logger,
         )
+        get_memory_client(silent=True).store_preflight_results(
+            [result.to_record() for result in preflight_results],
+            operation_id=operation_id,
+        )
         failed_preflight = [result for result in preflight_results if result.status == "fail"]
         if failed_preflight:
             failure_summary = "; ".join(

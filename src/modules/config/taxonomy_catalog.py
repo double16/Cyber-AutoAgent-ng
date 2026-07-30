@@ -27,6 +27,112 @@ _SOURCES = {
 }
 TAXONOMY_CONFIDENCE_THRESHOLD = 0.75
 _TAXONOMY_KINDS = (("cwe", "cwe"), ("mitre_attack", "attack"))
+_TECHNIQUE_TAXONOMY_SEEDS = {
+    "command injection": {
+        "cwe": ("CWE-78", "CWE-77", "CWE-88"),
+        "attack": ("T1190", "T1059.004", "T1059"),
+    },
+    "os command injection": {
+        "cwe": ("CWE-78", "CWE-77", "CWE-88"),
+        "attack": ("T1190", "T1059.004", "T1059"),
+    },
+    "sql injection": {
+        "cwe": ("CWE-89",),
+        "attack": (),
+    },
+    "stored xss": {
+        "cwe": ("CWE-79",),
+        "attack": (),
+    },
+    "cross site scripting": {
+        "cwe": ("CWE-79",),
+        "attack": (),
+    },
+    "path traversal": {
+        "cwe": ("CWE-22",),
+        "attack": (),
+    },
+    "directory traversal": {
+        "cwe": ("CWE-22",),
+        "attack": (),
+    },
+    "local file inclusion": {
+        "cwe": ("CWE-98",),
+        "attack": (),
+    },
+    "remote file inclusion": {
+        "cwe": ("CWE-98",),
+        "attack": (),
+    },
+    "server side request forgery": {
+        "cwe": ("CWE-918",),
+        "attack": (),
+    },
+    "ssrf": {
+        "cwe": ("CWE-918",),
+        "attack": (),
+    },
+    "xml external entity": {
+        "cwe": ("CWE-611",),
+        "attack": (),
+    },
+    "xxe": {
+        "cwe": ("CWE-611",),
+        "attack": (),
+    },
+    "cross site request forgery": {
+        "cwe": ("CWE-352",),
+        "attack": (),
+    },
+    "csrf": {
+        "cwe": ("CWE-352",),
+        "attack": (),
+    },
+    "idor": {
+        "cwe": ("CWE-639",),
+        "attack": (),
+    },
+    "broken object level authorization": {
+        "cwe": ("CWE-639",),
+        "attack": (),
+    },
+    "server side template injection": {
+        "cwe": ("CWE-1336",),
+        "attack": (),
+    },
+    "ssti": {
+        "cwe": ("CWE-1336",),
+        "attack": (),
+    },
+    "unsafe deserialization": {
+        "cwe": ("CWE-502",),
+        "attack": (),
+    },
+    "unrestricted file upload": {
+        "cwe": ("CWE-434",),
+        "attack": (),
+    },
+    "open redirect": {
+        "cwe": ("CWE-601",),
+        "attack": (),
+    },
+    "ldap injection": {
+        "cwe": ("CWE-90",),
+        "attack": (),
+    },
+    "xpath injection": {
+        "cwe": ("CWE-643",),
+        "attack": (),
+    },
+    "nosql injection": {
+        "cwe": ("CWE-943",),
+        "attack": (),
+    },
+    "prototype pollution": {
+        "cwe": ("CWE-1321",),
+        "attack": (),
+    },
+}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -68,9 +174,17 @@ class TaxonomyCatalog:
 
     def provenance(self) -> Dict[str, Any]:
         data = self.get_data()
-        return {"source": self._source, "version": data.get("version", "unknown"), "retrieved_at": data.get("retrieved_at")}
+        configured_url = os.getenv("CYBER_TAXONOMY_CATALOG_URL", "").strip()
+        refresh_urls = [configured_url] if configured_url else [_SOURCES["cwe"], _SOURCES["attack"]]
+        return {
+            "source": self._source,
+            "version": data.get("version", "unknown"),
+            "retrieved_at": data.get("retrieved_at"),
+            "configured_refresh_urls": refresh_urls,
+        }
 
     def candidates(self, finding: Dict[str, Any], kind: str, limit: int = 12) -> List[Dict[str, Any]]:
+        """Return relevant catalog candidates, favoring high-signal technique labels."""
         data = self.get_data()
         records = data.get(kind, []) if kind in {"cwe", "attack"} else []
         text = " ".join(str(value or "") for value in (
@@ -78,13 +192,26 @@ class TaxonomyCatalog:
             finding.get("parsed", {}).get("evidence") if isinstance(finding.get("parsed"), dict) else "",
             finding.get("metadata", {}).get("technique") if isinstance(finding.get("metadata"), dict) else "",
         )).lower()
-        tokens = {token for token in text.replace("_", " ").split() if len(token) >= 4}
+        normalized_text = re.sub(r"[^a-z0-9]+", " ", text.replace("_", " ")).strip()
+        tokens = {token for token in normalized_text.split() if len(token) >= 4}
+        seeded_scores = {
+            identifier: max(
+                100 - position
+                for position, candidate_id in enumerate(mappings.get(kind, ()))
+                if candidate_id == identifier
+            )
+            for phrase, mappings in _TECHNIQUE_TAXONOMY_SEEDS.items()
+            if phrase in normalized_text
+            for identifier in mappings.get(kind, ())
+        }
         scored = []
         for record in records:
-            haystack = " ".join(str(record.get(key, "")) for key in ("id", "name", "description", "keywords")).lower()
+            identifier = str(record.get("id", "")).upper()
+            haystack = " ".join(str(record.get(key, "")) for key in ("name", "description", "keywords")).lower()
             score = sum(token in haystack for token in tokens)
+            score += seeded_scores.get(identifier, 0)
             if score:
-                scored.append((score, str(record.get("id", "")), record))
+                scored.append((score, identifier, record))
         return [record for _score, _identifier, record in sorted(scored, key=lambda item: (-item[0], item[1]))[:limit]]
 
     def get(self, kind: str, identifier: str) -> Optional[Dict[str, Any]]:
@@ -238,6 +365,8 @@ def validate_taxonomy_mappings(
     cwe_mappings: Any,
     mitre_attack_mappings: Any,
     artifacts: List[str],
+    *,
+    disallowed_attack_ids: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """Validate model-proposed finding mappings against catalog records and evidence.
 
@@ -248,6 +377,7 @@ def validate_taxonomy_mappings(
     if cwe_mappings is None and mitre_attack_mappings is None:
         return {"cwe": [], "mitre_attack": [], "provenance": {}}
     catalog = get_taxonomy_catalog()
+    disallowed_attack_ids = {str(identifier).upper() for identifier in disallowed_attack_ids or set()}
     allowed_artifacts = set(artifacts)
     normalized: Dict[str, Any] = {
         "cwe": [],
@@ -267,6 +397,8 @@ def validate_taxonomy_mappings(
             identifier = str(mapping.get("id") or "").strip().upper()
             if not identifier:
                 raise ValueError(f"each {output_key} mapping requires an id")
+            if output_key == "mitre_attack" and identifier in disallowed_attack_ids:
+                raise ValueError(f"{identifier} is not eligible for this finding's preflight target context")
             if identifier in seen:
                 continue
             record = catalog.get(catalog_key, identifier)

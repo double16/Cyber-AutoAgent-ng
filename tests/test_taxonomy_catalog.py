@@ -59,6 +59,107 @@ def test_catalog_defaults_to_a_thirty_day_cache_ttl(monkeypatch, tmp_path):
     assert TaxonomyCatalog(cache_dir=cache_dir).provenance()["source"] == "cache"
 
 
+def test_catalog_ranks_command_injection_specific_taxonomy_before_generic_matches(tmp_path):
+    catalog = TaxonomyCatalog(cache_dir=tmp_path)
+    catalog._data = {
+        "version": "test-v1",
+        "cwe": [
+            {"id": "CWE-77", "name": "Command Injection", "description": "generic command injection"},
+            {"id": "CWE-78", "name": "OS Command Injection", "description": "OS command execution"},
+            {"id": "CWE-88", "name": "Argument Injection", "description": "argument delimiter injection"},
+            {"id": "CWE-999", "name": "Unrelated", "description": "command execution injection"},
+        ],
+        "attack": [
+            {"id": "T1055", "name": "Process Injection", "description": "injection"},
+            {"id": "T1059", "name": "Command and Scripting Interpreter", "description": "command execution"},
+            {"id": "T1059.004", "name": "Unix Shell", "description": "shell command execution"},
+            {"id": "T1190", "name": "Exploit Public-Facing Application", "description": "exploit application"},
+        ],
+    }
+    finding = {"title": "Command Injection", "metadata": {"technique": "command_injection"}}
+
+    assert [item["id"] for item in catalog.candidates(finding, "cwe", limit=3)] == [
+        "CWE-78",
+        "CWE-77",
+        "CWE-88",
+    ]
+    assert [item["id"] for item in catalog.candidates(finding, "attack", limit=3)] == [
+        "T1059.004",
+        "T1190",
+        "T1059",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("technique", "expected"),
+    [
+        ("sql_injection", "CWE-89"),
+        ("stored_xss", "CWE-79"),
+        ("path_traversal", "CWE-22"),
+        ("local_file_inclusion", "CWE-98"),
+        ("ssrf", "CWE-918"),
+        ("xxe", "CWE-611"),
+        ("csrf", "CWE-352"),
+        ("idor", "CWE-639"),
+        ("ssti", "CWE-1336"),
+        ("unsafe_deserialization", "CWE-502"),
+        ("unrestricted_file_upload", "CWE-434"),
+        ("open_redirect", "CWE-601"),
+        ("ldap_injection", "CWE-90"),
+        ("xpath_injection", "CWE-643"),
+        ("nosql_injection", "CWE-943"),
+        ("prototype_pollution", "CWE-1321"),
+    ],
+)
+def test_catalog_seeds_common_injection_and_xss_weaknesses(tmp_path, technique, expected):
+    catalog = TaxonomyCatalog(cache_dir=tmp_path)
+    catalog._data = {
+        "version": "test-v1",
+        "cwe": [
+            {"id": expected, "name": technique, "description": technique},
+            {"id": "CWE-999", "name": "Unrelated", "description": technique},
+        ],
+        "attack": [],
+    }
+
+    candidates = catalog.candidates(
+        {"title": technique, "metadata": {"technique": technique}},
+        "cwe",
+        limit=1,
+    )
+
+    assert candidates[0]["id"] == expected
+
+
+@pytest.mark.parametrize(
+    ("phrase", "expected"),
+    [
+        ("directory traversal", "CWE-22"),
+        ("local file inclusion", "CWE-98"),
+        ("remote file inclusion", "CWE-98"),
+        ("server-side request forgery", "CWE-918"),
+        ("XML external entity", "CWE-611"),
+        ("cross-site request forgery", "CWE-352"),
+        ("broken object level authorization", "CWE-639"),
+        ("server-side template injection", "CWE-1336"),
+    ],
+)
+def test_catalog_seeds_common_vulnerability_aliases(tmp_path, phrase, expected):
+    catalog = TaxonomyCatalog(cache_dir=tmp_path)
+    catalog._data = {
+        "version": "test-v1",
+        "cwe": [
+            {"id": expected, "name": phrase, "description": phrase},
+            {"id": "CWE-999", "name": "Unrelated", "description": phrase},
+        ],
+        "attack": [],
+    }
+
+    candidates = catalog.candidates({"title": phrase}, "cwe", limit=1)
+
+    assert candidates[0]["id"] == expected
+
+
 def test_normalize_cwe_reads_published_xml_zip():
     xml = b'''<?xml version="1.0"?><Weakness_Catalog xmlns="http://cwe.mitre.org/cwe-7"><Weaknesses>
     <Weakness ID="79" Name="Improper Neutralization of Input During Web Page Generation" Status="Draft">

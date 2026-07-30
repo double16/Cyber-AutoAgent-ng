@@ -46,6 +46,7 @@ from ragas.run_config import RunConfig
 
 from modules.config.manager import get_config_manager
 from modules.config.system.logger import get_logger
+from modules.tools.semantic_enum import normalize_semantic_enum
 
 from .trace_parser import TraceParser
 from ..config.providers.ollama_config import get_ollama_timeout
@@ -82,6 +83,33 @@ NON_EXECUTION_AGENT_ROLES = {
     "phase_evaluator",
 }
 MAX_REPORT_EVALUATION_CHARS = 100_000
+
+EVALUATION_STEP_STATUS_ALIASES = {
+    "complete": "completed",
+    "done": "completed",
+    "success": "completed",
+    "successful": "completed",
+    "succeeded": "completed",
+    "finished": "completed",
+    "finished_successfully": "completed",
+    "skip": "skipped",
+    "not_applicable": "skipped",
+    "inapplicable": "skipped",
+    "unsupported": "skipped",
+    "unavailable": "skipped",
+    "fail": "failed",
+    "failure": "failed",
+    "error": "failed",
+    "errored": "failed",
+    "unsuccessful": "failed",
+    "aborted": "failed",
+    "cancelled": "failed",
+    "canceled": "failed",
+    "timeout": "failed",
+    "timed_out": "failed",
+}
+EVALUATION_STEP_STATUSES = {"completed", "skipped", "failed"}
+EVALUATION_PREPARATION_STATUSES = {"started", *EVALUATION_STEP_STATUSES}
 
 
 class EvaluationUsageCallback(BaseCallbackHandler):
@@ -1179,6 +1207,16 @@ class CyberAgentEvaluator:
         if self._evaluation_operation_id is None:
             return
 
+        canonical_status = normalize_semantic_enum(
+            status,
+            aliases=EVALUATION_STEP_STATUS_ALIASES,
+            field_name="evaluation_step_status",
+            logger=logger,
+        )
+        if canonical_status not in EVALUATION_STEP_STATUSES:
+            logger.warning("Ignoring invalid evaluation step status=%r", status)
+            return
+
         scope = self._current_evaluation_scope or "operation"
         event: Dict[str, Any] = {
             "type": "evaluation_step_complete",
@@ -1186,7 +1224,7 @@ class CyberAgentEvaluator:
             "operation_stage": "ragas_evaluation",
             "evaluation_scope": scope,
             "evaluation_step_kind": kind,
-            "status": status,
+            "status": canonical_status,
         }
         if metric:
             event["evaluation_metric"] = metric
@@ -1219,11 +1257,21 @@ class CyberAgentEvaluator:
         if self._evaluation_operation_id is None:
             return
 
-        if status != "started":
+        canonical_status = normalize_semantic_enum(
+            status,
+            aliases=EVALUATION_STEP_STATUS_ALIASES,
+            field_name="evaluation_preparation_status",
+            logger=logger,
+        )
+        if canonical_status not in EVALUATION_PREPARATION_STATUSES:
+            logger.warning("Ignoring invalid evaluation preparation status=%r", status)
+            return
+
+        if canonical_status != "started":
             message = None
-            if status == "failed":
+            if canonical_status == "failed":
                 message = f"{kind.replace('_', ' ').title()} failed"
-            self._emit_evaluation_step_complete(kind, status, message=message)
+            self._emit_evaluation_step_complete(kind, canonical_status, message=message)
             return
 
         scope = self._current_evaluation_scope or "operation"

@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from modules.prompts.factory import ModulePromptLoader
 
 
@@ -510,3 +512,14 @@ def test_web_phase_contract_uses_distinct_industry_aligned_capabilities():
     assert "Hypothesis Testing & Validation" not in policy
     assert "not_applicable" in policy
     assert "without destructive action" in policy
+
+
+@pytest.mark.parametrize("module", ["web", "ctf", "code_security"])
+def test_chain_phase_contracts_are_analytical_and_conditionally_applicable(module):
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    policy = (root / module / "termination_policy.md").read_text()
+
+    assert "not_applicable" in policy
+    assert "rather than repeating" in policy or "does not repeat" in policy
+    assert "concrete" in policy
+    assert "evidence" in policy

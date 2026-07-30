@@ -40,6 +40,23 @@ class TargetValidationResult:
             "resolved_addresses": list(self.resolved_addresses),
         }
 
+    def to_record(self) -> dict[str, Any]:
+        """Return durable, deterministic preflight facts for later workflow policy checks."""
+
+        addresses = tuple(ipaddress.ip_address(value) for value in self.resolved_addresses)
+        return {
+            "target_id": self.target_id,
+            "target": self.target,
+            "target_type": self.target_type,
+            "status": self.status,
+            "checks": list(self.checks),
+            "reason": self.reason,
+            "resolved_addresses": list(self.resolved_addresses),
+            "has_global_address": any(address.is_global for address in addresses),
+            "has_private_or_reserved_address": any(not address.is_global for address in addresses),
+            "route_reachable": self.status == "pass" and "route" in self.checks,
+        }
+
 
 @dataclass(frozen=True)
 class _NetworkEndpoint:

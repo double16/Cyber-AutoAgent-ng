@@ -386,7 +386,11 @@ def _normalize_report_category(
         return "observation"
     if normalized in {"finding_candidate", "validation_failure"}:
         return "validation_failure"
-    if normalized in {"decision", "knowledge", "finding_validation"}:
+    if normalized in {"objective_candidate", "objective_validation_failure"}:
+        return "objective_validation_failure"
+    if normalized == "objective_result":
+        return "objective_result"
+    if normalized in {"decision", "knowledge", "finding_validation", "objective_validation"}:
         return ""
     if normalized != "finding":
         return normalized
@@ -900,6 +904,52 @@ def _validate_next_steps(data: Dict[str, Any], configured_budget: Dict[str, int 
     return normalized
 
 
+def _next_steps_recommend_rerun(data: Dict[str, Any]) -> bool:
+    """Return whether the generated guidance explicitly calls for a fresh operation."""
+    recommendations = data.get("recommended_next_steps", [])
+    if not isinstance(recommendations, list):
+        return False
+    text = " ".join(str(item).lower() for item in recommendations)
+    return bool(re.search(r"\b(?:re[- ]?run|new operation|fresh operation|start over)\b", text))
+
+
+def _apply_next_steps_budget_scope(
+    data: Dict[str, Any],
+    configured_budget: Dict[str, int | float],
+    source: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Align incomplete-operation budget wording and duration with continuation semantics."""
+    completion_status = source.get("completion_status", {})
+    completion_status = completion_status if isinstance(completion_status, dict) else {}
+    phase_coverage = source.get("phase_coverage", [])
+    phase_coverage = phase_coverage if isinstance(phase_coverage, list) else []
+    incomplete = not bool(completion_status.get("assessment_complete")) or any(
+        isinstance(phase, dict) and str(phase.get("status") or "") not in {"done", "not_applicable"}
+        for phase in phase_coverage
+    )
+    if not incomplete:
+        return data
+
+    if _next_steps_recommend_rerun(data):
+        for recommendation in data["budget_recommendations"]:
+            if recommendation["dimension"] == "duration":
+                recommendation["rationale"] = (
+                    "Start a new operation with this budget because the recommended rerun requires a fresh task "
+                    "plan and execution context."
+                )
+        return data
+
+    continuation_rationale = (
+        "Continue the existing operation with this budget to cover the missing tasks and record their terminal "
+        "outcomes; this is an additional continuation budget, not a new-operation total."
+    )
+    for recommendation in data["budget_recommendations"]:
+        if recommendation["dimension"] == "duration":
+            recommendation["recommended"] = configured_budget["duration"]
+            recommendation["rationale"] = continuation_rationale
+    return data
+
+
 def _next_steps_fallback(
     configured_budget: Dict[str, int | float],
     source: Dict[str, Any],
@@ -981,8 +1031,8 @@ def _next_steps_fallback(
     metrics = metrics if isinstance(metrics, dict) else {}
     duration = str(metrics.get("duration") or "the recorded operation duration")
     budget_rationale = (
-        f"The operation used {duration} and ended with incomplete coverage; retain the configured limit "
-        "pending a human estimate for the remaining work."
+        f"The operation used {duration} and ended with incomplete coverage; continue the existing operation "
+        "with the configured limit to cover the missing tasks and record terminal outcomes."
         if incomplete
         else "No unresolved coverage was recorded; retain the configured limit."
     )
@@ -1059,7 +1109,7 @@ def _run_next_steps_refinement(
         actor_agent, source_prompt, configured_budget, source, json_retries
     )
     if refinement_cycles == 0 or used_fallback:
-        return data, None
+        return _apply_next_steps_budget_scope(data, configured_budget, source), None
 
     final_rejection = None
     for cycle in range(1, refinement_cycles + 1):
@@ -1074,7 +1124,7 @@ def _run_next_steps_refinement(
             json_retries,
         )
         if critique["approved"]:
-            return data, None
+            return _apply_next_steps_budget_scope(data, configured_budget, source), None
         revision_prompt = f"""Revise the structured Appendix B result using every applicable critic feedback item.
 Return only the complete JSON object required by the original request.
 
@@ -1091,10 +1141,10 @@ Critic feedback:
             actor_agent, revision_prompt, configured_budget, source, json_retries
         )
         if used_fallback:
-            return data, None
+            return _apply_next_steps_budget_scope(data, configured_budget, source), None
         if cycle == refinement_cycles:
             final_rejection = critique
-    return data, final_rejection
+    return _apply_next_steps_budget_scope(data, configured_budget, source), final_rejection
 
 
 def _format_list_section(title: str, items: List[str]) -> str:
@@ -1135,14 +1185,21 @@ def _format_next_steps_appendix(data: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _format_taxonomy_mappings(taxonomy: Dict[str, Any]) -> str:
+def _format_taxonomy_mappings(taxonomy: Dict[str, Any], annotation: Optional[Dict[str, Any]] = None) -> str:
     """Render catalog-authoritative taxonomy mappings after report grounding."""
     parts: List[str] = []
     for label, key in (("MITRE ATT&CK", "mitre_attack"), ("CWE", "cwe")):
         mappings = taxonomy.get(key, []) if isinstance(taxonomy, dict) else []
         parts.append(f"#### {label} Mapping\n\n")
         if not mappings:
-            parts.append("No mapping met the configured confidence threshold.\n\n")
+            status = annotation.get("status") if isinstance(annotation, dict) else "not_attempted"
+            if status == "completed":
+                parts.append("Taxonomy annotation completed; no supported mapping was recorded.\n\n")
+            elif status == "failed":
+                error = str(annotation.get("error") or "the annotation response was invalid")
+                parts.append(f"Taxonomy annotation failed: {error}. No mappings are shown.\n\n")
+            else:
+                parts.append("Taxonomy annotation was not attempted; no mappings are shown.\n\n")
             continue
         parts.append("| ID | Name | Confidence | Basis | Rationale | Evidence | Reference |\n|---|---|---|---|---|---|---|\n")
         for item in mappings:
@@ -1155,9 +1212,15 @@ def _format_taxonomy_mappings(taxonomy: Dict[str, Any]) -> str:
         parts.append("\n")
     provenance = taxonomy.get("provenance", {}) if isinstance(taxonomy, dict) else {}
     if provenance:
+        refresh_urls = provenance.get("configured_refresh_urls") or []
+        refresh_urls = [str(url) for url in refresh_urls if str(url).strip()]
         parts.append(
-            f"> Taxonomy catalog: `{provenance.get('version', 'unknown')}` from `{provenance.get('source', 'unknown')}`.\n\n"
+            f"> Taxonomy catalog source: `{provenance.get('source', 'unknown')}`; "
+            f"version: `{provenance.get('version', 'unknown')}`.\n"
         )
+        if refresh_urls:
+            parts.append(f"> Configured refresh URL(s): {', '.join(f'`{url}`' for url in refresh_urls)}.\n")
+        parts.append("\n")
     return "".join(parts)
 
 
@@ -1166,8 +1229,12 @@ def _format_taxonomy_coverage_tables(findings: List[Dict[str, Any]]) -> str:
     parts: List[str] = []
     for heading, key in (("CWE Coverage", "cwe"), ("MITRE ATT&CK Coverage", "mitre_attack")):
         aggregate: Dict[str, Dict[str, Any]] = {}
+        annotation_statuses: Dict[str, int] = {}
         for finding in findings:
             metadata = finding.get("metadata", {}) if isinstance(finding.get("metadata"), dict) else {}
+            annotation = metadata.get("taxonomy_annotation")
+            status = annotation.get("status") if isinstance(annotation, dict) else "not_attempted"
+            annotation_statuses[str(status)] = annotation_statuses.get(str(status), 0) + 1
             taxonomy = metadata.get("taxonomy", {}) if isinstance(metadata.get("taxonomy"), dict) else {}
             anchor = str(finding.get("anchor") or "").strip()
             title = _report_item_title(finding, "Finding")
@@ -1186,7 +1253,12 @@ def _format_taxonomy_coverage_tables(findings: List[Dict[str, Any]]) -> str:
                 row["findings"][anchor or title] = (anchor, title)
         parts.append(f"### {heading}\n\n")
         if not aggregate:
-            parts.append("No verified mappings were recorded.\n\n")
+            if annotation_statuses.get("failed"):
+                parts.append("Taxonomy annotation failed for one or more verified findings; no mappings were recorded.\n\n")
+            elif annotation_statuses.get("completed"):
+                parts.append("Taxonomy annotation completed, but no supported mappings were recorded.\n\n")
+            else:
+                parts.append("Taxonomy annotation was not attempted for verified findings; no mappings were recorded.\n\n")
             continue
         parts.append("| ID | Name | Verified Finding Count | Associated Findings |\n|---|---|---:|---|\n")
         for identifier, row in sorted(aggregate.items()):
@@ -1357,6 +1429,11 @@ def generate_security_report(
             for i, finding in enumerate(raw_findings)
             if finding.get("category") == "validation_failure"
         ]
+        report_objective_results = [
+            (i, item)
+            for i, item in enumerate(raw_findings)
+            if item.get("category") in {"objective_result", "objective_validation_failure"}
+        ]
         taxonomy_coverage = _format_taxonomy_coverage_tables(
             [finding for _index, finding in report_findings]
         )
@@ -1408,8 +1485,12 @@ Paths" section. Label every unsupported transition as a hypothesis, cite the ver
 and keep hypothetical impact out of verified risk counts and conclusions.
 {completion_guidance}
 
+Objective validation is independent from vulnerability validation. A rejected or unresolved objective candidate must not
+downgrade a verified vulnerability used to obtain it, and an objective candidate is never part of vulnerability risk
+or severity totals.
+
 Use the following canonical data. Do not invent or recalculate counts:
-{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'verified_findings_total', 'validation_failure_count', 'target_coverage', 'phase_coverage', 'completion_status']})}
+{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'verified_findings_total', 'finding_validation_failure_count', 'objective_validation_status', 'objective_validation_failure_count', 'target_coverage', 'phase_coverage', 'completion_status']})}
 
 For the verified-findings distribution, copy severity counts exactly. If verified_findings_total is zero, state that
 there are zero verified findings; never create a nonzero "No Verified Findings" category.
@@ -1531,7 +1612,7 @@ Finding Data:
                     f"<a name=\"finding-{finding.get('id', i)}\"></a>\n"
                     + finding_text.rstrip()
                     + "\n\n"
-                    + _format_taxonomy_mappings(metadata.get("taxonomy", {}))
+                    + _format_taxonomy_mappings(metadata.get("taxonomy", {}), metadata.get("taxonomy_annotation"))
                 )
                 finding_text = _append_artifact_evidence(finding_text, finding)
                 finding_text = _append_inline_review_feedback(finding_text, final_critique)
@@ -1577,7 +1658,7 @@ Finding Data:
                     "**Required follow-up:** Reproduce this claim in a dedicated task and capture decisive direct "
                     "evidence or a test/control comparison before treating it as a vulnerability.\n"
                     "\n"
-                    + _format_taxonomy_mappings(metadata.get("taxonomy", {}))
+                    + _format_taxonomy_mappings(metadata.get("taxonomy", {}), metadata.get("taxonomy_annotation"))
                 )
                 path = os.path.join(
                     output_path,
@@ -1594,6 +1675,43 @@ Finding Data:
                     "validation_failure",
                     f"Requires validation: {title}",
                 )
+
+        if report_objective_results:
+            objective_path = os.path.join(output_path, "report_objective_validation.md")
+            lines = [
+                _PAGE_BREAK,
+                '<a name="objective-validation"></a>',
+                "## OBJECTIVE VALIDATION",
+                "",
+                "Objective completion is reported independently from vulnerability confirmation. A rejected objective "
+                "candidate does not invalidate a verified vulnerability used to obtain it.",
+                "",
+            ]
+            for index, item in report_objective_results:
+                metadata = item.get("metadata", {}) or {}
+                status = "Confirmed" if item.get("category") == "objective_result" else "Rejected or unresolved"
+                artifacts = metadata.get("evidence_artifacts") or metadata.get("artifacts") or []
+                if not isinstance(artifacts, list):
+                    artifacts = [artifacts]
+                lines.extend(
+                    [
+                        f"### {metadata.get('objective_type', 'Objective').title()} candidate {index + 1}",
+                        "",
+                        f"- **Status:** {status}",
+                        f"- **Confidence:** {metadata.get('confidence', 'N/A')}",
+                        f"- **Validator:** {metadata.get('validator', 'Not recorded')}",
+                        f"- **Reason:** {metadata.get('validation_reason') or metadata.get('summary') or 'Not recorded'}",
+                        "",
+                        f"**Candidate:** `{metadata.get('candidate_value') or item.get('content', '')}`",
+                        "",
+                        "**Evidence artifacts:**",
+                        *(f"- `{artifact}`" for artifact in artifacts if artifact),
+                        "",
+                    ]
+                )
+            with open(objective_path, "w") as report_file:
+                report_file.write("\n".join(lines).rstrip() + "\n")
+            report_parts_files.append(objective_path)
 
         # Part 4: Observations and Discoveries
         logger.info("Generating Observations and Discoveries...")
@@ -1842,8 +1960,9 @@ and must always be recommended. Token and cost recommendations are forbidden unl
 For each budget recommendation, `current` is the configured limit from configured_budget, never elapsed utilization.
 Give concrete projected values for full coverage and label their rationales as estimates. Manual investigations must
 be work where more automated tooling is unlikely to resolve the missing business context, authorization, access, or
-human judgment. Coverage gaps and completion criteria must be concrete and measurable. Empty non-budget lists are
-allowed when the canonical data supports no applicable item.
+human judgment. Coverage gaps and completion criteria must be concrete and measurable. For incomplete coverage,
+recommend continuing this operation to cover missing tasks unless you explicitly recommend a rerun/new operation in
+recommended_next_steps. Empty non-budget lists are allowed when the canonical data supports no applicable item.
 
 Canonical operation data:
 {json.dumps(next_steps_source, indent=2, sort_keys=True)}
@@ -2245,6 +2364,24 @@ def build_report_sections(
             run_id=operation_id if not cross_operation else None,
             limit=MAX_REPORT_FINDINGS * 10,
         )
+        list_finding_records = getattr(memory_client, "list_finding_records", None)
+        finding_records = list_finding_records() if callable(list_finding_records) else []
+        finding_records_by_uid = {
+            str(record.get("finding_uid")): record
+            for record in finding_records
+            if isinstance(record, dict) and record.get("finding_uid")
+        }
+        for memory_item in raw_memories:
+            metadata = memory_item.get("metadata")
+            if not isinstance(metadata, dict) or metadata.get("category") != "finding":
+                continue
+            record = finding_records_by_uid.get(str(metadata.get("finding_uid") or ""))
+            candidate = record.get("candidate_data") if isinstance(record, dict) else None
+            if not isinstance(candidate, dict):
+                continue
+            for key in ("taxonomy", "taxonomy_annotation", "final_attack_enrichment"):
+                if key in candidate:
+                    metadata[key] = candidate[key]
         logger.info(f"Total memories loaded: {len(raw_memories)}")
 
         # Count by operation_id and category for debugging
@@ -2324,6 +2461,13 @@ def build_report_sections(
             if (item.get("metadata", {}) or {}).get("category") in {"finding", "validation_failure"}
             and (item.get("metadata", {}) or {}).get("finding_uid")
         }
+        resolved_objective_candidate_uids = {
+            str((item.get("metadata", {}) or {}).get("candidate_uid"))
+            for item in raw_memories
+            if (item.get("metadata", {}) or {}).get("category")
+            in {"objective_result", "objective_validation_failure"}
+            and (item.get("metadata", {}) or {}).get("candidate_uid")
+        }
 
         for memory_item in raw_memories:
             memory_content = memory_item.get("memory", "")
@@ -2335,6 +2479,11 @@ def build_report_sections(
             if (
                 metadata.get("category") == "finding_candidate"
                 and str(metadata.get("finding_uid", "")) in resolved_finding_uids
+            ):
+                continue
+            if (
+                metadata.get("category") == "objective_candidate"
+                and str(metadata.get("candidate_uid", "")) in resolved_objective_candidate_uids
             ):
                 continue
 
@@ -2388,7 +2537,13 @@ def build_report_sections(
                 memory_content,
                 parsed_evidence,
             )
-            if category in ["finding", "observation", "validation_failure"]:
+            if category in [
+                "finding",
+                "observation",
+                "validation_failure",
+                "objective_result",
+                "objective_validation_failure",
+            ]:
                 if stored_category == "finding" and category == "validation_failure":
                     logger.info(
                         "Classifying report item '%s' (id: %s) as requiring validation",
@@ -2419,6 +2574,10 @@ def build_report_sections(
                             metadata.get("validation_status", "")
                         ).strip()
                                              or None,
+                        "validation_type": str(
+                            metadata.get("validation_type")
+                            or ("objective" if category.startswith("objective_") else "finding")
+                        ).strip(),
                     }
                 )
 
@@ -2441,7 +2600,10 @@ def build_report_sections(
         # Format evidence for report (cap to avoid context explosions)
         evidence.sort(key=lambda entry: _SEVERITY_ORDER.get(str(entry.get("severity", "")).upper(), 5))
         evidence = _trim_evidence_for_report(evidence, MAX_REPORT_FINDINGS)
-        evidence_text = format_evidence_for_report(evidence)
+        vulnerability_evidence = [
+            item for item in evidence if not str(item.get("category", "")).startswith("objective_")
+        ]
+        evidence_text = format_evidence_for_report(vulnerability_evidence)
 
         # Count severities from actual evidence, not just text
         severity_counts = {
@@ -2479,7 +2641,7 @@ def build_report_sections(
 
         # Transform evidence to content using domain lens
         report_content = _transform_evidence_to_content(
-            evidence=evidence,
+            evidence=vulnerability_evidence,
             domain_lens=domain_lens,
             target=target,
             objective=objective,
@@ -2569,6 +2731,21 @@ def build_report_sections(
         validation_failure_count = sum(
             1 for item in evidence if item.get("category") == "validation_failure"
         )
+        objective_results = [
+            item
+            for item in evidence
+            if item.get("category") in {"objective_result", "objective_validation_failure"}
+        ]
+        objective_validation_status = (
+            "verified"
+            if any(item.get("category") == "objective_result" for item in objective_results)
+            else "failed"
+            if any(item.get("category") == "objective_validation_failure" for item in objective_results)
+            else "not_recorded"
+        )
+        objective_validation_failure_count = sum(
+            1 for item in objective_results if item.get("category") == "objective_validation_failure"
+        )
         sections = {
             "operation_id": operation_id,
             "target": target,
@@ -2604,6 +2781,10 @@ def build_report_sections(
             "finding_count": finding_count,
             "observation_count": observation_count,
             "validation_failure_count": validation_failure_count,
+            "finding_validation_failure_count": validation_failure_count,
+            "objective_validation_status": objective_validation_status,
+            "objective_validation_failure_count": objective_validation_failure_count,
+            "objective_validation_results": objective_results,
             "tools_summary": tools_summary,
             "analysis_framework": domain_lens.get("framework", ""),
             "module": module,

@@ -656,7 +656,7 @@ def test_task_proposal_rejects_model_supplied_criterion_id():
         mod.TaskProposal.model_validate(payload)
 
 
-def test_task_proposal_compiler_generates_readable_criterion_id():
+def test_task_proposal_compiler_generates_short_task_scoped_criterion_id():
     payload = task_proposal("Check", "Check target", "Store résumé & route inventory!")
     proposal = mod.TaskProposal.model_validate(payload)
     plan = mod.OperationPlan(
@@ -668,10 +668,10 @@ def test_task_proposal_compiler_generates_readable_criterion_id():
 
     contract = mod._proposal_acceptance_contract(proposal, plan)
 
-    assert [criterion.id for criterion in contract.criteria] == ["store-resume-route-inventory"]
+    assert [criterion.id for criterion in contract.criteria] == ["criterion-1"]
 
 
-def test_task_proposal_criterion_id_uses_bounded_ordinal_fallback():
+def test_task_proposal_criterion_id_is_independent_of_description_characters():
     payload = task_proposal("Check", "Check target", "測試")
     proposal = mod.TaskProposal.model_validate(payload)
     plan = mod.OperationPlan(
@@ -684,6 +684,16 @@ def test_task_proposal_criterion_id_uses_bounded_ordinal_fallback():
     contract = mod._proposal_acceptance_contract(proposal, plan)
 
     assert contract.criteria[0].id == "criterion-1"
+
+
+def test_task_proposal_criterion_ids_are_short_ordinals_for_multiple_criteria():
+    criteria = [
+        mod.TaskProposalCriterion(description="A deliberately long criterion description " * 8),
+        mod.TaskProposalCriterion(description="測試"),
+        mod.TaskProposalCriterion(description="Punctuation! does not affect the identifier."),
+    ]
+
+    assert mod._task_proposal_criterion_ids(criteria) == ["criterion-1", "criterion-2", "criterion-3"]
 
 
 def test_task_proposal_rejects_multiple_criteria():
@@ -707,8 +717,8 @@ def test_task_proposal_criterion_ids_are_scoped_to_each_task():
     first_contract = mod._proposal_acceptance_contract(first, plan)
     second_contract = mod._proposal_acceptance_contract(second, plan)
 
-    assert first_contract.criteria[0].id == "store-result"
-    assert second_contract.criteria[0].id == "store-result"
+    assert first_contract.criteria[0].id == "criterion-1"
+    assert second_contract.criteria[0].id == "criterion-1"
 
 
 def test_task_proposal_limits_require_positive_value():
@@ -1118,6 +1128,98 @@ def test_inventory_manifest_does_not_filter_ambiguous_invalid_items(fake_memory_
     assert json.loads(manifest.read_text())["items"] == [item]
 
 
+def test_inventory_manifest_normalizes_protocol_neutral_interaction_and_raw_target_id(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Inspect /workspace/application",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="/workspace/application", type="filesystem")],
+    )
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    payload["items"] = [{
+        "id": "repository-1",
+        "target_id": "/workspace/application",
+        "kind": "service",
+        "value": "/workspace/application",
+        "attributes": {
+            "interaction": {
+                "interface": " filesystem ",
+                "operations": ["read", "read", "trace-data-flow"],
+                "inputs": [{"name": " path ", "location": " argument "}],
+                "success_signals": ["source located"],
+                "failure_signals": ["path absent"],
+            }
+        },
+    }]
+    manifest.write_text(json.dumps(payload))
+
+    loaded, _digest = mod._load_inventory_manifest(f"artifact:{manifest}")
+
+    item = loaded["items"][0]
+    assert item["target_id"] == "target-1"
+    assert item["attributes"]["interaction"] == {
+        "interface": "filesystem",
+        "operations": ["read", "trace-data-flow"],
+        "inputs": [{"name": "path", "location": "argument"}],
+        "success_signals": ["source located"],
+        "failure_signals": ["path absent"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("interaction", "message"),
+    [
+        ({"operations": ["read"], "transport": "local"}, "unsupported fields"),
+        ({"inputs": [{"location": "argument"}]}, "requires a name"),
+    ],
+)
+def test_inventory_manifest_rejects_invalid_interaction_metadata(fake_memory_client, interaction, message):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    payload["items"][0]["attributes"] = {"interaction": interaction}
+    manifest.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match=message):
+        mod._load_inventory_manifest(f"artifact:{manifest}")
+
+
+def test_deterministic_inventory_candidates_preserve_html_form_operation(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    artifact_dir = Path(mod._operation_output_root()) / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    form = artifact_dir / "ping.html"
+    form.write_text(
+        '<form action="/ping" method="post"><input name="host" type="text"><button>Ping</button></form>'
+    )
+
+    candidates, source_count = mod._deterministic_inventory_candidates()
+
+    ping = next(item for item in candidates if item["value"] == "http://target.test/ping")
+    assert source_count == 1
+    assert ping["attributes"]["interaction"]["operations"] == ["POST"]
+    assert ping["attributes"]["interaction"]["inputs"] == [
+        {"name": "host", "location": "body", "type": "text"}
+    ]
+
+
 def test_create_tasks_generated_schema_accepts_proposal_and_rejects_legacy_contract():
     schema = get_tool_spec(mod.create_tasks)["inputSchema"]["json"]
     validator = Draft202012Validator(schema)
@@ -1292,7 +1394,7 @@ def test_create_tasks_infers_all_targets_and_compiles_single_criterion(fake_memo
     assert task.target_scope == "all"
     assert task.target_ids == []
     assert task.acceptance.basis.source_refs == ("target:target-1", "target:target-2", "plan:phase-1")
-    assert [criterion.id for criterion in task.acceptance.criteria] == ["inventory"]
+    assert [criterion.id for criterion in task.acceptance.criteria] == ["criterion-1"]
 
 
 def test_create_tasks_accepts_inventory_and_workflow_artifact_procedures(fake_memory_client):
@@ -1879,7 +1981,7 @@ def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fak
     ]
 
 
-def test_create_tasks_coverage_deduplication_is_scoped_to_active_phase(fake_memory_client):
+def test_create_tasks_rejects_semantic_cross_phase_duplicate(fake_memory_client):
     _client, store = fake_memory_client
     manifest = Path(mod._operation_output_root()) / "cross-phase-inventory.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -1940,9 +2042,35 @@ def test_create_tasks_coverage_deduplication_is_scoped_to_active_phase(fake_memo
 
     result = json.loads(mod.create_tasks([payload]))
 
-    assert result["created_count"] == 1
-    assert store.tasks[-1].phase == 2
-    assert store.tasks[-1].acceptance.basis.item_ids == ("endpoint-login",)
+    assert result["created_count"] == 0
+    assert result["duplicate_count"] == 1
+    assert len(store.tasks) == 1
+
+
+def test_cross_phase_identity_ignores_controller_owned_phase_reference():
+    phase_one = make_acceptance()
+    phase_two = mod.AcceptanceContract(
+        mode=phase_one.mode,
+        basis=replace(phase_one.basis, source_refs=["target:target-1", "plan:phase-2"]),
+        criteria=phase_one.criteria,
+    )
+
+    first = mod._semantic_cross_phase_task_identity(
+        "Run bounded discovery",
+        "Discover the same surface",
+        phase_one,
+        "subset",
+        ["target-1"],
+    )
+    second = mod._semantic_cross_phase_task_identity(
+        "Run bounded discovery",
+        "Discover the same surface",
+        phase_two,
+        "subset",
+        ["target-1"],
+    )
+
+    assert first == second
 
 
 def test_bound_create_tasks_tool_keeps_duplicate_only_call_correctable(fake_memory_client):

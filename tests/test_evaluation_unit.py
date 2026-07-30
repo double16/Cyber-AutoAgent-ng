@@ -518,6 +518,50 @@ def test_evaluation_preparation_completion_is_semantic(monkeypatch):
     }
 
 
+@pytest.mark.parametrize(
+    ("alias", "canonical"),
+    [
+        ("SUCCESSFUL", "completed"),
+        ("not-applicable", "skipped"),
+        ("timed out", "failed"),
+    ],
+)
+def test_evaluation_step_status_aliases_are_emitted_canonically(monkeypatch, alias, canonical):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+
+    ev._emit_evaluation_step_complete("metric", alias)
+
+    assert ev._emitter.events[0]["status"] == canonical
+
+
+def test_evaluation_step_status_unknown_is_not_emitted(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+
+    ev._emit_evaluation_step_complete("metric", "maybe_done")
+
+    assert ev._emitter.events == []
+
+
+def test_evaluation_preparation_status_aliases_are_normalized(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+
+    ev._emit_evaluation_preparation_progress("rubric_judge", "error")
+
+    assert ev._emitter.events[0]["status"] == "failed"
+
+
+def test_evaluation_preparation_unknown_status_is_not_emitted(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+
+    ev._emit_evaluation_preparation_progress("rubric_judge", "pending")
+
+    assert ev._emitter.events == []
+
+
 def test_evaluation_step_completion_triggers_budget_progress_callback(monkeypatch):
     ev = evaluator(monkeypatch)
     callback = Mock()

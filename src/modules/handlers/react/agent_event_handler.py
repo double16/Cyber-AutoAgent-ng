@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 from strands.handlers import PrintingCallbackHandler
 
 from modules.config.system.logger import get_logger
+from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.handlers.utils import (
     get_output_path,
     sanitize_target_name,
@@ -49,6 +50,44 @@ logger = get_logger("Handlers.AgentEvent")
 _DEFAULT_REASONING_DEDUPE_TTL_S = 20.0
 _AGENT_USAGE_CACHE_SIZE = 128
 _AGENT_USAGE_UUID_ATTR = "_caa_agent_event_usage_uuid"
+
+EVALUATION_RESULT_STATUS_ALIASES = {
+    "complete": "completed",
+    "done": "completed",
+    "success": "completed",
+    "successful": "completed",
+    "succeeded": "completed",
+    "finished": "completed",
+    "finished_successfully": "completed",
+    "no_result": "no_results",
+    "empty": "no_results",
+    "no_data": "no_results",
+    "no_scores": "no_results",
+    "fail": "failed",
+    "failure": "failed",
+    "error": "failed",
+    "errored": "failed",
+    "unsuccessful": "failed",
+    "aborted": "failed",
+    "cancelled": "failed",
+    "canceled": "failed",
+    "timeout": "failed",
+    "timed_out": "failed",
+}
+EVALUATION_RESULT_STATUSES = {"completed", "no_results", "failed"}
+
+
+def _normalize_evaluation_result_status(status: str) -> str:
+    """Normalize an overall evaluation result to its canonical wire status."""
+    canonical_status = normalize_semantic_enum(
+        status,
+        aliases=EVALUATION_RESULT_STATUS_ALIASES,
+        field_name="evaluation_result_status",
+        logger=logger,
+    )
+    if canonical_status not in EVALUATION_RESULT_STATUSES:
+        raise ValueError(f"invalid evaluation result status: {status!r}")
+    return canonical_status
 
 # Do not increment action count for planning tools
 _PLANNING_TOOL_NAMES = {
@@ -2980,7 +3019,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             self.emit_ui_event(
                 {
                     "type": "output",
-                    "content": "\n◆ Generating comprehensive security assessment report...",
+                    "content": "Generating comprehensive security assessment report...",
                 }
             )
 
@@ -3092,7 +3131,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     self.emit_ui_event(
                         {
                             "type": "output",
-                            "content": "◆ No memories or evidence were collected during this operation. Skipping report generation.",
+                            "content": "No memories or evidence were collected during this operation. Skipping report generation.",
                         }
                     )
                 except Exception:
@@ -3195,7 +3234,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "type": "evaluation_complete",
                         "operation_id": self.operation_id,
                         "success": True,
-                        "status": "completed",
+                        "status": _normalize_evaluation_result_status("successful"),
                         "traces_evaluated": len(results),
                         "metrics_evaluated": len(scores),
                         "scores": scores,
@@ -3210,7 +3249,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "type": "evaluation_complete",
                         "operation_id": self.operation_id,
                         "success": False,
-                        "status": "no_results",
+                        "status": _normalize_evaluation_result_status("no_data"),
                         "traces_evaluated": 0,
                         "metrics_evaluated": 0,
                         "scores": {},
@@ -3226,7 +3265,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "type": "evaluation_complete",
                     "operation_id": self.operation_id,
                     "success": False,
-                    "status": "failed",
+                    "status": _normalize_evaluation_result_status("error"),
                     "traces_evaluated": 0,
                     "metrics_evaluated": 0,
                     "scores": {},

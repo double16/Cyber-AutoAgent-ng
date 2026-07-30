@@ -1360,6 +1360,21 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     assert isinstance(summary.get("duration"), str)
 
 
+def test_evaluation_result_status_aliases_are_canonical():
+    from modules.handlers.react.agent_event_handler import _normalize_evaluation_result_status
+
+    assert _normalize_evaluation_result_status("successful") == "completed"
+    assert _normalize_evaluation_result_status("no-data") == "no_results"
+    assert _normalize_evaluation_result_status("timed out") == "failed"
+
+
+def test_evaluation_result_status_unknown_is_rejected():
+    from modules.handlers.react.agent_event_handler import _normalize_evaluation_result_status
+
+    with pytest.raises(ValueError):
+        _normalize_evaluation_result_status("pending")
+
+
 def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatch):
     handler = make_handler()
     monkeypatch.setattr(rb, "get_buffered_output", lambda: "testphp.vulnweb.com output")
