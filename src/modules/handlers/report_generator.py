@@ -11,8 +11,11 @@ import json
 import math
 import os
 import re
+import subprocess
+import tomllib
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from modules.agents.report_agent import ReportGenerator
@@ -572,6 +575,152 @@ def _normalize_budget_config(raw_budget: Any, *, default_duration: Optional[int]
     return budget
 
 
+def _format_elapsed_seconds(seconds: Any) -> str:
+    """Format wall-clock seconds for the report footer."""
+    try:
+        total_seconds = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        return "N/A"
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds_value = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or hours:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds_value}s")
+    return " ".join(parts)
+
+
+def _format_inference_time(milliseconds: Any) -> str:
+    """Format provider-reported inference time, or show N/A when unavailable."""
+    try:
+        value = float(milliseconds)
+    except (TypeError, ValueError):
+        return "N/A"
+    if value <= 0:
+        return "N/A"
+    total_minutes = int(value // 60_000)
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours} hours {minutes} minutes"
+
+
+def _format_model_usage_table(
+    rows: Any,
+    fallback_provider: str,
+    fallback_model: str,
+    fallback_context_window: Optional[int] = None,
+) -> str:
+    """Render provider/model usage rows as a deterministic Markdown table."""
+    normalized_rows = [row for row in rows or [] if isinstance(row, dict)]
+    if not normalized_rows:
+        normalized_rows = [
+            {
+                "provider": fallback_provider,
+                "model": fallback_model,
+                "context_window_tokens": fallback_context_window,
+            }
+        ]
+
+    lines = [
+        "| Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in sorted(
+        normalized_rows,
+        key=lambda item: (str(item.get("provider") or "unknown"), str(item.get("model") or "unknown")),
+    ):
+        input_tokens = int(row.get("input_tokens", row.get("inputTokens", 0)) or 0)
+        output_tokens = int(row.get("output_tokens", row.get("outputTokens", 0)) or 0)
+        cache_read = int(row.get("cache_read_tokens", row.get("cacheReadTokens", 0)) or 0)
+        cache_write = int(row.get("cache_write_tokens", row.get("cacheWriteTokens", 0)) or 0)
+        total_tokens = int(row.get("total_tokens", row.get("totalTokens", input_tokens + output_tokens)) or 0)
+        cost = float(row.get("cost", 0.0) or 0.0)
+        context_window = row.get("context_window_tokens", row.get("contextWindowTokens"))
+        context_window_display = f"{int(context_window):,}" if isinstance(context_window, int) else "N/A"
+        lines.append(
+            f"| {row.get('provider') or 'unknown'} | {row.get('model') or 'unknown'} | "
+            f"{context_window_display} | {input_tokens:,} | {output_tokens:,} | {cache_read:,} | {cache_write:,} | "
+            f"{total_tokens:,} | ${cost:.6f} | {_format_inference_time(row.get('inference_time_ms', row.get('inferenceTimeMs')))} |"
+        )
+    return "\n".join(lines)
+
+
+def _project_root() -> Path:
+    """Return the repository root for source-tree report provenance."""
+    return Path(__file__).resolve().parents[3]
+
+
+def _software_provenance() -> Optional[Dict[str, str]]:
+    """Read the software name and version from the project manifest."""
+    try:
+        with (_project_root() / "pyproject.toml").open("rb") as manifest:
+            project = tomllib.load(manifest).get("project", {})
+        name = str(project.get("name") or "").strip()
+        version = str(project.get("version") or "").strip()
+        if name and version:
+            return {"name": name, "version": version}
+    except (OSError, tomllib.TOMLDecodeError):
+        logger.debug("Unable to read report software provenance", exc_info=True)
+    return None
+
+
+def _https_repository_url(remote_url: str) -> Optional[str]:
+    """Normalize supported Git remote URL forms to an HTTPS repository URL."""
+    remote = str(remote_url or "").strip()
+    if not remote:
+        return None
+    if remote.startswith(("http://", "https://")):
+        return remote.removesuffix(".git")
+    ssh_match = re.fullmatch(r"ssh://(?:[^@]+@)?([^/]+)/(.+)", remote)
+    if ssh_match:
+        return f"https://{ssh_match.group(1)}/{ssh_match.group(2).removesuffix('.git')}"
+    scp_match = re.fullmatch(r"(?:[^@]+@)?([^:]+):(.+)", remote)
+    if scp_match:
+        return f"https://{scp_match.group(1)}/{scp_match.group(2).removesuffix('.git')}"
+    return None
+
+
+def _git_provenance() -> Optional[Dict[str, str]]:
+    """Return HTTPS repository URL and immutable commit hash when Git metadata is available."""
+    root = _project_root()
+    try:
+        remote = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=root,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    repository_url = _https_repository_url(remote.stdout)
+    commit_hash = commit.stdout.strip() if commit.returncode == 0 else ""
+    if repository_url and re.fullmatch(r"[0-9a-fA-F]{40}", commit_hash):
+        return {"repository_url": repository_url, "commit_hash": commit_hash}
+    return None
+
+
+def _fallback_context_window(provider: str, model_id: str) -> Optional[int]:
+    """Resolve the configured model's effective context window for an empty usage table."""
+    try:
+        from modules.config.models.factory import require_prompt_token_limit
+
+        return require_prompt_token_limit(provider, model_id)
+    except Exception:
+        logger.debug("Unable to resolve fallback model context window", exc_info=True)
+        return None
+
+
 def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
     """Extract report inputs exclusively from the latest run in an operation log."""
     summary: Dict[str, Any] = {
@@ -585,6 +734,7 @@ def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
             "total_tokens": 0,
             "duration": "",
             "cost": 0.0,
+            "model_usage": [],
         },
         "tools_used": [],
         "tool_failures": {},
@@ -625,7 +775,7 @@ def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
 
         event_type = payload.get("type")
         event_budget = payload.get("budget")
-        if event_type == "metrics_update":
+        if event_type in {"metrics_update", "operation_complete"}:
             event_metrics = payload.get("metrics", {}) if isinstance(payload.get("metrics"), dict) else {}
             event_budget = event_metrics.get("budget", event_budget)
             metrics["input_tokens"] = max(metrics["input_tokens"], int(event_metrics.get("inputTokens") or 0))
@@ -634,7 +784,12 @@ def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
                 metrics["total_tokens"],
                 int(event_metrics.get("totalTokens", event_metrics.get("tokens", 0)) or 0),
             )
-            metrics["duration"] = duration_max(metrics["duration"], str(event_metrics.get("duration") or ""))
+            metrics["duration"] = duration_max(
+                metrics["duration"],
+                str(event_metrics.get("duration") or payload.get("duration") or ""),
+            )
+            if isinstance(event_metrics.get("modelUsage"), list):
+                metrics["model_usage"] = event_metrics["modelUsage"]
             try:
                 metrics["cost"] = max(metrics["cost"], float(event_metrics.get("cost") or 0.0))
             except (TypeError, ValueError):
@@ -2057,16 +2212,45 @@ Canonical operation data:
 
             # Add footer
             main_provider = config_manager.get_provider()
-            main_models = {config_manager.get_llm_config(main_provider).model_id,
-                           config_manager.get_swarm_config(main_provider).llm.model_id}
+            main_model = config_manager.get_llm_config(main_provider).model_id
+            model_usage = []
+            fallback_context_window = _fallback_context_window(main_provider, main_model)
+            total_operation_time = latest_run.get("metrics", {}).get("duration", "N/A")
+            if callback_handler is not None:
+                try:
+                    model_usage = callback_handler.model_usage()
+                    total_operation_time = _format_elapsed_seconds(
+                        callback_handler.total_operation_time_seconds()
+                    )
+                except Exception:
+                    logger.debug("Unable to read live operation usage for report footer", exc_info=True)
+            if not model_usage:
+                model_usage = latest_run.get("metrics", {}).get("model_usage", [])
+            software = _software_provenance()
+            repository = _git_provenance()
+            provenance_lines = []
+            if software is not None:
+                provenance_lines.append(f"- Software: {software['name']} v{software['version']}")
+            if repository is not None:
+                provenance_lines.append(
+                    f"- Repository: {repository['repository_url']} @ {repository['commit_hash']}"
+                )
+            provenance = "\n".join(provenance_lines)
+            if provenance:
+                provenance = f"{provenance}\n"
+            footer_objective = " ".join(str(objective or "").split()) or "N/A"
 
             footer = f"""
 ----
 
 - Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-- Operation ID: {operation_id}
-- Provider: {main_provider}
-- Model(s): {", ".join(main_models)}
+{provenance}- Operation ID: {operation_id}
+- Operation Objective: {footer_objective}
+- Total Operation Time: {total_operation_time}
+
+### Model Usage
+
+{_format_model_usage_table(model_usage, main_provider, main_model, fallback_context_window)}
 """
             final_f.write(footer)
             final_f.write("\n" + _AI_CONTENT_DISCLAIMER + "\n")

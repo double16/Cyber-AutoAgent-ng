@@ -2,6 +2,9 @@
 
 ### Features
 
+- Add a final report footer with the operation objective, model-usage table grouped by provider/model, context window,
+  input/output/cache tokens, cost, human-readable inference time, total operation time, software version, and Git
+  repository provenance.
 - Resolve SecLists once per operation and provide its verified root to wordlist-capable agents through the tools guide.
 - Add a final ATT&CK enrichment pass that uses linked terminal task evidence, preserves first-pass CWE mappings,
   persists retryable results, and overlays the merged taxonomy into final and report-only output.

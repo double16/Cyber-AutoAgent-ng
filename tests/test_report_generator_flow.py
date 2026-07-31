@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from modules.handlers import report_generator as report_generator_module
 from modules.handlers.report_generator import (
     _append_artifact_evidence,
     _append_inline_review_feedback,
@@ -11,6 +12,7 @@ from modules.handlers.report_generator import (
     _configured_nonnegative_int,
     _extract_text_from_result,
     _format_artifact_excerpt,
+    _format_model_usage_table,
     _format_next_steps_appendix,
     _format_taxonomy_mappings,
     _format_taxonomy_coverage_tables,
@@ -23,6 +25,8 @@ from modules.handlers.report_generator import (
     _normalize_artifact_reference,
     _next_steps_fallback,
     _parse_latest_operation_log,
+    _https_repository_url,
+    _software_provenance,
     _run_next_steps_refinement,
     _run_report_refinement,
     _select_artifact_excerpt,
@@ -33,6 +37,58 @@ from modules.handlers.report_generator import (
 )
 from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task, clear_memory_client
 from tests.helpers.acceptance import make_acceptance
+
+
+def test_format_model_usage_table_and_elapsed_time_fallbacks():
+    table = _format_model_usage_table(
+        [
+            {
+                "provider": "ollama",
+                "model": "llama3",
+                "context_window_tokens": 128000,
+                "input_tokens": 1200,
+                "output_tokens": 300,
+                "cache_read_tokens": 10,
+                "cache_write_tokens": 5,
+                "cost": 0.1234567,
+                "inference_time_ms": 2500,
+            }
+        ],
+        "bedrock",
+        "fallback-model",
+    )
+
+    assert "| Provider | Model | Context Window | Input Tokens | Output Tokens |" in table
+    assert (
+        "| ollama | llama3 | 128,000 | 1,200 | 300 | 10 | 5 | 1,500 | $0.123457 | 0 hours 0 minutes |"
+        in table
+    )
+    assert "| fallback-model |" not in table
+
+    fallback = _format_model_usage_table([], "bedrock", "fallback-model", 200000)
+    assert "| bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A |" in fallback
+
+
+def test_software_provenance_reads_project_manifest(monkeypatch, tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'cyber-autoagent'\nversion = '9.9.9'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(report_generator_module, "_project_root", lambda: tmp_path)
+
+    assert _software_provenance() == {"name": "cyber-autoagent", "version": "9.9.9"}
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        ("https://github.com/example/project.git", "https://github.com/example/project"),
+        ("git@github.com:example/project.git", "https://github.com/example/project"),
+        ("ssh://git@github.com/example/project.git", "https://github.com/example/project"),
+    ],
+)
+def test_repository_url_normalizes_supported_git_remote_forms(remote, expected):
+    assert _https_repository_url(remote) == expected
 
 
 def test_extract_text_from_result():
@@ -1009,6 +1065,17 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     assert '"approved"' not in content
     assert "```json" not in content
     assert f"Operation ID: {operation_id}" in content
+    assert f"- Operation Objective: {objective}" in content
+    assert "- Software: cyber-autoagent v0.10.0" in content
+    assert "- Total Operation Time: N/A" in content
+    assert "### Model Usage" in content
+    assert "| test_provider | test_model | N/A | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A |" in content
+    assert (
+        content.index("- Report Generated:")
+        < content.index("- Software:")
+        < content.index("- Operation ID:")
+        < content.index("- Operation Objective:")
+    )
 
     # Verify that intermediate files were created
     assert (output_dir / "security_assessment_report.json").exists()

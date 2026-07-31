@@ -654,6 +654,95 @@ def test_operation_coordinator_aggregates_multiple_handlers(monkeypatch):
     assert sub.parent_agent_run_id == main.agent_run_id
 
 
+def test_operation_coordinator_groups_usage_by_provider_model_and_latency():
+    coordinator = OperationEventCoordinator("OP_USAGE_ROWS", MagicMock())
+    coordinator.update_usage(
+        "agent-a",
+        rb._AgentUsageEntry(
+            input_tokens=10,
+            output_tokens=5,
+            cache_read_tokens=2,
+            cache_write_tokens=1,
+            cost=0.25,
+            inference_time_ms=100,
+        ),
+        provider_id="litellm",
+        model_id="model-a",
+    )
+    coordinator.update_usage(
+        "agent-b",
+        rb._AgentUsageEntry(input_tokens=4, output_tokens=3, cost=0.1, inference_time_ms=40),
+        provider_id="ollama",
+        model_id="model-b",
+    )
+    coordinator.update_usage(
+        "agent-c",
+        rb._AgentUsageEntry(input_tokens=6, output_tokens=2, cost=0.05, inference_time_ms=20),
+        provider_id="litellm",
+        model_id="model-a",
+    )
+
+    assert coordinator.model_usage() == [
+        {
+            "provider": "litellm",
+            "model": "model-a",
+            "input_tokens": 16,
+            "output_tokens": 7,
+            "cache_read_tokens": 2,
+            "cache_write_tokens": 1,
+            "total_tokens": 23,
+            "cost": 0.3,
+            "inference_time_ms": 120,
+            "context_window_tokens": None,
+        },
+        {
+            "provider": "ollama",
+            "model": "model-b",
+            "input_tokens": 4,
+            "output_tokens": 3,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 7,
+            "cost": 0.1,
+            "inference_time_ms": 40,
+            "context_window_tokens": None,
+        },
+    ]
+
+
+def test_process_metrics_captures_provider_reported_inference_latency():
+    handler = make_handler()
+    handler.process_metrics(
+        SimpleNamespace(
+            accumulated_usage={"inputTokens": 12, "outputTokens": 4},
+            metrics={"latencyMs": 275},
+        )
+    )
+    rows = handler.coordinator.model_usage()
+
+    assert rows[0]["provider"] == "litellm"
+    assert rows[0]["model"] == "model"
+    assert rows[0]["inference_time_ms"] == 275
+
+
+def test_operation_coordinator_retains_effective_context_window_per_model():
+    coordinator = OperationEventCoordinator("OP_CONTEXT_WINDOW", MagicMock())
+    coordinator.update_usage(
+        "agent-a",
+        rb._AgentUsageEntry(input_tokens=10, context_window_tokens=48_000),
+        provider_id="litellm",
+        model_id="model-a",
+    )
+    coordinator.update_usage(
+        "agent-b",
+        rb._AgentUsageEntry(input_tokens=5, context_window_tokens=48_000),
+        provider_id="litellm",
+        model_id="model-a",
+    )
+
+    assert coordinator.model_usage()[0]["context_window_tokens"] == 48_000
+
+
 def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
     events = []
     emitter = SimpleNamespace(emit=lambda event: events.append(event))
