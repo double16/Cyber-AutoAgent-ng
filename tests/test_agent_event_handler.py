@@ -694,6 +694,9 @@ def test_operation_coordinator_groups_usage_by_provider_model_and_latency():
             "cost": 0.3,
             "inference_time_ms": 120,
             "context_window_tokens": None,
+            "efficiency": 100.0,
+            "model_calls": 0,
+            "correction_loops": 0,
         },
         {
             "provider": "ollama",
@@ -706,6 +709,9 @@ def test_operation_coordinator_groups_usage_by_provider_model_and_latency():
             "cost": 0.1,
             "inference_time_ms": 40,
             "context_window_tokens": None,
+            "efficiency": 100.0,
+            "model_calls": 0,
+            "correction_loops": 0,
         },
     ]
 
@@ -723,6 +729,20 @@ def test_process_metrics_captures_provider_reported_inference_latency():
     assert rows[0]["provider"] == "litellm"
     assert rows[0]["model"] == "model"
     assert rows[0]["inference_time_ms"] == 275
+
+
+def test_model_efficiency_is_higher_when_corrections_are_lower():
+    coordinator = OperationEventCoordinator("OP_EFFICIENCY", MagicMock())
+    coordinator.record_model_call("litellm", "model-a")
+    coordinator.record_model_call("litellm", "model-a")
+    coordinator.record_model_call("litellm", "model-b")
+    coordinator.record_efficiency_correction("litellm", "model-b", "critic_cycle")
+
+    rows = {row["model"]: row for row in coordinator.model_usage()}
+
+    assert rows["model-a"]["efficiency"] > rows["model-b"]["efficiency"]
+    assert rows["model-a"]["efficiency"] == 100.0
+    assert rows["model-b"]["efficiency"] == 50.0
 
 
 def test_operation_coordinator_retains_effective_context_window_per_model():

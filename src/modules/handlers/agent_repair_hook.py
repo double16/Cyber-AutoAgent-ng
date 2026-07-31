@@ -103,6 +103,9 @@ class AgentRepairHook(HookProvider):
                     if not state.get(_TOOL_CALLS_RETRY_STATE_KEY):
                         state[_TOOL_CALLS_RETRY_STATE_KEY] = True
                         event.retry = True
+                        record_efficiency = getattr(callback_handler, "record_efficiency_event", None)
+                        if callable(record_efficiency):
+                            record_efficiency("model_repair", agent=agent)
                         logger.warning(
                             "Detected tool-call parse error in step %s; retrying once with stricter tool_call instruction (%s)",
                             str(callback_handler.action_count) if callback_handler else "?",
@@ -137,6 +140,9 @@ class AgentRepairHook(HookProvider):
                         if patch_ollama_model_json_toolcalls():
                             logger.info("Detected JSON style tool calls, patched model and retry")
                             event.retry = True
+                            record_efficiency = getattr(callback_handler, "record_efficiency_event", None)
+                            if callable(record_efficiency):
+                                record_efficiency("model_repair", agent=agent)
                             return
 
                 if _XML_TOOLCALL_RE.search(assistant_text):
@@ -148,6 +154,9 @@ class AgentRepairHook(HookProvider):
 
                     state[_TOOL_CALLS_RETRY_STATE_KEY] = True
                     event.retry = True
+                    record_efficiency = getattr(callback_handler, "record_efficiency_event", None)
+                    if callable(record_efficiency):
+                        record_efficiency("model_repair", agent=agent)
                     logger.warning(
                         "Detected XML-ish tool call markup in step %s; forcing model retry with corrective instruction",
                         str(callback_handler.action_count) if callback_handler else "?"

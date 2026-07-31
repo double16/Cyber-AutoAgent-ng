@@ -769,6 +769,11 @@ class MultiAgentWorkflowController:
     def _log_workflow(self, message: str, *args) -> None:
         logger.info("WORKFLOW[%s]: " + message, self.runtime.operation_id, *args)
 
+    def _record_efficiency_correction(self, category: str) -> None:
+        recorder = getattr(self.runtime.callback_handler, "record_efficiency_event", None)
+        if callable(recorder):
+            recorder(category)
+
     def _short(self, value: Any, limit: int = 300) -> str:
         text = str(value or "").replace("\n", " ").strip()
         return text[:limit] + "..." if len(text) > limit else text
@@ -1638,6 +1643,8 @@ class MultiAgentWorkflowController:
             repeated = any(signature in acceptance_failure_signatures for signature in signatures)
             acceptance_failure_signatures.update(signatures)
             acceptance_failures += len(failed_calls)
+            for _ in failed_calls:
+                self._record_efficiency_correction("acceptance_correction")
             return failed_calls, successful_calls, repeated
 
         with self._task_executor_session("task_executor", tools, system_prompt) as run_executor:
@@ -1828,6 +1835,7 @@ class MultiAgentWorkflowController:
                                 and endpoint_evidence_recoveries < max_endpoint_recoveries
                             ):
                                 endpoint_evidence_recoveries += 1
+                                self._record_efficiency_correction("endpoint_evidence_correction")
                                 decision = WorkflowDecision(
                                     status="partial_failure",
                                     reason=binding_failure,
@@ -1896,6 +1904,7 @@ class MultiAgentWorkflowController:
                                 if decision.finding_recommendation_required:
                                     if finding_observation_repairs < 1:
                                         finding_observation_repairs += 1
+                                        self._record_efficiency_correction("finding_observation_repair")
                                         acceptance_submitted = False
                                         continuation_criteria = [
                                             "store the artifact-backed security finding identified by the evaluator"
@@ -1921,6 +1930,7 @@ class MultiAgentWorkflowController:
                                     and evaluator_corrections < evaluator_correction_limit
                                 ):
                                     evaluator_corrections += 1
+                                    self._record_efficiency_correction("evaluator_correction")
                                     acceptance_submitted = False
                                     evaluator_instructions = decision.instructions.strip()
                                     continuation_criteria = [
@@ -2671,6 +2681,7 @@ Return exactly one decision for each candidate.
                         iteration,
                     )
                     break
+                self._record_efficiency_correction("task_prompt_critic_cycle")
                 if iteration == self.task_prompt_refinement_iterations:
                     initial_repairable = self._task_prompt_feedback_repairable(critique)
                     repairable_failure = initial_repairable
@@ -2712,6 +2723,7 @@ Return exactly one decision for each candidate.
                                 iteration,
                             )
                             break
+                        self._record_efficiency_correction("task_prompt_critic_cycle")
                         repair_feedback = repair_critique["feedback"]
                         repair_context_feedback = list(repair_feedback)
                     self._log_workflow(
@@ -3381,6 +3393,8 @@ review existing memories. Return only the requested JSON decision."""
             with self._task_creator_session(tools, system_prompt) as run_creator:
                 for attempt in range(1, max_attempts + 1):
                     batch_attempts = attempt
+                    if attempt > 1:
+                        self._record_efficiency_correction("task_creator_cycle")
                     creator_result = None
                     rejected_proposals = self._task_creator_rejected_proposals(previous_creator_result)
                     attempt_prompt = (
@@ -4449,6 +4463,7 @@ Allowed evidence references:
                 ratio = float(getattr(classification, "repetition_ratio", 0.0) or 0.0)
                 if attempt >= self.json_retries:
                     break
+                self._record_efficiency_correction("json_retry")
                 self._log_workflow(
                     "json agent role=%s max_tokens retrying classification=%s repetition_ratio=%.3f",
                     role,
@@ -4484,6 +4499,7 @@ Allowed evidence references:
                 last_error = error
                 if attempt >= self.json_retries:
                     break
+                self._record_efficiency_correction("json_retry")
                 self._log_workflow(
                     "json agent role=%s invalid_json retrying error=%s response_excerpt=%s",
                     role,
@@ -4586,6 +4602,7 @@ Original prompt:
             if critique["approved"]:
                 self._log_workflow("plan critic approved iteration=%s", iteration)
                 break
+            self._record_efficiency_correction("plan_critic_cycle")
             if iteration == self.plan_refinement_iterations:
                 self._log_workflow(
                     "plan critic rejected final iteration=%s feedback_count=%s",

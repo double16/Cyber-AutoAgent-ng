@@ -113,6 +113,12 @@ class _AgentUsageEntry:
 
 
 @dataclass
+class _ModelEfficiencyEntry:
+    model_calls: int = 0
+    correction_loops: int = 0
+
+
+@dataclass
 class ReportBudgetEstimate:
     input_tokens: int = 0
     output_tokens: int = 0
@@ -150,6 +156,7 @@ class OperationEventCoordinator:
         self.evidence_count = 0
         self.tool_counts: Dict[str, int] = {}
         self._handler_usage: Dict[str, tuple[str, str, _AgentUsageEntry]] = {}
+        self._model_efficiency: Dict[tuple[str, str], _ModelEfficiencyEntry] = {}
         self.report_findings = 0
         self.report_observations = 0
         self.report_finding_content_tokens = 0
@@ -224,6 +231,26 @@ class OperationEventCoordinator:
                 total.inference_time_ms += float(entry.inference_time_ms)
             return total
 
+    def record_model_call(self, provider_id: Optional[str], model_id: Optional[str]) -> None:
+        """Record one completed model inference for efficiency accounting."""
+        key = (str(provider_id or "unknown"), str(model_id or "unknown"))
+        with self._lock:
+            entry = self._model_efficiency.setdefault(key, _ModelEfficiencyEntry())
+            entry.model_calls += 1
+
+    def record_efficiency_correction(
+        self,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        category: str,
+    ) -> None:
+        """Record one bounded correction/recovery loop for a model."""
+        del category  # Categories remain available at call sites for auditability.
+        key = (str(provider_id or "unknown"), str(model_id or "unknown"))
+        with self._lock:
+            entry = self._model_efficiency.setdefault(key, _ModelEfficiencyEntry())
+            entry.correction_loops += 1
+
     def model_usage(self) -> List[Dict[str, Any]]:
         """Return operation usage grouped by provider and model."""
         with self._lock:
@@ -241,21 +268,32 @@ class OperationEventCoordinator:
                 if isinstance(context_window, int) and context_window > 0:
                     aggregate.context_window_tokens = max(aggregate.context_window_tokens or 0, context_window)
 
-            return [
-                {
-                    "provider": provider_id,
-                    "model": model_id,
-                    "input_tokens": entry.input_tokens,
-                    "output_tokens": entry.output_tokens,
-                    "cache_read_tokens": entry.cache_read_tokens,
-                    "cache_write_tokens": entry.cache_write_tokens,
-                    "total_tokens": entry.input_tokens + entry.output_tokens,
-                    "cost": entry.cost,
-                    "inference_time_ms": entry.inference_time_ms,
-                    "context_window_tokens": entry.context_window_tokens,
-                }
-                for (provider_id, model_id), entry in sorted(grouped.items())
-            ]
+            for key in self._model_efficiency:
+                grouped.setdefault(key, _AgentUsageEntry())
+
+            rows = []
+            for (provider_id, model_id), entry in sorted(grouped.items()):
+                efficiency = self._model_efficiency.get((provider_id, model_id), _ModelEfficiencyEntry())
+                denominator = efficiency.model_calls + efficiency.correction_loops
+                score = 100.0 if denominator == 0 else 100.0 * efficiency.model_calls / denominator
+                rows.append(
+                    {
+                        "provider": provider_id,
+                        "model": model_id,
+                        "input_tokens": entry.input_tokens,
+                        "output_tokens": entry.output_tokens,
+                        "cache_read_tokens": entry.cache_read_tokens,
+                        "cache_write_tokens": entry.cache_write_tokens,
+                        "total_tokens": entry.input_tokens + entry.output_tokens,
+                        "cost": entry.cost,
+                        "inference_time_ms": entry.inference_time_ms,
+                        "context_window_tokens": entry.context_window_tokens,
+                        "efficiency": score,
+                        "model_calls": efficiency.model_calls,
+                        "correction_loops": efficiency.correction_loops,
+                    }
+                )
+            return rows
 
     def elapsed_seconds(self) -> float:
         with self._lock:
@@ -582,6 +620,8 @@ class AgentEventHandler(PrintingCallbackHandler):
         self._aggregate_cost = 0.0
         self._agent_usage_cache: OrderedDict[str, _AgentUsageEntry] = OrderedDict()
         self._agent_usage_cache_size = _AGENT_USAGE_CACHE_SIZE
+        self._efficiency_usage_signatures: Dict[str, tuple[Any, ...]] = {}
+        self._report_efficiency_usage_signature: Optional[tuple[Any, ...]] = None
         self._report_metrics_input_baseline = 0
         self._report_metrics_output_baseline = 0
         self._report_metrics_cache_read_baseline = 0
@@ -968,6 +1008,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             self._handle_completion()
 
         if kwargs.get("error") and "MaxTokensReached" in str(kwargs.get("error")):
+            self.record_efficiency_event("output_token_retry", agent=kwargs.get("agent"))
             self.emit_ui_event(
                 {
                     "type": "error",
@@ -1096,6 +1137,55 @@ class AgentEventHandler(PrintingCallbackHandler):
         except Exception:
             pass
 
+    def _model_identity(self, agent: Any = None) -> tuple[str, str]:
+        provider_id = self.provider_id
+        model_id = self.model_id
+        if agent is not None:
+            try:
+                provider_id = get_provider_from_agent(agent) or provider_id
+                model_id = get_model_id_from_agent(agent) or model_id
+            except Exception:
+                pass
+        return str(provider_id or "unknown"), str(model_id or "unknown")
+
+    def record_efficiency_event(self, category: str, agent: Any = None) -> None:
+        """Record a correction loop attributed to this handler's active model."""
+        coordinator = self.coordinator
+        if coordinator is None:
+            return
+        provider_id, model_id = self._model_identity(agent or self._last_agent)
+        coordinator.record_efficiency_correction(provider_id, model_id, category)
+
+    def _record_model_call_if_new(self, usage: Dict[str, Any], agent: Any = None) -> None:
+        """Count one inference when cumulative usage advances for an agent."""
+        coordinator = self.coordinator
+        if coordinator is None:
+            return
+        signature = tuple(
+            usage.get(key, 0) or 0
+            for key in (
+                "inputTokens",
+                "outputTokens",
+                "cacheReadInputTokens",
+                "cacheWriteInputTokens",
+            )
+        )
+        if sum(int(value) for value in signature) <= 0:
+            return
+        if agent is not None:
+            identity = self._get_or_assign_agent_usage_uuid(agent)
+            signatures = getattr(self, "_efficiency_usage_signatures", {})
+            if signatures.get(identity) == signature:
+                return
+            signatures[identity] = signature
+            self._efficiency_usage_signatures = signatures
+        elif getattr(self, "_report_efficiency_usage_signature", None) == signature:
+            return
+        else:
+            self._report_efficiency_usage_signature = signature
+        provider_id, model_id = self._model_identity(agent)
+        coordinator.record_model_call(provider_id, model_id)
+
     @staticmethod
     def _context_window_limit(agent: Any) -> Optional[int]:
         """Return the effective context-window limit configured on an agent model."""
@@ -1124,6 +1214,10 @@ class AgentEventHandler(PrintingCallbackHandler):
         """Publish cumulative evaluation usage into the operation metrics total."""
         if self.coordinator is None:
             return
+        self.coordinator.record_model_call(
+            str(usage.get("providerId") or self.provider_id or "unknown"),
+            str(usage.get("modelId") or self.model_id or "unknown"),
+        )
         input_tokens = int(usage.get("inputTokens", 0) or 0)
         output_tokens = int(usage.get("outputTokens", 0) or 0)
         cache_read_tokens = int(usage.get("cacheReadTokens", 0) or 0)
@@ -1216,6 +1310,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             self._report_metrics_cache_read_baseline = 0
             self._report_metrics_cache_write_baseline = 0
             self._report_metrics_inference_time_baseline = 0.0
+            self._report_efficiency_usage_signature = None
 
     def record_report_metrics(self, event_loop_metrics: Any, agent: Any = None) -> None:
         self.process_metrics(event_loop_metrics, agent=agent)
@@ -2486,6 +2581,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             if self.should_stop():
                 raise BudgetLimitReached("Budget limit reached")
             self.action_count += 1
+            self.record_efficiency_event("reasoning_loop")
             self._record_action_boundary()
             self._reasoning_action_header_emitted = True
         except Exception:
@@ -2909,6 +3005,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         inference_time_ms = self._extract_inference_time_ms(event_loop_metrics)
         if inference_time_ms > 0:
             usage["inferenceTimeMs"] = inference_time_ms
+        self._record_model_call_if_new(usage, agent=agent)
 
         cache_read = usage.get("cacheReadInputTokens", 0)
         cache_write = usage.get("cacheWriteInputTokens", 0)

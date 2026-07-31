@@ -623,8 +623,8 @@ def _format_model_usage_table(
         ]
 
     lines = [
-        "| Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time | Efficiency |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in sorted(
         normalized_rows,
@@ -638,10 +638,14 @@ def _format_model_usage_table(
         cost = float(row.get("cost", 0.0) or 0.0)
         context_window = row.get("context_window_tokens", row.get("contextWindowTokens"))
         context_window_display = f"{int(context_window):,}" if isinstance(context_window, int) else "N/A"
+        efficiency = row.get("efficiency")
+        efficiency_display = f"{float(efficiency):.1f}%" if isinstance(efficiency, (int, float)) else "N/A"
         lines.append(
             f"| {row.get('provider') or 'unknown'} | {row.get('model') or 'unknown'} | "
             f"{context_window_display} | {input_tokens:,} | {output_tokens:,} | {cache_read:,} | {cache_write:,} | "
-            f"{total_tokens:,} | ${cost:.6f} | {_format_inference_time(row.get('inference_time_ms', row.get('inferenceTimeMs')))} |"
+            f"{total_tokens:,} | ${cost:.6f} | "
+            f"{_format_inference_time(row.get('inference_time_ms', row.get('inferenceTimeMs')))} | "
+            f"{efficiency_display} |"
         )
     return "\n".join(lines)
 
@@ -965,6 +969,7 @@ def _run_report_refinement(
     section_requirements: str,
     refinement_cycles: int,
     json_retries: int,
+    efficiency_callback: Any = None,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
     """Generate and critic-guided revise one report section."""
     content = _extract_text_from_result(actor_agent(source_prompt))
@@ -973,6 +978,8 @@ def _run_report_refinement(
 
     final_rejection = None
     for cycle in range(1, refinement_cycles + 1):
+        if callable(efficiency_callback):
+            efficiency_callback("critic_cycle")
         critique = _run_report_critic(
             critic_agent,
             _report_critic_prompt(section_label, section_requirements, source_prompt, content),
@@ -1291,6 +1298,7 @@ def _run_next_steps_refinement(
     source: Dict[str, Any],
     refinement_cycles: int,
     json_retries: int,
+    efficiency_callback: Any = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Generate and critic-guided revise the structured Appendix B data."""
     data, used_fallback = _run_next_steps_actor(
@@ -1301,6 +1309,8 @@ def _run_next_steps_refinement(
 
     final_rejection = None
     for cycle in range(1, refinement_cycles + 1):
+        if callable(efficiency_callback):
+            efficiency_callback("critic_cycle")
         critique = _run_report_critic(
             critic_agent,
             _report_critic_prompt(
@@ -1702,6 +1712,7 @@ there are zero verified findings; never create a nonzero "No Verified Findings" 
                 exec_system_prompt,
                 refinement_cycles,
                 json_retries,
+                efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
             )
         finally:
             _cleanup_report_agent(exec_agent, "report executive summary actor")
@@ -1789,6 +1800,7 @@ Finding Data:
                     finding_system_prompt,
                     refinement_cycles,
                     json_retries,
+                    efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
                 )
             finally:
                 _cleanup_report_agent(finding_agent, f"report finding {i + 1} actor")
@@ -1967,6 +1979,7 @@ Observation Data:
                     observation_system_prompt,
                     refinement_cycles,
                     json_retries,
+                    efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
                 )
             finally:
                 _cleanup_report_agent(obs_agent, f"report observation {i + 1} actor")
@@ -2060,6 +2073,7 @@ Use the following canonical data. Do not invent or recalculate task counts:
                 appendix_system_prompt,
                 refinement_cycles,
                 json_retries,
+                efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
             )
         finally:
             _cleanup_report_agent(appendix_agent, "report methodology actor")
@@ -2174,6 +2188,7 @@ Canonical operation data:
                 next_steps_source,
                 refinement_cycles,
                 json_retries,
+                efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
             )
         finally:
             _cleanup_report_agent(next_steps_agent, "report next-steps actor")
@@ -2245,12 +2260,14 @@ Canonical operation data:
 
 - Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {provenance}- Operation ID: {operation_id}
-- Operation Objective: {footer_objective}
 - Total Operation Time: {total_operation_time}
+- Operation Objective: {footer_objective}
 
 ### Model Usage
 
 {_format_model_usage_table(model_usage, main_provider, main_model, fallback_context_window)}
+
+*Efficiency = 100 × model inferences ÷ (model inferences + correction loops). Correction loops include bounded reasoning, output-token, repair, tool-recovery, evaluator, and critic retries; higher values indicate greater efficiency.*
 """
             final_f.write(footer)
             final_f.write("\n" + _AI_CONTENT_DISCLAIMER + "\n")

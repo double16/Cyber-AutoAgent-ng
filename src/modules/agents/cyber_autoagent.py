@@ -1154,6 +1154,7 @@ def create_agent(
             max_corrections=max_corrections,
             quarantine_callback=quarantine_shell_command,
             quarantined_executables=runtime.quarantined_shell_commands,
+            efficiency_callback=callback_handler.record_efficiency_event,
         )
         agent_hooks.append(failure_recovery_hook)
     if agent_type in {"task_creator", "task_executor"}:

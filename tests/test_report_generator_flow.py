@@ -60,13 +60,13 @@ def test_format_model_usage_table_and_elapsed_time_fallbacks():
 
     assert "| Provider | Model | Context Window | Input Tokens | Output Tokens |" in table
     assert (
-        "| ollama | llama3 | 128,000 | 1,200 | 300 | 10 | 5 | 1,500 | $0.123457 | 0 hours 0 minutes |"
+        "| ollama | llama3 | 128,000 | 1,200 | 300 | 10 | 5 | 1,500 | $0.123457 | 0 hours 0 minutes | N/A |"
         in table
     )
     assert "| fallback-model |" not in table
 
     fallback = _format_model_usage_table([], "bedrock", "fallback-model", 200000)
-    assert "| bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A |" in fallback
+    assert "| bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in fallback
 
 
 def test_software_provenance_reads_project_manifest(monkeypatch, tmp_path):
@@ -1069,7 +1069,8 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     assert "- Software: cyber-autoagent v0.10.0" in content
     assert "- Total Operation Time: N/A" in content
     assert "### Model Usage" in content
-    assert "| test_provider | test_model | N/A | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A |" in content
+    assert "| test_provider | test_model | N/A | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in content
+    assert "*Efficiency = 100 × model inferences" in content
     assert (
         content.index("- Report Generated:")
         < content.index("- Software:")
