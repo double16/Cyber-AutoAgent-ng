@@ -1695,6 +1695,7 @@ def main():
                                 text="",
                                 outcomes=outcomes,
                                 max_tokens_exhausted=True,
+                                max_tokens_classification=kind,
                                 max_tokens_reason=(
                                     f"{role_label} repeated the same reasoning loop after its bounded recovery."
                                     if kind == "reasoning_loop"

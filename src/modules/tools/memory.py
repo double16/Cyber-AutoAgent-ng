@@ -93,7 +93,7 @@ _FAISS_WRITE_LOCK = threading.Lock()
 
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
-TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
+TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded"]
 TargetType = Literal["network", "network_range", "filesystem"]
 TargetScope = Literal["all", "subset"]
 AcceptanceMode = Literal["outcome", "coverage"]
@@ -222,6 +222,8 @@ def _normalize_task_status(value: Any) -> Any:
         "failed_partial": "partial_failure",
         "failed": "blocked",
         "stalled": "blocked",
+        "replaced": "superseded",
+        "supersede": "superseded",
         "in_progress": "active",
         "queued": "pending",
     }, field_name="task_status")
@@ -843,14 +845,14 @@ class Task:
         if not isinstance(self.objective, str) or not self.objective.strip():
             raise ValueError("objective must be a non-empty string")
         normalized_status = _normalize_task_status(self.status)
-        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked"}:
+        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked", "superseded"}:
             raise ValueError("task status is invalid")
         object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
-        if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
-            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded"):
+            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked|superseded")
         if self.target_scope not in ("all", "subset"):
             raise ValueError("target_scope must be all or subset")
         if not isinstance(self.target_ids, list):
@@ -6390,7 +6392,7 @@ class Mem0ServiceClient:
         # retained for reporting, but must not be converted into a completed operation.
         tasks = _get_plan_store().get_tasks(op_id)
         all_done = all(p.status in {"done", "not_applicable"} for p in plan.phases)
-        all_tasks_done = all(task.status == "done" for task in tasks)
+        all_tasks_done = all(task.status in {"done", "superseded"} for task in tasks)
         actionable_tasks = [task for task in tasks if task.status in {"active", "pending"}]
         add_completion_reminder = False
         if all_done and all_tasks_done and not plan.assessment_complete:
@@ -6530,7 +6532,7 @@ class Mem0ServiceClient:
             *,
             user_id: str,
             phase: int,
-            new_status: Literal["done", "partial_failure", "blocked"],
+            new_status: Literal["done", "partial_failure", "blocked", "superseded"],
             new_status_reason: Optional[str] = None,
             task_uid: Optional[str] = None,
     ) -> Tuple[Optional[Task], Optional[Task]]:
@@ -6567,6 +6569,7 @@ class Mem0ServiceClient:
                 created_at=target.created_at,
                 kind=target.kind,
                 reference_id=target.reference_id,
+                replacement_of=target.replacement_of,
                 target_scope=target.target_scope,
                 target_ids=target.target_ids,
             )
@@ -6574,7 +6577,7 @@ class Mem0ServiceClient:
 
         # After updating, find next pending
         next_active: Optional[Task] = None
-        if new_status in ("done", "partial_failure", "blocked"):
+        if new_status in ("done", "partial_failure", "blocked", "superseded"):
             # Check for another active (shouldn't be any)
             still_active = [t for t in phase_tasks if t.status == "active" and t.task_uid != (target.task_uid if target else None)]
             if not still_active:
@@ -6595,6 +6598,7 @@ class Mem0ServiceClient:
                         created_at=p.created_at,
                         kind=p.kind,
                         reference_id=p.reference_id,
+                        replacement_of=p.replacement_of,
                         target_scope=p.target_scope,
                         target_ids=p.target_ids,
                     )

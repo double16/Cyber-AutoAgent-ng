@@ -14,6 +14,7 @@ TASK_QUALITY = {
     "done": 1.0,
     "active": 0.85,
     "pending": 0.65,
+    "superseded": 1.0,
     "partial_failure": 0.25,
     "blocked": 0.10,
 }
@@ -125,7 +126,9 @@ def _phase_health(
     prediction: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     future_phase = phase.status == "pending" and phase.id != current_phase
-    inconsistent = phase.status == "done" and (not tasks or any(task.status != "done" for task in tasks))
+    inconsistent = phase.status == "done" and (
+        not tasks or any(task.status not in {"done", "superseded"} for task in tasks)
+    )
 
     if future_phase:
         task_score = 1.0
@@ -203,7 +206,7 @@ def _coverage_feasibility(
     remaining_work = 0
     for task in tasks:
         weight = _task_weight(task)
-        if str(task.status) == "done":
+        if str(task.status) in {"done", "superseded"}:
             completed_work += weight
         else:
             remaining_work += weight

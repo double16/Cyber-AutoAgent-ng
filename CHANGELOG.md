@@ -2,6 +2,7 @@
 
 ### Features
 
+- Resolve SecLists once per operation and provide its verified root to wordlist-capable agents through the tools guide.
 - Add a final ATT&CK enrichment pass that uses linked terminal task evidence, preserves first-pass CWE mappings,
   persists retryable results, and overlays the merged taxonomy into final and report-only output.
 - Add a task-trace taxonomy annotator that catalog-validates and persists CWE and MITRE ATT&CK mappings after finding

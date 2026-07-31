@@ -11,6 +11,7 @@
 and shell commands is allowed and does not make any method exclusive.
 Save all artifacts to OPERATION ARTIFACTS DIRECTORY (path injected above).
 **Discovery Rule**: When choosing between tools or unsure what exists → `tool_catalog` first.
+{{ seclists_context }}
 
 - Large tool output will be truncated as indicated by
   `[Tool output: 10,000 chars | Inline: 2,000 chars | Full: <filename>]`. Use **shell** to analyze full content of "<filename>".

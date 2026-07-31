@@ -84,6 +84,17 @@ def test_all_successful_work_is_perfect_health():
     assert health["phase_inconsistent"] is False
 
 
+def test_superseded_task_is_neutral_terminal_work():
+    plan = _plan(PlanPhase(id=1, title="Done", status="done"))
+
+    health = compute_operation_health(plan, [_task("replaced", 1, "superseded")])
+
+    assert health["score"] == 1.0
+    assert health["phase_inconsistent"] is False
+    assert health["failure_count"] == 0
+    assert health["completion_feasible"] is True
+
+
 def test_done_phase_with_unfinished_task_is_not_perfect_and_is_inconsistent():
     plan = _plan(PlanPhase(id=1, title="Done", status="done"))
 

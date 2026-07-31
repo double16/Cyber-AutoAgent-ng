@@ -56,6 +56,31 @@ class TestGetSystemPrompt:
         assert "ENVIRONMENTAL CONTEXT" in prompt
         assert "nmap, curl" in prompt
 
+    def test_get_system_prompt_renders_seclists_context_in_tools_guide(self):
+        prompt = get_system_prompt(
+            target="test.com",
+            objective="test objective",
+            operation_id="OP_20240101_120000",
+            budget=_budget(),
+            seclists_root="/custom/SecLists",
+        )
+
+        assert "## SecLists Wordlists" in prompt
+        assert "SecLists root: `/custom/SecLists`" in prompt
+        assert "canonical SecLists-relative path" in prompt
+        assert "{{ seclists_context }}" not in prompt
+
+    def test_get_system_prompt_omits_seclists_context_when_unavailable(self):
+        prompt = get_system_prompt(
+            target="test.com",
+            objective="test objective",
+            operation_id="OP_20240101_120000",
+            budget=_budget(),
+        )
+
+        assert "SecLists Wordlists" not in prompt
+        assert "{{ seclists_context }}" not in prompt
+
     def test_get_system_prompt_with_output_config(self):
         output_config = {
             "artifacts_path": "/custom/artifacts",

@@ -198,6 +198,7 @@ class TaskExecutorCycleResult:
     recovery_guidance: str = ""
     max_tokens_exhausted: bool = False
     max_tokens_reason: str = ""
+    max_tokens_classification: str = ""
 
 
 FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
@@ -405,7 +406,7 @@ class WorkflowStateStore:
         """Return whether every phase and task reached a successful terminal state."""
 
         phases_complete = all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
-        tasks_complete = all(task.status == "done" for task in self.list_tasks())
+        tasks_complete = all(task.status in {"done", "superseded"} for task in self.list_tasks())
         objective_records = self.list_objective_validation_records()
         objective_complete = not objective_records or any(
             record.get("resolution") == "objective_verified" for record in objective_records
@@ -532,7 +533,7 @@ class WorkflowStateStore:
         ))
 
     def mark_task(self, task: Task, status: str, reason: str = "") -> Task:
-        if status not in ("done", "partial_failure", "blocked"):
+        if status not in ("done", "partial_failure", "blocked", "superseded"):
             raise ValueError(f"task status must be terminal, got {status}")
         return self.store_task(Task(
             task_uid=task.task_uid,
@@ -965,7 +966,7 @@ class MultiAgentWorkflowController:
     def _task_creator_correction_count(self) -> int:
         config_manager = self.runtime.config_manager
         if config_manager:
-            return max(0, config_manager.getenv_int("CYBER_TASK_CREATOR_MAX_CORRECTIONS", 4))
+            return max(0, config_manager.getenv_int("CYBER_TASK_CREATOR_MAX_CORRECTIONS", 6))
         return 4
 
     def _task_acceptance_correction_count(self) -> int:
@@ -978,6 +979,12 @@ class MultiAgentWorkflowController:
         config_manager = self.runtime.config_manager
         if config_manager:
             return max(0, config_manager.getenv_int("CYBER_ENDPOINT_EVIDENCE_MAX_CORRECTIONS", 1))
+        return 1
+
+    def _task_evaluator_correction_count(self) -> int:
+        config_manager = self.runtime.config_manager
+        if config_manager:
+            return max(0, config_manager.getenv_int("CYBER_TASK_EVALUATOR_MAX_CORRECTIONS", 1))
         return 1
 
     def run(self) -> None:
@@ -1340,7 +1347,7 @@ class MultiAgentWorkflowController:
 
         return (
             all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
-            and all(task.status == "done" for task in self.state.list_tasks())
+            and all(task.status in {"done", "superseded"} for task in self.state.list_tasks())
         )
 
     def _workflow_coverage_summary(self, plan: OperationPlan) -> List[Dict[str, Any]]:
@@ -1474,16 +1481,23 @@ class MultiAgentWorkflowController:
                 self._task_label(task),
                 self._short(reason),
             )
-            updated_task = self.state.mark_task(task, "partial_failure", reason)
-            self._emit_task_done(updated_task)
             if error.repairable:
                 replacement = self._create_prompt_replacement_task(task, error)
                 if replacement is not None:
+                    updated_task = self.state.mark_task(
+                        task,
+                        "superseded",
+                        f"{reason} Superseded by replacement task {replacement.task_uid}.",
+                    )
+                    self._emit_task_done(updated_task)
                     self._log_workflow(
-                        "task prompt replacement queued original=%s replacement=%s",
+                        "task prompt superseded original=%s replacement=%s",
                         self._task_label(task),
                         self._task_label(replacement),
                     )
+                    return
+            updated_task = self.state.mark_task(task, "partial_failure", reason)
+            self._emit_task_done(updated_task)
             return
 
         selected_tools = prompt_spec.get("tools", [])
@@ -1590,10 +1604,12 @@ class MultiAgentWorkflowController:
         failed_tool_inputs: Counter[tuple[str, str]] = Counter()
         recovery_used = False
         endpoint_evidence_recoveries = 0
+        evaluator_corrections = 0
         finding_observation_repairs = 0
         previous_progress_signature: Optional[str] = None
         acceptance_correction_limit = self._task_acceptance_correction_count()
         endpoint_evidence_correction_limit = self._task_endpoint_evidence_correction_count()
+        evaluator_correction_limit = self._task_evaluator_correction_count()
         decision = WorkflowDecision(status="partial_failure", reason="Task executor did not run")
 
         def repeated_correctable_failure(outcomes: List[ToolOutcome]) -> Optional[ToolOutcome]:
@@ -1630,6 +1646,7 @@ class MultiAgentWorkflowController:
                 self.task_execution_cycles
                 + acceptance_correction_limit
                 + endpoint_evidence_correction_limit
+                + evaluator_correction_limit
                 + 1
             )
             for cycle in range(1, maximum_actor_cycles + 1):
@@ -1639,6 +1656,9 @@ class MultiAgentWorkflowController:
                 ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit) + min(
                     finding_observation_repairs,
                     1,
+                ) + min(
+                    evaluator_corrections,
+                    evaluator_correction_limit,
                 )
                 if cycle > allowed_actor_cycles:
                     break
@@ -1676,6 +1696,23 @@ class MultiAgentWorkflowController:
                         phase,
                         existing_task_uids,
                     )
+                    if cycle_result.max_tokens_classification == "reasoning_loop":
+                        replacement = self._create_reasoning_loop_replacement_task(task, tool_outcomes)
+                        if replacement is not None:
+                            reason = (
+                                "Superseded after bounded reasoning-loop recovery; replacement task "
+                                f"{replacement.task_uid} will satisfy the remaining acceptance criterion."
+                            )
+                            updated_task = self.state.mark_task(task, "superseded", reason)
+                            self._emit_task_done(updated_task)
+                            self._emit_task_superseded(updated_task, replacement)
+                            self._log_workflow(
+                                "task reasoning-loop superseded original=%s replacement=%s cycle=%s",
+                                self._task_label(task),
+                                self._task_label(replacement),
+                                cycle,
+                            )
+                            return
                     decision = WorkflowDecision(
                         status="partial_failure",
                         reason=cycle_result.max_tokens_reason or (
@@ -1743,6 +1780,7 @@ class MultiAgentWorkflowController:
                 acceptance_submitted = False
                 continuation_criteria: Optional[List[str]] = None
                 continuation_required_tool = ""
+                evaluator_instructions = ""
                 self._log_workflow(
                     "task worker context task=%s cycle=%s included=%s chars=%s",
                     self._task_label(task),
@@ -1877,6 +1915,26 @@ class MultiAgentWorkflowController:
                                                 "bounded store_finding repair."
                                             ),
                                         )
+                                elif (
+                                    decision.status == "partial_failure"
+                                    and decision.instructions.strip()
+                                    and evaluator_corrections < evaluator_correction_limit
+                                ):
+                                    evaluator_corrections += 1
+                                    acceptance_submitted = False
+                                    evaluator_instructions = decision.instructions.strip()
+                                    continuation_criteria = [
+                                        "the evaluator-identified unsupported portion of the acceptance result"
+                                    ]
+                                    self._log_workflow(
+                                        "task evaluator requested continuation task=%s cycle=%s attempt=%s max=%s "
+                                        "reason=%s",
+                                        self._task_label(task),
+                                        cycle,
+                                        evaluator_corrections,
+                                        evaluator_correction_limit,
+                                        self._short(decision.reason),
+                                    )
                     elif repeated_acceptance:
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -1989,6 +2047,9 @@ class MultiAgentWorkflowController:
                 ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit) + min(
                     finding_observation_repairs,
                     1,
+                ) + min(
+                    evaluator_corrections,
+                    evaluator_correction_limit,
                 )
                 if cycle < allowed_actor_cycles:
                     actor_prompt = self._task_executor_critic_guidance(
@@ -2001,6 +2062,7 @@ class MultiAgentWorkflowController:
                         self._artifact_refs_from_tool_outcomes(tool_outcomes),
                         next_cycle=cycle + 1,
                         required_tool=continuation_required_tool,
+                        evaluator_instructions=evaluator_instructions,
                     )
                     self._log_workflow(
                         "task critic requested continuation task=%s cycle=%s status=%s reason=%s",
@@ -2081,6 +2143,50 @@ class MultiAgentWorkflowController:
         )
         return self.state.store_task(replacement)
 
+    def _create_reasoning_loop_replacement_task(
+        self,
+        task: Task,
+        tool_outcomes: List[ToolOutcome],
+    ) -> Optional[Task]:
+        """Create one narrow successor when bounded executor recovery still loops."""
+
+        existing = [candidate for candidate in self.state.list_tasks() if candidate.replacement_of == task.task_uid]
+        if existing:
+            return None
+        missing_criteria = self._missing_acceptance_criteria(
+            task,
+            self.state.list_task_acceptance_results(task.task_uid),
+        )
+        criterion = next(
+            (item for item in task.acceptance.criteria if item.id in missing_criteria),
+            task.acceptance.criteria[0],
+        )
+        artifact_refs = self._artifact_refs_from_tool_outcomes(tool_outcomes)
+        latest_artifact = artifact_refs[-1] if artifact_refs else "no prior durable artifact"
+        required_tool = self._validation_tool_name(task) or "record_task_acceptance"
+        replacement = Task(
+            task_uid=str(uuid.uuid4()),
+            title=f"{task.title} (reasoning-loop recovery)",
+            objective=(
+                f"Satisfy acceptance criterion {criterion.id}: {criterion.description} "
+                f"Use {latest_artifact} as the latest durable evidence context, then call {required_tool}."
+            ),
+            acceptance=task.acceptance,
+            phase=task.phase,
+            status="pending",
+            status_reason=(
+                f"Replacement for {task.task_uid} after bounded reasoning-loop recovery. "
+                f"Complete criterion {criterion.id} with one focused evidence action and {required_tool}."
+            ),
+            evidence=list(task.evidence),
+            kind=task.kind,
+            reference_id=task.reference_id,
+            replacement_of=task.task_uid,
+            target_scope=task.target_scope,
+            target_ids=list(task.target_ids),
+        )
+        return self.state.store_task(replacement)
+
     def _task_executor_critic_guidance(
         self,
         task: Task,
@@ -2089,20 +2195,33 @@ class MultiAgentWorkflowController:
         *,
         next_cycle: int,
         required_tool: str = "",
+        evaluator_instructions: str = "",
     ) -> str:
         required_tool = required_tool or self._validation_tool_name(task) or "record_task_acceptance"
         criteria = ", ".join(missing_criteria) or "the assigned acceptance contract"
         latest_artifact = artifact_refs[-1] if artifact_refs else "No new canonical artifact reference is available."
+        evaluator_section = ""
+        required_tool_section = f"Required tool call: {required_tool}\n"
+        completion_instruction = (
+            "Use the latest evidence, make only the smallest required correction, and call the required tool once "
+            "with the independent outcome. Do not broaden scope or add criteria."
+        )
+        if evaluator_instructions:
+            evaluator_section = f"\nEvaluator corrective guidance:\n{evaluator_instructions}\n"
+            required_tool_section = ""
+            completion_instruction = (
+                "Follow the evaluator guidance with the smallest evidence-producing action. Preserve the frozen "
+                "acceptance ledger unless a registered tool requires an update. Do not broaden scope or add criteria."
+            )
         return f"""## Compact Task Continuation
 Continue actor cycle {next_cycle} for the existing task. Do not replay prior reasoning, task history, or completed
 commands.
 
 Missing criterion: {criteria}
 Latest artifact/evidence: {latest_artifact}
-Required tool call: {required_tool}
+{required_tool_section}{evaluator_section}
 
-Use the latest evidence, make only the smallest required correction, and call the required tool once with the
-independent outcome. Do not broaden scope or add criteria.
+{completion_instruction}
 """
 
     @staticmethod
@@ -2418,6 +2537,17 @@ Return exactly one decision for each candidate.
         if finding_resolution:
             event["finding_resolution"] = str(finding_resolution)
         self._emit_workflow_event(event)
+
+    def _emit_task_superseded(self, task: Task, replacement: Task) -> None:
+        """Emit durable lineage when a replacement assumes a looped task's coverage."""
+
+        self._emit_workflow_event({
+            "type": "task_superseded",
+            "task_uid": str(task.task_uid),
+            "replacement_task_uid": str(replacement.task_uid),
+            "phase": int(task.phase),
+            "reason": str(task.status_reason or ""),
+        })
 
     def _emit_task_deferred(self, task: Task) -> None:
         task_uid = str(task.task_uid or "").strip()
@@ -4968,7 +5098,7 @@ generic replacement for an existing verification task.
         prior_tasks = [
             task
             for task in self.state.list_tasks()
-            if task.phase < phase.id and task.status in {"done", "partial_failure", "blocked"}
+            if task.phase < phase.id and task.status in {"done", "partial_failure", "blocked", "superseded"}
         ][-30:]
         lines = [f"prior_phase_terminal_tasks[{len(prior_tasks)}]{{phase,title,status,result}}:"]
         for task in prior_tasks:

@@ -202,9 +202,11 @@ critic reviews. Setting it to `0` uses the initial builder output without critiq
 builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
 evaluator are not invoked for that task.
 
-Task execution cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three passes, has a
-minimum of one, and has
-an independent `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` allowance for terminal acceptance schema or evidence repairs.
+Task execution cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three normal
+executor passes and has a minimum of one. `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS` independently allows one
+evaluator-directed evidence repair by default; set it to `0` to finalize actionable evaluator feedback without a
+correction pass. `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` separately governs terminal acceptance schema or evidence
+repairs.
 Acceptance evidence is stored as portable `artifact:artifacts/<file>` references, and every result declares whether
 it is negative, observational, a new finding candidate, or evidence for an existing finding. The task-executor agent
 and conversation are retained when no valid complete acceptance ledger was
@@ -411,8 +413,9 @@ limited to new follow-up work and never completes or records acceptance for the 
 }
 ```
 
-The controller uses `instructions` only as critic guidance when another task-executor cycle is available. It does not
-persist instructions as task state or emit them in task completion events.
+For an actionable `partial_failure`, the controller uses `instructions` as critic guidance in a bounded retained
+task-executor correction cycle. It does not persist instructions as task state or emit them in task completion events.
+`done`, `blocked`, and instruction-less `partial_failure` decisions remain terminal.
 
 `phase_evaluator` returns:
 

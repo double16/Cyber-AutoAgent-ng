@@ -167,7 +167,7 @@ Commands without a safe standalone canary remain available but unverified. The D
 the same configuration contract independently and is not imported by application runtime code.
 
 Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
-controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (four by
+controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (six by
 default). Each turn ends after its first tool result; the initial prompt contains stable phase context and corrections
 contain only the prior validation error. Generic reasoning-loop repair is disabled for this role. Agents submit a flat
 `TaskProposal` whose `limits` object is always required. Python discards it and `output_kind` for snapshot work,

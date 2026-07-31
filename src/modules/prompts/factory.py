@@ -494,6 +494,7 @@ def get_system_prompt(
     provider: Optional[str] = None,
     has_memory_path: bool = False,
     tools_context: Optional[str] = None,
+    seclists_root: Optional[str] = None,
     output_config: Optional[Dict[str, Any]] = None,
     plan_snapshot: Optional[OperationPlan] = None,
     plan_current_phase: Optional[int] = None,
@@ -526,6 +527,14 @@ def get_system_prompt(
         tools_guide_text = load_prompt_template("tools_guide.md")
     except Exception:
         tools_guide_text = ""
+    seclists_context = ""
+    if isinstance(seclists_root, str) and seclists_root:
+        seclists_context = (
+            "\n## SecLists Wordlists\n"
+            f"SecLists root: `{seclists_root}`\n"
+            "When a task requires a SecLists wordlist, prefix its canonical SecLists-relative path with this root.\n"
+        )
+    tools_guide_text = tools_guide_text.replace("{{ seclists_context }}", seclists_context)
 
     # Load System Template
     system_template = load_prompt_template("system_prompt.md")

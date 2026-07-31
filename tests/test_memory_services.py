@@ -24,6 +24,7 @@ from tests.helpers.acceptance import acceptance_dict, make_acceptance, task_prop
         (mod.NormalizedFindingValidationOutcome, "not verified", "not_confirmed"),
         (mod.NormalizedEvidenceStrategy, "negative-control", "differential"),
         (mod.NormalizedTaskStatus, "in progress", "active"),
+        (mod.NormalizedTaskStatus, "replaced", "superseded"),
         (mod.NormalizedPlanStatus, "N-A", "not_applicable"),
     ],
 )

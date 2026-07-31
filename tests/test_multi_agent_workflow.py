@@ -334,6 +334,7 @@ class FakeState:
             created_at=task.created_at,
             kind=task.kind,
             reference_id=task.reference_id,
+            replacement_of=task.replacement_of,
         ))
 
     def mark_task(self, task, status, reason=""):
@@ -349,6 +350,7 @@ class FakeState:
             created_at=task.created_at,
             kind=task.kind,
             reference_id=task.reference_id,
+            replacement_of=task.replacement_of,
         ))
 
     def defer_task(self, task, reason=""):
@@ -1598,8 +1600,8 @@ def test_different_tasks_get_distinct_task_trace_attributes():
     assert "task-two" in trace_names[1]
 
 
-def test_task_execution_finalizes_after_semantic_review_of_atomic_acceptance():
-    runtime = _runtime()
+def test_task_execution_retries_actionable_semantic_evaluator_feedback():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1})
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task])
     evaluator_prompts = []
@@ -1611,13 +1613,15 @@ def test_task_execution_finalizes_after_semantic_review_of_atomic_acceptance():
             return '{"prompt":"execute active","tools":[]}'
         if role == "task_evaluator":
             evaluator_prompts.append(prompt)
-            return json.dumps(
-                {
-                    "status": "partial_failure",
-                    "reason": "remaining endpoint lacks evidence",
-                    "instructions": "Run endpoint validation and store the artifact path.",
-                }
-            )
+            if len(evaluator_prompts) == 1:
+                return json.dumps(
+                    {
+                        "status": "partial_failure",
+                        "reason": "remaining endpoint lacks evidence",
+                        "instructions": "Run endpoint validation and store the artifact path.",
+                    }
+                )
+            return '{"status":"done","reason":"corrected evidence is sufficient"}'
         raise AssertionError(role)
 
     @contextmanager
@@ -1643,13 +1647,57 @@ def test_task_execution_finalizes_after_semantic_review_of_atomic_acceptance():
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert len(actor_prompts) == 1
+    assert len(actor_prompts) == 2
     assert actor_prompts[0].startswith("execute active")
+    assert "Continue actor cycle 2" in actor_prompts[1]
+    assert "Run endpoint validation and store the artifact path." in actor_prompts[1]
+    assert "Required tool call:" not in actor_prompts[1]
     assert "Cycle 1: actor result 1" in evaluator_prompts[0]
+    assert "Cycle 2: actor result 2" in evaluator_prompts[1]
     assert lifecycle == [
         ("created", "task_executor", "base prompt"),
         ("cleaned", "task_executor"),
     ]
+    assert state.tasks[0].status == "done"
+    assert state.tasks[0].status_reason == "corrected evidence is sufficient"
+
+
+def test_task_execution_does_not_retry_evaluator_feedback_when_corrections_are_disabled():
+    runtime = _runtime(
+        env_ints={
+            "CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1,
+            "CYBER_TASK_EVALUATOR_MAX_CORRECTIONS": 0,
+        }
+    )
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    actor_prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"execute active","tools":[]}'
+        if role == "task_evaluator":
+            return json.dumps(
+                {
+                    "status": "partial_failure",
+                    "reason": "remaining endpoint lacks evidence",
+                    "instructions": "Run endpoint validation and store the artifact path.",
+                }
+            )
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda role, prompt, tools, system_prompt, run_policy: actor_prompts.append(prompt),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert controller._task_evaluator_correction_count() == 0
+    assert len(actor_prompts) == 1
     assert state.tasks[0].status == "partial_failure"
     assert state.tasks[0].status_reason == "remaining endpoint lacks evidence"
 
@@ -2850,6 +2898,81 @@ def test_task_executor_max_token_recovery_exhaustion_is_partial_failure():
     assert "reasoning loop" in state.tasks[0].status_reason
 
 
+def test_reasoning_loop_recovery_supersedes_original_and_queues_one_replacement():
+    task = Task(
+        task_uid="active",
+        title="Active",
+        objective="capture bounded evidence",
+        phase=1,
+        status="active",
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"capture bounded evidence","tools":[]}'
+        pytest.fail(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        return workflow_mod.TaskExecutorCycleResult(
+            text="",
+            outcomes=[],
+            max_tokens_exhausted=True,
+            max_tokens_reason="Task executor repeated the same reasoning loop after its bounded recovery.",
+            max_tokens_classification="reasoning_loop",
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    original = next(candidate for candidate in state.tasks if candidate.task_uid == "active")
+    replacement = next(candidate for candidate in state.tasks if candidate.replacement_of == "active")
+    assert original.status == "superseded"
+    assert replacement.status == "pending"
+    assert replacement.phase == task.phase
+    assert replacement.acceptance == task.acceptance
+    assert "criterion" in replacement.objective
+    assert controller._assessment_is_complete(_plan()) is False
+
+
+def test_non_loop_max_token_exhaustion_remains_partial_failure():
+    state = FakeState(
+        _plan(),
+        tasks=[Task(task_uid="active", title="Active", objective="enumerate paths", phase=1, status="active")],
+    )
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"enumerate paths","tools":[]}'
+        pytest.fail(f"unexpected role: {role}")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda *args: workflow_mod.TaskExecutorCycleResult(
+            text="",
+            outcomes=[],
+            max_tokens_exhausted=True,
+            max_tokens_reason="Task executor reached its output-token limit after bounded recovery.",
+            max_tokens_classification="output_truncation",
+        ),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
+
+    assert state.tasks[0].status == "partial_failure"
+    assert not any(candidate.replacement_of == "active" for candidate in state.tasks)
+
+
 def test_task_evaluator_prompt_omits_empty_worker_context_and_truncates_long_context():
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     controller = MultiAgentWorkflowController(
@@ -3851,6 +3974,8 @@ def test_controller_marks_empty_phase_partial_when_task_creator_creates_no_tasks
         ("task_creator", {"create_tasks"}),
         ("task_creator", {"create_tasks"}),
         ("task_creator", {"create_tasks"}),
+        ("task_creator", {"create_tasks"}),
+        ("task_creator", {"create_tasks"}),
     ]
 
 
@@ -4782,8 +4907,8 @@ def test_task_creator_opens_and_cleans_one_session_for_all_default_attempts():
 
     outcome = controller._create_tasks(_plan(), _plan().phases[0])
 
-    assert outcome.attempts == 5
-    assert len(prompts) == 5
+    assert outcome.attempts == 7
+    assert len(prompts) == 7
     assert lifecycle == [("open", "task_creator"), ("close", "task_creator")]
     assert all("## Complete Plan" not in prompt for prompt in prompts[1:])
 
@@ -5997,8 +6122,9 @@ def test_task_prompt_repairable_rejection_queues_one_replacement_task():
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
+    original = next(candidate for candidate in state.tasks if candidate.task_uid == "active")
     replacement = next(candidate for candidate in state.tasks if candidate.replacement_of == "active")
-    assert state.tasks[0].status == "partial_failure"
+    assert original.status == "superseded"
     assert replacement.status == "pending"
     assert replacement.acceptance == task.acceptance
     assert replacement.phase == task.phase
