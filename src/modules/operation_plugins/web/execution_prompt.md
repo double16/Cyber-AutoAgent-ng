@@ -1,7 +1,7 @@
 <operation_intent>
 Perform an external web application assessment that preserves broad attack-surface coverage and produces only
 behaviorally validated vulnerabilities with impact evidence. Direct the operation plan through surface and trust-boundary
-mapping, prioritized hypothesis testing, exploitation validation, impact demonstration, and coverage closure.
+mapping, prioritized hypothesis testing, exploitation validation, and impact demonstration.
 </operation_intent>
 
 <access_and_scope>

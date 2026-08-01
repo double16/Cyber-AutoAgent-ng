@@ -33,6 +33,10 @@ class TestGetSystemPrompt:
         assert "Follow the selected module's" in prompt
         assert "Target infrastructure = remote endpoint" not in prompt
         assert "Never\n  infer authorization from available tools" in prompt
+        assert "Task Capture Gate" not in prompt
+        assert "Budget is intended to improve coverage" not in prompt
+        assert "Coverage-First Doctrine" not in prompt
+        assert "MUST pivot to different method OR deploy swarm" not in prompt
 
     @patch("modules.prompts.factory.load_prompt_template")
     def test_get_system_prompt_with_tools_context(self, mock_load_prompt_template):

@@ -483,12 +483,12 @@ def test_ctf_phase_contract_preserves_chain_evidence_and_flag_completion():
     assert "Generate Exploit Hypotheses from the Challenge Surface" in policy
     assert "Exploit Chain Analysis" in policy
     assert "Flag Retrieval and Confirmation" in policy
-    assert "Coverage Closure" in policy
+    assert "Coverage Closure" not in policy
     assert "each prerequisite, transition, required server-side acceptance" in policy
     assert "failed links" in policy
     assert "failed links and alternative branches" in policy
     assert "prerequisite, action, observed transition, and artifact" in policy
-    assert "A direct single-step flag path does not require artificial" in policy
+    assert "direct single-step flag path does not require artificial" in policy
     assert "chain records" in policy
 
 
@@ -503,7 +503,6 @@ def test_web_phase_contract_uses_distinct_industry_aligned_capabilities():
         "Exploit Chain Analysis",
         "Finding Validation",
         "Impact Demonstration",
-        "Coverage Closure",
     )
     for phase in expected_phases:
         assert phase in policy

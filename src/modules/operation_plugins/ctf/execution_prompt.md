@@ -13,7 +13,8 @@ confirmation. A vulnerability or intermediate capability is progress, not succes
 
 <module_execution_policy>
 - Extract literal hints and test the simplest plausible interpretation before more expensive exploitation chains.
-- Preserve discovered hosts, endpoints, parameters, roles, and capability classes as coverage tasks.
+- Record discovered hosts, endpoints, parameters, roles, and capability classes with artifact references so the workflow
+  can assess them.
 - Validate both client-side behavior and server-side acceptance when relevant. Treat reflection, upload, or client
   execution alone as insufficient when the objective depends on server state.
 - After gaining a capability, test its direct path to the flag. If it does not complete the assigned task, record the

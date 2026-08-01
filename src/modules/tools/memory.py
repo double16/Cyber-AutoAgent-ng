@@ -3344,6 +3344,7 @@ def _validate_task_target_scope(
     *,
     target_ids: List[str],
     plan: Optional[OperationPlan],
+    proposal: Optional[TaskProposal] = None,
 ) -> Tuple[TargetScope, List[str]]:
     if plan is None or not plan.targets:
         return "all", []
@@ -3353,9 +3354,153 @@ def _validate_task_target_scope(
     invalid_ids = [target_id for target_id in target_ids if target_id not in valid_ids]
     if invalid_ids:
         raise ValueError(f"target_ids contain unknown operation target IDs: {', '.join(invalid_ids)}")
+    selected_targets = [
+        target for target in plan.targets if not target_ids or target.target_id in set(target_ids)
+    ]
+    if proposal is not None:
+        _validate_proposal_service_scope(proposal, selected_targets)
     if target_ids:
         return "subset", target_ids
     return "all", []
+
+
+_PORT_RANGE_PATTERN = re.compile(r"(?<!\d)(\d{1,5})\s*-\s*(\d{1,5})(?!\d)")
+_PORT_NUMBER_PATTERN = re.compile(r"(?<![\d-])(\d{1,5})(?![\d-])")
+_PORT_CONTEXT_PATTERN = re.compile(r"\bports?\b(?P<tail>[^.;\n]{0,96})", re.IGNORECASE)
+_PORT_SELECTOR_PATTERN = re.compile(r"(?<!\w)(?:-p|--ports?)(?:\s*=\s*|\s+)([^\s,;)]*)", re.IGNORECASE)
+_BARE_PORT_SELECTOR_PATTERN = re.compile(
+    r"(?<!\w)(?:-p|--ports?)(?![-=]|\s+\d)(?=\s|$|[,)])", re.IGNORECASE
+)
+_BROAD_PORT_SELECTOR_PATTERN = re.compile(r"(?<!\w)(?:-p|--ports?)-(?=\s|$|[,)])", re.IGNORECASE)
+_BROAD_PORT_SCOPE_PATTERN = re.compile(
+    r"\b(?:all|every|remaining|other)\s+ports?\b|"
+    r"\b(?:host[- ]wide|all[- ]port|full[- ]port)\s+(?:scan|scanning|enumeration|discovery)\b|"
+    r"\b(?:port|ports)\s+(?:scan|scanning|enumeration|enumerate|discovery|sweep)\b",
+    re.IGNORECASE,
+)
+
+
+def _explicit_target_port(target: OperationTarget) -> Optional[int]:
+    """Return a registered service port, if the target has one."""
+
+    value = str(target.value or "").strip()
+    parsed = urlsplit(value if "://" in value else f"//{value}")
+    try:
+        return parsed.port
+    except ValueError as error:
+        raise ValueError(f"invalid registered target boundary for {target.target_id}: {value}") from error
+
+
+def _explicit_target_host(target: OperationTarget) -> Optional[str]:
+    value = str(target.value or "").strip()
+    parsed = urlsplit(value if "://" in value else f"//{value}")
+    return parsed.hostname
+
+
+def _proposal_scope_text(proposal: TaskProposal) -> str:
+    return " ".join(
+        [
+            proposal.title,
+            proposal.objective,
+            proposal.basis_description or proposal.objective,
+            *(criterion.description for criterion in proposal.criteria),
+        ]
+    )
+
+
+def _proposal_port_references(proposal: TaskProposal) -> Tuple[List[int], List[Tuple[int, int]], bool]:
+    """Extract explicit port references from proposal scope text."""
+
+    text = _proposal_scope_text(proposal)
+    numbers: List[int] = []
+    ranges: List[Tuple[int, int]] = []
+
+    if _BROAD_PORT_SELECTOR_PATTERN.search(text):
+        return numbers, ranges, True
+
+    for match in _PORT_CONTEXT_PATTERN.finditer(text):
+        tail = match.group("tail")
+        for range_match in _PORT_RANGE_PATTERN.finditer(tail):
+            ranges.append((int(range_match.group(1)), int(range_match.group(2))))
+        range_spans = [match.span() for match in _PORT_RANGE_PATTERN.finditer(tail)]
+        for number_match in _PORT_NUMBER_PATTERN.finditer(tail):
+            if not any(start <= number_match.start() < end for start, end in range_spans):
+                numbers.append(int(number_match.group(1)))
+
+    for match in _PORT_SELECTOR_PATTERN.finditer(text):
+        selector = match.group(1)
+        if selector == "-":
+            return numbers, ranges, True
+        for range_match in _PORT_RANGE_PATTERN.finditer(selector):
+            ranges.append((int(range_match.group(1)), int(range_match.group(2))))
+        range_spans = [match.span() for match in _PORT_RANGE_PATTERN.finditer(selector)]
+        for number_match in _PORT_NUMBER_PATTERN.finditer(selector):
+            if not any(start <= number_match.start() < end for start, end in range_spans):
+                numbers.append(int(number_match.group(1)))
+
+    if _BARE_PORT_SELECTOR_PATTERN.search(text):
+        return numbers, ranges, True
+    return numbers, ranges, False
+
+
+def _validate_proposal_service_scope(proposal: TaskProposal, selected_targets: List[OperationTarget]) -> None:
+    """Enforce exact registered ports for proposals scoped to explicit service targets."""
+
+    target_ports = {
+        (str(target.value), port)
+        for target in selected_targets
+        if (port := _explicit_target_port(target)) is not None
+    }
+    if not target_ports:
+        return
+
+    text = _proposal_scope_text(proposal)
+    if _BROAD_PORT_SCOPE_PATTERN.search(text):
+        raise ValueError(
+            "explicit service targets permit only their registered port; broad or omitted-port enumeration is not allowed"
+        )
+
+    numbers, ranges, ambiguous_selector = _proposal_port_references(proposal)
+    allowed_ports = {port for _value, port in target_ports}
+    allowed_ports_by_host: Dict[str, set[int]] = {}
+    for target in selected_targets:
+        port = _explicit_target_port(target)
+        host = _explicit_target_host(target)
+        if port is not None and host:
+            allowed_ports_by_host.setdefault(host.lower(), set()).add(port)
+    for host, allowed_host_ports in allowed_ports_by_host.items():
+        host_pattern = re.compile(
+            rf"(?<![\w.-])(?:[a-z][\w+.-]*://)?{re.escape(host)}:(\d{{1,5}})",
+            re.IGNORECASE,
+        )
+        invalid_host_ports = sorted(
+            {
+                int(match.group(1))
+                for match in host_pattern.finditer(text)
+                if int(match.group(1)) not in allowed_host_ports
+            }
+        )
+        if invalid_host_ports:
+            raise ValueError(
+                f"task scope uses ports {invalid_host_ports} for explicit host {host}; "
+                f"allowed ports are {sorted(allowed_host_ports)}"
+            )
+    invalid_numbers = sorted({number for number in numbers if number not in allowed_ports})
+    invalid_ranges = [item for item in ranges if item[0] > item[1] or any(port not in allowed_ports for port in range(item[0], item[1] + 1))]
+    if ambiguous_selector:
+        raise ValueError(
+            f"explicit service targets require an exact port selector; allowed ports are {sorted(allowed_ports)}"
+        )
+    if invalid_numbers or invalid_ranges:
+        details = []
+        if invalid_numbers:
+            details.append(f"ports {invalid_numbers}")
+        if invalid_ranges:
+            details.append(f"ranges {invalid_ranges}")
+        raise ValueError(
+            f"task scope exceeds explicit service target boundary ({'; '.join(details)}); "
+            f"allowed ports are {sorted(allowed_ports)}"
+        )
 
 
 def resolve_bound_executable_target(requested_target: str) -> str:
@@ -4491,6 +4636,7 @@ def _create_tasks_from_proposals(
         target_scope, target_ids = _validate_task_target_scope(
             target_ids=_normalize_target_ids(proposal.target_ids),
             plan=plan,
+            proposal=proposal,
         )
         acceptance = _freeze_and_validate_acceptance(
             _proposal_acceptance_contract(proposal, plan),

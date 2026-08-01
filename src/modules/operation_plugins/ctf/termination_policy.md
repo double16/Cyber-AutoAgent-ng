@@ -8,9 +8,8 @@ included capability, evidence requirement, and coverage outcome. Omit a recommen
 inapplicable and document the reason. The final flag-confirmation capability remains applicable whenever the objective
 requires a flag.
 
-1. **Challenge Surface Mapping** — Freeze the bounded inventory of authorized hosts, endpoints, parameters, roles,
-   literal hints, and capability classes. Preserve candidates as coverage tasks and document duplicates, exclusions,
-   and unreachable paths with artifacts.
+1. **Challenge Surface Mapping** — Characterize the bounded inventory of authorized hosts, endpoints, parameters, roles,
+   literal hints, and capability classes. Document duplicates, exclusions, and unreachable paths with artifacts.
 2. **Generate Exploit Hypotheses from the Challenge Surface** — Derive testable hypotheses from challenge hints,
    exposed capabilities, inputs, and trust boundaries without treating clues as findings.
 3. **Exploit Testing** — Test prioritized hypotheses with expected and actual results, negative controls, and artifacts.
@@ -21,12 +20,8 @@ requires a flag.
    Create follow-on execution work only for a concrete, evidence-backed chain link that still requires validation.
 5. **Flag Retrieval and Confirmation** — Demonstrate the minimum authorized direct path or end-to-end chain to every
    required flag, capture exact reproducible evidence, and reject placeholders.
-6. **Coverage Closure** — Document unassessed or excluded inventory without replacing unfinished work with summary.
-
-Applicable discovered attack surfaces and capability classes are covered or have artifact-backed exclusion,
-unreachability, duplication, or constraint reasons. Every claimed capability chain has evidence for each link's
-prerequisite, action, observed transition, and artifact. A direct single-step flag path does not require artificial
-chain records.
+Every claimed capability chain has evidence for each link's prerequisite, action, observed transition, and artifact. A
+direct single-step flag path does not require artificial chain records.
 
 The operation-level objective is satisfied only when every required flag is captured and supported by:
 

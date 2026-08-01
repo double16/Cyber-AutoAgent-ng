@@ -111,3 +111,5 @@ def test_ctf_policy_requires_artifact_backed_flag_without_worker_termination():
     assert "call `discover_flag_candidates` with that artifact" in prompt
     assert "do not\n  claim or perform task, phase, or operation termination" in prompt
     assert "Do not\ndeclare the overall operation successful" in policy
+    assert "Coverage Closure" not in policy
+    assert "coverage tasks" not in prompt

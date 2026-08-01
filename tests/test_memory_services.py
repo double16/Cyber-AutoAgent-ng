@@ -1319,6 +1319,155 @@ def test_create_tasks_compiles_bounded_procedure_proposal(fake_memory_client):
     assert task.status == "pending"
 
 
+@pytest.mark.parametrize(
+    "objective",
+    [
+        "Enumerate ports 80, 443, and 8080-8090 on the assigned service",
+        "Run nmap -sV -p 80 against the assigned service",
+        "Run nmap -p- against the assigned service",
+        "Run an all-port scan against the assigned service",
+        "Run nmap with HTTP title headers (-p) against the assigned service",
+    ],
+)
+def test_create_tasks_rejects_ports_outside_explicit_service_target(fake_memory_client, objective):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess host.docker.internal:32769",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[
+            mod.OperationTarget(
+                target_id="target-1",
+                value="host.docker.internal:32769",
+                type="network",
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="explicit service target|exact port selector|allowed ports"):
+        mod.create_tasks(
+            [
+                task_proposal(
+                    "Probe assigned service",
+                    objective,
+                    "invalid-service-scope",
+                    target_ids=["target-1"],
+                )
+            ]
+        )
+
+    assert store.tasks == []
+
+
+def test_create_tasks_accepts_exact_explicit_service_port_and_unrelated_limits(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess host.docker.internal:32769",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[
+            mod.OperationTarget(
+                target_id="target-1",
+                value="host.docker.internal:32769",
+                type="network",
+            )
+        ],
+    )
+
+    result = mod.create_tasks(
+        [
+            task_proposal(
+                "Probe assigned service",
+                "Run nmap -sV -p 32769 against host.docker.internal and collect at most 50 requests",
+                "valid-service-scope",
+                target_ids=["target-1"],
+            )
+        ]
+    )
+
+    assert json.loads(result)["created_count"] == 1
+    assert len(store.tasks) == 1
+
+
+@pytest.mark.parametrize("field", ["criteria", "basis_description"])
+def test_create_tasks_checks_all_scope_text_fields_for_explicit_service_ports(fake_memory_client, field):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess host.docker.internal:32769",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="host.docker.internal:32769", type="network")],
+    )
+    payload = task_proposal(
+        "Probe assigned service",
+        "Probe only the assigned service port 32769",
+        "Inspect the assigned service",
+        target_ids=["target-1"],
+    )
+    if field == "criteria":
+        payload["criteria"] = [{"description": "Inspect port 80 instead"}]
+    else:
+        payload["basis_description"] = "Bounded procedure for port 80"
+
+    with pytest.raises(ValueError, match="allowed ports"):
+        mod.create_tasks([payload])
+    assert store.tasks == []
+
+
+def test_create_tasks_allows_multiple_selected_exact_service_ports(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess two services",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[
+            mod.OperationTarget(target_id="target-1", value="first.test:32769", type="network"),
+            mod.OperationTarget(target_id="target-2", value="second.test:32770", type="network"),
+        ],
+    )
+
+    result = mod.create_tasks(
+        [
+            task_proposal(
+                "Probe selected services",
+                "Probe ports 32769 and 32770 on the selected services",
+                "selected-service-scope",
+                target_ids=["target-1", "target-2"],
+            )
+        ]
+    )
+
+    assert json.loads(result)["created_count"] == 1
+
+
+def test_create_tasks_keeps_bare_host_target_behavior(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="target.test", type="network")],
+    )
+
+    result = mod.create_tasks(
+        [
+            task_proposal(
+                "Enumerate selected host ports",
+                "Probe ports 80 and 443 on the selected bare host",
+                "bare-host-scope",
+                target_ids=["target-1"],
+            )
+        ]
+    )
+
+    assert json.loads(result)["created_count"] == 1
+
+
 def test_create_tasks_uses_exact_contract_deduplication_and_allows_failed_retry(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(

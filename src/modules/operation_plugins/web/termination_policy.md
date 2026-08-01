@@ -22,9 +22,6 @@ inapplicable and document the reason.
    expected-versus-actual behavior, negative controls, scope, confidence, and artifact paths.
 6. **Impact Demonstration** — Safely demonstrate the minimum necessary security consequence required by the objective,
    without destructive action or unnecessary data access.
-7. **Coverage Closure** — Account for every mapped inventory item as tested, confirmed, rejected, unreachable,
-   duplicated, not applicable, or unresolved, with an artifact-backed reason. This phase must not replace unfinished
-   executable assessment work with summary.
 
 Classify the phase against its own criteria and the following operation-level outcomes:
 

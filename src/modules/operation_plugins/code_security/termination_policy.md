@@ -20,7 +20,6 @@ inapplicable and document the reason.
 5. **Finding Validation** — Validate candidates in surrounding code and deployment context with exact locations and
    reproducible evidence.
 6. **Impact Assessment** — Establish security impact and provide practical remediation for each verified vulnerability.
-7. **Coverage Closure** — Account for analyzed, excluded, unreachable, duplicated, and unresolved repository areas.
 
 Classify the phase against its own criteria and the following operation-level outcomes:
 

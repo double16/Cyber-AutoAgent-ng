@@ -5311,6 +5311,81 @@ def test_task_prompt_builder_requires_reusable_acceptance_summaries():
     assert "Use `store_observation` only" in prompt
 
 
+def test_task_prompt_builder_adds_bounded_task_scoped_swarm_contract():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Test independent hypotheses",
+        objective="Test independent command-injection hypotheses against the assigned service",
+        phase=1,
+        status="active",
+    )
+
+    prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+
+    assert "core `swarm` tool" in prompt
+    assert "independent capability branches" in prompt
+    assert "no more than three agents" in prompt
+    assert "explicit handoff triggers" in prompt
+    assert "parent executor consolidates results" in prompt
+    assert "must not create or execute workflow tasks" in prompt
+
+
+def test_task_prompt_critic_defines_swarm_acceptance_rules():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Test hypotheses",
+        objective="Investigate independent command-injection hypotheses",
+        phase=1,
+        status="active",
+    )
+
+    prompt = controller._task_prompt_critic_prompt(
+        _plan(),
+        _plan().phases[0],
+        task,
+        {"prompt": "Use swarm if needed.", "memory_ids": [], "tools": [], "shell_commands": []},
+    )
+
+    assert "uses `swarm` only when" in prompt
+    assert "at most three distinct child approaches" in prompt
+    assert "explicit handoff triggers" in prompt
+    assert "does not delegate task creation" in prompt
+
+
+def test_task_prompt_revision_preserves_swarm_contract_rules():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="active", title="Test", objective="Test hypotheses", phase=1, status="active")
+
+    prompt = controller._task_prompt_revision_prompt(
+        _plan(),
+        _plan().phases[0],
+        task,
+        {"prompt": "Use swarm if needed.", "memory_ids": [], "tools": [], "shell_commands": []},
+        ["Define bounded swarm use"],
+    )
+
+    assert "Swarm is a core tool supplied automatically" in prompt
+    assert "limit the team to three" in prompt
+    assert "parent-owned acceptance" in prompt
+
+
 def test_task_prompt_builder_can_select_published_acceptance_memory():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
