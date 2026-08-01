@@ -108,6 +108,6 @@ def test_ctf_policy_requires_artifact_backed_flag_without_worker_termination():
     prompt = (PLUGIN_ROOT / "ctf" / "execution_prompt.md").read_text(encoding="utf-8")
     policy = (PLUGIN_ROOT / "ctf" / "termination_policy.md").read_text(encoding="utf-8")
 
-    assert "artifact path that contains the exact candidate value" in prompt
+    assert "call `discover_flag_candidates` with that artifact" in prompt
     assert "do not\n  claim or perform task, phase, or operation termination" in prompt
     assert "Do not\ndeclare the overall operation successful" in policy

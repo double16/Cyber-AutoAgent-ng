@@ -550,3 +550,23 @@ def sanitize_toon_value(value: Any) -> str:
     text = "" if value is None else str(value)
     text = re.sub(r"\s+", " ", text).strip()
     return text.replace(",", ";")
+
+
+def format_duration(seconds: Any) -> str:
+    """Format duration for human-readable display."""
+    try:
+        seconds = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        return "N/A"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        return f"{int(seconds / 60)}m {int(seconds % 60)}s"
+    elif seconds < 86400:
+        hours = int(seconds / 3600)
+        mins = int((seconds % 3600) / 60)
+        return f"{hours}h {mins}m"
+    else:
+        days = int(seconds / 86400)
+        hours = int((seconds % 86400) / 3600)
+        return f"{days}d {hours}h"

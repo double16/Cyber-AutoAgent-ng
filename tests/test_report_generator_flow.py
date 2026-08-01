@@ -1049,7 +1049,7 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
         "> **AI-Generated Content Disclaimer:** This report was generated with artificial intelligence and may "
         "contain errors, omissions, or hallucinations."
     )
-    assert content.startswith(disclaimer)
+    assert content.startswith("# SECURITY ASSESSMENT REPORT\n\n"+disclaimer)
     assert content.rstrip().endswith(
         "A qualified human should independently verify its findings and recommendations before relying on them."
     )

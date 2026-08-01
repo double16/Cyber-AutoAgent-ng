@@ -481,6 +481,33 @@ def test_store_objective_candidate_validates_inputs_and_is_idempotent(
     memory_client.store_task.assert_not_called()
 
 
+def test_store_objective_candidate_rejects_unproven_or_constraint_violating_values(
+    memory_client,
+    operation_ids,
+    tmp_path: Path,
+):
+    artifact = tmp_path / "flag.txt"
+    artifact.write_text("server response: FLAG{abc}", encoding="utf-8")
+    plan_store = MagicMock()
+    plan_store.get_objective_candidate_by_fingerprint.return_value = None
+    plan_store.get_plan.return_value = SimpleNamespace(
+        objective="Find the flag. Flag format is: FLAG{...} and has length 9."
+    )
+    with (
+        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        with pytest.raises(ValueError, match="evidence_artifacts"):
+            store_objective_candidate(
+                "flag", "FLAG{xyz}", "Retrieved", ["Read response"], [str(artifact)]
+            )
+        with pytest.raises(ValueError, match="objective constraints"):
+            store_objective_candidate("flag", "HTB{abcd}", "Retrieved", ["Read response"], [str(artifact)])
+
+    memory_client.store_task.assert_not_called()
+    plan_store.store_objective_candidate.assert_not_called()
+
+
 def test_objective_constraint_helpers_cover_optional_constraints(operation_ids):
     plan_store = MagicMock()
     plan_store.get_plan.return_value = SimpleNamespace(objective="Capture a flag without a prescribed shape")

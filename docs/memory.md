@@ -289,7 +289,8 @@ store_observation(
 )
 
 # Pass the returned memory_ref in record_task_acceptance.evidence_refs when a
-# frozen criterion requires observation evidence. Artifact references remain artifact evidence.
+# frozen criterion requires observation evidence. Memory references are scoped to the current operation; do not
+# reuse an ID from another operation or from cross-operation learning. Artifact references remain artifact evidence.
 
 mem0_retrieve(query="authentication findings")
 mem0_list()
@@ -376,8 +377,10 @@ observed behavior, reproduction steps, and a technique. A confirmed validation r
 artifacts. Differential evidence also requires a negative-control artifact.
 
 Objective candidates, such as CTF flags, are not vulnerability findings. Store them with
-`store_objective_candidate`; their independent validation records use `validation_type="objective"` and do not affect
-finding verification or severity totals. Existing records without `validation_type` retain finding semantics.
+`store_objective_candidate`; the exact value must already appear in a cited artifact. The CTF-only
+`discover_flag_candidates` tool scans artifacts for common braced and SHA-256/SHA-512-style flag shapes and returns
+opaque references instead of flag values. Independent validation records use `validation_type="objective"` and do not
+affect finding verification or severity totals. Existing records without `validation_type` retain finding semantics.
 
 **Optional Fields:**
 - **status**: Verification state (hypothesis, unverified, verified)

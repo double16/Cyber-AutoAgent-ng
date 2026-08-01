@@ -601,6 +601,25 @@ def test_task_proposal_accepts_concise_procedure_shape():
     assert proposal.target_ids == []
 
 
+@pytest.mark.parametrize("description", ["Check target", "Different target"])
+def test_task_proposal_objective_takes_precedence_over_description(description):
+    payload = task_proposal("Check", "Check target")
+    payload["description"] = description
+
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.objective == "Check target"
+
+
+def test_task_proposal_description_alias_becomes_objective():
+    payload = task_proposal("Check", "Check target")
+    payload["description"] = payload.pop("objective")
+
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.objective == "Check target"
+
+
 def test_task_proposal_defaults_basis_description_to_objective():
     payload = task_proposal("Check", "Check target")
     payload.pop("basis_description")
@@ -2571,7 +2590,13 @@ def test_evidence_reference_kind_validates_memory_findings_and_prefixes(fake_mem
     assert mod._evidence_reference_kind(f"artifact:{manifest}", "observation") is False
     assert mod._evidence_reference_kind("memory:m1", "memory") is True
     assert mod._evidence_reference_kind("memory:m1", "observation") is True
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Memory evidence is operation-scoped.*store_observation.*returned memory_ref.*"
+            r"artifact:artifacts/<file>"
+        ),
+    ):
         mod._evidence_reference_kind("memory:missing", "memory")
 
     store.findings["candidate"] = {"resolution": None}

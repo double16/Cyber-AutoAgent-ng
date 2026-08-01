@@ -14,6 +14,7 @@ from modules.handlers.react.agent_event_handler import (
     OperationEventCoordinator,
     ReportBudgetEstimate,
 )
+from modules.handlers.utils import format_duration
 
 
 def make_handler():
@@ -273,7 +274,7 @@ def test_reasoning_termination_metrics_and_basic_helpers():
     handler._stop_metrics_thread.assert_not_called()
     assert event_types(handler).count("termination_reason") == 1
     assert handler.termination_message == "done"
-    assert handler._format_duration(65) == "1m 5s"
+    assert format_duration(65) == "1m 5s"
     assert handler._extract_code_from_input({"code": "print(1)"}) == "print(1)"
     assert handler._extract_code_from_input({"value": [1, 2]}).startswith("{")
     assert handler._extract_output_text([{"json": {"a": 1}}, {"message": "m"}, "s"])

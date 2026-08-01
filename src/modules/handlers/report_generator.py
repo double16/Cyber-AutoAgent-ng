@@ -22,7 +22,7 @@ from modules.agents.report_agent import ReportGenerator
 from modules.config import get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import DEFAULT_MAX_DURATION
-from modules.handlers.utils import duration_max, get_output_path, sanitize_target_name
+from modules.handlers.utils import duration_max, get_output_path, sanitize_target_name, format_duration
 from modules.prompts.factory import (
     _extract_domain_lens,
     _transform_evidence_to_content,
@@ -573,23 +573,6 @@ def _normalize_budget_config(raw_budget: Any, *, default_duration: Optional[int]
     if cost is not None:
         budget["cost"] = cost
     return budget
-
-
-def _format_elapsed_seconds(seconds: Any) -> str:
-    """Format wall-clock seconds for the report footer."""
-    try:
-        total_seconds = max(0, int(round(float(seconds))))
-    except (TypeError, ValueError):
-        return "N/A"
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds_value = divmod(remainder, 60)
-    parts = []
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes or hours:
-        parts.append(f"{minutes}m")
-    parts.append(f"{seconds_value}s")
-    return " ".join(parts)
 
 
 def _format_inference_time(milliseconds: Any) -> str:
@@ -2206,8 +2189,8 @@ Canonical operation data:
             filename = os.path.join(output_path, "security_assessment_report.md")
 
         with open(filename, "w") as final_f:
-            final_f.write(_AI_CONTENT_DISCLAIMER + "\n\n")
             final_f.write("# SECURITY ASSESSMENT REPORT\n\n")
+            final_f.write(_AI_CONTENT_DISCLAIMER + "\n\n")
             final_f.write("## TABLE OF CONTENTS\n")
             final_f.write("- [Executive Summary](#executive-summary)\n")
             final_f.write("- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n")
@@ -2217,6 +2200,7 @@ Canonical operation data:
             final_f.write("- [Target Coverage](#target-coverage)\n")
             final_f.write("- [Appendix A: Assessment Methodology](#appendix-a-assessment-methodology)\n")
             final_f.write("- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n")
+            final_f.write("- [Appendix C: Operation Metadata](#appendix-c-operation-metadata)\n")
             final_f.write("\n")
             final_f.write(completion_notice)
 
@@ -2225,7 +2209,7 @@ Canonical operation data:
                     final_f.write(part_f.read())
                     final_f.write("\n\n")
 
-            # Add footer
+            # Add operation metadata
             main_provider = config_manager.get_provider()
             main_model = config_manager.get_llm_config(main_provider).model_id
             model_usage = []
@@ -2234,11 +2218,11 @@ Canonical operation data:
             if callback_handler is not None:
                 try:
                     model_usage = callback_handler.model_usage()
-                    total_operation_time = _format_elapsed_seconds(
+                    total_operation_time = format_duration(
                         callback_handler.total_operation_time_seconds()
                     )
                 except Exception:
-                    logger.debug("Unable to read live operation usage for report footer", exc_info=True)
+                    logger.debug("Unable to read live operation usage for operation metadata", exc_info=True)
             if not model_usage:
                 model_usage = latest_run.get("metrics", {}).get("model_usage", [])
             software = _software_provenance()
@@ -2253,15 +2237,15 @@ Canonical operation data:
             provenance = "\n".join(provenance_lines)
             if provenance:
                 provenance = f"{provenance}\n"
-            footer_objective = " ".join(str(objective or "").split()) or "N/A"
+            sanitized_objective = " ".join(str(objective or "").split()) or "N/A"
 
-            footer = f"""
-----
+            operation_metadata = f"""{_PAGE_BREAK}<a name="appendix-c-operation-metadata"></a>
+## APPENDIX C: OPERATION METADATA
 
 - Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {provenance}- Operation ID: {operation_id}
 - Total Operation Time: {total_operation_time}
-- Operation Objective: {footer_objective}
+- Operation Objective: {sanitized_objective}
 
 ### Model Usage
 
@@ -2269,7 +2253,7 @@ Canonical operation data:
 
 *Efficiency = 100 × model inferences ÷ (model inferences + correction loops). Correction loops include bounded reasoning, output-token, repair, tool-recovery, evaluator, and critic retries; higher values indicate greater efficiency.*
 """
-            final_f.write(footer)
+            final_f.write(operation_metadata)
             final_f.write("\n" + _AI_CONTENT_DISCLAIMER + "\n")
 
         logger.info("Final combined report generated: %s", filename)

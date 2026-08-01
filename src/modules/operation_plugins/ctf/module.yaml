@@ -31,6 +31,7 @@ tools:
   - advanced_payload_coordinator
   - auth_chain_analyzer
   - idor_specialist
+  - flag_candidates
 module_interface:
   accepts_from: []
   provides_to: []

@@ -2779,6 +2779,15 @@ def store_objective_candidate(
             sort_keys=True,
         )
 
+    constraints = _objective_constraints(normalized_type)
+    constraint_failures = _objective_constraint_failures(value, constraints)
+    if constraint_failures:
+        raise ValueError(
+            "candidate_value does not satisfy objective constraints: " + "; ".join(constraint_failures)
+        )
+    if not _objective_evidence_contains_candidate(value, artifacts):
+        raise ValueError("candidate_value does not appear in the supplied evidence_artifacts")
+
     candidate_uid = str(uuid.uuid4())
     task_uid = str(uuid.uuid4())
     candidate = {
@@ -2789,7 +2798,7 @@ def store_objective_candidate(
         "summary": _clean_memory_text(summary, "summary"),
         "reproduction_steps": steps,
         "artifacts": artifacts,
-        "constraints": _objective_constraints(normalized_type),
+        "constraints": constraints,
         "validation_status": "pending",
     }
     _store_memory_entry(candidate["summary"], "objective_candidate", candidate)
@@ -3096,6 +3105,12 @@ class TaskProposal(_StrictTaskWireModel):
                 normalized[canonical] = normalized.pop(alias)
                 logger.info("Normalized task proposal field alias %s -> %s", alias, canonical)
 
+        if "description" in normalized:
+            if "objective" not in normalized:
+                normalized["objective"] = normalized["description"]
+                logger.info("Normalized task proposal field alias description -> objective")
+            normalized.pop("description")
+
         output_aliases = {
             "report": "artifact",
             "evidence": "artifact",
@@ -3121,6 +3136,7 @@ class TaskProposal(_StrictTaskWireModel):
         if "output_kind" in normalized:
             normalized.pop("output_kind")
             logger.info("Normalized inapplicable output_kind from snapshot task proposal")
+
         return normalized
 
     @model_validator(mode="after")
@@ -3439,11 +3455,25 @@ _CANONICAL_ACCEPTANCE_EVIDENCE_HELP = (
     "Example: artifact:artifacts/http_response.txt"
 )
 
+_ACCEPTANCE_EVIDENCE_MEMORY_HELP = (
+    "Acceptance evidence memory does not exist in this operation: {reference}. "
+    "Memory evidence is operation-scoped; do not reuse a memory ID from another operation or from "
+    "cross-operation learning. Store the observation with store_observation(...) and pass its returned "
+    "memory_ref (for example, memory:<id>) in evidence_refs. If the evidence is a file, save it in the "
+    "current operation and use artifact:artifacts/<file> instead."
+)
+
 
 def _acceptance_evidence_reference_error() -> ValueError:
     """Return the shared correction-ready acceptance evidence error."""
 
     return ValueError(_CANONICAL_ACCEPTANCE_EVIDENCE_HELP)
+
+
+def _acceptance_evidence_memory_error(reference: str) -> ValueError:
+    """Return actionable guidance for a memory reference outside this operation."""
+
+    return ValueError(_ACCEPTANCE_EVIDENCE_MEMORY_HELP.format(reference=reference))
 
 
 def _canonical_evidence_reference(reference: str) -> str:
@@ -4783,7 +4813,7 @@ def _evidence_reference_kind(reference: str, expected_kind: EvidenceRequirementK
         memory = _ensure_memory_client().get_memory_by_id(memory_id)
         metadata = (memory or {}).get("metadata", {}) if isinstance(memory, dict) else {}
         if not memory or metadata.get("operation_id", op_id) != op_id:
-            raise ValueError(f"Acceptance evidence memory does not exist in this operation: {reference}")
+            raise _acceptance_evidence_memory_error(reference)
         category = str(metadata.get("category", ""))
         return expected_kind in {"memory", "durable_evidence"} or (
             expected_kind == "observation" and category == "observation"

@@ -2,6 +2,8 @@
 
 ### Features
 
+- Add a CTF-only artifact scanner that discovers braced and SHA-256/SHA-512-style flag candidates, creates opaque
+  objective-validation references, and does not require the objective to repeat a flag format.
 - Add a final report footer with the operation objective, model-usage table grouped by provider/model, context window,
   input/output/cache tokens, cost, human-readable inference time, per-model efficiency, total operation time, software
   version, and Git repository provenance.

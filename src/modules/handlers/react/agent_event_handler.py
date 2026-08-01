@@ -25,7 +25,7 @@ from modules.config.system.logger import get_logger
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.handlers.utils import (
     get_output_path,
-    sanitize_target_name,
+    sanitize_target_name, format_duration,
 )
 
 from ...config import get_config_manager
@@ -947,7 +947,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             "step": self.action_count if step is None else step,
             "progressPercent": self.get_budget_progress(),
             "operation": self.operation_id,
-            "duration": self._format_duration(self._operation_elapsed_seconds()),
+            "duration": format_duration(self._operation_elapsed_seconds()),
         }
         if total_tools is not None:
             event["totalTools"] = total_tools
@@ -2961,7 +2961,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "cacheReadTokens": cache_read_tokens,
                 "cacheWriteTokens": cache_write_tokens,
                 "modelUsage": self.coordinator.model_usage(),
-                "duration": self._format_duration(self._operation_elapsed_seconds()),
+                "duration": format_duration(self._operation_elapsed_seconds()),
                 "memoryOps": self.coordinator.memory_ops,
                 "evidence": self.coordinator.evidence_count,
                 "reportEstimate": report_estimate,
@@ -3052,7 +3052,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 {
                     "type": "operation_complete",
                     "operation": self.operation_id,
-                    "duration": self._format_duration(self._operation_elapsed_seconds()),
+                    "duration": format_duration(self._operation_elapsed_seconds()),
                     "metrics": {
                         "inputTokens": input_tokens,
                         "outputTokens": output_tokens,
@@ -3175,21 +3175,6 @@ class AgentEventHandler(PrintingCallbackHandler):
                 output_text += str(item)
         return output_text
 
-    def _format_duration(self, seconds: float) -> str:
-        """Format duration for human-readable display."""
-        if seconds < 60:
-            return f"{int(seconds)}s"
-        elif seconds < 3600:
-            return f"{int(seconds / 60)}m {int(seconds % 60)}s"
-        elif seconds < 86400:
-            hours = int(seconds / 3600)
-            mins = int((seconds % 3600) / 60)
-            return f"{hours}h {mins}m"
-        else:
-            days = int(seconds / 86400)
-            hours = int((seconds % 86400) / 3600)
-            return f"{days}d {hours}h"
-
     # Report generation methods
     def ensure_report_generated(
         self,
@@ -3233,7 +3218,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "step": "FINAL REPORT",
                     "progressPercent": self.get_budget_progress(),
                     "operation": self.operation_id,
-                    "duration": self._format_duration(self._operation_elapsed_seconds()),
+                    "duration": format_duration(self._operation_elapsed_seconds()),
                 }
             )
 
@@ -3628,6 +3613,6 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "capability_expansion": list(tool_counts.keys()),
                 "memory_ops": memory_ops,
                 "evidence_count": evidence_count,
-                "duration": self._format_duration(self._operation_elapsed_seconds()),
+                "duration": format_duration(self._operation_elapsed_seconds()),
                 "metrics": current_metrics,
             }

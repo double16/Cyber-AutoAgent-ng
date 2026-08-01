@@ -18,18 +18,24 @@ confirmation. A vulnerability or intermediate capability is progress, not succes
   execution alone as insufficient when the objective depends on server state.
 - After gaining a capability, test its direct path to the flag. If it does not complete the assigned task, record the
   constraint and create follow-up work for a different method or capability class.
-- Treat flag formats and exact lengths in the objective as objective-validation constraints. A candidate that violates
-  them is rejected even when the vulnerability used to retrieve it is valid.
+- The CTF flag-candidate tool recognizes braced flags such as `FLAG{...}` and `HTB{...}`, plus standalone 64- or
+  128-character hexadecimal flags. Treat any format or exact length in the objective as additional validation
+  constraints. A candidate that violates an explicit constraint is rejected even when the vulnerability used to
+  retrieve it is valid.
 </module_execution_policy>
 
 <evidence_policy>
-- Store a candidate immediately with the artifact path that contains the exact candidate value or command output.
+- After writing an artifact that contains a possible flag, call `discover_flag_candidates` with that artifact. It
+  deterministically scans the artifact and creates validation tasks using opaque candidate references; its response
+  deliberately does not reveal candidate values. Do not invent, copy from the objective, or manually transcribe a
+  candidate merely to create a task.
 - A confirmed flag requires preconditions, the exact request or command, expected and actual results, and an artifact
   that visibly contains the value. Prefer the strongest reproducible candidate when several exist.
 - Submit exploitable-capability candidates with `store_finding`; finding validation decides only whether that security
-  claim is reproducible. Submit exact flag candidates with `store_objective_candidate`; objective validation decides
-  whether the operation objective is satisfied. Never reject or downgrade a confirmed vulnerability because its flag
-  candidate is invalid.
+  claim is reproducible. `discover_flag_candidates` submits artifact-derived flag candidates; use
+  `store_objective_candidate` only when an exact value is already visibly present in a cited artifact. Objective
+  validation decides whether the operation objective is satisfied. Never reject or downgrade a confirmed
+  vulnerability because its flag candidate is invalid.
 - Objective-validation tasks must independently inspect the cited artifact, then call `record_objective_validation`.
   Confidence below 80%, format mismatch, length mismatch, or placeholder evidence leaves the flag objective
   unsatisfied and requires a different flag candidate or an evidence-backed terminal constraint.

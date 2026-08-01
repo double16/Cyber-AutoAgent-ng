@@ -239,8 +239,11 @@ report agents can inspect operation artifacts with the read-only `read_artifact`
 
 Operation-objective candidates use a separate lifecycle. `store_objective_candidate` creates an
 `objective_validation` task, and `record_objective_validation` records confirmed, rejected, or inconclusive objective
-status with confidence and artifacts. Objective validation never changes a vulnerability finding's resolution. For
-flag objectives, Python also enforces objective-derived format and exact-length constraints and requires at least 80%
+status with confidence and artifacts. Candidate registration rejects values absent from the cited artifact and values
+that violate explicit objective constraints. The CTF module additionally exposes `discover_flag_candidates`, which
+deterministically scans artifacts for braced flags and standalone 64- or 128-character hexadecimal flags, then returns
+opaque candidate references. Objective validation never changes a vulnerability finding's resolution. For flag
+objectives, Python also enforces objective-derived format and exact-length constraints and requires at least 80%
 confidence for confirmation. Reports show these results under **Objective Validation**, outside vulnerability counts.
 
 After creating or durably changing a plan, the controller also emits a standard `output` event containing the
