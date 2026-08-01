@@ -2940,6 +2940,10 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
             ),
             self._evaluator_tools(),
             self._task_evaluator_system_prompt(),
+            evaluator_fallback_context={
+                "task_uid": task.task_uid,
+                "task_title": task.title,
+            },
         )
         decision = self._decision_from_data(data, allowed=("done", "partial_failure", "blocked"))
         recommendation = self._finding_recommendation_from_evaluator(data)
@@ -3125,6 +3129,10 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
                 self._phase_evaluator_prompt(plan, phase) + context,
                 self._evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
+                evaluator_fallback_context={
+                    "phase_id": phase.id,
+                    "phase_title": phase.title,
+                },
             )
             decision = self._decision_from_data(data, allowed=("continue", *EVALUATOR_PLAN_STATUSES))
         except WorkflowInvariantError as error:
@@ -3158,6 +3166,10 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
                 self._phase_evaluator_prompt(plan, phase, hard_cap=hard_cap),
                 self._evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
+                evaluator_fallback_context={
+                    "phase_id": phase.id,
+                    "phase_title": phase.title,
+                },
             )
             allowed = EVALUATOR_PLAN_STATUSES if hard_cap is not None else ("continue", *EVALUATOR_PLAN_STATUSES)
             decision = self._decision_from_data(data, allowed=allowed)
@@ -4430,10 +4442,12 @@ Allowed evidence references:
         data_validator: Optional[Callable[[Dict[str, Any]], None]] = None,
         cycle: Optional[int] = None,
         cycle_total: Optional[int] = None,
+        evaluator_fallback_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         current_prompt = prompt
         last_response = ""
         last_error: Optional[Exception] = None
+        last_failure_was_parse = False
         for attempt in range(self.json_retries + 1):
             activity_attempt = attempt + 1
             activity_total = self.json_retries + 1
@@ -4458,6 +4472,7 @@ Allowed evidence references:
                     cycle_total=cycle_total,
                 )
                 last_error = error
+                last_failure_was_parse = False
                 classification = getattr(error, "max_token_classification", None)
                 kind = getattr(classification, "kind", "output_truncation")
                 ratio = float(getattr(classification, "repetition_ratio", 0.0) or 0.0)
@@ -4475,18 +4490,6 @@ Allowed evidence references:
             last_response = response
             try:
                 data = extract_json_object(response)
-                if data_validator:
-                    data_validator(data)
-                self._emit_workflow_activity(
-                    role,
-                    "completed",
-                    attempt=activity_attempt,
-                    attempt_total=activity_total,
-                    cycle=cycle,
-                    cycle_total=cycle_total,
-                )
-                self._log_workflow("json agent role=%s success keys=%s", role, ",".join(sorted(data.keys())))
-                return data
             except (json.JSONDecodeError, ValueError) as error:
                 self._emit_workflow_activity(
                     role,
@@ -4497,6 +4500,7 @@ Allowed evidence references:
                     cycle_total=cycle_total,
                 )
                 last_error = error
+                last_failure_was_parse = True
                 if attempt >= self.json_retries:
                     break
                 self._record_efficiency_correction("json_retry")
@@ -4512,7 +4516,70 @@ Allowed evidence references:
                     response,
                     include_previous_response=role in {"taxonomy_annotator", "attack_enricher"},
                 )
+                continue
+            try:
+                if data_validator:
+                    data_validator(data)
+            except (json.JSONDecodeError, ValueError) as error:
+                self._emit_workflow_activity(
+                    role,
+                    "failed",
+                    attempt=activity_attempt,
+                    attempt_total=activity_total,
+                    cycle=cycle,
+                    cycle_total=cycle_total,
+                )
+                last_error = error
+                last_failure_was_parse = False
+                if attempt >= self.json_retries:
+                    break
+                self._record_efficiency_correction("json_retry")
+                self._log_workflow(
+                    "json agent role=%s invalid_json retrying error=%s response_excerpt=%s",
+                    role,
+                    self._short(error),
+                    self._short(response),
+                )
+                current_prompt = self._json_retry_prompt(
+                    prompt,
+                    error,
+                    response,
+                    include_previous_response=role in {"taxonomy_annotator", "attack_enricher"},
+                )
+                continue
+            self._emit_workflow_activity(
+                role,
+                "completed",
+                attempt=activity_attempt,
+                attempt_total=activity_total,
+                cycle=cycle,
+                cycle_total=cycle_total,
+            )
+            self._log_workflow("json agent role=%s success keys=%s", role, ",".join(sorted(data.keys())))
+            return data
         excerpt = str(last_response or "")[:1000]
+        if role in {"phase_evaluator", "task_evaluator"} and last_failure_was_parse:
+            fallback = self._evaluator_prose_fallback(last_response)
+            if fallback is not None:
+                event = {
+                    "type": "evaluator_fallback",
+                    "role": role,
+                    "status": fallback["status"],
+                    "source": "prose_conclusion",
+                    "error_type": last_error.__class__.__name__ if last_error else "JSONDecodeError",
+                    "error_fingerprint": hashlib.sha256(
+                        str(last_error).encode("utf-8", errors="replace")
+                    ).hexdigest(),
+                }
+                event.update(evaluator_fallback_context or {})
+                self._emit_workflow_event(event)
+                self._log_workflow(
+                    "evaluator prose fallback role=%s status=%s context=%s",
+                    role,
+                    fallback["status"],
+                    self._short(evaluator_fallback_context or {}),
+                )
+                return fallback
         self._log_workflow(
             "json agent role=%s failed attempts=%s error=%s response_excerpt=%s",
             role,
@@ -4524,6 +4591,31 @@ Allowed evidence references:
             f"{role} returned invalid JSON after {self.json_retries + 1} attempt(s): {last_error}. "
             f"Response excerpt: {excerpt}"
         )
+
+    @staticmethod
+    def _evaluator_prose_fallback(response: str) -> Optional[Dict[str, Any]]:
+        """Recover only explicit blocked/failed evaluator conclusions from prose."""
+
+        compact = " ".join(str(response or "").split())
+        if not compact:
+            return None
+        status_pattern = re.compile(
+            r"\b(?:status(?:\s+assessment)?|assessment\s+status)\s*[:=-]\s*"
+            r"(?P<status>blocked|failed|failure|error|partial_failure)\b",
+            re.IGNORECASE,
+        )
+        match = status_pattern.search(compact)
+        if match is None:
+            return None
+        raw_status = match.group("status").lower()
+        status = "blocked" if raw_status == "blocked" else "partial_failure"
+        return {
+            "status": status,
+            "reason": (
+                f"Evaluator returned explicit prose status {raw_status!r} after JSON parsing failed: "
+                f"{compact[:1000]}"
+            ),
+        }
 
     @staticmethod
     def _json_max_token_retry_prompt(original_prompt: str, classification: str) -> str:

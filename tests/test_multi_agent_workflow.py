@@ -3233,6 +3233,78 @@ def test_phase_evaluator_malformed_output_emits_deterministic_partial_failure_fa
     assert len(event["error_fingerprint"]) == 64
 
 
+def test_phase_evaluator_recovers_explicit_blocked_prose_after_json_retries():
+    plan = _plan()
+    state = FakeState(plan)
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        return "Status Assessment: BLOCKED. No viable path remains within the assigned scope."
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    decision = controller._evaluate_phase_with_policy(plan, plan.phases[0])
+
+    assert decision.status == "blocked"
+    assert len(calls) == 2
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["role"] == "phase_evaluator"
+    assert event["phase_id"] == 1
+    assert event["status"] == "blocked"
+    assert event["source"] == "prose_conclusion"
+
+
+def test_task_evaluator_recovers_explicit_failed_prose_after_json_retries():
+    plan = _plan()
+    task = Task(task_uid="task", title="Task", objective="run", phase=1, status="active")
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: "Status: FAILED. The required evidence could not be produced.",
+    )
+
+    decision = controller._evaluate_task(plan, plan.phases[0], task)
+
+    assert decision.status == "partial_failure"
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["role"] == "task_evaluator"
+    assert event["task_uid"] == "task"
+    assert event["status"] == "partial_failure"
+
+
+def test_evaluator_prose_fallback_rejects_ambiguous_and_success_prose():
+    assert MultiAgentWorkflowController._evaluator_prose_fallback(
+        "The result is not blocked and the work completed successfully."
+    ) is None
+    assert MultiAgentWorkflowController._evaluator_prose_fallback(
+        "The evidence suggests there is no viable path, but no status was assigned."
+    ) is None
+
+
+def test_repaired_evaluator_json_does_not_use_prose_fallback():
+    plan = _plan()
+    state = FakeState(plan)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: '{"status":"blocked","reason":"closed",}',
+    )
+
+    decision = controller._evaluate_phase_with_policy(plan, plan.phases[0])
+
+    assert decision.status == "blocked"
+    assert not any(event["type"] == "evaluator_fallback" for event in controller.runtime.callback_handler.events)
+
+
 def test_task_creator_prior_phase_context_exposes_terminal_results_without_full_contracts():
     plan = OperationPlan(
         objective="assess",
