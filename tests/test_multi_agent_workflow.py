@@ -696,7 +696,14 @@ def test_json_agent_emits_workflow_activity_lifecycle_events():
         text_runner=lambda role, prompt, tools, system_prompt: '{"status":"done"}',
     )
 
-    controller._run_json_text_agent("task_evaluator", "original", [], "system")
+    controller._run_json_text_agent(
+        "task_evaluator",
+        "original",
+        [],
+        "system",
+        cycle=2,
+        cycle_total=3,
+    )
 
     activities = [event for event in runtime.callback_handler.events if event["type"] == "workflow_activity"]
     assert [(event["status"], event["action"]) for event in activities] == [
@@ -705,6 +712,7 @@ def test_json_agent_emits_workflow_activity_lifecycle_events():
     ]
     assert activities[0]["activity"] == "evaluation"
     assert activities[0]["label"] == "Task evaluation"
+    assert [(event["cycle"], event["cycle_total"]) for event in activities] == [(2, 3), (2, 3)]
     assert "original" not in activities[0]["content"]
 
 
@@ -1657,6 +1665,17 @@ def test_task_execution_retries_actionable_semantic_evaluator_feedback():
     assert lifecycle == [
         ("created", "task_executor", "base prompt"),
         ("cleaned", "task_executor"),
+    ]
+    evaluator_activities = [
+        event
+        for event in runtime.callback_handler.events
+        if event.get("type") == "workflow_activity" and event.get("role") == "task_evaluator"
+    ]
+    assert [(event["status"], event["cycle"], event["cycle_total"]) for event in evaluator_activities] == [
+        ("started", 1, 6),
+        ("completed", 1, 6),
+        ("started", 2, 6),
+        ("completed", 2, 6),
     ]
     assert state.tasks[0].status == "done"
     assert state.tasks[0].status_reason == "corrected evidence is sufficient"
@@ -3587,7 +3606,6 @@ def test_plan_revision_prompt_describes_advisory_phase_contract():
     assert "merge only adjacent capabilities" in prompt
     assert "document any omitted inapplicable capability" in prompt
     assert "one dominant outcome" in prompt
-    assert "operational coverage-closure" in prompt
 
 
 def test_plan_refinement_defaults_to_two_and_negative_values_disable_it():

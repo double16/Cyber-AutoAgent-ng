@@ -562,6 +562,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         self.model_id = model_id
         self.specialist_model_id = specialist_model_id or model_id
         self.init_context = init_context or {}
+        self.operation_mode = str(self.init_context.get("operation_mode") or "execution")
 
         # Unified budget caps
         budget_ctx = {}
@@ -1294,6 +1295,30 @@ class AgentEventHandler(PrintingCallbackHandler):
         if self.coordinator is None:
             return []
         return self.coordinator.model_usage()
+
+    def emit_model_usage_snapshot(self) -> None:
+        """Persist assessment model usage before report generation adds its own calls."""
+        if self.operation_mode == "report_only":
+            return
+        totals = self._operation_usage_totals()
+        input_tokens = int(totals["input_tokens"])
+        output_tokens = int(totals["output_tokens"])
+        self.emit_ui_event(
+            {
+                "type": "model_usage_snapshot",
+                "stage": "assessment_complete",
+                "metrics": {
+                    "modelUsage": self.model_usage(),
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "totalTokens": input_tokens + output_tokens,
+                    "cost": float(totals["cost"]),
+                    "duration": format_duration(self.total_operation_time_seconds()),
+                },
+            }
+        )
+        if hasattr(self.emitter, "flush_immediate"):
+            self.emitter.flush_immediate()
 
     def total_operation_time_seconds(self) -> float:
         """Return wall-clock elapsed time for the complete operation."""

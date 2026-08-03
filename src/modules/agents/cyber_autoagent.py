@@ -275,6 +275,9 @@ def create_agent_runtime_resources(
     else:
         operation_id = config.op_id
 
+    # Keep environment and memory context aligned before any continuation reads occur.
+    os.environ["CYBER_OPERATION_ID"] = operation_id
+
     # Configure memory system using centralized configuration
     memory_config = config_manager.get_mem0_service_config(config.provider)
     align_mem0_config(config.model_id, memory_config)
@@ -806,6 +809,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
             "objective": config.objective,
             "target": config.target,
             "module": config.module,
+            "operation_mode": config.operation_mode,
             "provider": config.provider,
             "model": config.model_id,
             "region": config.region_name,

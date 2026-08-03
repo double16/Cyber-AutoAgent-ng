@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +56,7 @@ class FakePlanStore:
         self.acceptance_results = {}
         self.findings = {}
         self.acceptance_memory_publications = {}
+        self.read_operation_ids = []
 
     def store_plan(self, _operation_id, plan):
         self.plan = plan
@@ -67,6 +69,7 @@ class FakePlanStore:
         self.tasks.append(task)
 
     def get_tasks(self, _operation_id):
+        self.read_operation_ids.append(("tasks", _operation_id))
         return list(self.tasks)
 
     def store_acceptance_results(self, _operation_id, task_uid, results):
@@ -75,6 +78,7 @@ class FakePlanStore:
         self.acceptance_results[task_uid] = list(current.values())
 
     def get_acceptance_results(self, _operation_id, task_uid):
+        self.read_operation_ids.append(("acceptance", _operation_id))
         return list(self.acceptance_results.get(task_uid, []))
 
     def has_acceptance_memory_publication(self, operation_id, task_uid, publication_key):
@@ -87,6 +91,7 @@ class FakePlanStore:
         return self.findings.get(finding_uid)
 
     def list_findings(self, _operation_id):
+        self.read_operation_ids.append(("findings", _operation_id))
         return [
             {"finding_uid": finding_uid, **record}
             for finding_uid, record in self.findings.items()
@@ -207,6 +212,108 @@ def _coverage_acceptance(manifest: Path) -> dict:
             }
         ],
     }
+
+
+def test_operation_scoped_reads_ignore_stale_memory_context(fake_memory_client):
+    client, store = fake_memory_client
+    store.list_preflight_results = Mock(return_value=[])
+
+    client.list_tasks(operation_id="op2")
+    client.list_task_acceptance_results("task-1", operation_id="op2")
+    client.list_finding_records(operation_id="op2")
+    client.list_preflight_results(operation_id="op2")
+
+    assert store.read_operation_ids == [
+        ("tasks", "op2"),
+        ("acceptance", "op2"),
+        ("findings", "op2"),
+    ]
+    store.list_preflight_results.assert_called_once_with("op2")
+
+
+def test_initialize_memory_system_synchronizes_operation_environment(monkeypatch):
+    monkeypatch.setattr(mod, "Mem0ServiceClient", Mock())
+    monkeypatch.setattr(mod, "_MEMORY_CONFIG", {"operation_id": "old-op"})
+    monkeypatch.setattr(mod, "_MEMORY_CLIENT", None)
+    monkeypatch.setenv("CYBER_OPERATION_ID", "old-op")
+
+    mod.initialize_memory_system(operation_id="new-op", target_name="target")
+
+    assert mod._MEMORY_CONFIG["operation_id"] == "new-op"
+    assert os.environ["CYBER_OPERATION_ID"] == "new-op"
+
+
+def test_get_memory_client_reinitializes_when_environment_operation_changes(fake_memory_client, monkeypatch):
+    _client, _store = fake_memory_client
+    replacement = Mock()
+    constructor = Mock(return_value=replacement)
+    monkeypatch.setattr(mod, "Mem0ServiceClient", constructor)
+    monkeypatch.setenv("CYBER_OPERATION_ID", "op2")
+
+    assert mod.get_memory_client(silent=True) is replacement
+    constructor.assert_called_once()
+    assert constructor.call_args.args[0]["operation_id"] == "op2"
+    assert mod._MEMORY_CONFIG["operation_id"] == "op2"
+
+
+def test_plan_store_rebinds_when_operation_context_changes(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMORY_ISOLATION", "operation")
+    monkeypatch.setattr(
+        mod,
+        "_MEMORY_CONFIG",
+        {"output_dir": str(tmp_path), "target_name": "target", "operation_id": "op1"},
+    )
+    first = mod._get_plan_store()
+    assert first.db_path.endswith("target/memory/op1/plan_storage.db")
+
+    monkeypatch.setattr(
+        mod,
+        "_MEMORY_CONFIG",
+        {"output_dir": str(tmp_path), "target_name": "target", "operation_id": "op2"},
+    )
+    second = mod._get_plan_store()
+
+    assert second is not first
+    assert second.db_path.endswith("target/memory/op2/plan_storage.db")
+
+
+def test_read_only_plan_store_does_not_create_missing_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        mod,
+        "_MEMORY_CONFIG",
+        {
+            "output_dir": str(tmp_path),
+            "target_name": "target",
+            "operation_id": "missing-op",
+            "read_only": True,
+        },
+    )
+
+    with pytest.raises(FileNotFoundError, match="Persisted plan store does not exist"):
+        mod._get_plan_store()
+
+    assert not (tmp_path / "target" / "memory" / "missing-op" / "plan_storage.db").exists()
+
+
+def test_read_only_plan_store_preserves_existing_database(tmp_path, monkeypatch):
+    config = {"output_dir": str(tmp_path), "target_name": "target", "operation_id": "op1"}
+    monkeypatch.setattr(mod, "_MEMORY_CONFIG", config)
+    writable = mod._get_plan_store()
+    writable.store_plan(
+        "op1",
+        mod.OperationPlan(
+            objective="test",
+            current_phase=1,
+            total_phases=1,
+            phases=[mod.PlanPhase(id=1, title="Test", status="pending")],
+        ),
+    )
+
+    monkeypatch.setattr(mod, "_MEMORY_CONFIG", {**config, "read_only": True})
+    readonly = mod._get_plan_store()
+
+    assert readonly.read_only is True
+    assert readonly.get_plan("op1").objective == "test"
 
 
 @pytest.mark.parametrize(

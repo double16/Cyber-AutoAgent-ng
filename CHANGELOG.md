@@ -2,11 +2,13 @@
 
 ### Features
 
+- Render report observations and execution-history/acceptance tables deterministically, reducing report model calls
+  while preserving LLM synthesis for executive, finding, methodology, and next-step sections.
 - Add a CTF-only artifact scanner that discovers braced and SHA-256/SHA-512-style flag candidates, creates opaque
   objective-validation references, and does not require the objective to repeat a flag format.
-- Add a final report footer with the operation objective, model-usage table grouped by provider/model, context window,
-  input/output/cache tokens, cost, human-readable inference time, per-model efficiency, total operation time, software
-  version, and Git repository provenance.
+- Add deterministic report model execution metrics to Appendix A, including provider/model usage grouped by context
+  window, input/output/cache tokens, cost, human-readable inference time, per-model efficiency, and total operation
+  time; retain operation metadata, software version, and Git repository provenance in Footer.
 - Resolve SecLists once per operation and provide its verified root to wordlist-capable agents through the tools guide.
 - Add a final ATT&CK enrichment pass that uses linked terminal task evidence, preserves first-pass CWE mappings,
   persists retryable results, and overlays the merged taxonomy into final and report-only output.

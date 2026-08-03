@@ -53,6 +53,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
@@ -1183,16 +1184,21 @@ class PlanStore:
     a simpler and more reliable local storage.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, read_only: bool = False):
         self.db_path = db_path
+        self.read_only = read_only
         self._lock = threading.Lock()
-        self._bootstrap()
+        if self.read_only:
+            if not os.path.isfile(self.db_path):
+                raise FileNotFoundError(f"Persisted plan store does not exist: {self.db_path}")
+        else:
+            self._bootstrap()
 
     def _bootstrap(self):
         """Initialize the database schema if it doesn't exist."""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS plans (
                         operation_id TEXT PRIMARY KEY,
@@ -1308,6 +1314,12 @@ class PlanStore:
                     )
                 """)
 
+    def _connect(self) -> sqlite3.Connection:
+        """Open the plan database, enforcing read-only access when configured."""
+        if self.read_only:
+            return sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True)
+        return sqlite3.connect(self.db_path)
+
     def store_plan(self, operation_id: str, plan: OperationPlan):
         """Store or update a plan."""
         plan_dict = plan.to_dict()
@@ -1317,7 +1329,7 @@ class PlanStore:
         plan_dict["updated_at"] = now
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute("""
                     INSERT INTO plans (operation_id, objective, current_phase, total_phases, assessment_complete, plan_data, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1342,7 +1354,7 @@ class PlanStore:
     def get_plan(self, operation_id: str) -> Optional[OperationPlan]:
         """Retrieve a plan by operation_id."""
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute("SELECT plan_data FROM plans WHERE operation_id = ?", (operation_id,))
                 row = cursor.fetchone()
                 if row:
@@ -1358,7 +1370,7 @@ class PlanStore:
         task_dict["updated_at"] = now
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 existing = conn.execute(
                     "SELECT acceptance_contract FROM tasks WHERE task_uid = ?",
                     (task.task_uid,),
@@ -1410,7 +1422,7 @@ class PlanStore:
         """Retrieve all tasks for an operation."""
         tasks = []
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute(
                     "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
                     "created_at, updated_at, kind, reference_id, target_scope, target_ids "
@@ -1448,7 +1460,7 @@ class PlanStore:
 
         now = datetime.now().isoformat()
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.executemany(
                     """
                     INSERT INTO task_acceptance_results (
@@ -1476,7 +1488,7 @@ class PlanStore:
         """Return the current acceptance ledger for one task."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT criterion_id, status, disposition, summary, evidence_refs, coverage "
                     "FROM task_acceptance_results WHERE operation_id = ? AND task_uid = ? "
@@ -1504,7 +1516,7 @@ class PlanStore:
         """Return whether this immutable acceptance ledger was published to operation memory."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT publication_key FROM task_acceptance_memory_publications "
                     "WHERE operation_id = ? AND task_uid = ?",
@@ -1521,7 +1533,7 @@ class PlanStore:
         """Record successful publication for replay-safe acceptance handling."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     """
                     INSERT INTO task_acceptance_memory_publications (
@@ -1539,7 +1551,7 @@ class PlanStore:
 
         now = datetime.now().isoformat()
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 for result in results:
                     target_id = str(result.get("target_id") or "").strip()
                     if not target_id:
@@ -1573,7 +1585,7 @@ class PlanStore:
         """Return the original persisted preflight facts for an operation."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     """
                     SELECT target_id, target, target_type, status, checks, reason, resolved_addresses,
@@ -1601,7 +1613,7 @@ class PlanStore:
 
     def get_finding_by_fingerprint(self, operation_id: str, fingerprint: str) -> Optional[Dict[str, Any]]:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT finding_uid, candidate_data, verification_task_uid, validation_data, resolution "
                     "FROM finding_records WHERE operation_id = ? AND fingerprint = ?",
@@ -1619,7 +1631,7 @@ class PlanStore:
 
     def get_finding(self, operation_id: str, finding_uid: str) -> Optional[Dict[str, Any]]:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
                     "FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
@@ -1640,7 +1652,7 @@ class PlanStore:
         """Return finding records for deterministic workflow scheduling decisions."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT finding_uid, fingerprint, candidate_data, verification_task_uid, "
                     "validation_data, resolution FROM finding_records WHERE operation_id = ? "
@@ -1669,7 +1681,7 @@ class PlanStore:
     ) -> None:
         now = datetime.now().isoformat()
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO finding_records "
                     "(finding_uid, operation_id, fingerprint, candidate_data, verification_task_uid, created_at, updated_at) "
@@ -1689,7 +1701,7 @@ class PlanStore:
         """Durably associate an idempotent finding candidate with a source task."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
                     (operation_id, finding_uid),
@@ -1714,7 +1726,7 @@ class PlanStore:
         validation_data: Dict[str, Any],
     ) -> None:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "UPDATE finding_records SET validation_data = ?, updated_at = ? "
                     "WHERE operation_id = ? AND finding_uid = ?",
@@ -1729,7 +1741,7 @@ class PlanStore:
     ) -> bool:
         """Atomically attach one taxonomy annotation to an unresolved finding candidate."""
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
                     (operation_id, finding_uid),
@@ -1758,7 +1770,7 @@ class PlanStore:
         """Persist final ATT&CK enrichment and merge it into the finding taxonomy."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
                     (operation_id, finding_uid),
@@ -1810,7 +1822,7 @@ class PlanStore:
 
     def resolve_finding(self, operation_id: str, finding_uid: str, resolution: str) -> None:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "UPDATE finding_records SET resolution = ?, updated_at = ? "
                     "WHERE operation_id = ? AND finding_uid = ?",
@@ -1819,7 +1831,7 @@ class PlanStore:
 
     def get_objective_candidate(self, operation_id: str, candidate_uid: str) -> Optional[Dict[str, Any]]:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
                     "FROM objective_validation_records WHERE operation_id = ? AND candidate_uid = ?",
@@ -1842,7 +1854,7 @@ class PlanStore:
         fingerprint: str,
     ) -> Optional[Dict[str, Any]]:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT candidate_uid FROM objective_validation_records "
                     "WHERE operation_id = ? AND fingerprint = ?",
@@ -1852,7 +1864,7 @@ class PlanStore:
 
     def list_objective_candidates(self, operation_id: str) -> List[Dict[str, Any]]:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT candidate_uid FROM objective_validation_records WHERE operation_id = ? "
                     "ORDER BY created_at, candidate_uid",
@@ -1870,7 +1882,7 @@ class PlanStore:
     ) -> None:
         now = datetime.now().isoformat()
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO objective_validation_records "
                     "(candidate_uid, operation_id, fingerprint, candidate_data, verification_task_uid, "
@@ -1893,7 +1905,7 @@ class PlanStore:
         validation_data: Dict[str, Any],
     ) -> None:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "UPDATE objective_validation_records SET validation_data = ?, updated_at = ? "
                     "WHERE operation_id = ? AND candidate_uid = ?",
@@ -1902,7 +1914,7 @@ class PlanStore:
 
     def resolve_objective_candidate(self, operation_id: str, candidate_uid: str, resolution: str) -> None:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "UPDATE objective_validation_records SET resolution = ?, updated_at = ? "
                     "WHERE operation_id = ? AND candidate_uid = ?",
@@ -1910,14 +1922,48 @@ class PlanStore:
                 )
 
 
-def _get_plan_store() -> PlanStore:
-    """Get or initialize the global plan store."""
+def _plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the operation-scoped SQLite plan-store path."""
+    return os.path.join(_get_memory_base_path(config), "plan_storage.db")
+
+
+def get_plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the resolved plan-store path without opening or creating it."""
+    return _plan_store_path(config or _MEMORY_CONFIG)
+
+
+def require_existing_plan_store(
+    *,
+    output_dir: str,
+    target_name: str,
+    operation_id: str,
+) -> str:
+    """Validate that an operation's persisted plan store exists without creating it."""
+    path = _plan_store_path(
+        {
+            "output_dir": output_dir,
+            "target_name": target_name,
+            "operation_id": operation_id,
+        }
+    )
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Persisted plan store does not exist: {path}")
+    return path
+
+
+def _get_plan_store(read_only: Optional[bool] = None) -> PlanStore:
+    """Get the plan store for the current memory context and resolved path."""
     global _PLAN_STORE
-    if _PLAN_STORE is None:
-        base_path = _get_memory_base_path(_MEMORY_CONFIG)
-        db_path = os.path.join(base_path, "plan_storage.db")
+    configured_read_only = bool((_MEMORY_CONFIG or {}).get("read_only", False))
+    requested_read_only = configured_read_only if read_only is None else read_only
+    db_path = _plan_store_path(_MEMORY_CONFIG)
+    if (
+        _PLAN_STORE is None
+        or getattr(_PLAN_STORE, "db_path", None) != db_path
+        or bool(getattr(_PLAN_STORE, "read_only", False)) != requested_read_only
+    ):
         print(f"[+] Plan Storage: {db_path}")
-        _PLAN_STORE = PlanStore(db_path)
+        _PLAN_STORE = PlanStore(db_path, read_only=requested_read_only)
     return _PLAN_STORE
 
 
@@ -6832,9 +6878,10 @@ class Mem0ServiceClient:
             user_id: Optional[str] = None,
             phase: Optional[int] = None,
             status: Optional[List[str]] = None,
+            operation_id: Optional[str] = None,
     ) -> List[Task]:
-        """List tasks for a phase."""
-        tasks = _get_plan_store().get_tasks(_operation_id())
+        """List tasks for a phase and, when provided, an explicit operation."""
+        tasks = _get_plan_store().get_tasks(_operation_id(operation_id))
         result = []
         for t in tasks:
             if phase is not None and int(t.phase) != int(phase):
@@ -6843,15 +6890,19 @@ class Mem0ServiceClient:
                 result.append(t)
         return result
 
-    def list_task_acceptance_results(self, task_uid: str) -> List[AcceptanceResult]:
-        """Return the frozen-manifest result ledger for one task."""
+    def list_task_acceptance_results(
+            self,
+            task_uid: str,
+            operation_id: Optional[str] = None,
+    ) -> List[AcceptanceResult]:
+        """Return the frozen-manifest result ledger for one task and operation."""
 
-        return _get_plan_store().get_acceptance_results(_operation_id(), task_uid)
+        return _get_plan_store().get_acceptance_results(_operation_id(operation_id), task_uid)
 
-    def list_finding_records(self) -> List[Dict[str, Any]]:
-        """Return finding records for the current operation."""
+    def list_finding_records(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return finding records for an explicit or current operation."""
 
-        return _get_plan_store().list_findings(_operation_id())
+        return _get_plan_store().list_findings(_operation_id(operation_id))
 
     def list_objective_validation_records(self) -> List[Dict[str, Any]]:
         """Return objective-validation records for the current operation."""
@@ -6863,10 +6914,10 @@ class Mem0ServiceClient:
 
         _get_plan_store().store_preflight_results(operation_id or _operation_id(), results)
 
-    def list_preflight_results(self) -> List[Dict[str, Any]]:
-        """Return persisted preflight facts for the current operation."""
+    def list_preflight_results(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return persisted preflight facts for an explicit or current operation."""
 
-        return _get_plan_store().list_preflight_results(_operation_id())
+        return _get_plan_store().list_preflight_results(_operation_id(operation_id))
 
     def update_finding_taxonomy_annotation(
         self,
@@ -6979,12 +7030,19 @@ def initialize_memory_system(
             operation_id or os.environ.get("CYBER_OPERATION_ID", f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     )
     enhanced_config["target_name"] = target_name or os.environ.get("CYBER_TARGET_NAME", "default_target")
+    enhanced_config["output_dir"] = enhanced_config.get(
+        "output_dir", os.environ.get("CYBER_AGENT_OUTPUT_DIR", get_default_base_dir())
+    )
+    enhanced_config["read_only"] = bool(
+        enhanced_config.get("read_only", os.environ.get("CYBER_MEMORY_READ_ONLY", "").lower() == "true")
+    )
     if enhanced_config["target_name"] == "default_target":
         enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["operation_id"]}"'
     else:
         enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["target_name"]}"'
 
     _MEMORY_CONFIG = enhanced_config
+    os.environ["CYBER_OPERATION_ID"] = enhanced_config["operation_id"]
     _MEMORY_CLIENT = Mem0ServiceClient(enhanced_config, has_existing_memories, silent)
     logger.info(
         "Memory system initialized for operation %s, target: %s, user: %s",
@@ -6995,7 +7053,7 @@ def initialize_memory_system(
 
 
 def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
-    """Get the current memory client, initializing if needed.
+    """Get the memory client for the authoritative environment operation.
 
     Args:
         silent: If True, suppress initialization output (used during report generation)
@@ -7004,8 +7062,27 @@ def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
         The memory client instance or None if initialization fails
     """
     global _MEMORY_CLIENT
+    authoritative_operation_id = os.environ.get("CYBER_OPERATION_ID")
     if _MEMORY_CLIENT is None:
         initialize_memory_system(silent=silent)
+    elif authoritative_operation_id:
+        configured_operation_id = (_MEMORY_CONFIG or {}).get("operation_id")
+        if configured_operation_id != authoritative_operation_id:
+            logger.info(
+                "Reinitializing memory client for CYBER_OPERATION_ID=%s (was configured for %s)",
+                authoritative_operation_id,
+                configured_operation_id or "unset",
+            )
+            existing_config = dict(_MEMORY_CONFIG or {})
+            target_name = existing_config.get("target_name")
+            has_existing_memories = bool(getattr(_MEMORY_CLIENT, "has_existing_memories", True))
+            initialize_memory_system(
+                config=existing_config,
+                operation_id=authoritative_operation_id,
+                target_name=target_name,
+                has_existing_memories=has_existing_memories,
+                silent=silent,
+            )
     return _MEMORY_CLIENT
 
 

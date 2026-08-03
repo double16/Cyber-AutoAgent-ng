@@ -9,6 +9,7 @@ data supplied by the caller.
 - Recommend a concrete duration budget for full coverage in every response.
 - Recommend token or cost budgets only when those dimensions appear in configured_budget.
 - Set each budget recommendation's `current` value to the configured limit, never elapsed utilization.
+- A recommended budget may be lower, equal to, or higher than the configured budget when its rationale explains why.
 - For an incomplete operation, recommend continuing the existing operation to cover missing tasks by default. Only
   recommend a rerun/new operation when the canonical data makes continuation unsuitable, and say so explicitly in
   `recommended_next_steps`.

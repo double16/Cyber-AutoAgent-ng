@@ -318,8 +318,9 @@ sequenceDiagram
     E->>E: Write security_assessment_report.md/json to operation directory
 ```
 
-Each LLM-generated executive, finding, observation, Appendix A, and Appendix B section uses this bounded
-actor/critic cycle.
+The executive summary, detailed findings, Appendix A methodology, and Appendix B recommendations use the bounded
+actor/critic cycle. Observations, target coverage, and execution-history/acceptance tables are rendered
+deterministically from canonical operation data.
 Critic JSON uses the workflow's tolerant JSON repair and retry path. A final rejection does not suppress the report:
 the actor applies the feedback once more, the assembled report retains that latest actor revision, and the critic's
 feedback prose appears under **Further Review Required** inside the section that produced it. Appendix A contains the

@@ -986,13 +986,12 @@ def _get_current_date() -> str:
 def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
     """Generate an actionable KEY FINDINGS table from structured evidence.
 
-    Columns: Severity | Count | Canonical Finding (anchor) | Primary Location | Verified | Confidence (range)
+    Columns: Severity | Count | Canonical Finding (anchor) | Primary Location | Verified
     - Canonical Finding links to the first detailed finding within that severity section
       by constructing a markdown anchor from the detailed heading text
       (format: "#### 1. <vulnerability> - <where>")
     - Primary Location is the parsed [WHERE] of the canonical finding, or "Multiple" if diverse
     - Verified reflects the canonical finding's validation_status when available
-    - Confidence shows min–max range across findings in the severity group using numeric confidences
     """
     # Helper: slugify heading text to markdown anchor (GitHub-style best effort)
     def _slugify(text: str) -> str:
@@ -1001,20 +1000,6 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
         s = re.sub(r"\s+", "-", s)
         s = re.sub(r"-+", "-", s)
         return s.strip("-")
-
-    def _parse_num_conf(val: str) -> Optional[float]:
-        if not val:
-            return None
-        m = re.search(r"([0-9]+(?:\.[0-9]+)?)", str(val))
-        if not m:
-            return None
-        try:
-            num = float(m.group(1))
-            if 0 <= num <= 100:
-                return num
-        except Exception:
-            return None
-        return None
 
     # Group evidence by severity using parsed fields when available
     groups: Dict[str, List[Dict[str, Any]]] = {
@@ -1032,8 +1017,8 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             groups[sev].append(item)
 
     header = (
-        "| Severity | Count | Canonical Finding | Primary Location | Verified | Confidence |\n"
-        "|----------|-------|-------------------|------------------|----------|------------|\n"
+        "| Severity | Count | Canonical Finding | Primary Location | Verified |\n"
+        "|----------|-------|-------------------|------------------|----------|\n"
     )
 
     rows: List[str] = []
@@ -1088,22 +1073,6 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             "Verified" if vstat == "verified" else ("Unverified" if vstat else "-")
         )
 
-        # Confidence range across group
-        nums: List[float] = []
-        for it in items:
-            c = it.get("confidence") or (it.get("metadata", {}) or {}).get("confidence")
-            n = _parse_num_conf(c)
-            if n is not None:
-                nums.append(n)
-        if nums:
-            cmin, cmax = min(nums), max(nums)
-            if abs(cmin - cmax) < 1e-9:
-                conf_str = f"{cmin:.1f}%"
-            else:
-                conf_str = f"{cmin:.1f}%–{cmax:.1f}%"
-        else:
-            conf_str = "N/A"
-
         # Build anchor link to detailed heading: "#### 1. {vuln} - {where}"
         heading_text = (
             f"1. {vuln} - {where}"
@@ -1115,16 +1084,16 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
         canonical_link = f"[{link_text}](#{anchor})"
 
         rows.append(
-            f"| {sev} | {count} | {canonical_link} | {where or '-'} | {verified} | {conf_str} |"
+            f"| {sev} | {count} | {canonical_link} | {where or '-'} | {verified} |"
         )
 
     return (
         header + "\n".join(rows)
         if rows
         else (
-            "| Severity | Count | Canonical Finding | Primary Location | Verified | Confidence |\n"
-            "|----------|-------|-------------------|------------------|----------|------------|\n"
-            "| NONE | 0 | - | - | - | - |"
+            "| Severity | Count | Canonical Finding | Primary Location | Verified |\n"
+            "|----------|-------|-------------------|------------------|----------|\n"
+            "| NONE | 0 | - | - | - |"
         )
     )
 
@@ -1163,10 +1132,18 @@ def format_evidence_for_report(
     Format evidence list into structured text for the report.
 
     Processes full evidence content including parsed components for detailed reporting.
-    Normalizes severity casing and confidence display, and includes status badges when available.
+    Normalizes severity casing and includes status badges when available.
     """
     if not evidence:
         return ""
+
+    def _without_finding_confidence(content: str) -> str:
+        return re.sub(
+            r"\s*\[CONFIDENCE\].*?(?=\s*\[(?:VULNERABILITY|FINDING|WHERE|IMPACT|EVIDENCE|STEPS|REMEDIATION)\]|\s*$)",
+            "",
+            content,
+            flags=re.IGNORECASE | re.DOTALL,
+        ).strip()
 
     evidence_text = ""
     severity_groups = {"CRITICAL": [], "HIGH": [], "MEDIUM": [], "LOW": [], "INFO": []}
@@ -1188,7 +1165,6 @@ def format_evidence_for_report(
             evidence_text += f"\n### {severity.capitalize()} Findings\n\n"
             for item in severity_groups[severity]:
                 category = str(item.get("category", "unknown")).upper()
-                confidence = str(item.get("confidence", "N/A"))
                 status = str(item.get("validation_status") or "").strip()
 
                 # Format the finding with parsed evidence if available
@@ -1202,7 +1178,7 @@ def format_evidence_for_report(
 
                     # Display raw item severity if available, otherwise use group label
                     disp_sev = item.get("severity", severity)
-                    line = f"**Severity:** {disp_sev} | **Confidence:** {confidence}"
+                    line = f"**Severity:** {disp_sev}"
                     if status:
                         st_norm = (
                             "Verified" if status.lower() == "verified" else "Unverified"
@@ -1239,6 +1215,8 @@ def format_evidence_for_report(
                 else:
                     # Use full content without truncation
                     content = item.get("content", "")
+                    if item.get("category") == "finding":
+                        content = _without_finding_confidence(content)
 
                     # If content has inline markers, format them better
                     if "[VULNERABILITY]" in content and "[WHERE]" in content:
@@ -1251,7 +1229,6 @@ def format_evidence_for_report(
                             "[EVIDENCE]",
                             "[STEPS]",
                             "[REMEDIATION]",
-                            "[CONFIDENCE]",
                         ]:
                             formatted_content = formatted_content.replace(
                                 f" {marker}", f"\n{marker}"
@@ -1264,9 +1241,7 @@ def format_evidence_for_report(
                     if item.get("category") == "finding":
                         evidence_text += f"#### {finding_number}. Finding\n"
                         disp_sev = item.get("severity", severity)
-                        line = (
-                            f"**Severity:** {disp_sev} | **Confidence:** {confidence}"
-                        )
+                        line = f"**Severity:** {disp_sev}"
                         if status:
                             st_norm = (
                                 "Verified"

@@ -26,6 +26,7 @@ def make_handler():
     handler._state_lock = threading.RLock()
     handler._emit_lock = threading.RLock()
     handler.operation_id = "OP_TEST"
+    handler.operation_mode = "execution"
     handler.agent_run_id = "test-agent-1"
     handler.coordinator = OperationEventCoordinator(operation_id="unittest", emitter=MagicMock())
     handler.emit_operation_init = True
@@ -730,6 +731,38 @@ def test_process_metrics_captures_provider_reported_inference_latency():
     assert rows[0]["provider"] == "litellm"
     assert rows[0]["model"] == "model"
     assert rows[0]["inference_time_ms"] == 275
+
+
+def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
+    handler = make_handler()
+    handler.process_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 12, "outputTokens": 4})
+    )
+
+    handler.emit_model_usage_snapshot()
+
+    assert len(handler._events) == 1
+    snapshot = handler._events[0]
+    assert snapshot["type"] == "model_usage_snapshot"
+    assert snapshot["stage"] == "assessment_complete"
+    metrics = snapshot["metrics"]
+    assert metrics["modelUsage"] == handler.model_usage()
+    assert metrics["inputTokens"] == 12
+    assert metrics["outputTokens"] == 4
+    assert metrics["totalTokens"] == 16
+    assert metrics["cost"] >= 0.0
+    assert metrics["duration"] == "0s"
+    handler.emitter.flush_immediate.assert_called_once()
+
+
+def test_emit_model_usage_snapshot_skips_report_only_handlers():
+    handler = make_handler()
+    handler.operation_mode = "report_only"
+
+    handler.emit_model_usage_snapshot()
+
+    assert handler._events == []
+    handler.emitter.flush_immediate.assert_not_called()
 
 
 def test_model_efficiency_is_higher_when_corrections_are_lower():

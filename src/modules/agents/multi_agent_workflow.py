@@ -1900,6 +1900,8 @@ class MultiAgentWorkflowController:
                                     combined_worker_context,
                                     tool_outcomes,
                                     acceptance_results,
+                                    cycle=cycle,
+                                    cycle_total=maximum_actor_cycles,
                                 )
                                 if decision.finding_recommendation_required:
                                     if finding_observation_repairs < 1:
@@ -2919,6 +2921,8 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
         worker_context: str = "",
         tool_outcomes: Optional[List[ToolOutcome]] = None,
         acceptance_results: Optional[List[Any]] = None,
+        cycle: Optional[int] = None,
+        cycle_total: Optional[int] = None,
     ) -> WorkflowDecision:
         binding_failure = self._endpoint_evidence_guard(task, acceptance_results or [], tool_outcomes or [])
         if binding_failure:
@@ -2940,6 +2944,8 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
             ),
             self._evaluator_tools(),
             self._task_evaluator_system_prompt(),
+            cycle=cycle,
+            cycle_total=cycle_total,
             evaluator_fallback_context={
                 "task_uid": task.task_uid,
                 "task_title": task.title,

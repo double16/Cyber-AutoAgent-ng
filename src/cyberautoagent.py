@@ -108,7 +108,12 @@ from modules.handlers.terminal_tool import (
     TERMINAL_TOOL_REJECTED_STATE_KEY,
 )
 from modules.tools import browser, channel_close_all
-from modules.tools.memory import OperationTarget, get_memory_client, resolve_operation_targets
+from modules.tools.memory import (
+    OperationTarget,
+    get_memory_client,
+    require_existing_plan_store,
+    resolve_operation_targets,
+)
 from modules.tools.oast import close_oast_providers
 from modules.tools.tool_catalog import get_shell_command_help_context
 from modules.utils.telemetry import flush_traces
@@ -884,6 +889,10 @@ def finalize_report_and_evaluation(
             logger.warning("Unable to determine workflow completion before report generation: %s", error)
             plan = None
         completion_status = _build_report_completion_status(plan, callback_handler)
+        try:
+            callback_handler.emit_model_usage_snapshot()
+        except Exception as error:
+            logger.warning("Unable to persist model usage before report generation: %s", error)
         callback_handler.ensure_report_generated(
             agent,
             target,
@@ -1039,6 +1048,19 @@ def cleanup_operation_resources(
 def main():
     """Main execution function"""
     global interrupted
+
+    previous_output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR")
+    previous_memory_read_only = os.environ.get("CYBER_MEMORY_READ_ONLY")
+
+    def restore_memory_environment() -> None:
+        if previous_output_dir is None:
+            os.environ.pop("CYBER_AGENT_OUTPUT_DIR", None)
+        else:
+            os.environ["CYBER_AGENT_OUTPUT_DIR"] = previous_output_dir
+        if previous_memory_read_only is None:
+            os.environ.pop("CYBER_MEMORY_READ_ONLY", None)
+        else:
+            os.environ["CYBER_MEMORY_READ_ONLY"] = previous_memory_read_only
 
     # Set up signal handlers for Ctrl+C, Ctrl+Z, and SIGTERM (ESC in UI)
     signal.signal(signal.SIGINT, signal_handler)
@@ -1357,6 +1379,13 @@ def main():
 
     server_config = config_manager.get_server_config(args.provider, **config_overrides)
 
+    # Keep memory and plan storage aligned with the output path selected by the CLI.
+    os.environ["CYBER_AGENT_OUTPUT_DIR"] = server_config.output.base_dir
+    if args.report:
+        os.environ["CYBER_MEMORY_READ_ONLY"] = "true"
+    else:
+        os.environ.pop("CYBER_MEMORY_READ_ONLY", None)
+
     # Set mem0 environment variables based on configuration
     os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
     os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
@@ -1386,6 +1415,19 @@ def main():
     )
     logger = setup_logging(log_file=log_file, verbose=verbose_mode)
 
+    if args.report:
+        try:
+            require_existing_plan_store(
+                output_dir=server_config.output.base_dir,
+                target_name=target_sanitized,
+                operation_id=operation_id,
+            )
+        except FileNotFoundError as error:
+            logger.error("Report-only operation data is unavailable: %s", error)
+            print_status(f"Report-only operation data is unavailable: {error}", "ERROR")
+            restore_memory_environment()
+            raise SystemExit(2) from error
+
     operation_targets: list[OperationTarget] = []
     if not bool(args.report):
         operation_targets, preflight_results = run_target_preflight(
@@ -1394,16 +1436,21 @@ def main():
             operation_id=operation_id,
             logger=logger,
         )
-        get_memory_client(silent=True).store_preflight_results(
-            [result.to_record() for result in preflight_results],
-            operation_id=operation_id,
-        )
+        try:
+            get_memory_client(silent=True).store_preflight_results(
+                [result.to_record() for result in preflight_results],
+                operation_id=operation_id,
+            )
+        except Exception:
+            restore_memory_environment()
+            raise
         failed_preflight = [result for result in preflight_results if result.status == "fail"]
         if failed_preflight:
             failure_summary = "; ".join(
                 f"{result.target}: {result.reason}" for result in failed_preflight
             )
             print_status(f"Target preflight failed: {failure_summary}", "ERROR")
+            restore_memory_environment()
             raise SystemExit(2)
 
     latest_pointer = update_latest_output_pointer(
@@ -1592,6 +1639,7 @@ def main():
             provider=args.provider,
             memory_path=args.memory_path,
             memory_mode=args.memory_mode,
+            operation_mode=("report_only" if args.report else "continuation" if args.cont else "execution"),
             module=args.module,
             bug_bounty_headers=bug_bounty_headers,
             mcp_connections=mcp_connections,
@@ -1921,6 +1969,7 @@ def main():
             telemetry=telemetry,
             logger=logger,
         )
+        restore_memory_environment()
 
 
 def ensure_workspace_marker_files():

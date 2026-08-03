@@ -12,8 +12,7 @@ You are a specialized security report writer tasked with generating a detailed r
 For the provided finding:
 1. **Title**: Clear, descriptive title of the vulnerability.
 2. **Severity**: Single word severity level from finding data.
-3. **Confidence**: Percentage with brief justification.
-4. **Evidence**: Actual request/response or command output first.
+3. **Evidence**: Actual request/response or command output first.
    - For verified web/API claims, cite at least one HTTP transcript artifact path (do not embed full content).
 5. **MITRE ATT&CK Mapping**: Include the deterministic catalog mapping supplied by the caller, or state that it is not established.
 6. **CWE Mapping**: Include the deterministic catalog mapping supplied by the caller, or state that it is not established.
@@ -53,8 +52,6 @@ For the provided finding:
 ### {{TITLE_FROM_FINDING_DATA}}
 
 **Severity:** {{SEVERITY_FROM_FINDING_DATA}}
-
-**Confidence:** {{CONFIDENCE_FROM_FINDING_DATA_WITH_JUSTIFICATION}}
 
 #### Evidence
 

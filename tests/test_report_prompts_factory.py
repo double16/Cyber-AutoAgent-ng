@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from modules.prompts.factory import (
+    format_evidence_for_report,
     generate_findings_summary_table,
     get_report_appendix_system_prompt,
     get_report_critic_system_prompt,
@@ -34,6 +35,11 @@ def test_free_form_report_prompts_use_fact_free_canonical_markdown_layouts():
             "### Risk Assessment",
             "### Attack Path Analysis",
             "### Key Findings",
+            "### Claim Status",
+            "#### Verified Risk",
+            "#### Findings Requiring Validation",
+            "#### Informational Observations",
+            "#### Coverage Status",
         ],
         "report_agent_finding_system_prompt.md": [
             "### {{TITLE_FROM_FINDING_DATA}}",
@@ -82,7 +88,7 @@ def test_report_critic_rejects_placeholder_leakage_and_layout_drift():
     assert "explicit module-specific override" in prompt
 
 
-def test_findings_summary_uses_canonical_metadata_location_and_confidence():
+def test_findings_summary_uses_canonical_metadata_location_without_confidence():
     table = generate_findings_summary_table([
         {
             "category": "finding",
@@ -94,11 +100,12 @@ def test_findings_summary_uses_canonical_metadata_location_and_confidence():
     ])
 
     assert "/vulnerabilities/xss_r/" in table
-    assert "92.0%" in table
     assert "Verified" in table
+    assert "Confidence" not in table
+    assert "92.0%" not in table
 
 
-def test_findings_summary_marks_genuinely_missing_confidence_as_not_available():
+def test_findings_summary_omits_confidence_when_missing():
     table = generate_findings_summary_table([
         {
             "category": "finding",
@@ -108,7 +115,32 @@ def test_findings_summary_marks_genuinely_missing_confidence_as_not_available():
         }
     ])
 
-    assert "| - | Verified | N/A |" in table
+    assert "| Verified | N/A |" not in table
+    assert "Confidence" not in table
+
+
+def test_finding_report_prompt_and_evidence_omit_confidence():
+    prompt = get_report_finding_system_prompt()
+    evidence = format_evidence_for_report(
+        [
+            {
+                "category": "finding",
+                "severity": "HIGH",
+                "confidence": "95",
+                "validation_status": "verified",
+                "parsed": {
+                    "vulnerability": "Reflected XSS",
+                    "where": "/search",
+                    "evidence": "artifact:artifacts/proof.txt",
+                    "confidence": "95",
+                },
+            }
+        ]
+    )
+
+    assert "Confidence" not in prompt
+    assert "Confidence" not in evidence
+    assert "**Severity:** HIGH" in evidence
 
 @patch("modules.prompts.factory.load_prompt_template")
 def test_get_report_executive_system_prompt(mock_load):

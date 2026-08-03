@@ -12,7 +12,11 @@ from modules.handlers.report_generator import (
     _configured_nonnegative_int,
     _extract_text_from_result,
     _format_artifact_excerpt,
+    _format_execution_history,
+    _format_observation,
+    _markdown_table_cell,
     _format_model_usage_table,
+    _remove_generated_execution_metrics,
     _format_next_steps_appendix,
     _format_taxonomy_mappings,
     _format_taxonomy_coverage_tables,
@@ -67,6 +71,76 @@ def test_format_model_usage_table_and_elapsed_time_fallbacks():
 
     fallback = _format_model_usage_table([], "bedrock", "fallback-model", 200000)
     assert "| bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in fallback
+
+
+def test_remove_generated_execution_metrics_preserves_following_appendix_section():
+    content = "Narrative\n\n### Execution Metrics\n\n| generated | data |\n\n### Methodology Limitations\n\nKept."
+
+    assert _remove_generated_execution_metrics(content) == "Narrative\n\n### Methodology Limitations\n\nKept."
+
+
+def test_format_execution_history_is_stable_and_escapes_markdown_cells():
+    history = _format_execution_history(
+        [
+            {
+                "phase": 2,
+                "title": "Second | task",
+                "status": "partial_failure",
+                "status_reason": "Needs\nfollow-up",
+                "target_ids": "target-2",
+                "acceptance": "0/1",
+                "manifest_hash": "manifest-two",
+            },
+            {
+                "phase": 1,
+                "title": "First task",
+                "status": "done",
+                "status_reason": "",
+                "target_ids": "target-1",
+                "acceptance": "1/1",
+                "manifest_hash": "manifest-one",
+            },
+        ],
+        [
+            {
+                "phase": 1,
+                "title": "First task",
+                "criterion_id": "criterion-1",
+                "status": "satisfied",
+                "disposition": "finding_candidate",
+                "summary": "Confirmed evidence",
+                "evidence_refs": "artifact:artifacts/proof.txt",
+            },
+            {
+                "phase": 2,
+                "title": "Second | task",
+                "criterion_id": "criterion-1",
+                "status": "not_recorded",
+                "disposition": "—",
+                "summary": "Needs\nfollow-up",
+                "evidence_refs": "—",
+            },
+        ],
+    )
+
+    assert history.index("| 1 | First task") < history.index("| 2 | Second \\| task")
+    assert "Needs follow-up" in history
+    assert "### Acceptance Outcomes" in history
+
+
+def test_markdown_table_cell_code_formats_xml_html_tags_only():
+    assert _markdown_table_cell("<input name='username'> | plain") == "`<input name='username'>` \\| plain"
+    assert _markdown_table_cell("already `code` and plain") == "already `code` and plain"
+
+
+def test_observation_recorded_detail_formats_xml_html_tags():
+    content = _format_observation(
+        {"title": "Observed markup", "content": "Response contained <input name='user'> and </form>."},
+        0,
+    )
+
+    assert "`<input name='user'>`" in content
+    assert "`</form>`" in content
 
 
 def test_software_provenance_reads_project_manifest(monkeypatch, tmp_path):
@@ -275,6 +349,63 @@ def test_taxonomy_mapping_provenance_shows_active_source_and_configured_urls():
 
     assert "source: `snapshot`; version: `official-refresh`" in content
     assert "Configured refresh URL(s): `https://catalog.example/taxonomy.json`" in content
+
+
+def test_finding_taxonomy_mapping_ids_link_to_catalog_urls():
+    content = _format_taxonomy_mappings(
+        {
+            "cwe": [
+                {
+                    "id": "CWE-79",
+                    "name": "Improper Neutralization",
+                    "confidence_band": "high",
+                    "confidence": 0.95,
+                    "basis": "finding terminology",
+                    "rationale": "Cross-site scripting evidence",
+                    "evidence": ["artifact:proof.txt"],
+                    "url": "https://cwe.mitre.org/data/definitions/79.html",
+                }
+            ],
+            "mitre_attack": [
+                {
+                    "id": "T1190",
+                    "name": "Exploit Public-Facing Application",
+                    "confidence_band": "medium",
+                    "confidence": 0.8,
+                    "basis": "execution trace",
+                    "rationale": "Observed exploit path",
+                    "evidence": ["artifact:trace.txt"],
+                    "url": "https://attack.mitre.org/techniques/T1190/",
+                }
+            ],
+        }
+    )
+
+    assert "[CWE-79](https://cwe.mitre.org/data/definitions/79.html)" in content
+    assert "[T1190](https://attack.mitre.org/techniques/T1190/)" in content
+
+
+def test_finding_taxonomy_mapping_without_url_remains_plain_text():
+    content = _format_taxonomy_mappings(
+        {
+            "cwe": [
+                {
+                    "id": "CWE-89",
+                    "name": "SQL Injection",
+                    "confidence_band": "medium",
+                    "confidence": 0.7,
+                    "basis": "finding terminology",
+                    "rationale": "Database input evidence",
+                    "evidence": [],
+                }
+            ],
+            "mitre_attack": [],
+        }
+    )
+
+    assert "| CWE-89 |" in content
+    assert "| [CWE-89]" not in content
+    assert "| Unavailable |" in content
 
 
 def test_taxonomy_reporting_distinguishes_failed_and_completed_unmapped_annotations():
@@ -539,6 +670,183 @@ def test_latest_operation_log_parser_uses_only_final_session(tmp_path):
     assert parsed["tool_failures"] == {"nmap:error": 1}
 
 
+def test_latest_operation_log_parser_uses_assessment_model_usage_snapshot(tmp_path):
+    usage = [
+        {
+            "provider": "litellm",
+            "model": "example-model",
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "total_tokens": 150,
+            "cost": 0.04,
+            "inference_time_ms": 250,
+            "context_window_tokens": 48000,
+            "efficiency": 100.0,
+            "model_calls": 2,
+            "correction_loops": 0,
+        }
+    ]
+    snapshot = {
+        "type": "model_usage_snapshot",
+        "operation_id": "OP_USAGE",
+        "stage": "assessment_complete",
+        "metrics": {"modelUsage": usage},
+    }
+    later_metrics = {
+        "type": "metrics_update",
+        "metrics": {"modelUsage": [{"model": "report-agent"}]},
+    }
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-02 11:00:00",
+                "Operation OP_USAGE initiated",
+                f"__CYBER_EVENT__{json.dumps(snapshot)}__CYBER_EVENT_END__",
+                f"__CYBER_EVENT__{json.dumps(later_metrics)}__CYBER_EVENT_END__",
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["metrics"]["model_usage"] == usage
+
+
+def test_operation_log_parser_uses_execution_session_before_report_only_session(tmp_path):
+    usage = [
+        {
+            "provider": "ollama",
+            "model": "assessment-model",
+            "input_tokens": 300,
+            "output_tokens": 100,
+            "total_tokens": 400,
+            "cost": 0.0,
+            "inference_time_ms": 900,
+            "model_calls": 4,
+            "correction_loops": 1,
+        }
+    ]
+
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    execution_init = {
+        "type": "operation_init",
+        "operation_id": "OP_HISTORY",
+        "operation_mode": "execution",
+        "budget": {"maxDurationMinutes": 180, "maxTokens": None, "maxCost": None},
+    }
+    execution_snapshot = {
+        "type": "model_usage_snapshot",
+        "metrics": {
+            "modelUsage": usage,
+            "inputTokens": 300,
+            "outputTokens": 100,
+            "totalTokens": 400,
+            "duration": "25m",
+        },
+    }
+    report_only_init = {
+        "type": "operation_init",
+        "operation_id": "OP_HISTORY",
+        "operation_mode": "report_only",
+        "budget": {"maxDurationMinutes": 90, "maxTokens": None, "maxCost": None},
+    }
+    report_only_metrics = {
+        "type": "metrics_update",
+        "metrics": {"totalTokens": 0, "duration": "0s", "budget": report_only_init["budget"]},
+    }
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-01 10:00:00",
+                event(execution_init),
+                event({"type": "tool_start", "tool_name": "shell"}),
+                event({"type": "termination_reason", "reason": "partial_failure", "message": "Phase 4 failed"}),
+                event(execution_snapshot),
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-01 11:00:00",
+                event(report_only_init),
+                event(report_only_metrics),
+                event({"type": "model_usage_snapshot", "metrics": {"modelUsage": []}}),
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["operation_mode"] == "execution"
+    assert parsed["configured_budget"] == {"duration": 180}
+    assert parsed["termination_reason"] == "partial_failure"
+    assert parsed["termination_message"] == "Phase 4 failed"
+    assert parsed["tools_used"] == ["shell"]
+    assert parsed["metrics"]["duration"] == "25m"
+    assert parsed["metrics"]["model_usage"] == usage
+
+
+def test_operation_log_parser_aggregates_execution_continuations_before_report_only(tmp_path):
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    def execution_session(start, tool_name, usage, duration):
+        return [
+            f"CYBER-AUTOAGENT SESSION STARTED: {start}",
+            event({"type": "operation_init", "operation_mode": "continuation"}),
+            event({"type": "tool_start", "tool_name": tool_name}),
+            event(
+                {
+                    "type": "model_usage_snapshot",
+                    "metrics": {
+                        "modelUsage": [usage],
+                        "inputTokens": usage["input_tokens"],
+                        "outputTokens": usage["output_tokens"],
+                        "totalTokens": usage["total_tokens"],
+                        "duration": duration,
+                    },
+                }
+            ),
+        ]
+
+    usage_one = {
+        "provider": "ollama",
+        "model": "assessment-model",
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "inference_time_ms": 100,
+        "model_calls": 1,
+        "correction_loops": 0,
+    }
+    usage_two = {**usage_one, "input_tokens": 40, "output_tokens": 10, "total_tokens": 50, "model_calls": 1}
+    lines = execution_session("2026-01-01 10:00:00", "shell", usage_one, "10m")
+    lines.extend(execution_session("2026-01-01 11:00:00", "read_artifact", usage_two, "5m"))
+    lines.extend(
+        [
+            "CYBER-AUTOAGENT SESSION STARTED: 2026-01-01 12:00:00",
+            event({"type": "operation_init", "operation_mode": "report_only"}),
+            event({"type": "model_usage_snapshot", "metrics": {"modelUsage": []}}),
+        ]
+    )
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text("\n".join(lines))
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["tools_used"] == ["shell", "read_artifact"]
+    assert parsed["metrics"]["total_tokens"] == 170
+    assert parsed["metrics"]["duration"] == "15m 0s"
+    assert len(parsed["metrics"]["model_usage"]) == 1
+    row = parsed["metrics"]["model_usage"][0]
+    assert row["provider"] == "ollama"
+    assert row["model"] == "assessment-model"
+    assert row["input_tokens"] == 140
+    assert row["output_tokens"] == 30
+    assert row["total_tokens"] == 170
+    assert row["model_calls"] == 2
+    assert row["efficiency"] == 100.0
+
+
 def _next_steps_data(budgets):
     return {
         "coverage_gaps": ["One route remains unassessed"],
@@ -583,8 +891,13 @@ def test_next_steps_validation_allows_only_configured_budgets_and_requires_durat
 
     lower_than_configured = _next_steps_data(configured)
     lower_than_configured["budget_recommendations"][0].update({"current": 17, "recommended": 30})
-    with pytest.raises(ValueError, match="cannot be lower"):
-        _validate_next_steps(lower_than_configured, configured)
+    normalized_lower = _validate_next_steps(lower_than_configured, configured)
+    assert normalized_lower["budget_recommendations"][0] == {
+        "dimension": "duration",
+        "current": 60,
+        "recommended": 30,
+        "rationale": "Estimated from the remaining coverage.",
+    }
 
     invalid = _next_steps_data(configured)
     invalid["budget_recommendations"].append(
@@ -637,9 +950,19 @@ def test_incomplete_next_steps_use_continuation_duration_budget_by_default():
     )
 
     duration = normalized["budget_recommendations"][0]
-    assert duration["recommended"] == 60
-    assert "Continue the existing operation" in duration["rationale"]
-    assert "new-operation total" in duration["rationale"]
+    assert duration["recommended"] == 120
+    assert "additional continuation budget" in duration["rationale"]
+
+
+def test_next_steps_accepts_budget_recommendation_below_configured_limit():
+    configured = {"duration": 60, "cost": 4.0}
+    data = _next_steps_data(configured)
+    data["budget_recommendations"][0]["recommended"] = 30
+    data["budget_recommendations"][1]["recommended"] = 2.0
+
+    normalized = _validate_next_steps(data, configured)
+
+    assert [item["recommended"] for item in normalized["budget_recommendations"]] == [30, 2.0]
 
 
 def test_incomplete_next_steps_keep_new_operation_budget_when_rerun_is_explicit():
@@ -768,6 +1091,30 @@ def test_format_target_coverage_counts_scoped_tasks_and_report_items():
 
     assert "| target-1 | network | `http://one.test` | 2 | 1 | 0 |" in coverage
     assert "| target-2 | network | `http://two.test` | 1 | 0 | 1 |" in coverage
+
+
+def test_format_target_coverage_reconstructs_targets_from_task_ids():
+    tasks = [
+        Task(
+            "task-1",
+            "Check target",
+            "Check target",
+            make_acceptance("task-1"),
+            1,
+            "done",
+            target_scope="subset",
+            target_ids=["target-1"],
+        )
+    ]
+
+    coverage = _format_target_coverage(
+        None,
+        tasks,
+        [{"category": "finding", "metadata": {"target": "http://target.test"}}],
+        {"target-1": "http://target.test"},
+    )
+
+    assert "| target-1 | network | `http://target.test` | 1 | 1 | 0 |" in coverage
 
 
 @pytest.fixture(autouse=True)
@@ -933,6 +1280,10 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     # Run build_report_sections
     sections = build_report_sections(op_id, "example.com", "Test Objective")
 
+    mock_client.get_active_plan.assert_called_once_with(operation_id=op_id)
+    mock_client.list_tasks.assert_called_once_with(operation_id=op_id)
+    mock_client.list_finding_records.assert_called_once_with(operation_id=op_id)
+
     evidence = sections.get("raw_evidence", [])
 
     # Check item 1: Should remain a finding
@@ -990,7 +1341,6 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
 
     mock_build_sections.return_value = {
         "evidence_count": 1,
-        "steps_executed": 5,
         "overview": "Overview content",
         "findings_table": "Findings table",
         "risk_assessment": "Risk assessment",
@@ -1029,7 +1379,6 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
         objective=objective,
         operation_id=operation_id,
         config_params={
-            "steps_executed": 5,
             "tools_used": ["nmap"],
             "completion_status": {
                 "assessment_complete": False,
@@ -1065,18 +1414,21 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     assert '"approved"' not in content
     assert "```json" not in content
     assert f"Operation ID: {operation_id}" in content
-    assert f"- Operation Objective: {objective}" in content
     assert "- Software: cyber-autoagent v0.10.0" in content
-    assert "- Total Operation Time: N/A" in content
-    assert "### Model Usage" in content
+    metrics_heading = "### Execution Metrics"
+    assert content.count(metrics_heading) == 1
+    assert content.index("## APPENDIX A: ASSESSMENT METHODOLOGY") < content.index(metrics_heading)
+    assert content.index(metrics_heading) < content.index("Total Operation Time: N/A")
+    assert content.index("Total Operation Time: N/A") < content.index("| Provider | Model |")
+    assert content.index(metrics_heading) < content.index("- Report Generated:")
     assert "| test_provider | test_model | N/A | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in content
-    assert "*Efficiency = 100 × model inferences" in content
+    assert content.count("*Efficiency = 100 × model inferences") == 1
     assert (
         content.index("- Report Generated:")
         < content.index("- Software:")
         < content.index("- Operation ID:")
-        < content.index("- Operation Objective:")
     )
+    assert content.index("Total Operation Time: N/A") < content.index("- Report Generated:")
 
     # Verify that intermediate files were created
     assert (output_dir / "security_assessment_report.json").exists()
@@ -1091,6 +1443,7 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     # finding_1_High_Finding.md
     assert (output_dir / "finding_1_High_Finding.md").exists()
     assert (output_dir / "report_target_coverage.md").exists()
+    assert (output_dir / "report_execution_history.md").exists()
     assert (output_dir / "report_methodology.md").exists()
     assert (output_dir / "report_recommended_next_steps.md").exists()
     assert "## APPENDIX A: ASSESSMENT METHODOLOGY" in content
@@ -1147,7 +1500,6 @@ def test_generate_security_report_emits_indexed_report_progress(
 
     mock_build_sections.return_value = {
         "evidence_count": 3,
-        "steps_executed": 5,
         "overview": "Overview content",
         "findings_table": "Findings table",
         "risk_assessment": "Risk assessment",
@@ -1197,7 +1549,7 @@ def test_generate_security_report_emits_indexed_report_progress(
         target=target,
         objective=objective,
         operation_id=operation_id,
-        config_params={"steps_executed": 5, "tools_used": ["nmap"]},
+        config_params={"tools_used": ["nmap"]},
         callback_handler=callback_handler,
         filename=str(tmp_path / "final_report.md"),
     )
@@ -1208,24 +1560,22 @@ def test_generate_security_report_emits_indexed_report_progress(
         if call.args[0].get("type") == "progress_update"
     ]
 
-    assert [event["report_step_index"] for event in progress_events] == [1, 2, 3, 4, 5, 6]
-    assert {event["report_step_total"] for event in progress_events} == {6}
+    assert [event["report_step_index"] for event in progress_events] == [1, 2, 3, 4, 5]
+    assert {event["report_step_total"] for event in progress_events} == {5}
     assert [event["report_step_kind"] for event in progress_events] == [
         "executive",
         "finding",
         "finding",
-        "observation",
         "methodology",
         "next_steps",
     ]
     assert all(event["operation_stage"] == "final_report" for event in progress_events)
     assert progress_events[1]["report_step_label"] == "Finding: High Finding"
-    assert progress_events[3]["report_step_label"] == "Observation: Useful Observation"
     callback_handler.set_report_items.assert_called_once_with(mock_build_sections.return_value["raw_evidence"])
-    assert len(created_agents) == 6
-    assert len({id(agent) for agent in created_agents}) == 6
+    assert len(created_agents) == 5
+    assert len({id(agent) for agent in created_agents}) == 5
     assert all(agent.cleanup.call_count == 1 for agent in created_agents)
-    assert callback_handler.mark_report_step_started.call_count == 6
+    assert callback_handler.mark_report_step_started.call_count == 5
     assert all(
         call.kwargs.get("callback_handler") is not callback_handler
         for call in mock_report_gen.create_report_agent.call_args_list
@@ -1254,7 +1604,6 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
 
     mock_build_sections.return_value = {
         "evidence_count": 1,
-        "steps_executed": 1,
         "overview": "Overview",
         "findings_table": "",
         "risk_assessment": "",
@@ -1276,7 +1625,7 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
 
     mock_agent = MagicMock()
     mock_report_gen.create_report_agent.return_value = mock_agent
-    mock_agent.return_value.message = {"content": [{"text": "Observation detail"}]}
+    mock_agent.return_value.message = {"content": [{"text": "Generated section"}]}
 
     report_file = tmp_path / "obs_report.md"
     
@@ -1291,7 +1640,8 @@ def test_generate_security_report_observations(mock_get_config, mock_build_secti
     assert report_file.exists()
     content = report_file.read_text()
     assert "OBSERVATIONS AND DISCOVERIES" in content
-    assert "Observation detail" in content
+    assert "Observation content" in content
+    assert "Generated section" in content
     assert "FURTHER REVIEW REQUIRED" not in content
     assert (output_dir / "report_observations_header.md").exists()
     assert (output_dir / "observation_1_Some_Observation.md").exists()
@@ -1315,7 +1665,6 @@ def test_generate_security_report_validation_failures(
     mock_get_config.return_value = config
     mock_build_sections.return_value = {
         "evidence_count": 1,
-        "steps_executed": 1,
         "overview": "Overview",
         "findings_table": "",
         "risk_assessment": "",

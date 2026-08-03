@@ -34,10 +34,10 @@ from modules.prompts.factory import (
     get_report_executive_system_prompt,
     get_report_finding_system_prompt,
     get_report_next_steps_system_prompt,
-    get_report_observation_system_prompt,
     safe_truncate,
 )
-from modules.tools.memory import Task, _artifact_path_from_ref, get_memory_client, memory_is_cross_operation
+from modules.tools.memory import Task, _artifact_path_from_ref, get_memory_client, memory_is_cross_operation, \
+    OperationTarget
 from modules.utils.json_repair import parse_json_response
 
 logger = get_logger("Handlers.ReportGenerator")
@@ -495,8 +495,18 @@ def _emit_report_progress(
         logger.debug("Unable to emit report progress event", exc_info=True)
 
 
-def _format_target_coverage(plan: Any, tasks: List[Any], evidence: List[Dict[str, Any]]) -> str:
+def _format_target_coverage(
+    plan: Any,
+    tasks: List[Any],
+    evidence: List[Dict[str, Any]],
+    target_values: Optional[Dict[str, str]] = None,
+) -> str:
     targets = list(getattr(plan, "targets", []) or [])
+    if not targets and target_values:
+        targets = [
+            OperationTarget(target_id=target_id, value=value, type="network", source="objective")
+            for target_id, value in sorted(target_values.items())
+        ]
     if not targets:
         return "No executable target registry was recorded for this operation."
 
@@ -529,6 +539,103 @@ def _format_target_coverage(plan: Any, tasks: List[Any], evidence: List[Dict[str
             f"{len(verified)} | {len(validation_failures)} |"
         )
     return "\n".join(lines)
+
+
+_RE_MARKDOWN_XML_HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
+
+
+def _format_markdown_xml_html_tags(text: str) -> str:
+    """Surround XML/HTML tags with inline-code delimiters for safe Markdown rendering."""
+
+    def _format_tag(match: re.Match[str]) -> str:
+        already_code = (
+            match.start() > 0
+            and text[match.start() - 1] == "`"
+            and match.end() < len(text)
+            and text[match.end()] == "`"
+        )
+        return match.group(0) if already_code else f"`{match.group(0)}`"
+
+    return _RE_MARKDOWN_XML_HTML_TAG.sub(_format_tag, text)
+
+
+def _markdown_table_cell(value: Any) -> str:
+    """Return a stable single-line Markdown table cell."""
+
+    text = " ".join(str(value or "").split()) or "—"
+    text = _format_markdown_xml_html_tags(text)
+    return text.replace("|", "\\|")
+
+
+def _format_execution_history(task_rows: List[Dict[str, Any]], acceptance_rows: List[Dict[str, Any]]) -> str:
+    """Render task and acceptance history from canonical operation records."""
+
+    lines = [
+        "## EXECUTION HISTORY",
+        "",
+        "### Task History",
+        "",
+        "| Phase | Task | Status | Status Reason | Targets | Acceptance | Manifest |",
+        "|---:|---|---|---|---|---:|---|",
+    ]
+    for row in sorted(task_rows, key=lambda item: (int(item.get("phase", 0)), str(item.get("title", "")))):
+        lines.append(
+            "| {phase} | {title} | {status} | {reason} | {targets} | {acceptance} | `{manifest}` |".format(
+                phase=_markdown_table_cell(row.get("phase")),
+                title=_markdown_table_cell(row.get("title")),
+                status=_markdown_table_cell(row.get("status")),
+                reason=_markdown_table_cell(row.get("status_reason")),
+                targets=_markdown_table_cell(row.get("target_ids")),
+                acceptance=_markdown_table_cell(row.get("acceptance")),
+                manifest=_markdown_table_cell(row.get("manifest_hash")),
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "### Acceptance Outcomes",
+            "",
+            "| Phase | Task | Criterion | Status | Disposition | Summary | Evidence |",
+            "|---:|---|---|---|---|---|---|",
+        ]
+    )
+    for row in sorted(
+        acceptance_rows,
+        key=lambda item: (int(item.get("phase", 0)), str(item.get("title", "")), str(item.get("criterion_id", ""))),
+    ):
+        lines.append(
+            "| {phase} | {title} | {criterion} | {status} | {disposition} | {summary} | {evidence} |".format(
+                phase=_markdown_table_cell(row.get("phase")),
+                title=_markdown_table_cell(row.get("title")),
+                criterion=_markdown_table_cell(row.get("criterion_id")),
+                status=_markdown_table_cell(row.get("status")),
+                disposition=_markdown_table_cell(row.get("disposition")),
+                summary=_markdown_table_cell(row.get("summary")),
+                evidence=_markdown_table_cell(row.get("evidence_refs")),
+            )
+        )
+    return "\n".join(lines)
+
+
+def _format_observation(item: Dict[str, Any], index: int) -> str:
+    """Render an informational observation without model-generated interpretation."""
+
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    title = _report_item_title(item, f"Observation {index + 1}")
+    status = item.get("validation_status") or metadata.get("validation_status") or "recorded"
+    location = metadata.get("target") or metadata.get("location") or "Not recorded"
+    content = _format_markdown_xml_html_tags(
+        str(item.get("content") or "No observation detail was recorded.").strip()
+    )
+    text = (
+        f"### {title}\n\n"
+        f"- **Status:** {status}\n"
+        f"- **Location:** {location}\n\n"
+        "#### Recorded Detail\n\n"
+        f"{content}\n"
+    )
+    return _append_artifact_evidence(text, item)
 
 
 def _latest_log_run_text(log_text: str) -> str:
@@ -633,6 +740,62 @@ def _format_model_usage_table(
     return "\n".join(lines)
 
 
+def _remove_generated_execution_metrics(content: str) -> str:
+    """Remove an LLM-generated metrics section before appending canonical metrics."""
+    match = re.search(r"(?im)^###\s+Execution Metrics\s*$", content)
+    if not match:
+        return content
+    next_heading = re.search(r"(?im)^###\s+", content[match.end() :])
+    end = match.end() + next_heading.start() if next_heading else len(content)
+    return (content[: match.start()] + content[end:]).strip()
+
+
+def _resolve_report_model_metrics(
+    config_manager: Any,
+    latest_run: Dict[str, Any],
+    callback_handler: Any,
+) -> Dict[str, Any]:
+    """Resolve model metrics once, preferring live callback data when available."""
+    main_provider = config_manager.get_provider()
+    main_model = config_manager.get_llm_config(main_provider).model_id
+    model_usage = []
+    fallback_context_window = _fallback_context_window(main_provider, main_model)
+    total_operation_time = latest_run.get("metrics", {}).get("duration", "N/A")
+    if callback_handler is not None:
+        try:
+            callback_usage = callback_handler.model_usage()
+            if _has_meaningful_model_usage(callback_usage):
+                model_usage = callback_usage
+                total_operation_time = format_duration(callback_handler.total_operation_time_seconds())
+        except Exception:
+            logger.debug("Unable to read live operation usage for operation metadata", exc_info=True)
+    if not _has_meaningful_model_usage(model_usage):
+        model_usage = latest_run.get("metrics", {}).get("model_usage", [])
+    return {
+        "main_provider": main_provider,
+        "main_model": main_model,
+        "model_usage": model_usage,
+        "fallback_context_window": fallback_context_window,
+        "total_operation_time": total_operation_time,
+    }
+
+
+def _has_meaningful_model_usage(rows: Any) -> bool:
+    """Return whether model usage represents assessment work rather than an empty report-only handler."""
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ("total_tokens", "totalTokens", "model_calls", "modelCalls", "inference_time_ms", "inferenceTimeMs"):
+            try:
+                if float(row.get(key) or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
 def _project_root() -> Path:
     """Return the repository root for source-tree report provenance."""
     return Path(__file__).resolve().parents[3]
@@ -708,12 +871,24 @@ def _fallback_context_window(provider: str, model_id: str) -> Optional[int]:
         return None
 
 
-def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
-    """Extract report inputs exclusively from the latest run in an operation log."""
+def _split_operation_log_sessions(log_text: str) -> List[str]:
+    """Split an appended operation log into chronological sessions."""
+    marker_indexes = [match.start() for match in re.finditer(re.escape(_SESSION_START_MARKER), log_text)]
+    if not marker_indexes:
+        return [log_text] if log_text else []
+    return [
+        log_text[start:end] for start, end in zip(marker_indexes, marker_indexes[1:] + [len(log_text)])
+    ]
+
+
+def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
+    """Extract report inputs from one operation-log session."""
     summary: Dict[str, Any] = {
         "session_started": None,
         "operation_id": None,
+        "operation_mode": None,
         "termination_reason": None,
+        "termination_message": None,
         "configured_budget": {},
         "metrics": {
             "input_tokens": 0,
@@ -726,12 +901,6 @@ def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
         "tools_used": [],
         "tool_failures": {},
     }
-    if not os.path.exists(log_path):
-        return summary
-
-    with open(log_path, "r", encoding="utf-8", errors="ignore") as log_file:
-        run_text = _latest_log_run_text(log_file.read())
-
     first_line = run_text.splitlines()[0] if run_text else ""
     if _SESSION_START_MARKER in first_line:
         summary["session_started"] = first_line.split(_SESSION_START_MARKER, 1)[1].strip()
@@ -740,6 +909,7 @@ def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
     tools_used: List[str] = []
     tool_failures: Counter[str] = Counter()
     metrics = summary["metrics"]
+    model_usage_snapshot_seen = False
     for line in run_text.splitlines():
         operation_match = re.search(r"Operation\s+(OP_[A-Za-z0-9_-]+)\s+initiated", line)
         if operation_match:
@@ -762,29 +932,35 @@ def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
 
         event_type = payload.get("type")
         event_budget = payload.get("budget")
-        if event_type in {"metrics_update", "operation_complete"}:
+        if event_type in {"metrics_update", "operation_complete", "model_usage_snapshot"}:
             event_metrics = payload.get("metrics", {}) if isinstance(payload.get("metrics"), dict) else {}
             event_budget = event_metrics.get("budget", event_budget)
-            metrics["input_tokens"] = max(metrics["input_tokens"], int(event_metrics.get("inputTokens") or 0))
-            metrics["output_tokens"] = max(metrics["output_tokens"], int(event_metrics.get("outputTokens") or 0))
-            metrics["total_tokens"] = max(
-                metrics["total_tokens"],
-                int(event_metrics.get("totalTokens", event_metrics.get("tokens", 0)) or 0),
-            )
-            metrics["duration"] = duration_max(
-                metrics["duration"],
-                str(event_metrics.get("duration") or payload.get("duration") or ""),
-            )
-            if isinstance(event_metrics.get("modelUsage"), list):
-                metrics["model_usage"] = event_metrics["modelUsage"]
-            try:
-                metrics["cost"] = max(metrics["cost"], float(event_metrics.get("cost") or 0.0))
-            except (TypeError, ValueError):
-                pass
+            if event_type == "model_usage_snapshot" or not model_usage_snapshot_seen:
+                metrics["input_tokens"] = max(metrics["input_tokens"], int(event_metrics.get("inputTokens") or 0))
+                metrics["output_tokens"] = max(metrics["output_tokens"], int(event_metrics.get("outputTokens") or 0))
+                metrics["total_tokens"] = max(
+                    metrics["total_tokens"],
+                    int(event_metrics.get("totalTokens", event_metrics.get("tokens", 0)) or 0),
+                )
+                metrics["duration"] = duration_max(
+                    metrics["duration"],
+                    str(event_metrics.get("duration") or payload.get("duration") or ""),
+                )
+                if event_type == "model_usage_snapshot" and isinstance(event_metrics.get("modelUsage"), list):
+                    metrics["model_usage"] = event_metrics["modelUsage"]
+                    model_usage_snapshot_seen = True
+                elif not model_usage_snapshot_seen and isinstance(event_metrics.get("modelUsage"), list):
+                    metrics["model_usage"] = event_metrics["modelUsage"]
+                try:
+                    metrics["cost"] = max(metrics["cost"], float(event_metrics.get("cost") or 0.0))
+                except (TypeError, ValueError):
+                    pass
         elif event_type == "operation_init":
             summary["operation_id"] = payload.get("operation_id") or summary["operation_id"]
+            summary["operation_mode"] = payload.get("operation_mode") or summary["operation_mode"]
         elif event_type == "termination_reason":
             summary["termination_reason"] = payload.get("reason")
+            summary["termination_message"] = payload.get("message")
         elif event_type == "tool_start":
             tool_name = str(payload.get("tool_name") or payload.get("name") or "").strip()
             if tool_name:
@@ -802,6 +978,97 @@ def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
     summary["tools_used"] = tools_used
     summary["tool_failures"] = dict(sorted(tool_failures.items()))
     return summary
+
+
+def _is_report_only_session(summary: Dict[str, Any]) -> bool:
+    """Identify explicit and legacy report-only sessions without execution evidence."""
+    if summary.get("operation_mode") == "report_only":
+        return True
+    metrics = summary.get("metrics", {}) if isinstance(summary.get("metrics"), dict) else {}
+    return (
+        not summary.get("tools_used")
+        and not summary.get("termination_reason")
+        and not int(metrics.get("total_tokens") or 0)
+        and not _has_meaningful_model_usage(metrics.get("model_usage"))
+    )
+
+
+def _duration_seconds(value: Any) -> int:
+    """Parse the compact duration values written to operation events."""
+    total = 0
+    for amount, unit in re.findall(r"(\d+)\s*([hms])", str(value or "").lower()):
+        total += int(amount) * {"h": 3600, "m": 60, "s": 1}[unit]
+    return total
+
+
+def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Combine execution-only facts across continuation sessions."""
+    if len(sessions) == 1:
+        return sessions[0]
+    summary = dict(sessions[-1])
+    metrics = dict(summary.get("metrics", {}))
+    for key in ("input_tokens", "output_tokens", "total_tokens", "cost"):
+        metrics[key] = 0
+    tools_used: List[str] = []
+    failures: Counter[str] = Counter()
+    usage_rows: Dict[tuple[str, str], Dict[str, Any]] = {}
+    duration_seconds = 0
+    for session in sessions:
+        for tool_name in session.get("tools_used", []):
+            if tool_name not in tools_used:
+                tools_used.append(tool_name)
+        failures.update(session.get("tool_failures", {}))
+        session_metrics = session.get("metrics", {})
+        duration_seconds += _duration_seconds(session_metrics.get("duration"))
+        for key in ("input_tokens", "output_tokens", "total_tokens", "cost"):
+            metrics[key] = metrics.get(key, 0) + session_metrics.get(key, 0)
+        for row in session_metrics.get("model_usage", []):
+            if not isinstance(row, dict):
+                continue
+            row_key = (str(row.get("provider") or "unknown"), str(row.get("model") or "unknown"))
+            if row_key not in usage_rows:
+                usage_rows[row_key] = dict(row)
+                continue
+            combined = usage_rows[row_key]
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "total_tokens",
+                "cost",
+                "inference_time_ms",
+                "model_calls",
+                "correction_loops",
+            ):
+                combined[key] = combined.get(key, 0) + row.get(key, 0)
+
+    if duration_seconds:
+        metrics["duration"] = format_duration(duration_seconds)
+    for row in usage_rows.values():
+        calls = int(row.get("model_calls") or 0)
+        corrections = int(row.get("correction_loops") or 0)
+        if calls:
+            row["efficiency"] = 100.0 * calls / (calls + corrections)
+    metrics["model_usage"] = list(usage_rows.values())
+    summary["metrics"] = metrics
+    summary["tools_used"] = tools_used
+    summary["tool_failures"] = dict(sorted(failures.items()))
+    return summary
+
+
+def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
+    """Extract canonical execution inputs, bypassing later report-only sessions."""
+    if not os.path.exists(log_path):
+        return _parse_operation_log_session("")
+    with open(log_path, "r", encoding="utf-8", errors="ignore") as log_file:
+        sessions = [_parse_operation_log_session(text) for text in _split_operation_log_sessions(log_file.read())]
+    if not sessions:
+        return _parse_operation_log_session("")
+    if not _is_report_only_session(sessions[-1]):
+        return sessions[-1]
+    execution_sessions = [summary for summary in sessions if not _is_report_only_session(summary)]
+    return _merge_execution_sessions(execution_sessions) if execution_sessions else sessions[-1]
 
 
 class _ReportMetricsCallback:
@@ -1061,8 +1328,6 @@ def _validate_next_steps(data: Dict[str, Any], configured_budget: Dict[str, int 
             or recommended <= 0
         ):
             raise ValueError(f"{dimension} recommended budget must be positive and numeric")
-        if float(recommended) < float(configured_budget[dimension]):
-            raise ValueError(f"{dimension} recommended budget cannot be lower than the configured value")
         rationale = str(item.get("rationale") or "").strip()
         if not rationale:
             raise ValueError(f"{dimension} budget recommendation requires a rationale")
@@ -1117,14 +1382,12 @@ def _apply_next_steps_budget_scope(
                 )
         return data
 
-    continuation_rationale = (
-        "Continue the existing operation with this budget to cover the missing tasks and record their terminal "
-        "outcomes; this is an additional continuation budget, not a new-operation total."
-    )
     for recommendation in data["budget_recommendations"]:
         if recommendation["dimension"] == "duration":
-            recommendation["recommended"] = configured_budget["duration"]
-            recommendation["rationale"] = continuation_rationale
+            recommendation["rationale"] = (
+                f"{recommendation['rationale'].rstrip()} This is an additional continuation budget, not a "
+                "new-operation total."
+            )
     return data
 
 
@@ -1386,9 +1649,13 @@ def _format_taxonomy_mappings(taxonomy: Dict[str, Any], annotation: Optional[Dic
         for item in mappings:
             evidence = ", ".join(f"`{value}`" for value in item["evidence"]) or "Recorded metadata"
             rationale = str(item["rationale"]).replace("|", "\\|").replace("\n", " ")
+            identifier = str(item["id"])
+            url = str(item.get("url") or "").strip()
+            identifier_display = f"[{identifier}]({url})" if url else identifier
+            reference_display = f"[Catalog]({url})" if url else "Unavailable"
             parts.append(
-                f"| {item['id']} | {item['name']} | {item['confidence_band']} ({item['confidence']:.2f}) | "
-                f"{item['basis']} | {rationale} | {evidence} | [Catalog]({item['url']}) |\n"
+                f"| {identifier_display} | {item['name']} | {item['confidence_band']} ({item['confidence']:.2f}) | "
+                f"{item['basis']} | {rationale} | {evidence} | {reference_display} |\n"
             )
         parts.append("\n")
     provenance = taxonomy.get("provenance", {}) if isinstance(taxonomy, dict) else {}
@@ -1453,6 +1720,301 @@ def _format_taxonomy_coverage_tables(findings: List[Dict[str, Any]]) -> str:
     return "".join(parts)
 
 
+def _generate_methodology_appendix(
+    *,
+    target: str,
+    operation_id: str,
+    sections: Dict[str, Any],
+    provider: str,
+    model_id: Optional[str],
+    module_guidance: str,
+    completion_guidance: str,
+    module_appendix_prompt: str,
+    refinement_cycles: int,
+    json_retries: int,
+    output_path: str,
+    report_parts_files: List[str],
+    callback_handler: Any,
+    report_metrics_callback: Any,
+    report_step_index: int,
+    report_step_total: int,
+    model_metrics: Dict[str, Any],
+) -> int:
+    """Generate and persist the LLM-authored assessment methodology appendix."""
+    logger.info("Generating Appendix A: Assessment Methodology...")
+    appendix_system_prompt = (
+        get_report_appendix_system_prompt()
+        + "\n"
+        + module_guidance
+        + "\n"
+        + completion_guidance
+        + "\n"
+        + module_appendix_prompt
+    )
+    appendix_agent = ReportGenerator.create_report_agent(
+        provider=provider,
+        model_id=model_id,
+        operation_id=operation_id,
+        target=target,
+        callback_handler=report_metrics_callback,
+        system_prompt=appendix_system_prompt,
+    )
+    appendix_critic = None
+    if refinement_cycles:
+        appendix_critic = ReportGenerator.create_report_agent(
+            provider=provider,
+            model_id=model_id,
+            operation_id=operation_id,
+            target=target,
+            callback_handler=report_metrics_callback,
+            system_prompt=get_report_critic_system_prompt(),
+            agent_role="report_critic",
+        )
+
+    appendix_prompt = f"""
+Generate all requested sections.
+Target: {target}
+Operation ID: {operation_id}
+{completion_guidance}
+
+Use the following canonical data. Do not invent or recalculate task counts:
+{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'execution_history_rows', 'task_status_counts', 'total_task_count', 'completed_task_count', 'phase_coverage', 'target_coverage', 'tools_summary', 'latest_run', 'completion_status']})}
+
+Do not generate an Execution Metrics section; Python will append the canonical deterministic table.
+"""
+    report_step_index += 1
+    _emit_report_progress(
+        callback_handler,
+        operation_id,
+        report_step_index,
+        report_step_total,
+        "methodology",
+        "Appendix A: Assessment Methodology",
+    )
+
+    appendix_content = None
+    try:
+        appendix_content, final_critique = _run_report_refinement(
+            appendix_agent,
+            appendix_critic,
+            appendix_prompt,
+            "Appendix A: Assessment Methodology",
+            appendix_system_prompt,
+            refinement_cycles,
+            json_retries,
+            efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
+        )
+    finally:
+        _cleanup_report_agent(appendix_agent, "report methodology actor")
+        _cleanup_report_agent(appendix_critic, "report methodology critic")
+
+    if appendix_content:
+        appendix_content = _remove_generated_execution_metrics(appendix_content)
+        appendix_content = _append_inline_review_feedback(appendix_content, final_critique)
+        appendix_content = (
+            _PAGE_BREAK
+            + '<a name="appendix-a-assessment-methodology"></a>\n'
+            + "## APPENDIX A: ASSESSMENT METHODOLOGY\n\n"
+            + appendix_content
+            + "\n\n### Execution Metrics\n\n"
+            + f"Total Operation Time: {model_metrics['total_operation_time']}\n\n"
+            + _format_model_usage_table(
+                model_metrics["model_usage"],
+                model_metrics["main_provider"],
+                model_metrics["main_model"],
+                model_metrics["fallback_context_window"],
+            )
+            + "\n\n*Efficiency = 100 × model inferences ÷ (model inferences + correction loops). Correction loops include bounded reasoning, output-token, repair, tool-recovery, evaluator, and critic retries; higher values indicate greater efficiency.*\n"
+        )
+        methodology_file = os.path.join(output_path, "report_methodology.md")
+        with open(methodology_file, "w") as f:
+            f.write(appendix_content)
+        report_parts_files.append(methodology_file)
+    return report_step_index
+
+
+def _generate_next_steps_appendix(
+    *,
+    target: str,
+    objective: str,
+    operation_id: str,
+    sections: Dict[str, Any],
+    completion_status: Dict[str, Any],
+    latest_run: Dict[str, Any],
+    configured_budget: Dict[str, Any],
+    report_validation_failures: List[tuple[int, Dict[str, Any]]],
+    provider: str,
+    model_id: Optional[str],
+    module_guidance: str,
+    completion_guidance: str,
+    refinement_cycles: int,
+    json_retries: int,
+    output_path: str,
+    report_parts_files: List[str],
+    callback_handler: Any,
+    report_metrics_callback: Any,
+    report_step_index: int,
+    report_step_total: int,
+) -> int:
+    """Generate and persist the structured recommended-next-steps appendix."""
+    logger.info("Generating Appendix B: Recommended Next Steps...")
+    next_steps_system_prompt = (
+        get_report_next_steps_system_prompt() + "\n" + module_guidance + "\n" + completion_guidance
+    )
+    next_steps_agent = ReportGenerator.create_report_agent(
+        provider=provider,
+        model_id=model_id,
+        operation_id=operation_id,
+        target=target,
+        callback_handler=report_metrics_callback,
+        system_prompt=next_steps_system_prompt,
+    )
+    next_steps_critic = None
+    if refinement_cycles:
+        next_steps_critic = ReportGenerator.create_report_agent(
+            provider=provider,
+            model_id=model_id,
+            operation_id=operation_id,
+            target=target,
+            callback_handler=report_metrics_callback,
+            system_prompt=get_report_critic_system_prompt(),
+            agent_role="report_critic",
+        )
+
+    validation_candidates = [
+        {
+            "id": item.get("id"),
+            "title": _report_item_title(item, "Validation item"),
+            "claim": item.get("content"),
+            "reason": (item.get("metadata", {}) or {}).get("validation_reason"),
+        }
+        for _index, item in report_validation_failures
+    ]
+    next_steps_source = {
+        "target": target,
+        "objective": objective,
+        "completion_status": completion_status,
+        "phase_coverage": sections.get("phase_coverage", []),
+        "task_status_counts": sections.get("task_status_counts", {}),
+        "total_task_count": sections.get("total_task_count", 0),
+        "completed_task_count": sections.get("completed_task_count", 0),
+        "target_coverage": sections.get("target_coverage", ""),
+        "validation_candidates": validation_candidates,
+        "latest_run": latest_run,
+        "configured_budget": configured_budget,
+    }
+    next_steps_prompt = f"""Generate Appendix B recommended-next-steps data from the canonical operation data.
+Return JSON exactly with these keys:
+{{
+  "coverage_gaps": [string],
+  "recommended_next_steps": [string],
+  "completion_criteria": [string],
+  "budget_recommendations": [
+    {{"dimension": "duration|tokens|cost", "current": number, "recommended": number, "rationale": string}}
+  ],
+  "agent_improvements": [string],
+  "tooling_improvements": [string],
+  "manual_investigations": [string]
+}}
+
+Include exactly one budget recommendation for every dimension in configured_budget and no others. Duration is required
+and must always be recommended. Token and cost recommendations are forbidden unless present in configured_budget.
+For each budget recommendation, `current` is the configured limit from configured_budget, never elapsed utilization.
+Give concrete projected values for full coverage and label their rationales as estimates. Manual investigations must
+be work where more automated tooling is unlikely to resolve the missing business context, authorization, access, or
+human judgment. Coverage gaps and completion criteria must be concrete and measurable. For incomplete coverage,
+recommend continuing this operation to cover missing tasks unless you explicitly recommend a rerun/new operation in
+recommended_next_steps. Empty non-budget lists are allowed when the canonical data supports no applicable item.
+
+Canonical operation data:
+{json.dumps(next_steps_source, indent=2, sort_keys=True)}
+"""
+    report_step_index += 1
+    _emit_report_progress(
+        callback_handler,
+        operation_id,
+        report_step_index,
+        report_step_total,
+        "next_steps",
+        "Appendix B: Recommended next steps",
+    )
+    try:
+        next_steps_data, next_steps_critique = _run_next_steps_refinement(
+            next_steps_agent,
+            next_steps_critic,
+            next_steps_prompt,
+            next_steps_system_prompt,
+            configured_budget,
+            next_steps_source,
+            refinement_cycles,
+            json_retries,
+            efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
+        )
+    finally:
+        _cleanup_report_agent(next_steps_agent, "report next-steps actor")
+        _cleanup_report_agent(next_steps_critic, "report next-steps critic")
+
+    next_steps_content = _format_next_steps_appendix(next_steps_data)
+    next_steps_content = _append_inline_review_feedback(next_steps_content, next_steps_critique)
+    next_steps_file = os.path.join(output_path, "report_recommended_next_steps.md")
+    with open(next_steps_file, "w") as f:
+        f.write(next_steps_content)
+    report_parts_files.append(next_steps_file)
+    return report_step_index
+
+
+def _assemble_security_assessment_report(
+    *,
+    filename: Optional[str],
+    output_path: str,
+    objective: str,
+    operation_id: str,
+    completion_notice: str,
+    has_observations: bool,
+    report_parts_files: List[str],
+    model_metrics: Dict[str, Any],
+) -> str:
+    """Combine report parts and append deterministic operation metadata."""
+    report_filename = filename or os.path.join(output_path, "security_assessment_report.md")
+    with open(report_filename, "w") as final_f:
+        final_f.write("# SECURITY ASSESSMENT REPORT\n\n")
+        final_f.write(_AI_CONTENT_DISCLAIMER + "\n\n")
+        final_f.write("## TABLE OF CONTENTS\n")
+        final_f.write("- [Executive Summary](#executive-summary)\n")
+        final_f.write("- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n")
+        final_f.write("- [Findings Requiring Validation](#findings-requiring-validation)\n")
+        if has_observations:
+            final_f.write("- [Observations and Discoveries](#observations-and-discoveries)\n")
+        final_f.write("- [Target Coverage](#target-coverage)\n")
+        final_f.write("- [Execution History](#execution-history)\n")
+        final_f.write("- [Appendix A: Assessment Methodology](#appendix-a-assessment-methodology)\n")
+        final_f.write("- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n\n")
+        final_f.write(completion_notice)
+
+        for part_file in report_parts_files:
+            with open(part_file, "r") as part_f:
+                final_f.write(part_f.read())
+                final_f.write("\n\n")
+
+        provenance_lines = []
+        software = _software_provenance()
+        repository = _git_provenance()
+        if software is not None:
+            provenance_lines.append(f"- Software: {software['name']} v{software['version']}")
+        if repository is not None:
+            provenance_lines.append(f"- Repository: {repository['repository_url']} @ {repository['commit_hash']}")
+        provenance = "\n".join(provenance_lines)
+        if provenance:
+            provenance = f"{provenance}\n"
+        footer = f"""
+- Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{provenance}- Operation ID: {operation_id}
+"""
+        final_f.write(footer)
+        final_f.write("\n" + _AI_CONTENT_DISCLAIMER + "\n")
+    return report_filename
+
+
 def generate_security_report(
     target: str,
     objective: str,
@@ -1473,7 +2035,7 @@ def generate_security_report(
         target: The target system that was assessed
         objective: The security assessment objective
         operation_id: The operation identifier
-        config_params: additional config (steps_executed, tools_used, evidence, provider, model_id, module)
+        config_params: additional config (tools_used, evidence, provider, model_id, module)
         callback_handler: Optional callback handler for agent events
         filename: Optional path to save the generated report. If not provided,
                   a default filename in the output directory will be used.
@@ -1486,7 +2048,7 @@ def generate_security_report(
             target="example.com",
             objective="Identify web application vulnerabilities",
             operation_id="OP_20240115_143022",
-            config_data='{"steps_executed": 15, "tools_used": ["nmap", "nikto"], "provider": "bedrock"}',
+            config_data='{"tools_used": ["nmap", "nikito"], "provider": "bedrock"}',
             filename="/path/to/report.md"
         )
     """
@@ -1497,7 +2059,6 @@ def generate_security_report(
         config_params = config_params or {}
 
         # Extract parameters with defaults
-        steps_executed = config_params.get("steps_executed", 0)
         tools_used = config_params.get("tools_used", [])
         provider = config_params.get("provider", config_manager.get_provider())
         model_id = config_params.get("model_id")
@@ -1511,7 +2072,6 @@ def generate_security_report(
             target=target,
             objective=objective,
             module=module,
-            steps_executed=steps_executed,
             tools_used=tools_used,
         )
         sections["completion_status"] = completion_status
@@ -1523,6 +2083,14 @@ def generate_security_report(
             }
         )
         latest_run = sections.get("latest_run") if isinstance(sections.get("latest_run"), dict) else {}
+        if not completion_status.get("termination_reason") and latest_run.get("termination_reason"):
+            termination_reason = str(latest_run["termination_reason"])
+            completion_status["termination_reason"] = termination_reason
+            completion_status["termination_message"] = latest_run.get("termination_message")
+            if not completion_status.get("workflow_complete"):
+                completion_status["incomplete_reason"] = (
+                    f"Workflow ended with termination_reason={termination_reason!r} before assessment_complete=true."
+                )
         fallback_budget = _normalize_budget_config(
             config_params.get("budget"),
             default_duration=DEFAULT_MAX_DURATION,
@@ -1536,9 +2104,7 @@ def generate_security_report(
             configured_budget = fallback_budget
         latest_run["configured_budget"] = configured_budget
         sections["latest_run"] = latest_run
-
-        # these values may have been updated when building the report section
-        steps_executed = max(steps_executed, sections.get("steps_executed", 0))
+        model_metrics = _resolve_report_model_metrics(config_manager, latest_run, callback_handler)
 
         # Validate evidence collection - skip report only if truly no memories
         if not sections or int(sections.get("evidence_count", 0)) == 0:
@@ -1560,16 +2126,12 @@ def generate_security_report(
             module_report_agent_finding_system_prompt = (
                 module_loader.load_module_report_agent_finding_system_prompt(module) or ""
             )
-            module_report_agent_observation_system_prompt = (
-                module_loader.load_module_report_agent_observation_system_prompt(module) or ""
-            )
             module_report_agent_appendix_system_prompt = (
                 module_loader.load_module_report_agent_appendix_system_prompt(module) or ""
             )
         except Exception:
             module_report_agent_executive_system_prompt = ""
             module_report_agent_finding_system_prompt = ""
-            module_report_agent_observation_system_prompt = ""
             module_report_agent_appendix_system_prompt = ""
 
         output_path = get_output_path(target_name=sanitize_target_name(target), operation_id=operation_id)
@@ -1619,7 +2181,7 @@ def generate_security_report(
             [finding for _index, finding in report_findings]
         )
         sections["taxonomy_coverage"] = taxonomy_coverage
-        report_step_total = 3 + len(report_findings) + len(report_observations) + len(report_validation_failures)
+        report_step_total = 3 + len(report_findings) + len(report_validation_failures)
         report_step_index = 0
 
         # Part 1: Executive Summary
@@ -1661,6 +2223,8 @@ Module: {module_str}
 
 Only verified findings may be counted as confirmed risk. If there are zero verified findings, do not label the target
 as "low risk"; state that no findings were verified and list validation failures separately.
+Clearly distinguish verified risk, findings requiring validation, informational observations, and coverage status.
+Configuration exposure alone is not exploit confirmation. Do not present incomplete coverage as exhaustive.
 Attack chains that were not demonstrated end to end may appear only in a separately titled "Hypothetical Attack
 Paths" section. Label every unsupported transition as a hypothesis, cite the verified findings supporting the chain,
 and keep hypothetical impact out of verified risk counts and conclusions.
@@ -1904,78 +2468,14 @@ Finding Data:
         # Pre-create observation parts list to only add header if there are observations
         observation_parts_files = []
 
-        observation_system_prompt = (
-            get_report_observation_system_prompt()
-            + "\n"
-            + module_guidance
-            + "\n"
-            + completion_guidance
-            + "\n"
-            + module_report_agent_observation_system_prompt
-        )
         for i, finding in report_observations:
             has_observations = True
-            logger.info(f"Generating report for observation {i+1}: {finding.get('content')}")
-
-            obs_prompt = f"""
-Generate a brief report for the following observation/discovery.
-Target: {target}
-{completion_guidance}
-Observation Data:
-{json.dumps(finding)}
-"""
-            report_step_index += 1
-            _emit_report_progress(
-                callback_handler,
-                operation_id,
-                report_step_index,
-                report_step_total,
-                "observation",
-                f"Observation: {_report_item_title(finding, f'Observation {i + 1}')}",
-            )
-            section_label = f"Observation: {_report_item_title(finding, f'Observation {i + 1}')}"
-            obs_agent = obs_critic = None
-            try:
-                obs_agent = ReportGenerator.create_report_agent(
-                    provider=provider,
-                    model_id=model_id,
-                    operation_id=operation_id,
-                    target=target,
-                    callback_handler=report_metrics_callback,
-                    system_prompt=observation_system_prompt,
-                )
-                if refinement_cycles:
-                    obs_critic = ReportGenerator.create_report_agent(
-                        provider=provider,
-                        model_id=model_id,
-                        operation_id=operation_id,
-                        target=target,
-                        callback_handler=report_metrics_callback,
-                        system_prompt=get_report_critic_system_prompt(),
-                        agent_role="report_critic",
-                    )
-                obs_text, final_critique = _run_report_refinement(
-                    obs_agent,
-                    obs_critic,
-                    obs_prompt,
-                    section_label,
-                    observation_system_prompt,
-                    refinement_cycles,
-                    json_retries,
-                    efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
-                )
-            finally:
-                _cleanup_report_agent(obs_agent, f"report observation {i + 1} actor")
-                _cleanup_report_agent(obs_critic, f"report observation {i + 1} critic")
-            if obs_text:
-                obs_text = _ground_report_item(obs_text, finding, observation=True)
-                obs_text = _append_artifact_evidence(obs_text, finding)
-                obs_text = _append_inline_review_feedback(obs_text, final_critique)
-                obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
-                obs_path = os.path.join(output_path, obs_filename)
-                with open(obs_path, "w") as f:
-                    f.write(_PAGE_BREAK + obs_text + "\n\n")
-                observation_parts_files.append(obs_path)
+            observation_text = _format_observation(finding, i)
+            obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
+            obs_path = os.path.join(output_path, obs_filename)
+            with open(obs_path, "w") as f:
+                f.write(_PAGE_BREAK + observation_text + "\n\n")
+            observation_parts_files.append(obs_path)
 
         if has_observations:
             observations_header_file = os.path.join(output_path, "report_observations_header.md")
@@ -1995,266 +2495,69 @@ Observation Data:
             )
         report_parts_files.append(target_coverage_file)
 
-        # Part 5: Appendix A - Assessment Methodology
-        logger.info("Generating Appendix A: Assessment Methodology...")
-        appendix_system_prompt = (
-            get_report_appendix_system_prompt()
-            + "\n"
-            + module_guidance
-            + "\n"
-            + completion_guidance
-            + "\n"
-            + module_report_agent_appendix_system_prompt
-        )
-        appendix_agent = ReportGenerator.create_report_agent(
-            provider=provider,
-            model_id=model_id,
-            operation_id=operation_id,
-            target=target,
-            callback_handler=report_metrics_callback,
-            system_prompt=appendix_system_prompt,
-        )
-        appendix_critic = None
-        if refinement_cycles:
-            appendix_critic = ReportGenerator.create_report_agent(
-                provider=provider,
-                model_id=model_id,
-                operation_id=operation_id,
-                target=target,
-                callback_handler=report_metrics_callback,
-                system_prompt=get_report_critic_system_prompt(),
-                agent_role="report_critic",
-            )
-
-        appendix_prompt = f"""
-Generate all requested sections.
-Target: {target}
-Operation ID: {operation_id}
-Steps Executed: {steps_executed}
-{completion_guidance}
-
-Use the following canonical data. Do not invent or recalculate task counts:
-{json.dumps({k: sections.get(k) for k in ['operation_plan', 'operation_tasks', 'task_status_counts', 'total_task_count', 'completed_task_count', 'phase_coverage', 'tools_summary', 'completion_status']})}
-"""
-        report_step_index += 1
-        _emit_report_progress(
-            callback_handler,
-            operation_id,
-            report_step_index,
-            report_step_total,
-            "methodology",
-            "Appendix A: Assessment Methodology",
-        )
-
-        appendix_content = None
-        try:
-            appendix_content, final_critique = _run_report_refinement(
-                appendix_agent,
-                appendix_critic,
-                appendix_prompt,
-                "Appendix A: Assessment Methodology",
-                appendix_system_prompt,
-                refinement_cycles,
-                json_retries,
-                efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
-            )
-        finally:
-            _cleanup_report_agent(appendix_agent, "report methodology actor")
-            _cleanup_report_agent(appendix_critic, "report methodology critic")
-
-        if appendix_content:
-            appendix_content = _append_inline_review_feedback(appendix_content, final_critique)
-            appendix_content = (
+        execution_history_file = os.path.join(output_path, "report_execution_history.md")
+        with open(execution_history_file, "w") as f:
+            f.write(
                 _PAGE_BREAK
-                + '<a name="appendix-a-assessment-methodology"></a>\n'
-                + "## APPENDIX A: ASSESSMENT METHODOLOGY\n\n"
-                + appendix_content
+                + '<a name="execution-history"></a>\n'
+                + str(sections.get("execution_history") or "No task history was recorded.")
+                + "\n\n"
             )
-            methodology_file = os.path.join(output_path, "report_methodology.md")
-            with open(methodology_file, "w") as f:
-                f.write(appendix_content)
-            report_parts_files.append(methodology_file)
+        report_parts_files.append(execution_history_file)
 
-        # Part 6: Appendix B - Recommended Next Steps
-        logger.info("Generating Appendix B: Recommended Next Steps...")
-        next_steps_system_prompt = (
-            get_report_next_steps_system_prompt()
-            + "\n"
-            + module_guidance
-            + "\n"
-            + completion_guidance
-        )
-        next_steps_agent = ReportGenerator.create_report_agent(
+        report_step_index = _generate_methodology_appendix(
+            target=target,
+            operation_id=operation_id,
+            sections=sections,
             provider=provider,
             model_id=model_id,
-            operation_id=operation_id,
+            module_guidance=module_guidance,
+            completion_guidance=completion_guidance,
+            module_appendix_prompt=module_report_agent_appendix_system_prompt,
+            refinement_cycles=refinement_cycles,
+            json_retries=json_retries,
+            output_path=output_path,
+            report_parts_files=report_parts_files,
+            callback_handler=callback_handler,
+            report_metrics_callback=report_metrics_callback,
+            report_step_index=report_step_index,
+            report_step_total=report_step_total,
+            model_metrics=model_metrics,
+        )
+
+        report_step_index = _generate_next_steps_appendix(
             target=target,
-            callback_handler=report_metrics_callback,
-            system_prompt=next_steps_system_prompt,
+            objective=objective,
+            operation_id=operation_id,
+            sections=sections,
+            completion_status=completion_status,
+            latest_run=latest_run,
+            configured_budget=configured_budget,
+            report_validation_failures=report_validation_failures,
+            provider=provider,
+            model_id=model_id,
+            module_guidance=module_guidance,
+            completion_guidance=completion_guidance,
+            refinement_cycles=refinement_cycles,
+            json_retries=json_retries,
+            output_path=output_path,
+            report_parts_files=report_parts_files,
+            callback_handler=callback_handler,
+            report_metrics_callback=report_metrics_callback,
+            report_step_index=report_step_index,
+            report_step_total=report_step_total,
         )
-        next_steps_critic = None
-        if refinement_cycles:
-            next_steps_critic = ReportGenerator.create_report_agent(
-                provider=provider,
-                model_id=model_id,
-                operation_id=operation_id,
-                target=target,
-                callback_handler=report_metrics_callback,
-                system_prompt=get_report_critic_system_prompt(),
-                agent_role="report_critic",
-            )
 
-        validation_candidates = [
-            {
-                "id": item.get("id"),
-                "title": _report_item_title(item, "Validation item"),
-                "claim": item.get("content"),
-                "reason": (item.get("metadata", {}) or {}).get("validation_reason"),
-            }
-            for _index, item in report_validation_failures
-        ]
-        next_steps_source = {
-            "target": target,
-            "objective": objective,
-            "completion_status": completion_status,
-            "phase_coverage": sections.get("phase_coverage", []),
-            "task_status_counts": sections.get("task_status_counts", {}),
-            "total_task_count": sections.get("total_task_count", 0),
-            "completed_task_count": sections.get("completed_task_count", 0),
-            "target_coverage": sections.get("target_coverage", ""),
-            "validation_candidates": validation_candidates,
-            "latest_run": latest_run,
-            "configured_budget": configured_budget,
-        }
-        next_steps_prompt = f"""Generate Appendix B recommended-next-steps data from the canonical operation data.
-Return JSON exactly with these keys:
-{{
-  "coverage_gaps": [string],
-  "recommended_next_steps": [string],
-  "completion_criteria": [string],
-  "budget_recommendations": [
-    {{"dimension": "duration|tokens|cost", "current": number, "recommended": number, "rationale": string}}
-  ],
-  "agent_improvements": [string],
-  "tooling_improvements": [string],
-  "manual_investigations": [string]
-}}
-
-Include exactly one budget recommendation for every dimension in configured_budget and no others. Duration is required
-and must always be recommended. Token and cost recommendations are forbidden unless present in configured_budget.
-For each budget recommendation, `current` is the configured limit from configured_budget, never elapsed utilization.
-Give concrete projected values for full coverage and label their rationales as estimates. Manual investigations must
-be work where more automated tooling is unlikely to resolve the missing business context, authorization, access, or
-human judgment. Coverage gaps and completion criteria must be concrete and measurable. For incomplete coverage,
-recommend continuing this operation to cover missing tasks unless you explicitly recommend a rerun/new operation in
-recommended_next_steps. Empty non-budget lists are allowed when the canonical data supports no applicable item.
-
-Canonical operation data:
-{json.dumps(next_steps_source, indent=2, sort_keys=True)}
-"""
-        report_step_index += 1
-        _emit_report_progress(
-            callback_handler,
-            operation_id,
-            report_step_index,
-            report_step_total,
-            "next_steps",
-            "Appendix B: Recommended next steps",
+        filename = _assemble_security_assessment_report(
+            filename=filename,
+            output_path=output_path,
+            objective=objective,
+            operation_id=operation_id,
+            completion_notice=completion_notice,
+            has_observations=has_observations,
+            report_parts_files=report_parts_files,
+            model_metrics=model_metrics,
         )
-        try:
-            next_steps_data, next_steps_critique = _run_next_steps_refinement(
-                next_steps_agent,
-                next_steps_critic,
-                next_steps_prompt,
-                next_steps_system_prompt,
-                configured_budget,
-                next_steps_source,
-                refinement_cycles,
-                json_retries,
-                efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
-            )
-        finally:
-            _cleanup_report_agent(next_steps_agent, "report next-steps actor")
-            _cleanup_report_agent(next_steps_critic, "report next-steps critic")
-
-        next_steps_content = _format_next_steps_appendix(next_steps_data)
-        next_steps_content = _append_inline_review_feedback(next_steps_content, next_steps_critique)
-        next_steps_file = os.path.join(output_path, "report_recommended_next_steps.md")
-        with open(next_steps_file, "w") as f:
-            f.write(next_steps_content)
-        report_parts_files.append(next_steps_file)
-
-        # --- Combine everything ---
-        if not filename:
-            filename = os.path.join(output_path, "security_assessment_report.md")
-
-        with open(filename, "w") as final_f:
-            final_f.write("# SECURITY ASSESSMENT REPORT\n\n")
-            final_f.write(_AI_CONTENT_DISCLAIMER + "\n\n")
-            final_f.write("## TABLE OF CONTENTS\n")
-            final_f.write("- [Executive Summary](#executive-summary)\n")
-            final_f.write("- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n")
-            final_f.write("- [Findings Requiring Validation](#findings-requiring-validation)\n")
-            if has_observations:
-                final_f.write("- [Observations and Discoveries](#observations-and-discoveries)\n")
-            final_f.write("- [Target Coverage](#target-coverage)\n")
-            final_f.write("- [Appendix A: Assessment Methodology](#appendix-a-assessment-methodology)\n")
-            final_f.write("- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n")
-            final_f.write("- [Appendix C: Operation Metadata](#appendix-c-operation-metadata)\n")
-            final_f.write("\n")
-            final_f.write(completion_notice)
-
-            for part_file in report_parts_files:
-                with open(part_file, "r") as part_f:
-                    final_f.write(part_f.read())
-                    final_f.write("\n\n")
-
-            # Add operation metadata
-            main_provider = config_manager.get_provider()
-            main_model = config_manager.get_llm_config(main_provider).model_id
-            model_usage = []
-            fallback_context_window = _fallback_context_window(main_provider, main_model)
-            total_operation_time = latest_run.get("metrics", {}).get("duration", "N/A")
-            if callback_handler is not None:
-                try:
-                    model_usage = callback_handler.model_usage()
-                    total_operation_time = format_duration(
-                        callback_handler.total_operation_time_seconds()
-                    )
-                except Exception:
-                    logger.debug("Unable to read live operation usage for operation metadata", exc_info=True)
-            if not model_usage:
-                model_usage = latest_run.get("metrics", {}).get("model_usage", [])
-            software = _software_provenance()
-            repository = _git_provenance()
-            provenance_lines = []
-            if software is not None:
-                provenance_lines.append(f"- Software: {software['name']} v{software['version']}")
-            if repository is not None:
-                provenance_lines.append(
-                    f"- Repository: {repository['repository_url']} @ {repository['commit_hash']}"
-                )
-            provenance = "\n".join(provenance_lines)
-            if provenance:
-                provenance = f"{provenance}\n"
-            sanitized_objective = " ".join(str(objective or "").split()) or "N/A"
-
-            operation_metadata = f"""{_PAGE_BREAK}<a name="appendix-c-operation-metadata"></a>
-## APPENDIX C: OPERATION METADATA
-
-- Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-{provenance}- Operation ID: {operation_id}
-- Total Operation Time: {total_operation_time}
-- Operation Objective: {sanitized_objective}
-
-### Model Usage
-
-{_format_model_usage_table(model_usage, main_provider, main_model, fallback_context_window)}
-
-*Efficiency = 100 × model inferences ÷ (model inferences + correction loops). Correction loops include bounded reasoning, output-token, repair, tool-recovery, evaluator, and critic retries; higher values indicate greater efficiency.*
-"""
-            final_f.write(operation_metadata)
-            final_f.write("\n" + _AI_CONTENT_DISCLAIMER + "\n")
 
         logger.info("Final combined report generated: %s", filename)
         return
@@ -2509,7 +2812,6 @@ def _trim_evidence_for_report(
                     "title": f"{overflow} additional finding(s) omitted",
                     "details": "Increase CYBER_REPORT_MAX_FINDINGS or review artifacts directly.",
                 },
-                "confidence": "",
                 "validation_status": "info",
             }
         )
@@ -2530,7 +2832,6 @@ def build_report_sections(
         target: str,
         objective: str,
         module: str = "web",
-        steps_executed: int = 0,
         tools_used: List[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -2547,7 +2848,6 @@ def build_report_sections(
         target: Assessment target (URL/system)
         objective: Assessment objective
         module: Operation module used (default: web)
-        steps_executed: Number of steps executed in operation
         tools_used: List of tools used during assessment
 
     Returns:
@@ -2583,7 +2883,11 @@ def build_report_sections(
             limit=MAX_REPORT_FINDINGS * 10,
         )
         list_finding_records = getattr(memory_client, "list_finding_records", None)
-        finding_records = list_finding_records() if callable(list_finding_records) else []
+        finding_records = (
+            list_finding_records(operation_id=operation_id)
+            if callable(list_finding_records)
+            else []
+        )
         finding_records_by_uid = {
             str(record.get("finding_uid")): record
             for record in finding_records
@@ -2591,15 +2895,31 @@ def build_report_sections(
         }
         for memory_item in raw_memories:
             metadata = memory_item.get("metadata")
-            if not isinstance(metadata, dict) or metadata.get("category") != "finding":
+            if not isinstance(metadata, dict):
                 continue
             record = finding_records_by_uid.get(str(metadata.get("finding_uid") or ""))
             candidate = record.get("candidate_data") if isinstance(record, dict) else None
             if not isinstance(candidate, dict):
                 continue
-            for key in ("taxonomy", "taxonomy_annotation", "final_attack_enrichment"):
-                if key in candidate:
+            for key in (
+                "taxonomy",
+                "taxonomy_annotation",
+                "final_attack_enrichment",
+                "severity",
+                "title",
+                "target",
+                "location",
+            ):
+                if key in candidate and not metadata.get(key):
                     metadata[key] = candidate[key]
+            annotation = candidate.get("taxonomy_annotation")
+            if not metadata.get("taxonomy") and isinstance(annotation, dict) and isinstance(annotation.get("taxonomy"), dict):
+                metadata["taxonomy"] = annotation["taxonomy"]
+            validation = record.get("validation_data") if isinstance(record, dict) else None
+            if isinstance(validation, dict):
+                for key in ("severity", "target", "location"):
+                    if key in validation and not metadata.get(key):
+                        metadata[key] = validation[key]
         logger.info(f"Total memories loaded: {len(raw_memories)}")
 
         # Count by operation_id and category for debugging
@@ -2618,13 +2938,30 @@ def build_report_sections(
         if not cross_operation:
             logger.info(f"Filtering evidence for current operation_id: {operation_id}")
 
-        operation_plan = memory_client.get_active_plan()
-        task_records = memory_client.list_tasks()
+        operation_plan = memory_client.get_active_plan(operation_id=operation_id)
+        task_records = memory_client.list_tasks(operation_id=operation_id)
+        target_values = {
+            str(item.target_id): str(item.value)
+            for item in list(getattr(operation_plan, "targets", []) or [])
+            if str(getattr(item, "target_id", "")).strip() and str(getattr(item, "value", "")).strip()
+        }
+        if not target_values:
+            target_values = {
+                target_id: target
+                for task in task_records
+                for target_id in getattr(task, "target_ids", [])
+                if str(target_id).strip()
+            }
         operation_tasks = []
+        task_history_rows = []
+        acceptance_history_rows = []
         phase_coverage_state: Dict[int, Dict[str, Any]] = {}
         for task in task_records:
             task_status_counts[str(task.status)] += 1
-            acceptance_results = memory_client.list_task_acceptance_results(task.task_uid)
+            acceptance_results = memory_client.list_task_acceptance_results(
+                task.task_uid,
+                operation_id=operation_id,
+            )
             acceptance_results = acceptance_results if isinstance(acceptance_results, list) else []
             completed_ids = {result.criterion_id for result in acceptance_results}
             completed_count = sum(
@@ -2634,6 +2971,31 @@ def build_report_sections(
                 f"{task.to_toon(include_format=False)},acceptance={completed_count}/"
                 f"{len(task.acceptance.criteria)},manifest={task.acceptance.manifest_hash}"
             )
+            results_by_criterion = {result.criterion_id: result for result in acceptance_results}
+            task_history_rows.append(
+                {
+                    "phase": task.phase,
+                    "title": task.title,
+                    "status": task.status,
+                    "status_reason": task.status_reason or "",
+                    "target_ids": ", ".join(task.target_ids) if task.target_ids else task.target_scope,
+                    "acceptance": f"{completed_count}/{len(task.acceptance.criteria)}",
+                    "manifest_hash": task.acceptance.manifest_hash,
+                }
+            )
+            for criterion in task.acceptance.criteria:
+                result = results_by_criterion.get(criterion.id)
+                acceptance_history_rows.append(
+                    {
+                        "phase": task.phase,
+                        "title": task.title,
+                        "criterion_id": criterion.id,
+                        "status": result.status if result else "not_recorded",
+                        "disposition": result.disposition if result else "—",
+                        "summary": result.summary if result else criterion.description,
+                        "evidence_refs": ", ".join(result.evidence_refs) if result else "—",
+                    }
+                )
             phase_state = phase_coverage_state.setdefault(
                 task.phase,
                 {"task_status_counts": Counter(), "expected_items": set(), "assessed_items": set()},
@@ -2764,6 +3126,10 @@ def build_report_sections(
                 parsed_evidence = {
                     key: value for key, value in parsed_evidence.items() if str(value).strip()
                 }
+            location = str(parsed_evidence.get("where") or "").strip()
+            if location in target_values:
+                parsed_evidence["where"] = target_values[location]
+                metadata.setdefault("target", target_values[location])
 
             # Normalize report categories without modifying the stored memory.
             stored_category = metadata.get("category")
@@ -2796,16 +3162,10 @@ def build_report_sections(
                     if category == "validation_failure"
                     else "INFO"
                 )
-                conf = str(
-                    metadata.get("confidence")
-                    or parsed_evidence.get("confidence")
-                    or ("N/A" if category == "finding" else "")
-                )
                 item.update(
                     {
                         "category": category,
                         "severity": sev,
-                        "confidence": conf,
                         "validation_status": str(
                             metadata.get("validation_status", "")
                         ).strip()
@@ -2816,6 +3176,10 @@ def build_report_sections(
                         ).strip(),
                     }
                 )
+                if category != "finding":
+                    item["confidence"] = str(
+                        metadata.get("confidence") or parsed_evidence.get("confidence") or ""
+                    )
 
                 # Parse structured markers from the content so downstream sections have clean fields
                 if parsed_evidence and isinstance(parsed_evidence, dict):
@@ -2896,7 +3260,7 @@ def build_report_sections(
             else ""
         )
 
-        # Extract metrics, tools, failures, and configured budgets from only the latest appended log session.
+        # Extract canonical execution facts while ignoring later report-only log sessions.
         latest_run = {}
         try:
             safe_target_name = sanitize_target_name(target)
@@ -2954,7 +3318,7 @@ def build_report_sections(
             }
 
         # Build complete sections dictionary
-        target_coverage = _format_target_coverage(operation_plan, task_records, evidence)
+        target_coverage = _format_target_coverage(operation_plan, task_records, evidence, target_values)
         evidence_integrity_errors = []
         for item in evidence:
             for reference in sorted(_artifact_references(item)):
@@ -2993,7 +3357,6 @@ def build_report_sections(
             "target": target,
             "objective": objective,
             "date": operation_date,
-            "steps_executed": steps_executed,
             "severity_counts": severity_counts,
             "verified_findings_total": verified_findings_total,
             "critical_count": severity_counts["critical"],
@@ -3006,6 +3369,11 @@ def build_report_sections(
             "operation_tasks": {
                 "columns": Task.csv_format(),
                 "items": operation_tasks,
+            },
+            "execution_history": _format_execution_history(task_history_rows, acceptance_history_rows),
+            "execution_history_rows": {
+                "tasks": task_history_rows,
+                "acceptance": acceptance_history_rows,
             },
             "task_status_counts": dict(sorted(task_status_counts.items())),
             "total_task_count": total_task_count,
@@ -3139,7 +3507,6 @@ def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> 
         evidence = ""
         impact = ""
         remediation = ""
-        confidence = ""
         status = str(finding.get("validation_status") or "").strip()
 
         # Extract from parsed structure if available
@@ -3152,7 +3519,6 @@ def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> 
             evidence = parsed.get("evidence", "")
             impact = parsed.get("impact", "")
             remediation = parsed.get("remediation", "")
-            confidence = parsed.get("confidence", "")
         else:
             # Use raw content if no parsed structure
             content = finding.get("content", "")
@@ -3160,10 +3526,8 @@ def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> 
             evidence = content
             impact = ""
             remediation = ""
-            confidence = finding.get("confidence", "")
 
-        # Normalize fields (only remediation cleanup; display confidence as-is)
-        confidence = confidence or finding.get("confidence", "")
+        # Normalize fields.
         remediation = _clean_remediation_text(remediation)
 
         # If impact missing, attempt to parse from original content
@@ -3183,7 +3547,7 @@ def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> 
             output.append(f'<a id="{anchor_id}"></a>')
         output.append(f"#### {i}. {title}")
 
-        # Status badge and confidence
+        # Status badge
         if status:
             status_norm = (
                 "Verified"
@@ -3192,9 +3556,6 @@ def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> 
             )
             if status_norm:
                 output.append(f"**Status:** {status_norm}")
-        if confidence:
-            output.append(f"**Confidence:** {confidence}")
-
         # Evidence first (full for critical/high)
         if evidence:
             # For critical/high, show full evidence
@@ -3210,7 +3571,6 @@ def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> 
                         "[EVIDENCE]",
                         "[STEPS]",
                         "[REMEDIATION]",
-                        "[CONFIDENCE]",
                     ]:
                         formatted_evidence = formatted_evidence.replace(
                             marker, f"\n{marker}"
@@ -3247,16 +3607,14 @@ def _format_summary_table(findings: List[Dict[str, Any]]) -> str:
         return ""
 
     table = [
-        "| # | Severity | Finding | Location | Confidence |",
-        "|---|----------|---------|----------|------------|",
+        "| # | Severity | Finding | Location |",
+        "|---|----------|---------|----------|",
     ]
 
     for i, finding in enumerate(
             findings[:MAX_REPORT_FINDINGS], 1
     ):  # Include up to 50 findings in summary
         severity = finding.get("severity", "MEDIUM")
-        confidence = finding.get("confidence", "N/A")
-
         # Extract title and location
         if "parsed" in finding and any(finding["parsed"].values()):
             parsed = finding["parsed"]
@@ -3267,7 +3625,7 @@ def _format_summary_table(findings: List[Dict[str, Any]]) -> str:
             title = content.split("[WHERE]")[0] if "[WHERE]" in content else content
             location = "See appendix"
 
-        table.append(f"| {i} | {severity} | {title} | {location} | {confidence} |")
+        table.append(f"| {i} | {severity} | {title} | {location} |")
 
     # Include all findings count if more than shown
     if len(findings) > MAX_REPORT_FINDINGS:
