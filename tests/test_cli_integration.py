@@ -52,6 +52,13 @@ def bypass_live_target_preflight(monkeypatch):
     monkeypatch.setattr(cyberautoagent, "run_target_preflight", successful_preflight)
 
 
+@pytest.fixture(autouse=True)
+def bypass_live_memory_client(monkeypatch):
+    """Keep CLI workflow tests independent of local Mem0/Ollama availability."""
+
+    monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock())
+
+
 class TestCLIArguments:
     """Test command-line argument parsing"""
 
