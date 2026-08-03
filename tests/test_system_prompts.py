@@ -33,6 +33,10 @@ class TestGetSystemPrompt:
         assert "Follow the selected module's" in prompt
         assert "Target infrastructure = remote endpoint" not in prompt
         assert "Never\n  infer authorization from available tools" in prompt
+        assert "Task Capture Gate" not in prompt
+        assert "Budget is intended to improve coverage" not in prompt
+        assert "Coverage-First Doctrine" not in prompt
+        assert "MUST pivot to different method OR deploy swarm" not in prompt
 
     @patch("modules.prompts.factory.load_prompt_template")
     def test_get_system_prompt_with_tools_context(self, mock_load_prompt_template):
@@ -55,6 +59,31 @@ class TestGetSystemPrompt:
 
         assert "ENVIRONMENTAL CONTEXT" in prompt
         assert "nmap, curl" in prompt
+
+    def test_get_system_prompt_renders_seclists_context_in_tools_guide(self):
+        prompt = get_system_prompt(
+            target="test.com",
+            objective="test objective",
+            operation_id="OP_20240101_120000",
+            budget=_budget(),
+            seclists_root="/custom/SecLists",
+        )
+
+        assert "## SecLists Wordlists" in prompt
+        assert "SecLists root: `/custom/SecLists`" in prompt
+        assert "canonical SecLists-relative path" in prompt
+        assert "{{ seclists_context }}" not in prompt
+
+    def test_get_system_prompt_omits_seclists_context_when_unavailable(self):
+        prompt = get_system_prompt(
+            target="test.com",
+            objective="test objective",
+            operation_id="OP_20240101_120000",
+            budget=_budget(),
+        )
+
+        assert "SecLists Wordlists" not in prompt
+        assert "{{ seclists_context }}" not in prompt
 
     def test_get_system_prompt_with_output_config(self):
         output_config = {

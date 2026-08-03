@@ -202,9 +202,11 @@ critic reviews. Setting it to `0` uses the initial builder output without critiq
 builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
 evaluator are not invoked for that task.
 
-Task execution cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three passes, has a
-minimum of one, and has
-an independent `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` allowance for terminal acceptance schema or evidence repairs.
+Task execution cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three normal
+executor passes and has a minimum of one. `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS` independently allows one
+evaluator-directed evidence repair by default; set it to `0` to finalize actionable evaluator feedback without a
+correction pass. `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` separately governs terminal acceptance schema or evidence
+repairs.
 Acceptance evidence is stored as portable `artifact:artifacts/<file>` references, and every result declares whether
 it is negative, observational, a new finding candidate, or evidence for an existing finding. The task-executor agent
 and conversation are retained when no valid complete acceptance ledger was
@@ -234,6 +236,15 @@ same-phase `finding_validation` task. The linked task must call
 unfinished validations remain visible in the final report under **Findings Requiring Validation**. Evaluators and
 report agents can inspect operation artifacts with the read-only `read_artifact` tool, limited by
 `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation).
+
+Operation-objective candidates use a separate lifecycle. `store_objective_candidate` creates an
+`objective_validation` task, and `record_objective_validation` records confirmed, rejected, or inconclusive objective
+status with confidence and artifacts. Candidate registration rejects values absent from the cited artifact and values
+that violate explicit objective constraints. The CTF module additionally exposes `discover_flag_candidates`, which
+deterministically scans artifacts for braced flags and standalone 64- or 128-character hexadecimal flags, then returns
+opaque candidate references. Objective validation never changes a vulnerability finding's resolution. For flag
+objectives, Python also enforces objective-derived format and exact-length constraints and requires at least 80%
+confidence for confirmation. Reports show these results under **Objective Validation**, outside vulnerability counts.
 
 After creating or durably changing a plan, the controller also emits a standard `output` event containing the
 objective, current phase, and status of every phase. These snapshots appear in interactive and headless output.
@@ -405,8 +416,9 @@ limited to new follow-up work and never completes or records acceptance for the 
 }
 ```
 
-The controller uses `instructions` only as critic guidance when another task-executor cycle is available. It does not
-persist instructions as task state or emit them in task completion events.
+For an actionable `partial_failure`, the controller uses `instructions` as critic guidance in a bounded retained
+task-executor correction cycle. It does not persist instructions as task state or emit them in task completion events.
+`done`, `blocked`, and instruction-less `partial_failure` decisions remain terminal.
 
 `phase_evaluator` returns:
 

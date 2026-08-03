@@ -53,6 +53,7 @@ from modules.config.models.factory import (
     require_prompt_token_limit,
     create_strands_model,
 )
+from modules.config.system.environment import resolve_seclists_root
 from modules.config.system.logger import get_logger
 from modules.handlers.agent_repair_hook import AgentRepairHook
 from modules.handlers.conversation_budget import (
@@ -111,7 +112,9 @@ from modules.tools.memory import (
     mem0_list,
     mem0_retrieve,
     record_finding_validation,
+    record_objective_validation,
     store_finding,
+    store_objective_candidate,
     store_knowledge,
     store_observation,
 )
@@ -134,6 +137,8 @@ from modules.tools.web_search import web_search
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 logger = get_logger("Agents.CyberAutoAgent")
+
+_SECLISTS_CONSUMER_TOOLS = {"dirb", "feroxbuster", "ffuf", "gobuster", "hydra", "ncrack", "wfuzz", "wpscan"}
 
 # Backward compatibility: expose get_system_prompt from modules.prompts for legacy imports/tests
 get_system_prompt = prompts.get_system_prompt
@@ -269,6 +274,9 @@ def create_agent_runtime_resources(
         operation_id = f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     else:
         operation_id = config.op_id
+
+    # Keep environment and memory context aligned before any continuation reads occur.
+    os.environ["CYBER_OPERATION_ID"] = operation_id
 
     # Configure memory system using centralized configuration
     memory_config = config_manager.get_mem0_service_config(config.provider)
@@ -508,6 +516,10 @@ def create_agent_runtime_resources(
 
     # Build additional environment context
     full_tools_context = ""
+    available_tool_names = set(config.available_tools or [])
+    seclists_root = (
+        resolve_seclists_root() if available_tool_names.intersection(_SECLISTS_CONSUMER_TOOLS) else None
+    )
     if config.bug_bounty_headers:
         marker_headers = "\n".join(
             f"- {name}: {value}" for name, value in sorted(config.bug_bounty_headers.items())
@@ -609,6 +621,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         store_knowledge,
         store_finding,
         record_finding_validation,
+        store_objective_candidate,
+        record_objective_validation,
         mem0_retrieve,
         mem0_list,
         read_artifact,
@@ -722,6 +736,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         has_existing_memories=has_existing_memories,
         memory_overview=memory_overview,
         tools_context=full_tools_context if full_tools_context else None,
+        seclists_root=seclists_root,
         output_config={
             "base_dir": server_config.output.base_dir,
             "target_name": target_name,
@@ -794,6 +809,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
             "objective": config.objective,
             "target": config.target,
             "module": config.module,
+            "operation_mode": config.operation_mode,
             "provider": config.provider,
             "model": config.model_id,
             "region": config.region_name,
@@ -1142,6 +1158,7 @@ def create_agent(
             max_corrections=max_corrections,
             quarantine_callback=quarantine_shell_command,
             quarantined_executables=runtime.quarantined_shell_commands,
+            efficiency_callback=callback_handler.record_efficiency_event,
         )
         agent_hooks.append(failure_recovery_hook)
     if agent_type in {"task_creator", "task_executor"}:

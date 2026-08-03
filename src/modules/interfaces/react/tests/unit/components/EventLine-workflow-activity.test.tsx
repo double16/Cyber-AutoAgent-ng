@@ -50,7 +50,8 @@ describe('EventLine workflow activity rendering', () => {
 
     expect(withLabel).toContain('Plan creation');
     expect(withLabel).not.toContain('wrong action');
-    expect(withAction).toContain('phase evaluator');
+    expect(withAction).toContain('Phase evaluator');
+    expect(withAction).toContain('🔄');
   });
 
   it('renders completed and failed statuses without prompt contents', async () => {
@@ -62,6 +63,8 @@ describe('EventLine workflow activity rendering', () => {
 
     expect(frames[0]).toContain('completed');
     expect(frames[1]).toContain('failed');
+    expect(frames[0]).toContain('✅');
+    expect(frames[1]).toContain('⚠️');
     expect(frames.join('\n')).not.toContain('secret prompt');
   });
 });

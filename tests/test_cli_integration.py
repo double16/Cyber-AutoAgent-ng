@@ -52,6 +52,13 @@ def bypass_live_target_preflight(monkeypatch):
     monkeypatch.setattr(cyberautoagent, "run_target_preflight", successful_preflight)
 
 
+@pytest.fixture(autouse=True)
+def bypass_live_memory_client(monkeypatch):
+    """Keep CLI workflow tests independent of local Mem0/Ollama availability."""
+
+    monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock())
+
+
 class TestCLIArguments:
     """Test command-line argument parsing"""
 
@@ -934,6 +941,7 @@ class CliCallback:
         self.pending_progress_update = False
         self._emitted_any_reasoning = False
         self.termination_reason = None
+        self.emit_model_usage_snapshot = Mock()
         self.ensure_report_generated = Mock()
         self.trigger_evaluation_on_completion = Mock()
         self.emit_assessment_complete = Mock()
@@ -1832,6 +1840,7 @@ def test_finalize_report_and_evaluation_runs_once(monkeypatch):
         Mock(return_value=SimpleNamespace(get_active_plan=lambda: SimpleNamespace(assessment_complete=True))),
     )
     lifecycle = Mock()
+    callback.emit_model_usage_snapshot = lifecycle.emit_model_usage_snapshot
     callback.ensure_report_generated = lifecycle.ensure_report_generated
     callback.trigger_evaluation_on_completion = lifecycle.trigger_evaluation_on_completion
     callback.emit_assessment_complete = lifecycle.emit_assessment_complete
@@ -1864,6 +1873,7 @@ def test_finalize_report_and_evaluation_runs_once(monkeypatch):
     callback.trigger_evaluation_on_completion.assert_called_once()
     callback.emit_assessment_complete.assert_called_once()
     assert [call[0] for call in lifecycle.method_calls] == [
+        "emit_model_usage_snapshot",
         "ensure_report_generated",
         "trigger_evaluation_on_completion",
         "emit_assessment_complete",
@@ -1895,6 +1905,34 @@ def test_finalize_report_and_evaluation_allows_missing_agent_for_report_mode(mon
     assert report_call.args == (None, "example.com", "test", "web")
     assert report_call.kwargs["completion_status"]["assessment_complete"] is True
     callback.emit_assessment_complete.assert_called_once()
+
+
+def test_finalize_report_and_evaluation_continues_when_model_usage_snapshot_fails(monkeypatch):
+    callback = CliCallback()
+    callback.termination_reason = "complete"
+    snapshot_error = RuntimeError("snapshot unavailable")
+    callback.emit_model_usage_snapshot.side_effect = snapshot_error
+    monkeypatch.setattr(
+        cyberautoagent,
+        "get_memory_client",
+        Mock(return_value=SimpleNamespace(get_active_plan=lambda: SimpleNamespace(assessment_complete=True))),
+    )
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=SimpleNamespace(model=SimpleNamespace()),
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    callback.ensure_report_generated.assert_called_once()
+    callback.trigger_evaluation_on_completion.assert_called_once()
+    logger.warning.assert_called_with(
+        "Unable to persist model usage before report generation: %s", snapshot_error
+    )
 
 
 def test_finalize_report_and_evaluation_completes_when_evaluation_is_disabled(monkeypatch):
@@ -2009,6 +2047,9 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
             return True
 
     monkeypatch.setattr(cyberautoagent.os, "scandir", lambda _path: [DirEntry("OP_20260101_000000"), DirEntry("OP_20260102_000000")])
+    from modules.tools.memory import PlanStore
+
+    PlanStore(str(tmp_path / "example.com" / "memory" / "OP_20260102_000000" / "plan_storage.db"))
 
     cyberautoagent.main()
 

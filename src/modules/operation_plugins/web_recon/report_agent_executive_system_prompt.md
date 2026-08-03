@@ -5,7 +5,7 @@ The module is recon-first: the primary goal is to map the attack surface, then h
 - Do not invent new observations/findings. Use ONLY the emitted items.
 - Prefer observations over findings when describing the attack surface.
 - Every observation must contribute to attack-surface understanding (what exists, where it is, and what boundary it sits behind).
-- Findings must be ordered to give manual testers a work plan: highest (confidence × impact) first.
+- Findings must be ordered to give manual testers a work plan: highest severity and impact first.
 </general_report_structure>
 
 <sections_to_generate>
@@ -45,5 +45,5 @@ Additional sections:
 **Observation-First Reporting Rules**
 - Observations describe *attack surface facts* (what is reachable, what endpoints exist, what roles can do what, what boundary checks are visible).
 - Observations MUST NOT be phrased as vulnerabilities unless the run explicitly labeled them as a vulnerability.
-- If an item is ambiguous, keep it as an observation and explain what would raise or lower confidence.
+- If an item is ambiguous, keep it as an observation and explain the evidence gap.
 </finding_organization>

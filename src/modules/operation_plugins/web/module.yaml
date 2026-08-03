@@ -22,7 +22,6 @@ tools:
   - specialized_recon_orchestrator
   - advanced_payload_coordinator
   - auth_chain_analyzer
-  - validation_specialist
   - idor_specialist
 module_interface:
   accepts_from: []

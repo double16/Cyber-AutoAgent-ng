@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 os.environ["ENABLE_LANGFUSE_PROMPTS"] = "false"
 
+
 # Ensure provider override envs do not leak into tests expecting defaults
 for _var in (
     "CYBER_AGENT_PROVIDER",
@@ -72,6 +73,34 @@ def outputs_dir():
         yield cwd / "outputs"
     else:
         yield Path.cwd() / ".." / "outputs"
+
+
+@pytest.fixture
+def ollama_taxonomy_client(request):
+    """Return an installed local Ollama model or skip without downloading one."""
+
+    import ollama
+
+    model = request.config.getoption("ollama_model")
+    client = ollama.Client(
+        host=request.config.getoption("ollama_host"),
+        timeout=request.config.getoption("ollama_timeout"),
+    )
+    try:
+        response = client.list()
+    except Exception as error:
+        pytest.skip(f"Ollama is unavailable: {error}")
+    models = getattr(response, "models", None)
+    if models is None and isinstance(response, dict):
+        models = response.get("models", [])
+    installed = set()
+    for item in models or []:
+        name = item.get("model", "") if isinstance(item, dict) else getattr(item, "model", "")
+        if name:
+            installed.add(str(name))
+    if model not in installed:
+        pytest.skip(f"Ollama model {model!r} is not installed")
+    return client, model
 
 
 @pytest.fixture
@@ -236,6 +265,26 @@ def clear_lru_caches():
 
 
 def pytest_addoption(parser):
+    ollama_group = parser.getgroup("ollama")
+    ollama_group.addoption(
+        "--ollama-model",
+        action="store",
+        default="qwen3.6:27b-mlx",
+        help="Installed Ollama model for tests marked ollama.",
+    )
+    ollama_group.addoption(
+        "--ollama-host",
+        action="store",
+        default="http://localhost:11434",
+        help="Ollama host for tests marked ollama.",
+    )
+    ollama_group.addoption(
+        "--ollama-timeout",
+        action="store",
+        type=float,
+        default=120.0,
+        help="Per-request timeout in seconds for tests marked ollama.",
+    )
     parser.addoption(
         "--browser",
         action="store_true",
@@ -258,8 +307,7 @@ def pytest_runtest_setup(item):
         pytest.skip("Test requires --external option to run.")
 
     if "ollama" in item.keywords:
-        # pytest.skip(f"Skipping tests: Ollama", allow_module_level=True)
-        ollama_host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+        ollama_host = item.config.getoption("ollama_host")
         if "://" not in ollama_host:
             ollama_host = "http://" + ollama_host
         try:

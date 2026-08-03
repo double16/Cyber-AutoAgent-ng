@@ -59,7 +59,7 @@ elements. \
 - **No Direct Flag Exposure**: Attempts to extract the flag via XSS payloads did not reveal it in the page or via browser inspection. \
 - **No Hidden Flag Elements**: No elements or cookies contained the expected flag format. \
 - **Application Behavior**: The application is vulnerable to XSS and allows JavaScript execution but does not directly expose the flag. \
-- **No Validation Tool Used**: The `validation_specialist` tool was not invoked, as the flag was not successfully extracted. \
+- **Objective Validation**: No flag candidate was extracted, so no artifact-backed objective validation was possible. \
  \
  \
 ### END OF EXAMPLE, REAL LOG STARTS AFTER THIS #### \

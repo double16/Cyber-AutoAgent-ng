@@ -16,9 +16,9 @@ describe('formatWorkflowActivityEvent', () => {
   });
 
   it.each([
-    ['completed', '✅ plan review completed'],
-    ['failed', '⚠️ plan review failed'],
-    ['started', '🔄 plan review started'],
+    ['completed', '✅ Plan review completed'],
+    ['failed', '⚠️ Plan review failed'],
+    ['started', '🔄 Plan review started'],
   ])('formats %s status', (status, expected) => {
     expect(formatWorkflowActivityEvent({
       type: 'workflow_activity',
@@ -31,11 +31,18 @@ describe('formatWorkflowActivityEvent', () => {
     expect(formatWorkflowActivityEvent({
       type: 'workflow_activity',
       action: 'phase_evaluator',
-    })).toBe('🔄 phase evaluator started');
+    })).toBe('🔄 Phase evaluator started');
     expect(formatWorkflowActivityEvent({
       type: 'workflow_activity',
       activity: 'task_creation',
-    })).toBe('🔄 task creation started');
+    })).toBe('🔄 Task creation started');
+  });
+
+  it('uppercases the first character of a lower-case action', () => {
+    expect(formatWorkflowActivityEvent({
+      type: 'workflow_activity',
+      action: 'task_create_prompt',
+    })).toBe('🔄 Task create prompt started');
   });
 
   it('prefers actor/critic cycle counters over JSON retry attempts', () => {

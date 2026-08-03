@@ -52,6 +52,12 @@
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
 - When an LLM is to return structured data, prefer JSON.
 - Primary use-case LLM have ~26b parameters and 48,000 tokens context window.
+- CWE mappings describe software weaknesses and may use deterministic candidate seeds derived from vulnerability
+  terminology. MITRE ATT&CK mappings describe observed adversary behavior and should be inferred only from evidence
+  such as execution traces, commands, access paths, or post-exploitation activity; a vulnerability alone does not
+  imply an ATT&CK technique. Require artifact-backed evidence and confidence thresholds, and omit uncertain ATT&CK
+  mappings rather than guessing. Threat-emulation modules may use ATT&CK-first reasoning because their workflows
+  explicitly produce behavioral evidence.
 
 ## User Interface
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.
@@ -64,3 +70,4 @@
 - Cross-check `workflow_coverage_summary` against final health. In particular, check `applicable_phase_count`, `phase_inconsistent`, failure counts, and the validation-candidate rationale; an excellent health score can coexist with a skipped phase or incomplete coverage.
 - Distinguish logical completion from resource termination. Compare elapsed duration with `maxDurationMinutes`, and inspect token/cost limits and `termination_reason`; `progressPercent` is budget/utilization progress, not phase completion.
 - Do not recommend changing task fan-out based on lack of budget. Lack of budget is for the user to control.
+- Broken or missing tools are acceptable, the operation will remove them from consideration, do not flag or offer plans to address.

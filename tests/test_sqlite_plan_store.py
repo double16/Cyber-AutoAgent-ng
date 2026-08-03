@@ -25,6 +25,28 @@ def test_sqlite_plan_store_init(tmp_path):
         assert cursor.fetchone() is not None
 
 
+def test_sqlite_plan_store_persists_immutable_preflight_results(tmp_path):
+    store = PlanStore(str(tmp_path / "test.db"))
+    initial = {
+        "target_id": "target-1",
+        "target": "service.example",
+        "target_type": "network",
+        "status": "pass",
+        "checks": ["resolve", "tcp_connect"],
+        "resolved_addresses": ["8.8.8.8"],
+        "has_global_address": True,
+        "has_private_or_reserved_address": False,
+        "route_reachable": False,
+    }
+    changed = {**initial, "resolved_addresses": ["127.0.0.1"], "has_global_address": False}
+
+    store.store_preflight_results("op-1", [initial])
+    store.store_preflight_results("op-1", [changed])
+
+    assert store.list_preflight_results("op-1")[0]["resolved_addresses"] == ["8.8.8.8"]
+    assert store.list_preflight_results("other-operation") == []
+
+
 def test_sqlite_plan_store_tracks_acceptance_memory_publication(tmp_path):
     store = PlanStore(str(tmp_path / "test.db"))
 
@@ -162,6 +184,94 @@ def test_sqlite_finding_ledger_operations(tmp_path):
     assert resolved["resolution"] == "verified"
     assert store.list_findings("op") == [resolved]
     assert store.list_findings("other-operation") == []
+
+
+def test_sqlite_objective_validation_ledger_operations(tmp_path):
+    store = PlanStore(str(tmp_path / "objective.db"))
+    candidate = {"objective_type": "flag", "candidate_value": "FLAG{abc}"}
+    store.store_objective_candidate("op", "candidate-1", "fingerprint", candidate, "task-1")
+
+    assert store.get_objective_candidate_by_fingerprint("op", "fingerprint")["candidate_uid"] == "candidate-1"
+    store.store_objective_validation("op", "candidate-1", {"outcome": "confirmed", "confidence": 90})
+    store.resolve_objective_candidate("op", "candidate-1", "objective_verified")
+
+    resolved = store.get_objective_candidate("op", "candidate-1")
+    assert resolved["validation_data"] == {"outcome": "confirmed", "confidence": 90}
+    assert resolved["resolution"] == "objective_verified"
+    assert store.list_objective_candidates("op") == [resolved]
+    assert store.list_objective_candidates("other-operation") == []
+    assert store.get_objective_candidate("op", "missing") is None
+
+
+def test_sqlite_finding_ledger_persists_one_taxonomy_annotation(tmp_path):
+    store = PlanStore(str(tmp_path / "test.db"))
+    store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
+    annotation = {
+        "status": "completed",
+        "annotated_at": "2026-07-28T00:00:00+00:00",
+        "taxonomy": {"cwe": [{"id": "CWE-79"}], "mitre_attack": [], "provenance": {"version": "test"}},
+    }
+
+    assert store.update_finding_taxonomy_annotation("op", "finding-1", annotation) is True
+    assert store.update_finding_taxonomy_annotation("op", "finding-1", annotation) is False
+
+    candidate = store.get_finding("op", "finding-1")["candidate_data"]
+    assert candidate["taxonomy_annotation"] == annotation
+    assert candidate["taxonomy"]["cwe"][0]["id"] == "CWE-79"
+
+
+def test_sqlite_finding_ledger_merges_final_attack_enrichment_without_changing_cwe(tmp_path):
+    store = PlanStore(str(tmp_path / "test.db"))
+    store.store_finding_candidate(
+        "op",
+        "finding-1",
+        "fingerprint",
+        {
+            "claim": "claim",
+            "taxonomy": {
+                "cwe": [{"id": "CWE-78", "confidence": 0.95}],
+                "mitre_attack": [
+                    {"id": "T1190", "confidence": 0.80, "evidence": ["artifact:initial.txt"]}
+                ],
+            },
+        },
+        "task-1",
+    )
+    enrichment = {
+        "status": "completed",
+        "taxonomy": {
+            "cwe": [],
+            "mitre_attack": [
+                {"id": "T1190", "confidence": 0.92, "evidence": ["artifact:final.txt"]},
+                {"id": "T1059.004", "confidence": 0.96, "evidence": ["artifact:shell.txt"]},
+            ],
+            "provenance": {"version": "test"},
+        },
+    }
+
+    assert store.update_finding_attack_enrichment("op", "finding-1", enrichment) is True
+    assert store.update_finding_attack_enrichment("op", "finding-1", enrichment) is False
+
+    candidate = store.get_finding("op", "finding-1")["candidate_data"]
+    assert candidate["taxonomy"]["cwe"] == [{"id": "CWE-78", "confidence": 0.95}]
+    assert [item["id"] for item in candidate["taxonomy"]["mitre_attack"]] == ["T1059.004", "T1190"]
+    assert candidate["taxonomy"]["mitre_attack"][1]["confidence"] == 0.92
+    assert candidate["final_attack_enrichment"] == enrichment
+
+
+def test_sqlite_finding_ledger_allows_failed_attack_enrichment_retry(tmp_path):
+    store = PlanStore(str(tmp_path / "test.db"))
+    store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
+
+    assert store.update_finding_attack_enrichment("op", "finding-1", {"status": "failed"}) is True
+    assert store.update_finding_attack_enrichment(
+        "op",
+        "finding-1",
+        {"status": "completed", "taxonomy": {"cwe": [], "mitre_attack": [], "provenance": {}}},
+    ) is True
+
+    candidate = store.get_finding("op", "finding-1")["candidate_data"]
+    assert candidate["final_attack_enrichment"]["status"] == "completed"
 
 
 def test_sqlite_plan_store_multiple_tasks(tmp_path):

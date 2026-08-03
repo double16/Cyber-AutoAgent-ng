@@ -59,7 +59,9 @@ def create_agent_with_stateful_retry(
     try:
         return agent_cls(**agent_kwargs)
     except ValueError as exc:
-        if _is_stateful_model_manager_error(exc) and "conversation_manager" in agent_kwargs:
+        if _is_stateful_model_manager_error(exc) and (
+            "conversation_manager" in agent_kwargs or "context_manager" in agent_kwargs
+        ):
             logger.info(
                 "Retrying agent creation without local conversation manager for stateful model '%s'.",
                 model_id,

@@ -49,11 +49,11 @@ import os
 import re
 import sqlite3
 import threading
-import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
@@ -94,7 +94,7 @@ _FAISS_WRITE_LOCK = threading.Lock()
 
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
-TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked"]
+TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded"]
 TargetType = Literal["network", "network_range", "filesystem"]
 TargetScope = Literal["all", "subset"]
 AcceptanceMode = Literal["outcome", "coverage"]
@@ -190,6 +190,19 @@ def _normalize_finding_validation_outcome(value: Any) -> Any:
     }, field_name="finding_validation_outcome")
 
 
+def _normalize_objective_validation_outcome(value: Any) -> Any:
+    return _normalize_semantic_enum(value, aliases={
+        "verified": "confirmed",
+        "valid": "confirmed",
+        "success": "confirmed",
+        "failed": "rejected",
+        "invalid": "rejected",
+        "not_confirmed": "rejected",
+        "uncertain": "inconclusive",
+        "pending": "inconclusive",
+    }, field_name="objective_validation_outcome")
+
+
 def _normalize_evidence_strategy(value: Any) -> Any:
     return _normalize_semantic_enum(value, aliases={
         "single": "direct",
@@ -210,6 +223,8 @@ def _normalize_task_status(value: Any) -> Any:
         "failed_partial": "partial_failure",
         "failed": "blocked",
         "stalled": "blocked",
+        "replaced": "superseded",
+        "supersede": "superseded",
         "in_progress": "active",
         "queued": "pending",
     }, field_name="task_status")
@@ -260,7 +275,6 @@ TERMINAL_ACCEPTANCE_STATUSES = (
 TASK_ACCEPTANCE_MEMORY_MAX_CHARS = 4000
 TASK_ACCEPTANCE_MEMORY_SUMMARY_MAX_CHARS = 500
 TASK_ACCEPTANCE_MEMORY_MAX_EVIDENCE_REFS = 20
-TASK_PROPOSAL_CRITERION_ID_MAX_CHARS = 64
 
 
 @dataclass(frozen=True)
@@ -280,7 +294,19 @@ INVENTORY_MANIFEST_EXAMPLE = {
             "target_id": "target-1",
             "kind": "endpoint",
             "value": "https://target.example/login",
-            "attributes": {"parameters": ["username", "password"]},
+            "attributes": {
+                "interaction": {
+                    "interface": "http",
+                    "operations": ["POST"],
+                    "inputs": [
+                        {"name": "username", "location": "body"},
+                        {"name": "password", "location": "body"},
+                    ],
+                    "success_signals": ["authenticated session"],
+                    "failure_signals": ["401 response"],
+                    "evidence_refs": ["artifact:artifacts/login-form.html"],
+                }
+            },
         }
     ],
     "unassessed_gaps": [],
@@ -303,7 +329,11 @@ def inventory_manifest_contract_text() -> str:
         "items must be a non-empty list with unique IDs; every item requires non-empty id, target_id, value, "
         f"kind ({kinds}), and an optional attributes object; unassessed_gaps must be a list. "
         "The extraction summary is controller-owned and may be omitted by the producer. "
-        "Put item metadata such as parameters in attributes, not in a metadata field. Workflow maps, reports, "
+        "Put item metadata in attributes, not in a metadata field. Optional attributes.interaction is protocol-neutral "
+        "and may contain interface, operations, inputs, success_signals, failure_signals, and evidence_refs. Each input "
+        "requires a name and may include location and type. Use HTTP operations and input locations only for HTTP "
+        "items; filesystem, code-security, service, workflow, and other modules should use their native operations. "
+        "Workflow maps, reports, "
         "and arbitrary JSON outputs are artifact evidence, not inventory_manifest evidence."
     )
 
@@ -806,6 +836,7 @@ class Task:
     reference_id: Optional[str] = None
     target_scope: TargetScope = "all"
     target_ids: List[str] = field(default_factory=list)
+    replacement_of: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -815,14 +846,14 @@ class Task:
         if not isinstance(self.objective, str) or not self.objective.strip():
             raise ValueError("objective must be a non-empty string")
         normalized_status = _normalize_task_status(self.status)
-        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked"}:
+        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked", "superseded"}:
             raise ValueError("task status is invalid")
         object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
-        if self.status not in ("active", "pending", "done", "partial_failure", "blocked"):
-            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded"):
+            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked|superseded")
         if self.target_scope not in ("all", "subset"):
             raise ValueError("target_scope must be all or subset")
         if not isinstance(self.target_ids, list):
@@ -853,6 +884,7 @@ class Task:
             updated_at=obj.get("updated_at"),
             kind=str(obj.get("kind", "standard") or "standard"),
             reference_id=obj.get("reference_id"),
+            replacement_of=obj.get("replacement_of"),
             target_scope=str(obj.get("target_scope", "all") or "all"),
             target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
@@ -871,6 +903,7 @@ class Task:
             "updated_at": self.updated_at,
             "kind": self.kind,
             "reference_id": self.reference_id,
+            "replacement_of": self.replacement_of,
             "target_scope": self.target_scope,
             "target_ids": self.target_ids,
         })
@@ -883,7 +916,7 @@ class Task:
     def csv_format() -> str:
         return (
             "title,objective,acceptance_mode,acceptance_criteria,evidence,phase,status,status_reason,kind,"
-            "reference_id,target_scope,target_ids"
+            "reference_id,replacement_of,target_scope,target_ids"
         )
 
     def to_toon(self, include_format=True) -> str:
@@ -898,6 +931,7 @@ class Task:
         status_reason = sanitize_toon_value(self.status_reason)
         kind = sanitize_toon_value(self.kind)
         reference_id = sanitize_toon_value(self.reference_id)
+        replacement_of = sanitize_toon_value(self.replacement_of)
         target_ids = "|".join(sanitize_toon_value(target_id) for target_id in self.target_ids)
         lines = []
         if include_format:
@@ -905,7 +939,7 @@ class Task:
         lines.append(
             f"  {title},{objective},{acceptance_mode},{acceptance_criteria},{evidence},{self.phase},{status},"
             f"{status_reason},{kind},"
-            f"{reference_id},{self.target_scope},{target_ids}"
+            f"{reference_id},{replacement_of},{self.target_scope},{target_ids}"
         )
         return "\n".join(lines).strip()
 
@@ -1150,16 +1184,21 @@ class PlanStore:
     a simpler and more reliable local storage.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, read_only: bool = False):
         self.db_path = db_path
+        self.read_only = read_only
         self._lock = threading.Lock()
-        self._bootstrap()
+        if self.read_only:
+            if not os.path.isfile(self.db_path):
+                raise FileNotFoundError(f"Persisted plan store does not exist: {self.db_path}")
+        else:
+            self._bootstrap()
 
     def _bootstrap(self):
         """Initialize the database schema if it doesn't exist."""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS plans (
                         operation_id TEXT PRIMARY KEY,
@@ -1192,6 +1231,23 @@ class PlanStore:
                     )
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_operation_id ON tasks(operation_id)")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS operation_preflight_results (
+                        operation_id TEXT NOT NULL,
+                        target_id TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        target_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        checks TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        resolved_addresses TEXT NOT NULL,
+                        has_global_address BOOLEAN NOT NULL,
+                        has_private_or_reserved_address BOOLEAN NOT NULL,
+                        route_reachable BOOLEAN NOT NULL,
+                        recorded_at TEXT NOT NULL,
+                        PRIMARY KEY(operation_id, target_id)
+                    )
+                """)
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS task_acceptance_results (
                         operation_id TEXT NOT NULL,
@@ -1243,6 +1299,26 @@ class PlanStore:
                         UNIQUE(operation_id, fingerprint)
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS objective_validation_records (
+                        candidate_uid TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        candidate_data TEXT NOT NULL,
+                        verification_task_uid TEXT NOT NULL,
+                        validation_data TEXT,
+                        resolution TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(operation_id, fingerprint)
+                    )
+                """)
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open the plan database, enforcing read-only access when configured."""
+        if self.read_only:
+            return sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True)
+        return sqlite3.connect(self.db_path)
 
     def store_plan(self, operation_id: str, plan: OperationPlan):
         """Store or update a plan."""
@@ -1253,7 +1329,7 @@ class PlanStore:
         plan_dict["updated_at"] = now
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute("""
                     INSERT INTO plans (operation_id, objective, current_phase, total_phases, assessment_complete, plan_data, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1278,7 +1354,7 @@ class PlanStore:
     def get_plan(self, operation_id: str) -> Optional[OperationPlan]:
         """Retrieve a plan by operation_id."""
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute("SELECT plan_data FROM plans WHERE operation_id = ?", (operation_id,))
                 row = cursor.fetchone()
                 if row:
@@ -1294,7 +1370,7 @@ class PlanStore:
         task_dict["updated_at"] = now
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 existing = conn.execute(
                     "SELECT acceptance_contract FROM tasks WHERE task_uid = ?",
                     (task.task_uid,),
@@ -1346,7 +1422,7 @@ class PlanStore:
         """Retrieve all tasks for an operation."""
         tasks = []
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute(
                     "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
                     "created_at, updated_at, kind, reference_id, target_scope, target_ids "
@@ -1384,7 +1460,7 @@ class PlanStore:
 
         now = datetime.now().isoformat()
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.executemany(
                     """
                     INSERT INTO task_acceptance_results (
@@ -1412,7 +1488,7 @@ class PlanStore:
         """Return the current acceptance ledger for one task."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT criterion_id, status, disposition, summary, evidence_refs, coverage "
                     "FROM task_acceptance_results WHERE operation_id = ? AND task_uid = ? "
@@ -1440,7 +1516,7 @@ class PlanStore:
         """Return whether this immutable acceptance ledger was published to operation memory."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT publication_key FROM task_acceptance_memory_publications "
                     "WHERE operation_id = ? AND task_uid = ?",
@@ -1457,7 +1533,7 @@ class PlanStore:
         """Record successful publication for replay-safe acceptance handling."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     """
                     INSERT INTO task_acceptance_memory_publications (
@@ -1470,9 +1546,74 @@ class PlanStore:
                     (operation_id, task_uid, publication_key, datetime.now().isoformat()),
                 )
 
+    def store_preflight_results(self, operation_id: str, results: List[Dict[str, Any]]) -> None:
+        """Persist immutable preflight facts for one operation's executable targets."""
+
+        now = datetime.now().isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                for result in results:
+                    target_id = str(result.get("target_id") or "").strip()
+                    if not target_id:
+                        raise ValueError("preflight result requires target_id")
+                    conn.execute(
+                        """
+                        INSERT INTO operation_preflight_results (
+                            operation_id, target_id, target, target_type, status, checks, reason,
+                            resolved_addresses, has_global_address, has_private_or_reserved_address,
+                            route_reachable, recorded_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(operation_id, target_id) DO NOTHING
+                        """,
+                        (
+                            operation_id,
+                            target_id,
+                            str(result.get("target") or ""),
+                            str(result.get("target_type") or ""),
+                            str(result.get("status") or "skip"),
+                            json.dumps(list(result.get("checks") or [])),
+                            str(result.get("reason") or ""),
+                            json.dumps(list(result.get("resolved_addresses") or [])),
+                            bool(result.get("has_global_address")),
+                            bool(result.get("has_private_or_reserved_address")),
+                            bool(result.get("route_reachable")),
+                            now,
+                        ),
+                    )
+
+    def list_preflight_results(self, operation_id: str) -> List[Dict[str, Any]]:
+        """Return the original persisted preflight facts for an operation."""
+
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT target_id, target, target_type, status, checks, reason, resolved_addresses,
+                           has_global_address, has_private_or_reserved_address, route_reachable, recorded_at
+                    FROM operation_preflight_results WHERE operation_id = ? ORDER BY target_id
+                    """,
+                    (operation_id,),
+                ).fetchall()
+        return [
+            {
+                "target_id": row[0],
+                "target": row[1],
+                "target_type": row[2],
+                "status": row[3],
+                "checks": json.loads(row[4]),
+                "reason": row[5],
+                "resolved_addresses": json.loads(row[6]),
+                "has_global_address": bool(row[7]),
+                "has_private_or_reserved_address": bool(row[8]),
+                "route_reachable": bool(row[9]),
+                "recorded_at": row[10],
+            }
+            for row in rows
+        ]
+
     def get_finding_by_fingerprint(self, operation_id: str, fingerprint: str) -> Optional[Dict[str, Any]]:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT finding_uid, candidate_data, verification_task_uid, validation_data, resolution "
                     "FROM finding_records WHERE operation_id = ? AND fingerprint = ?",
@@ -1490,7 +1631,7 @@ class PlanStore:
 
     def get_finding(self, operation_id: str, finding_uid: str) -> Optional[Dict[str, Any]]:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
                     "FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
@@ -1511,7 +1652,7 @@ class PlanStore:
         """Return finding records for deterministic workflow scheduling decisions."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT finding_uid, fingerprint, candidate_data, verification_task_uid, "
                     "validation_data, resolution FROM finding_records WHERE operation_id = ? "
@@ -1540,7 +1681,7 @@ class PlanStore:
     ) -> None:
         now = datetime.now().isoformat()
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO finding_records "
                     "(finding_uid, operation_id, fingerprint, candidate_data, verification_task_uid, created_at, updated_at) "
@@ -1560,7 +1701,7 @@ class PlanStore:
         """Durably associate an idempotent finding candidate with a source task."""
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
                     (operation_id, finding_uid),
@@ -1585,31 +1726,244 @@ class PlanStore:
         validation_data: Dict[str, Any],
     ) -> None:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "UPDATE finding_records SET validation_data = ?, updated_at = ? "
                     "WHERE operation_id = ? AND finding_uid = ?",
                     (json.dumps(validation_data), datetime.now().isoformat(), operation_id, finding_uid),
                 )
 
+    def update_finding_taxonomy_annotation(
+        self,
+        operation_id: str,
+        finding_uid: str,
+        annotation: Dict[str, Any],
+    ) -> bool:
+        """Atomically attach one taxonomy annotation to an unresolved finding candidate."""
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
+                    (operation_id, finding_uid),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Unknown finding_uid for taxonomy annotation: {finding_uid}")
+                candidate_data = json.loads(row[0])
+                existing = candidate_data.get("taxonomy_annotation")
+                if isinstance(existing, dict) and existing.get("status") == "completed":
+                    return False
+                candidate_data["taxonomy"] = annotation.get("taxonomy", {"cwe": [], "mitre_attack": []})
+                candidate_data["taxonomy_annotation"] = annotation
+                conn.execute(
+                    "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND finding_uid = ?",
+                    (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                )
+        return True
+
+    def update_finding_attack_enrichment(
+        self,
+        operation_id: str,
+        finding_uid: str,
+        enrichment: Dict[str, Any],
+    ) -> bool:
+        """Persist final ATT&CK enrichment and merge it into the finding taxonomy."""
+
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
+                    (operation_id, finding_uid),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Unknown finding_uid for ATT&CK enrichment: {finding_uid}")
+                candidate_data = json.loads(row[0])
+                existing_enrichment = candidate_data.get("final_attack_enrichment")
+                if isinstance(existing_enrichment, dict) and existing_enrichment.get("status") == "completed":
+                    return False
+
+                candidate_data["final_attack_enrichment"] = enrichment
+                if enrichment.get("status") == "completed":
+                    taxonomy = dict(candidate_data.get("taxonomy") or {})
+                    taxonomy.setdefault("cwe", [])
+                    existing_attack = taxonomy.get("mitre_attack")
+                    existing_attack = existing_attack if isinstance(existing_attack, list) else []
+                    enrichment_taxonomy = enrichment.get("taxonomy")
+                    enrichment_taxonomy = enrichment_taxonomy if isinstance(enrichment_taxonomy, dict) else {}
+                    proposed_attack = enrichment_taxonomy.get("mitre_attack")
+                    proposed_attack = proposed_attack if isinstance(proposed_attack, list) else []
+                    merged: Dict[str, Dict[str, Any]] = {}
+                    for mapping in [*existing_attack, *proposed_attack]:
+                        if not isinstance(mapping, dict) or not str(mapping.get("id") or "").strip():
+                            continue
+                        identifier = str(mapping["id"]).upper()
+                        current = merged.get(identifier)
+                        if current is None or float(mapping.get("confidence", 0.0)) > float(
+                            current.get("confidence", 0.0)
+                        ):
+                            merged[identifier] = dict(mapping)
+                        elif float(mapping.get("confidence", 0.0)) == float(current.get("confidence", 0.0)):
+                            evidence = [
+                                *list(current.get("evidence") or []),
+                                *list(mapping.get("evidence") or []),
+                            ]
+                            current["evidence"] = list(dict.fromkeys(evidence))
+                    taxonomy["mitre_attack"] = [merged[identifier] for identifier in sorted(merged)]
+                    if enrichment_taxonomy.get("provenance"):
+                        taxonomy["provenance"] = enrichment_taxonomy["provenance"]
+                    candidate_data["taxonomy"] = taxonomy
+
+                conn.execute(
+                    "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND finding_uid = ?",
+                    (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                )
+        return True
+
     def resolve_finding(self, operation_id: str, finding_uid: str, resolution: str) -> None:
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "UPDATE finding_records SET resolution = ?, updated_at = ? "
                     "WHERE operation_id = ? AND finding_uid = ?",
                     (resolution, datetime.now().isoformat(), operation_id, finding_uid),
                 )
 
+    def get_objective_candidate(self, operation_id: str, candidate_uid: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
+                    "FROM objective_validation_records WHERE operation_id = ? AND candidate_uid = ?",
+                    (operation_id, candidate_uid),
+                ).fetchone()
+        if not row:
+            return None
+        return {
+            "candidate_uid": candidate_uid,
+            "fingerprint": row[0],
+            "candidate_data": json.loads(row[1]),
+            "verification_task_uid": row[2],
+            "validation_data": json.loads(row[3]) if row[3] else None,
+            "resolution": row[4],
+        }
 
-def _get_plan_store() -> PlanStore:
-    """Get or initialize the global plan store."""
+    def get_objective_candidate_by_fingerprint(
+        self,
+        operation_id: str,
+        fingerprint: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT candidate_uid FROM objective_validation_records "
+                    "WHERE operation_id = ? AND fingerprint = ?",
+                    (operation_id, fingerprint),
+                ).fetchone()
+        return self.get_objective_candidate(operation_id, row[0]) if row else None
+
+    def list_objective_candidates(self, operation_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT candidate_uid FROM objective_validation_records WHERE operation_id = ? "
+                    "ORDER BY created_at, candidate_uid",
+                    (operation_id,),
+                ).fetchall()
+        return [self.get_objective_candidate(operation_id, row[0]) for row in rows]
+
+    def store_objective_candidate(
+        self,
+        operation_id: str,
+        candidate_uid: str,
+        fingerprint: str,
+        candidate_data: Dict[str, Any],
+        verification_task_uid: str,
+    ) -> None:
+        now = datetime.now().isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO objective_validation_records "
+                    "(candidate_uid, operation_id, fingerprint, candidate_data, verification_task_uid, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        candidate_uid,
+                        operation_id,
+                        fingerprint,
+                        json.dumps(candidate_data),
+                        verification_task_uid,
+                        now,
+                        now,
+                    ),
+                )
+
+    def store_objective_validation(
+        self,
+        operation_id: str,
+        candidate_uid: str,
+        validation_data: Dict[str, Any],
+    ) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE objective_validation_records SET validation_data = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND candidate_uid = ?",
+                    (json.dumps(validation_data), datetime.now().isoformat(), operation_id, candidate_uid),
+                )
+
+    def resolve_objective_candidate(self, operation_id: str, candidate_uid: str, resolution: str) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE objective_validation_records SET resolution = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND candidate_uid = ?",
+                    (resolution, datetime.now().isoformat(), operation_id, candidate_uid),
+                )
+
+
+def _plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the operation-scoped SQLite plan-store path."""
+    return os.path.join(_get_memory_base_path(config), "plan_storage.db")
+
+
+def get_plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the resolved plan-store path without opening or creating it."""
+    return _plan_store_path(config or _MEMORY_CONFIG)
+
+
+def require_existing_plan_store(
+    *,
+    output_dir: str,
+    target_name: str,
+    operation_id: str,
+) -> str:
+    """Validate that an operation's persisted plan store exists without creating it."""
+    path = _plan_store_path(
+        {
+            "output_dir": output_dir,
+            "target_name": target_name,
+            "operation_id": operation_id,
+        }
+    )
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Persisted plan store does not exist: {path}")
+    return path
+
+
+def _get_plan_store(read_only: Optional[bool] = None) -> PlanStore:
+    """Get the plan store for the current memory context and resolved path."""
     global _PLAN_STORE
-    if _PLAN_STORE is None:
-        base_path = _get_memory_base_path(_MEMORY_CONFIG)
-        db_path = os.path.join(base_path, "plan_storage.db")
+    configured_read_only = bool((_MEMORY_CONFIG or {}).get("read_only", False))
+    requested_read_only = configured_read_only if read_only is None else read_only
+    db_path = _plan_store_path(_MEMORY_CONFIG)
+    if (
+        _PLAN_STORE is None
+        or getattr(_PLAN_STORE, "db_path", None) != db_path
+        or bool(getattr(_PLAN_STORE, "read_only", False)) != requested_read_only
+    ):
         print(f"[+] Plan Storage: {db_path}")
-        _PLAN_STORE = PlanStore(db_path)
+        _PLAN_STORE = PlanStore(db_path, read_only=requested_read_only)
     return _PLAN_STORE
 
 
@@ -1666,6 +2020,11 @@ _RE_BARE_TARGET_CONTEXT = re.compile(
     r"\b(?:target|host|endpoint|system|against|assess|scan|test|verify)\s+([a-zA-Z0-9][a-zA-Z0-9_.-]+)\b",
     re.IGNORECASE,
 )
+_RE_CONTEXTUAL_FQDN_TARGET = re.compile(
+    r"\b(?:target|host|endpoint|system|against|assess|scan|test|verify|at)\s+"
+    r"((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})\b",
+    re.IGNORECASE,
+)
 
 
 def _classify_target_literal(value: str, *, allow_bare_hostname: bool = False) -> Optional[TargetType]:
@@ -1697,18 +2056,23 @@ def _canonical_target_value(value: str, target_type: TargetType) -> str:
 
 def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source: str) -> List[Tuple[str, str]]:
     candidates: List[Tuple[str, str]] = []
-    for pattern in (
+    patterns = (
         _RE_URL_PATTERN,
         _RE_CIDR_TARGET,
         _RE_HOST_PORT_TARGET,
         _RE_IP_TARGET,
         _RE_IPV6_TARGET,
-        _RE_FQDN_TARGET,
-    ):
+    )
+    for pattern in patterns:
         candidates.extend((match.group(0), source) for match in pattern.finditer(text or ""))
-    candidates.extend((match.group(0), source) for match in _RE_PATH_PATTERN.finditer(text or ""))
-    candidates.extend((match.group(1), source) for match in _RE_QUOTED_PATH_TARGET.finditer(text or ""))
-    if allow_bare_hostname:
+
+    if source == "objective":
+        candidates.extend((match.group(1), source) for match in _RE_CONTEXTUAL_FQDN_TARGET.finditer(text or ""))
+    else:
+        candidates.extend((match.group(0), source) for match in _RE_FQDN_TARGET.finditer(text or ""))
+        candidates.extend((match.group(0), source) for match in _RE_PATH_PATTERN.finditer(text or ""))
+        candidates.extend((match.group(1), source) for match in _RE_QUOTED_PATH_TARGET.finditer(text or ""))
+    if allow_bare_hostname and source != "objective":
         candidates.extend((match.group(1), source) for match in _RE_BARE_TARGET_CONTEXT.finditer(text or ""))
     return candidates
 
@@ -1716,12 +2080,13 @@ def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source
 def resolve_operation_targets(logical_target: str, objective: str = "") -> List[OperationTarget]:
     """Resolve executable targets while keeping the CLI target as logical naming.
 
-    Objective literals win. If the objective has no executable target literals, the logical target is used as a
-    fallback and may be a bare hostname or path.
+    Objective network literals win. Paths in an objective are remote-resource hints, not local filesystem targets.
+    If the objective has no executable network literal, the logical target is used as a fallback and may be a bare
+    hostname or path.
     """
 
-    raw_candidates = _target_candidates_from_text(objective or "", allow_bare_hostname=True, source="objective")
-    has_objective_targets = any(_classify_target_literal(value, allow_bare_hostname=True) for value, _ in raw_candidates)
+    raw_candidates = _target_candidates_from_text(objective or "", allow_bare_hostname=False, source="objective")
+    has_objective_targets = any(_classify_target_literal(value) for value, _ in raw_candidates)
     if not has_objective_targets:
         raw_candidates = _target_candidates_from_text(
             logical_target or "",
@@ -1736,7 +2101,7 @@ def resolve_operation_targets(logical_target: str, objective: str = "") -> List[
     for value, source in raw_candidates:
         target_type = _classify_target_literal(
             value,
-            allow_bare_hostname=source == "logical_target_fallback" or source == "objective",
+            allow_bare_hostname=source == "logical_target_fallback",
         )
         if not target_type:
             continue
@@ -2035,7 +2400,7 @@ def _active_finding_source_task_uid(store: Any, operation_id: str) -> str:
     active = [
         task
         for task in store.get_tasks(operation_id)
-        if task.status == "active" and task.kind != "finding_validation"
+        if task.status == "active" and task.kind not in {"finding_validation", "objective_validation"}
     ]
     return active[0].task_uid if len(active) == 1 else ""
 
@@ -2068,7 +2433,8 @@ def store_finding(
     """Submit one finding candidate and create its dedicated verification task.
 
     This tool never creates a verified finding directly. Every distinct candidate is verified by a separate,
-    same-phase task before it can affect confirmed risk totals.
+    same-phase task before it can affect confirmed risk totals. Taxonomy classification is performed by a separate,
+    read-only workflow agent after this candidate is persisted.
     """
 
     candidate = {
@@ -2350,6 +2716,362 @@ def finding_validation_outcome(task: Task) -> Optional[str]:
     return str(validation.get("outcome")) if isinstance(validation, dict) else None
 
 
+def _objective_candidate_fingerprint(objective_type: str, candidate_value: str) -> str:
+    normalized = f"{objective_type.strip().lower()}|{candidate_value.strip()}"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _objective_constraints(objective_type: str) -> Dict[str, Any]:
+    """Extract deterministic constraints for supported objective types from the operation plan."""
+
+    plan = _get_plan_store().get_plan(_operation_id())
+    objective = plan.objective if plan else ""
+    constraints: Dict[str, Any] = {}
+    if objective_type == "flag":
+        length_match = re.search(r"\blength\s+(?:is\s+)?(\d+)\b", objective, flags=re.IGNORECASE)
+        if length_match:
+            constraints["exact_length"] = int(length_match.group(1))
+        format_match = re.search(
+            r"\bflag\s+format\s+(?:is|:)\s*[:=]?\s*([^\s,;]+)",
+            objective,
+            flags=re.IGNORECASE,
+        )
+        if format_match:
+            constraints["format_template"] = format_match.group(1).rstrip(".")
+    return constraints
+
+
+def _objective_constraint_failures(candidate_value: str, constraints: Dict[str, Any]) -> List[str]:
+    failures = []
+    exact_length = constraints.get("exact_length")
+    if isinstance(exact_length, int) and len(candidate_value) != exact_length:
+        failures.append(f"candidate length {len(candidate_value)} does not equal required length {exact_length}")
+    template = str(constraints.get("format_template") or "").strip()
+    if template:
+        pattern = re.escape(template).replace(r"\.\.\.", ".+")
+        if re.fullmatch(pattern, candidate_value) is None:
+            failures.append(f"candidate does not match required format {template}")
+    return failures
+
+
+def _objective_evidence_contains_candidate(candidate_value: str, evidence_artifacts: List[str]) -> bool:
+    """Return whether an objective candidate appears in at least one bounded text artifact."""
+
+    for artifact_ref in evidence_artifacts:
+        try:
+            with open(_artifact_path_from_ref(artifact_ref), "r", encoding="utf-8", errors="replace") as artifact_file:
+                if candidate_value in artifact_file.read(1_000_000):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "objective_type": {
+                    "type": "string",
+                    "enum": ["flag"],
+                    "description": "Canonical objective result type.",
+                },
+                "candidate_value": {"type": "string", "description": "Exact candidate value."},
+                "summary": {"type": "string", "description": "How the candidate was obtained."},
+                "reproduction_steps": {"type": "array", "items": {"type": "string"}},
+                "evidence_artifacts": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "objective_type",
+                "candidate_value",
+                "summary",
+                "reproduction_steps",
+                "evidence_artifacts",
+            ],
+        }
+    }
+)
+def store_objective_candidate(
+    objective_type: str,
+    candidate_value: str,
+    summary: str,
+    reproduction_steps: List[str],
+    evidence_artifacts: List[str],
+) -> str:
+    """Store an operation-objective candidate and create an independent validation task."""
+
+    normalized_type = str(objective_type or "").strip().lower()
+    if normalized_type != "flag":
+        raise ValueError("objective_type must be flag")
+    value = _clean_memory_text(candidate_value, "candidate_value")
+    steps = [_clean_memory_text(step, "reproduction step") for step in reproduction_steps]
+    if not steps:
+        raise ValueError("reproduction_steps requires at least one step")
+    artifacts = _validated_artifact_paths(evidence_artifacts, require_one=True)
+    fingerprint = _objective_candidate_fingerprint(normalized_type, value)
+    op_id = _operation_id()
+    store = _get_plan_store()
+    existing = store.get_objective_candidate_by_fingerprint(op_id, fingerprint)
+    if existing:
+        return json.dumps(
+            {
+                "candidate_ref": f"objective_candidate:{existing['candidate_uid']}",
+                "candidate_uid": existing["candidate_uid"],
+                "status": existing.get("resolution") or "pending_validation",
+                "verification_task_ref": f"task:{existing['verification_task_uid']}",
+                "verification_task_uid": existing["verification_task_uid"],
+            },
+            sort_keys=True,
+        )
+
+    constraints = _objective_constraints(normalized_type)
+    constraint_failures = _objective_constraint_failures(value, constraints)
+    if constraint_failures:
+        raise ValueError(
+            "candidate_value does not satisfy objective constraints: " + "; ".join(constraint_failures)
+        )
+    if not _objective_evidence_contains_candidate(value, artifacts):
+        raise ValueError("candidate_value does not appear in the supplied evidence_artifacts")
+
+    candidate_uid = str(uuid.uuid4())
+    task_uid = str(uuid.uuid4())
+    candidate = {
+        "candidate_uid": candidate_uid,
+        "validation_type": "objective",
+        "objective_type": normalized_type,
+        "candidate_value": value,
+        "summary": _clean_memory_text(summary, "summary"),
+        "reproduction_steps": steps,
+        "artifacts": artifacts,
+        "constraints": constraints,
+        "validation_status": "pending",
+    }
+    _store_memory_entry(candidate["summary"], "objective_candidate", candidate)
+    current_phase = _get_plan_current_phase()
+    task = Task(
+        task_uid=task_uid,
+        title=f"Validate {normalized_type} objective candidate",
+        objective=(
+            f"Independently validate objective candidate {candidate_uid}. Confirm that the exact value appears in "
+            "the supplied artifact, is reproducibly extracted, satisfies the recorded objective constraints, and "
+            "call record_objective_validation with the outcome."
+        ),
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description=f"Objective candidate {candidate_uid}",
+                source_refs=artifacts,
+            ),
+            criteria=[
+                AcceptanceCriterion(
+                    id=f"validate-objective:{candidate_uid}",
+                    description="Record an independent, evidence-backed objective validation outcome.",
+                    evidence_requirements=[EvidenceRequirement(kind="artifact", min_count=1)],
+                )
+            ],
+        ),
+        evidence=artifacts,
+        phase=current_phase,
+        status="pending",
+        kind="objective_validation",
+        reference_id=candidate_uid,
+    )
+    store.store_objective_candidate(op_id, candidate_uid, fingerprint, candidate, task_uid)
+    _ensure_memory_client().store_task(task=task, user_id=_user_id())
+    return json.dumps(
+        {
+            "candidate_ref": f"objective_candidate:{candidate_uid}",
+            "candidate_uid": candidate_uid,
+            "status": "pending_validation",
+            "verification_task_ref": f"task:{task_uid}",
+            "verification_task_uid": task_uid,
+        },
+        sort_keys=True,
+    )
+
+
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "candidate_uid": {"type": "string"},
+                "outcome": {"type": "string", "enum": ["confirmed", "rejected", "inconclusive"]},
+                "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+                "summary": {"type": "string"},
+                "evidence_artifacts": {"type": "array", "items": {"type": "string"}},
+                "validator": {"type": "string"},
+            },
+            "required": ["candidate_uid", "outcome", "confidence", "summary", "evidence_artifacts", "validator"],
+        }
+    }
+)
+def record_objective_validation(
+    candidate_uid: str,
+    outcome: str,
+    confidence: int,
+    summary: str,
+    evidence_artifacts: List[str],
+    validator: str,
+) -> str:
+    """Record the result of the active objective-validation task without changing finding status."""
+
+    op_id = _operation_id()
+    store = _get_plan_store()
+    record = store.get_objective_candidate(op_id, candidate_uid)
+    if not record:
+        raise ValueError("Unknown objective candidate for the current operation")
+    active = [task for task in store.get_tasks(op_id) if task.status == "active"]
+    if len(active) != 1 or active[0].task_uid != record["verification_task_uid"]:
+        raise ValueError("Objective validation may only be recorded by its active verification task")
+    normalized_outcome = _normalize_objective_validation_outcome(outcome)
+    if normalized_outcome not in {"confirmed", "rejected", "inconclusive"}:
+        raise ValueError("outcome must be confirmed, rejected, or inconclusive")
+    if isinstance(confidence, bool) or not isinstance(confidence, int) or not 0 <= confidence <= 100:
+        raise ValueError("confidence must be an integer from 0 through 100")
+    evidence = _validated_artifact_paths(evidence_artifacts, require_one=True)
+    candidate = record["candidate_data"]
+    failures = _objective_constraint_failures(candidate["candidate_value"], candidate.get("constraints", {}))
+    if normalized_outcome == "confirmed" and not _objective_evidence_contains_candidate(
+        candidate["candidate_value"], evidence
+    ):
+        failures.append("candidate value does not appear in the supplied evidence artifacts")
+    if normalized_outcome == "confirmed" and confidence < 80:
+        failures.append("confirmed objective confidence must be at least 80")
+    effective_outcome = "rejected" if failures else normalized_outcome
+    clean_summary = _clean_memory_text(summary, "summary")
+    if failures:
+        clean_summary = f"{clean_summary} Deterministic checks: {'; '.join(failures)}."
+    validation = {
+        "candidate_uid": candidate_uid,
+        "validation_type": "objective",
+        "objective_type": candidate["objective_type"],
+        "outcome": effective_outcome,
+        "confidence": confidence,
+        "summary": clean_summary,
+        "evidence_artifacts": evidence,
+        "validator": _clean_memory_text(validator, "validator"),
+        "constraint_failures": failures,
+        "validation_status": "submitted",
+    }
+    _store_memory_entry(clean_summary, "objective_validation", {**candidate, **validation})
+    store.store_objective_validation(op_id, candidate_uid, validation)
+    task = active[0]
+    acceptance = AcceptanceResult(
+        criterion_id=task.acceptance.criteria[0].id,
+        status="satisfied" if effective_outcome == "confirmed" else "assessed_negative",
+        disposition="observation",
+        summary=clean_summary,
+        evidence_refs=tuple(dict.fromkeys(evidence)),
+    )
+    acceptance_response = json.loads(_record_task_acceptance(task.task_uid, [acceptance]))
+    return json.dumps(
+        {
+            "complete": True,
+            "candidate_uid": candidate_uid,
+            "requested_outcome": normalized_outcome,
+            "outcome": effective_outcome,
+            "confidence": confidence,
+            "acceptance": acceptance_response,
+        },
+        sort_keys=True,
+    )
+
+
+def objective_validation_submitted(task: Task) -> bool:
+    if task.kind != "objective_validation" or not task.reference_id:
+        return True
+    record = _get_plan_store().get_objective_candidate(_operation_id(), task.reference_id)
+    return bool(record and record.get("validation_data"))
+
+
+def objective_validation_outcome(task: Task) -> Optional[str]:
+    if task.kind != "objective_validation" or not task.reference_id:
+        return None
+    record = _get_plan_store().get_objective_candidate(_operation_id(), task.reference_id)
+    validation = record.get("validation_data") if record else None
+    return str(validation.get("outcome")) if isinstance(validation, dict) else None
+
+
+def finalize_objective_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> Optional[str]:
+    if task.kind != "objective_validation" or not task.reference_id:
+        return None
+    op_id = _operation_id()
+    store = _get_plan_store()
+    record = store.get_objective_candidate(op_id, task.reference_id)
+    if not record or record.get("resolution"):
+        return record.get("resolution") if record else None
+    candidate = record["candidate_data"]
+    validation = record.get("validation_data")
+    confirmed = evaluator_status == "done" and validation and validation.get("outcome") == "confirmed"
+    resolution = "objective_verified" if confirmed else "objective_rejected"
+    category = "objective_result" if confirmed else "objective_validation_failure"
+    reason = evaluator_reason or (validation.get("summary") if validation else "Objective validation was incomplete")
+    metadata = dict(candidate)
+    if validation:
+        metadata.update(validation)
+    metadata.update(
+        {
+            "category": category,
+            "validation_type": "objective",
+            "validation_status": "verified" if confirmed else "failed",
+            "validation_reason": reason,
+        }
+    )
+    _store_memory_entry(candidate["candidate_value"], category, metadata)
+    store.resolve_objective_candidate(op_id, task.reference_id, resolution)
+    if not confirmed:
+        follow_up_reference = f"objective-search:{candidate['objective_type']}"
+        existing_follow_up = next(
+            (
+                existing
+                for existing in store.get_tasks(op_id)
+                if existing.reference_id == follow_up_reference and existing.status in {"active", "pending"}
+            ),
+            None,
+        )
+        if existing_follow_up is None:
+            evidence = list(
+                dict.fromkeys(
+                    (validation or {}).get("evidence_artifacts", [])
+                    or candidate.get("artifacts", [])
+                )
+            )
+            follow_up = Task(
+                task_uid=str(uuid.uuid4()),
+                title=f"Continue {candidate['objective_type']} retrieval after rejected candidate",
+                objective=(
+                    f"Find a different {candidate['objective_type']} candidate that satisfies the operation objective. "
+                    f"Do not resubmit rejected candidate {task.reference_id}; preserve its rejection evidence and test "
+                    "a changed retrieval hypothesis."
+                ),
+                acceptance=AcceptanceContract(
+                    mode="outcome",
+                    basis=AcceptanceBasis(
+                        kind="snapshot",
+                        description=f"Rejected {candidate['objective_type']} candidate {task.reference_id}",
+                        source_refs=evidence or [f"task:{task.task_uid}"],
+                    ),
+                    criteria=[AcceptanceCriterion(
+                        id=f"continue-objective-search:{candidate['objective_type']}",
+                        description="Record a different objective candidate or an evidence-backed terminal constraint.",
+                        evidence_requirements=[EvidenceRequirement(kind="durable_evidence", min_count=1)],
+                    )],
+                ),
+                evidence=evidence,
+                phase=task.phase,
+                status="pending",
+                kind="standard",
+                reference_id=follow_up_reference,
+                target_scope=task.target_scope,
+                target_ids=task.target_ids,
+            )
+            _ensure_memory_client().store_task(task=follow_up, user_id=_user_id())
+    return resolution
+
+
 def get_plan() -> str:
     """Get the most recent active plan.
     Returns the plan or null if none found.
@@ -2375,6 +3097,12 @@ class TaskProposalLimits(_StrictTaskWireModel):
     max_depth: Optional[PositiveInt] = None
 
 
+DEFAULT_TASK_PROPOSAL_LIMITS = {
+    "max_requests": 50,
+    "max_duration_minutes": 10,
+}
+
+
 class TaskProposalCriterion(_StrictTaskWireModel):
     description: str = Field(min_length=1, description="Finite result required from the declared basis")
 
@@ -2383,16 +3111,16 @@ class TaskProposal(_StrictTaskWireModel):
     """Small model-facing task proposal compiled into an immutable acceptance contract by Python."""
 
     title: str = Field(min_length=1)
-    objective: str = Field(min_length=1)
+    objective: str = Field(min_length=1, validation_alias=AliasChoices("objective", "description"))
     basis_description: Optional[str] = Field(default=None, description="Finite boundary; defaults to objective")
-    methods: List[str] = Field(..., description="Procedure methods; use [] for snapshot proposals")
+    methods: List[str] = Field(default_factory=list, description="Procedure methods; use [] for snapshot proposals")
     limits: TaskProposalLimits = Field(
-        ...,
+        default_factory=lambda: TaskProposalLimits(**DEFAULT_TASK_PROPOSAL_LIMITS),
         validation_alias=AliasChoices("limits", "limit"),
-        description="Required object; procedure bounds are discarded when snapshot_refs are supplied",
+        description="Optional procedure bounds; defaults to 50 requests and 10 minutes",
     )
     snapshot_refs: List[str] = Field(
-        ...,
+        default_factory=list,
         description="Existing task, memory, artifact, or finding references; use [] for procedure proposals",
     )
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
@@ -2423,6 +3151,12 @@ class TaskProposal(_StrictTaskWireModel):
                 normalized[canonical] = normalized.pop(alias)
                 logger.info("Normalized task proposal field alias %s -> %s", alias, canonical)
 
+        if "description" in normalized:
+            if "objective" not in normalized:
+                normalized["objective"] = normalized["description"]
+                logger.info("Normalized task proposal field alias description -> objective")
+            normalized.pop("description")
+
         output_aliases = {
             "report": "artifact",
             "evidence": "artifact",
@@ -2443,12 +3177,12 @@ class TaskProposal(_StrictTaskWireModel):
 
         if not normalized.get("snapshot_refs"):
             return normalized
-        if "limit" in normalized or "limits" in normalized:
-            normalized.pop("limit", None)
-            normalized["limits"] = {}
+        normalized.pop("limit", None)
+        normalized["limits"] = {}
         if "output_kind" in normalized:
             normalized.pop("output_kind")
             logger.info("Normalized inapplicable output_kind from snapshot task proposal")
+
         return normalized
 
     @model_validator(mode="after")
@@ -2551,8 +3285,8 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "description": (
-            "Submit complete task proposals using canonical field names. Every proposal requires methods, limits, "
-            "snapshot_refs, and exactly one criterion; snapshot proposals use methods=[] and limits={}."
+            "Submit task proposals using canonical field names. Methods and snapshot_refs default to [] and "
+            "procedure limits default to 50 requests and 10 minutes; snapshot proposals use limits={}."
         ),
         "properties": {
             "tasks": {
@@ -2588,28 +3322,22 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                         "target_ids": ["target-1"],
                     },
                 ],
-                "required": [
-                    "title",
-                    "objective",
-                    "methods",
-                    "limits",
-                    "snapshot_refs",
-                    "criteria",
-                ],
+                "required": ["title", "objective", "criteria"],
                 "properties": {
                     "title": {"type": "string", "minLength": 1},
                     "objective": {"type": "string", "minLength": 1},
                     "basis_description": {"type": ["string", "null"]},
-                    "methods": {"type": "array", "items": {"type": "string"}},
+                    "methods": {"type": "array", "items": {"type": "string"}, "default": []},
                     "limits": {
                         "type": "object",
                         "additionalProperties": False,
+                        "default": DEFAULT_TASK_PROPOSAL_LIMITS,
                         "properties": {
                             key: {"type": "integer", "exclusiveMinimum": 0}
                             for key in DISCOVERY_PROCEDURE_LIMIT_KEYS
                         },
                     },
-                    "snapshot_refs": {"type": "array", "items": {"type": "string"}},
+                    "snapshot_refs": {"type": "array", "items": {"type": "string"}, "default": []},
                     "output_kind": {"type": "string", "enum": ["artifact", "inventory_manifest"]},
                     "criteria": {
                         "type": "array",
@@ -2662,6 +3390,7 @@ def _validate_task_target_scope(
     *,
     target_ids: List[str],
     plan: Optional[OperationPlan],
+    proposal: Optional[TaskProposal] = None,
 ) -> Tuple[TargetScope, List[str]]:
     if plan is None or not plan.targets:
         return "all", []
@@ -2671,9 +3400,153 @@ def _validate_task_target_scope(
     invalid_ids = [target_id for target_id in target_ids if target_id not in valid_ids]
     if invalid_ids:
         raise ValueError(f"target_ids contain unknown operation target IDs: {', '.join(invalid_ids)}")
+    selected_targets = [
+        target for target in plan.targets if not target_ids or target.target_id in set(target_ids)
+    ]
+    if proposal is not None:
+        _validate_proposal_service_scope(proposal, selected_targets)
     if target_ids:
         return "subset", target_ids
     return "all", []
+
+
+_PORT_RANGE_PATTERN = re.compile(r"(?<!\d)(\d{1,5})\s*-\s*(\d{1,5})(?!\d)")
+_PORT_NUMBER_PATTERN = re.compile(r"(?<![\d-])(\d{1,5})(?![\d-])")
+_PORT_CONTEXT_PATTERN = re.compile(r"\bports?\b(?P<tail>[^.;\n]{0,96})", re.IGNORECASE)
+_PORT_SELECTOR_PATTERN = re.compile(r"(?<!\w)(?:-p|--ports?)(?:\s*=\s*|\s+)([^\s,;)]*)", re.IGNORECASE)
+_BARE_PORT_SELECTOR_PATTERN = re.compile(
+    r"(?<!\w)(?:-p|--ports?)(?![-=]|\s+\d)(?=\s|$|[,)])", re.IGNORECASE
+)
+_BROAD_PORT_SELECTOR_PATTERN = re.compile(r"(?<!\w)(?:-p|--ports?)-(?=\s|$|[,)])", re.IGNORECASE)
+_BROAD_PORT_SCOPE_PATTERN = re.compile(
+    r"\b(?:all|every|remaining|other)\s+ports?\b|"
+    r"\b(?:host[- ]wide|all[- ]port|full[- ]port)\s+(?:scan|scanning|enumeration|discovery)\b|"
+    r"\b(?:port|ports)\s+(?:scan|scanning|enumeration|enumerate|discovery|sweep)\b",
+    re.IGNORECASE,
+)
+
+
+def _explicit_target_port(target: OperationTarget) -> Optional[int]:
+    """Return a registered service port, if the target has one."""
+
+    value = str(target.value or "").strip()
+    parsed = urlsplit(value if "://" in value else f"//{value}")
+    try:
+        return parsed.port
+    except ValueError as error:
+        raise ValueError(f"invalid registered target boundary for {target.target_id}: {value}") from error
+
+
+def _explicit_target_host(target: OperationTarget) -> Optional[str]:
+    value = str(target.value or "").strip()
+    parsed = urlsplit(value if "://" in value else f"//{value}")
+    return parsed.hostname
+
+
+def _proposal_scope_text(proposal: TaskProposal) -> str:
+    return " ".join(
+        [
+            proposal.title,
+            proposal.objective,
+            proposal.basis_description or proposal.objective,
+            *(criterion.description for criterion in proposal.criteria),
+        ]
+    )
+
+
+def _proposal_port_references(proposal: TaskProposal) -> Tuple[List[int], List[Tuple[int, int]], bool]:
+    """Extract explicit port references from proposal scope text."""
+
+    text = _proposal_scope_text(proposal)
+    numbers: List[int] = []
+    ranges: List[Tuple[int, int]] = []
+
+    if _BROAD_PORT_SELECTOR_PATTERN.search(text):
+        return numbers, ranges, True
+
+    for match in _PORT_CONTEXT_PATTERN.finditer(text):
+        tail = match.group("tail")
+        for range_match in _PORT_RANGE_PATTERN.finditer(tail):
+            ranges.append((int(range_match.group(1)), int(range_match.group(2))))
+        range_spans = [match.span() for match in _PORT_RANGE_PATTERN.finditer(tail)]
+        for number_match in _PORT_NUMBER_PATTERN.finditer(tail):
+            if not any(start <= number_match.start() < end for start, end in range_spans):
+                numbers.append(int(number_match.group(1)))
+
+    for match in _PORT_SELECTOR_PATTERN.finditer(text):
+        selector = match.group(1)
+        if selector == "-":
+            return numbers, ranges, True
+        for range_match in _PORT_RANGE_PATTERN.finditer(selector):
+            ranges.append((int(range_match.group(1)), int(range_match.group(2))))
+        range_spans = [match.span() for match in _PORT_RANGE_PATTERN.finditer(selector)]
+        for number_match in _PORT_NUMBER_PATTERN.finditer(selector):
+            if not any(start <= number_match.start() < end for start, end in range_spans):
+                numbers.append(int(number_match.group(1)))
+
+    if _BARE_PORT_SELECTOR_PATTERN.search(text):
+        return numbers, ranges, True
+    return numbers, ranges, False
+
+
+def _validate_proposal_service_scope(proposal: TaskProposal, selected_targets: List[OperationTarget]) -> None:
+    """Enforce exact registered ports for proposals scoped to explicit service targets."""
+
+    target_ports = {
+        (str(target.value), port)
+        for target in selected_targets
+        if (port := _explicit_target_port(target)) is not None
+    }
+    if not target_ports:
+        return
+
+    text = _proposal_scope_text(proposal)
+    if _BROAD_PORT_SCOPE_PATTERN.search(text):
+        raise ValueError(
+            "explicit service targets permit only their registered port; broad or omitted-port enumeration is not allowed"
+        )
+
+    numbers, ranges, ambiguous_selector = _proposal_port_references(proposal)
+    allowed_ports = {port for _value, port in target_ports}
+    allowed_ports_by_host: Dict[str, set[int]] = {}
+    for target in selected_targets:
+        port = _explicit_target_port(target)
+        host = _explicit_target_host(target)
+        if port is not None and host:
+            allowed_ports_by_host.setdefault(host.lower(), set()).add(port)
+    for host, allowed_host_ports in allowed_ports_by_host.items():
+        host_pattern = re.compile(
+            rf"(?<![\w.-])(?:[a-z][\w+.-]*://)?{re.escape(host)}:(\d{{1,5}})",
+            re.IGNORECASE,
+        )
+        invalid_host_ports = sorted(
+            {
+                int(match.group(1))
+                for match in host_pattern.finditer(text)
+                if int(match.group(1)) not in allowed_host_ports
+            }
+        )
+        if invalid_host_ports:
+            raise ValueError(
+                f"task scope uses ports {invalid_host_ports} for explicit host {host}; "
+                f"allowed ports are {sorted(allowed_host_ports)}"
+            )
+    invalid_numbers = sorted({number for number in numbers if number not in allowed_ports})
+    invalid_ranges = [item for item in ranges if item[0] > item[1] or any(port not in allowed_ports for port in range(item[0], item[1] + 1))]
+    if ambiguous_selector:
+        raise ValueError(
+            f"explicit service targets require an exact port selector; allowed ports are {sorted(allowed_ports)}"
+        )
+    if invalid_numbers or invalid_ranges:
+        details = []
+        if invalid_numbers:
+            details.append(f"ports {invalid_numbers}")
+        if invalid_ranges:
+            details.append(f"ranges {invalid_ranges}")
+        raise ValueError(
+            f"task scope exceeds explicit service target boundary ({'; '.join(details)}); "
+            f"allowed ports are {sorted(allowed_ports)}"
+        )
 
 
 def resolve_bound_executable_target(requested_target: str) -> str:
@@ -2773,11 +3646,25 @@ _CANONICAL_ACCEPTANCE_EVIDENCE_HELP = (
     "Example: artifact:artifacts/http_response.txt"
 )
 
+_ACCEPTANCE_EVIDENCE_MEMORY_HELP = (
+    "Acceptance evidence memory does not exist in this operation: {reference}. "
+    "Memory evidence is operation-scoped; do not reuse a memory ID from another operation or from "
+    "cross-operation learning. Store the observation with store_observation(...) and pass its returned "
+    "memory_ref (for example, memory:<id>) in evidence_refs. If the evidence is a file, save it in the "
+    "current operation and use artifact:artifacts/<file> instead."
+)
+
 
 def _acceptance_evidence_reference_error() -> ValueError:
     """Return the shared correction-ready acceptance evidence error."""
 
     return ValueError(_CANONICAL_ACCEPTANCE_EVIDENCE_HELP)
+
+
+def _acceptance_evidence_memory_error(reference: str) -> ValueError:
+    """Return actionable guidance for a memory reference outside this operation."""
+
+    return ValueError(_ACCEPTANCE_EVIDENCE_MEMORY_HELP.format(reference=reference))
 
 
 def _canonical_evidence_reference(reference: str) -> str:
@@ -2795,15 +3682,35 @@ class _InventoryLinkParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.references: List[str] = []
+        self.forms: List[Dict[str, Any]] = []
+        self._active_form: Optional[Dict[str, Any]] = None
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        attribute_name = "href" if tag.lower() == "a" else "action" if tag.lower() == "form" else ""
+        normalized_tag = tag.lower()
+        values = dict(attrs)
+        if normalized_tag == "form":
+            action = str(values.get("action") or "").strip() or "/"
+            method = str(values.get("method") or "GET").strip().upper()
+            self.references.append(action)
+            self._active_form = {"action": action, "method": method, "inputs": []}
+            self.forms.append(self._active_form)
+            return
+        if normalized_tag in {"input", "textarea", "select", "button"} and self._active_form is not None:
+            name = str(values.get("name") or "").strip()
+            if name:
+                input_type = str(values.get("type") or normalized_tag).strip().lower()
+                self._active_form["inputs"].append({"name": name, "location": "body", "type": input_type})
+            return
+        attribute_name = "href" if normalized_tag == "a" else ""
         if not attribute_name:
             return
-        values = dict(attrs)
         value = str(values.get(attribute_name) or "").strip()
         if value:
             self.references.append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "form":
+            self._active_form = None
 
 
 def _inventory_target_bases() -> Dict[str, str]:
@@ -2868,6 +3775,22 @@ def _deterministic_inventory_candidates() -> Tuple[List[Dict[str, Any]], int]:
                 attributes: Dict[str, Any] = {"discovered_by": "html_link_extraction"}
                 if query_pairs:
                     attributes["query_parameters"] = sorted({name for name, _value in query_pairs})
+                matching_forms = [
+                    form
+                    for form in parser.forms
+                    if urlsplit(urljoin(base, str(form["action"]))).path == absolute.path
+                ]
+                if matching_forms:
+                    operations = sorted({str(form["method"]).upper() for form in matching_forms})
+                    inputs = []
+                    for form in matching_forms:
+                        inputs.extend(form["inputs"])
+                    attributes["interaction"] = {
+                        "interface": "http",
+                        "operations": operations,
+                        "inputs": list({json.dumps(item, sort_keys=True): item for item in inputs}.values()),
+                        "evidence_refs": [canonical_artifact_reference(path)],
+                    }
                 candidates[(target_id, route_key)] = {
                     "target_id": target_id,
                     "kind": "endpoint",
@@ -2936,6 +3859,97 @@ def _is_out_of_scope_inventory_item(item: Any, target_values: Dict[str, str]) ->
     return parsed.scheme.lower() != boundary.scheme.lower() or parsed.netloc.lower() != boundary.netloc.lower()
 
 
+def _normalize_inventory_target_ids(items: Any, target_values: Dict[str, str]) -> bool:
+    """Replace an unambiguous raw target value with its controller-owned logical target ID."""
+
+    if not isinstance(items, list) or not target_values:
+        return False
+    value_to_ids: Dict[str, List[str]] = {}
+    for target_id, value in target_values.items():
+        value_to_ids.setdefault(str(value).strip(), []).append(target_id)
+    changed = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        supplied = str(item.get("target_id") or "").strip()
+        matches = value_to_ids.get(supplied, [])
+        if supplied not in target_values and len(matches) == 1:
+            item["target_id"] = matches[0]
+            changed = True
+    return changed
+
+
+def _normalize_inventory_interaction(item_id: str, attributes: Dict[str, Any]) -> bool:
+    """Validate and normalize optional protocol-neutral interaction metadata in place."""
+
+    interaction = attributes.get("interaction")
+    if interaction is None:
+        return False
+    if not isinstance(interaction, dict):
+        raise ValueError(f"inventory manifest item {item_id} attributes.interaction must be an object")
+    allowed = {
+        "interface",
+        "operations",
+        "inputs",
+        "success_signals",
+        "failure_signals",
+        "evidence_refs",
+    }
+    unknown = sorted(set(interaction) - allowed)
+    if unknown:
+        raise ValueError(
+            f"inventory manifest item {item_id} attributes.interaction has unsupported fields: {', '.join(unknown)}"
+        )
+    changed = False
+    interface = interaction.get("interface")
+    if interface is not None and not str(interface).strip():
+        raise ValueError(f"inventory manifest item {item_id} interaction.interface must be non-empty")
+    if interface is not None and interface != str(interface).strip():
+        interaction["interface"] = str(interface).strip()
+        changed = True
+    for field_name in ("operations", "success_signals", "failure_signals", "evidence_refs"):
+        values = interaction.get(field_name)
+        if values is None:
+            continue
+        if not isinstance(values, list) or not all(str(value).strip() for value in values):
+            raise ValueError(f"inventory manifest item {item_id} interaction.{field_name} must be non-empty strings")
+        normalized_values = list(dict.fromkeys(str(value).strip() for value in values))
+        if values != normalized_values:
+            interaction[field_name] = normalized_values
+            changed = True
+    inputs = interaction.get("inputs")
+    if inputs is not None:
+        if not isinstance(inputs, list):
+            raise ValueError(f"inventory manifest item {item_id} interaction.inputs must be a list")
+        normalized_inputs = []
+        for input_index, input_item in enumerate(inputs):
+            if not isinstance(input_item, dict) or not str(input_item.get("name") or "").strip():
+                raise ValueError(
+                    f"inventory manifest item {item_id} interaction.inputs[{input_index}] requires a name"
+                )
+            unknown_input_fields = sorted(set(input_item) - {"name", "location", "type"})
+            if unknown_input_fields:
+                raise ValueError(
+                    f"inventory manifest item {item_id} interaction.inputs[{input_index}] has unsupported fields: "
+                    + ", ".join(unknown_input_fields)
+                )
+            normalized_input = {"name": str(input_item["name"]).strip()}
+            for field_name in ("location", "type"):
+                if field_name in input_item:
+                    value = str(input_item[field_name]).strip()
+                    if not value:
+                        raise ValueError(
+                            f"inventory manifest item {item_id} interaction.inputs[{input_index}].{field_name} "
+                            "must be non-empty"
+                        )
+                    normalized_input[field_name] = value
+            normalized_inputs.append(normalized_input)
+        if inputs != normalized_inputs:
+            interaction["inputs"] = normalized_inputs
+            changed = True
+    return changed
+
+
 def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tuple[Dict[str, Any], str]:
     path = _artifact_path_from_ref(reference)
     try:
@@ -2956,6 +3970,8 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
         target_values = {}
     items = manifest.get("items")
     normalized_root = False
+    if _normalize_inventory_target_ids(items, target_values):
+        normalized_root = True
     removed_count = 0
     if isinstance(items, list):
         filtered_items = [item for item in items if not _is_out_of_scope_inventory_item(item, target_values)]
@@ -3031,6 +4047,12 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
                 f"inventory manifest item {item_id} field attributes at $.items[{item_index}].attributes "
                 "must be an object"
             )
+            continue
+        try:
+            if _normalize_inventory_interaction(item_id, attributes):
+                normalized_inventory = True
+        except ValueError as error:
+            diagnostics.append(str(error))
             continue
         item_ids.append(item_id)
         validated_items.append((item_index, item))
@@ -3205,25 +4227,9 @@ def _extract_sensitive_patterns(text: str) -> List[str]:
 
 
 def _task_proposal_criterion_ids(criteria: List[TaskProposalCriterion]) -> List[str]:
-    """Generate readable, deterministic IDs for one proposal's criteria."""
+    """Generate short task-scoped IDs; descriptions retain the semantic meaning."""
 
-    generated: List[str] = []
-    used: set[str] = set()
-    for position, criterion in enumerate(criteria, start=1):
-        normalized = unicodedata.normalize("NFKD", criterion.description)
-        ascii_description = normalized.encode("ascii", "ignore").decode("ascii").lower()
-        base = re.sub(r"[^a-z0-9]+", "-", ascii_description).strip("-")
-        base = base[:TASK_PROPOSAL_CRITERION_ID_MAX_CHARS].rstrip("-") or f"criterion-{position}"
-        candidate = base
-        suffix_number = 2
-        while candidate in used:
-            suffix = f"-{suffix_number}"
-            prefix = base[: TASK_PROPOSAL_CRITERION_ID_MAX_CHARS - len(suffix)].rstrip("-")
-            candidate = f"{prefix}{suffix}"
-            suffix_number += 1
-        generated.append(candidate)
-        used.add(candidate)
-    return generated
+    return [f"criterion-{position}" for position, _criterion in enumerate(criteria, start=1)]
 
 
 @dataclass(frozen=True)
@@ -3589,6 +4595,37 @@ def _frozen_task_identity(
     )
 
 
+def _semantic_cross_phase_task_identity(
+    title: str,
+    objective: str,
+    acceptance: AcceptanceContract,
+    target_scope: TargetScope,
+    target_ids: List[str],
+) -> str:
+    """Return an exact work identity while ignoring controller-owned phase references."""
+
+    acceptance_identity = acceptance.to_dict()
+    acceptance_identity.pop("frozen_at", None)
+    acceptance_identity.pop("manifest_hash", None)
+    basis = acceptance_identity.get("basis", {})
+    basis["source_refs"] = [
+        reference
+        for reference in basis.get("source_refs", [])
+        if not str(reference).startswith("plan:phase-")
+    ]
+    return json.dumps(
+        {
+            "title": title.strip(),
+            "objective": objective.strip(),
+            "acceptance": acceptance_identity,
+            "target_ids": sorted(target_ids),
+            "target_scope": target_scope,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _create_tasks_from_proposals(
     tasks: TaskProposalList,
     *,
@@ -3645,6 +4682,7 @@ def _create_tasks_from_proposals(
         target_scope, target_ids = _validate_task_target_scope(
             target_ids=_normalize_target_ids(proposal.target_ids),
             plan=plan,
+            proposal=proposal,
         )
         acceptance = _freeze_and_validate_acceptance(
             _proposal_acceptance_contract(proposal, plan),
@@ -3830,6 +4868,28 @@ def _create_tasks_from_proposals(
                 proposal_duplicate_count += 1
                 logger.info("Skipped duplicate task proposal after frozen acceptance expansion: %s", group_title)
                 continue
+            cross_phase_identity = _semantic_cross_phase_task_identity(
+                group_title,
+                group_objective,
+                group_acceptance,
+                group_target_scope,
+                group_target_ids,
+            )
+            if any(
+                _semantic_cross_phase_task_identity(
+                    task.title,
+                    task.objective,
+                    task.acceptance,
+                    task.target_scope,
+                    task.target_ids,
+                ) == cross_phase_identity
+                for task in [*existing_tasks, *staged_tasks]
+                if task.status in {"active", "pending", "done"}
+            ):
+                duplicate_count += 1
+                proposal_duplicate_count += 1
+                logger.info("Skipped semantic cross-phase duplicate task proposal: %s", group_title)
+                continue
             staged_tasks.append(Task(
                 task_uid=str(uuid.uuid4()),
                 title=group_title,
@@ -3945,7 +5005,7 @@ def _evidence_reference_kind(reference: str, expected_kind: EvidenceRequirementK
         memory = _ensure_memory_client().get_memory_by_id(memory_id)
         metadata = (memory or {}).get("metadata", {}) if isinstance(memory, dict) else {}
         if not memory or metadata.get("operation_id", op_id) != op_id:
-            raise ValueError(f"Acceptance evidence memory does not exist in this operation: {reference}")
+            raise _acceptance_evidence_memory_error(reference)
         category = str(metadata.get("category", ""))
         return expected_kind in {"memory", "durable_evidence"} or (
             expected_kind == "observation" and category == "observation"
@@ -4324,7 +5384,11 @@ def _bind_acceptance_finding_reference(
         return list(evidence_refs)
     linked_refs = _source_task_finding_refs(task_uid)
     if not linked_refs:
-        raise ValueError("Acceptance disposition finding_candidate requires a finding created by this task")
+        raise ValueError(
+            "Acceptance disposition finding_candidate requires a finding created by this task. "
+            "Call store_finding first, retain its returned canonical finding:<id> reference, "
+            "then retry record_task_acceptance."
+        )
     supplied_refs = [reference for reference in evidence_refs if str(reference).startswith("finding:")]
     if len(linked_refs) == 1:
         selected_ref = linked_refs[0]
@@ -5550,7 +6614,7 @@ class Mem0ServiceClient:
         # retained for reporting, but must not be converted into a completed operation.
         tasks = _get_plan_store().get_tasks(op_id)
         all_done = all(p.status in {"done", "not_applicable"} for p in plan.phases)
-        all_tasks_done = all(task.status == "done" for task in tasks)
+        all_tasks_done = all(task.status in {"done", "superseded"} for task in tasks)
         actionable_tasks = [task for task in tasks if task.status in {"active", "pending"}]
         add_completion_reminder = False
         if all_done and all_tasks_done and not plan.assessment_complete:
@@ -5690,7 +6754,7 @@ class Mem0ServiceClient:
             *,
             user_id: str,
             phase: int,
-            new_status: Literal["done", "partial_failure", "blocked"],
+            new_status: Literal["done", "partial_failure", "blocked", "superseded"],
             new_status_reason: Optional[str] = None,
             task_uid: Optional[str] = None,
     ) -> Tuple[Optional[Task], Optional[Task]]:
@@ -5727,6 +6791,7 @@ class Mem0ServiceClient:
                 created_at=target.created_at,
                 kind=target.kind,
                 reference_id=target.reference_id,
+                replacement_of=target.replacement_of,
                 target_scope=target.target_scope,
                 target_ids=target.target_ids,
             )
@@ -5734,7 +6799,7 @@ class Mem0ServiceClient:
 
         # After updating, find next pending
         next_active: Optional[Task] = None
-        if new_status in ("done", "partial_failure", "blocked"):
+        if new_status in ("done", "partial_failure", "blocked", "superseded"):
             # Check for another active (shouldn't be any)
             still_active = [t for t in phase_tasks if t.status == "active" and t.task_uid != (target.task_uid if target else None)]
             if not still_active:
@@ -5755,6 +6820,7 @@ class Mem0ServiceClient:
                         created_at=p.created_at,
                         kind=p.kind,
                         reference_id=p.reference_id,
+                        replacement_of=p.replacement_of,
                         target_scope=p.target_scope,
                         target_ids=p.target_ids,
                     )
@@ -5812,9 +6878,10 @@ class Mem0ServiceClient:
             user_id: Optional[str] = None,
             phase: Optional[int] = None,
             status: Optional[List[str]] = None,
+            operation_id: Optional[str] = None,
     ) -> List[Task]:
-        """List tasks for a phase."""
-        tasks = _get_plan_store().get_tasks(_operation_id())
+        """List tasks for a phase and, when provided, an explicit operation."""
+        tasks = _get_plan_store().get_tasks(_operation_id(operation_id))
         result = []
         for t in tasks:
             if phase is not None and int(t.phase) != int(phase):
@@ -5823,15 +6890,60 @@ class Mem0ServiceClient:
                 result.append(t)
         return result
 
-    def list_task_acceptance_results(self, task_uid: str) -> List[AcceptanceResult]:
-        """Return the frozen-manifest result ledger for one task."""
+    def list_task_acceptance_results(
+            self,
+            task_uid: str,
+            operation_id: Optional[str] = None,
+    ) -> List[AcceptanceResult]:
+        """Return the frozen-manifest result ledger for one task and operation."""
 
-        return _get_plan_store().get_acceptance_results(_operation_id(), task_uid)
+        return _get_plan_store().get_acceptance_results(_operation_id(operation_id), task_uid)
 
-    def list_finding_records(self) -> List[Dict[str, Any]]:
-        """Return finding records for the current operation."""
+    def list_finding_records(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return finding records for an explicit or current operation."""
 
-        return _get_plan_store().list_findings(_operation_id())
+        return _get_plan_store().list_findings(_operation_id(operation_id))
+
+    def list_objective_validation_records(self) -> List[Dict[str, Any]]:
+        """Return objective-validation records for the current operation."""
+
+        return _get_plan_store().list_objective_candidates(_operation_id())
+
+    def store_preflight_results(self, results: List[Dict[str, Any]], operation_id: Optional[str] = None) -> None:
+        """Persist preflight facts once so later workflow stages do not re-resolve targets."""
+
+        _get_plan_store().store_preflight_results(operation_id or _operation_id(), results)
+
+    def list_preflight_results(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return persisted preflight facts for an explicit or current operation."""
+
+        return _get_plan_store().list_preflight_results(_operation_id(operation_id))
+
+    def update_finding_taxonomy_annotation(
+        self,
+        finding_uid: str,
+        annotation: Dict[str, Any],
+    ) -> bool:
+        """Persist one controller-owned taxonomy annotation for a finding candidate."""
+
+        return _get_plan_store().update_finding_taxonomy_annotation(
+            _operation_id(),
+            finding_uid,
+            annotation,
+        )
+
+    def update_finding_attack_enrichment(
+        self,
+        finding_uid: str,
+        enrichment: Dict[str, Any],
+    ) -> bool:
+        """Persist one controller-owned final ATT&CK enrichment result."""
+
+        return _get_plan_store().update_finding_attack_enrichment(
+            _operation_id(),
+            finding_uid,
+            enrichment,
+        )
 
     def get_memory_overview(self, user_id: Optional[str] = None) -> Dict:
         """Get an overview of stored memories."""
@@ -5918,12 +7030,19 @@ def initialize_memory_system(
             operation_id or os.environ.get("CYBER_OPERATION_ID", f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     )
     enhanced_config["target_name"] = target_name or os.environ.get("CYBER_TARGET_NAME", "default_target")
+    enhanced_config["output_dir"] = enhanced_config.get(
+        "output_dir", os.environ.get("CYBER_AGENT_OUTPUT_DIR", get_default_base_dir())
+    )
+    enhanced_config["read_only"] = bool(
+        enhanced_config.get("read_only", os.environ.get("CYBER_MEMORY_READ_ONLY", "").lower() == "true")
+    )
     if enhanced_config["target_name"] == "default_target":
         enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["operation_id"]}"'
     else:
         enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["target_name"]}"'
 
     _MEMORY_CONFIG = enhanced_config
+    os.environ["CYBER_OPERATION_ID"] = enhanced_config["operation_id"]
     _MEMORY_CLIENT = Mem0ServiceClient(enhanced_config, has_existing_memories, silent)
     logger.info(
         "Memory system initialized for operation %s, target: %s, user: %s",
@@ -5934,7 +7053,7 @@ def initialize_memory_system(
 
 
 def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
-    """Get the current memory client, initializing if needed.
+    """Get the memory client for the authoritative environment operation.
 
     Args:
         silent: If True, suppress initialization output (used during report generation)
@@ -5943,8 +7062,27 @@ def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
         The memory client instance or None if initialization fails
     """
     global _MEMORY_CLIENT
+    authoritative_operation_id = os.environ.get("CYBER_OPERATION_ID")
     if _MEMORY_CLIENT is None:
         initialize_memory_system(silent=silent)
+    elif authoritative_operation_id:
+        configured_operation_id = (_MEMORY_CONFIG or {}).get("operation_id")
+        if configured_operation_id != authoritative_operation_id:
+            logger.info(
+                "Reinitializing memory client for CYBER_OPERATION_ID=%s (was configured for %s)",
+                authoritative_operation_id,
+                configured_operation_id or "unset",
+            )
+            existing_config = dict(_MEMORY_CONFIG or {})
+            target_name = existing_config.get("target_name")
+            has_existing_memories = bool(getattr(_MEMORY_CLIENT, "has_existing_memories", True))
+            initialize_memory_system(
+                config=existing_config,
+                operation_id=authoritative_operation_id,
+                target_name=target_name,
+                has_existing_memories=has_existing_memories,
+                silent=silent,
+            )
     return _MEMORY_CLIENT
 
 

@@ -40,6 +40,7 @@ export class PythonExecutionService extends EventEmitter {
   private activeProcess?: ChildProcess;
   private isExecutionActive = false;
   private streamEventBuffer = '';
+  private discardingTruncatedEvent = false;
   private abortController?: AbortController;
   private sessionId = `py-${Date.now()}`;
   // Emit policy: only stream raw stdout during active tool execution
@@ -374,6 +375,7 @@ export class PythonExecutionService extends EventEmitter {
   public clearRuntimeState(): void {
     this.clearStartupTimers();
     this.streamEventBuffer = '';
+    this.discardingTruncatedEvent = false;
     this.toolOutputBuffer = '';
     this.stderrBuffer = '';
     this.inToolExecution = false;
@@ -934,7 +936,6 @@ export class PythonExecutionService extends EventEmitter {
       this.activeProcess.stderr?.on('data', (data: Buffer) => {
         const output = data.toString();
         // Python may output regular messages to stderr
-        this.processOutputStream(output);
         // Keep a bounded buffer (~8KB) of stderr for error reporting
         this.stderrBuffer += output;
         if (this.stderrBuffer.length > 8192) {
@@ -1076,6 +1077,8 @@ export class PythonExecutionService extends EventEmitter {
     return {
       get streamEventBuffer() { return service.streamEventBuffer; },
       set streamEventBuffer(value: string) { service.streamEventBuffer = value; },
+      get discardingTruncatedEvent() { return service.discardingTruncatedEvent; },
+      set discardingTruncatedEvent(value: boolean | undefined) { service.discardingTruncatedEvent = value ?? false; },
       get inToolExecution() { return service.inToolExecution; },
       set inToolExecution(value: boolean) { service.inToolExecution = value; },
       get toolOutputBuffer() { return service.toolOutputBuffer; },

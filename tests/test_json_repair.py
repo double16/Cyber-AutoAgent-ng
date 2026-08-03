@@ -51,3 +51,17 @@ def test_parse_json_response_rejects_non_object_when_requested():
 def test_repair_json_text_serialization_can_escape_emoji():
     parsed = parse_json_response('{"message":"😀"}')
     assert json.dumps(parsed, ensure_ascii=True) == '{"message": "\\ud83d\\ude00"}'
+
+
+def test_parse_json_response_preserves_valid_json_without_repairing():
+    response = '{"message":"quoted \\\"text\\\"", "items":[1,2]}'
+
+    assert parse_json_response(response, require_object=True) == {
+        "message": 'quoted "text"',
+        "items": [1, 2],
+    }
+
+
+def test_parse_json_response_rejects_truncated_repair_candidate():
+    with pytest.raises(json.JSONDecodeError):
+        parse_json_response('{"message":"truncated')

@@ -180,6 +180,8 @@ The compose stack automatically provides:
 - **Model Context Protocol (MCP)**: MCP support for local and remote, fine-grained tool selection
 - **Natural Language Reasoning**: Uses Strands framework with metacognitive architecture
 - **Evidence Collection**: Stores observations and knowledge separately and verifies every finding in its own task
+- **Evidence-Grounded Taxonomy**: Seeds CWE candidates from vulnerability terminology, then enriches confirmed findings
+  with ATT&CK mappings after terminal workflow evidence is available
 - **Meta-Tool Creation**: Dynamically creates custom exploitation tools when needed
 - **Adaptive Execution**: Metacognitive assessment guides strategy based on confidence levels
 - **Assessment Reporting**: Generates comprehensive reports with findings and remediation
@@ -800,6 +802,9 @@ uv run pytest -v
 
 # Run tests with coverage
 uv run pytest --cov=src
+
+# Run opt-in Ollama taxonomy compatibility tests (requires an installed local model)
+uv run pytest -m ollama tests/test_taxonomy_ollama.py -v
 ```
 
 ## Project Structure

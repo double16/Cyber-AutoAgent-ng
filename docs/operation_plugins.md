@@ -41,13 +41,13 @@ operation_plugins/
 
 ## Component Functions
 
-### Specialist Agents (Web Module)
-The `web` module currently ships with a `validation_specialist` tool that spins up its own Strands `Agent` to run the seven-gate validation checklist before a finding is accepted. The tool lives under `tools/validation_specialist.py` and follows a repeatable pattern:
+### Evidence Validation
+Finding validation is owned by the multi-agent workflow. A finding candidate creates an independent verification task;
+the verifier records an artifact-backed outcome and the evaluator approves or rejects promotion. The controller applies
+claim-specific checks for differential evidence, extracted data, backend-layer responses, and authorization bypasses.
 
-- An `agent_factory` property is injected on the `@tool` function. It is a function that builds a Strands `Agent` using the swarm model configuration, with the necessary components for context window management and observability.
-- An agent is built with a focused system prompt plus the minimal tool set (`shell`, `http_request`, etc.) required for validation.
-
-You can add additional specialists (e.g., SQLi, XSS, SSRF) by copying this file, adjusting the prompt/available tools, and registering the new tool name in `module.yaml`. The runtime orchestration automatically exposes any `tools/*.py` entry that uses this pattern.
+Module tools may still implement specialized execution capabilities. They must produce durable evidence for the native
+finding-validation task instead of making an independent validation decision.
 
 The `agent_factory` function allows custom model configuration, such as purpose-built models for the specialist.
 
@@ -402,7 +402,6 @@ if loader.validate_module("custom_module"):
 - `specialized_recon_orchestrator`: Coordinates external recon tools
 - `advanced_payload_coordinator`: Orchestrates payload testing tools
 - `auth_chain_analyzer`: Analyzes authentication mechanisms
-- `validation_specialist`: Rigorous false positive prevention
 
 **Configuration:**
 - Approach: Intelligence-driven assessment with specialized tools
