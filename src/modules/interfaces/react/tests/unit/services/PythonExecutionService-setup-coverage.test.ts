@@ -1,4 +1,4 @@
-import {beforeEach, describe, expect, it, jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {promisify} from 'util';
 
 let existingPaths = new Set<string>();
@@ -70,13 +70,12 @@ describe('PythonExecutionService setup coverage', () => {
         const {PythonExecutionService} = await load();
         commandResults = [
             {match: /^python3\.12 --version/, stdout: 'Python 3.12.2\n'},
-            {match: /^python3\.11 --version/, stdout: 'Python 3.11.9\n'},
-            {match: /^python3\.10 --version/, stdout: 'Python 3.10.14\n'},
+            {match: /^python3\.13 --version/, stdout: 'Python 3.13.5\n'},
         ];
         const service = new PythonExecutionService();
 
-        await expect(service.checkPythonVersion()).resolves.toEqual({installed: true, version: 'Python 3.12.2'});
-        expect(service.getCurrentPythonCommand()).toBe('python3.12');
+        await expect(service.checkPythonVersion()).resolves.toEqual({installed: true, version: 'Python 3.13.5'});
+        expect(service.getCurrentPythonCommand()).toBe('python3.13');
         expect(service.getActiveProcessPid()).toBeUndefined();
         expect(service.getSessionId()).toMatch(/^py-/);
         expect(service.isActive()).toBe(false);
@@ -91,7 +90,21 @@ describe('PythonExecutionService setup coverage', () => {
 
         await expect(service.checkPythonVersion()).resolves.toEqual({
             installed: false,
-            error: 'Python 3.11+ is required but not found',
+            error: 'Python 3.12+ is required but not found',
+        });
+    });
+
+    it('rejects Python 3.11 because the project minimum is 3.12', async () => {
+        const {PythonExecutionService} = await load();
+        commandResults = [
+            {match: /^python3\.12 --version/, stdout: 'Python 3.11.9\n'},
+            {match: /.*/, error: new Error('not found')},
+        ];
+        const service = new PythonExecutionService();
+
+        await expect(service.checkPythonVersion()).resolves.toEqual({
+            installed: false,
+            error: 'Python 3.12+ is required but not found',
         });
     });
 
@@ -129,7 +142,7 @@ describe('PythonExecutionService setup coverage', () => {
         const unhealthy = new PythonExecutionService();
         const unhealthyProgress: string[] = [];
         await expect(unhealthy.preflightChecks(message => unhealthyProgress.push(message))).resolves.toBe(false);
-        expect(unhealthyProgress.join('\n')).toContain('[ERR] Python 3.11+ not found');
+        expect(unhealthyProgress.join('\n')).toContain('[ERR] Python 3.12+ not found');
         expect(unhealthyProgress.join('\n')).toContain('Virtual environment missing');
     });
 
@@ -179,7 +192,7 @@ describe('PythonExecutionService setup coverage', () => {
         const oldVenvService = new PythonExecutionService();
         const oldProgress: string[] = [];
         await oldVenvService.setupPythonEnvironment(message => oldProgress.push(message));
-        expect(oldProgress.join('\n')).toContain('Recreating virtual environment with Python 3.11+');
+        expect(oldProgress.join('\n')).toContain('Recreating virtual environment with Python 3.12+');
         expect(oldProgress.join('\n')).toContain('Dependencies already installed');
     });
 });

@@ -1,6 +1,6 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
@@ -51,7 +51,12 @@ const execMock = jest.fn((command: string, optionsOrCallback: any, maybeCallback
 jest.unstable_mockModule('child_process', () => ({
     exec: execMock,
     spawn: jest.fn(),
-    execFile: jest.fn(),
+    execFile: jest.fn((_file: string, args: string[], callback: (error: Error | null, result: any) => void) => {
+        const stdout = args.includes('--show-current')
+            ? 'feature/python-3.12-min-and-docs\n'
+            : 'https://github.com/double16/Cyber-AutoAgent-ng.git\n';
+        callback(null, {stdout, stderr: ''});
+    }),
 }));
 
 const readFile = jest.fn<() => Promise<string>>(async () => {
@@ -93,6 +98,12 @@ const sendInput = (input = '', key: Record<string, boolean> = {}) => {
     });
 };
 
+const sendDocumentationInput = (input: string) => {
+    act(() => {
+        (global as any).__inkStdin?.emit('data', Buffer.from(input));
+    });
+};
+
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe('setup and documentation screens', () => {
@@ -108,6 +119,7 @@ describe('setup and documentation screens', () => {
 
     afterEach(() => {
         jest.useRealTimers();
+        (global as any).__inkStdin?.removeAllListeners('data');
     });
 
     it('shows SetupProgressScreen running, failed, and complete states with keyboard actions', async () => {
@@ -187,25 +199,68 @@ describe('setup and documentation screens', () => {
         });
         expect(textFromTree(view.toJSON())).toContain('Cyber-AutoAgent Documentation');
 
-        sendInput('', {downArrow: true});
-        sendInput('', {upArrow: true});
+        sendDocumentationInput('\u001B[B');
+        sendDocumentationInput('\u001B[A');
         await act(async () => {
-            sendInput('', {return: true});
+            sendDocumentationInput('\r');
             await Promise.resolve();
         });
         expect(readFile).toHaveBeenCalled();
-        expect(textFromTree(view.toJSON())).toContain('USER INSTRUCTIONS');
+        expect(textFromTree(view.toJSON())).toContain('Documentation unavailable');
+        expect(textFromTree(view.toJSON())).toContain(
+            'https://github.com/double16/Cyber-AutoAgent-ng/blob/feature%2Fpython-3.12-min-and-docs/docs/user-instructions.md'
+        );
 
-        sendInput('G');
-        sendInput('g');
-        sendInput('j');
-        sendInput('k');
-        sendInput('', {pageDown: true});
-        sendInput('', {pageUp: true});
-        sendInput('', {escape: true});
+        sendDocumentationInput('G');
+        sendDocumentationInput('g');
+        sendDocumentationInput('j');
+        sendDocumentationInput('k');
+        sendDocumentationInput('\u001B[6~');
+        sendDocumentationInput('\u001B[5~');
+        sendDocumentationInput('\u001B');
         expect(textFromTree(view.toJSON())).toContain('Select a document to read');
-        sendInput('', {escape: true});
+        sendDocumentationInput('\u001B');
         expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('scrolls documents with vertical keys and changes documents with horizontal keys', async () => {
+        const {DocumentationViewer} = await load();
+        const content = Array.from({length: 25}, (_, index) => `Line ${index + 1}`).join('\n');
+        readFile.mockResolvedValueOnce(content);
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(<DocumentationViewer onClose={jest.fn()} selectedDoc={1}/>);
+            await Promise.resolve();
+        });
+        expect(textFromTree(view.toJSON())).toContain('Row 1/25');
+
+        sendDocumentationInput('\u001B[B');
+        expect(textFromTree(view.toJSON())).toContain('Row 2/25');
+        sendDocumentationInput('j');
+        expect(textFromTree(view.toJSON())).toContain('Row 3/25');
+        sendDocumentationInput('\u001B[A');
+        sendDocumentationInput('k');
+        expect(textFromTree(view.toJSON())).toContain('Row 1/25');
+
+        sendDocumentationInput('G');
+        expect(textFromTree(view.toJSON())).toContain('Row 6/25');
+        sendDocumentationInput('g');
+        expect(textFromTree(view.toJSON())).toContain('Row 1/25');
+
+        await act(async () => {
+            sendDocumentationInput('\u001B[C');
+            sendDocumentationInput('\u001B[C');
+            await Promise.resolve();
+        });
+        expect(textFromTree(view.toJSON())).toContain('Deployment Guide');
+
+        await act(async () => {
+            sendDocumentationInput('\u001B[D');
+            sendDocumentationInput('\u001B[D');
+            await Promise.resolve();
+        });
+        expect(textFromTree(view.toJSON())).toContain('User Instructions');
     });
 
     it('recovers and skips DeploymentRecovery paths', async () => {

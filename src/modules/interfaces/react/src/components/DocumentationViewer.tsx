@@ -1,13 +1,12 @@
-/**
- * Documentation Viewer Component
- * Interactive documentation browser for Cyber-AutoAgent
- */
+/** Interactive Markdown documentation browser for Cyber-AutoAgent. */
 
-import React, { useState, useEffect } from 'react';
-import { Box, Text, useInput } from 'ink';
-import { themeManager } from '../themes/theme-manager.js';
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import React, {useCallback, useEffect, useMemo, useState} from "react";
+import {Box, Text, useStdin} from "ink";
+import * as fs from "fs/promises";
+import * as path from "path";
+import {themeManager} from "../themes/theme-manager.js";
+import {getDocumentationUrl} from "../utils/documentationLinks.js";
+import {MarkdownRow, renderInlineMarkdown, tokenizeMarkdown} from "../utils/markdownRows.js";
 
 interface DocumentInfo {
   name: string;
@@ -20,384 +19,214 @@ interface DocumentationViewerProps {
   selectedDoc?: number;
 }
 
-export const DocumentationViewer: React.FC<DocumentationViewerProps> = React.memo(({ onClose, selectedDoc }) => {
-  const theme = themeManager.getCurrentTheme();
-  const [selectedIndex, setSelectedIndex] = useState(selectedDoc ? selectedDoc - 1 : 0);
-  const [viewMode, setViewMode] = useState<'list' | 'view'>(selectedDoc ? 'view' : 'list');
-  const [documentContent, setDocumentContent] = useState<string>('');
-  const [scrollOffset, setScrollOffset] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+const documents: DocumentInfo[] = [
+  {name: "User Instructions", file: "user-instructions.md", description: "Using Cyber-AutoAgent from the terminal"},
+  {name: "Architecture Overview", file: "architecture.md", description: "Workflow concepts and troubleshooting context"},
+  {name: "Deployment Guide", file: "deployment.md", description: "Setup, configuration, and deployment troubleshooting"},
+  {name: "Observability & Evaluation", file: "observability-evaluation.md", description: "Tracing, evaluation, and operation health"},
+  {name: "Memory System", file: "memory.md", description: "Memory modes, storage, and retrieval"},
+  {name: "Terminal Interface", file: "terminal-frontend.md", description: "React terminal behavior and diagnostics"},
+  {name: "Prompt Management", file: "prompt_management.md", description: "Modules and prompt configuration"},
+];
 
-  const documents: DocumentInfo[] = [
-    { 
-      name: 'User Instructions', 
-      file: 'user-instructions.md', 
-      description: 'Complete guide for using Cyber-AutoAgent effectively' 
-    },
-    { 
-      name: 'Architecture Overview', 
-      file: 'architecture.md', 
-      description: 'System design, components, and technical details' 
-    },
-    { 
-      name: 'Deployment Guide', 
-      file: 'deployment.md', 
-      description: 'Installation options and setup instructions' 
-    },
-    { 
-      name: 'Observability & Evaluation', 
-      file: 'observability-evaluation.md', 
-      description: 'Monitoring, tracing, and quality metrics' 
-    },
-    { 
-      name: 'Memory System', 
-      file: 'memory.md', 
-      description: 'Knowledge persistence and retrieval system' 
-    },
-    { 
-      name: 'Terminal Interface', 
-      file: 'terminal-frontend.md', 
-      description: 'React CLI components and user interface' 
-    },
-    { 
-      name: 'Prompt Management', 
-      file: 'prompt_management.md', 
-      description: 'Dynamic prompt configuration with Langfuse' 
-    }
+const findDocument = async (filename: string): Promise<string | null> => {
+  const cwd = process.cwd();
+  const possiblePaths = [
+    path.join(cwd, "docs", filename),
+    path.join(cwd, "..", "docs", filename),
+    path.join(cwd, "..", "..", "docs", filename),
+    path.join(cwd, "..", "..", "..", "docs", filename),
+    path.join(cwd, "..", "..", "..", "..", "docs", filename),
+    path.join("/app", "docs", filename),
   ];
 
-  // Load document content
-  useEffect(() => {
-    if (viewMode === 'view') {
-      loadDocument(documents[selectedIndex].file);
-    }
-  }, [viewMode, selectedIndex]);
-
-  // Fallback documentation content in case file loading fails
-  const getFallbackContent = (filename: string): string => {
-    switch (filename) {
-      case 'user-instructions.md':
-        return `# Cyber-AutoAgent User Instructions
-
-## ▶ Getting Started
-
-Welcome to Cyber-AutoAgent, an autonomous cybersecurity assessment tool.
-
-### First Time Setup
-
-When you first launch Cyber-AutoAgent, you'll be presented with a deployment mode selection:
-
-1. **Local CLI** - Minimal setup, runs directly in Python
-2. **Single Container** - Docker isolation without observability  
-3. **Enterprise** (Recommended) - Full stack with monitoring and evaluation
-
-### Basic Usage Patterns
-
-#### Guided Flow (Step-by-Step)
-\`\`\`bash
-◆ web > target https://testphp.vulnweb.com
-✓ Target set
-◆ web > execute focus on SQL injection
-\`\`\`
-
-## ■ Safety & Authorization
-
-**CRITICAL**: Only use Cyber-AutoAgent on systems you have explicit authorization to test.
-
-### Authorization Flow
-1. **Target Confirmation**: Shows exact target and module
-2. **Legal Acknowledgment**: Type 'y' to confirm authorization
-3. **Final Confirmation**: Type 'y' again to proceed
-
-### Authorized Test Targets
-- https://testphp.vulnweb.com (Public test site)
-- Your own applications and infrastructure
-- Systems with written penetration testing agreements
-
-## ▣ Commands Reference
-
-### Assessment Commands
-- \`target <url>\` - Set assessment target
-- \`execute [objective]\` - Start assessment with optional focus
-- \`reset\` - Clear current configuration
-
-### Configuration Commands
-- \`/config\` - View configuration
-- \`/help\` - Show all commands
-- \`/docs\` - Browse documentation
-- \`/memory list\` - View previous findings
-
-For complete documentation, see the /docs folder in your installation.`;
-
-      case 'architecture.md':
-        return `# Cyber-AutoAgent Architecture
-
-## System Overview
-
-Cyber-AutoAgent is built on a modern, scalable architecture:
-
-- **Python Backend**: Strands SDK framework
-- **React CLI**: Terminal interface with Ink
-- **Docker**: Containerized deployment
-- **Observability**: Langfuse integration
-- **Evaluation**: Ragas metrics system
-
-## Key Components
-
-### Core Agent (src/cyberautoagent.py)
-- Main entry point and CLI argument parsing
-- Strands SDK agent initialization
-- Assessment orchestration
-
-### React Interface (src/modules/interfaces/react/)
-- Professional terminal UI
-- Real-time event streaming
-- Configuration management
-
-### Memory System (src/modules/tools/memory.py)
-- Persistent knowledge storage
-- FAISS/OpenSearch backends
-- Cross-assessment learning
-
-For detailed architecture information, refer to the source code and inline documentation.`;
-
-      default:
-        return `# ${filename}
-
-Documentation for this file is not available in fallback mode.
-
-To access the complete documentation:
-
-1. Ensure you're running from the project root directory
-2. Check that the /docs folder exists
-3. Verify file permissions
-
-Available documentation includes:
-- User Instructions
-- Architecture Overview  
-- Deployment Guide
-- Memory System
-- Observability & Evaluation
-
-Use /help for available commands or refer to the project repository for complete documentation.`;
-    }
-  };
-
-  const loadDocument = async (filename: string) => {
-    setLoading(true);
-    setError(null);
+  for (const candidate of possiblePaths) {
     try {
-      // Get current working directory info for debugging
-      const cwd = process.cwd();
-      
-      // Try to load from file system first
-      const possiblePaths = [
-        path.join(cwd, 'docs', filename),
-        path.join(cwd, '..', 'docs', filename),
-        path.join(cwd, '..', '..', 'docs', filename),
-        path.join(cwd, '..', '..', '..', 'docs', filename),
-        path.join(cwd, '..', '..', '..', '..', 'docs', filename),
-        path.join('/app', 'docs', filename)
-      ];
-      
-      let content = '';
-      let foundPath = '';
-      
-      for (const testPath of possiblePaths) {
-        try {
-          content = await fs.readFile(testPath, 'utf-8');
-          foundPath = testPath;
-          break;
-        } catch (err) {
-          continue;
-        }
-      }
-      
-      // If file loading failed, use fallback content
-      if (!foundPath) {
-        // console.warn('[DocumentationViewer] File loading failed, using fallback content for:', filename);
-        content = getFallbackContent(filename);
-      }
-      
-      setDocumentContent(content);
-      setScrollOffset(0);
-    } catch (err) {
-      // If everything fails, use fallback content
-      // console.error('[DocumentationViewer] All loading methods failed, using fallback for:', filename);
-      setDocumentContent(getFallbackContent(filename));
-      setScrollOffset(0);
-    } finally {
-      setLoading(false);
+      return await fs.readFile(candidate, "utf-8");
+    } catch {
+      // Try the next known project location.
     }
-  };
+  }
+  return null;
+};
 
-  // Handle keyboard input with high priority to override other handlers
-  useInput((input, key) => {
-    if (key.escape || (key.ctrl && input === 'c')) {
-      if (viewMode === 'view') {
-        setViewMode('list');
-        setDocumentContent('');
+const fallbackContent = async (filename: string): Promise<string> => {
+  const url = await getDocumentationUrl(filename);
+  return `# Documentation unavailable\n\nThe full document is not available in this installation.\n\nRead the complete document: ${url}`;
+};
+
+const renderRow = (row: MarkdownRow, key: string, foreground: string) => {
+  if (row.kind === "code") return <Text key={key} color="cyan">  {row.text}</Text>;
+  if (row.kind === "rule") return <Text key={key} color="gray">{row.text}</Text>;
+  if (row.kind === "heading") {
+    const marker = row.level === 1 ? "═" : row.level === 2 ? "─" : "•";
+    return <Text key={key} color="yellow" bold>{marker} {renderInlineMarkdown(row.text)}</Text>;
+  }
+  if (row.kind === "quote") return <Text key={key} color="gray">{renderInlineMarkdown(row.text)}</Text>;
+  if (row.kind === "table") return <Text key={key} color="cyan">{renderInlineMarkdown(row.text)}</Text>;
+  return <Text key={key} color={foreground}>{renderInlineMarkdown(row.text)}</Text>;
+};
+
+export const DocumentationViewer: React.FC<DocumentationViewerProps> = React.memo(({onClose, selectedDoc}) => {
+  const theme = themeManager.getCurrentTheme();
+  const {stdin} = useStdin();
+  const [selectedIndex, setSelectedIndex] = useState(() => Math.min(Math.max((selectedDoc ?? 1) - 1, 0), documents.length - 1));
+  const [viewMode, setViewMode] = useState<"list" | "view">(selectedDoc ? "view" : "list");
+  const [documentContent, setDocumentContent] = useState("");
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const [loading, setLoading] = useState(false);
+
+  const rows = useMemo(() => tokenizeMarkdown(documentContent), [documentContent]);
+  const linesPerPage = 20;
+  const maxScroll = Math.max(0, rows.length - linesPerPage);
+
+  useEffect(() => {
+    if (viewMode !== "view") return;
+    let cancelled = false;
+    setLoading(true);
+    setScrollOffset(0);
+    void (async () => {
+      const content = await findDocument(documents[selectedIndex].file) ?? await fallbackContent(documents[selectedIndex].file);
+      if (!cancelled) {
+        setDocumentContent(content);
+        setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedIndex, viewMode]);
+
+  const handleNavigation = useCallback((input: string, key: Record<string, boolean> = {}) => {
+    if (key.escape || (key.ctrl && input === "c")) {
+      if (viewMode === "view") {
+        setViewMode("list");
+        setDocumentContent("");
       } else {
         onClose();
       }
       return;
     }
 
-    if (viewMode === 'list') {
-      if (key.upArrow) {
-        setSelectedIndex(prev => prev > 0 ? prev - 1 : documents.length - 1);
-      } else if (key.downArrow) {
-        setSelectedIndex(prev => prev < documents.length - 1 ? prev + 1 : 0);
-      } else if (key.return) {
-        setViewMode('view');
-      }
-    } else {
-      // Document view mode
-      const linesPerPage = 20;
-      const totalLines = documentContent.split('\n').length;
-      
-      if (key.upArrow || input === 'k') {
-        setScrollOffset(prev => Math.max(0, prev - 1));
-      } else if (key.downArrow || input === 'j') {
-        setScrollOffset(prev => Math.min(totalLines - linesPerPage, prev + 1));
-      } else if (key.pageDown) {
-        setScrollOffset(prev => Math.min(totalLines - linesPerPage, prev + linesPerPage));
-      } else if (key.pageUp) {
-        setScrollOffset(prev => Math.max(0, prev - linesPerPage));
-      } else if (input === 'g') {
-        setScrollOffset(0); // Go to top
-      } else if (input === 'G') {
-        setScrollOffset(Math.max(0, totalLines - linesPerPage)); // Go to bottom
-      }
+    if (viewMode === "list") {
+      if (key.upArrow) setSelectedIndex((previous) => previous > 0 ? previous - 1 : documents.length - 1);
+      if (key.downArrow) setSelectedIndex((previous) => previous < documents.length - 1 ? previous + 1 : 0);
+      if (key.leftArrow) setSelectedIndex((previous) => previous > 0 ? previous - 1 : documents.length - 1);
+      if (key.rightArrow) setSelectedIndex((previous) => previous < documents.length - 1 ? previous + 1 : 0);
+      if (key.return) setViewMode("view");
+      return;
     }
-  }, { isActive: true });
 
-  const renderDocumentList = () => (
+    if (key.leftArrow || key.rightArrow) {
+      setSelectedIndex((previous) => {
+        if (key.leftArrow) return previous > 0 ? previous - 1 : documents.length - 1;
+        return previous < documents.length - 1 ? previous + 1 : 0;
+      });
+      setDocumentContent("");
+      setScrollOffset(0);
+      return;
+    }
+
+    if (key.upArrow || input === "k") setScrollOffset((previous) => Math.max(0, previous - 1));
+    if (key.downArrow || input === "j") setScrollOffset((previous) => Math.min(maxScroll, previous + 1));
+    if (key.pageUp) setScrollOffset((previous) => Math.max(0, previous - linesPerPage));
+    if (key.pageDown) setScrollOffset((previous) => Math.min(maxScroll, previous + linesPerPage));
+    if (input === "g") setScrollOffset(0);
+    if (input === "G") setScrollOffset(maxScroll);
+  }, [maxScroll, onClose, viewMode]);
+
+  useEffect(() => {
+    let pendingInput = "";
+    const sequences: Array<[string, string, Record<string, boolean>]> = [
+      ["\u001B[5~", "", {pageUp: true}],
+      ["\u001B[6~", "", {pageDown: true}],
+      ["\u001B[A", "", {upArrow: true}],
+      ["\u001B[B", "", {downArrow: true}],
+      ["\u001B[C", "", {rightArrow: true}],
+      ["\u001B[D", "", {leftArrow: true}],
+    ];
+
+    const processInput = () => {
+      while (pendingInput.length > 0) {
+        const matchingSequence = sequences.find(([sequence]) => pendingInput.startsWith(sequence));
+        if (matchingSequence) {
+          const [sequence, input, key] = matchingSequence;
+          pendingInput = pendingInput.slice(sequence.length);
+          handleNavigation(input, key);
+          continue;
+        }
+
+        if (pendingInput.startsWith("\u001B")) {
+          const isPartialSequence = pendingInput.length > 1
+            && sequences.some(([sequence]) => sequence.startsWith(pendingInput));
+          if (isPartialSequence) return;
+          pendingInput = pendingInput.slice(1);
+          handleNavigation("", {escape: true});
+          continue;
+        }
+
+        const input = pendingInput[0];
+        pendingInput = pendingInput.slice(1);
+        handleNavigation(input, {return: input === "\r" || input === "\n", ctrl: input === "\u0003"});
+      }
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      pendingInput += chunk.toString();
+      processInput();
+    };
+
+    stdin.on("data", onData);
+    return () => {
+      stdin.removeListener("data", onData);
+    };
+  }, [handleNavigation, stdin]);
+
+  const renderList = () => (
     <Box flexDirection="column">
-      <Box marginBottom={1}>
-        <Text color={theme.primary} bold>■ Cyber-AutoAgent Documentation</Text>
-      </Box>
-      
+      <Box marginBottom={1}><Text color={theme.primary} bold>■ Cyber-AutoAgent Documentation</Text></Box>
       <Box borderStyle="single" borderColor={theme.accent} paddingX={1} flexDirection="column">
         <Text color={theme.muted}>Select a document to read:</Text>
         <Box marginTop={1} />
-        
-        {documents.map((doc, index) => (
-          <Box key={index} marginBottom={1}>
+        {documents.map((document, index) => (
+          <Box key={document.file} marginBottom={1}>
             <Text color={index === selectedIndex ? theme.primary : theme.foreground}>
-              {index === selectedIndex ? '▶ ' : '  '}
-              {index + 1}. {doc.name}
+              {index === selectedIndex ? "▶ " : "  "}{index + 1}. {document.name}
             </Text>
-            <Text color={theme.muted}>
-              {'     '}{doc.description}
-            </Text>
+            <Text color={theme.muted}>{"     "}{document.description}</Text>
           </Box>
         ))}
       </Box>
-      
-      <Box marginTop={1}>
-        <Text color={theme.muted}>
-          Use ↑↓ to navigate, Enter to read, Esc to exit
-        </Text>
-      </Box>
+      <Box marginTop={1}><Text color={theme.muted}>Use ↑↓/←→ to navigate, Enter to read, Esc to exit</Text></Box>
     </Box>
   );
 
-  const renderDocumentView = () => {
-    if (loading) {
-      return (
-        <Box>
-          <Text color={theme.info}>Loading document...</Text>
-        </Box>
-      );
-    }
-
-    if (error) {
-      return (
-        <Box flexDirection="column">
-          <Text color="red">Error: {error}</Text>
-          <Text color={theme.muted}>Press Esc to go back</Text>
-        </Box>
-      );
-    }
-
-    const lines = documentContent.split('\n');
-    const visibleLines = lines.slice(scrollOffset, scrollOffset + 20);
-    const currentLine = scrollOffset + 1;
-    const totalLines = lines.length;
-    const scrollPercentage = Math.round((currentLine / totalLines) * 100);
-
+  const renderDocument = () => {
+    if (loading) return <Text color={theme.info}>Loading document...</Text>;
+    const visibleRows = rows.slice(scrollOffset, scrollOffset + linesPerPage);
+    const currentRow = rows.length === 0 ? 0 : scrollOffset + 1;
+    const percentage = rows.length === 0 ? 0 : Math.round((currentRow / rows.length) * 100);
     return (
       <Box flexDirection="column">
-        {/* Header */}
-        <Box 
-          borderStyle="single" 
-          borderColor={theme.accent} 
-          paddingX={1} 
-          marginBottom={1}
-          justifyContent="space-between"
-        >
-          <Text color={theme.primary} bold>
-            ▎{documents[selectedIndex].name}
-          </Text>
-          <Text color={theme.muted}>
-            Line {currentLine}/{totalLines} ({scrollPercentage}%)
-          </Text>
+        <Box borderStyle="single" borderColor={theme.accent} paddingX={1} marginBottom={1} justifyContent="space-between">
+          <Text color={theme.primary} bold>▎{documents[selectedIndex].name}</Text>
+          <Text color={theme.muted}>Row {currentRow}/{rows.length} ({percentage}%)</Text>
         </Box>
-
-        {/* Content */}
         <Box flexDirection="column" paddingX={1}>
-          {visibleLines.map((line, index) => (
-            <Text key={index} color={theme.foreground}>
-              {formatMarkdownLine(line)}
-            </Text>
-          ))}
+          {visibleRows.map((row, index) => renderRow(row, `${scrollOffset + index}`, theme.foreground))}
         </Box>
-
-        {/* Footer */}
         <Box marginTop={1} paddingX={1}>
-          <Text color={theme.muted}>
-            ↑↓/jk: scroll | PgUp/PgDn: page | g/G: top/bottom | Esc: back to list
-          </Text>
+          <Text color={theme.muted}>↑↓/jk: scroll | ←→: document | PgUp/PgDn: page | g/G: top/bottom | Esc: back to list</Text>
         </Box>
       </Box>
     );
   };
 
-  // Simple markdown formatting
-  const formatMarkdownLine = (line: string): string => {
-    // Headers
-    if (line.startsWith('# ')) return `\n${line.substring(2).toUpperCase()}\n${'═'.repeat(line.length - 2)}`;
-    if (line.startsWith('## ')) return `\n${line.substring(3)}\n${'─'.repeat(line.length - 3)}`;
-    if (line.startsWith('### ')) return `• ${line.substring(4)}`;
-    
-    // Code blocks
-    if (line.startsWith('```')) return '─'.repeat(50);
-    
-    // Lists
-    if (line.startsWith('- ')) return `  • ${line.substring(2)}`;
-    if (line.match(/^\d+\. /)) return `  ${line}`;
-    
-    // Bold (simple replacement)
-    line = line.replace(/\*\*(.*?)\*\*/g, '$1');
-    
-    return line;
-  };
-
   return (
     <Box flexDirection="column" flexGrow={1}>
-      <Box 
-        flexDirection="column" 
-        padding={1}
-        borderStyle="round"
-        borderColor={theme.accent}
-        marginTop={1}
-      >
-        {viewMode === 'list' ? renderDocumentList() : renderDocumentView()}
+      <Box flexDirection="column" padding={1} borderStyle="round" borderColor={theme.accent} marginTop={1}>
+        {viewMode === "list" ? renderList() : renderDocument()}
       </Box>
     </Box>
   );
 });
 
-DocumentationViewer.displayName = 'DocumentationViewer';
+DocumentationViewer.displayName = "DocumentationViewer";

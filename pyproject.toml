@@ -20,14 +20,13 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: System :: Systems Administration",
     "Environment :: Console"
 ]
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "strands-agents[ollama,otel,litellm]~=1.47.0",
     "strands-agents-tools~=0.8.3",
@@ -99,7 +98,7 @@ include = ["*"]
 
 [tool.black]
 line-length = 120
-target-version = ['py310']
+target-version = ['py312']
 include = '\.pyi?$'
 extend-exclude = '''
 /(

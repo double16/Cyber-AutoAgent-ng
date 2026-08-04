@@ -28,7 +28,7 @@ containerManager.getRunningCountForServices = jest.fn(async () => ({
 }));
 
 const pythonService = {
-  checkPythonVersion: jest.fn(async () => ({ installed: true, version: '3.11.8' })),
+  checkPythonVersion: jest.fn(async () => ({ installed: true, version: '3.12.8' })),
   setupPythonEnvironment: jest.fn(async (onMessage?: (message: string) => void) => {
     onMessage?.('Installing dependencies');
   }),
@@ -104,13 +104,13 @@ describe('SetupService', () => {
     const service = new SetupService();
     pythonService.checkPythonVersion.mockResolvedValueOnce({
       installed: false,
-      error: 'Python 3.11 missing',
+      error: 'Python 3.12 missing',
     } as never);
 
     const pythonResult = await service.setupDeploymentMode('local-cli');
     expect(pythonResult).toEqual({
       success: false,
-      error: 'Python 3.11 missing',
+      error: 'Python 3.12 missing',
       deploymentMode: 'local-cli',
     });
 
@@ -201,7 +201,7 @@ describe('SetupService', () => {
 
     expect(SetupService.getDeploymentModeInfo('local-cli')).toEqual(expect.objectContaining({
       name: 'Local CLI',
-      requirements: expect.arrayContaining(['Python 3.11+']),
+      requirements: expect.arrayContaining(['Python 3.12+']),
     }));
     expect(SetupService.getDeploymentModeInfo('single-container')).toEqual(expect.objectContaining({
       name: 'Single Container',

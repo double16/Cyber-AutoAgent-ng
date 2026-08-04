@@ -111,7 +111,7 @@ describe('deployment and health services', () => {
     const detector = new DeploymentDetector();
     existingDirs.add(`${process.cwd()}/.venv`);
     execResponses = [
-      { match: 'python3 --version', stdout: 'Python 3.11.8\n' },
+      { match: 'python3 --version', stdout: 'Python 3.12.8\n' },
       { match: 'docker info', stdout: 'ok' },
       { match: 'docker ps names', stdout: 'cyber-autoagent\ncyber-langfuse\ncyber-langfuse-postgres\n' },
     ];

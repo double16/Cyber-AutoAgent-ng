@@ -18,7 +18,7 @@ jest.unstable_mockModule('../../../src/contexts/ConfigContext.js', () => ({
 }));
 
 const pythonService = {
-  checkPythonVersion: jest.fn(async () => ({ installed: true, version: '3.11.8' })),
+  checkPythonVersion: jest.fn(async () => ({ installed: true, version: '3.12.8' })),
   setupPythonEnvironment: jest.fn(async (onMessage?: (message: string) => void) => {
     onMessage?.('Creating virtual environment');
     onMessage?.('Installing dependencies');
@@ -147,7 +147,7 @@ describe('InitializationFlow', () => {
     await wait(120);
     expect(pythonService.checkPythonVersion).toHaveBeenCalled();
     expect(pythonService.setupPythonEnvironment).toHaveBeenCalled();
-    expect(textFromTree(view.toJSON())).toContain('Python 3.11.8 detected');
+    expect(textFromTree(view.toJSON())).toContain('Python 3.12.8 detected');
     expect(textFromTree(view.toJSON())).toContain('Installing dependencies');
 
     await wait(1600);
@@ -182,7 +182,7 @@ describe('InitializationFlow', () => {
     const onComplete = jest.fn();
     pythonService.checkPythonVersion.mockResolvedValueOnce({
       installed: false,
-      error: 'Python 3.11+ is required',
+      error: 'Python 3.12+ is required',
     } as never);
 
     let view!: ReactTestRenderer;
@@ -195,20 +195,20 @@ describe('InitializationFlow', () => {
     await wait(120);
 
     expect(textFromTree(view.toJSON())).toContain('Setup Failed');
-    expect(textFromTree(view.toJSON())).toContain('Python 3.11 or higher is required');
+    expect(textFromTree(view.toJSON())).toContain('Python 3.12 or higher is required');
 
     sendInput('b');
     expect(textFromTree(view.toJSON())).toContain('Choose Your Deployment Mode');
 
     pythonService.checkPythonVersion.mockResolvedValueOnce({
       installed: false,
-      error: 'Python 3.11+ is required',
+      error: 'Python 3.12+ is required',
     } as never);
     sendInput('', { return: true });
     await wait(120);
     expect(textFromTree(view.toJSON())).toContain('Setup Failed');
 
-    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.11.8' } as never);
+    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.12.8' } as never);
     sendInput('r');
     await wait(120);
     expect(pythonService.checkPythonVersion).toHaveBeenCalledTimes(3);
@@ -271,9 +271,9 @@ describe('InitializationFlow', () => {
     sendInput('', { return: true });
     await wait(120);
 
-    expect(textFromTree(view.toJSON())).toContain('Python 3.11+ is not installed');
+    expect(textFromTree(view.toJSON())).toContain('Python 3.12+ is not installed');
 
-    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.11.8' } as never);
+    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.12.8' } as never);
     pythonService.setupPythonEnvironment.mockRejectedValueOnce(new Error('No requirements.txt'));
     sendInput('r');
     await wait(120);

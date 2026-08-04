@@ -162,7 +162,7 @@ export class PythonExecutionService extends EventEmitter {
     const userHome = process.env.HOME || process.env.USERPROFILE || '';
     const condaPy = process.env.CONDA_PREFIX ? `${process.env.CONDA_PREFIX}/bin/python` : undefined;
 
-    const versioned = ['3.12', '3.11', '3.10'];
+    const versioned = ['3.12', '3.13'];
     const baseNames = [
       ...versioned.map(v => `python3.${v.split('.')[1]}`),
       'python3',
@@ -188,7 +188,7 @@ export class PythonExecutionService extends EventEmitter {
           `${userHome}/.asdf/shims/python`,
         ]
       : [];
-    const windowsPy = isWindows ? ['py -3.12', 'py -3.11', 'py -3.10', 'py -3', 'py'] : [];
+    const windowsPy = isWindows ? ['py -3.12', 'py -3'] : [];
 
     const candidates = [
       ...(override ? [override] : []),
@@ -224,14 +224,14 @@ export class PythonExecutionService extends EventEmitter {
         }
         const major = parseInt(m[1]);
         const minor = parseInt(m[2]);
-        const ok = major > 3 || (major === 3 && minor >= 10);
+        const ok = major > 3 || (major === 3 && minor >= 12);
         detections.push({ cmd, versionStr: versionLine, major, minor, ok });
       } catch {
         // Ignore failures and continue to next candidate
       }
     }
 
-    // Choose the highest version that satisfies >= 3.10
+    // Choose the highest version that satisfies >= 3.12
     let best: Detected | undefined = undefined;
     for (const d of detections) {
       if (!d.ok || d.major === undefined || d.minor === undefined) continue;
@@ -260,7 +260,7 @@ export class PythonExecutionService extends EventEmitter {
       return { installed: true, version: best.versionStr };
     }
 
-    return { installed: false, error: 'Python 3.11+ is required but not found' };
+    return { installed: false, error: 'Python 3.12+ is required but not found' };
   }
   
   /**
@@ -465,7 +465,7 @@ export class PythonExecutionService extends EventEmitter {
     const status = await this.checkEnvironmentStatus();
 
     if (!status.pythonInstalled) {
-      say('[ERR] Python 3.11+ not found');
+      say('[ERR] Python 3.12+ not found');
       ok = false;
     } else {
       say(`[OK] Python detected: ${status.pythonVersion}`);
@@ -518,7 +518,7 @@ export class PythonExecutionService extends EventEmitter {
       const status = await this.checkEnvironmentStatus();
       
       if (!status.pythonInstalled) {
-        throw new Error('Python 3.11+ is required but not found. Please install Python first.');
+        throw new Error('Python 3.12+ is required but not found. Please install Python first.');
       }
       
       progress(`[OK] Python ${status.pythonVersion} found`);
@@ -535,7 +535,7 @@ export class PythonExecutionService extends EventEmitter {
         await execAsync(`${this.pythonCommand} -m venv "${this.venvPath}"`);
         progress('[OK] Virtual environment recreated');
       } else {
-        // Validate venv Python version >= 3.10
+        // Validate venv Python version >= 3.12
         try {
           const { stdout: venvVerOut } = await execAsync(`"${this.pythonPath}" --version`);
           const versionStr = venvVerOut.trim();
@@ -544,7 +544,7 @@ export class PythonExecutionService extends EventEmitter {
             const vMaj = parseInt(m[1]);
             const vMin = parseInt(m[2]);
             if (!(vMaj > 3 || (vMaj === 3 && vMin >= 11))) {
-              progress('[INFO] Recreating virtual environment with Python 3.11+...');
+              progress('[INFO] Recreating virtual environment with Python 3.12+...');
               await execAsync(`rm -rf "${this.venvPath}"`);
               await execAsync(`${this.pythonCommand} -m venv "${this.venvPath}"`);
               progress('[OK] Virtual environment recreated with compatible Python');

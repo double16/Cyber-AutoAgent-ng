@@ -195,14 +195,8 @@ task work and handles separate advisory checkpoints before pending task activati
 
 ### Security Tool Access
 
-Security tools are accessed **via shell**, not as direct tools:
-
-```python
-# Agent uses shell tool to run security commands
-shell("nmap -sV 192.168.1.1")
-shell("sqlmap -u 'http://target.com?id=1' --batch")
-shell("nikto -h target.com")
-```
+Security utilities are normally reached through the restricted shell capability. The active role receives only the
+capabilities allowed for its task, and command output is captured as operation evidence.
 
 ### MCP Tool Access
 
@@ -215,39 +209,99 @@ sequenceDiagram
     participant User
     participant Controller as Python Controller
     participant State as SQLite Plan/Task Store
-    participant Builder as Prompt Builder Agent
-    participant Worker as Task Worker Agent
-    participant Eval as Evaluator Agent
+    participant PlanActor as Plan Creator Agent
+    participant PlanCritic as Plan Critic Agent
+    participant TaskCreator as Task Creator Agent
+    participant PromptActor as Task Prompt Builder Agent
+    participant PromptCritic as Task Prompt Critic Agent
+    participant Worker as Task Executor Agent
+    participant Eval as Task Evaluator Agent
+    participant PhaseEval as Phase Evaluator Agent
+    participant ReportActor as Report Actor Agent
+    participant ReportCritic as Report Critic Agent
     participant Tools
     participant Memory as Mem0 Memory
-    
+
     User->>Controller: Start Assessment
-    Controller->>State: Load or create plan
-    
-    loop Assessment Cycle
-        Controller->>State: Select active phase/task
-        alt No task candidates
-            Controller->>Worker: Run task_creator
-            Worker->>Tools: create_tasks when needed
-            Tools-->>State: Persist tasks
-        end
 
-        Controller->>Builder: Build task-execution prompt
-        Builder-->>Controller: Prompt + selected optional tools/memory
-        Controller->>Worker: Execute active task
-        Worker->>Tools: shell/http/MCP/module tools
-        Worker->>Memory: Store observations/findings
-        Controller->>Eval: Evaluate task or phase
-        Eval-->>Controller: Structured status decision
-        Controller->>State: Apply status and advance loop
-
-        alt Phase soft budget reached
-            Controller->>Eval: Evaluate phase before activating more pending tasks
+    Controller->>State: Load existing plan
+    alt No plan exists
+        Controller->>PlanActor: Create structured plan
+        PlanActor-->>Controller: Draft phases and acceptance criteria
+        loop Bounded plan actor/critic refinement
+            Controller->>PlanCritic: Review plan for coverage and constraints
+            PlanCritic-->>Controller: Approve or provide feedback
+            alt Critic rejects and reviews remain
+                Controller->>PlanActor: Revise plan using feedback
+                PlanActor-->>Controller: Revised plan
+            else Critic approves
+                Controller->>State: Persist approved plan
+            end
         end
     end
-    
+
+    loop Python-owned assessment cycle
+        Controller->>State: Select active phase and task
+        alt No actionable task exists
+            Controller->>TaskCreator: Propose missing or follow-up tasks
+            TaskCreator->>Tools: create_tasks when permitted
+            Tools-->>State: Validate and persist tasks
+            opt Task-creation correction required
+                Controller->>TaskCreator: Correct rejected task proposals
+            end
+        else Active task exists
+            Controller->>PromptActor: Build task-execution prompt
+            PromptActor-->>Controller: Draft prompt, memory, and tools
+            loop Bounded prompt actor/critic refinement
+                Controller->>PromptCritic: Review prompt scope and safety
+                PromptCritic-->>Controller: Approve or provide feedback
+                alt Critic rejects and reviews remain
+                    Controller->>PromptActor: Revise prompt using feedback
+                    PromptActor-->>Controller: Revised prompt
+                else Critic approves
+                    Controller->>Worker: Execute approved task prompt
+                end
+            end
+
+            loop Bounded task actor/evaluator cycle
+                Worker->>Tools: Use restricted shell, HTTP, MCP, or module tools
+                Worker->>Memory: Store observations, findings, and evidence
+                Controller->>Eval: Evaluate acceptance, evidence, and status
+                Eval-->>Controller: done, partial_failure, blocked, or correction
+                alt Evaluator requests correction
+                    Controller->>Worker: Continue with bounded evaluator guidance
+                else Evaluator returns terminal status
+                    Controller->>State: Persist task status and evidence
+                end
+            end
+        end
+
+        opt Phase checkpoint or soft budget reached
+            Controller->>PhaseEval: Evaluate phase evidence and remaining work
+            PhaseEval-->>Controller: Continue, close, or partial_failure
+            Controller->>State: Advance or close phase
+        end
+    end
+
+    Controller->>ReportActor: Generate report sections
+    ReportActor-->>Controller: Draft section
+    loop Bounded report actor/critic refinement per section
+        Controller->>ReportCritic: Review report accuracy and requirements
+        ReportCritic-->>Controller: Approve or provide feedback
+        alt Critic rejects and cycles remain
+            Controller->>ReportActor: Revise section using feedback
+            ReportActor-->>Controller: Revised section
+        else Critic approves or cycle limit is reached
+            Controller->>State: Persist final section and critique metadata
+        end
+    end
     Controller->>User: completion termination_reason event + Final Report
 ```
+
+The actor/critic loops are bounded by separate configuration values: plan refinement, task-prompt refinement, task
+execution cycles plus evaluator corrections, and report refinement cycles. The controller remains the source of truth for
+state transitions; agents propose plans, prompts, evidence, evaluations, or revisions but cannot directly activate or
+close phases and tasks.
 
 ## Role-Agent Reasoning
 
