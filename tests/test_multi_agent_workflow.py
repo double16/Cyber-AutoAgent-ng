@@ -606,6 +606,56 @@ def test_task_evaluator_completed_alias_does_not_abort_workflow():
     assert decision.status == "done"
 
 
+def test_task_evaluator_retries_schema_valid_non_decision_response():
+    plan = _plan()
+    task = Task(task_uid="schema-retry", title="Assess", objective="run", phase=1, status="active")
+    state = FakeState(plan, tasks=[task])
+    responses = iter([
+        '{"action":"record_task_acceptance","action_input":{}}',
+        '{"status":"done","reason":"acceptance is supported"}',
+    ])
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: next(responses),
+    )
+
+    decision = controller._evaluate_task(plan, plan.phases[0], task)
+
+    assert decision.status == "done"
+    activities = [event for event in controller.runtime.callback_handler.events if event["type"] == "workflow_activity"]
+    assert [(event["status"], event["attempt"]) for event in activities] == [
+        ("started", 1),
+        ("failed", 1),
+        ("started", 2),
+        ("completed", 2),
+    ]
+
+
+def test_task_evaluator_schema_failure_falls_back_to_partial_failure():
+    plan = _plan()
+    task = Task(task_uid="schema-fallback", title="Assess", objective="run", phase=1, status="active")
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: '{"action":"record_task_acceptance","action_input":{}}',
+    )
+
+    decision = controller._evaluate_task(plan, plan.phases[0], task)
+
+    assert decision.status == "partial_failure"
+    assert "received keys: action, action_input" in decision.reason
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["role"] == "task_evaluator"
+    assert event["task_uid"] == "schema-fallback"
+    assert event["source"] == "schema_validation"
+    assert event["received_keys"] == ["action", "action_input"]
+
+
 def test_pending_finding_validation_is_prioritized_and_events_include_scope():
     plan = _plan()
     standard = Task("task-1", "Standard", "Do standard work", 1, "pending", created_at="1")
@@ -3244,11 +3294,16 @@ def test_phase_evaluator_malformed_output_emits_deterministic_partial_failure_fa
     decision = controller._evaluate_phase_with_policy(plan, plan.phases[0])
 
     assert decision.status == "partial_failure"
-    assert "could not be parsed" in decision.reason
     event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    if response == "not json":
+        assert "could not be parsed" in decision.reason
+        assert event["error_type"] == "WorkflowInvariantError"
+    else:
+        assert "required decision schema" in decision.reason
+        assert event["source"] == "schema_validation"
+        assert event["error_type"] == "ValueError"
     assert event["phase_id"] == 1
     assert event["status"] == "partial_failure"
-    assert event["error_type"] == "WorkflowInvariantError"
     assert len(event["error_fingerprint"]) == 64
 
 
@@ -6351,7 +6406,7 @@ def test_invalid_task_prompt_builder_json_marks_task_partial_failure():
     assert "task_prompt_builder returned invalid JSON" in state.tasks[0].status_reason
 
 
-def test_controller_rejects_invalid_evaluator_status():
+def test_controller_converts_invalid_evaluator_status_to_partial_failure():
     state = FakeState(_plan(), tasks=[Task(task_uid="active", title="Active", objective="run", phase=1, status="active")])
 
     def text_runner(role, prompt, tools, system_prompt):
@@ -6370,8 +6425,11 @@ def test_controller_rejects_invalid_evaluator_status():
         max_iterations=1,
     )
 
-    with pytest.raises(WorkflowInvariantError, match="Invalid workflow decision"):
-        controller.run()
+    decision = controller._evaluate_task(state.plan, state.plan.phases[0], state.tasks[0])
+
+    assert decision.status == "partial_failure"
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["source"] == "schema_validation"
 
 
 def test_json_text_agent_retries_invalid_json_by_default():
@@ -6446,7 +6504,7 @@ def test_json_text_agent_raises_after_configured_retries():
     assert calls == ["task_prompt_builder", "task_prompt_builder", "task_prompt_builder"]
 
 
-def test_json_text_agent_does_not_retry_valid_json_with_invalid_status():
+def test_json_text_agent_retries_valid_json_with_invalid_status_and_falls_back():
     task = Task(task_uid="active", title="Active", objective="run", phase=1, status="active")
     calls = []
 
@@ -6461,10 +6519,10 @@ def test_json_text_agent_does_not_retry_valid_json_with_invalid_status():
         text_runner=text_runner,
     )
 
-    with pytest.raises(WorkflowInvariantError, match="Invalid workflow decision"):
-        controller._evaluate_task(_plan(), _plan().phases[0], task)
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task)
 
-    assert calls == ["task_evaluator"]
+    assert decision.status == "partial_failure"
+    assert calls == ["task_evaluator", "task_evaluator"]
 
 
 def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):

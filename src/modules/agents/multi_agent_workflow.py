@@ -92,7 +92,7 @@ from modules.tools.memory import (
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.config.taxonomy_catalog import get_taxonomy_catalog, validate_taxonomy_mappings
 from modules.tools.tool_catalog import get_shell_command_help_context, get_shell_command_specs
-from modules.utils.json_repair import parse_json_response
+from modules.utils.json_repair import parse_json_response, parse_json_response_with_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -2944,6 +2944,9 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
             ),
             self._evaluator_tools(),
             self._task_evaluator_system_prompt(),
+            data_validator=lambda payload: self._validate_evaluator_decision_payload(
+                payload, allowed=("done", "partial_failure", "blocked")
+            ),
             cycle=cycle,
             cycle_total=cycle_total,
             evaluator_fallback_context={
@@ -3135,6 +3138,9 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
                 self._phase_evaluator_prompt(plan, phase) + context,
                 self._evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
+                data_validator=lambda payload: self._validate_evaluator_decision_payload(
+                    payload, allowed=("continue", *EVALUATOR_PLAN_STATUSES)
+                ),
                 evaluator_fallback_context={
                     "phase_id": phase.id,
                     "phase_title": phase.title,
@@ -3172,6 +3178,14 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
                 self._phase_evaluator_prompt(plan, phase, hard_cap=hard_cap),
                 self._evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
+                data_validator=lambda payload: self._validate_evaluator_decision_payload(
+                    payload,
+                    allowed=(
+                        EVALUATOR_PLAN_STATUSES
+                        if hard_cap is not None
+                        else ("continue", *EVALUATOR_PLAN_STATUSES)
+                    ),
+                ),
                 evaluator_fallback_context={
                     "phase_id": phase.id,
                     "phase_title": phase.title,
@@ -4454,6 +4468,8 @@ Allowed evidence references:
         last_response = ""
         last_error: Optional[Exception] = None
         last_failure_was_parse = False
+        last_failure_was_schema = False
+        last_response_keys: List[str] = []
         for attempt in range(self.json_retries + 1):
             activity_attempt = attempt + 1
             activity_total = self.json_retries + 1
@@ -4479,6 +4495,7 @@ Allowed evidence references:
                 )
                 last_error = error
                 last_failure_was_parse = False
+                last_failure_was_schema = False
                 classification = getattr(error, "max_token_classification", None)
                 kind = getattr(classification, "kind", "output_truncation")
                 ratio = float(getattr(classification, "repetition_ratio", 0.0) or 0.0)
@@ -4495,7 +4512,16 @@ Allowed evidence references:
                 continue
             last_response = response
             try:
-                data = extract_json_object(response)
+                parsed_response = parse_json_response_with_metadata(response, require_object=True)
+                data = parsed_response.value
+                last_response_keys = sorted(data.keys())
+                if parsed_response.metadata.extracted or parsed_response.metadata.repaired:
+                    self._log_workflow(
+                        "json agent role=%s normalized_response extracted=%s repaired=%s",
+                        role,
+                        parsed_response.metadata.extracted,
+                        parsed_response.metadata.repaired,
+                    )
             except (json.JSONDecodeError, ValueError) as error:
                 self._emit_workflow_activity(
                     role,
@@ -4507,6 +4533,7 @@ Allowed evidence references:
                 )
                 last_error = error
                 last_failure_was_parse = True
+                last_failure_was_schema = False
                 if attempt >= self.json_retries:
                     break
                 self._record_efficiency_correction("json_retry")
@@ -4537,6 +4564,7 @@ Allowed evidence references:
                 )
                 last_error = error
                 last_failure_was_parse = False
+                last_failure_was_schema = True
                 if attempt >= self.json_retries:
                     break
                 self._record_efficiency_correction("json_retry")
@@ -4586,6 +4614,21 @@ Allowed evidence references:
                     self._short(evaluator_fallback_context or {}),
                 )
                 return fallback
+        if role in {"phase_evaluator", "task_evaluator"} and last_failure_was_schema:
+            fallback = self._evaluator_schema_fallback(
+                role,
+                last_error,
+                last_response_keys,
+                evaluator_fallback_context,
+            )
+            self._emit_workflow_event(fallback["event"])
+            self._log_workflow(
+                "evaluator schema fallback role=%s status=partial_failure received_keys=%s context=%s",
+                role,
+                ",".join(last_response_keys) or "none",
+                self._short(evaluator_fallback_context or {}),
+            )
+            return fallback["data"]
         self._log_workflow(
             "json agent role=%s failed attempts=%s error=%s response_excerpt=%s",
             role,
@@ -4622,6 +4665,63 @@ Allowed evidence references:
                 f"{compact[:1000]}"
             ),
         }
+
+    @staticmethod
+    def _evaluator_schema_fallback(
+        role: str,
+        error: Optional[Exception],
+        response_keys: List[str],
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return a conservative evaluator result after schema retries are exhausted."""
+        key_text = ", ".join(response_keys) or "none"
+        error_text = str(error or "invalid evaluator decision schema")
+        reason = (
+            f"{role} response failed the required decision schema after bounded retries; received keys: {key_text}. "
+            f"Existing evidence was preserved and the result was marked partial_failure. Error: {error_text}"
+        )
+        fingerprint = hashlib.sha256(error_text.encode("utf-8", errors="replace")).hexdigest()
+        event = {
+            "type": "evaluator_fallback",
+            "role": role,
+            "status": "partial_failure",
+            "source": "schema_validation",
+            "error_type": error.__class__.__name__ if error else "ValueError",
+            "error_fingerprint": fingerprint,
+            "received_keys": response_keys,
+        }
+        event.update(context or {})
+        return {
+            "data": {"status": "partial_failure", "reason": reason, "instructions": ""},
+            "event": event,
+        }
+
+    @staticmethod
+    def _validate_evaluator_decision_payload(
+        data: Dict[str, Any],
+        *,
+        allowed: tuple[str, ...],
+    ) -> None:
+        """Validate evaluator decision shape before accepting syntactically valid JSON."""
+        if not isinstance(data, dict):
+            raise ValueError("workflow evaluator response must be a JSON object")
+        raw_status = str(data.get("status") or "").strip()
+        if not raw_status:
+            keys = ", ".join(sorted(str(key) for key in data)) or "none"
+            raise ValueError(f"workflow evaluator response requires a non-empty status; received keys: {keys}")
+        status = str(
+            normalize_semantic_enum(
+                raw_status,
+                aliases=WORKFLOW_DECISION_STATUS_ALIASES,
+                field_name="workflow_decision_status",
+                logger=logger,
+            )
+        ).strip()
+        if status not in allowed:
+            raise ValueError(
+                f"workflow evaluator status {raw_status!r} normalized to {status!r}; "
+                f"expected one of {', '.join(allowed)}"
+            )
 
     @staticmethod
     def _json_max_token_retry_prompt(original_prompt: str, classification: str) -> str:
