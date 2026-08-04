@@ -22,9 +22,10 @@ from typing import Any, Callable, Dict, List, Optional
 from strands.handlers import PrintingCallbackHandler
 
 from modules.config.system.logger import get_logger
+from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.handlers.utils import (
     get_output_path,
-    sanitize_target_name,
+    sanitize_target_name, format_duration,
 )
 
 from ...config import get_config_manager
@@ -50,6 +51,44 @@ _DEFAULT_REASONING_DEDUPE_TTL_S = 20.0
 _AGENT_USAGE_CACHE_SIZE = 128
 _AGENT_USAGE_UUID_ATTR = "_caa_agent_event_usage_uuid"
 
+EVALUATION_RESULT_STATUS_ALIASES = {
+    "complete": "completed",
+    "done": "completed",
+    "success": "completed",
+    "successful": "completed",
+    "succeeded": "completed",
+    "finished": "completed",
+    "finished_successfully": "completed",
+    "no_result": "no_results",
+    "empty": "no_results",
+    "no_data": "no_results",
+    "no_scores": "no_results",
+    "fail": "failed",
+    "failure": "failed",
+    "error": "failed",
+    "errored": "failed",
+    "unsuccessful": "failed",
+    "aborted": "failed",
+    "cancelled": "failed",
+    "canceled": "failed",
+    "timeout": "failed",
+    "timed_out": "failed",
+}
+EVALUATION_RESULT_STATUSES = {"completed", "no_results", "failed"}
+
+
+def _normalize_evaluation_result_status(status: str) -> str:
+    """Normalize an overall evaluation result to its canonical wire status."""
+    canonical_status = normalize_semantic_enum(
+        status,
+        aliases=EVALUATION_RESULT_STATUS_ALIASES,
+        field_name="evaluation_result_status",
+        logger=logger,
+    )
+    if canonical_status not in EVALUATION_RESULT_STATUSES:
+        raise ValueError(f"invalid evaluation result status: {status!r}")
+    return canonical_status
+
 # Do not increment action count for planning tools
 _PLANNING_TOOL_NAMES = {
     "create_tasks",
@@ -69,6 +108,14 @@ class _AgentUsageEntry:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cost: float = 0.0
+    inference_time_ms: float = 0.0
+    context_window_tokens: Optional[int] = None
+
+
+@dataclass
+class _ModelEfficiencyEntry:
+    model_calls: int = 0
+    correction_loops: int = 0
 
 
 @dataclass
@@ -108,7 +155,8 @@ class OperationEventCoordinator:
         self.memory_ops = 0
         self.evidence_count = 0
         self.tool_counts: Dict[str, int] = {}
-        self._handler_usage: Dict[str, _AgentUsageEntry] = {}
+        self._handler_usage: Dict[str, tuple[str, str, _AgentUsageEntry]] = {}
+        self._model_efficiency: Dict[tuple[str, str], _ModelEfficiencyEntry] = {}
         self.report_findings = 0
         self.report_observations = 0
         self.report_finding_content_tokens = 0
@@ -157,20 +205,95 @@ class OperationEventCoordinator:
             return None
         return dict(snapshot) if isinstance(snapshot, dict) else None
 
-    def update_usage(self, handler_id: str, entry: _AgentUsageEntry) -> None:
+    def update_usage(
+        self,
+        handler_id: str,
+        entry: _AgentUsageEntry,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+    ) -> None:
         with self._lock:
-            self._handler_usage[handler_id] = entry
+            self._handler_usage[handler_id] = (
+                str(provider_id or "unknown"),
+                str(model_id or "unknown"),
+                entry,
+            )
 
     def current_usage(self) -> _AgentUsageEntry:
         with self._lock:
             total = _AgentUsageEntry()
-            for entry in self._handler_usage.values():
+            for _provider_id, _model_id, entry in self._handler_usage.values():
                 total.input_tokens += int(entry.input_tokens)
                 total.output_tokens += int(entry.output_tokens)
                 total.cache_read_tokens += int(entry.cache_read_tokens)
                 total.cache_write_tokens += int(entry.cache_write_tokens)
                 total.cost += float(entry.cost)
+                total.inference_time_ms += float(entry.inference_time_ms)
             return total
+
+    def record_model_call(self, provider_id: Optional[str], model_id: Optional[str]) -> None:
+        """Record one completed model inference for efficiency accounting."""
+        key = (str(provider_id or "unknown"), str(model_id or "unknown"))
+        with self._lock:
+            entry = self._model_efficiency.setdefault(key, _ModelEfficiencyEntry())
+            entry.model_calls += 1
+
+    def record_efficiency_correction(
+        self,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        category: str,
+    ) -> None:
+        """Record one bounded correction/recovery loop for a model."""
+        del category  # Categories remain available at call sites for auditability.
+        key = (str(provider_id or "unknown"), str(model_id or "unknown"))
+        with self._lock:
+            entry = self._model_efficiency.setdefault(key, _ModelEfficiencyEntry())
+            entry.correction_loops += 1
+
+    def model_usage(self) -> List[Dict[str, Any]]:
+        """Return operation usage grouped by provider and model."""
+        with self._lock:
+            grouped: Dict[tuple[str, str], _AgentUsageEntry] = {}
+            for provider_id, model_id, entry in self._handler_usage.values():
+                key = (provider_id, model_id)
+                aggregate = grouped.setdefault(key, _AgentUsageEntry())
+                aggregate.input_tokens += int(entry.input_tokens)
+                aggregate.output_tokens += int(entry.output_tokens)
+                aggregate.cache_read_tokens += int(entry.cache_read_tokens)
+                aggregate.cache_write_tokens += int(entry.cache_write_tokens)
+                aggregate.cost += float(entry.cost)
+                aggregate.inference_time_ms += float(entry.inference_time_ms)
+                context_window = getattr(entry, "context_window_tokens", None)
+                if isinstance(context_window, int) and context_window > 0:
+                    aggregate.context_window_tokens = max(aggregate.context_window_tokens or 0, context_window)
+
+            for key in self._model_efficiency:
+                grouped.setdefault(key, _AgentUsageEntry())
+
+            rows = []
+            for (provider_id, model_id), entry in sorted(grouped.items()):
+                efficiency = self._model_efficiency.get((provider_id, model_id), _ModelEfficiencyEntry())
+                denominator = efficiency.model_calls + efficiency.correction_loops
+                score = 100.0 if denominator == 0 else 100.0 * efficiency.model_calls / denominator
+                rows.append(
+                    {
+                        "provider": provider_id,
+                        "model": model_id,
+                        "input_tokens": entry.input_tokens,
+                        "output_tokens": entry.output_tokens,
+                        "cache_read_tokens": entry.cache_read_tokens,
+                        "cache_write_tokens": entry.cache_write_tokens,
+                        "total_tokens": entry.input_tokens + entry.output_tokens,
+                        "cost": entry.cost,
+                        "inference_time_ms": entry.inference_time_ms,
+                        "context_window_tokens": entry.context_window_tokens,
+                        "efficiency": score,
+                        "model_calls": efficiency.model_calls,
+                        "correction_loops": efficiency.correction_loops,
+                    }
+                )
+            return rows
 
     def elapsed_seconds(self) -> float:
         with self._lock:
@@ -439,6 +562,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         self.model_id = model_id
         self.specialist_model_id = specialist_model_id or model_id
         self.init_context = init_context or {}
+        self.operation_mode = str(self.init_context.get("operation_mode") or "execution")
 
         # Unified budget caps
         budget_ctx = {}
@@ -488,17 +612,22 @@ class AgentEventHandler(PrintingCallbackHandler):
         # Cache token metrics for prompt caching (Bedrock/Anthropic)
         self._sdk_cache_read_tokens = 0
         self._sdk_cache_write_tokens = 0
+        self._sdk_inference_time_ms = 0.0
         self._aggregate_input_tokens = 0
         self._aggregate_output_tokens = 0
         self._aggregate_cache_read_tokens = 0
         self._aggregate_cache_write_tokens = 0
+        self._aggregate_inference_time_ms = 0.0
         self._aggregate_cost = 0.0
         self._agent_usage_cache: OrderedDict[str, _AgentUsageEntry] = OrderedDict()
         self._agent_usage_cache_size = _AGENT_USAGE_CACHE_SIZE
+        self._efficiency_usage_signatures: Dict[str, tuple[Any, ...]] = {}
+        self._report_efficiency_usage_signature: Optional[tuple[Any, ...]] = None
         self._report_metrics_input_baseline = 0
         self._report_metrics_output_baseline = 0
         self._report_metrics_cache_read_baseline = 0
         self._report_metrics_cache_write_baseline = 0
+        self._report_metrics_inference_time_baseline = 0.0
         # Metrics emission handled by background thread
 
         try:
@@ -819,7 +948,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             "step": self.action_count if step is None else step,
             "progressPercent": self.get_budget_progress(),
             "operation": self.operation_id,
-            "duration": self._format_duration(self._operation_elapsed_seconds()),
+            "duration": format_duration(self._operation_elapsed_seconds()),
         }
         if total_tools is not None:
             event["totalTools"] = total_tools
@@ -880,6 +1009,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             self._handle_completion()
 
         if kwargs.get("error") and "MaxTokensReached" in str(kwargs.get("error")):
+            self.record_efficiency_event("output_token_retry", agent=kwargs.get("agent"))
             self.emit_ui_event(
                 {
                     "type": "error",
@@ -956,6 +1086,9 @@ class AgentEventHandler(PrintingCallbackHandler):
             cache_read_tokens = self._aggregate_cache_read_tokens + self._sdk_cache_read_tokens
             cache_write_tokens = self._aggregate_cache_write_tokens + self._sdk_cache_write_tokens
             cost = self._aggregate_cost
+            inference_time_ms = getattr(self, "_aggregate_inference_time_ms", 0.0) + getattr(
+                self, "_sdk_inference_time_ms", 0.0
+            )
 
             cache = self._agent_usage_cache
             for entry in list(cache.values()):
@@ -964,6 +1097,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 cache_read_tokens += int(entry.cache_read_tokens)
                 cache_write_tokens += int(entry.cache_write_tokens)
                 cost += float(entry.cost)
+                inference_time_ms += float(getattr(entry, "inference_time_ms", 0.0))
 
             return {
                 "input_tokens": input_tokens,
@@ -971,6 +1105,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "cache_read_tokens": cache_read_tokens,
                 "cache_write_tokens": cache_write_tokens,
                 "cost": cost,
+                "inference_time_ms": inference_time_ms,
             }
 
     def _publish_usage_to_coordinator(self) -> None:
@@ -978,6 +1113,14 @@ class AgentEventHandler(PrintingCallbackHandler):
             totals = self._current_usage_totals()
             coordinator = self.coordinator
             if coordinator is not None:
+                provider_id = self.provider_id
+                model_id = self.model_id
+                if self._last_agent is not None:
+                    try:
+                        provider_id = get_provider_from_agent(self._last_agent) or provider_id
+                        model_id = get_model_id_from_agent(self._last_agent) or model_id
+                    except Exception:
+                        pass
                 coordinator.update_usage(
                     self.agent_run_id,
                     _AgentUsageEntry(
@@ -986,10 +1129,72 @@ class AgentEventHandler(PrintingCallbackHandler):
                         cache_read_tokens=int(totals["cache_read_tokens"]),
                         cache_write_tokens=int(totals["cache_write_tokens"]),
                         cost=float(self._compute_total_cost_from_usage()),
+                        inference_time_ms=float(totals["inference_time_ms"]),
+                        context_window_tokens=self._context_window_limit(self._last_agent),
                     ),
+                    provider_id=provider_id,
+                    model_id=model_id,
                 )
         except Exception:
             pass
+
+    def _model_identity(self, agent: Any = None) -> tuple[str, str]:
+        provider_id = self.provider_id
+        model_id = self.model_id
+        if agent is not None:
+            try:
+                provider_id = get_provider_from_agent(agent) or provider_id
+                model_id = get_model_id_from_agent(agent) or model_id
+            except Exception:
+                pass
+        return str(provider_id or "unknown"), str(model_id or "unknown")
+
+    def record_efficiency_event(self, category: str, agent: Any = None) -> None:
+        """Record a correction loop attributed to this handler's active model."""
+        coordinator = self.coordinator
+        if coordinator is None:
+            return
+        provider_id, model_id = self._model_identity(agent or self._last_agent)
+        coordinator.record_efficiency_correction(provider_id, model_id, category)
+
+    def _record_model_call_if_new(self, usage: Dict[str, Any], agent: Any = None) -> None:
+        """Count one inference when cumulative usage advances for an agent."""
+        coordinator = self.coordinator
+        if coordinator is None:
+            return
+        signature = tuple(
+            usage.get(key, 0) or 0
+            for key in (
+                "inputTokens",
+                "outputTokens",
+                "cacheReadInputTokens",
+                "cacheWriteInputTokens",
+            )
+        )
+        if sum(int(value) for value in signature) <= 0:
+            return
+        if agent is not None:
+            identity = self._get_or_assign_agent_usage_uuid(agent)
+            signatures = getattr(self, "_efficiency_usage_signatures", {})
+            if signatures.get(identity) == signature:
+                return
+            signatures[identity] = signature
+            self._efficiency_usage_signatures = signatures
+        elif getattr(self, "_report_efficiency_usage_signature", None) == signature:
+            return
+        else:
+            self._report_efficiency_usage_signature = signature
+        provider_id, model_id = self._model_identity(agent)
+        coordinator.record_model_call(provider_id, model_id)
+
+    @staticmethod
+    def _context_window_limit(agent: Any) -> Optional[int]:
+        """Return the effective context-window limit configured on an agent model."""
+        model = getattr(agent, "model", None)
+        value = getattr(model, "context_window_limit", None)
+        if isinstance(value, (int, float)) and int(value) > 0:
+            return int(value)
+        return None
 
     def _operation_usage_totals(self) -> Dict[str, Any]:
         self._publish_usage_to_coordinator()
@@ -1003,12 +1208,17 @@ class AgentEventHandler(PrintingCallbackHandler):
             "cache_read_tokens": int(usage.cache_read_tokens),
             "cache_write_tokens": int(usage.cache_write_tokens),
             "cost": float(usage.cost),
+            "inference_time_ms": float(usage.inference_time_ms),
         }
 
     def _record_evaluation_usage(self, usage: Dict[str, Any]) -> None:
         """Publish cumulative evaluation usage into the operation metrics total."""
         if self.coordinator is None:
             return
+        self.coordinator.record_model_call(
+            str(usage.get("providerId") or self.provider_id or "unknown"),
+            str(usage.get("modelId") or self.model_id or "unknown"),
+        )
         input_tokens = int(usage.get("inputTokens", 0) or 0)
         output_tokens = int(usage.get("outputTokens", 0) or 0)
         cache_read_tokens = int(usage.get("cacheReadTokens", 0) or 0)
@@ -1028,7 +1238,10 @@ class AgentEventHandler(PrintingCallbackHandler):
                     provider_override=str(usage.get("providerId") or ""),
                     model_id_override=str(usage.get("modelId") or ""),
                 ),
+                inference_time_ms=float(usage.get("inferenceTimeMs", 0.0) or 0.0),
             ),
+            provider_id=str(usage.get("providerId") or self.provider_id or "unknown"),
+            model_id=str(usage.get("modelId") or self.model_id or "unknown"),
         )
         self._emit_estimated_metrics(force=True)
 
@@ -1077,6 +1290,42 @@ class AgentEventHandler(PrintingCallbackHandler):
         if self.coordinator is not None:
             self.coordinator.set_report_items(items, model_id=self.model_id)
 
+    def model_usage(self) -> List[Dict[str, Any]]:
+        """Return provider/model usage rows for final report rendering."""
+        if self.coordinator is None:
+            return []
+        return self.coordinator.model_usage()
+
+    def emit_model_usage_snapshot(self) -> None:
+        """Persist assessment model usage before report generation adds its own calls."""
+        if self.operation_mode == "report_only":
+            return
+        totals = self._operation_usage_totals()
+        input_tokens = int(totals["input_tokens"])
+        output_tokens = int(totals["output_tokens"])
+        self.emit_ui_event(
+            {
+                "type": "model_usage_snapshot",
+                "stage": "assessment_complete",
+                "metrics": {
+                    "modelUsage": self.model_usage(),
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "totalTokens": input_tokens + output_tokens,
+                    "cost": float(totals["cost"]),
+                    "duration": format_duration(self.total_operation_time_seconds()),
+                },
+            }
+        )
+        if hasattr(self.emitter, "flush_immediate"):
+            self.emitter.flush_immediate()
+
+    def total_operation_time_seconds(self) -> float:
+        """Return wall-clock elapsed time for the complete operation."""
+        if self.coordinator is not None:
+            return self.coordinator.elapsed_seconds()
+        return self._operation_elapsed_seconds()
+
     def mark_report_step_started(self) -> None:
         if self.coordinator is not None:
             self.coordinator.mark_report_step_started()
@@ -1085,6 +1334,8 @@ class AgentEventHandler(PrintingCallbackHandler):
             self._report_metrics_output_baseline = 0
             self._report_metrics_cache_read_baseline = 0
             self._report_metrics_cache_write_baseline = 0
+            self._report_metrics_inference_time_baseline = 0.0
+            self._report_efficiency_usage_signature = None
 
     def record_report_metrics(self, event_loop_metrics: Any, agent: Any = None) -> None:
         self.process_metrics(event_loop_metrics, agent=agent)
@@ -1106,6 +1357,9 @@ class AgentEventHandler(PrintingCallbackHandler):
             self._aggregate_output_tokens += int(entry.output_tokens)
             self._aggregate_cache_read_tokens += int(entry.cache_read_tokens)
             self._aggregate_cache_write_tokens += int(entry.cache_write_tokens)
+            self._aggregate_inference_time_ms = getattr(self, "_aggregate_inference_time_ms", 0.0) + float(
+                getattr(entry, "inference_time_ms", 0.0)
+            )
             self._aggregate_cost += float(entry.cost)
 
     def _capture_agent_usage(self, agent: Any, usage: Dict[str, Any]) -> None:
@@ -1125,12 +1379,16 @@ class AgentEventHandler(PrintingCallbackHandler):
                 agent=agent,
             )
 
+            inference_time_ms = self._extract_inference_time_ms(usage)
+            if inference_time_ms <= 0 and agent_uuid in self._agent_usage_cache:
+                inference_time_ms = self._agent_usage_cache[agent_uuid].inference_time_ms
             self._agent_usage_cache[agent_uuid] = _AgentUsageEntry(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cache_read_tokens=cache_read_tokens,
                 cache_write_tokens=cache_write_tokens,
                 cost=cost,
+                inference_time_ms=inference_time_ms,
             )
             self._agent_usage_cache.move_to_end(agent_uuid)
 
@@ -1150,17 +1408,23 @@ class AgentEventHandler(PrintingCallbackHandler):
         output_tokens = int(usage.get("outputTokens", 0) or 0)
         cache_read_tokens = int(usage.get("cacheReadInputTokens", 0) or 0)
         cache_write_tokens = int(usage.get("cacheWriteInputTokens", 0) or 0)
+        inference_time_ms = self._extract_inference_time_ms(usage)
 
         with self._metrics_lock:
             input_delta = max(0, input_tokens - self._report_metrics_input_baseline)
             output_delta = max(0, output_tokens - self._report_metrics_output_baseline)
             cache_read_delta = max(0, cache_read_tokens - self._report_metrics_cache_read_baseline)
             cache_write_delta = max(0, cache_write_tokens - self._report_metrics_cache_write_baseline)
+            inference_time_delta = max(
+                0.0,
+                inference_time_ms - self._report_metrics_inference_time_baseline,
+            )
 
             self._aggregate_input_tokens += input_delta
             self._aggregate_output_tokens += output_delta
             self._aggregate_cache_read_tokens += cache_read_delta
             self._aggregate_cache_write_tokens += cache_write_delta
+            self._aggregate_inference_time_ms = getattr(self, "_aggregate_inference_time_ms", 0.0) + inference_time_delta
             self._aggregate_cost += self._compute_cost_from_metrics(
                 input_delta,
                 output_delta,
@@ -1178,6 +1442,29 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self._report_metrics_cache_write_baseline,
                 cache_write_tokens,
             )
+            self._report_metrics_inference_time_baseline = max(
+                self._report_metrics_inference_time_baseline,
+                inference_time_ms,
+            )
+
+    @staticmethod
+    def _extract_inference_time_ms(metrics: Any) -> float:
+        """Extract provider-reported model latency when the SDK exposes it."""
+        candidates = [metrics]
+        for attribute in ("metrics", "accumulated_metrics", "metadata"):
+            value = getattr(metrics, attribute, None)
+            if value is not None:
+                candidates.append(value)
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                for key in ("inferenceTimeMs", "latencyMs", "inference_time_ms", "latency_ms"):
+                    value = candidate.get(key)
+                    if value is not None:
+                        try:
+                            return max(0.0, float(value))
+                        except (TypeError, ValueError):
+                            continue
+        return 0.0
 
     # -- Helper methods ----------------------------------------------------
 
@@ -2319,6 +2606,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             if self.should_stop():
                 raise BudgetLimitReached("Budget limit reached")
             self.action_count += 1
+            self.record_efficiency_event("reasoning_loop")
             self._record_action_boundary()
             self._reasoning_action_header_emitted = True
         except Exception:
@@ -2420,6 +2708,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "totalTokens": 0,
                     "cacheReadTokens": self.sdk_cache_read_tokens,
                     "cacheWriteTokens": self.sdk_cache_write_tokens,
+                    "modelUsage": [],
                     "duration": "0s",
                     "memoryOps": 0,
                     "evidence": 0,
@@ -2696,7 +2985,8 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "totalTokens": total_tokens,
                 "cacheReadTokens": cache_read_tokens,
                 "cacheWriteTokens": cache_write_tokens,
-                "duration": self._format_duration(self._operation_elapsed_seconds()),
+                "modelUsage": self.coordinator.model_usage(),
+                "duration": format_duration(self._operation_elapsed_seconds()),
                 "memoryOps": self.coordinator.memory_ops,
                 "evidence": self.coordinator.evidence_count,
                 "reportEstimate": report_estimate,
@@ -2736,7 +3026,11 @@ class AgentEventHandler(PrintingCallbackHandler):
     def process_metrics(self, event_loop_metrics: Dict[str, Any], agent: Any = None) -> None:
         """Process SDK metrics - only updates internal counters."""
 
-        usage = event_loop_metrics.accumulated_usage
+        usage = dict(event_loop_metrics.accumulated_usage or {})
+        inference_time_ms = self._extract_inference_time_ms(event_loop_metrics)
+        if inference_time_ms > 0:
+            usage["inferenceTimeMs"] = inference_time_ms
+        self._record_model_call_if_new(usage, agent=agent)
 
         cache_read = usage.get("cacheReadInputTokens", 0)
         cache_write = usage.get("cacheWriteInputTokens", 0)
@@ -2758,6 +3052,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self._sdk_output_tokens = usage.get("outputTokens", 0)
                 self._sdk_cache_read_tokens = usage.get("cacheReadInputTokens", 0)
                 self._sdk_cache_write_tokens = usage.get("cacheWriteInputTokens", 0)
+                self._sdk_inference_time_ms = self._extract_inference_time_ms(event_loop_metrics)
 
         self._publish_usage_to_coordinator()
 
@@ -2782,7 +3077,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 {
                     "type": "operation_complete",
                     "operation": self.operation_id,
-                    "duration": self._format_duration(self._operation_elapsed_seconds()),
+                    "duration": format_duration(self._operation_elapsed_seconds()),
                     "metrics": {
                         "inputTokens": input_tokens,
                         "outputTokens": output_tokens,
@@ -2791,6 +3086,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         # Cache metrics for prompt caching cost calculation
                         "cacheReadTokens": int(totals["cache_read_tokens"]),
                         "cacheWriteTokens": int(totals["cache_write_tokens"]),
+                        "modelUsage": self.coordinator.model_usage(),
                         "memoryOps": self.coordinator.memory_ops,
                         "evidence": self.coordinator.evidence_count,
                     },
@@ -2904,21 +3200,6 @@ class AgentEventHandler(PrintingCallbackHandler):
                 output_text += str(item)
         return output_text
 
-    def _format_duration(self, seconds: float) -> str:
-        """Format duration for human-readable display."""
-        if seconds < 60:
-            return f"{int(seconds)}s"
-        elif seconds < 3600:
-            return f"{int(seconds / 60)}m {int(seconds % 60)}s"
-        elif seconds < 86400:
-            hours = int(seconds / 3600)
-            mins = int((seconds % 3600) / 60)
-            return f"{hours}h {mins}m"
-        else:
-            days = int(seconds / 86400)
-            hours = int((seconds % 86400) / 3600)
-            return f"{days}d {hours}h"
-
     # Report generation methods
     def ensure_report_generated(
         self,
@@ -2962,7 +3243,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "step": "FINAL REPORT",
                     "progressPercent": self.get_budget_progress(),
                     "operation": self.operation_id,
-                    "duration": self._format_duration(self._operation_elapsed_seconds()),
+                    "duration": format_duration(self._operation_elapsed_seconds()),
                 }
             )
 
@@ -2980,7 +3261,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             self.emit_ui_event(
                 {
                     "type": "output",
-                    "content": "\n◆ Generating comprehensive security assessment report...",
+                    "content": "Generating comprehensive security assessment report...",
                 }
             )
 
@@ -3017,6 +3298,11 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "module": module,
                 "model_id": model_id,  # Pass main model for reports
                 "completion_status": completion_status,
+                "budget": {
+                    "maxDurationMinutes": self._budget_max_duration(),
+                    "maxTokens": self._budget_max_tokens(),
+                    "maxCost": self._budget_max_cost(),
+                },
             }
 
             target_name = sanitize_target_name(target)
@@ -3087,7 +3373,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     self.emit_ui_event(
                         {
                             "type": "output",
-                            "content": "◆ No memories or evidence were collected during this operation. Skipping report generation.",
+                            "content": "No memories or evidence were collected during this operation. Skipping report generation.",
                         }
                     )
                 except Exception:
@@ -3190,7 +3476,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "type": "evaluation_complete",
                         "operation_id": self.operation_id,
                         "success": True,
-                        "status": "completed",
+                        "status": _normalize_evaluation_result_status("successful"),
                         "traces_evaluated": len(results),
                         "metrics_evaluated": len(scores),
                         "scores": scores,
@@ -3205,7 +3491,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "type": "evaluation_complete",
                         "operation_id": self.operation_id,
                         "success": False,
-                        "status": "no_results",
+                        "status": _normalize_evaluation_result_status("no_data"),
                         "traces_evaluated": 0,
                         "metrics_evaluated": 0,
                         "scores": {},
@@ -3221,7 +3507,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "type": "evaluation_complete",
                     "operation_id": self.operation_id,
                     "success": False,
-                    "status": "failed",
+                    "status": _normalize_evaluation_result_status("error"),
                     "traces_evaluated": 0,
                     "metrics_evaluated": 0,
                     "scores": {},
@@ -3338,6 +3624,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "cost": float(totals.get("cost", self._compute_total_cost_from_usage())),
                 "cacheReadTokens": int(totals["cache_read_tokens"]),
                 "cacheWriteTokens": int(totals["cache_write_tokens"]),
+                "modelUsage": self.coordinator.model_usage(),
             }
             memory_ops = self.coordinator.memory_ops
             evidence_count = self.coordinator.evidence_count
@@ -3351,6 +3638,6 @@ class AgentEventHandler(PrintingCallbackHandler):
                 "capability_expansion": list(tool_counts.keys()),
                 "memory_ops": memory_ops,
                 "evidence_count": evidence_count,
-                "duration": self._format_duration(self._operation_elapsed_seconds()),
+                "duration": format_duration(self._operation_elapsed_seconds()),
                 "metrics": current_metrics,
             }

@@ -14,6 +14,7 @@ from modules.handlers.react.agent_event_handler import (
     OperationEventCoordinator,
     ReportBudgetEstimate,
 )
+from modules.handlers.utils import format_duration
 
 
 def make_handler():
@@ -25,6 +26,7 @@ def make_handler():
     handler._state_lock = threading.RLock()
     handler._emit_lock = threading.RLock()
     handler.operation_id = "OP_TEST"
+    handler.operation_mode = "execution"
     handler.agent_run_id = "test-agent-1"
     handler.coordinator = OperationEventCoordinator(operation_id="unittest", emitter=MagicMock())
     handler.emit_operation_init = True
@@ -273,7 +275,7 @@ def test_reasoning_termination_metrics_and_basic_helpers():
     handler._stop_metrics_thread.assert_not_called()
     assert event_types(handler).count("termination_reason") == 1
     assert handler.termination_message == "done"
-    assert handler._format_duration(65) == "1m 5s"
+    assert format_duration(65) == "1m 5s"
     assert handler._extract_code_from_input({"code": "print(1)"}) == "print(1)"
     assert handler._extract_code_from_input({"value": [1, 2]}).startswith("{")
     assert handler._extract_output_text([{"json": {"a": 1}}, {"message": "m"}, "s"])
@@ -553,17 +555,17 @@ def test_constructor_adds_generic_agent_metadata_and_alias(monkeypatch):
         model_id="model",
         emitter=emitter,
         coordinator=coordinator,
-        agent_name="validation_specialist",
-        agent_type="validation_specialist",
+        agent_name="evidence_reviewer",
+        agent_type="evidence_reviewer",
         parent_agent_run_id="main-1",
         init_context={"budget": {"maxDurationMinutes": 60}},
     )
 
     assert AgentEventHandler is AgentEventHandler
-    assert handler.agent_name == "validation_specialist"
-    assert handler.agent_type == "validation_specialist"
+    assert handler.agent_name == "evidence_reviewer"
+    assert handler.agent_type == "evidence_reviewer"
     assert handler.parent_agent_run_id == "main-1"
-    assert any(event["type"] == "operation_init" and event["agent_name"] == "validation_specialist" for event in events)
+    assert any(event["type"] == "operation_init" and event["agent_name"] == "evidence_reviewer" for event in events)
 
 
 def test_callback_events_use_agent_attached_metadata(monkeypatch):
@@ -638,7 +640,7 @@ def test_operation_coordinator_aggregates_multiple_handlers(monkeypatch):
         emitter=emitter,
         coordinator=coordinator,
         agent_name="sub",
-        agent_type="validation_specialist",
+        agent_type="evidence_reviewer",
         parent_agent_run_id=main.agent_run_id,
         emit_operation_init=False,
         start_metrics_thread=False,
@@ -652,6 +654,147 @@ def test_operation_coordinator_aggregates_multiple_handlers(monkeypatch):
     assert metrics_events[-1]["metrics"]["inputTokens"] == 17
     assert metrics_events[-1]["metrics"]["outputTokens"] == 8
     assert sub.parent_agent_run_id == main.agent_run_id
+
+
+def test_operation_coordinator_groups_usage_by_provider_model_and_latency():
+    coordinator = OperationEventCoordinator("OP_USAGE_ROWS", MagicMock())
+    coordinator.update_usage(
+        "agent-a",
+        rb._AgentUsageEntry(
+            input_tokens=10,
+            output_tokens=5,
+            cache_read_tokens=2,
+            cache_write_tokens=1,
+            cost=0.25,
+            inference_time_ms=100,
+        ),
+        provider_id="litellm",
+        model_id="model-a",
+    )
+    coordinator.update_usage(
+        "agent-b",
+        rb._AgentUsageEntry(input_tokens=4, output_tokens=3, cost=0.1, inference_time_ms=40),
+        provider_id="ollama",
+        model_id="model-b",
+    )
+    coordinator.update_usage(
+        "agent-c",
+        rb._AgentUsageEntry(input_tokens=6, output_tokens=2, cost=0.05, inference_time_ms=20),
+        provider_id="litellm",
+        model_id="model-a",
+    )
+
+    assert coordinator.model_usage() == [
+        {
+            "provider": "litellm",
+            "model": "model-a",
+            "input_tokens": 16,
+            "output_tokens": 7,
+            "cache_read_tokens": 2,
+            "cache_write_tokens": 1,
+            "total_tokens": 23,
+            "cost": 0.3,
+            "inference_time_ms": 120,
+            "context_window_tokens": None,
+            "efficiency": 100.0,
+            "model_calls": 0,
+            "correction_loops": 0,
+        },
+        {
+            "provider": "ollama",
+            "model": "model-b",
+            "input_tokens": 4,
+            "output_tokens": 3,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 7,
+            "cost": 0.1,
+            "inference_time_ms": 40,
+            "context_window_tokens": None,
+            "efficiency": 100.0,
+            "model_calls": 0,
+            "correction_loops": 0,
+        },
+    ]
+
+
+def test_process_metrics_captures_provider_reported_inference_latency():
+    handler = make_handler()
+    handler.process_metrics(
+        SimpleNamespace(
+            accumulated_usage={"inputTokens": 12, "outputTokens": 4},
+            metrics={"latencyMs": 275},
+        )
+    )
+    rows = handler.coordinator.model_usage()
+
+    assert rows[0]["provider"] == "litellm"
+    assert rows[0]["model"] == "model"
+    assert rows[0]["inference_time_ms"] == 275
+
+
+def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
+    handler = make_handler()
+    handler.process_metrics(
+        SimpleNamespace(accumulated_usage={"inputTokens": 12, "outputTokens": 4})
+    )
+
+    handler.emit_model_usage_snapshot()
+
+    assert len(handler._events) == 1
+    snapshot = handler._events[0]
+    assert snapshot["type"] == "model_usage_snapshot"
+    assert snapshot["stage"] == "assessment_complete"
+    metrics = snapshot["metrics"]
+    assert metrics["modelUsage"] == handler.model_usage()
+    assert metrics["inputTokens"] == 12
+    assert metrics["outputTokens"] == 4
+    assert metrics["totalTokens"] == 16
+    assert metrics["cost"] >= 0.0
+    assert metrics["duration"] == "0s"
+    handler.emitter.flush_immediate.assert_called_once()
+
+
+def test_emit_model_usage_snapshot_skips_report_only_handlers():
+    handler = make_handler()
+    handler.operation_mode = "report_only"
+
+    handler.emit_model_usage_snapshot()
+
+    assert handler._events == []
+    handler.emitter.flush_immediate.assert_not_called()
+
+
+def test_model_efficiency_is_higher_when_corrections_are_lower():
+    coordinator = OperationEventCoordinator("OP_EFFICIENCY", MagicMock())
+    coordinator.record_model_call("litellm", "model-a")
+    coordinator.record_model_call("litellm", "model-a")
+    coordinator.record_model_call("litellm", "model-b")
+    coordinator.record_efficiency_correction("litellm", "model-b", "critic_cycle")
+
+    rows = {row["model"]: row for row in coordinator.model_usage()}
+
+    assert rows["model-a"]["efficiency"] > rows["model-b"]["efficiency"]
+    assert rows["model-a"]["efficiency"] == 100.0
+    assert rows["model-b"]["efficiency"] == 50.0
+
+
+def test_operation_coordinator_retains_effective_context_window_per_model():
+    coordinator = OperationEventCoordinator("OP_CONTEXT_WINDOW", MagicMock())
+    coordinator.update_usage(
+        "agent-a",
+        rb._AgentUsageEntry(input_tokens=10, context_window_tokens=48_000),
+        provider_id="litellm",
+        model_id="model-a",
+    )
+    coordinator.update_usage(
+        "agent-b",
+        rb._AgentUsageEntry(input_tokens=5, context_window_tokens=48_000),
+        provider_id="litellm",
+        model_id="model-a",
+    )
+
+    assert coordinator.model_usage()[0]["context_window_tokens"] == 48_000
 
 
 def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
@@ -685,8 +828,8 @@ def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
         model_id="model",
         emitter=emitter,
         coordinator=coordinator,
-        agent_name="validation_specialist",
-        agent_type="validation_specialist",
+        agent_name="evidence_reviewer",
+        agent_type="evidence_reviewer",
         parent_agent_run_id=main.agent_run_id,
         emit_operation_init=False,
         start_metrics_thread=False,
@@ -707,7 +850,7 @@ def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
     progress_event = [event for event in events if event["type"] == "progress_update"][-1]
     metrics_event = [event for event in events if event["type"] == "metrics_update"][-1]
 
-    assert progress_event["agent_name"] == "validation_specialist"
+    assert progress_event["agent_name"] == "evidence_reviewer"
     assert progress_event["duration"] == "5m 0s"
     assert progress_event["progressPercent"] == 869
     assert metrics_event["metrics"]["inputTokens"] == 125
@@ -1179,6 +1322,11 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     assert generated_calls
     assert generated_calls[0]["config_params"]["provider"] == "litellm"
     assert generated_calls[0]["config_params"]["completion_status"] is None
+    assert generated_calls[0]["config_params"]["budget"] == {
+        "maxDurationMinutes": handler._budget_max_duration(),
+        "maxTokens": None,
+        "maxCost": None,
+    }
     assert "assessment_complete" not in event_types(handler)
     handler.emitter = SimpleNamespace()
     handler._stop_metrics_thread = Mock()
@@ -1353,6 +1501,21 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     assert handler.has_reached_limit() is True
     summary = handler.get_summary()
     assert isinstance(summary.get("duration"), str)
+
+
+def test_evaluation_result_status_aliases_are_canonical():
+    from modules.handlers.react.agent_event_handler import _normalize_evaluation_result_status
+
+    assert _normalize_evaluation_result_status("successful") == "completed"
+    assert _normalize_evaluation_result_status("no-data") == "no_results"
+    assert _normalize_evaluation_result_status("timed out") == "failed"
+
+
+def test_evaluation_result_status_unknown_is_rejected():
+    from modules.handlers.react.agent_event_handler import _normalize_evaluation_result_status
+
+    with pytest.raises(ValueError):
+        _normalize_evaluation_result_status("pending")
 
 
 def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatch):

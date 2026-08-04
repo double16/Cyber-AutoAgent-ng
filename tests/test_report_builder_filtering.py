@@ -154,7 +154,6 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 target="example.com",
                 objective="test",
                 module="web",
-                steps_executed=197,
                 tools_used=["shell", "shell", "python_repl", "shell", "python_repl"],
             )
 
@@ -162,7 +161,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert out.get("target") == "example.com"
         assert out.get("objective") == "test"
         assert out.get("date")
-        assert out.get("steps_executed") == 197
+        assert "steps_executed" not in out
         assert out.get("severity_counts", {}) == {"critical": 1, "high": 1, "medium": 2, "low": 2, "info": 0}
         assert out["finding_count"] == 6
         assert out["observation_count"] == 5

@@ -310,7 +310,7 @@ cyber_tools:
     caps: [tunneling]
     canary: {args: ["-h"]}
   curl:
-    description: "HTTP client for URL requests"
+    description: "HTTP client for URL requests. Reflection, exploit, validation, and artifact-producing tasks must capture the body using -o [filename]."
     caps: [http_client, ftp_client]
     canary: {args: ["-h"]}
   tcpdump:

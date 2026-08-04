@@ -1,5 +1,21 @@
 ## Module completion criteria
 
+## Recommended Minimum Phase Contract
+
+Use these recommendations as the default phase decomposition. They are advisory guidance, not a mandatory phase count
+or fixed plan schema. Adjacent recommendations may be merged only when the resulting phase explicitly preserves every
+included capability, evidence requirement, and coverage outcome. Omit a recommendation only when it is demonstrably
+inapplicable and document the reason. Keep all coverage and gap documentation within these operational phases.
+
+1. **Surface and Trust-Boundary Mapping** — Map services, entry points, technology, authentication, sessions, roles,
+   tenants, user journeys, and endpoint parameters with artifact evidence.
+2. **Access Context Mapping** — Compare applicable access contexts and document authenticated coverage or the absence
+   of authorized test credentials.
+3. **Workflow and High-Value Area Mapping** — Map prioritized workflows and high-value areas.
+4. **Safe Security Verification** — Perform read-only behavioral checks with negative controls and preserve verified
+   weakness candidates.
+5. **Coverage Gap Documentation** — Document unmapped or unassessed areas without exploitation.
+
 Classify the phase against its own criteria and the following operation-level outcomes:
 
 Distribute these outcomes across the applicable operational phases. They are completion criteria, not a request for a

@@ -130,7 +130,13 @@ def parse_json_response(text: str, *, require_object: bool = False) -> Any:
 
     if not isinstance(text, str):
         raise ValueError("agent response must be text")
-    parsed = json.loads(repair_json_text(text))
+    candidate = _candidate(text).strip()
+    try:
+        # Do not rewrite payloads that are already valid. Repair is intentionally
+        # best-effort and must not change valid JSON semantics.
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        parsed = json.loads(repair_json_text(text))
     if require_object and not isinstance(parsed, dict):
         raise ValueError("agent response must be a JSON object")
     return parsed

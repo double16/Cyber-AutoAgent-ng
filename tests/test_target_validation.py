@@ -57,6 +57,20 @@ def test_hostname_uses_system_resolver_and_reports_addresses():
     resolver.assert_called_once_with("internal.test", None, socket.AF_UNSPEC, socket.SOCK_STREAM)
 
 
+def test_preflight_record_derives_publicness_and_route_facts():
+    public = TargetValidator(resolver=Mock(return_value=address_info("8.8.8.8"))).validate(
+        OperationTarget("target-1", "public.test", "network")
+    )
+    private = TargetValidator(socket_factory=SocketFactory()).validate(
+        OperationTarget("target-2", "127.0.0.1", "network")
+    )
+
+    assert public.to_record()["has_global_address"] is True
+    assert public.to_record()["route_reachable"] is False
+    assert private.to_record()["has_private_or_reserved_address"] is True
+    assert private.to_record()["route_reachable"] is True
+
+
 def test_hostname_resolution_failure_is_reported():
     validator = TargetValidator(resolver=Mock(side_effect=socket.gaierror("not found")))
 

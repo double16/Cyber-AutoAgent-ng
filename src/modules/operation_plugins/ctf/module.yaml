@@ -30,8 +30,8 @@ tools:
   - '*_search'
   - advanced_payload_coordinator
   - auth_chain_analyzer
-  - validation_specialist
   - idor_specialist
+  - flag_candidates
 module_interface:
   accepts_from: []
   provides_to: []

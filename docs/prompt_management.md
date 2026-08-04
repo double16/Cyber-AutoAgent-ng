@@ -67,9 +67,9 @@ src/modules/operation_plugins/  (CYBER_PLUGIN_PATH, ~/.cyber-autoagent/modules/)
 │   ├── report_agent_finding_system_prompt.md      # Finding report guidance
 │   ├── report_agent_observation_system_prompt.md  # Observation report guidance
 │   ├── report_agent_appendix_system_prompt.md     # Report appendix guidance (additional sections can be specified)
+│   ├── report_agent_next_steps_system_prompt.md   # Structured Appendix B recommendations
 │   ├── module.yaml                                # Module configuration
-│   └── tools/                                     # Module-specific tools / specialist agents
-│       └── validation_specialist.py
+│   └── tools/                                     # Module-specific tools
 └── ctf/
     ├── execution_prompt.md
     ├── report_prompt.md
@@ -87,7 +87,7 @@ configuration:
 
 **Available Modules**:
 - **web**: Comprehensive web application and network security testing
-  - Includes the `validation_specialist` tool (invoked via `load_tool("validation_specialist")`) and can be extended with additional specialist agents following the same pattern.
+  - Finding validation is performed by the workflow's independent evidence-validation task.
 - **ctf**: CTF challenge solving with flag recognition and success detection
 
 ## Prompt Loading System
@@ -296,7 +296,8 @@ sequenceDiagram
     participant T as build_report_sections Tool
     participant M as Memory System
     participant L as ModulePromptLoader
-    participant A as Report Agent
+    participant A as Report Actor
+    participant C as Report Critic
 
     E->>T: build_report_sections(operation_id, target, objective, module)
     T->>M: Retrieve evidence with category="finding"
@@ -307,10 +308,47 @@ sequenceDiagram
     L-->>T: Domain lens and report guidance
     T->>T: Transform evidence using domain lens
     T-->>A: Structured report sections
-    A->>A: Generate final report markdown
-    A-->>E: Complete report with findings
+    A->>A: Generate report section draft
+    loop Up to CYBER_REPORT_REFINEMENT_CYCLES
+        A->>C: Review section draft
+        C-->>A: Approval or actionable JSON feedback
+        A->>A: Revise rejected draft using feedback
+    end
+    A-->>E: Complete report sections with review status
     E->>E: Write security_assessment_report.md/json to operation directory
 ```
+
+The executive summary, detailed findings, Appendix A methodology, and Appendix B recommendations use the bounded
+actor/critic cycle. Observations, target coverage, and execution-history/acceptance tables are rendered
+deterministically from canonical operation data.
+Critic JSON uses the workflow's tolerant JSON repair and retry path. A final rejection does not suppress the report:
+the actor applies the feedback once more, the assembled report retains that latest actor revision, and the critic's
+feedback prose appears under **Further Review Required** inside the section that produced it. Appendix A contains the
+assessment methodology. Appendix B contains validated coverage gaps, completion criteria, projected configured-budget
+recommendations, agent/tooling improvements, and manual investigations. Log-derived report inputs use only the final
+session in `cyber_operations.log`. The final Markdown report also carries an AI-generated-content disclaimer at its top
+and bottom.
+
+### Canonical Report Layouts
+
+The free-form executive, finding, observation, and Appendix A prompts include concise canonical Markdown layouts.
+These layouts are format-only skeletons: placeholders such as `{{TITLE_FROM_FINDING_DATA}}` identify where canonical
+operation data belongs and must never be copied into a report. The skeletons intentionally contain no realistic hosts,
+identifiers, severities, counts, payloads, or artifact paths that a model could mistake for assessment evidence.
+
+Actors must keep the canonical headings and order, use only supplied operation data, and state when an optional detail
+was not established instead of filling the layout with invented content. Critics review the same layout and reject
+placeholder leakage, unsupported filler, missing headings, and incorrect heading order. This is prompt-based guidance;
+the report assembler does not reject Markdown mechanically. A module-specific report prompt may explicitly override
+the canonical layout when a domain requires a different presentation.
+
+For findings and observations with attached artifacts, the report assembler adds bounded, relevance-selected excerpts
+from up to four artifact files. Excerpts retain the recorded content, including sensitive assessment data, and include
+the canonical artifact reference plus source line numbers. Artifact lines are length-bounded for report stability, but
+content is not redacted because operation reports are treated as confidential. Unsupported artifact citations are
+removed without replacing the rest of the generated section. Grounding accepts canonical `artifact:artifacts/...`,
+`artifact_id:...`, and normalized bare `artifacts/...` or `outputs/...` references; URLs, endpoint paths, Markdown
+labels, and code comments are not treated as artifact references.
 
 ## Module Examples
 

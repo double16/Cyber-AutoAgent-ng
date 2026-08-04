@@ -326,20 +326,6 @@ export const toolFormatters: Record<string, ToolFormatter> = {
     return details.join(' | ');
   },
 
-  validation_specialist: (input) => {
-    if (!input || typeof input !== 'object') {
-      return 'validating finding | 0 artifacts: ';
-    }
-
-    const finding = input.finding_description || input.finding || '';
-    const artifacts = input.artifact_paths || input.artifactPaths || [];
-    const artifactCount = Array.isArray(artifacts) ? artifacts.length : 0;
-
-    const findingPreview = finding.length > 60 ? finding.substring(0, 60) + '...' : finding;
-
-    return `validating finding | ${artifactCount} artifacts: ${findingPreview}`;
-  },
-  
   shell: (input) => {
     const rawInput = input || {};
     // Prefer the most common fields in order of likelihood

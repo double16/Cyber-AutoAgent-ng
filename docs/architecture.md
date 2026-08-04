@@ -32,7 +32,8 @@ The controller creates agents for specific jobs:
 - **phase_evaluator**: returns phase status: `continue`, `done`, `partial_failure`, or `blocked`
 
 Module execution guidance supplies operation intent, explicit access boundaries, domain behavior, and evidence rules to
-planning and execution roles. The module termination policy is also supplied directly to plan creation, plan criticism,
+planning and execution roles. The module termination policy, including any advisory recommended minimum phase contract,
+is also supplied directly to plan creation, plan criticism,
 plan revision, and phase evaluation so required end states become measurable plan criteria. A controller-owned executor
 contract keeps individual workers scoped to one task regardless of module.
 
@@ -166,7 +167,7 @@ Commands without a safe standalone canary remain available but unverified. The D
 the same configuration contract independently and is not imported by application runtime code.
 
 Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
-controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (four by
+controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (six by
 default). Each turn ends after its first tool result; the initial prompt contains stable phase context and corrections
 contain only the prior validation error. Generic reasoning-loop repair is disabled for this role. Agents submit a flat
 `TaskProposal` whose `limits` object is always required. Python discards it and `output_kind` for snapshot work,

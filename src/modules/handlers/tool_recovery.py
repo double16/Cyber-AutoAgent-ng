@@ -292,6 +292,7 @@ class TaskFailureRecoveryHook(HookProvider):
         max_corrections: int = 2,
         quarantine_callback: Optional[Callable[[str], List[str]]] = None,
         quarantined_executables: Optional[set[str]] = None,
+        efficiency_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.journal = journal
         self.max_policy_violations = max(1, int(max_policy_violations))
@@ -306,6 +307,7 @@ class TaskFailureRecoveryHook(HookProvider):
         self.failure_category = ""
         self.alternative_executables: List[str] = []
         self.quarantined_executables = quarantined_executables if quarantined_executables is not None else set()
+        self.efficiency_callback = efficiency_callback
         self._correction_attempts = 0
         self._policy_violations = 0
         self._recovery_roles: Dict[str, str] = {}
@@ -359,6 +361,8 @@ class TaskFailureRecoveryHook(HookProvider):
                 return
             self._correction_attempts += 1
             self._recovery_roles[tool_id] = "correction"
+            if self.efficiency_callback is not None:
+                self.efficiency_callback("tool_correction")
             return
         if self._is_diagnostic(tool_name, tool_input):
             self._recovery_roles[tool_id] = "diagnostic"
@@ -373,6 +377,8 @@ class TaskFailureRecoveryHook(HookProvider):
         event.cancel_tool = message
         self._recovery_roles[tool_id] = "blocked"
         self._policy_violations += 1
+        if self.efficiency_callback is not None:
+            self.efficiency_callback("tool_policy_recovery")
         if self.exhausted or self._policy_violations >= self.max_policy_violations:
             self.exhausted = True
             self._stop_event_loop(event, "policy_violation_limit")

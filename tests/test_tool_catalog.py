@@ -271,7 +271,7 @@ def test_tool_catalog_wrapper_lists_agent_tools_and_schemas(monkeypatch, tmp_pat
     _write_env(tmp_path, cyber_tools={})  # no cyber tools needed for this test
 
     tools_config = {
-        "validation_specialist": {
+        "sample_validator": {
             "description": "Validates findings",
             "inputSchema": {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
             "outputSchema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
@@ -282,7 +282,7 @@ def test_tool_catalog_wrapper_lists_agent_tools_and_schemas(monkeypatch, tmp_pat
 
     text = tool_catalog()
     assert "# TOOL CATALOG" in text
-    assert "name: validation_specialist" in text
+    assert "name: sample_validator" in text
     # simplified, schemas are included in tool descriptions
     assert "input schema:" not in text
     # Pretty JSON should be present (indent=2 => newline + two spaces)

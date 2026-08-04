@@ -12,6 +12,35 @@ from modules.config.system import environment as mod
 from modules.config.system import logger as logger_mod
 
 
+def test_resolve_seclists_root_prefers_valid_configured_override(monkeypatch, tmp_path):
+    configured_root = tmp_path / "custom-seclists"
+    (configured_root / "Discovery").mkdir(parents=True)
+    fallback_root = tmp_path / "fallback-seclists"
+    (fallback_root / "Fuzzing").mkdir(parents=True)
+
+    monkeypatch.setenv("CYBER_SECLISTS_DIR", str(configured_root))
+    monkeypatch.setattr(mod, "_SECLISTS_ROOT_CANDIDATES", (fallback_root,))
+
+    assert mod.resolve_seclists_root() == str(configured_root.resolve())
+
+
+def test_resolve_seclists_root_uses_valid_known_location_when_override_is_invalid(monkeypatch, tmp_path):
+    fallback_root = tmp_path / "known-seclists"
+    (fallback_root / "Passwords").mkdir(parents=True)
+
+    monkeypatch.setenv("CYBER_SECLISTS_DIR", str(tmp_path / "not-seclists"))
+    monkeypatch.setattr(mod, "_SECLISTS_ROOT_CANDIDATES", (fallback_root,))
+
+    assert mod.resolve_seclists_root() == str(fallback_root.resolve())
+
+
+def test_resolve_seclists_root_returns_none_without_valid_location(monkeypatch, tmp_path):
+    monkeypatch.delenv("CYBER_SECLISTS_DIR", raising=False)
+    monkeypatch.setattr(mod, "_SECLISTS_ROOT_CANDIDATES", (tmp_path / "missing",))
+
+    assert mod.resolve_seclists_root() is None
+
+
 def test_configured_canaries_use_optional_structured_schema():
     config_path = mod.Path(mod.__file__).with_name("environment.yaml")
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))

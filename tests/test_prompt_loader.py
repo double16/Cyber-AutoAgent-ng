@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from modules.prompts.factory import ModulePromptLoader
 
 
@@ -444,3 +446,79 @@ def test_module_prompt_loader_find_module_dir_deep_search(tmp_path, monkeypatch)
     
     found_dir = loader._find_module_dir("web")
     assert found_dir == module_dir
+
+
+def test_built_in_modules_define_advisory_phase_contracts():
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    modules = ("code_security", "context_navigator", "ctf", "threat_emulation", "web", "web_recon")
+
+    for module in modules:
+        policy = (root / module / "termination_policy.md").read_text()
+        assert "## Recommended Minimum Phase Contract" in policy
+        assert "advisory guidance, not a mandatory phase count" in policy
+        assert "Adjacent recommendations may be merged" in policy
+        assert "Omit a recommendation only when it is demonstrably" in policy
+
+
+def test_built_in_phase_contract_titles_have_one_primary_outcome():
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    modules = ("code_security", "context_navigator", "ctf", "threat_emulation", "web", "web_recon")
+
+    for module in modules:
+        policy = (root / module / "termination_policy.md").read_text()
+        phase_lines = [
+            line
+            for line in policy.splitlines()
+            if line.lstrip().split(" ", 1)[0].rstrip(".").isdigit()
+        ]
+        assert phase_lines
+        assert all("** &" not in line and "& **" not in line for line in phase_lines)
+
+
+def test_ctf_phase_contract_preserves_chain_evidence_and_flag_completion():
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    policy = (root / "ctf" / "termination_policy.md").read_text()
+
+    assert "Challenge Surface Mapping" in policy
+    assert "Generate Exploit Hypotheses from the Challenge Surface" in policy
+    assert "Exploit Chain Analysis" in policy
+    assert "Flag Retrieval and Confirmation" in policy
+    assert "Coverage Closure" not in policy
+    assert "each prerequisite, transition, required server-side acceptance" in policy
+    assert "failed links" in policy
+    assert "failed links and alternative branches" in policy
+    assert "prerequisite, action, observed transition, and artifact" in policy
+    assert "direct single-step flag path does not require artificial" in policy
+    assert "chain records" in policy
+
+
+def test_web_phase_contract_uses_distinct_industry_aligned_capabilities():
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    policy = (root / "web" / "termination_policy.md").read_text()
+
+    expected_phases = (
+        "Attack Surface Mapping",
+        "Generate Attack Hypotheses from the Mapped Attack Surface",
+        "Vulnerability Discovery and Exploitability Testing",
+        "Exploit Chain Analysis",
+        "Finding Validation",
+        "Impact Demonstration",
+    )
+    for phase in expected_phases:
+        assert phase in policy
+
+    assert "Impact Demonstration & Coverage Closure" not in policy
+    assert "Hypothesis Testing & Validation" not in policy
+    assert "not_applicable" in policy
+    assert "without destructive action" in policy
+
+
+@pytest.mark.parametrize("module", ["web", "ctf", "code_security"])
+def test_chain_phase_contracts_are_analytical_and_conditionally_applicable(module):
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    policy = (root / module / "termination_policy.md").read_text()
+
+    assert "not_applicable" in policy
+    assert "rather than repeating" in policy or "does not repeat" in policy
+    assert "concrete" in policy
+    assert "evidence" in policy

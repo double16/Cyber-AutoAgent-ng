@@ -1,0 +1,62 @@
+name: Update CWE and ATT&CK taxonomy snapshot
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Monthly refresh aligns with the application's 30-day cache default.
+    - cron: '0 5 1 * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-taxonomy-snapshot:
+    name: Update taxonomy snapshot and open PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v7
+        with:
+          ref: develop
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Refresh bundled taxonomy snapshot
+        run: uv run python -m modules.config.taxonomy_refresh --write-snapshot
+
+      - name: Validate refreshed snapshot
+        run: |
+          uv run python -c "import json; data=json.load(open('src/modules/config/taxonomy/taxonomy_snapshot.json')); assert data['cwe'] and data['attack']; print(len(data['cwe']), len(data['attack']))"
+
+      - name: Set branch metadata
+        id: meta
+        run: |
+          echo "branch=chore/taxonomy-snapshot-$(date +'%Y%m%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: develop
+          branch: ${{ steps.meta.outputs.branch }}
+          title: "chore: update CWE and ATT&CK taxonomy snapshot"
+          body: |
+            Automated update of `src/modules/config/taxonomy/taxonomy_snapshot.json`.
+
+            - Sources: CWE JSON catalog and MITRE ATT&CK Enterprise STIX
+            - Trigger: ${{ github.event_name }}
+          labels: |
+            automated
+            chore
+          commit-message: "chore: update CWE and ATT&CK taxonomy snapshot"
+          author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+          signoff: false
+          draft: true

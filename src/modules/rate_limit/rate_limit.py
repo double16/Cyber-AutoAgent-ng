@@ -7,6 +7,7 @@ the operation.
 from __future__ import annotations
 
 import asyncio
+import httpx
 import logging
 from datetime import datetime
 import time
@@ -195,8 +196,10 @@ class ThreadSafeRateLimiter:
         """
         assert e is not None
 
-        is_retryable = False
-        if isinstance(e, _RetryableError):
+        is_retryable = isinstance(e, httpx.ReadTimeout)
+        if is_retryable:
+            code = "read_timeout"
+        elif isinstance(e, _RetryableError):
             is_retryable = True
             code = e.code
             # Don't call self.report_error a second time
@@ -208,7 +211,7 @@ class ThreadSafeRateLimiter:
                 is_retryable = True
 
         if attempt >= self.cfg.max_retries:
-            logger.error("Rate limit: Max retries reached for code %d", code)
+            logger.error("Rate limit: Max retries reached for %s", code)
             is_retryable = False
 
         if not is_retryable:
@@ -220,6 +223,7 @@ class ThreadSafeRateLimiter:
         # TODO: use an EventEmitter object
         rate_limit_event = {
             "type": "rate_limit",
+            "reason": code,
             "timestamp": datetime.now().isoformat(),
             "needed": delay,
             "wait_total": delay,

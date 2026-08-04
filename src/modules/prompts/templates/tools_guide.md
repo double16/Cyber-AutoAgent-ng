@@ -3,14 +3,14 @@
 1. **Tool discovery**: If uncertain which specialized tool exists or which args to use → call `tool_catalog` (fast) before choosing 2–6.
 2. Any confidence → Use any native tool, optional tool, or shell command applicable to the task
 3. Overlapping methods → Multiple applicable capabilities may be used for validation, reproduction, coverage, or convenience
-4. Low confidence (<50%) → Swarm for parallel capability exploration OR gather more data
-5. Novel exploit → Meta-tooling (editor + load_tool) when existing tools insufficient
-6. POC reuse → python_repl for prototype → if logic needed >2 times → editor+load_tool promotion
+4. Novel exploit → Meta-tooling (editor + load_tool) when existing tools insufficient
+5. POC reuse → python_repl for prototype → if logic needed >2 times → editor+load_tool promotion
 
 **Core Rule**: Select and use capabilities based on task applicability. Overlap between native tools, optional tools,
 and shell commands is allowed and does not make any method exclusive.
 Save all artifacts to OPERATION ARTIFACTS DIRECTORY (path injected above).
 **Discovery Rule**: When choosing between tools or unsure what exists → `tool_catalog` first.
+{{ seclists_context }}
 
 - Large tool output will be truncated as indicated by
   `[Tool output: 10,000 chars | Inline: 2,000 chars | Full: <filename>]`. Use **shell** to analyze full content of "<filename>".
@@ -31,7 +31,7 @@ Save all artifacts to OPERATION ARTIFACTS DIRECTORY (path injected above).
 - "New confidence after applying formula?" → If <50%: pivot required
 - "Pivot to what?" → Target constraint learned, NOT iterate same method
 
-**Minimal Action Principle**: For the current task, use the least-cost step that maximizes learning. This does not justify reducing candidate coverage.
+**Minimal Action Principle**: For the current task, use the least-cost step that maximizes learning.
 
 **Validation After Every Tool**: "Intended outcome achieved? Constraint learned? Confidence update? Next action?"
 

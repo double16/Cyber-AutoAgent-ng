@@ -89,6 +89,44 @@ _STARTUP_FAILURE_PATTERNS = tuple(
     )
 )
 
+_SECLISTS_ENV_VAR = "CYBER_SECLISTS_DIR"
+_SECLISTS_ROOT_CANDIDATES = (
+    Path("/usr/share/seclists"),
+    Path("/usr/share/SecLists"),
+    Path("/opt/seclists"),
+    Path("/opt/SecLists"),
+    Path.home() / "seclists",
+    Path.home() / "SecLists",
+    Path.home() / "wordlists" / "seclists",
+    Path.home() / "wordlists" / "SecLists",
+)
+_SECLISTS_ROOT_MARKERS = ("Discovery", "Fuzzing", "Passwords", "Usernames", "Miscellaneous")
+
+
+def _is_seclists_root(path: Path) -> bool:
+    """Return whether ``path`` has the expected SecLists root structure."""
+
+    try:
+        return path.is_dir() and any((path / marker).is_dir() for marker in _SECLISTS_ROOT_MARKERS)
+    except OSError:
+        return False
+
+
+def resolve_seclists_root() -> Optional[str]:
+    """Resolve the local SecLists root without performing a filesystem-wide search."""
+
+    configured_root = os.getenv(_SECLISTS_ENV_VAR, "").strip()
+    candidate_roots = [Path(configured_root)] if configured_root else []
+    candidate_roots.extend(_SECLISTS_ROOT_CANDIDATES)
+
+    for candidate in candidate_roots:
+        if _is_seclists_root(candidate):
+            try:
+                return str(candidate.resolve())
+            except OSError:
+                return str(candidate.absolute())
+    return None
+
 
 @dataclass(frozen=True)
 class ToolHealth:

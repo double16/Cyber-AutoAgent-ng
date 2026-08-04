@@ -18,6 +18,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import type { Config } from '../contexts/ConfigContext.js';
 import { formatOperationHealth } from '../utils/operationHealthFormatting.js';
 import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
+import { formatWorkflowActivityEvent } from '../utils/workflowActivityFormatting.js';
 
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
 let cachedProjectRoot: string | null | undefined;
@@ -766,23 +767,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
 
     case 'workflow_activity': {
       const status = String((event as any).status || 'started').toLowerCase();
-      const action = String((event as any).label || (event as any).action || (event as any).activity || 'workflow').replaceAll('_', ' ');
-      const phase = (event as any).phase_id != null ? ` phase ${(event as any).phase_id}` : '';
-      const task = String((event as any).task_title || '').trim();
-      const taskSuffix = task ? `: ${task}` : '';
-      const cycle = (event as any).cycle != null && (event as any).cycle_total != null
-        ? ` [cycle ${(event as any).cycle}/${(event as any).cycle_total}]`
-        : '';
-      const attempt = !cycle && (event as any).attempt != null && (event as any).attempt_total != null
-        ? ` [${(event as any).attempt}/${(event as any).attempt_total}]`
-        : '';
-      const icon = ['completed', 'success', 'done'].includes(status)
-        ? '✓'
-        : ['failed', 'error', 'blocked', 'partial_failure'].includes(status)
-          ? '⚠'
-          : ['cancelled', 'canceled', 'skipped', 'terminated', 'not_applicable'].includes(status)
-            ? '■'
-            : null;
+      const formattedActivity = formatWorkflowActivityEvent(event);
       const color = ['completed', 'success', 'done'].includes(status)
         ? 'green'
         : ['failed', 'error', 'blocked', 'partial_failure', 'cancelled', 'canceled', 'skipped', 'terminated', 'not_applicable'].includes(status)
@@ -791,8 +776,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       return (
         <Box>
           <Text color={color}>
-            {icon ? icon : ' '}
-          {` ${action}${phase}${taskSuffix}${cycle || attempt} ${status}`}
+            {formattedActivity || ''}
           </Text>
         </Box>
       );
@@ -1804,6 +1788,7 @@ const method = latestInput.method || 'GET';
       if (!fromToolBuffer && filtered && (
         filtered.startsWith('▶') ||
         filtered.startsWith('◆') ||
+        filtered.trim().startsWith('✓') ||
         filtered.trim().startsWith('✓') ||
         filtered.trim().startsWith('○') ||
         filtered.startsWith('[Observability]')
