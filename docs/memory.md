@@ -96,23 +96,9 @@ sequenceDiagram
 
 ## Memory Categorization
 
-Evidence storage employs structured metadata for efficient retrieval and analysis:
-
-```python
-store_observation("The login endpoint returns a distinct error for unknown users")
-store_knowledge("Use a test/control request pair for behavioral security claims")
-store_finding(
-    title="SQL injection in login",
-    claim="The username parameter changes query behavior",
-    severity="CRITICAL",
-    target="/login",
-    technique="sql_injection",
-    expected_result="The payload is rejected",
-    observed_result="The response differs from the negative control",
-    reproduction_steps=["Send the control request", "Send the test payload"],
-    artifacts=["artifacts/login-test.txt", "artifacts/login-control.txt"],
-)
-```
+Evidence storage employs structured metadata for efficient retrieval and analysis. Observations capture factual
+observations, knowledge captures reusable lessons, and findings include claims, severity, target, technique, expected
+and observed results, reproduction steps, and artifact references.
 
 Successful `record_task_acceptance` calls automatically publish one operation-scoped observation for the completed
 task. The observation contains concrete criterion statuses and summaries, direct evidence references, and bounded
@@ -258,86 +244,14 @@ phase_decision = {"status": "partial_failure", "reason": "Soft budget reached; r
     └── cyber_operations.log
 ```
 
-## Memory Tool Usage
+## Memory operations
 
-### Basic Operations
-```python
-# Store operation facts and reusable lessons. Keep memory_ref when the fact is acceptance evidence.
-observation = store_observation(
-    "The upload route accepts multipart requests",
-    artifacts=["artifacts/upload.txt"],
-)
-# {"stored": true, "created": true, "memory_ref": "memory:<id>"}
-store_knowledge("Validate upload execution with a harmless marker and a negative control")
+Agents store observations, findings, and reusable knowledge through typed memory capabilities. Retrieval can be scoped
+to the current operation or explicitly enabled for cross-operation learning. Acceptance evidence keeps its memory
+reference alongside artifact references; operation-scoped references must not be reused as evidence in another operation.
 
-# Search memories  
-mem0_retrieve(query="SQL injection")
-
-# List all memories
-mem0_list()
-```
-
-### Advanced Operations
-
-Agents should use typed semantic memory tools:
-
-```python
-store_observation(
-    "The login response changes for a quote character",
-    artifacts=["artifacts/login-response.txt"],
-    metadata={"confidence": "65%"},
-)
-
-# Pass the returned memory_ref in record_task_acceptance.evidence_refs when a
-# frozen criterion requires observation evidence. Memory references are scoped to the current operation; do not
-# reuse an ID from another operation or from cross-operation learning. Artifact references remain artifact evidence.
-
-mem0_retrieve(query="authentication findings")
-mem0_list()
-```
-
-The Python workflow controller uses direct memory service calls for plans and tasks. Normal worker agents should not call plan/task mutation tools directly, except `create_tasks` when their role prompt permits task creation.
-
-### Memory Query Patterns
-```python
-# Semantic search (current operation only - default)
-mem0_retrieve(query="SQL injection vulnerabilities")
-
-# Search with metadata filter
-mem0_retrieve(
-    query="authentication bypass",
-    metadata={"category": "finding", "severity": "CRITICAL"}
-)
-
-# Cross-operation learning (search ALL operations)
-mem0_retrieve(
-    query="SQL injection techniques",
-    cross_operation=True  # Enables cross-learning
-)
-
-# List memories from current operation
-mem0_list()
-
-# List all memories across operations
-mem0_list(cross_operation=True)
-```
-
-### Cross-Operation Learning
-```python
-# Learn from past successful exploits
-mem0_retrieve(
-    query="successful exploitation techniques",
-    metadata={"status": "verified"},
-    cross_operation=True
-)
-
-# Find what blocked previous attempts
-mem0_retrieve(
-    query="blocked or filtered",
-    metadata={"category": "observation"},
-    cross_operation=True
-)
-```
+The Python workflow controller performs plan and task memory operations directly. Worker agents do not mutate plan or
+task state, except for permitted follow-up task creation.
 
 ## Configuration
 

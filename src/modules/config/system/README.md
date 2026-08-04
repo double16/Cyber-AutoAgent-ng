@@ -62,7 +62,7 @@ logger.info("Processing started")
 ```
 
 ### defaults.py
-Default configurations for all three providers.
+Default configurations for the supported providers, including Bedrock, Ollama, LiteLLM, and Gemini.
 
 **Functions:**
 - `build_default_configs()` - Build all provider defaults

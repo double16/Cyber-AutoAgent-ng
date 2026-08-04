@@ -2,6 +2,51 @@
 
 This guide covers deployment options for Cyber-AutoAgent in various environments.
 
+## How each mode works
+
+The React terminal uses one of three execution profiles. The setup wizard uses friendly display names, while the
+configuration and `--deployment-mode` option use the canonical values shown below.
+
+```text
+React UI
+├── Python / Local CLI (local-cli)
+│   └── Local Python agent process
+├── Single Container (single-container)
+│   └── Docker agent container
+└── Full Stack (full-stack)
+    └── Docker Compose: agent + supporting services
+```
+
+### Python / Local CLI (`local-cli`)
+
+The React UI starts the Python agent directly on the host through the local Python execution service. The host Python
+environment supplies the agent runtime, installed dependencies, and host-local security tools. Provider credentials,
+model configuration, and output paths are passed to that process, and no Docker services are started.
+
+The Python process emits structured execution events that the React UI consumes for progress, tool activity, metrics,
+reports, and terminal completion. This mode has the smallest footprint and is suited to development or environments
+where the required Python tools are already installed locally.
+
+### Single Container (`single-container`)
+
+The React UI uses the Docker execution service to start one isolated agent container. The container supplies the Python
+runtime and bundled assessment tools, while the UI passes the selected configuration, provider credentials, target
+information, and output mounts into the container.
+
+The container runs the assessment and exits when the operation completes. This mode does not start the persistent
+observability and evaluation service stack from Docker Compose. If observability is configured for this mode, it must
+use an externally available service.
+
+### Full Stack (`full-stack`)
+
+The React UI starts the Docker Compose deployment and communicates with the agent service over the Compose network.
+Alongside the agent, the stack provides the supporting services required for the complete platform experience,
+including observability, evaluation, service networking, databases, caching, and object storage.
+
+The supporting services remain available across agent processes and provide the infrastructure used for Langfuse
+tracing, evaluation workflows, and persisted service data. This mode has the largest disk, memory, startup-time, and
+operational requirements, but is the recommended profile when the complete platform is needed.
+
 ## Invocation Methods
 
 Cyber-AutoAgent supports **4 invocation methods**, each with different use cases:
@@ -152,7 +197,7 @@ cd cyber-autoagent
 
 # Build and run with Docker Compose (includes observability)
 cd docker
-docker-compose up -d
+docker compose -f docker-compose.yml up -d
 
 # Run a penetration test
 docker run --rm \
@@ -312,7 +357,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 
 | Variable                                           | Description                                                | Required                                                        |
 |----------------------------------------------------|------------------------------------------------------------|-----------------------------------------------------------------|
-| `CYBER_AGENT_PROVIDER`                             | Provider choice (bedrock/ollama/litellm)                   | No (auto-detected)                                              |
+| `CYBER_AGENT_PROVIDER`                             | Provider choice (bedrock/ollama/litellm/gemini)             | No (default: bedrock)                                           |
 | `CYBER_AGENT_LLM_MODEL`                            | Main LLM model ID                                          | Yes                                                             |
 | `CYBER_AGENT_EMBEDDING_MODEL`                      | Embedding model ID                                         | No (provider default)                                           |
 | `REASONING_EFFORT`                                 | Reasoning effort (low/medium/high)                         | No (default: medium)                                            |
@@ -431,7 +476,7 @@ npm start
 # The interface will guide you through:
 # 1. Docker environment setup
 # 2. Deployment mode selection (local-cli, single-container, full-stack)
-# 3. Model provider configuration (Bedrock, Ollama, LiteLLM)
+# 3. Model provider configuration (Bedrock, Ollama, LiteLLM, Gemini)
 # 4. First assessment execution
 ```
 

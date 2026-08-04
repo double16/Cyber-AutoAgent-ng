@@ -123,7 +123,7 @@ Provider requirement validation:
 ## Environment Variables
 
 ### Core Configuration
-- `CYBER_AGENT_PROVIDER` - Provider choice (bedrock/ollama/litellm)
+- `CYBER_AGENT_PROVIDER` - Provider choice (bedrock/ollama/litellm/gemini)
 - `CYBER_AGENT_LLM_MODEL` - Main LLM model ID
 - `CYBER_AGENT_EMBEDDING_MODEL` - Embedding model ID
 - `REASONING_EFFORT` - Reasoning configuration (low/medium/high)
@@ -137,7 +137,6 @@ Provider requirement validation:
 - `MEM0_API_KEY` - Mem0 Platform API key
 - `MEM0_LLM_MODEL` - Memory system LLM
 - `OPENSEARCH_HOST` - OpenSearch endpoint
-- `MEMORY_BACKEND` - Force backend (mem0/opensearch/faiss)
 
 ### Runtime Diagnostics
 - `CYBER_HEAP_MONITOR_AUTOSTART` - Auto-start heap monitor thread (`1` by default; set to `0`, `false`, or `no` to disable)

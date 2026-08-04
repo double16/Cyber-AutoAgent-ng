@@ -17,7 +17,7 @@
 </p>
 
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker&style=for-the-badge)](https://hub.docker.com/r/cyberautoagent/cyber-autoagent)
-[![Python](https://img.shields.io/badge/Python-3.11+-yellow?logo=python&style=for-the-badge)](https://www.python.org)
+[![Python](https://img.shields.io/badge/Python-3.12+-yellow?logo=python&style=for-the-badge)](https://www.python.org)
 [![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-orange?logo=amazon-aws&style=for-the-badge)](https://aws.amazon.com/bedrock/)
 [![Ollama](https://img.shields.io/badge/Ollama-Local_AI-green?style=for-the-badge)](https://ollama.ai)
 [![Discord](https://img.shields.io/badge/Discord-Join_Us-5865F2?logo=discord&logoColor=white&style=for-the-badge)](https://discord.gg/mxtSRhwY)
@@ -426,7 +426,7 @@ When running with Docker Compose, observability and evaluation are enabled by de
 ```bash
 # Start with observability and evaluation
 cd docker
-docker-compose up -d
+docker compose -f docker-compose.yml up -d
 
 # Access Langfuse UI at http://localhost:3000
 # Login: admin@cyber-autoagent.com / changeme
@@ -473,7 +473,7 @@ LANGFUSE_ADMIN_PASSWORD=strong-password-here
 
 **System Requirements**
 - **Node.js**: Version 24+ required for React CLI interface
-- **Python**: Version 3.11+ for local installation
+- **Python**: Version 3.12+ for local installation
 - **Docker**: For containerized deployments
 - **macOS Users**: Xcode Command Line Tools required
 
@@ -618,7 +618,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install Python dependencies
-pip install -e .
+uv sync
 
 # Install React CLI interface
 cd src/modules/interfaces/react
@@ -634,7 +634,7 @@ cd src/modules/interfaces/react
 npm start
 
 # Or run Python directly
-python src/cyberautoagent.py \
+uv run python src/cyberautoagent.py \
   --target "http://testphp.vulnweb.com" \
   --objective "Comprehensive security assessment"
 ```
@@ -661,9 +661,9 @@ The unified structure organizes all artifacts under operation-specific directori
 - `--target`: Target system/network to assess (ensure you have permission!)
 
 **Optional Arguments**:
-- `--provider`: Model provider - `bedrock` (AWS), `ollama` (local), or `litellm` (universal), default: bedrock
-- `--module`: Security module - `general` (web apps) or `ctf` (challenges), default: general
-- `--max-duration`: Required duration budget in minutes
+- `--provider`: Model provider - `bedrock`, `ollama`, `litellm`, or `gemini`, default: bedrock
+- `--module`: Security module, default: `web`; bundled modules also include `web_recon`, `ctf`, `threat_emulation`, `context_navigator`, and `code_security`
+- `--max-duration`: Optional duration budget in minutes
 - `--max-tokens`: Optional total token budget
 - `--max-cost`: Optional total cost budget
 - `--model`: Model ID to use (default: remote=claude-sonnet-4-5, local=qwen3-coder:30b-a3b-q4_K_M)
@@ -824,8 +824,8 @@ cyber-autoagent/
 │       ├── tools/             # Tool implementations
 │       │   └── memory.py      # Mem0 memory management tool
 │       ├── prompts/           # Prompt management
-│       │   ├── system.py      # AI prompts and configurations
-│       │   └── manager.py     # Langfuse prompt management
+│       │   ├── factory.py      # Prompt construction and module loading
+│       │   └── templates/      # Base prompt templates
 │       ├── evaluation/        # Evaluation system
 │       │   └── evaluation.py  # Ragas evaluation metrics
 │       ├── handlers/          # Callback handling and UI utilities
@@ -878,8 +878,7 @@ artifact and tool paths stay inside that operation workspace.
 | `src/modules/config/manager.py`         | Centralized configuration system              |
 | `src/modules/tools/memory.py`           | Unified Mem0 tool (FAISS/OpenSearch/Platform) |
 | `src/modules/evaluation/evaluation.py`  | Ragas evaluation system                       |
-| `src/modules/prompts/system.py`         | AI prompts and configurations                 |
-| `src/modules/prompts/manager.py`        | Langfuse prompt management                    |
+| `src/modules/prompts/factory.py`        | Prompt construction, module loading, and Langfuse integration |
 | `.env.example`                          | Environment configuration template            |
 | `docker/docker-compose.yml`             | Complete observability stack                  |
 | `docker/Dockerfile`                     | Agent container build                         |

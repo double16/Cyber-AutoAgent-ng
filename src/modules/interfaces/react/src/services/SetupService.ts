@@ -117,14 +117,14 @@ export class SetupService extends EventEmitter {
       stepName: 'environment'
     });
 
-    this.logger.info('Verifying Python 3.11+ is installed');
+    this.logger.info('Verifying Python 3.12+ is installed');
     const { PythonExecutionService } = await import('./PythonExecutionService.js');
     const pythonService = new PythonExecutionService();
     
     const pythonCheck = await pythonService.checkPythonVersion();
     if (!pythonCheck.installed) {
-      this.logger.error('Python 3.11+ not found');
-      throw new Error(pythonCheck.error || 'Python 3.11+ is required');
+      this.logger.error('Python 3.12+ not found');
+      throw new Error(pythonCheck.error || 'Python 3.12+ is required');
     }
     
     onProgress?.({
@@ -603,7 +603,7 @@ const health = await healthMonitor.checkHealth();
           name: 'Local CLI',
           description: 'Minimal footprint - Python environment with direct API calls',
           icon: '🖥️',
-          requirements: ['~100MB disk', '1GB RAM', 'Python 3.11+', 'Direct LLM API access']
+          requirements: ['~100MB disk', '1GB RAM', 'Python 3.12+', 'Direct LLM API access']
         };
       case 'single-container':
         return {

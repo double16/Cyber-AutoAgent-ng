@@ -25,7 +25,7 @@ describe('ExecutionServiceSelectionError', () => {
       {
         mode: ExecutionMode.PYTHON_CLI,
         reason: 'Service creation failed',
-        errorMessage: 'Python 3.11+ not available'
+        errorMessage: 'Python 3.12+ not available'
       }
     ];
 
@@ -44,7 +44,7 @@ describe('ExecutionServiceSelectionError', () => {
 
     const secondDiagnostics = error.diagnostics[1];
     expect(secondDiagnostics).toContain('Local CLI');
-    expect(secondDiagnostics).toContain('Python 3.11+ not available');
+    expect(secondDiagnostics).toContain('Python 3.12+ not available');
   });
 
   it('clears validation timeout handles when validation resolves first', async () => {

@@ -2,6 +2,7 @@
 
 ### Features
 
+- Format Markdown in the React `/docs` viewer and provide runtime repository links when local documentation is unavailable.
 - Render report observations and execution-history/acceptance tables deterministically, reducing report model calls
   while preserving LLM synthesis for executive, finding, methodology, and next-step sections.
 - Add a CTF-only artifact scanner that discovers braced and SHA-256/SHA-512-style flag candidates, creates opaque
