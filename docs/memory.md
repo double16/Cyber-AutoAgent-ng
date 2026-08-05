@@ -166,7 +166,8 @@ phase_cap = phase_id / total_phases * 100
 ```
 
 When a phase reaches its cap, the controller stops its task work and runs `phase_evaluator` with terminal-only outcomes.
-Python stores `done`, `partial_failure`, or `blocked` and advances the plan. Separate 20%, 40%, 60%, 80%, and 90%
+Python stores `done`, `partial_failure`, or `blocked` and advances the plan. A later Python reconciliation may store
+`superseded` when explicitly linked replacement tasks resolve a failed or blocked task. Separate 20%, 40%, 60%, 80%, and 90%
 checkpoints remain advisory below the phase cap and may return `continue`.
 
 ### Strategic Plan Management
@@ -206,6 +207,12 @@ plan = {
 - `done`
 - `partial_failure`
 - `blocked`
+- `superseded`
+
+`superseded` is a successful terminal disposition for a task whose intent was completed by explicitly linked
+replacement tasks. The original task record, evidence, failure reason, `replacement_of` lineage, and
+`supersedes_criteria` metadata remain durable and auditable. Python requires every parent acceptance criterion to be
+covered and every linked replacement to be `done` or `superseded`; unlinked failures remain unresolved.
 
 ### Reflection via Plan Updates
 
@@ -322,7 +329,8 @@ The memory system automatically validates and corrects inconsistent status field
 2. Python ensures exactly one active phase.
 3. Python activates existing active tasks first, then pending tasks when budget policy allows.
 4. Evaluator agents return task/phase decisions.
-5. Python records `done`, `partial_failure`, or `blocked` and advances the plan.
+5. Python records `done`, `partial_failure`, or `blocked` and advances the plan; explicit successful replacement
+   lineage may later reconcile a failed task to `superseded`.
 
 ### Plan-Based Strategy Updates
 

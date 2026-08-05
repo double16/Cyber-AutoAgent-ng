@@ -335,6 +335,7 @@ class FakeState:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
         ))
 
     def mark_task(self, task, status, reason=""):
@@ -351,6 +352,7 @@ class FakeState:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
         ))
 
     def defer_task(self, task, reason=""):
@@ -3009,6 +3011,115 @@ def test_reasoning_loop_recovery_supersedes_original_and_queues_one_replacement(
     assert replacement.acceptance == task.acceptance
     assert "criterion" in replacement.objective
     assert controller._assessment_is_complete(_plan()) is False
+
+
+def test_partial_failure_is_superseded_when_split_replacements_resolve_all_criteria():
+    parent = Task(
+        task_uid="parent",
+        title="Combined authentication bypass test",
+        objective="Test the security cookie and user token",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacements = [
+        Task(
+            task_uid="cookie-replacement",
+            title="Security cookie test",
+            objective="Test the security cookie",
+            phase=1,
+            status="done",
+            replacement_of="parent",
+            supersedes_criteria=["criterion-1"],
+        ),
+        Task(
+            task_uid="token-replacement",
+            title="User token test",
+            objective="Test the user token",
+            phase=1,
+            status="done",
+            replacement_of="parent",
+            supersedes_criteria=["criterion-1"],
+        ),
+    ]
+    state = FakeState(_plan(), tasks=[parent, *replacements])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    updated_plan = controller._mark_phase(_plan(), 1, "partial_failure")
+
+    updated_parent = next(task for task in state.tasks if task.task_uid == "parent")
+    assert updated_parent.status == "superseded"
+    assert "cookie-replacement" in updated_parent.status_reason
+    assert "token-replacement" in updated_parent.status_reason
+    assert updated_plan.phases[0].status == "done"
+
+
+@pytest.mark.parametrize(
+    "replacement_status",
+    ["active", "pending", "partial_failure", "blocked"],
+)
+def test_partial_failure_remains_blocking_until_all_replacements_succeed(replacement_status):
+    parent = Task(
+        task_uid="parent",
+        title="Combined test",
+        objective="Resolve the test intent",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Replacement test",
+        objective="Resolve the remaining criterion",
+        phase=1,
+        status=replacement_status,
+        replacement_of="parent",
+        supersedes_criteria=["criterion-1"],
+    )
+    state = FakeState(_plan(), tasks=[parent, replacement])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    controller._reconcile_superseded_tasks(1)
+
+    assert next(task for task in state.tasks if task.task_uid == "parent").status == "partial_failure"
+
+
+def test_partial_failure_remains_blocking_when_replacement_omits_parent_criterion():
+    parent = Task(
+        task_uid="parent",
+        title="Combined test",
+        objective="Resolve the test intent",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Unrelated replacement",
+        objective="Resolve another criterion",
+        phase=1,
+        status="done",
+        replacement_of="parent",
+        supersedes_criteria=["other-criterion"],
+    )
+    state = FakeState(_plan(), tasks=[parent, replacement])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    controller._reconcile_superseded_tasks(1)
+
+    assert next(task for task in state.tasks if task.task_uid == "parent").status == "partial_failure"
 
 
 def test_non_loop_max_token_exhaustion_remains_partial_failure():

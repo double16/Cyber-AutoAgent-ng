@@ -530,6 +530,7 @@ class WorkflowStateStore:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -550,6 +551,7 @@ class WorkflowStateStore:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -570,6 +572,7 @@ class WorkflowStateStore:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -590,6 +593,7 @@ class WorkflowStateStore:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -1083,7 +1087,7 @@ class MultiAgentWorkflowController:
                     self._short(validation_reason),
                 )
                 previous_signature = self._plan_signature(plan)
-                updated_plan = self.state.mark_phase(plan, phase.id, validation_status)
+                updated_plan = self._mark_phase(plan, phase.id, validation_status)
                 self._emit_plan_output("updated", updated_plan, previous_signature)
                 if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                     self._emit_workflow_completion(updated_plan)
@@ -1108,7 +1112,7 @@ class MultiAgentWorkflowController:
                         self._short(decision.reason),
                     )
                     previous_signature = self._plan_signature(plan)
-                    updated_plan = self.state.mark_phase(plan, phase.id, decision.status)
+                    updated_plan = self._mark_phase(plan, phase.id, decision.status)
                     self._emit_plan_output("updated", updated_plan, previous_signature)
                     if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                         self._log_workflow("workflow terminal after phase=%s status=%s", phase.id, decision.status)
@@ -1139,7 +1143,7 @@ class MultiAgentWorkflowController:
                     self._short(reason),
                 )
                 previous_signature = self._plan_signature(plan)
-                updated_plan = self.state.mark_phase(plan, phase.id, "partial_failure")
+                updated_plan = self._mark_phase(plan, phase.id, "partial_failure")
                 self._emit_plan_output("updated", updated_plan, previous_signature)
                 if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                     self._emit_workflow_completion(updated_plan)
@@ -1162,7 +1166,7 @@ class MultiAgentWorkflowController:
                     self._short(final_decision.reason),
                 )
                 previous_signature = self._plan_signature(plan)
-                updated_plan = self.state.mark_phase(plan, phase.id, final_status)
+                updated_plan = self._mark_phase(plan, phase.id, final_status)
                 self._emit_plan_output("updated", updated_plan, previous_signature)
                 if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                     self._emit_workflow_completion(updated_plan)
@@ -1170,7 +1174,7 @@ class MultiAgentWorkflowController:
                 continue
             self._log_workflow("no active/pending tasks after creation; marking phase=%s partial_failure", self._phase_label(phase))
             previous_signature = self._plan_signature(plan)
-            updated_plan = self.state.mark_phase(plan, phase.id, "partial_failure")
+            updated_plan = self._mark_phase(plan, phase.id, "partial_failure")
             self._emit_plan_output("updated", updated_plan, previous_signature)
             if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                 self._log_workflow("workflow terminal after partial_failure phase=%s", phase.id)
@@ -1356,6 +1360,64 @@ class MultiAgentWorkflowController:
             all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
             and all(task.status in {"done", "superseded"} for task in self.state.list_tasks())
         )
+
+    def _mark_phase(self, plan: OperationPlan, phase_id: int, status: str) -> OperationPlan:
+        """Reconcile resolved replacement tasks before applying phase completion rules."""
+
+        reconciled = self._reconcile_superseded_tasks(phase_id)
+        if status == "partial_failure" and reconciled:
+            remaining_failures = self.state.list_tasks(
+                phase=phase_id,
+                status=["active", "pending", "partial_failure", "blocked"],
+            )
+            if not remaining_failures:
+                self._log_workflow(
+                    "promoting phase after replacement reconciliation phase=%s status=done",
+                    phase_id,
+                )
+                status = "done"
+        return self.state.mark_phase(plan, phase_id, status)
+
+    def _reconcile_superseded_tasks(self, phase_id: int) -> List[Task]:
+        """Mark failed tasks superseded when explicitly linked replacements resolve their intent."""
+
+        tasks = self.state.list_tasks(phase=phase_id)
+        reconciled: List[Task] = []
+        for parent in tasks:
+            if parent.status not in {"partial_failure", "blocked"}:
+                continue
+            replacements = [
+                task for task in tasks
+                if task.replacement_of == parent.task_uid
+            ]
+            if not replacements:
+                continue
+            parent_criteria = {criterion.id for criterion in parent.acceptance.criteria}
+            covered_criteria = {
+                criterion_id
+                for replacement in replacements
+                for criterion_id in replacement.supersedes_criteria
+            }
+            if not parent_criteria.issubset(covered_criteria):
+                continue
+            if any(replacement.status not in {"done", "superseded"} for replacement in replacements):
+                continue
+            reason = (
+                f"Original task intent resolved by successful replacement tasks: "
+                f"{', '.join(replacement.task_uid for replacement in replacements)}. "
+                f"Superseded from {parent.status}."
+            )
+            updated = self.state.mark_task(parent, "superseded", reason)
+            reconciled.append(updated)
+            self._emit_task_done(updated)
+            for replacement in replacements:
+                self._emit_task_superseded(updated, replacement)
+            self._log_workflow(
+                "task superseded after replacement reconciliation original=%s replacements=%s",
+                self._task_label(parent),
+                ",".join(self._task_label(replacement) for replacement in replacements),
+            )
+        return reconciled
 
     def _workflow_coverage_summary(self, plan: OperationPlan) -> List[Dict[str, Any]]:
         """Return deterministic per-phase task and frozen-inventory coverage counts."""
@@ -2152,6 +2214,7 @@ class MultiAgentWorkflowController:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.task_uid,
+            supersedes_criteria=[criterion.id for criterion in task.acceptance.criteria],
             target_scope=task.target_scope,
             target_ids=list(task.target_ids),
         )
@@ -2196,6 +2259,7 @@ class MultiAgentWorkflowController:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.task_uid,
+            supersedes_criteria=[criterion.id for criterion in task.acceptance.criteria],
             target_scope=task.target_scope,
             target_ids=list(task.target_ids),
         )
@@ -3350,7 +3414,7 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
             self._short(decision.reason),
         )
         previous_signature = self._plan_signature(plan)
-        updated_plan = self.state.mark_phase(plan, phase.id, decision.status)
+        updated_plan = self._mark_phase(plan, phase.id, decision.status)
         self._emit_plan_output("updated", updated_plan, previous_signature)
         return updated_plan
 
@@ -5260,6 +5324,9 @@ not be duplicated. Use prior-phase task results as inputs, but create work that 
 distinct objective. When revisiting an earlier endpoint, make the task perform the current phase's materially different
 work and preserve that distinction in its objective and criterion. Do not turn closure, verification, or validation
 phases into another generic assessment batch. Every created task must be executable without violating any plan constraint.
+When resolving an existing `partial_failure` or `blocked` task, set `replacement_of` to that task UID and set
+`supersedes_criteria` to the parent criterion IDs resolved by the replacement. Do not use this metadata for unrelated
+follow-up work.
 For inventory-backed work, preserve protocol-neutral interaction metadata. Use the recorded operation and input location
 when present; do not substitute another HTTP method, filesystem operation, repository action, or service command unless
 the task explicitly tests that difference.
@@ -5306,7 +5373,7 @@ generic replacement for an existing verification task.
         ]
         lines.append(
             f"task_creation_relevant_tasks[{len(relevant)}]"
-            "{task_uid,phase,title,status,kind,reference_id}:"
+            "{task_uid,phase,title,status,kind,reference_id,replacement_of,supersedes_criteria}:"
         )
         for task in relevant:
             lines.append(
@@ -5318,6 +5385,8 @@ generic replacement for an existing verification task.
                     sanitize_toon_value(task.status),
                     sanitize_toon_value(task.kind),
                     sanitize_toon_value(task.reference_id),
+                    sanitize_toon_value(task.replacement_of),
+                    sanitize_toon_value("|".join(task.supersedes_criteria)),
                 ))
             )
         lines.append(self._task_creator_prior_phase_context(phase))

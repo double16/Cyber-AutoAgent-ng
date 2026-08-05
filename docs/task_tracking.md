@@ -72,8 +72,46 @@ Tasks support:
 - `done`: task objective achieved
 - `partial_failure`: task made useful progress but did not fully achieve the objective
 - `blocked`: task cannot proceed because of a missing dependency, authorization, capability, or prerequisite
+- `superseded`: the task was failed or blocked, but explicitly linked replacement tasks resolved its complete
+  acceptance intent
 
-Task evaluators decide terminal task status, but Python stores that status.
+Task evaluators decide execution outcomes, but Python stores terminal status and owns supersession reconciliation.
+Superseded tasks remain in history with their original evidence and failure reason; they are not erased or silently
+converted to `done`.
+
+When a task is split into replacement work, each replacement declares:
+
+- `replacement_of`: the UID of the failed or blocked parent task
+- `supersedes_criteria`: the parent acceptance-criterion IDs resolved by that replacement
+
+Python marks the parent `superseded` only when every parent criterion is covered and all linked replacements are
+`done` or `superseded`. A replacement that is pending, active, failed, or blocked keeps the parent unresolved. Tasks
+without explicit lineage are not treated as replacements based on similar titles or objectives.
+
+For example, one failed combined task can be split into two successful tasks:
+
+```json
+[
+  {
+    "task_uid": "combined-test",
+    "status": "superseded",
+    "status_reason": "Original task intent resolved by successful replacement tasks",
+    "replacement_of": null
+  },
+  {
+    "task_uid": "cookie-test",
+    "status": "done",
+    "replacement_of": "combined-test",
+    "supersedes_criteria": ["criterion-1"]
+  },
+  {
+    "task_uid": "token-test",
+    "status": "done",
+    "replacement_of": "combined-test",
+    "supersedes_criteria": ["criterion-1"]
+  }
+]
+```
 
 ## Data Model
 
@@ -212,6 +250,8 @@ it is negative, observational, a new finding candidate, or evidence for an exist
 and conversation are retained when no valid complete acceptance ledger was
 recorded. Once the atomic ledger passes structural validation, one short-lived semantic evaluator returns the terminal
 `done`, `partial_failure`, or `blocked` verdict; immutable acceptance results are not replayed through another pass.
+Python may later reconcile a failed or blocked task to `superseded` when explicitly linked replacement tasks resolve
+all of its criteria.
 
 Correctable tool invocation failures receive one bounded recovery turn in the same retained executor conversation.
 The executor may inspect or create prerequisites, continue independent work, select another executable, and make a
@@ -338,6 +378,10 @@ basis, source references, unique criteria, and evidence requirements. The rules 
 - do not reduce task coverage based only on likelihood or convenience
 - create prerequisite inventory work before dependent coverage tasks
 - create a follow-up task for discoveries outside an active task's frozen manifest
+- when replacing failed or blocked work, set `replacement_of` to the parent task UID and list the resolved parent
+  criterion IDs in `supersedes_criteria`
+- use replacement lineage only when the new task resolves the parent's acceptance intent; unrelated follow-up work
+  must remain unlinked
 
 Snapshot references use explicit `task:<uid>`, `memory:<id>`, `artifact:<path>`, or `finding:<uid>` namespaces. A
 snapshot that resolves to a canonical inventory automatically becomes coverage work. For procedures, Python generates
@@ -492,4 +536,5 @@ The task system now combines durable state with multi-agent execution:
 - Active tasks run before pending tasks.
 - Budget progress is a soft phase cap.
 - `create_tasks` remains available for durable work capture.
-- Phase and task terminal states are explicit: `done`, `partial_failure`, and `blocked`.
+- Phase terminal states are explicit: `done`, `partial_failure`, and `blocked`. Task terminal states additionally
+  include `superseded` for resolved replacement lineage.

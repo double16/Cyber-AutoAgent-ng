@@ -837,6 +837,7 @@ class Task:
     target_scope: TargetScope = "all"
     target_ids: List[str] = field(default_factory=list)
     replacement_of: Optional[str] = None
+    supersedes_criteria: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -885,6 +886,7 @@ class Task:
             kind=str(obj.get("kind", "standard") or "standard"),
             reference_id=obj.get("reference_id"),
             replacement_of=obj.get("replacement_of"),
+            supersedes_criteria=_normalize_target_ids(obj.get("supersedes_criteria", [])),
             target_scope=str(obj.get("target_scope", "all") or "all"),
             target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
@@ -904,6 +906,7 @@ class Task:
             "kind": self.kind,
             "reference_id": self.reference_id,
             "replacement_of": self.replacement_of,
+            "supersedes_criteria": self.supersedes_criteria,
             "target_scope": self.target_scope,
             "target_ids": self.target_ids,
         })
@@ -916,7 +919,7 @@ class Task:
     def csv_format() -> str:
         return (
             "title,objective,acceptance_mode,acceptance_criteria,evidence,phase,status,status_reason,kind,"
-            "reference_id,replacement_of,target_scope,target_ids"
+            "reference_id,replacement_of,supersedes_criteria,target_scope,target_ids"
         )
 
     def to_toon(self, include_format=True) -> str:
@@ -932,6 +935,7 @@ class Task:
         kind = sanitize_toon_value(self.kind)
         reference_id = sanitize_toon_value(self.reference_id)
         replacement_of = sanitize_toon_value(self.replacement_of)
+        supersedes_criteria = "|".join(sanitize_toon_value(item) for item in self.supersedes_criteria)
         target_ids = "|".join(sanitize_toon_value(target_id) for target_id in self.target_ids)
         lines = []
         if include_format:
@@ -939,7 +943,7 @@ class Task:
         lines.append(
             f"  {title},{objective},{acceptance_mode},{acceptance_criteria},{evidence},{self.phase},{status},"
             f"{status_reason},{kind},"
-            f"{reference_id},{replacement_of},{self.target_scope},{target_ids}"
+            f"{reference_id},{replacement_of},{supersedes_criteria},{self.target_scope},{target_ids}"
         )
         return "\n".join(lines).strip()
 
@@ -3126,6 +3130,14 @@ class TaskProposal(_StrictTaskWireModel):
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
     criteria: List[TaskProposalCriterion] = Field(min_length=1, max_length=1)
     target_ids: List[str] = Field(default_factory=list)
+    replacement_of: Optional[str] = Field(
+        default=None,
+        description="UID of a failed task whose acceptance work this task replaces",
+    )
+    supersedes_criteria: List[str] = Field(
+        default_factory=list,
+        description="Parent acceptance criterion IDs resolved by this replacement task",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -3250,6 +3262,11 @@ _TASK_PROPOSAL_FIELD_CORRECTIONS = {
     "output_kind": ('artifact or inventory_manifest', '"output_kind":"artifact"'),
     "criteria": ('array containing exactly one description object', '"criteria":[{"description":"Store evidence"}]'),
     "target_ids": ('array of exact registered target IDs', '"target_ids":["target-1"]'),
+    "replacement_of": ('existing failed task UID when replacing work', '"replacement_of":"task-uid"'),
+    "supersedes_criteria": (
+        'array of parent acceptance criterion IDs when replacing work',
+        '"supersedes_criteria":["criterion-1"]',
+    ),
 }
 
 
@@ -3346,6 +3363,8 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                         "items": {"$ref": "#/$defs/TaskProposalCriterion"},
                     },
                     "target_ids": {"type": "array", "items": {"type": "string"}},
+                    "replacement_of": {"type": ["string", "null"]},
+                    "supersedes_criteria": {"type": "array", "items": {"type": "string"}, "default": []},
                 },
             },
             "TaskProposalCriterion": {
@@ -4677,6 +4696,25 @@ def _create_tasks_from_proposals(
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
         title = proposal.title.strip()
         objective = proposal.objective.strip()
+        replacement_of = str(proposal.replacement_of or "").strip() or None
+        supersedes_criteria = list(dict.fromkeys(
+            str(criterion_id).strip() for criterion_id in proposal.supersedes_criteria if str(criterion_id).strip()
+        ))
+        if replacement_of is not None:
+            parent = next((task for task in existing_tasks if task.task_uid == replacement_of), None)
+            if parent is None:
+                raise ValueError(f"replacement_of references unknown task {replacement_of}")
+            if parent.phase != current_phase:
+                raise ValueError("replacement task must remain in the parent task's phase")
+            if parent.status not in {"partial_failure", "blocked"}:
+                raise ValueError("replacement_of must reference a partial_failure or blocked task")
+            parent_criteria = {criterion.id for criterion in parent.acceptance.criteria}
+            if not supersedes_criteria or not set(supersedes_criteria).issubset(parent_criteria):
+                raise ValueError(
+                    "supersedes_criteria must identify existing acceptance criteria on the parent task"
+                )
+        elif supersedes_criteria:
+            raise ValueError("supersedes_criteria requires replacement_of")
         proposal_created_count = 0
         proposal_duplicate_count = 0
         target_scope, target_ids = _validate_task_target_scope(
@@ -4900,6 +4938,8 @@ def _create_tasks_from_proposals(
                 status="pending",
                 target_scope=group_target_scope,
                 target_ids=group_target_ids,
+                replacement_of=replacement_of,
+                supersedes_criteria=supersedes_criteria,
             ))
             proposal_created_count += 1
         logger.info(
@@ -6740,6 +6780,8 @@ class Mem0ServiceClient:
                             created_at=t.created_at,
                             kind=t.kind,
                             reference_id=t.reference_id,
+                            replacement_of=t.replacement_of,
+                            supersedes_criteria=t.supersedes_criteria,
                             target_scope=t.target_scope,
                             target_ids=t.target_ids,
                         )
@@ -6792,6 +6834,7 @@ class Mem0ServiceClient:
                 kind=target.kind,
                 reference_id=target.reference_id,
                 replacement_of=target.replacement_of,
+                supersedes_criteria=target.supersedes_criteria,
                 target_scope=target.target_scope,
                 target_ids=target.target_ids,
             )
@@ -6821,6 +6864,7 @@ class Mem0ServiceClient:
                         kind=p.kind,
                         reference_id=p.reference_id,
                         replacement_of=p.replacement_of,
+                        supersedes_criteria=p.supersedes_criteria,
                         target_scope=p.target_scope,
                         target_ids=p.target_ids,
                     )
