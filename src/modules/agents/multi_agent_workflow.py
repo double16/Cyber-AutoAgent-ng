@@ -2894,10 +2894,13 @@ shell command selections. Do not broaden scope or add criteria.
 ## Draft
 {json.dumps(prompt_spec, indent=2, sort_keys=True)}
 
+## Memory Selection Map
+{self._memory_selection_summary()}
+
 ## Critic feedback
 {json.dumps(feedback, indent=2)}
 
-Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [string],
+Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_ids": [string], "tools": [string],
 "shell_commands": [string]}}.
 """
 
@@ -2954,10 +2957,41 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
             + [name for name in selected_tools if name in available_commands]
         ))
 
-        memory_ids = self._coerce_memory_ids(prompt_spec.get("memory_ids", []))
+        memory_records = self._prompt_memory_records()
+        canonical_memory_ids = [self._memory_id(memory) for memory in memory_records]
+        requested_memory_indices = self._coerce_memory_indices(prompt_spec.get("memory_indices", []))
+        memory_indices = [
+            index for index in requested_memory_indices if index < len(canonical_memory_ids)
+        ]
+        invalid_memory_indices = [
+            index for index in requested_memory_indices if index >= len(canonical_memory_ids)
+        ]
+        selected_memory_ids = [canonical_memory_ids[index] for index in memory_indices]
+        legacy_memory_ids = self._coerce_memory_ids(prompt_spec.get("memory_ids", []))
+        if canonical_memory_ids:
+            invalid_memory_ids = [
+                memory_id for memory_id in legacy_memory_ids if memory_id not in canonical_memory_ids
+            ]
+            selected_memory_ids.extend(
+                memory_id for memory_id in legacy_memory_ids
+                if memory_id in canonical_memory_ids and memory_id not in selected_memory_ids
+            )
+            if invalid_memory_ids:
+                self._log_workflow(
+                    "task prompt ignored non-canonical memory ids=%s",
+                    ",".join(invalid_memory_ids),
+                )
+            if invalid_memory_indices:
+                self._log_workflow(
+                    "task prompt ignored out-of-range memory indices=%s",
+                    ",".join(str(index) for index in invalid_memory_indices),
+                )
+        else:
+            selected_memory_ids = legacy_memory_ids
         return {
             "prompt": prompt.strip(),
-            "memory_ids": memory_ids,
+            "memory_indices": memory_indices,
+            "memory_ids": list(dict.fromkeys(selected_memory_ids)),
             "tools": tools,
             "shell_commands": shell_commands,
         }
@@ -5067,7 +5101,7 @@ while planning.
             "reference the finding returned by `store_finding`; negative and non-finding results use "
             "no_vulnerability or observation."
         )
-        return f"""Build a tailored task execution prompt as JSON with keys prompt, memory_ids, tools, shell_commands. Select optional tool names and likely shell command names that are applicable to the task.
+        return f"""Build a tailored task execution prompt as JSON with keys prompt, memory_indices, memory_ids, tools, shell_commands. Select optional tool names and likely shell command names that are applicable to the task.
 
 The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
@@ -5098,6 +5132,11 @@ The generated prompt must instruct the task-executor agent:
   The controller has already bound the tool to the task, criterion, and coverage IDs, so do not supply or guess them.
   Never add criteria to the active task; create a
   separately contracted follow-up task for discoveries outside the frozen manifest.
+
+Memory selection:
+- Prefer `memory_indices` from the controller-owned Memory Selection Map below.
+- Memory IDs are controller-owned identifiers. Do not reproduce or edit UUIDs from memory text.
+- `memory_ids` is retained only for compatibility; Python canonicalizes it before review and execution.
 
 Tool selection guidance:
 - The `tools` JSON field contains optional-tool names only.
@@ -5141,6 +5180,9 @@ Shell command selection guidance:
 
 ## Memories
 {self._memory_summary()}
+
+## Memory Selection Map
+{self._memory_selection_summary()}
 
 ## Available core tools
 {self._core_tool_catalog()}
@@ -5219,6 +5261,9 @@ When approved is false, provide concise, actionable feedback for every material 
 ## Memories
 {self._memory_summary()}
 
+## Memory Selection Map
+{self._memory_selection_summary()}
+
 ## Available core tools
 {self._core_tool_catalog()}
 
@@ -5268,6 +5313,9 @@ recording. Remove vague or unnecessary swarm instructions.
 ## Memories
 {self._memory_summary()}
 
+## Memory Selection Map
+{self._memory_selection_summary()}
+
 ## Available core tools
 {self._core_tool_catalog()}
 
@@ -5283,7 +5331,7 @@ recording. Remove vague or unnecessary swarm instructions.
 ## Critic feedback
 {json.dumps(feedback, indent=2)}
 
-Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [string],
+Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_ids": [string], "tools": [string],
 "shell_commands": [string]}}.
 
 Output only the revised task prompt:
@@ -5812,12 +5860,21 @@ unless a separate executable host or network target authorizes that scope."""
         return selected
 
     def _memory_summary(self) -> str:
+        return self._render_memories(self._prompt_memory_records())
+
+    def _prompt_memory_records(self) -> List[Dict[str, Any]]:
         try:
-            memories = self.state.client.list_memories(run_id=self.runtime.operation_id, limit=20)[:20]
+            return self.state.client.list_memories(run_id=self.runtime.operation_id, limit=20)[:20]
         except Exception as error:
             logger.debug("Unable to load memories for workflow prompt", exc_info=error)
-            return "memories[0]{id,memory}:"
-        return self._render_memories(memories)
+            return []
+
+    def _memory_selection_summary(self) -> str:
+        memories = self._prompt_memory_records()
+        lines = [f"memory_options[{len(memories)}]{{index,id}}:"]
+        for index, memory in enumerate(memories):
+            lines.append(f"  {index},{sanitize_toon_value(self._memory_id(memory))}")
+        return "\n".join(lines)
 
     def _selected_memory_context(self, memory_ids: Any) -> str:
         ids = self._coerce_memory_ids(memory_ids)
@@ -5861,8 +5918,24 @@ unless a separate executable host or network target authorizes that scope."""
             seen.add(clean_id)
         return selected
 
+    @staticmethod
+    def _coerce_memory_indices(memory_indices: Any) -> List[int]:
+        if not isinstance(memory_indices, list):
+            return []
+        selected = []
+        seen = set()
+        for memory_index in memory_indices:
+            if isinstance(memory_index, bool) or not isinstance(memory_index, int) or memory_index < 0:
+                continue
+            if memory_index not in seen:
+                selected.append(memory_index)
+                seen.add(memory_index)
+        return selected
+
     def _render_memories(self, memories: List[Dict[str, Any]]) -> str:
         toon = f"memories[{len(memories)}]{{id,memory}}:\n"
+        if not memories:
+            return toon.rstrip("\n")
         for memory in memories:
             memory_id = self._memory_id(memory)
             memory_text = self._memory_text(memory)[:1000]

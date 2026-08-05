@@ -2492,6 +2492,102 @@ def test_task_executor_continues_when_selected_memory_lookup_fails():
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
 
 
+def test_task_prompt_normalization_uses_canonical_memory_indices():
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: [
+            {"id": "memory-1", "memory": "first"},
+            {"id": "memory-2", "memory": "second"},
+        ]
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "execute active",
+            "memory_indices": [1, 1, 99],
+            "memory_ids": ["memory-1", "memory-2-corrupted"],
+            "tools": [],
+            "shell_commands": [],
+        },
+        Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
+    )
+
+    assert normalized["memory_indices"] == [1]
+    assert normalized["memory_ids"] == ["memory-2", "memory-1"]
+
+
+def test_malformed_memory_id_does_not_fail_prompt_build():
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: [
+            {"id": "98d09291-78dc-443c-aba2-f2c4b46dc7fc", "memory": "validated observation"},
+        ]
+    )
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "execute active",
+            "memory_ids": ["98d09291-78dc-443c-aba2-f2c4b467fc"],
+            "tools": [],
+            "shell_commands": [],
+        },
+        task,
+    )
+
+    assert normalized["memory_ids"] == []
+
+
+def test_malformed_memory_id_reaches_prompt_critic_without_false_failure():
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: [
+            {"id": "98d09291-78dc-443c-aba2-f2c4b46dc7fc", "memory": "validated observation"},
+        ]
+    )
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append((role, prompt))
+        if role == "task_prompt_builder":
+            return (
+                '{"prompt":"execute active","memory_ids":'
+                '["98d09291-78dc-443c-aba2-f2c4b467fc"],"tools":[],"shell_commands":[]}'
+            )
+        if role == "task_prompt_critic":
+            assert "98d09291-78dc-443c-aba2-f2c4b467fc" not in prompt
+            return '{"approved":true,"feedback":[]}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    normalized = controller._build_task_prompt(
+        _plan(),
+        _plan().phases[0],
+        Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
+    )
+
+    assert [role for role, _prompt in calls] == ["task_prompt_builder", "task_prompt_critic"]
+    assert normalized["memory_ids"] == []
+
+
 def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
     runtime = _runtime()
     runtime.config.available_tools = ["httpx", "nmap"]
@@ -6024,7 +6120,7 @@ def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
     assert row.endswith(",scan;validate")
     description = row.split(",", maxsplit=2)[1]
     assert len(description) == 250
-    assert "keys prompt, memory_ids, tools, shell_commands" in prompt
+    assert "keys prompt, memory_indices, memory_ids, tools, shell_commands" in prompt
 
 
 def test_shell_command_catalog_is_empty_without_shell_tool(monkeypatch):
