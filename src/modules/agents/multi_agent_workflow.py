@@ -140,6 +140,7 @@ TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
         "uniq",
         "wc",
         "which",
+        "command",
         "xargs",
         "echo",
         "pwd",
@@ -161,6 +162,7 @@ TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
         "time",
         "id",
         "whoami",
+        "sleep",
     }
 )
 

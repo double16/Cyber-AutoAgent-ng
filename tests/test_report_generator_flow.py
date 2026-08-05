@@ -755,6 +755,51 @@ def test_latest_operation_log_parser_uses_only_final_session(tmp_path):
     assert parsed["tool_failures"] == {"nmap:error": 1}
 
 
+def test_operation_log_parser_filters_bookkeeping_and_extracts_shell_commands(tmp_path):
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-02 11:00:00",
+                event({"type": "tool_start", "tool_name": "create_tasks"}),
+                event(
+                    {
+                        "type": "tool_start",
+                        "tool_name": "shell",
+                        "tool_id": "shell-1",
+                "tool_input": {"command": ["curl -I https://example.test", "python -V"]},
+                    }
+                ),
+                event(
+                    {
+                        "type": "tool_input_corrected",
+                        "tool_name": "shell",
+                        "tool_id": "shell-1",
+                        "tool_input": {"command": "curl -s https://example.test"},
+                    }
+                ),
+                event(
+                    {
+                        "type": "tool_start",
+                        "tool_name": "shell",
+                        "tool_input": {"command": "sudo curl -s https://example.test && env FOO=1 nmap -sV target | grep nmap"},
+                    }
+                ),
+                event({"type": "tool_start", "tool_name": "store_observation"}),
+                event({"type": "tool_start", "tool_name": "http_request"}),
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["tools_used"] == ["create_tasks", "shell", "shell", "store_observation", "http_request"]
+    assert parsed["reportable_tools_used"] == ["shell", "http_request", "curl", "nmap"]
+
+
 def test_latest_operation_log_parser_uses_assessment_model_usage_snapshot(tmp_path):
     usage = [
         {
@@ -866,6 +911,7 @@ def test_operation_log_parser_uses_execution_session_before_report_only_session(
     assert parsed["termination_reason"] == "partial_failure"
     assert parsed["termination_message"] == "Phase 4 failed"
     assert parsed["tools_used"] == ["shell"]
+    assert parsed["reportable_tools_used"] == ["shell"]
     assert parsed["metrics"]["duration"] == "25m"
     assert parsed["metrics"]["model_usage"] == usage
 
@@ -919,6 +965,7 @@ def test_operation_log_parser_aggregates_execution_continuations_before_report_o
     parsed = _parse_latest_operation_log(str(log_path))
 
     assert parsed["tools_used"] == ["shell", "read_artifact"]
+    assert parsed["reportable_tools_used"] == ["shell"]
     assert parsed["metrics"]["total_tokens"] == 170
     assert parsed["metrics"]["duration"] == "15m 0s"
     assert len(parsed["metrics"]["model_usage"]) == 1

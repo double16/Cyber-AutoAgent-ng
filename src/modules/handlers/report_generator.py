@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import tomllib
 from collections import Counter
@@ -35,6 +36,7 @@ from modules.prompts.factory import (
     get_report_finding_system_prompt,
     get_report_next_steps_system_prompt,
     safe_truncate,
+    is_reportable_tool,
 )
 from modules.tools.memory import _artifact_path_from_ref, get_memory_client, memory_is_cross_operation, \
     OperationTarget
@@ -710,6 +712,7 @@ def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
             for key in ("main_model", "input_tokens", "output_tokens", "total_tokens", "total_duration", "estimated_cost")
         },
         "latest_run": sections.get("latest_run") or {},
+        "reportable_tools_used": sections.get("reportable_tools_used") or [],
         "tools_summary": sections.get("tools_summary") or "",
         "next_steps": sections.get("next_steps") or {},
     }
@@ -1173,6 +1176,7 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
             "model_usage": [],
         },
         "tools_used": [],
+        "reportable_tools_used": [],
         "tool_failures": {},
     }
     first_line = run_text.splitlines()[0] if run_text else ""
@@ -1181,6 +1185,8 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
 
     budget_candidate: Dict[str, Any] = {}
     tools_used: List[str] = []
+    shell_command_names: List[str] = []
+    shell_commands_by_tool_id: Dict[str, List[str]] = {}
     tool_failures: Counter[str] = Counter()
     metrics = summary["metrics"]
     model_usage_snapshot_seen = False
@@ -1235,10 +1241,20 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
         elif event_type == "termination_reason":
             summary["termination_reason"] = payload.get("reason")
             summary["termination_message"] = payload.get("message")
-        elif event_type == "tool_start":
+        elif event_type in {"tool_start", "tool_input_corrected"}:
             tool_name = str(payload.get("tool_name") or payload.get("name") or "").strip()
             if tool_name:
-                tools_used.append(tool_name)
+                if event_type == "tool_start":
+                    tools_used.append(tool_name)
+                if tool_name.lower() == "shell":
+                    tool_input = payload.get("tool_input", {})
+                    command_value = tool_input.get("command") if isinstance(tool_input, dict) else None
+                    command_values = _normalize_shell_command_names(command_value)
+                    tool_id = str(payload.get("tool_id") or "").strip()
+                    if tool_id:
+                        shell_commands_by_tool_id[tool_id] = command_values
+                    else:
+                        shell_command_names.extend(command_values)
         elif event_type == "tool_end":
             outcome = str(payload.get("outcome") or payload.get("status") or "").strip().lower()
             if outcome and outcome not in {"success", "succeeded", "done"}:
@@ -1250,8 +1266,44 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
 
     summary["configured_budget"] = _normalize_budget_config(budget_candidate)
     summary["tools_used"] = tools_used
+    for command_values in shell_commands_by_tool_id.values():
+        shell_command_names.extend(command_values)
+    reportable_tools: List[str] = []
+    for tool_name in list(tools_used) + shell_command_names:
+        normalized = str(tool_name).strip().split(":", 1)[0]
+        if normalized and is_reportable_tool(normalized) and normalized not in reportable_tools:
+            reportable_tools.append(normalized)
+    summary["reportable_tools_used"] = reportable_tools
     summary["tool_failures"] = dict(sorted(tool_failures.items()))
     return summary
+
+
+def _normalize_shell_command_names(value: Any) -> List[str]:
+    """Extract unique executable names from shell tool input."""
+
+    if isinstance(value, (list, tuple)):
+        commands: List[str] = []
+        for item in value:
+            commands.extend(_normalize_shell_command_names(item))
+        return commands
+    text = str(value or "").strip()
+    if not text:
+        return []
+    names: List[str] = []
+    for segment in re.split(r"&&|\|\||[;|]", text):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        while tokens and (tokens[0] in {"sudo", "command", "builtin", "exec", "timeout"}):
+            tokens.pop(0)
+        if tokens and tokens[0] == "env":
+            tokens.pop(0)
+            while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+                tokens.pop(0)
+        if tokens:
+            names.append(tokens[0].rsplit("/", 1)[-1])
+    return list(dict.fromkeys(names))
 
 
 def _is_report_only_session(summary: Dict[str, Any]) -> bool:
@@ -1284,6 +1336,7 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     for key in ("input_tokens", "output_tokens", "total_tokens", "cost"):
         metrics[key] = 0
     tools_used: List[str] = []
+    reportable_tools_used: List[str] = []
     failures: Counter[str] = Counter()
     usage_rows: Dict[tuple[str, str], Dict[str, Any]] = {}
     duration_seconds = 0
@@ -1291,6 +1344,9 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
         for tool_name in session.get("tools_used", []):
             if tool_name not in tools_used:
                 tools_used.append(tool_name)
+        for tool_name in session.get("reportable_tools_used", []):
+            if tool_name not in reportable_tools_used:
+                reportable_tools_used.append(tool_name)
         failures.update(session.get("tool_failures", {}))
         session_metrics = session.get("metrics", {})
         duration_seconds += _duration_seconds(session_metrics.get("duration"))
@@ -1327,6 +1383,7 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     metrics["model_usage"] = list(usage_rows.values())
     summary["metrics"] = metrics
     summary["tools_used"] = tools_used
+    summary["reportable_tools_used"] = reportable_tools_used
     summary["tool_failures"] = dict(sorted(failures.items()))
     return summary
 
@@ -3626,7 +3683,8 @@ def build_report_sections(
         if session_started:
             operation_date = session_started[:10]
         if not tools_used:
-            tools_used = latest_run.get("tools_used", [])
+            tools_used = latest_run.get("reportable_tools_used") or latest_run.get("tools_used", [])
+        tools_used = [tool for tool in tools_used if is_reportable_tool(tool)]
 
         # Format tools summary (accepts dict or list); prefer accurate counts if provided
         try:
@@ -3743,6 +3801,7 @@ def build_report_sections(
             "objective_validation_failure_count": objective_validation_failure_count,
             "objective_validation_results": objective_results,
             "tools_summary": tools_summary,
+            "reportable_tools_used": list(tools_used or []),
             "analysis_framework": domain_lens.get("framework", ""),
             "module": module,
             "evidence_count": len(evidence),

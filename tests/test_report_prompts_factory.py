@@ -122,6 +122,12 @@ def test_module_executive_prompts_define_informational_observation_context():
         assert "severity" in prompt.lower(), prompt_path
 
 
+def test_appendix_prompt_defines_unified_reportable_tools():
+    prompt = _read_report_prompt("report_agent_appendix_system_prompt.md")
+
+    assert "reportable operational-tool list" in prompt
+
+
 def test_high_risk_module_overrides_do_not_reclaim_canonical_report_data():
     ctf_prompt = (OPERATION_PLUGIN_DIR / "ctf" / "report_agent_finding_executive_prompt.md").read_text(
         encoding="utf-8"

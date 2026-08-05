@@ -226,7 +226,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert len(list(filter(lambda e: e["severity"] == "LOW", verified))) == 2
         assert len(list(filter(lambda e: e["severity"] == "INFO", verified))) == 0
 
-        assert out.get("tools_summary") == "- shell: 3 uses\n- python_repl: 2 uses"
+        assert out.get("tools_summary") == "- shell\n- python_repl"
         assert "OWASP Top 10 2021" in out.get("analysis_framework")
         assert out.get("module") == "web"
         assert out.get("evidence_count") == 15
