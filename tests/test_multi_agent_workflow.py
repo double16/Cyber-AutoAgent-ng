@@ -4739,6 +4739,25 @@ def test_task_cycle_progress_signature_changes_only_with_controller_observed_pro
     assert signature != MultiAgentWorkflowController._task_cycle_progress_signature([changed], [acceptance])
 
 
+def test_repeat_loop_recovery_is_bounded_and_requires_changed_action():
+    cycle_result = workflow_mod.TaskExecutorCycleResult(
+        text="Stopped after repeated browser_evaluate_js calls",
+        outcomes=[],
+        repeat_loop_detected=True,
+        repeat_loop_signature="loop-1",
+        repeat_loop_reason="Stopped after repeated browser_evaluate_js calls",
+    )
+
+    assert not MultiAgentWorkflowController._repeat_loop_is_repeated(False, set(), "loop-1")
+    assert MultiAgentWorkflowController._repeat_loop_is_repeated(True, {"loop-1"}, "loop-2")
+    assert MultiAgentWorkflowController._repeat_loop_is_repeated(False, {"loop-1"}, "loop-1")
+
+    guidance = MultiAgentWorkflowController._repeat_loop_recovery_guidance(cycle_result)
+    assert "same normalized input" in guidance
+    assert "same browser expression" in guidance
+    assert "equivalent replacement task" in guidance
+
+
 def test_task_correction_stops_after_repeated_no_progress_cycle():
     runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2})
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")

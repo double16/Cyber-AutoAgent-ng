@@ -2357,6 +2357,43 @@ def test_cli_main_worker_session_reuses_and_cleans_role_agent(
     fake_agent.cleanup.assert_called_once()
 
 
+def test_cli_main_retained_executor_preserves_repeated_tool_loop_metadata(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    loop_details = {
+        "cycle_signature": "loop-signature",
+        "cycle_length": 1,
+        "repeat_count": 4,
+        "tool_name": "shell",
+        "tool_names": ["shell"],
+    }
+    runner_result = cyberautoagent.AgentRunResult(
+        "repeated_tool_loop",
+        "Stopped agent after repeated shell calls",
+        details=loop_details,
+    )
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(return_value=runner_result))
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"],
+    )
+
+    def run_workflow():
+        session_factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
+        with session_factory("task_executor", ["shell"], "role system") as run_executor:
+            result = run_executor("perform task", cyberautoagent.AgentRunPolicy())
+        assert result.text == runner_result.message
+        assert result.repeat_loop_detected is True
+        assert result.repeat_loop_signature == "loop-signature"
+        assert result.repeat_loop_reason == runner_result.message
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
+
+
 def test_cli_main_workflow_runner_prefers_agent_final_text_over_policy_message(monkeypatch, tmp_path):
     callback = CliCallback()
     fake_agent = CallableCliAgent()

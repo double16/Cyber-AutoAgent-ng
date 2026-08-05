@@ -256,6 +256,12 @@ all of its criteria.
 Correctable tool invocation failures receive one bounded recovery turn in the same retained executor conversation.
 The executor may inspect or create prerequisites, continue independent work, select another executable, and make a
 bounded number of corrected invocations. A correction must change the failed input; an identical failed call is blocked.
+When the exact tool-repeat guard stops an executor, Python records the normalized loop signature across retained
+executor cycles. The task receives at most one changed-procedure recovery prompt. That prompt prohibits the prior
+tool/input cycle and requires a materially different evidence action. If any tool loop recurs, the task is terminally
+marked `partial_failure`; Python does not create an equivalent replacement task. A replacement is appropriate only
+when a separately planned prerequisite, target state, or method is required, and it must use `replacement_of` and
+declare the parent criteria in `supersedes_criteria`.
 Validation failures from structured memory and acceptance tools are correctable, but repeated equivalent failures are
 counted across retained executor cycles and terminate the task deterministically.
 Acceptance corrections identify prerequisites: executors create a finding before a candidate disposition, create

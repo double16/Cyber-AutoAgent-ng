@@ -201,6 +201,9 @@ class TaskExecutorCycleResult:
     max_tokens_exhausted: bool = False
     max_tokens_reason: str = ""
     max_tokens_classification: str = ""
+    repeat_loop_detected: bool = False
+    repeat_loop_signature: str = ""
+    repeat_loop_reason: str = ""
 
 
 FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
@@ -1676,6 +1679,8 @@ class MultiAgentWorkflowController:
         evaluator_corrections = 0
         finding_observation_repairs = 0
         previous_progress_signature: Optional[str] = None
+        repeat_loop_signatures: set[str] = set()
+        repeat_loop_recovery_used = False
         acceptance_correction_limit = self._task_acceptance_correction_count()
         endpoint_evidence_correction_limit = self._task_endpoint_evidence_correction_count()
         evaluator_correction_limit = self._task_evaluator_correction_count()
@@ -1742,6 +1747,34 @@ class MultiAgentWorkflowController:
                 worker_result = run_executor(actor_prompt, task_policy)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
+                repeated_loop = cycle_result.repeat_loop_detected
+                if repeated_loop:
+                    loop_signature = cycle_result.repeat_loop_signature or cycle_result.repeat_loop_reason
+                    if self._repeat_loop_is_repeated(
+                        repeat_loop_recovery_used,
+                        repeat_loop_signatures,
+                        loop_signature,
+                    ):
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                "A tool-call loop recurred after the one bounded changed-action recovery; "
+                                "the task was not replaced with an equivalent task."
+                            ),
+                        )
+                        self._log_workflow(
+                            "task repeated tool loop after changed recovery task=%s signature=%s",
+                            self._task_label(task),
+                            self._short(loop_signature),
+                        )
+                        break
+                    repeat_loop_signatures.add(loop_signature)
+                    repeat_loop_recovery_used = True
+                    self._log_workflow(
+                        "task tool loop recovery task=%s signature=%s action=changed_procedure",
+                        self._task_label(task),
+                        self._short(loop_signature),
+                    )
                 repeated_tool_failure = repeated_correctable_failure(cycle_result.outcomes)
                 failed_acceptance_calls, successful_acceptance_calls, repeated_acceptance = (
                     track_acceptance_outcomes(cycle_result.outcomes)
@@ -2139,6 +2172,11 @@ class MultiAgentWorkflowController:
                         next_cycle=cycle + 1,
                         required_tool=continuation_required_tool,
                         evaluator_instructions=evaluator_instructions,
+                        loop_guidance=(
+                            self._repeat_loop_recovery_guidance(cycle_result)
+                            if repeated_loop and repeat_loop_recovery_used
+                            else ""
+                        ),
                     )
                     self._log_workflow(
                         "task critic requested continuation task=%s cycle=%s status=%s reason=%s",
@@ -2274,6 +2312,7 @@ class MultiAgentWorkflowController:
         next_cycle: int,
         required_tool: str = "",
         evaluator_instructions: str = "",
+        loop_guidance: str = "",
     ) -> str:
         required_tool = required_tool or self._validation_tool_name(task) or "record_task_acceptance"
         criteria = ", ".join(missing_criteria) or "the assigned acceptance contract"
@@ -2291,6 +2330,7 @@ class MultiAgentWorkflowController:
                 "Follow the evaluator guidance with the smallest evidence-producing action. Preserve the frozen "
                 "acceptance ledger unless a registered tool requires an update. Do not broaden scope or add criteria."
             )
+        loop_section = f"\n{loop_guidance.strip()}\n" if loop_guidance.strip() else ""
         return f"""## Compact Task Continuation
 Continue actor cycle {next_cycle} for the existing task. Do not replay prior reasoning, task history, or completed
 commands.
@@ -2300,7 +2340,33 @@ Latest artifact/evidence: {latest_artifact}
 {required_tool_section}{evaluator_section}
 
 {completion_instruction}
+{loop_section}
 """
+
+    @staticmethod
+    def _repeat_loop_is_repeated(
+        recovery_used: bool,
+        signatures: set[str],
+        signature: str,
+    ) -> bool:
+        """Return whether a task has already consumed its one loop recovery attempt."""
+
+        return recovery_used or signature in signatures
+
+    @staticmethod
+    def _repeat_loop_recovery_guidance(cycle_result: TaskExecutorCycleResult) -> str:
+        """Require a materially different action after invocation-level loop suppression."""
+
+        reason = cycle_result.repeat_loop_reason or "An exact repeated tool-call cycle was detected."
+        return (
+            "## Mandatory Loop Recovery\n"
+            f"{reason}\n"
+            "The prior tool-call cycle is prohibited. Do not call the same tool with the same normalized input, "
+            "repeat the same URL/method/payload, or repeat the same browser expression. Make one materially "
+            "different evidence-producing action that addresses the missing criterion. If the required page, "
+            "route, artifact, or other prerequisite is unavailable, record that bounded result and terminate "
+            "the task; do not create an equivalent replacement task."
+        )
 
     @staticmethod
     def _task_acceptance_repair_instruction(error: str) -> str:
