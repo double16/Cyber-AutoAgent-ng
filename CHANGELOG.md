@@ -46,6 +46,8 @@
 
 ### Fixes
 
+- Ground executive report narratives with explicitly labeled informational observations, resolve endpoint findings to
+  registered targets, remove redundant observation metadata, and simplify task-history report tables.
 - Persist operation preflight resolution and route-check facts for taxonomy and later workflow policy checks, clarify
   configured taxonomy refresh URLs in finding reports, and require a globally routable resolved target before T1190
   can be recorded.

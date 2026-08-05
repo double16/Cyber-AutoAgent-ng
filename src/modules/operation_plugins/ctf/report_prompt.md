@@ -26,3 +26,10 @@ CTF reports serve specialized evaluators:
 - **Strategy Leads**: Effectiveness of different approaches, tool performance, resource allocation
 - **Future Teams**: Lessons learned, reusable technique patterns, common pitfalls
 </audience_adaptation>
+
+<deterministic_reporting_boundary>
+Use this module guidance only for narrative interpretation of the canonical operation data. Python owns objective and
+flag-validation status, exact flag values, verified finding state, counts, coverage, artifact references, taxonomy,
+and metrics.
+Do not calculate, declare, or tabulate those facts.
+</deterministic_reporting_boundary>

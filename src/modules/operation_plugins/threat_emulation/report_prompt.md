@@ -19,3 +19,9 @@ Adversary simulations serve diverse stakeholders:
 - **Blue Teams/SOC**: Specific detection gaps, alert tuning, log source requirements
 - **Incident Responders**: TTP patterns, marker identification, containment strategies
 </audience_adaptation>
+
+<deterministic_reporting_boundary>
+Use this module guidance only for narrative interpretation of recorded emulation context. Python owns ATT&CK mappings,
+executed-TTP and cleanup status, coverage, task/phase facts, artifact references, findings, and metrics. Do not
+calculate, declare, or tabulate those facts.
+</deterministic_reporting_boundary>

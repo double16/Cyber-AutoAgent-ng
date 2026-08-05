@@ -19,3 +19,9 @@ Discovery reports serve operational and strategic stakeholders:
 - **Blue Teams**: Baseline visibility, identified misconfigurations, security software coverage
 - **Security Architects**: Trust relationship maps, network segmentation gaps, dependency analysis
 </audience_adaptation>
+
+<deterministic_reporting_boundary>
+Use this module guidance only for narrative interpretation of the recorded environment. Python owns discovery and
+completion status, coverage, target/task/phase facts, artifact references, taxonomy, and metrics. Do not calculate,
+declare, or tabulate those facts.
+</deterministic_reporting_boundary>

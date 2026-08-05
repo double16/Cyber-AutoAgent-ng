@@ -15,6 +15,7 @@ from modules.prompts.factory import (
 
 
 PROMPT_TEMPLATE_DIR = Path(__file__).parents[1] / "src" / "modules" / "prompts" / "templates"
+OPERATION_PLUGIN_DIR = Path(__file__).parents[1] / "src" / "modules" / "operation_plugins"
 
 
 def _read_report_prompt(name):
@@ -86,6 +87,59 @@ def test_report_critic_rejects_placeholder_leakage_and_layout_drift():
     assert "missing required headings" in prompt
     assert "incorrect heading order" in prompt
     assert "explicit module-specific override" in prompt
+
+
+def test_module_report_prompts_preserve_python_owned_facts():
+    """Module guidance may specialize prose, but must not reclaim report facts from Python."""
+    report_prompts = sorted(OPERATION_PLUGIN_DIR.glob("*/report_prompt.md"))
+    agent_prompts = sorted(OPERATION_PLUGIN_DIR.glob("*/report_agent_*prompt.md"))
+
+    assert report_prompts
+    assert agent_prompts
+    for prompt_path in report_prompts:
+        prompt = prompt_path.read_text(encoding="utf-8")
+        assert "<deterministic_reporting_boundary>" in prompt, prompt_path
+        assert "Python owns" in prompt, prompt_path
+        assert "artifact references" in prompt, prompt_path
+        assert "metrics" in prompt, prompt_path
+
+    for prompt_path in agent_prompts:
+        prompt = prompt_path.read_text(encoding="utf-8")
+        assert "Python" in prompt, prompt_path
+
+
+def test_module_executive_prompts_define_informational_observation_context():
+    executive_prompts = sorted(
+        list(OPERATION_PLUGIN_DIR.glob("*/report_agent_executive_system_prompt.md"))
+        + list(OPERATION_PLUGIN_DIR.glob("*/report_agent_finding_executive_prompt.md"))
+    )
+
+    assert executive_prompts
+    for prompt_path in executive_prompts:
+        prompt = prompt_path.read_text(encoding="utf-8")
+        assert "informational" in prompt.lower(), prompt_path
+        assert "do not" in prompt.lower(), prompt_path
+        assert "severity" in prompt.lower(), prompt_path
+
+
+def test_high_risk_module_overrides_do_not_reclaim_canonical_report_data():
+    ctf_prompt = (OPERATION_PLUGIN_DIR / "ctf" / "report_agent_finding_executive_prompt.md").read_text(
+        encoding="utf-8"
+    )
+    recon_prompt = (OPERATION_PLUGIN_DIR / "web_recon" / "report_agent_executive_system_prompt.md").read_text(
+        encoding="utf-8"
+    )
+    context_prompt = (OPERATION_PLUGIN_DIR / "context_navigator" / "report_agent_observation_system_prompt.md").read_text(
+        encoding="utf-8"
+    )
+    threat_prompt = (OPERATION_PLUGIN_DIR / "threat_emulation" / "report_agent_executive_system_prompt.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "without declaring CAPTURED/NOT CAPTURED" in ctf_prompt
+    assert "without listing or clustering" in recon_prompt
+    assert "without assigning completion markers" in context_prompt
+    assert "do not create ATT&CK mappings" in threat_prompt
 
 
 def test_findings_summary_uses_canonical_metadata_location_without_confidence():
