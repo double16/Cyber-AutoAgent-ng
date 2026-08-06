@@ -65,6 +65,8 @@ export class PythonExecutionService extends EventEmitter {
   private pythonCommand: string = 'python3'; // Will be updated by checkPythonVersion
   private stderrBuffer: string = '';
   private startupTimers = new Set<NodeJS.Timeout>();
+  private bufferedStartupEvents: any[] = [];
+  private startupEventConsumerAttached = false;
   
   constructor() {
     super();
@@ -87,6 +89,28 @@ export class PythonExecutionService extends EventEmitter {
     this.pipPath = path.join(this.venvPath, venvBinDir, pipExecutable);
     this.requirementsPath = path.join(this.projectRoot, 'pyproject.toml');
     // Note: Python version detection is performed in checkPythonVersion(), not in the constructor
+  }
+
+  drainBufferedStartupEvents(): any[] {
+    const events = this.bufferedStartupEvents;
+    this.bufferedStartupEvents = [];
+    return events;
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.startupEventConsumerAttached = true;
+  }
+
+  private emitParsedEvent(event: any): void {
+    if (!this.startupEventConsumerAttached && [
+      'tool_discovery_start',
+      'tool_available',
+      'tool_unavailable',
+      'environment_ready',
+    ].includes(event?.type)) {
+      this.bufferedStartupEvents.push(event);
+    }
+    this.emit('event', event);
   }
 
   private scheduleStartupTimer(callback: () => void, delayMs: number): NodeJS.Timeout {
@@ -1083,7 +1107,7 @@ export class PythonExecutionService extends EventEmitter {
 
   private handleParsedPythonEvent(eventData: any): void {
     emitStatusEvents(eventData, {
-      emitEvent: event => this.emit('event', event),
+      emitEvent: event => this.emitParsedEvent(event),
       onComplete: () => this.emit('complete')
     });
   }

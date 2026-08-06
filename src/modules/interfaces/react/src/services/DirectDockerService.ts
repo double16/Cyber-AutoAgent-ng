@@ -141,6 +141,8 @@ export class DirectDockerService extends EventEmitter {
   private _currentToolName: string | undefined = undefined;
   private pendingTimers = new Set<NodeJS.Timeout>();
   private eventParser?: Transform;
+  private bufferedStartupEvents: any[] = [];
+  private startupEventConsumerAttached = false;
 
   /**
    * Initialize the Docker service with connection to Docker daemon
@@ -149,6 +151,28 @@ export class DirectDockerService extends EventEmitter {
   constructor() {
     super();
     this.dockerClient = new Dockerode(getDockerConnectionOptions());
+  }
+
+  drainBufferedStartupEvents(): any[] {
+    const events = this.bufferedStartupEvents;
+    this.bufferedStartupEvents = [];
+    return events;
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.startupEventConsumerAttached = true;
+  }
+
+  private emitParsedEvent(event: any): void {
+    if (!this.startupEventConsumerAttached && [
+      'tool_discovery_start',
+      'tool_available',
+      'tool_unavailable',
+      'environment_ready',
+    ].includes(event?.type)) {
+      this.bufferedStartupEvents.push(event);
+    }
+    this.emit('event', event);
   }
 
   private scheduleTimer(callback: () => void, delayMs: number): NodeJS.Timeout {
@@ -918,7 +942,7 @@ export class DirectDockerService extends EventEmitter {
 
   private handleParsedDockerEvent(eventData: any): void {
     emitStatusEvents(eventData, {
-      emitEvent: event => this.emit('event', event),
+      emitEvent: event => this.emitParsedEvent(event),
       onComplete: () => {
         this.seenOperationComplete = true;
         this.emit('complete');

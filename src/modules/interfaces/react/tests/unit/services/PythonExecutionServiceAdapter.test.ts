@@ -21,6 +21,8 @@ class MockPythonService extends EventEmitter {
     stop = jest.fn(async () => undefined);
     cleanup = jest.fn();
     isActive = jest.fn(() => false);
+    drainBufferedStartupEvents = jest.fn(() => [{type: 'tool_discovery_start'}]);
+    markStartupEventConsumerAttached = jest.fn();
     projectRoot = process.cwd();
 
     constructor() {
@@ -62,6 +64,16 @@ describe('PythonExecutionServiceAdapter', () => {
             supportsParallel: false,
             maxConcurrent: 1,
         }));
+    });
+
+    it('delegates startup discovery event buffering to the wrapped service', async () => {
+        const {adapter, service} = await loadAdapter();
+
+        expect(adapter.drainBufferedStartupEvents()).toEqual([{type: 'tool_discovery_start'}]);
+        expect(service.drainBufferedStartupEvents).toHaveBeenCalledTimes(1);
+
+        adapter.markStartupEventConsumerAttached();
+        expect(service.markStartupEventConsumerAttached).toHaveBeenCalledTimes(1);
     });
 
     it('checks Python support and handles check failures', async () => {

@@ -77,6 +77,29 @@ describe('StreamDisplay broad event rendering', () => {
     expect(normal || '').toBe('');
   });
 
+  it('renders structured tool-discovery events without generic output labels', async () => {
+    const { EventLine, render } = await load();
+    const events: any[] = [
+      { type: 'tool_discovery_start', message: 'Discovering tools' },
+      { type: 'tool_available', tool_name: 'scanner', description: 'Scan hosts' },
+      { type: 'tool_unavailable', tool_name: 'browser' },
+      { type: 'environment_ready', tool_count: 2 },
+    ];
+
+    const output = events.map(event => (
+      render(<EventLine event={event} animationsEnabled={false} />).lastFrame()
+    )).join('\n');
+
+    expect(output).toContain('TOOL DISCOVERY');
+    expect(output).toContain('Discovering tools');
+    expect(output).toContain('scanner');
+    expect(output).toContain('Scan hosts');
+    expect(output).toContain('browser');
+    expect(output).toContain('unavailable');
+    expect(output).toContain('Environment ready - 2 cybersecurity tools loaded');
+    expect(output).not.toContain('output');
+  });
+
   it('renders SDK, lifecycle, reasoning, termination, and metadata event variants', async () => {
     const { EventLine, render } = await load();
     const events: any[] = [

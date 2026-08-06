@@ -56,6 +56,8 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Execution results
+- `tool_discovery_start` / `tool_available` / `tool_unavailable` / `environment_ready`: Structured tool-discovery
+  and environment status events, rendered directly by the terminal and auto-run console rather than as generic output
 - `task_started` / `task_deferred` / `task_done`: Workflow lifecycle events; deferred tasks return to the pending queue,
   while completed finding-validation tasks include their candidate reference and final `verified` or
   `validation_failure` resolution

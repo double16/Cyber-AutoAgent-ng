@@ -56,6 +56,14 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
     return ExecutionMode.PYTHON_CLI;
   }
 
+  drainBufferedStartupEvents(): any[] {
+    return this.pythonService.drainBufferedStartupEvents();
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.pythonService.markStartupEventConsumerAttached();
+  }
+
   getCapabilities(): ExecutionCapabilities {
     return {
       canExecute: true,

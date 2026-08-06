@@ -21,6 +21,7 @@ import { installAutoRunInterruptFallback } from './utils/autoRunInterrupt.js';
 import { formatAutoRunTerminationEvent } from './utils/autoRunTerminationFormatting.js';
 import { resolveRecordingMode } from './utils/recordingMode.js';
 import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
+import { formatToolDiscoveryEvent } from './utils/toolDiscoveryEventFormatting.js';
 import { formatWorkflowActivityEvent } from './utils/workflowActivityFormatting.js';
 import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
 import { appendOperationHealth } from './utils/operationHealthFormatting.js';
@@ -425,8 +426,12 @@ const runAutoAssessment = async () => {
       // This provides real-time progress visibility during assessment
       executionService.on('event', (event: any) => {
         const memoryEventMessage = formatAutoRunMemoryEvent(event);
+        const toolDiscoveryMessage = formatToolDiscoveryEvent(event);
         if (memoryEventMessage) {
           loggingService.info(memoryEventMessage);
+        }
+        else if (toolDiscoveryMessage) {
+          loggingService.info(toolDiscoveryMessage);
         }
         else if (event.type === 'workflow_activity') {
           const message = formatWorkflowActivityEvent(event);

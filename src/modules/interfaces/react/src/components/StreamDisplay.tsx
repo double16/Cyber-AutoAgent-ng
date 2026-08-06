@@ -75,6 +75,10 @@ export type AdditionalStreamEvent =
   | { type: 'tool_input_corrected'; tool_id: string; tool_input: any; [key: string]: any }
   | { type: 'command'; content: string; [key: string]: any }
   | { type: 'output'; content: string; exitCode?: number; duration?: number; [key: string]: any }
+  | { type: 'tool_discovery_start'; message?: string; [key: string]: any }
+  | { type: 'tool_available'; tool_name?: string; description?: string; [key: string]: any }
+  | { type: 'tool_unavailable'; tool_name?: string; description?: string; [key: string]: any }
+  | { type: 'environment_ready'; message?: string; tool_count?: number; [key: string]: any }
   | { type: 'error'; content: string; [key: string]: any }
   | { type: 'metadata'; content: Record<string, string>; [key: string]: any }
   | { type: 'divider'; [key: string]: any }
@@ -582,6 +586,63 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
   const effectiveConfig = configOverride ?? config;
 
   switch (event.type) {
+    case 'tool_discovery_start': {
+      const message = typeof event.message === 'string' && event.message.trim()
+        ? event.message.trim()
+        : 'Loading cybersecurity assessment tools';
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="cyan" bold>TOOL DISCOVERY</Text>
+          <Box marginLeft={2}>
+            <Text>🔎 {message}</Text>
+          </Box>
+        </Box>
+      );
+    }
+
+    case 'tool_available': {
+      const toolName = typeof event.tool_name === 'string' && event.tool_name.trim()
+        ? event.tool_name.trim()
+        : 'unnamed tool';
+      const description = typeof event.description === 'string' ? event.description.trim() : '';
+      return (
+        <Box marginLeft={2}>
+          <Text color="green">🔧 </Text>
+          <Text bold>{toolName}</Text>
+          {description ? <Text dimColor>{` — ${description}`}</Text> : null}
+        </Box>
+      );
+    }
+
+    case 'tool_unavailable': {
+      const toolName = typeof event.tool_name === 'string' && event.tool_name.trim()
+        ? event.tool_name.trim()
+        : 'unnamed tool';
+      const description = typeof event.description === 'string' ? event.description.trim() : '';
+      return (
+        <Box marginLeft={2}>
+          <Text color="yellow">⛔ </Text>
+          <Text color="yellow" bold>{toolName}</Text>
+          {description ? <Text dimColor>{` — ${description}`}</Text> : null}
+          <Text dimColor> (unavailable)</Text>
+        </Box>
+      );
+    }
+
+    case 'environment_ready': {
+      const toolCount = Number(event.tool_count);
+      const message = typeof event.message === 'string' && event.message.trim()
+        ? event.message.trim()
+        : Number.isFinite(toolCount)
+          ? `Environment ready - ${toolCount} cybersecurity tools loaded`
+          : 'Environment ready';
+      return (
+        <Box marginTop={1}>
+          <Text color="green" bold>🟢 {message}</Text>
+        </Box>
+      );
+    }
+
     // =======================================================================
     // SDK NATIVE EVENT HANDLERS - Integrated with SDK context
     // =======================================================================

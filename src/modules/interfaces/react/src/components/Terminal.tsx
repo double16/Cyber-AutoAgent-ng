@@ -1925,6 +1925,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
     // Subscribe to events
     executionService.on('event', handleEvent);
+    const bufferedStartupEvents = executionService.drainBufferedStartupEvents?.() ?? [];
+    executionService.markStartupEventConsumerAttached?.();
+    for (const bufferedEvent of bufferedStartupEvents) {
+      handleEvent(bufferedEvent);
+    }
     
     // Event flushing no longer needed - events are processed directly
     
