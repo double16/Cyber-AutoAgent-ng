@@ -1340,8 +1340,6 @@ def main():
     config_overrides = {}
     if args.output_dir:
         config_overrides["output_dir"] = args.output_dir
-    # Always enable unified output system
-    config_overrides["enable_unified_output"] = True
     if args.model:
         config_overrides["model_id"] = args.model
     # MCP overrides

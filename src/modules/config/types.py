@@ -335,7 +335,6 @@ class OutputConfig:
 
     base_dir: str = field(default_factory=get_default_base_dir)
     target_name: Optional[str] = None
-    enable_unified_output: bool = True  # Default to enabled for new unified structure
     operation_id: Optional[str] = None  # Current operation ID for path generation
 
 

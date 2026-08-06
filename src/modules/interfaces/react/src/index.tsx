@@ -308,7 +308,6 @@ const runAutoAssessment = async () => {
         memoryMode: 'operation' as const,
         keepMemory: true,
         outputDir: './outputs',
-        unifiedOutput: true,
         theme: 'retro' as const,
         showMemoryUsage: false,
         showOperationId: true,

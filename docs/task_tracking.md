@@ -352,7 +352,8 @@ Selection happens in two passes:
 2. A prompt-builder agent sees separate `core_tools` and `optional_tools` TOON catalogs, then selects the final
    applicable optional tools and memory references. Core capabilities are supplied automatically and are not returned
    in the prompt-builder's `tools` selection. If a model nevertheless returns a core tool in either selection field,
-   workflow normalization silently removes it because the executor already receives that tool.
+   workflow normalization silently removes it because the executor already receives that tool. The controller-bound
+   `record_task_acceptance` terminal tool is also supplied automatically and is removed from either selection field.
 
 When shell is available, the prompt-builder also receives a compact `shell_commands` TOON catalog containing installed
 command names, bounded descriptions, and capabilities. The builder may select

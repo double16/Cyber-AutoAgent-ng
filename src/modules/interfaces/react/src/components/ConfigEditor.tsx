@@ -257,7 +257,6 @@ const CONFIG_FIELDS: ConfigField[] = [
       { label: 'HTML', value: 'html' }
     ]
   },
-  { key: 'unifiedOutput', label: 'Unified Output Structure', type: 'boolean', section: 'Output' }
 ];
 
 const SECTIONS: ConfigSection[] = [

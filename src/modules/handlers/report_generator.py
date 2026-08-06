@@ -78,6 +78,10 @@ _GENERIC_PATH_REFERENCE = re.compile(
 _EXCERPT_TOKEN = re.compile(r"[A-Za-z0-9_'-]{4,}")
 _INFORMATIONAL_OBSERVATION_CATEGORIES = frozenset({"observation", "signal", "discovery"})
 _WORKFLOW_BOOKKEEPING_SOURCES = frozenset({"plan", "task", "task_acceptance"})
+_NARRATIVE_FINDING_REFERENCE_STOPWORDS = frozenset({
+    "discovery",
+    "validation",
+})
 _EXCERPT_STOPWORDS = {
     "about",
     "after",
@@ -772,7 +776,11 @@ def _validate_narrative_consistency(text: Any, canonical: Dict[str, Any]) -> Lis
     lowered = text.lower()
     for match in re.finditer(r"(?:finding|vulnerability)\s+([a-z0-9_-]+)", lowered):
         token = match.group(1)
-        if token not in known_findings and not token.isdigit():
+        if (
+            token not in known_findings
+            and not token.isdigit()
+            and token not in _NARRATIVE_FINDING_REFERENCE_STOPWORDS
+        ):
             warnings.append(f"Narrative references unknown finding '{token}'.")
     for raw, normalized in _artifact_reference_matches(text):
         if normalized not in set(canonical.get("artifact_references", [])):

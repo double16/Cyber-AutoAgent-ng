@@ -641,7 +641,7 @@ uv run python src/cyberautoagent.py \
 
 ### Data Storage
 
-**Unified Output Structure** (default, enabled by `CYBER_AGENT_ENABLE_UNIFIED_OUTPUT=true`):
+**Unified Output Structure**:
 
 | Data Type  | Location                            |
 |------------|-------------------------------------|
@@ -771,7 +771,7 @@ The `.env.example` file contains detailed configuration options with inline comm
 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION` for remote mode (AWS Bedrock)
 - `OLLAMA_HOST` for local mode (Ollama)
-- `CYBER_AGENT_OUTPUT_DIR`, `CYBER_AGENT_ENABLE_UNIFIED_OUTPUT` for output management
+- `CYBER_AGENT_OUTPUT_DIR` for output management
 - `CYBER_HEAP_MONITOR_AUTOSTART` to control diagnostic heap monitor autostart (`1` by default, set `0` to disable)
 - `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` for observability
 - `QDRANT_URL` and optional `QDRANT_API_KEY` for service-backed semantic memory

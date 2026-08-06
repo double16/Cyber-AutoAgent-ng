@@ -6076,13 +6076,39 @@ def test_task_prompt_spec_filters_runtime_supplied_core_tools_from_both_selectio
     normalized = controller._normalize_task_prompt_spec(
         {
             "prompt": "Store evidence",
-            "tools": ["read_artifact", "shell", "store_observation", "mcp_scan"],
-            "shell_commands": ["shell", "store_observation", "module_probe"],
+            "tools": ["read_artifact", "shell", "store_observation", "record_task_acceptance", "mcp_scan"],
+            "shell_commands": ["shell", "store_observation", "record_task_acceptance", "module_probe"],
         },
         task,
     )
 
     assert normalized["tools"] == ["mcp_scan", "module_probe"]
+    assert normalized["shell_commands"] == []
+
+
+def test_task_prompt_spec_filters_controller_supplied_tools_with_runtime_fallback():
+    runtime = _runtime()
+    runtime.tools_list = [_tool("shell"), _tool("record_finding_validation")]
+    runtime.core_tools_list = []
+    runtime.optional_tools_list = [_tool("mcp_scan")]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Accept", objective="Assess target", phase=1, status="pending")
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Assess target",
+            "tools": ["shell", "record_finding_validation", "record_task_acceptance", "mcp_scan"],
+            "shell_commands": ["record_task_acceptance"],
+        },
+        task,
+    )
+
+    assert normalized["tools"] == ["mcp_scan"]
     assert normalized["shell_commands"] == []
 
 

@@ -49,7 +49,6 @@ function ensureTestConfig() {
     memoryMode: 'operation',
     keepMemory: true,
     outputDir: './outputs',
-    unifiedOutput: true,
     theme: 'retro',
     showMemoryUsage: false,
     showOperationId: true,

@@ -250,7 +250,6 @@ describe('ConfigEditor', () => {
                 outputCostPer1k: 0.02,
             },
             outputDir: './outputs',
-            unifiedOutput: true,
         };
         inputHandlers.length = 0;
         const {ConfigEditor} = await load();
@@ -294,7 +293,7 @@ describe('ConfigEditor', () => {
         sendInput('', {return: true});
         output = textFromTree(view.toJSON());
         expect(output).toContain('Output Directory');
-        expect(output).toContain('Unified Output Structure');
+        expect(output).not.toContain('Unified Output Structure');
     });
 
     it('renders configuration status and deployment description branches', async () => {

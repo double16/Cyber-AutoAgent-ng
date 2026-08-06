@@ -1093,18 +1093,16 @@ class TestOutputConfig:
         config = OutputConfig()
         assert config.base_dir == get_default_base_dir()
         assert config.target_name is None
-        assert config.enable_unified_output is True
+        assert not hasattr(config, "enable_unified_output")
 
     def test_custom_output_config(self):
         """Test custom output configuration."""
         config = OutputConfig(
             base_dir="/tmp/custom_outputs",
             target_name="test_target",
-            enable_unified_output=True,
         )
         assert config.base_dir == "/tmp/custom_outputs"
         assert config.target_name == "test_target"
-        assert config.enable_unified_output is True
 
     def test_get_default_base_dir_project_root(self):
         """Test get_default_base_dir when in project root."""
@@ -1131,7 +1129,7 @@ class TestOutputConfigIntegration:
         assert isinstance(output_config, OutputConfig)
         assert output_config.base_dir == get_default_base_dir()
         assert output_config.target_name is None
-        assert output_config.enable_unified_output is True
+        assert not hasattr(output_config, "enable_unified_output")
 
     def test_get_output_config_with_overrides(self):
         """Test getting output configuration with overrides."""
@@ -1140,18 +1138,16 @@ class TestOutputConfigIntegration:
             "bedrock",
             output_dir="/tmp/custom",
             target_name="test_target",
-            enable_unified_output=True,
         )
 
         assert output_config.base_dir == "/tmp/custom"
         assert output_config.target_name == "test_target"
-        assert output_config.enable_unified_output is True
 
     @patch.dict(
         os.environ,
         {
             "CYBER_AGENT_OUTPUT_DIR": "/env/outputs",
-            "CYBER_AGENT_ENABLE_UNIFIED_OUTPUT": "true",
+            "CYBER_AGENT_ENABLE_UNIFIED_OUTPUT": "false",
         },
     )
     def test_get_output_config_with_env_vars(self):
@@ -1160,7 +1156,6 @@ class TestOutputConfigIntegration:
         output_config = config_manager.get_output_config("bedrock")
 
         assert output_config.base_dir == "/env/outputs"
-        assert output_config.enable_unified_output is True
 
     def test_output_config_in_server_config(self):
         """Test that output configuration is included in server configuration."""

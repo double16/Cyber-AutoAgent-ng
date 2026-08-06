@@ -48,6 +48,7 @@
 
 ### Fixes
 
+- Remove the obsolete unified-output toggle so all output uses the unified filesystem structure.
 - Ground executive report narratives with explicitly labeled informational observations, resolve endpoint findings to
   registered targets, remove redundant observation metadata, and simplify task-history report tables.
 - Include a unique reportable operational-tool list in methodology reports, including shell executable names while

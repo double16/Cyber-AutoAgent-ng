@@ -169,6 +169,7 @@ TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
         "sleep",
     }
 )
+TASK_PROMPT_CONTROLLER_SUPPLIED_TOOLS = frozenset({"record_task_acceptance"})
 
 
 class WorkflowInvariantError(RuntimeError):
@@ -2981,14 +2982,19 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         if not isinstance(prompt, str) or not prompt.strip():
             raise TaskPromptBuildError("task prompt must be a non-empty string")
 
-        core_names = {get_tool_name(tool) for tool in self.runtime.core_tools_list}
+        core_tools = self.runtime.core_tools_list or getattr(self.runtime, "tools_list", [])
+        core_names = {get_tool_name(tool) for tool in core_tools}
         optional_names = {get_tool_name(tool) for tool in self.runtime.optional_tools_list}
         selected_tools = self._validated_selection_list(prompt_spec.get("tools", []), "tools")
         selected_shell_commands = self._validated_selection_list(
             prompt_spec.get("shell_commands", []),
             "shell_commands",
         )
-        ignored_selection_names = TASK_PROMPT_IGNORED_SHELL_COMMANDS | core_names
+        ignored_selection_names = (
+            TASK_PROMPT_IGNORED_SHELL_COMMANDS
+            | core_names
+            | TASK_PROMPT_CONTROLLER_SUPPLIED_TOOLS
+        )
         selected_tools = [name for name in selected_tools if name not in ignored_selection_names]
         selected_shell_commands = [
             name for name in selected_shell_commands if name not in ignored_selection_names
@@ -5305,7 +5311,8 @@ For task objectives that ask to gather, map, enumerate, identify, inspect, colle
 drafts whose acceptance summaries could be generic completion claims rather than concrete reusable results.
 
 The `tools` field contains optional tools only. Core tools are supplied automatically and must not appear in `tools`;
-never require a core tool to be listed there. Tool overlap is permitted. Do not reject a draft because selections
+the controller-bound `record_task_acceptance` tool is also supplied automatically and must not appear in `tools` or
+`shell_commands`; never require either to be listed there. Tool overlap is permitted. Do not reject a draft because selections
 overlap, appear redundant, include both a native tool and a shell command for the same capability, contain more
 selections than the executor may ultimately use, or omit an overlapping alternative. There is no single-tool,
 exclusivity, or minimal-selection requirement. Reject a selection only when it has no reasonable relationship to the

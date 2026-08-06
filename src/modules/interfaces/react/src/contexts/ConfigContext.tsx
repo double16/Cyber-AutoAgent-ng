@@ -200,7 +200,6 @@ export interface Config {
 
   // Output Settings
   outputDir: string; // Base directory for output artifacts
-  unifiedOutput: boolean; // Enable unified output directory structure
 
   // UI Settings
   theme: 'default' | 'dark' | 'light' | 'hacker' | 'retro';
@@ -414,7 +413,6 @@ export const defaultConfig: Config = {
 
   // Output Settings
   outputDir: './outputs', // Default base directory for output artifacts
-  unifiedOutput: true, // Enable unified output by default
 
   // UI Settings
   theme: 'retro', // Default to retro theme for 80s aesthetic

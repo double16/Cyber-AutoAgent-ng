@@ -142,6 +142,22 @@ def test_narrative_consistency_flags_unknown_facts_and_incomplete_completion_cla
     assert any("incomplete" in warning for warning in warnings)
 
 
+def test_narrative_consistency_ignores_workflow_terms_after_finding_keywords():
+    canonical = {
+        "findings": [],
+        "artifact_references": [],
+        "phase_coverage": [{"phase_id": 1}],
+        "completion_status": {"assessment_complete": True},
+    }
+
+    warnings = _validate_narrative_consistency(
+        "Vulnerability Discovery was incomplete, followed by Finding Validation.",
+        canonical,
+    )
+
+    assert not any("unknown finding" in warning for warning in warnings)
+
+
 def test_narrative_consistency_flags_false_empty_observation_claim():
     canonical = {
         "observations": [{"id": "observation-1", "category": "observation"}],

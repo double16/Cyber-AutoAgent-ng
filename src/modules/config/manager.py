@@ -968,15 +968,9 @@ class ConfigManager:
         # Get operation ID
         operation_id = overrides.get("operation_id")
 
-        # Get feature flags - unified output is now enabled by default
-        enable_unified_output = overrides.get(
-            "enable_unified_output", True
-        ) or self.getenv_bool("CYBER_AGENT_ENABLE_UNIFIED_OUTPUT", True)
-
         return OutputConfig(
             base_dir=base_dir,
             target_name=target_name,
-            enable_unified_output=enable_unified_output,
             operation_id=operation_id,
         )
 
