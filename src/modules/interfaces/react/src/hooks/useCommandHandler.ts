@@ -250,8 +250,8 @@ export function useCommandHandler({
         } catch {}
         break;
       case 'memory':
-        // Memory functionality requires Python environment with Mem0
-        addOperationHistoryEntry('info', 'Memory operations require running in container mode with Mem0 installed');
+        // Semantic memory is managed by the Python Qdrant integration.
+        addOperationHistoryEntry('info', 'Memory operations are available during Python or container operations');
         break;
       case 'clear':
         handleScreenClear();

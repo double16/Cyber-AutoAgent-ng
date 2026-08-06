@@ -80,7 +80,7 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
       );
       
     case ModalType.MEMORY_SEARCH:
-      // Memory functionality removed - requires Python environment with Mem0
+      // Memory functionality is provided by the Python Qdrant integration.
       return null;
       
     case ModalType.MODULE_SELECTOR:

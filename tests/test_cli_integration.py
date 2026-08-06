@@ -54,13 +54,32 @@ def bypass_live_target_preflight(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def bypass_live_memory_client(monkeypatch):
-    """Keep CLI workflow tests independent of local Mem0/Ollama availability."""
+    """Keep CLI workflow tests independent of local Qdrant/Ollama availability."""
 
     monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock())
 
 
 class TestCLIArguments:
     """Test command-line argument parsing"""
+
+    def test_invalid_memory_mode_environment_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("CYBER_MEMORY_MODE", "automatic")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "cyberautoagent.py",
+                "--target",
+                "test.com",
+                "--objective",
+                "test objective",
+            ],
+        )
+
+        with pytest.raises(SystemExit) as error:
+            cyberautoagent.main()
+
+        assert error.value.code == 2
 
     def test_required_arguments(self):
         """Test that required arguments are parsed correctly"""
@@ -2225,6 +2244,39 @@ def test_cli_main_runs_workflow_controller(monkeypatch, tmp_path):
     agent.cleanup.assert_not_called()
     expected_cwd = tmp_path / "example.com" / os.environ["CYBER_OPERATION_ID"]
     assert Path.cwd() == expected_cwd
+
+
+def test_cli_preflight_persists_without_initializing_qdrant(monkeypatch, tmp_path):
+    callback = CliCallback()
+    plan_store = Mock()
+    plan_store_cls = Mock(return_value=plan_store)
+    agent = CallableCliAgent()
+    _patch_cli_common(monkeypatch, tmp_path, agent, callback)
+    monkeypatch.setattr(cyberautoagent, "PlanStore", plan_store_cls)
+    monkeypatch.setattr(cyberautoagent, "get_plan_store_path", Mock(return_value="/tmp/preflight.db"))
+    semantic_memory = Mock()
+    monkeypatch.setattr(cyberautoagent, "get_memory_client", semantic_memory)
+    plan_store.store_preflight_results.side_effect = lambda *_args: semantic_memory.assert_not_called()
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    cyberautoagent.main()
+
+    plan_store_cls.assert_called_once_with("/tmp/preflight.db")
+    plan_store.store_preflight_results.assert_called_once()
 
 
 def test_cli_main_preflight_failure_stops_before_environment_or_workflow(monkeypatch, tmp_path):

@@ -2,6 +2,8 @@
 
 ### Features
 
+- Replace semantic-memory backends with Qdrant 1.18, using `outputs/qdrant` by default or a configured service.
+- Change memory modes to 'shared' and 'operation' for clarity.
 - Format Markdown in the React `/docs` viewer and provide runtime repository links when local documentation is unavailable.
 - Render report observations and execution-history/acceptance tables deterministically, reducing report model calls
   while preserving LLM synthesis for executive, finding, methodology, and next-step sections.

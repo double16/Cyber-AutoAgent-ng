@@ -3,7 +3,6 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 from jsonschema import Draft202012Validator
@@ -104,7 +103,7 @@ class FakePlanStore:
             source_task_uids.append(task_uid)
 
 
-class FakeMem0:
+class FakeMemoryBackend:
     def __init__(self):
         self.add_calls = []
         self.search_calls = []
@@ -148,8 +147,23 @@ class FakeMem0:
 @pytest.fixture
 def fake_memory_client(monkeypatch, tmp_path):
     store = FakePlanStore()
-    client = mod.Mem0ServiceClient.__new__(mod.Mem0ServiceClient)
-    client.mem0 = FakeMem0()
+    backend = FakeMemoryBackend()
+    client = mod.QdrantMemoryClient.__new__(mod.QdrantMemoryClient)
+    client._fake_backend = backend
+    client.store_memory = lambda content, user_id=None, agent_id=None, metadata=None: backend.add(
+        messages=[{"role": "user", "content": content}],
+        user_id=user_id,
+        agent_id=agent_id,
+        metadata=metadata,
+        run_id=mod._operation_id(),
+    )
+    client.search = lambda query, filters=None, limit=100, **kwargs: backend.search(
+        query=query, filters=filters, limit=limit, **kwargs
+    )["results"]
+    client.list_memories = lambda *_args, **kwargs: [
+        item for item in backend.get_all(**kwargs)["results"] if isinstance(item, dict) and item.get("metadata", {}).get("active", True)
+    ]
+    client.get_memory_by_id = lambda memory_id, **_kwargs: backend.get(memory_id)
     client.has_existing_memories = True
     client.silent = True
     client.config = {}
@@ -232,7 +246,7 @@ def test_operation_scoped_reads_ignore_stale_memory_context(fake_memory_client):
 
 
 def test_initialize_memory_system_synchronizes_operation_environment(monkeypatch):
-    monkeypatch.setattr(mod, "Mem0ServiceClient", Mock())
+    monkeypatch.setattr(mod, "QdrantMemoryClient", Mock())
     monkeypatch.setattr(mod, "_MEMORY_CONFIG", {"operation_id": "old-op"})
     monkeypatch.setattr(mod, "_MEMORY_CLIENT", None)
     monkeypatch.setenv("CYBER_OPERATION_ID", "old-op")
@@ -247,7 +261,7 @@ def test_get_memory_client_reinitializes_when_environment_operation_changes(fake
     _client, _store = fake_memory_client
     replacement = Mock()
     constructor = Mock(return_value=replacement)
-    monkeypatch.setattr(mod, "Mem0ServiceClient", constructor)
+    monkeypatch.setattr(mod, "QdrantMemoryClient", constructor)
     monkeypatch.setenv("CYBER_OPERATION_ID", "op2")
 
     assert mod.get_memory_client(silent=True) is replacement
@@ -257,7 +271,6 @@ def test_get_memory_client_reinitializes_when_environment_operation_changes(fake
 
 
 def test_plan_store_rebinds_when_operation_context_changes(tmp_path, monkeypatch):
-    monkeypatch.setenv("MEMORY_ISOLATION", "operation")
     monkeypatch.setattr(
         mod,
         "_MEMORY_CONFIG",
@@ -3210,8 +3223,8 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
         "replayed": False,
         "required_count": 1,
     }
-    assert len(_client.mem0.add_calls) == 1
-    published = _client.mem0.add_calls[0]
+    assert len(_client._fake_backend.add_calls) == 1
+    published = _client._fake_backend.add_calls[0]
     assert published["messages"][0]["content"].startswith('Task acceptance for "Map parameters".')
     assert "Criterion endpoint:/login.php [satisfied; observation]: Login form mapped" in published["messages"][0]["content"]
     assert mod.canonical_artifact_reference(str(manifest)) in published["messages"][0]["content"]
@@ -3238,7 +3251,7 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     assert replay_payload["replayed"] is True
     assert replay_payload["memory_published"] is True
     assert replay_payload["memory_created"] is False
-    assert len(_client.mem0.add_calls) == 1
+    assert len(_client._fake_backend.add_calls) == 1
 
     with pytest.raises(ValueError, match="evidence_refs required"):
         acceptance_tool(
@@ -3503,9 +3516,9 @@ def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_p
     assert mod._has_valid_proof_pack({"proof_pack": {"artifacts": [str(proof)]}}) is True
     assert memory_tasks.active_task_message(mod, None, current_phase=2).startswith("<active_task")
     assert mod.memory_create_time({"metadata": {"created_at": "1"}}) == "1"
-    monkeypatch.setenv("MEMORY_ISOLATION", "shared")
+    mod._MEMORY_CONFIG["memory_mode"] = "shared"
     assert mod.memory_is_cross_operation() is True
-    monkeypatch.setenv("MEMORY_ISOLATION", "operation")
+    mod._MEMORY_CONFIG["memory_mode"] = "operation"
 
     stored = mod.store_observation(
         "[OBSERVATION] confirmed issue",
@@ -3519,7 +3532,7 @@ def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_p
         "created": True,
         "memory_ref": "memory:m1",
     }
-    metadata = client.mem0.add_calls[0]["metadata"]
+    metadata = client._fake_backend.add_calls[0]["metadata"]
     assert metadata["category"] == "observation"
     assert metadata["severity"] == "HIGH"
 
@@ -3542,8 +3555,8 @@ def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_p
     assert "task[" in memory_tasks.list_uncompleted_tasks(mod)
     assert "<active_task" in memory_tasks.mark_task_done(mod, "done")
 
-    assert "- active" in mod.mem0_list()
-    assert "- finding one" in mod.mem0_retrieve("finding", {"category": "finding"})
+    assert "- active" in mod.memory_list()
+    assert "- finding one" in mod.memory_retrieve("finding", {"category": "finding"})
 
 
 def test_create_tasks_assigns_every_proposal_to_active_phase(fake_memory_client):
@@ -3887,41 +3900,15 @@ def test_acceptance_finding_auto_binding_rejects_missing_and_ambiguous_candidate
         )
 
 
-def test_mem0_service_client_methods_and_fallbacks(fake_memory_client, monkeypatch):
+def test_qdrant_memory_client_scope_and_workflow_methods(fake_memory_client, monkeypatch):
     client, store = fake_memory_client
-
-    assert mod.Mem0ServiceClient._remove_inactive(None) == []
-    assert mod.Mem0ServiceClient._coerce_entry(["a"])["memory"] == '["a"]'
-    assert mod.Mem0ServiceClient._normalise_results_list({"data": ["x"]}) == [{"memory": "x", "metadata": {}}]
-
-    client.store_memory("content", user_id="u1", metadata={"category": "finding"})
-    assert client.mem0.add_calls[-1]["run_id"] == "op1"
-
-    listed = client.list_memories(user_id="u1", limit=3, run_id="op1")
-    assert [entry["memory"] for entry in listed] == ["active", "plain text", ""]
-
-    memory = client.get_memory_by_id("m1", user_id="u1")
-    assert memory == {
-        "id": "m1",
-        "memory": "direct memory",
-        "metadata": {"active": True, "category": "observation", "operation_id": "op1"},
-    }
-    assert client.mem0.get_calls == ["m1"]
-    assert client.get_memory_by_id("inactive", user_id="u1") is None
-    assert client.get_memory_by_id("", user_id="u1") is None
-
-    found = client.search(query="finding", filters={"category": "finding"}, limit=5, user_id="u1", run_id="op1")
-    assert found[0]["memory"] == "finding one"
-    client.mem0 = SimpleNamespace()
-    client.list_memories = Mock(
-        return_value=[
-            {"memory": "alpha beta", "metadata": {"category": "finding", "operation_id": "op1"}},
-            {"memory": "alpha", "metadata": {"category": "observation", "operation_id": "op1"}},
-            {"memory": "other", "metadata": {"category": "finding", "operation_id": "other"}},
-        ]
-    )
-    fallback = client.search(query="alpha beta", filters={"category": "finding"}, limit=2, user_id="u1", run_id="op1")
-    assert fallback == [{"memory": "alpha beta", "metadata": {"category": "finding", "operation_id": "op1"}}]
+    client.target_values = ["https://target.test"]
+    client.memory_mode = "operation"
+    client.operation_id = "OP-1"
+    scope = mod.QdrantMemoryClient._scope_filter(client, {"category": ["finding", "observation"]})
+    assert scope.must[0].key == "target_values"
+    assert scope.must[1].key == "operation_id"
+    assert scope.must[2].key == "metadata.category"
 
     prev = mod.OperationPlan(
         objective="Old",
@@ -3940,7 +3927,7 @@ def test_mem0_service_client_methods_and_fallbacks(fake_memory_client, monkeypat
             mod.PlanPhase(id=2, title="New", status="pending"),
         ],
     )
-    result = mod.Mem0ServiceClient.store_plan(client, expanded, operation_id="op1")
+    result = mod.QdrantMemoryClient.store_plan(client, expanded, operation_id="op1")
     assert result["status"] == "success"
     assert "_reminder" in result
 
@@ -3967,22 +3954,10 @@ def test_mem0_service_client_methods_and_fallbacks(fake_memory_client, monkeypat
     assert overview["has_memories"] is True
 
 
-def test_mem0_platform_store_waits_for_durable_memory_id(fake_memory_client, monkeypatch):
-    client, _store = fake_memory_client
-
-    class FakePlatformMemoryClient:
-        def __init__(self):
-            self.add_calls = []
-
-        def add(self, **kwargs):
-            self.add_calls.append(kwargs)
-            return {"results": [{"id": "platform-memory"}]}
-
-    platform = FakePlatformMemoryClient()
-    client.mem0 = platform
-    monkeypatch.setattr(mod, "MemoryClient", FakePlatformMemoryClient)
-
-    result = client.store_memory("content", user_id="u1", metadata={"category": "observation"})
-
-    assert result["results"][0]["id"] == "platform-memory"
-    assert platform.add_calls[0]["async_mode"] is False
+def test_qdrant_memory_rejects_invalid_mode_and_missing_target():
+    assert mod.QdrantMemoryClient._memory_mode("shared") == "shared"
+    assert mod.QdrantMemoryClient._memory_mode("operation") == "operation"
+    with pytest.raises(ValueError, match="operation, shared"):
+        mod.QdrantMemoryClient._memory_mode("fresh")
+    with pytest.raises(ValueError, match="OperationTarget"):
+        mod.QdrantMemoryClient._target_values({})

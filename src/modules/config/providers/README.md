@@ -164,14 +164,8 @@ LiteLLM automatically aligns embedding dimensions based on the selected model:
 ```
 
 ### Memory System Alignment
-When using Moonshot or other OpenAI-compatible providers, the memory system (Mem0) requires:
-
-```bash
-export OPENAI_API_KEY=your_moonshot_key  # For Mem0 compatibility
-export MEM0_LLM_MODEL=azure/gpt-4o       # Use Azure/Bedrock for memory LLM
-```
-
-The `align_mem0_config()` function automatically handles this alignment.
+The semantic-memory embedding model follows `CYBER_AGENT_EMBEDDING_MODEL`. Qdrant stores the resulting vectors and
+does not require a separate memory LLM. Ensure the configured collection dimension matches the embedding model.
 
 ## Context Window Fallbacks
 

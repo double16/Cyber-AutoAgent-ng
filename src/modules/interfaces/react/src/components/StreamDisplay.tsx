@@ -1026,9 +1026,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
               </Box>
             </Box>
           );
-        case 'mem0_get':
-        case 'mem0_retrieve':
-        case 'mem0_list': {
+        case 'memory_get':
+        case 'memory_retrieve':
+        case 'memory_list': {
           const action = event.tool_name.substring(5);
           const rawContent = latestInput?.plan || latestInput?.content || latestInput?.query || '';
           // Ensure content is always a string (handle plan objects, etc.)

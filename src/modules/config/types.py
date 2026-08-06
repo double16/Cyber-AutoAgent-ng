@@ -76,27 +76,6 @@ EMBEDDING_DIMENSIONS: Dict[str, int] = {
     "mxbai-embed-large:latest": 1024,
     "ollama/mxbai-embed-large:latest": 1024,
 }
-MEM0_PROVIDER_MAP: Dict[str, str] = {
-    "bedrock": "aws_bedrock",
-    "openai": "openai",
-    "azure": "azure_openai",
-    "anthropic": "anthropic",
-    "gemini": "gemini",  
-    "google": "gemini",
-    "deepseek": "deepseek",
-    "together": "together",
-    "groq": "groq",
-    "xai": "xai",
-    "lmstudio": "lmstudio",
-    "vllm": "vllm",
-    "mistral": "huggingface",
-    "sagemaker": "huggingface",
-    "openrouter": "openai",
-    "moonshot": "openai",
-    "ollama": "ollama",
-}
-
-
 class ModelProvider(Enum):
     """Supported model providers."""
 
@@ -161,7 +140,7 @@ class EmbeddingConfig(ModelConfig):
 class VectorStoreConfig:
     """Configuration for vector storage."""
 
-    provider: str = "faiss"
+    provider: str = "qdrant"
     config: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -200,33 +179,17 @@ class MemoryEmbeddingConfig(ModelConfig):
 
 @dataclass
 class MemoryVectorStoreConfig:
-    """Configuration for memory vector store with provider-specific settings."""
+    """Configuration for the semantic-memory Qdrant collection."""
 
-    provider: str = "faiss"
-    opensearch_config: Dict[str, Any] = field(
-        default_factory=lambda: {
-            "port": 443,
-            "collection_name": "mem0_memories",
-            "embedding_model_dims": 1024,
-            "pool_maxsize": 20,
-            "use_ssl": True,
-            "verify_certs": True,
-        }
-    )
-    faiss_config: Dict[str, Any] = field(
-        default_factory=lambda: {
-            "embedding_model_dims": 1024,
-        }
+    provider: str = "qdrant"
+    qdrant_config: Dict[str, Any] = field(
+        default_factory=lambda: {"collection_name": "cyber_autoagent_memories", "embedding_model_dims": 1024}
     )
 
     def get_config_for_provider(self, provider: str, **overrides) -> Dict[str, Any]:
         """Get configuration for specific provider."""
-        if provider == "opensearch":
-            config = self.opensearch_config.copy()
-            config.update(overrides)
-            return config
-        if provider == "faiss":
-            config = self.faiss_config.copy()
+        if provider == "qdrant":
+            config = self.qdrant_config.copy()
             config.update(overrides)
             return config
         return overrides
@@ -307,8 +270,7 @@ class AgentConfig:
     model_id: Optional[str] = None
     region_name: Optional[str] = None
     provider: str = "bedrock"
-    memory_path: Optional[str] = None
-    memory_mode: str = "auto"
+    memory_mode: Literal["shared", "operation"] = "operation"
     operation_mode: str = "execution"
     module: str = "web"
     bug_bounty_headers: Dict[str, str] = field(default_factory=dict)

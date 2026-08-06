@@ -741,12 +741,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             # Best-effort defaults for memory backend if not supplied
             memory_info = op_event.get("memory", {}) or {}
             if "backend" not in memory_info:
-                if os.getenv("MEM0_API_KEY"):
-                    memory_info["backend"] = "mem0_cloud"
-                elif os.getenv("OPENSEARCH_HOST"):
-                    memory_info["backend"] = "opensearch"
-                else:
-                    memory_info["backend"] = "faiss"
+                memory_info["backend"] = "qdrant_service" if os.getenv("QDRANT_URL") else "qdrant_local"
             op_event["memory"] = memory_info
 
             # UI mode hint
@@ -3353,9 +3348,11 @@ class AgentEventHandler(PrintingCallbackHandler):
                     {
                         "type": "output",
                         "content": (
-                            f"\n{'━' * 80}\n\nREPORT GENERATED\n\nREPORT ALSO SAVED TO:\n"
-                            f"  • {report_path}\n\nMEMORY STORED IN:\n  • {output_dir}/memory/\n\n"
-                            f"OPERATION LOGS:\n  • {os.path.join(output_dir, 'cyber_operations.log')}\n\n"
+                            f"\n{'━' * 80}\n\nREPORT GENERATED\n\n"
+                            "REPORT ALSO SAVED TO:\n"
+                            f"  • {report_path}\n\n"
+                            "OPERATION LOGS:\n"
+                            f"  • {os.path.join(output_dir, 'cyber_operations.log')}\n\n"
                             f"{'━' * 80}\n"
                         ),
                     }

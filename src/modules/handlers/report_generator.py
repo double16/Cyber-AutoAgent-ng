@@ -76,6 +76,8 @@ _GENERIC_PATH_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 _EXCERPT_TOKEN = re.compile(r"[A-Za-z0-9_'-]{4,}")
+_INFORMATIONAL_OBSERVATION_CATEGORIES = frozenset({"observation", "signal", "discovery"})
+_WORKFLOW_BOOKKEEPING_SOURCES = frozenset({"plan", "task", "task_acceptance"})
 _EXCERPT_STOPWORDS = {
     "about",
     "after",
@@ -662,6 +664,21 @@ def _format_report_consistency_warnings(errors: List[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _is_reportable_informational_observation(item: Any) -> bool:
+    """Return whether an evidence item belongs in report observations.
+
+    Task acceptance and plan/task records remain in raw evidence for auditability,
+    but they duplicate deterministic workflow tables and are not informational
+    observations for either report agents or the rendered report.
+    """
+    if not isinstance(item, dict) or item.get("category") not in _INFORMATIONAL_OBSERVATION_CATEGORIES:
+        return False
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source = str(metadata.get("source") or "").strip().lower()
+    publication_key = str(metadata.get("publication_key") or "").strip().lower()
+    return source not in _WORKFLOW_BOOKKEEPING_SOURCES and not publication_key.startswith("task_acceptance:")
+
+
 def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
     """Return the Python-owned, JSON-safe contract used to assemble a report.
 
@@ -677,7 +694,7 @@ def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
     ]
     observations = [
         item for item in evidence
-        if isinstance(item, dict) and item.get("category") in {"observation", "signal", "discovery"}
+        if _is_reportable_informational_observation(item)
     ]
     artifacts = sorted(_artifact_references(evidence))
     return {
@@ -724,7 +741,7 @@ def _informational_observation_context(sections: Dict[str, Any]) -> List[Dict[st
     observations = [
         item
         for item in sections.get("raw_evidence", [])
-        if isinstance(item, dict) and item.get("category") in {"observation", "signal", "discovery"}
+        if _is_reportable_informational_observation(item)
     ]
     context = []
     for item in observations:
@@ -2505,7 +2522,7 @@ def generate_security_report(
         report_observations = [
             (i, finding)
             for i, finding in enumerate(raw_findings)
-            if finding.get("category") in ["signal", "observation", "discovery"]
+            if _is_reportable_informational_observation(finding)
         ]
         report_validation_failures = [
             (i, finding)
@@ -3608,7 +3625,13 @@ def build_report_sections(
         evidence.sort(key=lambda entry: _SEVERITY_ORDER.get(str(entry.get("severity", "")).upper(), 5))
         evidence = _trim_evidence_for_report(evidence, MAX_REPORT_FINDINGS)
         vulnerability_evidence = [
-            item for item in evidence if not str(item.get("category", "")).startswith("objective_")
+            item
+            for item in evidence
+            if not str(item.get("category", "")).startswith("objective_")
+            and (
+                item.get("category") not in _INFORMATIONAL_OBSERVATION_CATEGORIES
+                or _is_reportable_informational_observation(item)
+            )
         ]
         evidence_text = format_evidence_for_report(vulnerability_evidence)
 
@@ -3734,7 +3757,7 @@ def build_report_sections(
                     )
         finding_count = sum(1 for item in evidence if item.get("category") == "finding")
         observation_count = sum(
-            1 for item in evidence if item.get("category") in {"signal", "observation", "discovery"}
+            1 for item in evidence if _is_reportable_informational_observation(item)
         )
         validation_failure_count = sum(
             1 for item in evidence if item.get("category") == "validation_failure"

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Tool for managing memories using Mem0 (store, delete, list, get, and retrieve)
+Tool for managing semantic memories with Qdrant and workflow state with SQLite.
 
-This module provides comprehensive memory management capabilities using
-Mem0 as the backend. It handles all aspects of memory management with
-a user-friendly interface and proper error handling.
+This module provides Qdrant-backed semantic memory and SQLite-backed workflow
+state with explicit target and operation scoping.
 
 Key Features:
 ------------
@@ -28,7 +27,7 @@ Key Features:
    • Semantic search with relevance filtering
    • Rich output formatting
    • Support for both user and agent memories
-   • Multiple vector database backends (OpenSearch, Mem0 Platform, FAISS)
+   • Local filesystem or service-hosted Qdrant storage
 
 5. Error Handling:
    • Memory ID validation
@@ -39,7 +38,7 @@ Key Features:
 6. Configurable Components:
    • Embedder (AWS Bedrock, Ollama, OpenAI)
    • LLM (AWS Bedrock, Ollama, OpenAI)
-   • Vector Store (FAISS, OpenSearch, Mem0 Platform)
+   • Vector Store (Qdrant)
 """
 
 import hashlib
@@ -57,10 +56,10 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
-import boto3
-from mem0 import Memory as Mem0Memory
-from mem0 import MemoryClient
-from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
+import litellm
+from langchain_aws import BedrockEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -73,9 +72,10 @@ from pydantic import (
     conlist,
     model_validator,
 )
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
 from strands import tool
 
-from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
@@ -86,11 +86,11 @@ logger = get_logger("Tools.Memory")
 
 # Global configuration and client
 _MEMORY_CONFIG: Optional[Dict[str, str]] = None
-_MEMORY_CLIENT: Optional["Mem0ServiceClient"] = None
+_MEMORY_CLIENT: Optional["QdrantMemoryClient"] = None
 _PLAN_STORE: Optional["PlanStore"] = None
 
-# Thread lock for FAISS write safety (prevents corruption during concurrent writes)
-_FAISS_WRITE_LOCK = threading.Lock()
+# Local Qdrant clients share one outputs-backed database within this process.
+_QDRANT_WRITE_LOCK = threading.Lock()
 
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
@@ -1151,41 +1151,18 @@ class OperationPlan:
 
 
 def _get_memory_base_path(config: Optional[Dict] = None) -> str:
-    """Determine the base path for memory storage (FAISS, SQLite)."""
-    # Use provided path or create unified output structure path
-    if config and config.get("vector_store", {}).get("config", {}).get("path"):
-        return config["vector_store"]["config"]["path"]
-
-    # Create memory path using unified output structure
-    target_name = (config or {}).get("target_name", "default_target")
-    operation_id = (config or {}).get("operation_id", "default_operation")
-
-    # Get output directory from environment or config
+    """Return the operation-independent local Qdrant database directory."""
     output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or (config or {}).get(
         "output_dir", get_default_base_dir()
     )
-
-    # Memory isolation strategy (controlled via MEMORY_ISOLATION env var)
-    # Options: "operation" (per-operation, safe for parallel) | "shared" (per-target, cross-learning)
-    isolation_mode = os.environ.get("MEMORY_ISOLATION", "operation")
-
-    if isolation_mode == "shared":
-        # Shared per-target store (enables automatic cross-learning but parallel-unsafe)
-        memory_base_path = os.path.join(output_dir, target_name, "memory")
-        logger.debug("Memory mode: SHARED per-target at %s", memory_base_path)
-    else:
-        # Per-operation isolation (parallel-safe, explicit cross-learning needed)
-        memory_base_path = os.path.join(output_dir, target_name, "memory", operation_id)
-        logger.debug("Memory mode: ISOLATED per-operation at %s", memory_base_path)
-
-    return memory_base_path
+    return os.path.join(output_dir, "qdrant")
 
 
 class PlanStore:
     """Persistence for OperationPlan and Task using SQLite.
 
-    This replaces the use of Mem0 for storing plans and tasks, providing
-    a simpler and more reliable local storage.
+    Plans and tasks remain in a reliable relational store rather than the
+    semantic vector database.
     """
 
     def __init__(self, db_path: str, read_only: bool = False):
@@ -1928,7 +1905,11 @@ class PlanStore:
 
 def _plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
     """Return the operation-scoped SQLite plan-store path."""
-    return os.path.join(_get_memory_base_path(config), "plan_storage.db")
+    resolved = config or {}
+    output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or resolved.get("output_dir", get_default_base_dir())
+    target_name = str(resolved.get("target_name", "default_target"))
+    operation_id = str(resolved.get("operation_id", "default_operation"))
+    return os.path.join(output_dir, target_name, "memory", operation_id, "plan_storage.db")
 
 
 def get_plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
@@ -2156,10 +2137,11 @@ def memory_create_time(m: Dict[str, Any]) -> str:
 
 
 def memory_is_cross_operation() -> bool:
-    return os.getenv("MEMORY_ISOLATION", "operation").lower() == "shared"
+    configured_mode = (_MEMORY_CONFIG or {}).get("memory_mode")
+    return str(configured_mode or os.getenv("CYBER_MEMORY_MODE", "operation")).lower() == "shared"
 
 
-def _ensure_memory_client() -> "Mem0ServiceClient":
+def _ensure_memory_client() -> "QdrantMemoryClient":
     """Ensure the global memory client is initialized and return it."""
     global _MEMORY_CLIENT
     if _MEMORY_CLIENT is None:
@@ -2246,7 +2228,7 @@ def _clean_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _memory_result_items(result: Any) -> List[Dict[str, Any]]:
-    """Normalize supported Mem0 result envelopes into memory records."""
+    """Normalize supported memory result envelopes into memory records."""
 
     if isinstance(result, dict):
         nested = result.get("results")
@@ -2260,7 +2242,7 @@ def _memory_result_items(result: Any) -> List[Dict[str, Any]]:
 
 
 def _memory_id_from_result(result: Any) -> str:
-    """Return the first non-empty memory ID in a Mem0 result."""
+    """Return the first non-empty memory ID in a storage result."""
 
     for item in _memory_result_items(result):
         memory_id = str(item.get("id") or "").strip()
@@ -2270,7 +2252,7 @@ def _memory_id_from_result(result: Any) -> str:
 
 
 def _exact_memory_match(result: Any, content: str) -> Optional[Dict[str, Any]]:
-    """Return an exact cleaned-content match from a Mem0 search result."""
+    """Return an exact cleaned-content match from a memory search result."""
 
     for item in _memory_result_items(result):
         try:
@@ -2283,12 +2265,12 @@ def _exact_memory_match(result: Any, content: str) -> Optional[Dict[str, Any]]:
 
 
 def _search_memory_entry(client: Any, content: str, user_id: str, operation_id: str, category: str) -> Any:
-    """Search for a category-fixed memory in the current operation."""
+    """Search for a category-fixed memory in the configured memory scope."""
 
-    return client.mem0.search(
+    return client.search(
         query=content,
         user_id=user_id,
-        run_id=operation_id,
+        run_id=None if memory_is_cross_operation() else operation_id,
         limit=5,
         filters={"category": category},
     )
@@ -5626,14 +5608,14 @@ def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:
 
 
 @tool
-def mem0_list() -> str:
+def memory_list() -> str:
     """List operation findings, validation records, observations, and knowledge."""
     try:
         client = _ensure_memory_client()
 
-        # Respect MEM0_LIST_LIMIT if set, default to 100 (matches retrieve/report limits)
+        # Keep list/retrieve output bounded for prompts and reports.
         try:
-            list_limit = int(os.getenv("MEM0_LIST_LIMIT", "100"))
+            list_limit = int(os.getenv("MEMORY_LIST_LIMIT", "100"))
         except Exception:
             list_limit = 100
 
@@ -5661,7 +5643,7 @@ def mem0_list() -> str:
 
 
 @tool
-def mem0_retrieve(
+def memory_retrieve(
     query: str,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -5674,10 +5656,10 @@ def mem0_retrieve(
     - metadata: filter dict applied to metadata (e.g., {"category": "finding", "status": "verified"}).
 
     CROSS-SESSION LEARNING:
-        - mem0_retrieve: Scoped to the current operation by default
+        - memory_retrieve: Scoped according to the configured memory mode
 
         Cross-Learning Query Examples:
-        - Learn from past: mem0_retrieve(query="SQLi techniques")
+        - Learn from past: memory_retrieve(query="SQLi techniques")
         - Skip verified: metadata={"status": "verified"} to find verified findings
         - Learn techniques: metadata={"category": "knowledge"}
         - Avoid failures: query for failed_technique or blocker in metadata
@@ -5735,574 +5717,201 @@ def mem0_retrieve(
         return f"Error: {str(e)}"
 
 
-class Mem0ServiceClient:
-    """Lightweight client for Mem0 operations (store, search, list).
+class _LiteLLMEmbeddings:
+    """Minimal embedding adapter for providers routed through LiteLLM."""
 
-    Supports FAISS, OpenSearch, or Mem0 Platform based on environment.
-    """
+    def __init__(self, model: str) -> None:
+        if not model:
+            raise ValueError("A LiteLLM embedding model is required")
+        self.model = model
 
-    @staticmethod
-    def _remove_inactive(payload: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if payload is None:
-            return []
-        if not isinstance(payload, list):
-            return payload
-        payload[:] = [
-            memory
-            for memory in payload
-            if not isinstance(memory, dict) or bool(memory.get("metadata", {}).get("active", True))
-        ]
-        return payload
+    def embed_query(self, text: str) -> List[float]:
+        response = litellm.embedding(model=self.model, input=[text])
+        data = response.data if hasattr(response, "data") else response["data"]
+        item = data[0]
+        embedding = item.embedding if hasattr(item, "embedding") else item["embedding"]
+        return list(embedding)
 
-    @staticmethod
-    def _coerce_entry(entry: Any) -> Dict[str, Any]:
-        """Ensure every entry behaves like a memory dict."""
-        if isinstance(entry, dict):
-            return entry
-        if isinstance(entry, str):
-            return {"memory": entry, "metadata": {}}
-        if entry is None:
-            return {"memory": "", "metadata": {}}
-        # Fallback stringify for unexpected types (lists/tuples/etc.)
-        try:
-            text = (
-                json.dumps(entry)
-                if isinstance(entry, (list, tuple, set))
-                else str(entry)
-            )
-        except Exception:  # pragma: no cover - defensive conversion
-            text = str(entry)
-        return {"memory": text, "metadata": {}}
 
-    @staticmethod
-    def _normalise_results_list(payload: Any) -> List[Dict[str, Any]]:
-        """Best-effort conversion of Mem0 responses to a list of memory dicts."""
-        if payload is None:
-            return []
-        if isinstance(payload, list):
-            return Mem0ServiceClient._remove_inactive([Mem0ServiceClient._coerce_entry(entry) for entry in payload])
-        if isinstance(payload, dict):
-            for key in ("results", "memories", "data"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return Mem0ServiceClient._remove_inactive([Mem0ServiceClient._coerce_entry(entry) for entry in value])
-        return []
+class QdrantMemoryClient:
+    """Qdrant-backed semantic memory with mandatory target scoping."""
 
-    @staticmethod
-    def get_default_config(server: str = "bedrock") -> Dict:
-        """Get default configuration from ConfigManager."""
-        config_manager = get_config_manager()
-        mem0_config = config_manager.get_mem0_service_config(server)
-
-        # Add RequestsHttpConnection for OpenSearch if needed
-        if mem0_config["vector_store"]["provider"] == "opensearch":
-            mem0_config["vector_store"]["config"]["connection_class"] = (
-                RequestsHttpConnection
-            )
-
-        return mem0_config
+    COLLECTION_NAME = "cyber_autoagent_memories"
 
     def __init__(
         self,
-        config: Optional[Dict] = None,
+        config: Optional[Dict[str, Any]] = None,
         has_existing_memories: bool = False,
         silent: bool = False,
-    ):
-        """Initialize the Mem0 service client.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-                   If provided, it will be merged with the default configuration.
-            has_existing_memories: Whether memories already existed before initialization
-            silent: If True, suppress initialization output (used during report generation)
-
-        The client will use one of three backends based on environment variables:
-        1. Mem0 Platform if MEM0_API_KEY is set
-        2. OpenSearch if OPENSEARCH_HOST is set
-        3. FAISS (default) if neither MEM0_API_KEY nor OPENSEARCH_HOST is set
-        """
-        self.region = None  # Initialize region attribute
-        self.has_existing_memories = has_existing_memories  # Store existing memory info
-        self.silent = silent  # Store silent flag for use in initialization methods
-        self.mem0 = self._initialize_client(config)
-        self.config = config  # Store config for later use
-
-        # Display memory overview if existing memories are detected (unless silent)
+    ) -> None:
+        self.config = dict(config or {})
+        self.has_existing_memories = has_existing_memories
+        self.silent = silent
+        self.collection_name = str(self.config.get("collection_name", self.COLLECTION_NAME))
+        self.embedding_dimensions = int(self.config.get("embedding_dimensions", 1024))
+        self.target_values = self._target_values(self.config)
+        self.operation_id = str(self.config.get("operation_id") or "").strip()
+        if not self.operation_id:
+            raise ValueError("Qdrant memory requires an operation ID")
+        self.memory_mode = self._memory_mode(self.config.get("memory_mode", "operation"))
+        self.embeddings = self.config.get("embeddings") or self._build_embeddings()
+        self.qdrant_url = str(os.getenv("QDRANT_URL", "")).strip()
+        self.qdrant = self._build_client()
+        self._ensure_collection()
         if not silent:
-            self._display_startup_overview()
-
-    def _initialize_client(self, config: Optional[Dict] = None) -> Any:
-        """Initialize the appropriate Mem0 client based on environment variables.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-
-        Returns:
-            An initialized Mem0 client (MemoryClient or Mem0Memory instance).
-        """
-        if os.environ.get("MEM0_API_KEY"):
-            # Ensure base path exists for SQLite
-            _get_memory_base_path(config)
-            if not self.silent:
-                print("[+] Memory Backend: Mem0 Platform (cloud)")
-                print(
-                    f"    API Key: {'*' * 8}{os.environ.get('MEM0_API_KEY', '')[-4:]}"
-                )
-            logger.debug("Using Mem0 Platform backend (MemoryClient)")
-            return MemoryClient()
-
-        # Determine provider type based on environment
-        # When OpenSearch is enabled we default to Bedrock for AWS compatibility,
-        # otherwise align with the active CYBER_AGENT_PROVIDER (fallback to Ollama)
-        active_provider = os.environ.get("CYBER_AGENT_PROVIDER", "ollama").lower()
-        if os.environ.get("OPENSEARCH_HOST"):
-            server_type = "bedrock"
-        elif active_provider in ("litellm", "bedrock", "ollama"):
-            server_type = active_provider
-        elif active_provider == "gemini":
-            server_type = "gemini"
-        else:
-            server_type = "ollama"
-
-        if os.environ.get("OPENSEARCH_HOST"):
-            merged_config = self._merge_config(config, server_type)
-            self._realign_provider_configs(merged_config)
-            config_manager = get_config_manager()
-
-            # Resolve provider labels
-            def _provider_label(p: str) -> str:
-                mapping = {
-                    "aws_bedrock": "AWS Bedrock",
-                    "ollama": "Ollama",
-                    "azure_openai": "Azure OpenAI",
-                    "openai": "OpenAI",
-                    "anthropic": "Anthropic",
-                    "cohere": "Cohere",
-                    "gemini": "Google Gemini",
-                    "huggingface": "Hugging Face",
-                    "sagemaker": "Amazon SageMaker",
-                    "groq": "Groq",
-                }
-                return mapping.get(p, p or "unknown")
-
-            embedder_cfg = merged_config.get("embedder", {})
-            llm_cfg = merged_config.get("llm", {})
-            embedder_provider = embedder_cfg.get("provider", "")
-            llm_provider = llm_cfg.get("provider", "")
-            embedder_model = embedder_cfg.get("config", {}).get("model")
-            llm_model = llm_cfg.get("config", {}).get("model")
-            # Prefer dims from vector_store config if present
-            dims = (
-                merged_config.get("vector_store", {})
-                .get("config", {})
-                .get("embedding_model_dims", 1024)
-            )
-            embedder_region = (
-                embedder_cfg.get("config", {}).get("aws_region")
-                or config_manager.get_default_region()
-            )
-
-            if not self.silent:
-                print("[+] Memory Backend: OpenSearch")
-                print(f"    Host: {os.environ.get('OPENSEARCH_HOST')}")
-                # Only show region for AWS-based providers
-                if embedder_provider == "aws_bedrock" or llm_provider == "aws_bedrock":
-                    print(f"    Region: {embedder_region}")
-                print(
-                    f"    Embedder: {_provider_label(embedder_provider)} - {embedder_model} ({dims} dims)"
-                )
-                print(f"    LLM: {_provider_label(llm_provider)} - {llm_model}")
-            logger.debug("Using OpenSearch backend (Mem0Memory with OpenSearch)")
-            return self._initialize_opensearch_client(config, server_type)
-
-        # FAISS backend
-        logger.debug("Using FAISS backend (Mem0Memory with FAISS)")
-        return self._initialize_faiss_client(
-            config, server_type, self.has_existing_memories
-        )
-
-    def _initialize_opensearch_client(
-        self, config: Optional[Dict] = None, server: str = "bedrock"
-    ) -> Mem0Memory:
-        """Initialize a Mem0 client with OpenSearch backend."""
-        merged_config = self._merge_config(config, server)
-        
-        # Ensure base path exists for SQLite
-        _get_memory_base_path(merged_config)
-        self._realign_provider_configs(merged_config)
-        config_manager = get_config_manager()
-        config_region = (
-            merged_config.get("embedder", {}).get("config", {}).get("aws_region")
-        )
-        self.region = (
-            config_region
-            or os.environ.get("AWS_REGION")
-            or config_manager.get_default_region()
-        )
-
-        if not os.environ.get("AWS_REGION"):
-            os.environ["AWS_REGION"] = self.region
-
-        # Set up AWS credentials
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        auth = AWSV4SignerAuth(credentials, self.region, "es")
-
-        # Prepare configuration
-        merged_config["vector_store"]["config"].update(
-            {"http_auth": auth, "host": os.environ["OPENSEARCH_HOST"]}
-        )
-
-        return Mem0Memory.from_config(config_dict=merged_config)
-
-    def _initialize_faiss_client(
-        self,
-        config: Optional[Dict] = None,
-        server: str = "ollama",
-        has_existing_memories: bool = False,
-    ) -> Mem0Memory:
-        """Initialize a Mem0 client with FAISS backend.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-            server: Server type for configuration.
-
-        Returns:
-            An initialized Mem0Memory instance configured for FAISS.
-
-        Raises:
-            ImportError: If faiss-cpu package is not installed.
-        """
-
-        merged_config = self._merge_config(config, server)
-
-        # Initialize store existence flag
-        store_existed_before = False
-
-        faiss_path = _get_memory_base_path(merged_config)
-        store_existed_before = os.path.exists(faiss_path)
-
-        # Ensure the memory directory exists
-        os.makedirs(faiss_path, exist_ok=True)
-
-        merged_config["vector_store"]["config"]["path"] = faiss_path
-
-        # Display FAISS configuration (unless silent mode for report generation)
-        if not self.silent:
-            print("[+] Memory Backend: FAISS (local)")
-            print(f"    Store Location: {faiss_path}")
-
-            # Display embedder/LLM configuration
-            def _provider_label(p: str) -> str:
-                mapping = {
-                    "aws_bedrock": "AWS Bedrock",
-                    "ollama": "Ollama",
-                    "azure_openai": "Azure OpenAI",
-                    "openai": "OpenAI",
-                    "anthropic": "Anthropic",
-                    "cohere": "Cohere",
-                    "gemini": "Google Gemini",
-                    "huggingface": "Hugging Face",
-                    "sagemaker": "Amazon SageMaker",
-                    "groq": "Groq",
-                    "litellm": "LiteLLM",
-                }
-                return mapping.get(p, p or "unknown")
-
-            embedder_config = merged_config.get("embedder", {})
-            llm_config = merged_config.get("llm", {})
-            embedder_provider = embedder_config.get("provider", "")
-            llm_provider = llm_config.get("provider", "")
-            embedder_model = embedder_config.get("config", {}).get("model")
-            llm_model = llm_config.get("config", {}).get("model")
-            # Prefer dims from vector_store config if present
-            dims = (
-                merged_config.get("vector_store", {})
-                .get("config", {})
-                .get("embedding_model_dims", 1024)
-            )
-
-            # Derive region only for AWS-based providers
-            config_manager = get_config_manager()
-            embedder_region = embedder_config.get("config", {}).get(
-                "aws_region", config_manager.get_default_region()
-            )
-
-            # Show region only when relevant
-            if embedder_provider == "aws_bedrock" or llm_provider == "aws_bedrock":
-                print(f"    Region: {embedder_region}")
-
-            # Pretty print providers
-            print(
-                f"    Embedder: {_provider_label(embedder_provider)} - {embedder_model} ({dims} dims)"
-            )
-
-            # If using LiteLLM for LLM, try to extract actual provider from model prefix for display
-            display_llm_provider = _provider_label(llm_provider)
-            if (
-                llm_provider in ("", "litellm")
-                and isinstance(llm_model, str)
-                and "/" in llm_model
-            ):
-                prefix = llm_model.split("/", 1)[0].lower()
-                display_llm_provider = _provider_label(
-                    {
-                        "bedrock": "aws_bedrock",
-                        "ollama": "ollama",
-                        "azure": "azure_openai",
-                        "openai": "openai",
-                        "anthropic": "anthropic",
-                        "cohere": "cohere",
-                        "gemini": "gemini",
-                        "sagemaker": "sagemaker",
-                        "groq": "groq",
-                        "xai": "huggingface",
-                        "mistral": "huggingface",
-                    }.get(prefix, llm_provider)
-                )
-
-            print(f"    LLM: {display_llm_provider} - {llm_model}")
-
-            # Display appropriate message based on whether store existed before initialization
-            # Use has_existing_memories parameter which includes proper file size validation
-            if has_existing_memories or store_existed_before:
-                print(f"    Loading existing FAISS store from: {faiss_path}")
-                print("    Memory will persist across operations for this target")
-            else:
-                # For fresh starts, just show the persistence message
-                print("    Memory will persist across operations for this target")
-
-        logger.debug("Initializing Mem0Memory with config: %s", merged_config)
-        try:
-            mem0_client = Mem0Memory.from_config(config_dict=merged_config)
-            logger.debug("Mem0Memory client initialized successfully")
-            return mem0_client
-        except Exception as e:
-            # Check if this is an Ollama network error (model may already exist locally)
-            error_msg = str(e)
-            if "connection reset" in error_msg or "pull model manifest" in error_msg:
-                logger.warning(
-                    "Ollama network error during model pull - model may already exist locally, retrying initialization..."
-                )
-                # Retry once without forcing model pull (Mem0 will use existing local model)
-                try:
-                    mem0_client = Mem0Memory.from_config(config_dict=merged_config)
-                    logger.info(
-                        "Mem0Memory initialized successfully on retry (using existing local model)"
-                    )
-                    return mem0_client
-                except Exception as retry_error:
-                    logger.error("Retry failed: %s", retry_error)
-                    raise retry_error
-            elif (
-                "Unknown provider in model" in error_msg
-                or "Unsupported LLM provider" in error_msg
-            ):
-                logger.warning(
-                    "Mem0 provider mismatch detected (%s). Applying OpenAI-compatible fallback.",
-                    error_msg,
-                )
-                self._realign_provider_configs(merged_config, force_openai=True)
-                try:
-                    mem0_client = Mem0Memory.from_config(config_dict=merged_config)
-                    logger.info(
-                        "Mem0Memory initialized successfully after provider fallback"
-                    )
-                    return mem0_client
-                except Exception as retry_error:
-                    logger.error("Provider fallback failed: %s", retry_error)
-                    raise retry_error
-            else:
-                logger.error("Failed to initialize Mem0Memory client: %s", e)
-                raise
-
-    def _merge_config(
-        self, config: Optional[Dict] = None, server: str = "bedrock"
-    ) -> Dict:
-        """Merge user-provided configuration with default configuration.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-            server: Server type for configuration.
-
-        Returns:
-            A merged configuration dictionary.
-        """
-        merged_config = self.get_default_config(server).copy()
-        if not config:
-            return merged_config
-
-        # Deep merge the configs
-        for key, value in config.items():
-            if (
-                key in merged_config
-                and isinstance(value, dict)
-                and isinstance(merged_config[key], dict)
-            ):
-                merged_config[key].update(value)
-            else:
-                merged_config[key] = value
-
-        return merged_config
+            location = os.getenv("QDRANT_URL") or _get_memory_base_path(self.config)
+            print(f"[+] Memory Backend: Qdrant ({'service' if os.getenv('QDRANT_URL') else 'local'})")
+            print(f"    Store Location: {location}")
+            print(f"    Query Scope: {self.memory_mode}")
 
     @staticmethod
-    def _split_model_identifier(model_id: Any) -> Tuple[str, str]:
-        if not isinstance(model_id, str):
-            return "", ""
-        if "/" in model_id:
-            prefix, remainder = model_id.split("/", 1)
-            return prefix.lower(), remainder
-        return "", model_id
+    def _memory_mode(value: Any) -> str:
+        mode = str(value or "operation").strip().lower()
+        if mode not in {"operation", "shared"}:
+            raise ValueError("memory_mode must be one of: operation, shared")
+        return mode
 
-    def _inject_azure_defaults(
-        self, section_config: Dict[str, Any], deployment: str
-    ) -> None:
-        section_config["azure_kwargs"] = {
-            "api_key": os.getenv("AZURE_API_KEY", ""),
-            "azure_deployment": deployment,
-            "azure_endpoint": os.getenv("AZURE_API_BASE", ""),
-            "api_version": os.getenv("AZURE_API_VERSION", ""),
-        }
-        azure_kwargs = section_config["azure_kwargs"]
-        if not all(azure_kwargs.values()):
-            logger.warning(
-                "Azure OpenAI credentials appear incomplete. Values set: endpoint=%s, deployment=%s",
-                azure_kwargs.get("azure_endpoint"),
-                azure_kwargs.get("azure_deployment"),
+    @staticmethod
+    def _target_values(config: Dict[str, Any]) -> List[str]:
+        raw_values = config.get("target_values")
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        values = [str(value).strip() for value in (raw_values or []) if str(value).strip()]
+        if not values:
+            fallback = str(config.get("target_value") or config.get("target_name") or "").strip()
+            if fallback and fallback != "default_target":
+                values = [fallback]
+        if not values:
+            raise ValueError("Qdrant memory requires at least one canonical OperationTarget value")
+        return list(dict.fromkeys(values))
+
+    def _build_embeddings(self) -> Any:
+        provider = str(self.config.get("embedding_provider") or os.getenv("CYBER_AGENT_PROVIDER", "bedrock")).lower()
+        model = str(self.config.get("embedding_model") or os.getenv("CYBER_AGENT_EMBEDDING_MODEL", ""))
+        if provider == "ollama":
+            return OllamaEmbeddings(
+                model=model,
+                base_url=str(self.config.get("ollama_base_url") or os.getenv("OLLAMA_HOST", "http://localhost:11434")),
             )
+        if provider == "gemini":
+            return GoogleGenerativeAIEmbeddings(model=model)
+        if provider == "litellm":
+            return _LiteLLMEmbeddings(model)
+        if model.startswith("bedrock/"):
+            model = model.split("/", 1)[1]
+        return BedrockEmbeddings(
+            model_id=model,
+            region_name=str(self.config.get("aws_region") or os.getenv("AWS_REGION", "us-east-1")),
+        )
 
-    def _realign_provider_configs(
-        self, merged_config: Dict[str, Any], *, force_openai: bool = False
-    ) -> None:
-        """Ensure Mem0 provider sections match the selected model identifiers."""
-        if force_openai and not os.getenv("OPENAI_API_KEY"):
-            logger.warning(
-                "Skipping OpenAI provider fallback because OPENAI_API_KEY is not set"
+    def _build_client(self) -> QdrantClient:
+        if self.qdrant_url:
+            return QdrantClient(url=self.qdrant_url, api_key=os.getenv("QDRANT_API_KEY") or None)
+        path = _get_memory_base_path(self.config)
+        os.makedirs(path, exist_ok=True)
+        return QdrantClient(path=path)
+
+    def _ensure_collection(self) -> None:
+        if not self.qdrant.collection_exists(self.collection_name):
+            self.qdrant.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=qdrant_models.VectorParams(
+                    size=self.embedding_dimensions,
+                    distance=qdrant_models.Distance.COSINE,
+                ),
             )
-            force_openai = False
-        for section_key in ("embedder", "llm"):
-            section = merged_config.get(section_key)
-            if not isinstance(section, dict):
-                continue
-            config_section = section.setdefault("config", {})
-            model_id = config_section.get("model")
-            provider = (section.get("provider") or "").lower()
-
-            if force_openai and section_key == "llm":
-                section["provider"] = "openai"
-                if not isinstance(model_id, str) or "/" in model_id or not model_id:
-                    config_section["model"] = os.getenv(
-                        "MEM0_FALLBACK_LLM_MODEL", "gpt-4o-mini"
-                    )
-                continue
-
-            if not isinstance(model_id, str):
-                continue
-            prefix, remainder = self._split_model_identifier(model_id)
-            if not prefix:
-                continue
-            mapped_provider = MEM0_PROVIDER_MAP.get(prefix)
-            if not mapped_provider:
-                continue
-
-            if mapped_provider == provider:
-                if mapped_provider == "azure_openai" and remainder:
-                    config_section["model"] = remainder
-                    self._inject_azure_defaults(config_section, remainder)
-                continue
-
-            if provider not in ("aws_bedrock", "", "ollama", "litellm"):
-                continue
-
-            section["provider"] = mapped_provider
-            if remainder:
-                config_section["model"] = remainder
-            if mapped_provider == "azure_openai":
-                self._inject_azure_defaults(
-                    config_section, remainder or config_section.get("model", "")
+        if not self.qdrant_url:
+            return
+        for field_name in ("target_values", "operation_id", "metadata.category", "metadata.status"):
+            try:
+                self.qdrant.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+                    wait=True,
                 )
-            logger.warning(
-                "Aligned Mem0 %s provider from '%s' to '%s' for model '%s'",
-                section_key,
-                provider or "unknown",
-                mapped_provider,
-                model_id,
+            except Exception as error:  # Local mode may report an existing or unsupported index.
+                logger.debug("Qdrant payload index %s was not created: %s", field_name, error)
+
+    def _scope_filter(
+        self,
+        metadata: Optional[Dict[str, Any]] = None,
+        operation_id: Optional[str] = None,
+    ) -> qdrant_models.Filter:
+        must: List[Any] = [
+            qdrant_models.FieldCondition(
+                key="target_values",
+                match=qdrant_models.MatchAny(any=self.target_values),
             )
+        ]
+        effective_operation = None
+        if self.memory_mode == "operation":
+            effective_operation = operation_id or self.operation_id
+        if effective_operation:
+            must.append(
+                qdrant_models.FieldCondition(
+                    key="operation_id",
+                    match=qdrant_models.MatchValue(value=effective_operation),
+                )
+            )
+        for key, value in (metadata or {}).items():
+            if isinstance(value, list):
+                match: Any = qdrant_models.MatchAny(any=value)
+            elif isinstance(value, (str, int, bool)):
+                match = qdrant_models.MatchValue(value=value)
+            else:
+                raise ValueError(f"Unsupported Qdrant metadata filter value for {key}")
+            must.append(qdrant_models.FieldCondition(key=f"metadata.{key}", match=match))
+        return qdrant_models.Filter(must=must)
+
+    @staticmethod
+    def _point_to_memory(point: Any) -> Dict[str, Any]:
+        payload = dict(point.payload or {})
+        return {
+            "id": str(point.id),
+            "memory": str(payload.get("memory", "")),
+            "metadata": dict(payload.get("metadata") or {}),
+            "created_at": str(payload.get("created_at", "")),
+            "operation_id": str(payload.get("operation_id", "")),
+            "target_values": list(payload.get("target_values") or []),
+            "score": getattr(point, "score", None),
+        }
 
     def store_memory(
         self,
         content: str,
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-        metadata: Optional[Dict] = None,
-    ):
-        """Store a memory in Mem0 with native operation scoping via run_id.
-
-        Uses run_id for mem0's native operation isolation instead of manual metadata filtering.
-        This provides O(log n) indexed lookups vs O(n) local filtering.
-        """
-        user_id = _user_id(user_id)
-        if not user_id and not agent_id:
-            raise ValueError("Either user_id or agent_id must be provided")
-
-        # Default agent_id to user_id to avoid null actor attribution in some backends
-        if user_id and not agent_id:
-            agent_id = user_id
-
-        metadata = metadata or {}
-
-        # Get operation ID for native session scoping
-        op_id = _operation_id()
-
-        messages = [{"role": "user", "content": content}]
-        try:
-            # For cybersecurity findings, use infer=False to ensure all data is stored
-            # regardless of mem0's fact filtering (critical for security assessments)
-            # Use session_id=operation_id for mem0's native operation isolation
-            add_kwargs = {
-                "messages": messages,
-                "user_id": user_id,
-                "agent_id": agent_id,
-                "metadata": metadata,
-                "infer": False,
-            }
-
-            # Add run_id for native operation scoping (mem0 1.0.0 API)
-            if op_id:
-                add_kwargs["run_id"] = op_id
-                metadata["operation_id"] = op_id
-
-            # Platform writes default to asynchronous processing, which may return before a durable
-            # memory ID can be used as acceptance evidence. The local Mem0 API has no async_mode argument.
-            if isinstance(self.mem0, MemoryClient):
-                add_kwargs["async_mode"] = False
-
-            # Debug: Log metadata BEFORE storage
-            logger.debug(
-                "BEFORE mem0.add() - category=%s, metadata=%s",
-                metadata.get("category") if metadata else "none",
-                metadata
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        content = str(content or "").strip()
+        if not content:
+            raise ValueError("memory content is required")
+        memory_id = str(uuid.uuid4())
+        resolved_metadata = dict(metadata or {})
+        resolved_metadata["operation_id"] = self.operation_id
+        payload = {
+            "memory": content,
+            "metadata": resolved_metadata,
+            "created_at": datetime.now().isoformat(),
+            "operation_id": self.operation_id,
+            "target_values": self.target_values,
+            "user_id": _user_id(user_id),
+            "agent_id": agent_id or _user_id(user_id),
+            "active": True,
+        }
+        vector = self.embeddings.embed_query(content)
+        if len(vector) != self.embedding_dimensions:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {self.embedding_dimensions}, received {len(vector)}"
             )
-
-            # Use thread lock for FAISS write safety (prevents index corruption
-            # during concurrent writes from swarm agents)
-            with _FAISS_WRITE_LOCK:
-                result = self.mem0.add(**add_kwargs)
-
-            # Debug: Verify what was actually stored
-            logger.info(
-                "Memory stored successfully - run_id=%s, category=%s, result=%s",
-                op_id or "none",
-                metadata.get("category") if metadata else "none",
-                result
+        with _QDRANT_WRITE_LOCK:
+            self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=[qdrant_models.PointStruct(id=memory_id, vector=vector, payload=payload)],
+                wait=True,
             )
-
-            return result
-        except Exception as e:
-            logger.error("Critical error storing memory: %s", str(e), exc_info=True)
-            logger.error("Exception type: %s", type(e).__name__)
-            logger.error("Exception args: %s", e.args)
-            raise RuntimeError(f"Memory storage failed: {str(e)}") from e
+        return {"results": [{"id": memory_id, "memory": content, "metadata": resolved_metadata}]}
 
     def list_memories(
         self,
@@ -6313,73 +5922,23 @@ class Mem0ServiceClient:
         page: int = 1,
         run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """List memories for a user/agent with safe defaults and pagination.
-
-        Args:
-            user_id: User identifier
-            agent_id: Agent identifier
-            limit: Maximum number of memories to return
-            page: Page number for pagination
-            run_id: Operation/session ID for scoping (None = all operations)
-
-        Falls back gracefully if backend doesn't support limit/page/run_id.
-        """
-        user_id = _user_id(user_id)
-        if not user_id and not agent_id:
-            raise ValueError("Either user_id or agent_id must be provided")
-
-        logger.debug(
-            "Calling mem0.get_all with user_id=%s, agent_id=%s, run_id=%s",
-            user_id, agent_id, run_id
+        del user_id, agent_id
+        effective_limit = max(int(limit or os.getenv("MEMORY_LIST_LIMIT", "100")), 1)
+        effective_page = max(int(page), 1)
+        points, _ = self.qdrant.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=self._scope_filter(operation_id=run_id),
+            limit=effective_limit * effective_page,
+            with_payload=True,
+            with_vectors=False,
         )
-
-        # Determine effective limit from env or passed arg (default 100 for report consistency)
-        try:
-            default_limit = int(os.getenv("MEM0_LIST_LIMIT", "100"))
-        except Exception:
-            default_limit = 100
-        eff_limit = (
-            int(limit) if isinstance(limit, int) and limit > 0 else default_limit
-        )
-
-        # Build base kwargs
-        base_kwargs = {}
-        if user_id:
-            base_kwargs["user_id"] = user_id
-        if agent_id:
-            base_kwargs["agent_id"] = agent_id
-        if run_id:
-            base_kwargs["run_id"] = run_id
-
-        # Try variants: with limit/page, with limit only, then no args
-        # Normalize and slice to eff_limit as a last resort
-        try:
-            try:
-                result = self.mem0.get_all(
-                    **base_kwargs, limit=eff_limit, page=page
-                )
-            except TypeError:
-                try:
-                    result = self.mem0.get_all(
-                        **base_kwargs, limit=eff_limit
-                    )
-                except TypeError:
-                    try:
-                        result = self.mem0.get_all(**base_kwargs)
-                    except TypeError as te:
-                        if "run_id" in base_kwargs:
-                            no_run_id = base_kwargs.copy()
-                            no_run_id.pop("run_id")
-                            result = self.mem0.get_all(**no_run_id)
-                        else:
-                            raise te
-            logger.debug("mem0.get_all returned type: %s", type(result))
-            # Normalize structures
-            normalised = self._normalise_results_list(result)
-            return normalised[:eff_limit]
-        except Exception as e:
-            logger.error("Error in mem0.get_all: %s", e)
-            raise
+        start = (effective_page - 1) * effective_limit
+        page_points = points[start:start + effective_limit]
+        return [
+            self._point_to_memory(point)
+            for point in page_points
+            if bool((point.payload or {}).get("active", True))
+        ]
 
     def get_memory_by_id(
         self,
@@ -6387,76 +5946,29 @@ class Mem0ServiceClient:
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Get a single memory by its Mem0 ID.
-
-        Mem0 backends have used slightly different ``get`` signatures, so this
-        method tries the direct ID form first and then keyword variants. The
-        returned value is normalized to the same dictionary shape used by list
-        and search helpers.
-        """
-
-        memory_id = str(memory_id or "").strip()
-        if not memory_id:
+        del user_id, agent_id
+        points = self.qdrant.retrieve(
+            collection_name=self.collection_name,
+            ids=[str(memory_id)],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
             return None
-        if not hasattr(self.mem0, "get"):
-            raise AttributeError("Mem0 backend does not support get")
-
-        base_kwargs: Dict[str, Any] = {}
-        user_id = _user_id(user_id)
-        if user_id:
-            base_kwargs["user_id"] = user_id
-        if agent_id:
-            base_kwargs["agent_id"] = agent_id
-
-        attempts = [
-            lambda: self.mem0.get(memory_id),
-            lambda: self.mem0.get(memory_id=memory_id, **base_kwargs),
-            lambda: self.mem0.get(id=memory_id, **base_kwargs),
-        ]
-        result: Any = None
-        last_type_error: Optional[TypeError] = None
-        for attempt in attempts:
-            try:
-                result = attempt()
-                break
-            except TypeError as error:
-                last_type_error = error
-        else:
-            if last_type_error:
-                raise last_type_error
-
-        entries = self._normalise_results_list(result)
-        if entries:
-            return entries[0]
-        if isinstance(result, dict):
-            entries = self._remove_inactive([self._coerce_entry(result)])
-            if entries:
-                return entries[0]
-        if isinstance(result, str):
-            return self._coerce_entry(result)
-        return None
+        memory = self._point_to_memory(points[0])
+        allowed = memory["target_values"] and bool(set(memory["target_values"]) & set(self.target_values))
+        if self.memory_mode == "operation":
+            allowed = allowed and memory["operation_id"] == self.operation_id
+        return memory if allowed else None
 
     def search_memories(
-            self,
-            query: str,
-            user_id: Optional[str] = None,
-            agent_id: Optional[str] = None,
-            run_id: Optional[str] = None,
+        self,
+        query: str,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search memories using semantic search."""
-        user_id = _user_id(user_id)
-        if not user_id and not agent_id:
-            raise ValueError("Either user_id or agent_id must be provided")
-
-        # Delegate to the compatibility search helper for normalized results
-        return self.search(
-            query=query,
-            filters=None,
-            limit=20,
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-        )
+        return self.search(query, limit=20, user_id=user_id, agent_id=agent_id, run_id=run_id)
 
     def search(
         self,
@@ -6464,175 +5976,21 @@ class Mem0ServiceClient:
         filters: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         *,
-            user_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Compatibility wrapper providing Mem0-style search with filter support.
-
-        Args:
-            query: Semantic search query
-            filters: Metadata filters (legacy - use run_id for operation scoping)
-            limit: Maximum results to return (default 100 for report consistency)
-            user_id: User identifier
-            agent_id: Agent identifier
-            run_id: Run/operation ID for native mem0 scoping (recommended)
-
-        Returns:
-            List of memory dictionaries with 'memory' and 'metadata' fields
-        """
-
-        user_id = _user_id(user_id)
-        filters = filters or {}
-        top_k = max(int(limit or 100), 1)
-
-        # Try native Mem0 search first (covers FAISS/OpenSearch/Platform backends)
-        if hasattr(self.mem0, "search"):
-            search_kwargs: Dict[str, Any] = {"user_id": user_id}
-            if agent_id:
-                search_kwargs["agent_id"] = agent_id
-
-            # Prefer run_id for operation scoping (mem0 1.0.0 API)
-            if run_id:
-                search_kwargs["run_id"] = run_id
-                logger.debug("Using run_id=%s for native operation scoping", run_id)
-
-            # Pass filters to mem0's native search (supports advanced operators like "in")
-            if filters:
-                search_kwargs["filters"] = filters
-
-            for size_kw in ("top_k", "limit"):
-                try:
-                    search_kwargs[size_kw] = top_k
-                    results = self.mem0.search(query=query, **search_kwargs)
-                    normalised = self._normalise_results_list(results)
-                    if normalised:
-                        return normalised[:top_k]
-                except TypeError:
-                    search_kwargs.pop(size_kw, None)
-                except Exception as exc:  # pragma: no cover - backend specific
-                    logger.debug("Native Mem0 search failed (%s): %s", size_kw, exc)
-                    break
-
-        # Fallback: list memories and apply lightweight filtering locally
-        try:
-            # Pass run_id to list_memories for consistent scoping
-            all_memories = self.list_memories(
-                user_id=user_id, agent_id=agent_id, run_id=run_id
-            )
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Fallback memory listing failed during search: %s", exc)
-            return []
-
-        # If run_id was provided but list_memories didn't filter (backend limitation),
-        # apply local filtering by operation_id in metadata
-        if run_id:
-            all_memories = [
-                e for e in all_memories
-                if e.get("metadata", {}).get("operation_id") == run_id
-                or e.get("run_id") == run_id
-            ]
-
-        def _matches_filters(entry: Dict[str, Any]) -> bool:
-            """Match filters with support for simple list values (FAISS-compatible)."""
-            metadata = entry.get("metadata", {}) or {}
-            for key, value in filters.items():
-                meta_val = metadata.get(key)
-                # Handle list filter values (e.g., {"category": ["finding", "observation"]})
-                if isinstance(value, list):
-                    if meta_val not in value:
-                        return False
-                elif str(meta_val) != str(value):
-                    return False
-            return True
-
-        if query:
-            terms = [term.lower() for term in re.split(r"\s+", query) if term]
-        else:
-            terms = []
-
-        results: List[Dict[str, Any]] = []
-        for entry in all_memories:
-            if filters and not _matches_filters(entry):
-                continue
-
-            if terms:
-                text = " ".join(
-                    str(part)
-                    for part in (
-                        entry.get("memory"),
-                        entry.get("content"),
-                        json.dumps(entry.get("metadata", {}), default=str),
-                    )
-                    if part
-                ).lower()
-                if not all(term in text for term in terms):
-                    continue
-
-            results.append(entry)
-            if len(results) >= top_k:
-                break
-
-        return results
-
-    def _display_startup_overview(self) -> None:
-        """Display memory overview at startup if memories exist."""
-        try:
-            # Ensure _PLAN_STORE is initialized
-            _get_plan_store()
-            
-            # For Mem0 Platform & OpenSearch - always display (remote backends)
-            # For FAISS - only if memories existed before init
-            should_display = (
-                os.environ.get("MEM0_API_KEY")
-                or os.environ.get("OPENSEARCH_HOST")
-                or self.has_existing_memories
-            )
-
-            if not should_display:
-                return
-
-            # Get and display overview
-            overview = self.get_memory_overview(user_id=_user_id())
-
-            if overview.get("error"):
-                print(
-                    f"    Warning: Could not retrieve memory overview: {overview['error']}"
-                )
-                return
-
-            if not overview.get("has_memories"):
-                print("    No existing memories found - starting fresh")
-                return
-
-            # Display overview
-            total = overview.get("total_count", 0)
-            categories = overview.get("categories", {})
-            recent_findings = overview.get("recent_findings", [])
-
-            print(f"    Found {total} existing memories:")
-
-            # Show category breakdown
-            if categories:
-                category_parts = [
-                    f"{count} {category}" for category, count in categories.items()
-                ]
-                print(f"      Categories: {', '.join(category_parts)}")
-
-            # Show recent findings
-            if recent_findings:
-                print("      Recent findings:")
-                for i, finding in enumerate(recent_findings[:3], 1):
-                    content = finding.get("content", "")
-                    if len(content) > 80:
-                        content = content[:77] + "..."
-                    print(f"        {i}. {content}")
-
-            print("    Memory will be loaded as first action to avoid duplicate work")
-
-        except Exception as e:
-            logger.debug("Could not display startup memory overview: %s", str(e))
-            print(f"    Note: Could not check existing memories: {str(e)}")
+        del user_id, agent_id
+        vector = self.embeddings.embed_query(str(query or ""))
+        result = self.qdrant.query_points(
+            collection_name=self.collection_name,
+            query=vector,
+            query_filter=self._scope_filter(filters, run_id),
+            limit=max(int(limit), 1),
+            with_payload=True,
+            with_vectors=False,
+        )
+        return [self._point_to_memory(point) for point in result.points if bool((point.payload or {}).get("active", True))]
 
     def store_plan(
         self,
@@ -6995,7 +6353,7 @@ class Mem0ServiceClient:
         op_id = _operation_id()
 
         try:
-            # Get all memories for the user from Mem0
+            # Get all memories visible under the current Qdrant scope.
             raw_memories = self.list_memories(user_id=user_id)
 
             # Analyze memories
@@ -7060,7 +6418,7 @@ def initialize_memory_system(
     """Initialize the memory system with custom configuration.
 
     Args:
-        config: Optional configuration dictionary with embedder, llm, vector_store settings
+        config: Optional Qdrant and embedding configuration dictionary
         operation_id: Unique operation identifier
         target_name: Sanitized target name for organizing memory by target
         has_existing_memories: Whether memories already existed before initialization
@@ -7074,6 +6432,9 @@ def initialize_memory_system(
             operation_id or os.environ.get("CYBER_OPERATION_ID", f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     )
     enhanced_config["target_name"] = target_name or os.environ.get("CYBER_TARGET_NAME", "default_target")
+    enhanced_config["memory_mode"] = str(
+        enhanced_config.get("memory_mode") or os.environ.get("CYBER_MEMORY_MODE", "operation")
+    ).lower()
     enhanced_config["output_dir"] = enhanced_config.get(
         "output_dir", os.environ.get("CYBER_AGENT_OUTPUT_DIR", get_default_base_dir())
     )
@@ -7087,7 +6448,7 @@ def initialize_memory_system(
 
     _MEMORY_CONFIG = enhanced_config
     os.environ["CYBER_OPERATION_ID"] = enhanced_config["operation_id"]
-    _MEMORY_CLIENT = Mem0ServiceClient(enhanced_config, has_existing_memories, silent)
+    _MEMORY_CLIENT = QdrantMemoryClient(enhanced_config, has_existing_memories, silent)
     logger.info(
         "Memory system initialized for operation %s, target: %s, user: %s",
         enhanced_config["operation_id"],
@@ -7096,7 +6457,7 @@ def initialize_memory_system(
     )
 
 
-def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
+def get_memory_client(silent: bool = False) -> QdrantMemoryClient:
     """Get the memory client for the authoritative environment operation.
 
     Args:
@@ -7131,5 +6492,7 @@ def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
 
 
 def clear_memory_client() -> None:
-    global _MEMORY_CLIENT
+    global _MEMORY_CLIENT, _MEMORY_CONFIG, _PLAN_STORE
     _MEMORY_CLIENT = None
+    _MEMORY_CONFIG = None
+    _PLAN_STORE = None

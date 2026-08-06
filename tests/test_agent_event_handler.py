@@ -1268,7 +1268,7 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
     assert handler.budget_max_duration == 60
 
     events.clear()
-    monkeypatch.setenv("MEM0_API_KEY", "token")
+    monkeypatch.setenv("QDRANT_URL", "http://qdrant:6333")
     AgentEventHandler(
         operation_id="OP_MEM0",
         provider_id="litellm",
@@ -1276,11 +1276,11 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
         emitter=emitter,
         init_context={},
     )
-    assert any(event.get("memory", {}).get("backend") == "mem0_cloud" for event in events)
+    assert any(event.get("memory", {}).get("backend") == "qdrant_service" for event in events)
 
     events.clear()
-    monkeypatch.delenv("MEM0_API_KEY", raising=False)
-    monkeypatch.setenv("OPENSEARCH_HOST", "https://opensearch.example")
+    monkeypatch.delenv("QDRANT_URL", raising=False)
+    monkeypatch.setenv("LEGACY_MEMORY_HOST", "https://ignored.example")
     AgentEventHandler(
         operation_id="OP_OPENSEARCH",
         provider_id="litellm",
@@ -1288,7 +1288,7 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
         emitter=emitter,
         init_context={},
     )
-    assert any(event.get("memory", {}).get("backend") == "opensearch" for event in events)
+    assert any(event.get("memory", {}).get("backend") == "qdrant_local" for event in events)
 
 
 def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):

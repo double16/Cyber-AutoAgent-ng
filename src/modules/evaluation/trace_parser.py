@@ -143,9 +143,9 @@ class TraceParser:
             "store_knowledge",
             "store_finding",
             "record_finding_validation",
-            "mem0_get",
-            "mem0_retrieve",
-            "mem0_list",
+            "memory_get",
+            "memory_retrieve",
+            "memory_list",
             "create_tasks",
             "editor",
             "load_tool",
@@ -669,8 +669,8 @@ class TraceParser:
             "store_knowledge",
             "store_finding",
             "record_finding_validation",
-            "mem0_retrieve",
-            "mem0_list",
+            "memory_retrieve",
+            "memory_list",
         }
         return sum(1 for tc in tool_calls if tc.name in memory_tools)
 
@@ -795,7 +795,7 @@ class TraceParser:
             # Memory operations contain findings
             content = tool.input_data.get("content") or tool.input_data.get("claim") or ""
             return f"[Memory Store] {str(content)[:400]}"
-        elif tool.name.startswith("mem0"):
+        elif tool.name.startswith("memory_"):
             # Memory operations contain findings
             return f"[Memory Operation] {output_str[:400]}"
         elif tool.name == "http_request":
@@ -830,7 +830,7 @@ class TraceParser:
             current_op_id = None
 
         for tool in parsed_trace.tool_calls:
-            memory_tools = {"store_observation", "store_knowledge", "store_finding", "mem0_retrieve"}
+            memory_tools = {"store_observation", "store_knowledge", "store_finding", "memory_retrieve"}
             if tool.name in memory_tools and isinstance(tool.input_data, dict):
                 content = tool.input_data.get("content") or tool.input_data.get("claim") or ""
                 meta = (
@@ -856,7 +856,7 @@ class TraceParser:
                         f"[Security Finding - {sev}/{cat}] {str(content)[:500]}"
                     )
 
-                elif tool.name == "mem0_retrieve" and tool.output and same_operation:
+                elif tool.name == "memory_retrieve" and tool.output and same_operation:
                     # Include retrieved findings from this operation only
                     output_str = str(tool.output)
                     if output_str:

@@ -110,7 +110,9 @@ from modules.handlers.terminal_tool import (
 from modules.tools import browser, channel_close_all
 from modules.tools.memory import (
     OperationTarget,
+    PlanStore,
     get_memory_client,
+    get_plan_store_path,
     require_existing_plan_store,
     resolve_operation_targets,
 )
@@ -1029,13 +1031,16 @@ def cleanup_operation_resources(
     if agent is not None:
         agent.cleanup()
 
-    should_cleanup = not args.keep_memory and not args.memory_path
+    should_cleanup = not args.keep_memory
 
     if should_cleanup:
         try:
-            target_name = sanitize_target_name(args.target)
-            logger.debug("Calling clean_operation_memory with target_name=%s", target_name)
-            clean_operation_memory(operation_id, target_name)
+            target_values = [
+                target.value
+                for target in resolve_operation_targets(args.target, args.objective)
+            ]
+            logger.debug("Cleaning memory for exact target values: %s", target_values)
+            clean_operation_memory(operation_id, target_values)
             logger.info("Memory cleaned up for operation %s", operation_id)
         except Exception as cleanup_error:
             logger.warning("Error cleaning up memory: %s", cleanup_error)
@@ -1159,16 +1164,11 @@ def main():
         help="Enable tool confirmation prompts (default: disabled)",
     )
     parser.add_argument(
-        "--memory-path",
-        type=str,
-        help="Path to existing FAISS memory store to load past memories (e.g., /outputs/target_name/OP_20240320_101530)",
-    )
-    parser.add_argument(
         "--memory-mode",
         type=str,
-        choices=["auto", "fresh"],
-        default="fresh" if os.getenv("MEMORY_ISOLATION") == "operation" else "auto",
-        help="Memory initialization mode: 'auto' loads existing memory if found, 'fresh' starts with new memory",
+        choices=["shared", "operation"],
+        default=os.getenv("CYBER_MEMORY_MODE", "operation"),
+        help="Memory query scope: 'operation' isolates the current run; 'shared' includes prior runs for the target",
     )
     parser.add_argument(
         "--keep-memory",
@@ -1230,6 +1230,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.memory_mode not in {"shared", "operation"}:
+        parser.error("CYBER_MEMORY_MODE must be one of: shared, operation")
 
     if args.heap_monitor or os.getenv("CYBER_HEAP_MONITOR", "").lower() == "true":
         # side effect is the heap monitor starts when imported
@@ -1262,7 +1264,7 @@ def main():
         os.environ["CYBER_BUG_BOUNTY_HEADERS"] = json.dumps(bug_bounty_headers)
 
     if args.cont or args.report:
-        args.memory_mode = "auto"
+        args.memory_mode = "operation"
 
     ensure_workspace_marker_files()
 
@@ -1391,10 +1393,8 @@ def main():
     else:
         os.environ.pop("CYBER_MEMORY_READ_ONLY", None)
 
-    # Set mem0 environment variables based on configuration
-    os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
-    os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
-    os.environ["MEM0_EMBEDDING_MODEL"] = server_config.embedding.model_id
+    os.environ["CYBER_MEMORY_MODE"] = args.memory_mode
+    os.environ["CYBER_AGENT_EMBEDDING_MODEL"] = server_config.embedding.model_id
 
     mcp_config = config_manager.get_mcp_config(args.provider, **config_overrides)
     if mcp_config.enabled:
@@ -1442,9 +1442,18 @@ def main():
             logger=logger,
         )
         try:
-            get_memory_client(silent=True).store_preflight_results(
+            preflight_store = PlanStore(
+                get_plan_store_path(
+                    {
+                        "output_dir": server_config.output.base_dir,
+                        "target_name": target_sanitized,
+                        "operation_id": operation_id,
+                    }
+                )
+            )
+            preflight_store.store_preflight_results(
+                operation_id,
                 [result.to_record() for result in preflight_results],
-                operation_id=operation_id,
             )
         except Exception:
             restore_memory_environment()
@@ -1542,8 +1551,7 @@ def main():
         )
 
     # Auto-setup and environment discovery
-    # Pass memory_path to auto_setup to skip cleanup if using existing memory
-    available_tools = auto_setup(skip_mem0_cleanup=bool(args.memory_path))
+    available_tools = auto_setup()
 
     logger.info("Operation %s initiated", operation_id)
     logger.info("Objective: %s", args.objective)
@@ -1642,7 +1650,6 @@ def main():
             model_id=args.model,
             region_name=args.region,
             provider=args.provider,
-            memory_path=args.memory_path,
             memory_mode=args.memory_mode,
             operation_mode=("report_only" if args.report else "continuation" if args.cont else "execution"),
             module=args.module,
@@ -1907,14 +1914,7 @@ def main():
 
             # Show where evidence and memories are stored
             # Determine memory location based on backend and unified output structure
-            # FIXME: memory_location should be returned by the initialized memory system, not duplicated here
-            target_name = sanitize_target_name(args.target)
-            if os.getenv("MEM0_API_KEY"):
-                memory_location = "Mem0 Platform (cloud)"
-            elif os.getenv("OPENSEARCH_HOST"):
-                memory_location = f"OpenSearch: {os.getenv('OPENSEARCH_HOST')}"
-            else:
-                memory_location = f"{get_default_base_dir()}/{target_name}/memory"
+            memory_location = os.getenv("QDRANT_URL") or f"{get_default_base_dir()}/qdrant"
 
             # Use unified output paths for evidence storage
             evidence_location = get_output_path(

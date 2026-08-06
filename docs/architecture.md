@@ -77,7 +77,7 @@ graph TB
     F --> I[AI Models]
     
     G --> J[shell]
-    G --> K[Typed memory tools / mem0_retrieve]
+    G --> K[Typed memory tools / memory_retrieve]
     G --> L[create_tasks when allowed]
     G --> M[Selected Module Tools]
     G --> N[Selected MCP Tools]
@@ -101,7 +101,7 @@ Agents operate through role-specific restricted tool lists.
 - **editor**: Create/modify files and custom tools
 - **swarm**: Deploy parallel agents for complex tasks
 - **http_request**: Make HTTP requests for web testing
-- **mem0_...**: Store/retrieve findings and knowledge
+- **memory_list / memory_retrieve**: List or semantically retrieve findings and knowledge
 - **load_tool**: Dynamically load created tools
 - **create_tasks**: Create durable tasks when a role permits task creation
 
@@ -229,7 +229,7 @@ sequenceDiagram
     participant ReportActor as Report Actor Agent
     participant ReportCritic as Report Critic Agent
     participant Tools
-    participant Memory as Mem0 Memory
+    participant Memory as Qdrant Semantic Memory
 
     User->>Controller: Start Assessment
 
@@ -347,7 +347,7 @@ flowchart TD
 - **Focused Reasoning**: Agents receive narrow role prompts and task-specific context
 - **Metacognitive Awareness**: Agents assess confidence within their assigned objective
 - **Dynamic Capability Expansion**: Workers can use shell, selected tools, and swarm when appropriate
-- **Centralized Memory**: Discoveries flow into mem0 and reports query that memory
+- **Centralized Memory**: Discoveries flow into Qdrant and reports query operation-scoped evidence
 
 ## Tool Hierarchy
 
@@ -407,21 +407,17 @@ MCP Tools pre-configured:
 graph TB
     A[Agent Actions] --> B[Finding Discovered]
     B --> C[store_finding / store_observation / store_knowledge]
-    C --> D[Backend Selection]
-
-    D --> E[Mem0 Platform<br/>MEM0_API_KEY]
-    D --> F[OpenSearch<br/>OPENSEARCH_HOST]
-    D --> G[FAISS<br/>Default]
-
-    E --> H[Categorized Storage]
-    F --> H
-    G --> H
+    C --> D[Qdrant Semantic Memory]
+    D --> E[Target values always filtered]
+    E --> F{Memory mode}
+    F -->|operation| H[Target + operation]
+    F -->|shared| H[Target across operations]
 
     H --> I[category: finding]
     H --> J[category: plan]
     H --> K[category: reflection]
 
-    L[Future Decisions] --> M[mem0_retrieve]
+    L[Future Decisions] --> M[memory_retrieve]
     M --> N[Historical Context]
     N --> A
 
@@ -429,12 +425,10 @@ graph TB
     style D fill:#e3f2fd,stroke:#333,stroke-width:2px
 ```
 
-**Memory Backend Selection**:
-1. **Plans and Tasks**: Stored in a local SQLite database (`plan_store.db`).
-2. **Semantic Memories**:
-   - **Mem0 Platform** - If `MEM0_API_KEY` environment variable is set
-   - **OpenSearch** - If `OPENSEARCH_HOST` environment variable is set
-   - **FAISS** - Default local vector storage if neither is configured
+**Memory Storage**:
+1. **Plans and Tasks**: Stored in a local SQLite database (`plan_storage.db`) for each operation.
+2. **Semantic Memories**: Stored in one Qdrant collection under `outputs/qdrant`, or in the configured Qdrant service.
+3. **Scope**: Exact target values are always criteria; operation ID is additionally required in `operation` mode.
 
 **Evidence Storage Format**:
 ```
@@ -498,7 +492,7 @@ Evaluation triggers automatically after operation completion when `ENABLE_AUTO_E
 1. **Python-Owned Orchestration**: Durable workflow state is managed by code, not by prompt instructions.
 2. **Focused Role Agents**: Each agent receives a short, defined objective and restricted tools.
 3. **Soft Budget Distribution**: Phase progress is evaluated against proportional budget targets.
-4. **Evidence-Focused Memory**: Findings, observations, and proof artifacts are stored in mem0 for retrieval and reporting.
+4. **Evidence-Focused Memory**: Findings, observations, and proof references are stored in Qdrant for retrieval and reporting.
 5. **Swarm Intelligence as a Capability**: Workers may deploy specialized sub-agents when useful, without giving up controller state authority.
 6. **Tool Agnostic Execution**: Shell can access installed tools, while optional MCP/module tools are selected per task.
 7. **Continuous Evaluation**: Automated performance metrics support operational improvement.

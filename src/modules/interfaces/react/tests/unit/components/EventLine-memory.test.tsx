@@ -34,12 +34,12 @@ describe('EventLine memory formatting', () => {
     const {EventLine, render} = await importEventLine();
     const event = {
       type: 'tool_start',
-      tool_name: 'mem0_retrieve',
+      tool_name: 'memory_retrieve',
       tool_input: { query: 'find: injection' }
     };
     const { lastFrame } = render(React.createElement(EventLine, { event, animationsEnabled: false }));
     const out = lastFrame();
-    expect(out).toMatch(/tool:\s+mem0_retrieve/i);
+    expect(out).toMatch(/tool:\s+memory_retrieve/i);
     expect(out).toMatch(/action:\s+retrieving/i);
     expect(out).toMatch(/find: injection/i);
   });

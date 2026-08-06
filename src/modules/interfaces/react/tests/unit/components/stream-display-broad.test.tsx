@@ -178,7 +178,7 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'tool_start', tool_name: 'store_knowledge', tool_input: { content: 'reuse negative controls' } },
       { type: 'tool_start', tool_name: 'store_finding', tool_input: { title: 'SQLi', severity: 'HIGH', target: '/search' } },
       { type: 'tool_start', tool_name: 'record_finding_validation', tool_input: { finding_uid: 'abc', outcome: 'confirmed' } },
-      { type: 'tool_start', tool_name: 'mem0_get', tool_input: { query: 'finding' } },
+      { type: 'tool_start', tool_name: 'memory_get', tool_input: { query: 'finding' } },
       { type: 'tool_start', tool_name: 'shell', tool_input: { command: 'nmap -sV example.com' } },
       { type: 'tool_start', tool_name: 'http_request', tool_input: { method: 'GET', url: 'https://example.com' } },
       { type: 'tool_start', tool_name: 'browser_goto_url', tool_input: { url: 'https://example.com/login' } },

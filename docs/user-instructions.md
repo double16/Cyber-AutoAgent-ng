@@ -41,7 +41,7 @@ options include:
 | `--max-tokens` / `--max-cost` | Optional token and cost budgets |
 | `--auto-run` | Start an assessment without the interactive UI |
 | `--auto-approve` | Skip interactive tool confirmations |
-| `--memory-mode` | `auto` or `fresh` |
+| `--memory-mode` | `operation` (current operation only) or `shared` (same target across operations) |
 | `--provider` / `--model` / `--region` | Model configuration |
 | `--continue` / `--report` | Continue or regenerate the latest operation, optionally by ID |
 | `--deployment-mode` | `local-cli`, `single-container`, or `full-stack` |
@@ -148,8 +148,9 @@ prompt inheritance, and custom-tool development.
 
 ## Memory and outputs
 
-`auto` memory mode reuses eligible operation memory; `fresh` starts with an isolated memory context. Reports and logs
-are written beneath the configured output directory, normally `outputs/<target>/<operation-id>/`.
+`operation` memory mode limits retrieval to the current target and operation; `shared` reuses memories from prior
+operations with the same exact target value. Reports and logs are written beneath the configured output directory,
+normally `outputs/<target>/<operation-id>/`.
 
 ## MCP configuration
 

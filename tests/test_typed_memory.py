@@ -29,7 +29,7 @@ from tests.helpers.acceptance import make_acceptance
 def memory_client():
     with patch("src.modules.tools.memory._ensure_memory_client") as ensure:
         client = MagicMock()
-        client.mem0.search.return_value = {"results": []}
+        client.search.return_value = []
         client.store_memory.return_value = {"results": [{"id": "m-new"}]}
         ensure.return_value = client
         yield client
@@ -66,9 +66,9 @@ def test_store_knowledge_is_internal_category(memory_client, operation_ids):
 
 
 def test_typed_memory_cleaning_and_duplicates(memory_client, operation_ids):
-    memory_client.mem0.search.return_value = {
-        "results": [{"id": "m-existing", "memory": "Line one Line two", "score": 0.01}]
-    }
+    memory_client.search.return_value = [
+        {"id": "m-existing", "memory": "Line one Line two", "score": 0.01}
+    ]
 
     result = json.loads(store_observation("Line one\nLine two"))
 
@@ -81,7 +81,7 @@ def test_typed_memory_cleaning_and_duplicates(memory_client, operation_ids):
 
 
 def test_duplicate_without_id_creates_referenceable_memory(memory_client, operation_ids):
-    memory_client.mem0.search.return_value = {"results": [{"memory": "Same observation"}]}
+    memory_client.search.return_value = [{"memory": "Same observation"}]
 
     result = json.loads(store_observation("Same observation"))
 
@@ -100,9 +100,9 @@ def test_store_memory_entry_accepts_direct_id_envelope(memory_client, operation_
 
 def test_store_memory_entry_recovers_missing_write_id(memory_client, operation_ids):
     memory_client.store_memory.return_value = {"results": []}
-    memory_client.mem0.search.side_effect = [
-        {"results": []},
-        {"results": [{"id": "m-recovered", "memory": "Recover this observation"}]},
+    memory_client.search.side_effect = [
+        [],
+        [{"id": "m-recovered", "memory": "Recover this observation"}],
     ]
 
     result = json.loads(store_observation("Recover this observation"))
@@ -119,7 +119,7 @@ def test_store_memory_entry_rejects_unrecoverable_id(memory_client, operation_id
 
 def test_store_memory_entry_reports_recovery_search_failure(memory_client, operation_ids):
     memory_client.store_memory.return_value = {"results": []}
-    memory_client.mem0.search.side_effect = [{"results": []}, RuntimeError("search unavailable")]
+    memory_client.search.side_effect = [[], RuntimeError("search unavailable")]
 
     with pytest.raises(RuntimeError, match="durable ID could not be recovered"):
         store_observation("Recovery search failure")

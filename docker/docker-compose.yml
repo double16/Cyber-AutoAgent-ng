@@ -1,4 +1,13 @@
 services:
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    profiles: ["qdrant"]
+    restart: unless-stopped
+    volumes:
+      - ../outputs/qdrant:/qdrant/storage
+    ports:
+      - "6333:6333"
+
   cyber-autoagent:
     image: cyber-autoagent:latest
     build:
@@ -229,10 +238,10 @@ services:
       - CYBER_HEAP_MONITOR_AUTOSTART=${CYBER_HEAP_MONITOR_AUTOSTART:-}
 
       # Memory configuration
-      - MEM0_API_KEY=${MEM0_API_KEY:-}
-      - MEM0_LLM_MODEL=${MEM0_LLM_MODEL:-}
-      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-}
-      - MEM0_TELEMETRY=false
+      - CYBER_MEMORY_MODE=${CYBER_MEMORY_MODE:-operation}
+      - QDRANT_URL=${QDRANT_URL:-}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-}
 
       # Observability configuration (auto-detected by default, forced true in compose mode)
       - ENABLE_OBSERVABILITY=${ENABLE_OBSERVABILITY:-true}

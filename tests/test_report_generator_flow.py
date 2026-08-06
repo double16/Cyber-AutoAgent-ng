@@ -39,6 +39,8 @@ from modules.handlers.report_generator import (
     _validate_report_consistency,
     _canonical_report_data,
     _canonical_report_json,
+    _informational_observation_context,
+    _is_reportable_informational_observation,
     _format_verified_findings_summary,
     _validate_narrative_consistency,
     _format_report_consistency_warnings,
@@ -69,6 +71,49 @@ def test_canonical_report_data_owns_counts_and_json_separates_narrative():
     assert canonical["artifact_references"] == ["artifact:artifacts/proof.txt"]
     assert report["canonical"]["severity_counts"]["critical"] == 1
     assert report["narrative"]["executive"] == "one critical finding"
+
+
+def test_report_observations_exclude_workflow_bookkeeping_but_retain_real_observations():
+    acceptance = {
+        "id": "acceptance-1",
+        "category": "observation",
+        "content": "Task acceptance passed.",
+        "metadata": {"source": "task_acceptance"},
+    }
+    plan = {
+        "id": "plan-1",
+        "category": "observation",
+        "content": "Planned task record.",
+        "metadata": {"source": "plan"},
+    }
+    published_acceptance = {
+        "id": "acceptance-2",
+        "category": "observation",
+        "content": "Published acceptance record.",
+        "metadata": {"publication_key": "task_acceptance:task-2"},
+    }
+    observation = {
+        "id": "observation-1",
+        "category": "observation",
+        "content": "The endpoint disclosed a server banner.",
+        "metadata": {"source": "store_observation"},
+    }
+    signal = {"id": "signal-1", "category": "signal", "content": "A useful signal."}
+    sections = {"raw_evidence": [acceptance, plan, published_acceptance, observation, signal]}
+
+    assert not _is_reportable_informational_observation(acceptance)
+    assert not _is_reportable_informational_observation(plan)
+    assert not _is_reportable_informational_observation(published_acceptance)
+    assert _is_reportable_informational_observation(observation)
+    assert _is_reportable_informational_observation(signal)
+    assert [item["id"] for item in _canonical_report_data(sections)["observations"]] == [
+        "observation-1",
+        "signal-1",
+    ]
+    assert [item["id"] for item in _informational_observation_context(sections)] == [
+        "observation-1",
+        "signal-1",
+    ]
 
 
 def test_deterministic_summary_cannot_be_overridden_by_narrative():

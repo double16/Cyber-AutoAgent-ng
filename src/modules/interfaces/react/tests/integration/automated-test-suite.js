@@ -729,7 +729,7 @@ async function testMemoryAndState() {
     setupConfig: {
       isConfigured: true,
       hasSeenWelcome: true,
-      memoryMode: 'auto'
+      memoryMode: 'operation'
     }
   });
   

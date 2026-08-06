@@ -175,30 +175,22 @@ class TestMemoryVectorStoreConfig:
     def test_default_provider(self):
         """Test default vector store configuration."""
         config = MemoryVectorStoreConfig()
-        assert config.provider == "faiss"
-        assert "embedding_model_dims" in config.faiss_config
-        assert config.faiss_config["embedding_model_dims"] == 1024
+        assert config.provider == "qdrant"
+        assert config.qdrant_config["embedding_model_dims"] == 1024
 
-    def test_opensearch_config(self):
-        """Test OpenSearch configuration."""
+    def test_qdrant_config(self):
+        """Test Qdrant configuration."""
         config = MemoryVectorStoreConfig()
-        opensearch_config = config.get_config_for_provider("opensearch")
-        assert opensearch_config["port"] == 443
-        assert opensearch_config["collection_name"] == "mem0_memories"
-        assert opensearch_config["embedding_model_dims"] == 1024
-
-    def test_faiss_config(self):
-        """Test FAISS configuration."""
-        config = MemoryVectorStoreConfig()
-        faiss_config = config.get_config_for_provider("faiss")
-        assert faiss_config["embedding_model_dims"] == 1024
+        qdrant_config = config.get_config_for_provider("qdrant")
+        assert qdrant_config["collection_name"] == "cyber_autoagent_memories"
+        assert qdrant_config["embedding_model_dims"] == 1024
 
     def test_config_overrides(self):
         """Test configuration overrides."""
         config = MemoryVectorStoreConfig()
-        opensearch_config = config.get_config_for_provider("opensearch", host="test-host")
-        assert opensearch_config["host"] == "test-host"
-        assert opensearch_config["port"] == 443  # Default preserved
+        qdrant_config = config.get_config_for_provider("qdrant", collection_name="custom")
+        assert qdrant_config["collection_name"] == "custom"
+        assert qdrant_config["embedding_model_dims"] == 1024
 
 
 class TestConfigManager:
@@ -343,67 +335,20 @@ class TestConfigManager:
         assert remote_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
         assert remote_config.llm.max_tokens == 5000
 
-    def test_get_mem0_service_config(self):
-        """Test getting Mem0 service configuration."""
-        # Test local config
+    def test_get_qdrant_memory_config(self):
+        """Test Qdrant embedding configuration for local and remote providers."""
         with patch.dict(os.environ, {}, clear=True):
-            # Clear cache to ensure fresh config
             self.config_manager._config_cache = {}
-            local_config = self.config_manager.get_mem0_service_config("ollama")
-            assert isinstance(local_config, dict)
-            assert "embedder" in local_config
-            assert "llm" in local_config
-            assert "vector_store" in local_config
+            local_config = self.config_manager.get_qdrant_memory_config("ollama")
+            assert local_config["embedding_provider"] == "ollama"
+            assert local_config["embedding_model"] == "mxbai-embed-large:latest"
+            assert local_config["ollama_base_url"].startswith("http://")
 
-            # Test embedder config
-            embedder_config = local_config["embedder"]
-            assert embedder_config["provider"] == "ollama"
-            assert embedder_config["config"]["model"] == "mxbai-embed-large:latest"
-
-            # Test LLM config
-            llm_config = local_config["llm"]
-            assert llm_config["provider"] == "ollama"
-            assert llm_config["config"]["model"] == "llama3.2:3b"
-            assert llm_config["config"]["temperature"] == 0.1
-            assert llm_config["config"]["max_tokens"] == 2000
-
-            # Test vector store config (should default to FAISS for local)
-            vector_store_config = local_config["vector_store"]
-            assert vector_store_config["provider"] == "faiss"
-            assert vector_store_config["config"]["embedding_model_dims"] == 1024
-
-            # Test remote config
-            remote_config = self.config_manager.get_mem0_service_config("bedrock")
-            assert isinstance(remote_config, dict)
-
-            # Test embedder config
-            embedder_config = remote_config["embedder"]
-            assert embedder_config["provider"] == "aws_bedrock"
-            assert "titan-embed" in embedder_config["config"]["model"]
-            assert embedder_config["config"]["aws_region"] == "us-east-1"
-
-            # Test LLM config
-            llm_config = remote_config["llm"]
-            assert llm_config["provider"] == "aws_bedrock"
-            assert "claude" in llm_config["config"]["model"]
-            assert llm_config["config"]["temperature"] == 0.1
-            assert llm_config["config"]["max_tokens"] == 2000
-            # aws_region is no longer passed to LLM config; Mem0 infers region from environment
-
-    @patch.dict(os.environ, {"OPENSEARCH_HOST": "test-opensearch.com"})
-    def test_get_mem0_service_config_with_opensearch(self):
-        """Test Mem0 service configuration with OpenSearch."""
-        # Clear cache to ensure fresh config
-        self.config_manager._config_cache = {}
-
-        config = self.config_manager.get_mem0_service_config("bedrock")
-
-        # Should use OpenSearch when OPENSEARCH_HOST is set
-        vector_store_config = config["vector_store"]
-        assert vector_store_config["provider"] == "opensearch"
-        assert vector_store_config["config"]["host"] == "test-opensearch.com"
-        assert vector_store_config["config"]["port"] == 443
-        assert vector_store_config["config"]["collection_name"] == "mem0_memories"
+            remote_config = self.config_manager.get_qdrant_memory_config("bedrock")
+            assert remote_config["embedding_provider"] == "bedrock"
+            assert "titan-embed" in remote_config["embedding_model"]
+            assert remote_config["aws_region"] == "us-east-1"
+            assert remote_config["collection_name"] == "cyber_autoagent_memories"
 
     @patch.dict(os.environ, {"CYBER_AGENT_LLM_MODEL": "custom-llm"})
     def test_environment_variable_override(self):
@@ -729,17 +674,14 @@ class TestConfigManager:
         with patch.dict(os.environ, {}, clear=True):
             self.config_manager.set_environment_variables("ollama")
 
-            assert os.environ["MEM0_LLM_PROVIDER"] == "ollama"
-            assert os.environ["MEM0_LLM_MODEL"] == "llama3.2:3b"
-            assert os.environ["MEM0_EMBEDDING_MODEL"] == "mxbai-embed-large:latest"
+            assert os.environ["CYBER_AGENT_EMBEDDING_MODEL"] == "mxbai-embed-large:latest"
 
     def test_set_environment_variables_remote(self):
         """Test setting environment variables for remote mode."""
         with patch.dict(os.environ, {}, clear=True):
             self.config_manager.set_environment_variables("bedrock")
 
-            assert "claude-sonnet-4-5" in os.environ["MEM0_LLM_MODEL"]
-            assert "titan-embed" in os.environ["MEM0_EMBEDDING_MODEL"]
+            assert "titan-embed" in os.environ["CYBER_AGENT_EMBEDDING_MODEL"]
 
     @patch.dict(os.environ, {"CYBER_MCP_ENABLED": "false"})
     def test_get_mcp_config_disabled(self):
@@ -1075,10 +1017,8 @@ class TestEnvironmentIntegration:
             assert memory_config.llm.aws_region == "eu-west-1"
             assert memory_config.embedder.aws_region == "eu-west-1"
 
-            # Test mem0 service config uses centralized region
-            mem0_config = config_manager.get_mem0_service_config("bedrock")
-            # LLM no longer includes aws_region; region is inferred from environment
-            assert mem0_config["embedder"]["config"]["aws_region"] == "eu-west-1"
+            qdrant_config = config_manager.get_qdrant_memory_config("bedrock")
+            assert qdrant_config["aws_region"] == "eu-west-1"
 
         # Test without environment variable (should use default)
         with patch.dict(os.environ, {}, clear=True):
@@ -1134,23 +1074,15 @@ class TestEnvironmentIntegration:
         assert "host" in local_config
         assert local_config["host"].startswith("http://")
 
-    def test_centralized_mem0_service_config_local_vs_remote(self):
-        """Test that local and remote Mem0 configurations are properly differentiated."""
+    def test_centralized_qdrant_memory_config_local_vs_remote(self):
+        """Test local and remote embedding configuration for Qdrant."""
         config_manager = ConfigManager()
 
-        # Test local config has ollama_base_url
-        local_config = config_manager.get_mem0_service_config("ollama")
-        assert local_config["embedder"]["config"]["ollama_base_url"].startswith("http://")
-        assert local_config["llm"]["config"]["ollama_base_url"].startswith("http://")
-        assert "aws_region" not in local_config["embedder"]["config"]
-        assert "aws_region" not in local_config["llm"]["config"]
-
-        # Test remote config region handling
-        remote_config = config_manager.get_mem0_service_config("bedrock")
-        assert "aws_region" in remote_config["embedder"]["config"]
-        assert "aws_region" not in remote_config["llm"]["config"]
-        assert "ollama_base_url" not in remote_config["embedder"]["config"]
-        assert "ollama_base_url" not in remote_config["llm"]["config"]
+        local_config = config_manager.get_qdrant_memory_config("ollama")
+        assert local_config["ollama_base_url"].startswith("http://")
+        remote_config = config_manager.get_qdrant_memory_config("bedrock")
+        assert remote_config["ollama_base_url"] is None
+        assert remote_config["aws_region"]
 
 
 class TestOutputConfig:

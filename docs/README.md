@@ -17,7 +17,7 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 
 **[memory.md](memory.md)**
 - Memory system architecture
-- Backend configurations (FAISS, OpenSearch, Mem0 Platform)
+- Qdrant filesystem and service configuration
 - Evidence categorization and storage
 - Reflection and planning systems
 - Query optimization

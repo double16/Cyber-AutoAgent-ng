@@ -134,9 +134,10 @@ Provider requirement validation:
 - `CYBER_CONTEXT_WINDOW_FALLBACKS` - Model fallback mappings (JSON)
 
 ### Memory Configuration
-- `MEM0_API_KEY` - Mem0 Platform API key
-- `MEM0_LLM_MODEL` - Memory system LLM
-- `OPENSEARCH_HOST` - OpenSearch endpoint
+- `CYBER_MEMORY_MODE` - Qdrant query scope (`operation` or `shared`)
+- `QDRANT_URL` - Optional Qdrant service endpoint
+- `QDRANT_API_KEY` - Optional Qdrant service API key
+- `QDRANT_COLLECTION` - Semantic-memory collection name
 
 ### Runtime Diagnostics
 - `CYBER_HEAP_MONITOR_AUTOSTART` - Auto-start heap monitor thread (`1` by default; set to `0`, `false`, or `no` to disable)

@@ -28,7 +28,7 @@ module.exports = {
     'Terminal-initial-state.test.tsx',
     'Terminal-event-batching.test.tsx',
     'MultiLineTextInput-paste.test.tsx',
-    'EventLine-mem0-memory.test.tsx'
+    'EventLine-memory.test.tsx'
   ],
   setupFilesAfterEnv: ['<rootDir>/tests/unit/setup.ts'],
   collectCoverageFrom: [

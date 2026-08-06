@@ -44,8 +44,8 @@ describe('toolFormatters source coverage', () => {
     });
 
     it('formats memory retrieval, typed storage, and plan tools', () => {
-        expect(toolFormatters.mem0_list({query: 'findings'})).toBe('list memories');
-        expect(toolFormatters.mem0_retrieve({query: 'findings'})).toBe('retrieve memories');
+        expect(toolFormatters.memory_list({query: 'findings'})).toBe('list memories');
+        expect(toolFormatters.memory_retrieve({query: 'findings'})).toBe('retrieve memories');
         expect(toolFormatters.store_observation({content: 'Observed 403', artifacts: ['403.txt']}))
             .toContain('1 artifact');
         expect(toolFormatters.store_knowledge({content: 'Use a negative control'}))
@@ -57,8 +57,8 @@ describe('toolFormatters source coverage', () => {
             finding_uid: '1234567890', outcome: 'not_confirmed', evidence_strategy: 'differential',
             evidence_artifacts: ['response.txt'], control_artifacts: ['control.txt'], summary: 'Not reproducible',
         })).toContain('finding: 12345678');
-        expect(toolFormatters.mem0_get({query: {target: 'example.com'}})).toContain('target');
-        expect(toolFormatters.mem0_get({query: '{bad json'})).toContain('{bad json');
+        expect(toolFormatters.memory_get({query: {target: 'example.com'}})).toContain('target');
+        expect(toolFormatters.memory_get({query: '{bad json'})).toContain('{bad json');
 
         const toon = `plan_overview[1]{objective,current_phase,total_phases}:
   Test portal,2,4

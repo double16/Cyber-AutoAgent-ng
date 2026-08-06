@@ -1,395 +1,162 @@
 # Memory System
 
-Cyber-AutoAgent implements persistent memory using Mem0 with automatic reflection and evidence categorization. The system uses a hybrid storage approach: a local SQLite database for structured plans and tasks, and a vector backend (Mem0 Platform, OpenSearch, or FAISS) for semantic memories.
+Cyber-AutoAgent uses two complementary persistence layers:
 
-## Key Features
+- Qdrant stores semantic memories such as observations, verified findings, validation records, and reusable knowledge.
+- SQLite stores authoritative workflow state such as operation plans, phases, tasks, acceptance outcomes, and finding validation.
 
-- **Operation Scoping**: Memories and task state are automatically scoped to the current operation via `run_id`
-- **Cross-Operation Learning**: Query semantic memories across all operations using `cross_operation=True`
-- **Hybrid Storage**: Relational data (plans, tasks) uses SQLite; semantic data uses vector stores
-- **Thread-Safe Writes**: SQLite and FAISS backends use locking for safe concurrent writes
-- **Category Validation**: Invalid categories are auto-corrected to prevent empty reports
-- **Status Validation**: Contradictory status fields are automatically reconciled
-- **Target Scoping**: Plans store executable target literals separately from the logical `--target` output label, and
-  tasks carry `all` or `subset` target scopes.
+Qdrant is the only semantic-memory backend. By default it runs as an embedded filesystem database under
+`./outputs/qdrant`. A Qdrant service can be configured without changing the memory model or agent tools.
 
 ## Architecture
 
-The memory system employs a hybrid architecture to balance structured task tracking with unstructured semantic search.
-
 ```mermaid
-graph TD
-    A[Python Workflow Controller] --> B[SQLite Plan/Task Helpers]
-    C[Worker Agents] --> D[mem0_* Tools]
-    B --> E[SQLite Plan Store]
-    D --> F{Vector Backend Selection}
-
-    F -->|MEM0_API_KEY set| G[Mem0 Platform]
-    F -->|OPENSEARCH_HOST set| H[OpenSearch + AWS]
-    F -->|Default| I[FAISS Local]
-
-    E --> J[plan_store.db]
-    G --> K[Cloud Vector Store]
-    H --> L[OpenSearch + Bedrock]
-    I --> M[mem0.faiss]
-
-    style B fill:#e3f2fd,stroke:#333,stroke-width:2px
-    style E fill:#fff9c4,stroke:#333,stroke-width:2px
-    style I fill:#e8f5e8,stroke:#333,stroke-width:2px
+flowchart LR
+    A[OperationTarget values] --> B[Memory initialization]
+    B --> C[Worker and report agents]
+    C --> D[memory_list / memory_retrieve]
+    C --> E[Typed storage tools]
+    D --> F[Qdrant semantic memory]
+    E --> F
+    E --> G[SQLite PlanStore]
+    F --> H[Target filter always]
+    H --> I{Memory mode}
+    I -->|operation| J[Target + operation filter]
+    I -->|shared| K[Target filter]
 ```
 
-## Backend Selection
+All operations use the same physical Qdrant database. Query scope is controlled by payload filters, not by creating a
+different database for each target or operation.
 
-Backend configuration follows environment-based precedence:
+## Identity and isolation
 
-**Priority Order:**
-1. **Mem0 Platform**: `MEM0_API_KEY` configured - Cloud-hosted service
-2. **OpenSearch**: `OPENSEARCH_HOST` configured - AWS managed search
-3. **FAISS**: Default - Local vector storage
+Every semantic-memory point contains:
 
-Backend selection occurs at memory initialization and remains fixed for operation duration.
+- `target_values`: exact values from the operation's `OperationTarget` records.
+- `operation_id`: the operation that created the point.
+- `memory`: searchable content.
+- `metadata`: category, status, evidence references, and other typed-memory fields.
 
-## Memory Operations
+Target filtering is mandatory for every list, search, get, and delete operation. Sanitized output-directory names are
+never used as target identity.
 
-```mermaid
-sequenceDiagram
-    participant Agent
-    participant Tool
-    participant Backend
-    participant Storage
+The `--memory-mode` option controls only query scope:
 
-    Agent->>Tool: store(content, metadata)
-    Tool->>Backend: Generate embedding
-    Backend->>Storage: Persist vector + metadata
-    Storage-->>Tool: Confirmation
+| Mode | Qdrant criteria | Intended use |
+| --- | --- | --- |
+| `operation` | Target value and operation ID | Isolate retrieval to the current run. This is the default. |
+| `shared` | Target value | Reuse knowledge from other operations against the same target. |
 
-    Agent->>Tool: retrieve(query)
-    Tool->>Backend: Vector similarity search
-    Backend->>Storage: Query execution
-    Storage-->>Backend: Matching vectors
-    Backend-->>Agent: Ranked results
+Writes always retain both target values and operation ID, including in shared mode. This preserves provenance and lets
+operation reports select their own authoritative records.
+
+Examples:
+
+```bash
+# Isolated retrieval for a new operation
+uv run python src/cyberautoagent.py --target https://example.com --memory-mode operation
+
+# Reuse memories from earlier operations against exactly the same target value
+uv run python src/cyberautoagent.py --target https://example.com --memory-mode shared
 ```
 
-## Backend Configurations
+The former `auto` and `fresh` values are no longer CLI values. Persisted React configuration is normalized once:
+`auto` becomes `shared`, and `fresh` becomes `operation`.
 
-### FAISS Backend
-**Default Configuration:**
-- **Storage Location**:
-  - Default (operation isolation): `./outputs/<target>/memory/<operation_id>/`
-  - Shared mode (`MEMORY_ISOLATION=shared`): `./outputs/<target>/memory/`
-- **Embedder**: AWS Bedrock Titan Text v2 (1024 dimensions)
-- **LLM**: Claude 3.5 Sonnet
-- **Characteristics**: Local persistence, no external dependencies, thread-safe writes
+## Storage options
 
-### OpenSearch Backend
-**AWS Managed Configuration:**
-- **Storage**: AWS OpenSearch Service
-- **Embedder**: AWS Bedrock Titan Text v2 (1024 dimensions)
-- **LLM**: Claude 3.5 Sonnet
-- **Characteristics**: Scalable search, managed infrastructure
+### Embedded filesystem storage
 
-### Mem0 Platform
-**Cloud Service Configuration:**
-- **Storage**: Mem0 managed infrastructure
-- **Configuration**: Platform-managed
-- **Characteristics**: Zero-setup, fully managed
-
-## Memory Categorization
-
-Evidence storage employs structured metadata for efficient retrieval and analysis. Observations capture factual
-observations, knowledge captures reusable lessons, and findings include claims, severity, target, technique, expected
-and observed results, reproduction steps, and artifact references.
-
-Successful `record_task_acceptance` calls automatically publish one operation-scoped observation for the completed
-task. The observation contains concrete criterion statuses and summaries, direct evidence references, and bounded
-coverage aggregates. Metadata identifies `source=task_acceptance`, the task UID, phase, targets, acceptance manifest,
-and a replay-safe publication key. Later task-prompt-builders can select this memory when it applies to a new objective.
-Publication warnings do not invalidate the already persisted acceptance ledger; explicit `memory` or `observation`
-acceptance requirements still require their referenced evidence to exist before acceptance is recorded.
-
-`store_finding` requires at least one existing artifact path and an `observed_result` that describes concrete observed
-behavior. Assumptions, hypothetical findings, or unread output should be stored as observations or follow-up tasks
-instead of findings.
-
-## Target Registry and Task Scope
-
-The CLI `--target` value is always treated as the logical operation label used for output naming. The workflow builds an
-executable target registry from exact target literals in the objective first, including URLs, IP addresses, CIDR ranges,
-FQDNs, host:port values, and resolvable filesystem paths. If the objective contains no executable targets, the logical
-`--target` value is used as the fallback executable target.
-
-Tasks can cover all executable targets or a subset:
-
-```json
-{
-  "tasks": [
-    {
-      "title": "Enumerate login routes",
-      "objective": "Enumerate login routes on http://dvwa.local",
-      "target_scope": "subset",
-      "target_ids": ["target-1"]
-    }
-  ]
-}
-```
-
-`target_ids` must match the registry exactly. Placeholder or unknown IDs are rejected. Finding-verification tasks inherit
-the exact finding target when it matches the registry, and final reports include a deterministic Target Coverage section.
-
-### Category Taxonomy
-
-- **observation**: Operation-specific facts, reconnaissance, failed attempts, and informational behavior.
-- **knowledge**: Reusable techniques and lessons. Knowledge is retrievable but excluded from reports.
-- **finding_candidate**: A claim submitted through `store_finding`; it automatically creates one verification task.
-- **finding**: A candidate promoted only after its verification task and evaluator approve the evidence.
-- **validation_failure**: A claim that was rejected, not confirmed, incomplete, or still pending at report time.
-
-Legacy `signal` and `discovery` memories are read as observations. Legacy `decision` memories remain internally
-retrievable but are excluded from reports. New workflow decisions are stored in plans, tasks, evaluator results, and
-logs rather than semantic memory.
-
-**Severity Levels** (for findings):
-- **CRITICAL**: Remote code execution, authentication bypass, data breach
-- **HIGH**: Significant security impact, privilege escalation
-- **MEDIUM**: Moderate risk, information disclosure
-- **LOW**: Minor security concerns, informational
-
-## Advanced Features
-
-### Budget-Aware Phase Evaluation
-
-Plan evaluation is triggered by the Python workflow controller. Budget progress is distributed across phases using
-mandatory caps:
+No service configuration is required. The default layout is:
 
 ```text
-phase_cap = phase_id / total_phases * 100
+outputs/
+├── qdrant/                         # Semantic memories for every operation
+└── <sanitized-target>/
+    └── memory/
+        └── <operation-id>/
+            └── plan_storage.db     # Authoritative plan/task state
 ```
 
-When a phase reaches its cap, the controller stops its task work and runs `phase_evaluator` with terminal-only outcomes.
-Python stores `done`, `partial_failure`, or `blocked` and advances the plan. A later Python reconciliation may store
-`superseded` when explicitly linked replacement tasks resolve a failed or blocked task. Separate 20%, 40%, 60%, 80%, and 90%
-checkpoints remain advisory below the phase cap and may return `continue`.
+The embedded client is suitable for a single Cyber-AutoAgent process. Use a Qdrant service when multiple processes or
+hosts need concurrent access.
 
-### Strategic Plan Management
+### Qdrant service
 
-Hierarchical planning with phase tracking is stored in SQLite by Python workflow helpers:
+Set `QDRANT_URL` to use a service. Set `QDRANT_API_KEY` when the service requires authentication.
 
-```python
-plan = {
-    "objective": "Compromise web application",
-    "constraints": [
-        "Use only network-accessible target interfaces",
-        "Keep activity within the authorized target scope",
-        "Support findings with durable artifact evidence"
-    ],
-    "current_phase": 1,
-    "total_phases": 3,
-    "phases": [
-        {"id": 1, "title": "Reconnaissance", "status": "active", "criteria": "Map attack surface"},
-        {"id": 2, "title": "Exploitation", "status": "pending", "criteria": "Exploit vulnerabilities"},
-        {"id": 3, "title": "Post-Exploitation", "status": "pending", "criteria": "Document impact"}
-    ],
-    "assessment_complete": false
-}
+```bash
+export QDRANT_URL=http://localhost:6333
+export QDRANT_API_KEY=optional-secret
+uv run python src/cyberautoagent.py --target https://example.com
 ```
 
-**Required Plan Fields:**
-- `objective`: Overall mission goal
-- `constraints`: Operation-wide guardrails inferred during plan generation from the objective and active prompts
-- `current_phase`: Active phase number
-- `total_phases`: Total number of phases
-- `phases`: List of phase objects with `id`, `title`, `status`, `criteria`
-- `assessment_complete`: Whether all phases are terminal
+The Docker Compose file includes an optional Qdrant service profile:
 
-**Phase Status Values:**
-- `active`
-- `pending`
-- `done`
-- `partial_failure`
-- `blocked`
-- `superseded`
-
-`superseded` is a successful terminal disposition for a task whose intent was completed by explicitly linked
-replacement tasks. The original task record, evidence, failure reason, `replacement_of` lineage, and
-`supersedes_criteria` metadata remain durable and auditable. Python requires every parent acceptance criterion to be
-covered and every linked replacement to be `done` or `superseded`; unlinked failures remain unresolved.
-
-### Reflection via Plan Updates
-
-Tactical pivots are managed by evaluator decisions and Python plan updates:
-
-```python
-phase_decision = {"status": "partial_failure", "reason": "Soft budget reached; remaining work deferred"}
-# Python records phase status, activates the next pending phase, and leaves pending tasks durable.
+```bash
+QDRANT_URL=http://qdrant:6333 docker compose --profile qdrant up
 ```
 
-## Storage Structure
+Its data is persisted in the repository `outputs/qdrant` directory.
 
-### FAISS Backend Layout (Default - Per-Operation Isolation)
-```
-./outputs/<target>/memory/<operation_id>/
-├── mem0.faiss           # Vector embeddings (FAISS index)
-├── mem0.pkl             # Metadata storage (pickle: docstore + ID mapping)
-└── plan_store.db        # SQLite database (Plans and Tasks)
-```
+## Agent tools
 
-### FAISS Backend Layout (Shared Mode)
-```
-./outputs/<target>/memory/
-├── mem0.faiss           # Vector embeddings (FAISS index)
-├── mem0.pkl             # Metadata storage (pickle: docstore + ID mapping)
-└── plan_store.db        # SQLite database (Plans and Tasks)
-```
+Agents use provider-neutral names:
 
-### Operation Output Structure
-```
-./outputs/<target>/<operation_id>/
-├── artifacts/                      # Operation artifacts
-├── security_assessment_report.md   # Final assessment report
-├── security_assessment_report.json # Final assessment report data (can be used in other tools)
-└── logs/                           # Operation logs
-    └── cyber_operations.log
-```
+- `memory_list`: returns a bounded list in the configured target/operation scope.
+- `memory_retrieve`: performs semantic retrieval in that same scope and accepts metadata filters.
+- Typed storage tools such as `store_observation`, `store_finding`, and `record_finding_validation` enforce their own
+  schemas and write semantic or workflow records as appropriate.
 
-## Memory operations
+Workflow bookkeeping tools are intentionally separate from semantic retrieval. Qdrant does not replace SQLite as the
+authoritative source for task, phase, acceptance, or validation status.
 
-Agents store observations, findings, and reusable knowledge through typed memory capabilities. Retrieval can be scoped
-to the current operation or explicitly enabled for cross-operation learning. Acceptance evidence keeps its memory
-reference alongside artifact references; operation-scoped references must not be reused as evidence in another operation.
+Workflow prompts exclude automatically published task-acceptance memories and any semantic plan/task bookkeeping.
+Those records remain available for audit and reporting, while agents receive the controller-owned task history and
+acceptance ledger instead. Ordinary observations, findings, validation outcomes, and reusable knowledge remain eligible
+as supporting prompt context in either memory mode.
 
-The Python workflow controller performs plan and task memory operations directly. Worker agents do not mutate plan or
-task state, except for permitted follow-up task creation.
+Reports apply the same distinction to informational observations: task-acceptance and plan/task bookkeeping records
+remain in canonical evidence for auditability, but are omitted from the informational-observations narrative and its
+LLM context because the deterministic task and acceptance tables already represent them.
+
+## Embeddings
+
+Qdrant stores vectors generated by the configured operation embedding provider. The collection has one configured
+dimension, so changing to a model with a different vector size requires a new collection name or an explicit migration.
+The application validates vector dimensions before writing.
+
+No automatic import of legacy semantic-memory files is performed. Keep old output directories as archives or migrate
+them with a purpose-built, reviewed process.
 
 ## Configuration
 
-### Local Mode (Ollama)
-```python
-config = {
-    "embedder": {"provider": "ollama", "config": {"model": "mxbai-embed-large:latest"}},
-    "llm": {"provider": "ollama", "config": {"model": "llama3.2:3b"}}
-}
-```
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CYBER_MEMORY_MODE` | `operation` | Query scope: `operation` or `shared`. |
+| `QDRANT_URL` | unset | Qdrant service URL. Unset selects filesystem storage. |
+| `QDRANT_API_KEY` | unset | Optional Qdrant service API key. |
+| `QDRANT_COLLECTION` | `cyber_autoagent_memories` | Semantic-memory collection name. |
+| `CYBER_AGENT_OUTPUT_DIR` | `./outputs` | Parent of the local `qdrant` directory and operation outputs. |
+| `CYBER_AGENT_EMBEDDING_MODEL` | provider default | Embedding model used for Qdrant vectors. |
+| `MEMORY_LIST_LIMIT` | `100` | Maximum default records returned by bounded list operations. |
 
-### Remote Mode (AWS Bedrock)
-```python
-config = {
-    "embedder": {"provider": "aws_bedrock", "config": {"model": "amazon.titan-embed-text-v2:0"}},
-    "llm": {"provider": "aws_bedrock", "config": {"model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"}}
-}
-```
+These variables are represented in `.env.example`; Docker Compose forwards the service-related values.
 
-## Operational Guidelines
+## Cleanup and reporting
 
-### Finding Documentation Format
+When memory retention is disabled, cleanup deletes points matching the operation ID and leaves the shared database and
+other operations untouched. Raw artifacts are not modified.
 
-Structured finding format ensures consistent evidence collection:
+Reports use the current operation's SQLite records and operation-tagged semantic evidence. Shared mode helps agent
+reasoning across earlier runs but does not allow another operation to overwrite current operation status, counts, or
+validation outcomes.
 
-```
-[WHAT] Vulnerability classification
-[WHERE] Precise location identifier
-[IMPACT] Business and technical impact
-[EVIDENCE] Reproduction steps and proof
-```
+## Troubleshooting
 
-### Metadata Standards
-
-Memory tools assign their category; agents do not provide it. `store_finding` requires severity, target, expected and
-observed behavior, reproduction steps, and a technique. A confirmed validation requires existing operation-scoped
-artifacts. Differential evidence also requires a negative-control artifact.
-
-Objective candidates, such as CTF flags, are not vulnerability findings. Store them with
-`store_objective_candidate`; the exact value must already appear in a cited artifact. The CTF-only
-`discover_flag_candidates` tool scans artifacts for common braced and SHA-256/SHA-512-style flag shapes and returns
-opaque references instead of flag values. Independent validation records use `validation_type="objective"` and do not
-affect finding verification or severity totals. Existing records without `validation_type` retain finding semantics.
-
-**Optional Fields:**
-- **status**: Verification state (hypothesis, unverified, verified)
-- **validation_status**: Submission state (hypothesis, unverified, verified)
-- **technique**: Exploitation technique used
-- **challenge_id**: CTF challenge identifier
-
-### Status Validation
-
-The memory system automatically validates and corrects inconsistent status fields:
-
-```python
-# These contradictions are auto-corrected:
-# status="verified" + validation_status="hypothesis" → validation_status="verified"
-# validation_status="verified" + status="hypothesis" → status="verified"
-
-# FORBIDDEN: status="solved" is ambiguous and auto-converts to "hypothesis"
-# Use status="verified" for confirmed findings
-```
-
-### Plan Management
-
-**Lifecycle:**
-1. Python loads the current plan or runs the configured `plan_creator`/`plan_critic` refinement cycle when none exists.
-2. Python ensures exactly one active phase.
-3. Python activates existing active tasks first, then pending tasks when budget policy allows.
-4. Evaluator agents return task/phase decisions.
-5. Python records `done`, `partial_failure`, or `blocked` and advances the plan; explicit successful replacement
-   lineage may later reconcile a failed task to `superseded`.
-
-### Plan-Based Strategy Updates
-
-**Operational Flow:**
-- Check phase progress against the soft phase budget target.
-- Run `phase_evaluator` when no tasks remain or soft budget suggests moving on.
-- Store updated phase status in SQLite through Python helpers.
-- Leave pending work durable when the controller advances to preserve budget for later phases.
-
-### Query Optimization
-
-**Efficiency Techniques:**
-- Pre-query deduplication checks
-- Metadata-based filtering
-- Specific query construction
-- Result ranking utilization
-
-## Configuration Options
-
-### Command Line Arguments
-
-```bash
-# Specify memory path
---memory-path ./outputs/<target>/memory/
-
-# Memory persistence (default: enabled)
---keep-memory
-
-# Memory storage location
-# Format: ./outputs/<target>/memory/
-```
-
-### Memory Persistence
-
-**Default Behavior (Operation Isolation):**
-- Each operation gets its own isolated memory store
-- No automatic cross-operation contamination
-- Use `cross_operation=True` to explicitly query across operations
-
-**Shared Mode (`MEMORY_ISOLATION=shared`):**
-- All operations share a single memory store per target
-- Automatic cross-operation learning
-- Use `run_id` filtering for operation-specific queries
-
-**Storage Path Patterns:**
-```
-# Default (operation isolation)
-./outputs/<target>/memory/<operation_id>/
-
-# Shared mode
-./outputs/<target>/memory/
-```
-
-### Environment Variables
-
-| Variable             | Default        | Description                                                |
-|----------------------|----------------|------------------------------------------------------------|
-| `MEMORY_ISOLATION`   | `operation`    | `operation` for isolated stores, `shared` for single store |
-| `CYBER_OPERATION_ID` | Auto-generated | Operation identifier for scoping                           |
-| `MEM0_LIST_LIMIT`    | `100`          | Default limit for list/retrieve operations                 |
-
-Memory isolation ensures target-specific knowledge remains separated while enabling explicit cross-operation learning when needed via the `cross_operation` parameter.
+- **Qdrant cannot open the local path:** verify `CYBER_AGENT_OUTPUT_DIR` is writable and only one process owns the
+  embedded database. Use a service for concurrent processes.
+- **Dimension mismatch:** choose an embedding model matching the collection dimension or configure a new collection.
+- **No shared results:** target values must match exactly. A URL and hostname are distinct unless both are explicit
+  `OperationTarget` values.
+- **Service connection failure:** check `QDRANT_URL`, credentials, network access, and the service health endpoint.

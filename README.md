@@ -166,7 +166,7 @@ The compose stack automatically provides:
 
 - **[User Guide](docs/user-instructions.md)** - Complete usage, configuration, and examples
 - **[Agent Architecture](docs/architecture.md)** - Strands framework, tools, and metacognitive design
-- **[Memory System](docs/memory.md)** - Mem0 backends, storage, and evidence management
+- **[Memory System](docs/memory.md)** - Qdrant storage, query scope, and evidence management
 - **[Observability & Evaluation](docs/observability-evaluation.md)** - Langfuse tracing, Ragas metrics, and performance monitoring
 - **[Deployment Guide](docs/deployment.md)** - Docker, Kubernetes, and production setup
 - **[Terminal Frontend](docs/terminal-frontend.md)** - React interface architecture and event protocol
@@ -221,7 +221,7 @@ graph LR
 - **Agent Core**: Strands framework orchestration with metacognitive reasoning and tool selection
 - **AI Models**: GenAI tool use models (AWS Bedrock remote) or local models (Ollama)
 - **Security Tools**: Pentesting tools (nmap, sqlmap, nikto, metasploit, custom tools, etc.)
-- **Evidence Storage**: Persistent memory with FAISS, OpenSearch, or Mem0 Platform backends
+- **Evidence Storage**: Qdrant semantic memory plus SQLite workflow state
 - **Observability**: Real-time tracing with Langfuse and automated evaluation with Ragas metrics
 
 ### Assessment Execution Flow
@@ -670,8 +670,8 @@ The unified structure organizes all artifacts under operation-specific directori
 - `--region`: AWS region for Bedrock, default: us-east-1
 - `--verbose`: Enable verbose output with detailed debug logging
 - `--confirmations`: Enable tool confirmation prompts (default: disabled)
-- `--memory-path`: Path to existing memory store to load past memories
-- `--memory-mode`: Memory initialization mode - `auto` (loads existing) or `fresh` (starts new), default: auto
+- `--memory-mode`: Qdrant query scope - `operation` (current operation) or `shared` (same target across operations),
+  default: `operation`
 - `--keep-memory`: Keep memory data after operation completes (default: true)
 - `--output-dir`: Custom output directory (default: ./outputs)
 - `--mcp-enabled`: Enable MCP tools
@@ -774,7 +774,7 @@ The `.env.example` file contains detailed configuration options with inline comm
 - `CYBER_AGENT_OUTPUT_DIR`, `CYBER_AGENT_ENABLE_UNIFIED_OUTPUT` for output management
 - `CYBER_HEAP_MONITOR_AUTOSTART` to control diagnostic heap monitor autostart (`1` by default, set `0` to disable)
 - `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` for observability
-- `MEM0_API_KEY` or `OPENSEARCH_HOST` for memory backends
+- `QDRANT_URL` and optional `QDRANT_API_KEY` for service-backed semantic memory
 
 See `.env.example` for complete configuration options and usage examples.
 
@@ -822,7 +822,7 @@ cyber-autoagent/
 │       │   ├── manager.py     # Centralized configuration system
 │       │   └── environment.py # Environment setup and validation
 │       ├── tools/             # Tool implementations
-│       │   └── memory.py      # Mem0 memory management tool
+│       │   └── memory.py      # Qdrant semantic memory and SQLite workflow state
 │       ├── prompts/           # Prompt management
 │       │   ├── factory.py      # Prompt construction and module loading
 │       │   └── templates/      # Base prompt templates
@@ -840,7 +840,7 @@ cyber-autoagent/
 │       └── operation_plugins/ # Security modules (web, ctf)
 ├── docs/                      # Documentation
 │   ├── architecture.md       # Agent architecture and tools
-│   ├── memory.md             # Memory system (Mem0 backends)
+│   ├── memory.md             # Qdrant memory system
 │   ├── observability.md      # Langfuse monitoring setup
 │   └── deployment.md         # Docker and production deployment
 ├── docker/                   # Docker deployment files
@@ -850,6 +850,7 @@ cyber-autoagent/
 ├── uv.lock                   # Dependency lockfile
 ├── .env.example              # Environment configuration template
 ├── outputs/                  # Unified output directory (auto-created)
+│   ├── qdrant/               # Shared physical semantic-memory database
 │   └── <target>/             # Target-specific organization
 │       ├── OP_<id>/          # Operation-specific files
 │       │   ├── security_assessment_report.md   # Final assessment report (when generated)
@@ -857,10 +858,9 @@ cyber-autoagent/
 │       │   ├── cyber_operations.log            # Operation log
 │       │   ├── artifacts/  # Ad-hoc files
 │       │   └── tools/      # Custom tools created by agent
-│       └── memory/         # Cross-operation memory
-│           ├── mem0.faiss
-│           ├── mem0.pkl
-│           └── plan_store.db
+│       └── memory/
+│           └── <operation-id>/
+│               └── plan_storage.db  # Authoritative workflow state
 └── README.md                 # This file
 ```
 
@@ -876,7 +876,7 @@ artifact and tool paths stay inside that operation workspace.
 | `src/modules/agents/multi_agent_workflow.py` | Python-owned phase/task workflow controller |
 | `src/modules/agents/report_agent.py`    | Report generation agent                       |
 | `src/modules/config/manager.py`         | Centralized configuration system              |
-| `src/modules/tools/memory.py`           | Unified Mem0 tool (FAISS/OpenSearch/Platform) |
+| `src/modules/tools/memory.py`           | Qdrant semantic memory and SQLite workflow state |
 | `src/modules/evaluation/evaluation.py`  | Ragas evaluation system                       |
 | `src/modules/prompts/factory.py`        | Prompt construction, module loading, and Langfuse integration |
 | `.env.example`                          | Environment configuration template            |
@@ -951,20 +951,14 @@ export AWS_REGION=us-east-1
 
 #### Memory System Errors
 
-> **See [Memory System Guide](docs/memory.md)** for complete backend configuration and troubleshooting
+> **See [Memory System Guide](docs/memory.md)** for complete storage configuration and troubleshooting.
 ```bash
-# For local FAISS backend (default)
-pip install faiss-cpu  # or faiss-gpu for CUDA
+# Filesystem-backed Qdrant is the default
+ls -la ./outputs/qdrant
 
-# For Mem0 Platform
-export MEM0_API_KEY=your_api_key
-
-# For OpenSearch backend
-export OPENSEARCH_HOST=your_host
-export AWS_REGION=your_region
-
-# Check memory storage location
-ls -la ./mem0_faiss_OP_*/
+# Or configure a Qdrant service
+export QDRANT_URL=http://localhost:6333
+export QDRANT_API_KEY=optional_secret
 ```
 
 #### Tool Not Found Errors
@@ -1057,7 +1051,7 @@ This tool is provided for educational and authorized security testing purposes o
 - [Strands Framework](https://github.com/anthropics/strands) - Agent orchestration & swarm intelligence
 - [AWS Bedrock](https://aws.amazon.com/bedrock/) - Foundation model access
 - [Ollama](https://ollama.ai) - Local model inference
-- [Mem0](https://github.com/mem0ai/mem0) - Advanced memory management with FAISS/OpenSearch/Platform backends
+- [Qdrant](https://qdrant.tech/) - Vector database for semantic memory
 ---
 
 **Remember: With great power comes great responsibility. Use this tool ethically and legally.**
