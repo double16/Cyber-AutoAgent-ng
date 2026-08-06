@@ -3351,6 +3351,16 @@ class AgentEventHandler(PrintingCallbackHandler):
             if report_content:
                 self._completed_report_path = report_path
                 self.emit_ui_event({"type": "report_content", "content": report_content})
+                self.emit_ui_event(
+                    {
+                        "type": "report_paths",
+                        "target": target_name,
+                        "output_dir": output_dir,
+                        "report_path": report_path,
+                        "log_path": os.path.join(output_dir, "cyber_operations.log"),
+                        "artifacts_path": os.path.join(output_dir, "artifacts"),
+                    }
+                )
                 self.emit_budget_progress_update()
 
                 # Also emit file path information for reference

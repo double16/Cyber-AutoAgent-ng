@@ -19,6 +19,7 @@ import type { Config } from '../contexts/ConfigContext.js';
 import { formatOperationHealth } from '../utils/operationHealthFormatting.js';
 import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 import { formatWorkflowActivityEvent } from '../utils/workflowActivityFormatting.js';
+import { MarkdownRenderer } from '../utils/markdownRows.js';
 
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
 let cachedProjectRoot: string | null | undefined;
@@ -93,7 +94,7 @@ export type AdditionalStreamEvent =
   | { type: 'batch'; id?: string; events: DisplayStreamEvent[]; [key: string]: any }
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
-  | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
+  | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; artifactsPath?: string; [key: string]: any }
   | { type: 'workflow_activity'; content?: string; activity?: string; action?: string; role?: string; status?: string; phase_id?: number; phase_title?: string; task_uid?: string; task_title?: string; attempt?: number; attempt_total?: number; cycle?: number; cycle_total?: number; iteration?: number; iteration_total?: number; [key: string]: any }
   | { type: 'preflight_check'; operation_id?: string; target_id?: string; target?: string; target_type?: string; status: 'pass' | 'fail' | 'skip'; checks?: string[]; reason?: string; resolved_addresses?: string[]; [key: string]: any }
   | { type: 'task_started'; task_uid?: string; title?: string; status?: string; task_kind?: string; reference_id?: string; [key: string]: any }
@@ -527,9 +528,7 @@ const InlineReportViewer: React.FC<{
     <Box flexDirection="column" marginTop={1} marginBottom={1}>
       <Text color="cyan" bold>SECURITY ASSESSMENT REPORT</Text>
       <Box flexDirection="column" marginTop={1} paddingX={1}>
-        {previewLines.map((line, i) => (
-          <Text key={i}>{line}</Text>
-        ))}
+        <MarkdownRenderer content={previewLines.join('\n')} />
         {truncatedNotice && (
           <Box marginTop={1}>
             <Text dimColor>
@@ -1609,7 +1608,7 @@ const method = latestInput.method || 'GET';
                   const truncated = line.length > maxLineLength
                     ? line.slice(0, maxLineLength) + '…'
                     : line;
-                  return <Text key={i} dimColor>{truncated}</Text>;
+                  return <MarkdownRenderer key={i} content={truncated} foreground="gray" />;
                 })}
                 <Text> </Text>
                 <Text dimColor>... ({displayLines.length - 20} more lines in saved file)</Text>
@@ -1634,9 +1633,7 @@ const method = latestInput.method || 'GET';
               <Text color="cyan" bold>SECURITY ASSESSMENT REPORT</Text>
             </Box>
             <Box flexDirection="column" marginTop={1} paddingX={1}>
-              {truncatedLines.map((line, i) => (
-                <Text key={i}>{line}</Text>
-              ))}
+              <MarkdownRenderer content={truncatedLines.join('\n')} />
               {lines.length > (maxHead + maxTail) && (
                 <Box marginTop={1}>
                   <Text dimColor>Full report saved to disk - check operation output directory</Text>
@@ -1667,10 +1664,18 @@ const method = latestInput.method || 'GET';
     case 'report_paths': {
       const opId = (event as any).operation_id || '';
       const target = (event as any).target || '';
-      const outputDir = (event as any).outputDir || '';
-      const reportPath = (event as any).reportPath || '';
-      const logPath = (event as any).logPath || '';
-      const memoryPath = (event as any).memoryPath || '';
+      const outputBaseDir = (() => {
+        const configured = effectiveConfig.outputDir || './outputs';
+        return path.isAbsolute(configured)
+          ? configured
+          : path.resolve(projectRoot || process.cwd(), configured);
+      })();
+      const displayPath = (raw: string): string => mapContainerReportPath(raw, outputBaseDir);
+      const outputDir = displayPath((event as any).outputDir || '');
+      const reportPath = displayPath((event as any).reportPath || '');
+      const logPath = displayPath((event as any).logPath || '');
+      const artifactsPath = displayPath((event as any).artifactsPath || '');
+      const fields = [opId, target, outputDir, reportPath, logPath, artifactsPath];
       return (
         <Box flexDirection="column" marginTop={1} marginBottom={1}>
           <Box borderStyle="round" borderColor="green" paddingX={1}>
@@ -1682,7 +1687,8 @@ const method = latestInput.method || 'GET';
             {outputDir ? (<Text>Operation Path: {outputDir}</Text>) : null}
             {reportPath ? (<Text>Report: {reportPath}</Text>) : null}
             {logPath ? (<Text>Log: {logPath}</Text>) : null}
-            {memoryPath ? (<Text>Memory: {memoryPath}</Text>) : null}
+            {artifactsPath ? (<Text>Artifacts: {artifactsPath}</Text>) : null}
+            {fields.every(value => !value) ? (<Text dimColor>Paths unavailable</Text>) : null}
           </Box>
         </Box>
       );

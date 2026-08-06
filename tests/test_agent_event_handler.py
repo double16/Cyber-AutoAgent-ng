@@ -1392,8 +1392,16 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     types = event_types(handler)
     assert "report_content" in types
     report_index = types.index("report_content")
-    assert handler._events[report_index + 1]["type"] == "progress_update"
-    assert handler._events[report_index + 1]["progressPercent"] == handler.get_budget_progress()
+    assert handler._events[report_index + 1] == {
+        "type": "report_paths",
+        "target": "example_com",
+        "output_dir": str(output_dir),
+        "report_path": str(output_dir / "security_assessment_report.md"),
+        "log_path": str(output_dir / "cyber_operations.log"),
+        "artifacts_path": str(output_dir / "artifacts"),
+    }
+    assert handler._events[report_index + 2]["type"] == "progress_update"
+    assert handler._events[report_index + 2]["progressPercent"] == handler.get_budget_progress()
     assert "assessment_complete" not in types
     assert output_dir.joinpath("security_assessment_report.md").exists()
     handler.emit_assessment_complete()

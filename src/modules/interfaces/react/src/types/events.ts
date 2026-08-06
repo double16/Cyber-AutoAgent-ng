@@ -466,6 +466,20 @@ export interface ReportContentEvent {
   timestamp?: string;
 }
 
+export interface ReportPathsEvent {
+  type: 'report_paths';
+  operation_id?: string;
+  target?: string;
+  output_dir?: string;
+  report_path?: string;
+  log_path?: string;
+  artifacts_path?: string;
+  outputDir?: string;
+  reportPath?: string;
+  logPath?: string;
+  artifactsPath?: string;
+}
+
 /**
  * Termination Reason Event Interface
  * 

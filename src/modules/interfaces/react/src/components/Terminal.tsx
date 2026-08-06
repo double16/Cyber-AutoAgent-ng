@@ -1628,9 +1628,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           const target = targetRef.current || '';
           const safeTarget = target ? target.replace(/^https?:\/\//, '').replace(/\.{2}|\.\//g, '').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^[_\.]+|[_\.]+$/g, '') : '';
           const base = safeTarget && opId ? `./outputs/${safeTarget}/${opId}` : '';
-          const memory = safeTarget ? `./outputs/${safeTarget}/memory` : '';
           const reportPath = base ? `${base}/security_assessment_report.md` : '';
           const logPath = base ? `${base}/cyber_operations.log` : '';
+          const artifactsPath = base ? `${base}/artifacts` : '';
           const pathsEvent: DisplayStreamEvent = {
             type: 'report_paths',
             operation_id: opId,
@@ -1638,7 +1638,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             outputDir: base,
             reportPath,
             logPath,
-            memoryPath: memory
+            artifactsPath,
           } as unknown as DisplayStreamEvent;
 
           results.push(pathsEvent);

@@ -6,7 +6,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import {themeManager} from "../themes/theme-manager.js";
 import {getDocumentationUrl} from "../utils/documentationLinks.js";
-import {MarkdownRow, renderInlineMarkdown, tokenizeMarkdown} from "../utils/markdownRows.js";
+import {MarkdownRow, renderMarkdownRow, tokenizeMarkdown} from "../utils/markdownRows.js";
 
 interface DocumentInfo {
   name: string;
@@ -53,18 +53,6 @@ const findDocument = async (filename: string): Promise<string | null> => {
 const fallbackContent = async (filename: string): Promise<string> => {
   const url = await getDocumentationUrl(filename);
   return `# Documentation unavailable\n\nThe full document is not available in this installation.\n\nRead the complete document: ${url}`;
-};
-
-const renderRow = (row: MarkdownRow, key: string, foreground: string) => {
-  if (row.kind === "code") return <Text key={key} color="cyan">  {row.text}</Text>;
-  if (row.kind === "rule") return <Text key={key} color="gray">{row.text}</Text>;
-  if (row.kind === "heading") {
-    const marker = row.level === 1 ? "═" : row.level === 2 ? "─" : "•";
-    return <Text key={key} color="yellow" bold>{marker} {renderInlineMarkdown(row.text)}</Text>;
-  }
-  if (row.kind === "quote") return <Text key={key} color="gray">{renderInlineMarkdown(row.text)}</Text>;
-  if (row.kind === "table") return <Text key={key} color="cyan">{renderInlineMarkdown(row.text)}</Text>;
-  return <Text key={key} color={foreground}>{renderInlineMarkdown(row.text)}</Text>;
 };
 
 export const DocumentationViewer: React.FC<DocumentationViewerProps> = React.memo(({onClose, selectedDoc}) => {
@@ -211,7 +199,7 @@ export const DocumentationViewer: React.FC<DocumentationViewerProps> = React.mem
           <Text color={theme.muted}>Row {currentRow}/{rows.length} ({percentage}%)</Text>
         </Box>
         <Box flexDirection="column" paddingX={1}>
-          {visibleRows.map((row, index) => renderRow(row, `${scrollOffset + index}`, theme.foreground))}
+          {visibleRows.map((row, index) => renderMarkdownRow(row, `${scrollOffset + index}`, theme.foreground))}
         </Box>
         <Box marginTop={1} paddingX={1}>
           <Text color={theme.muted}>↑↓/jk: scroll | ←→: document | PgUp/PgDn: page | g/G: top/bottom | Esc: back to list</Text>

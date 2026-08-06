@@ -33,6 +33,31 @@ const load = async () => {
 };
 
 describe('StreamDisplay broad event rendering', () => {
+  it('shows a diagnostic when report paths are unavailable', async () => {
+    const { EventLine, render } = await load();
+    const output = render(
+      <EventLine event={{ type: 'report_paths' } as any} animationsEnabled={false} />
+    ).lastFrame();
+
+    expect(output).toContain('ARTIFACTS AND LOGS');
+    expect(output).toContain('Paths unavailable');
+  });
+
+  it('formats streamed report content as Markdown', async () => {
+    const {EventLine, render} = await load();
+    const output = render(
+      <EventLine
+        event={{type: 'report_content', content: '# Report\n\n**Finding**\n\n- Verify the fix'} as any}
+        animationsEnabled={false}
+      />
+    ).lastFrame();
+
+    expect(output).toContain('Report');
+    expect(output).toContain('Finding');
+    expect(output).toContain('• Verify the fix');
+    expect(output).not.toContain('**Finding**');
+  });
+
   it('treats thinking events as non-rendering stream controls', async () => {
     const { EventLine, render } = await load();
     const startup = render(
@@ -139,7 +164,7 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'separator', content: 'phase break' },
       { type: 'user_handoff', message: 'Need OTP', breakout: true },
       { type: 'operation_init', operation_id: 'op1', target: 'https://example.com', objective: 'audit', memory: { enabled: true } },
-      { type: 'report_paths', operation_id: 'op1', target: 'example.com', reportPath: '/app/outputs/example.com/op1/report.md' },
+      { type: 'report_paths', operation_id: 'op1', target: 'example.com', reportPath: '/app/outputs/example.com/op1/report.md', logPath: '/app/outputs/example.com/op1/cyber_operations.log', artifactsPath: '/app/outputs/example.com/op1/artifacts' },
     ];
 
     const output = events.map(event => render(<EventLine event={event} animationsEnabled={false} />).lastFrame()).join('\n');
@@ -168,6 +193,8 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Need OTP');
     expect(output).toContain('Operation initialization complete');
     expect(output).toContain('report.md');
+    expect(output).toContain('cyber_operations.log');
+    expect(output).toContain('artifacts');
   });
 
   it('keeps step-only progress events labeled as progress', async () => {

@@ -49,6 +49,8 @@
 
 ### Fixes
 
+- Format inline React TUI report previews as terminal-friendly Markdown.
+- Emit explicit report, log, and artifacts paths so the React TUI populates the ARTIFACTS AND LOGS section reliably.
 - Keep the React footer spinner task title within the live terminal width so long task names do not wrap off screen.
 - Remove the obsolete unified-output toggle so all output uses the unified filesystem structure.
 - Ground executive report narratives with explicitly labeled informational observations, resolve endpoint findings to

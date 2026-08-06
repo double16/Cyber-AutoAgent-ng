@@ -57,6 +57,21 @@ describe('normalizeEvent source coverage', () => {
         }));
     });
 
+    it('normalizes report paths from backend snake_case fields', () => {
+        expect(normalizeEvent({
+            type: 'report_paths',
+            output_dir: '/app/outputs/dvwa/OP_1',
+            report_path: '/app/outputs/dvwa/OP_1/security_assessment_report.md',
+            log_path: '/app/outputs/dvwa/OP_1/cyber_operations.log',
+            artifacts_path: '/app/outputs/dvwa/OP_1/artifacts',
+        })).toEqual(expect.objectContaining({
+            outputDir: '/app/outputs/dvwa/OP_1',
+            reportPath: '/app/outputs/dvwa/OP_1/security_assessment_report.md',
+            logPath: '/app/outputs/dvwa/OP_1/cyber_operations.log',
+            artifactsPath: '/app/outputs/dvwa/OP_1/artifacts',
+        }));
+    });
+
     it('normalizes shell tool starts and creates stable ids', () => {
         const event = normalizeEvent({
             type: 'tool_start',
