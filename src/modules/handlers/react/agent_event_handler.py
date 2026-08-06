@@ -15,7 +15,7 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -1298,12 +1298,22 @@ class AgentEventHandler(PrintingCallbackHandler):
         totals = self._operation_usage_totals()
         input_tokens = int(totals["input_tokens"])
         output_tokens = int(totals["output_tokens"])
+        model_usage = self.model_usage()
+        captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        if model_usage:
+            try:
+                from modules.tools.memory import persist_operation_model_metrics
+
+                persist_operation_model_metrics(model_usage, captured_at, operation_id=self.operation_id)
+            except Exception as error:
+                logger.warning("Unable to persist assessment model metrics: %s", error)
         self.emit_ui_event(
             {
                 "type": "model_usage_snapshot",
                 "stage": "assessment_complete",
                 "metrics": {
-                    "modelUsage": self.model_usage(),
+                    "capturedAt": captured_at,
+                    "modelUsage": model_usage,
                     "inputTokens": input_tokens,
                     "outputTokens": output_tokens,
                     "totalTokens": input_tokens + output_tokens,

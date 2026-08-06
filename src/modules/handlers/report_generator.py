@@ -38,8 +38,13 @@ from modules.prompts.factory import (
     safe_truncate,
     is_reportable_tool,
 )
-from modules.tools.memory import _artifact_path_from_ref, get_memory_client, memory_is_cross_operation, \
-    OperationTarget
+from modules.tools.memory import (
+    OperationTarget,
+    _artifact_path_from_ref,
+    get_memory_client,
+    list_persisted_operation_model_metrics,
+    memory_is_cross_operation,
+)
 from modules.utils.json_repair import parse_json_response
 
 logger = get_logger("Handlers.ReportGenerator")
@@ -1015,12 +1020,16 @@ def _format_model_usage_table(
         ]
 
     lines = [
-        "| Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time | Efficiency |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Capture Timestamp | Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time | Efficiency |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in sorted(
         normalized_rows,
-        key=lambda item: (str(item.get("provider") or "unknown"), str(item.get("model") or "unknown")),
+        key=lambda item: (
+            str(item.get("captured_at") or ""),
+            str(item.get("provider") or "unknown"),
+            str(item.get("model") or "unknown"),
+        ),
     ):
         input_tokens = int(row.get("input_tokens", row.get("inputTokens", 0)) or 0)
         output_tokens = int(row.get("output_tokens", row.get("outputTokens", 0)) or 0)
@@ -1030,10 +1039,11 @@ def _format_model_usage_table(
         cost = float(row.get("cost", 0.0) or 0.0)
         context_window = row.get("context_window_tokens", row.get("contextWindowTokens"))
         context_window_display = f"{int(context_window):,}" if isinstance(context_window, int) else "N/A"
+        captured_at = str(row.get("captured_at") or row.get("capturedAt") or "N/A")
         efficiency = row.get("efficiency")
         efficiency_display = f"{float(efficiency):.1f}%" if isinstance(efficiency, (int, float)) else "N/A"
         lines.append(
-            f"| {row.get('provider') or 'unknown'} | {row.get('model') or 'unknown'} | "
+            f"| {captured_at} | {row.get('provider') or 'unknown'} | {row.get('model') or 'unknown'} | "
             f"{context_window_display} | {input_tokens:,} | {output_tokens:,} | {cache_read:,} | {cache_write:,} | "
             f"{total_tokens:,} | ${cost:.6f} | "
             f"{_format_inference_time(row.get('inference_time_ms', row.get('inferenceTimeMs')))} | "
@@ -1056,6 +1066,7 @@ def _resolve_report_model_metrics(
     config_manager: Any,
     latest_run: Dict[str, Any],
     callback_handler: Any,
+    operation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve model metrics once, preferring live callback data when available."""
     main_provider = config_manager.get_provider()
@@ -1063,7 +1074,14 @@ def _resolve_report_model_metrics(
     model_usage = []
     fallback_context_window = _fallback_context_window(main_provider, main_model)
     total_operation_time = latest_run.get("metrics", {}).get("duration", "N/A")
-    if callback_handler is not None:
+    if operation_id:
+        try:
+            persisted_usage = list_persisted_operation_model_metrics(operation_id)
+            if isinstance(persisted_usage, list) and persisted_usage:
+                model_usage = persisted_usage
+        except Exception:
+            logger.debug("Unable to read persisted operation model metrics", exc_info=True)
+    if not _has_meaningful_model_usage(model_usage) and callback_handler is not None:
         try:
             callback_usage = callback_handler.model_usage()
             if _has_meaningful_model_usage(callback_usage):
@@ -2460,7 +2478,12 @@ def generate_security_report(
             configured_budget = fallback_budget
         latest_run["configured_budget"] = configured_budget
         sections["latest_run"] = latest_run
-        model_metrics = _resolve_report_model_metrics(config_manager, latest_run, callback_handler)
+        model_metrics = _resolve_report_model_metrics(
+            config_manager,
+            latest_run,
+            callback_handler,
+            operation_id=operation_id,
+        )
 
         # Validate evidence collection - skip report only if truly no memories
         if not sections or int(sections.get("evidence_count", 0)) == 0:

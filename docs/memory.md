@@ -3,7 +3,8 @@
 Cyber-AutoAgent uses two complementary persistence layers:
 
 - Qdrant stores semantic memories such as observations, verified findings, validation records, and reusable knowledge.
-- SQLite stores authoritative workflow state such as operation plans, phases, tasks, acceptance outcomes, and finding validation.
+- SQLite stores authoritative workflow state such as operation plans, phases, tasks, acceptance outcomes, finding
+  validation, and timestamped per-model assessment metrics.
 
 Qdrant is the only semantic-memory backend. By default it runs as an embedded filesystem database under
 `./outputs/qdrant`. A Qdrant service can be configured without changing the memory model or agent tools.
@@ -18,15 +19,15 @@ flowchart LR
     C --> E[Typed storage tools]
     D --> F[Qdrant semantic memory]
     E --> F
-    E --> G[SQLite PlanStore]
+    E --> G[SQLite ApplicationStore]
     F --> H[Target filter always]
     H --> I{Memory mode}
     I -->|operation| J[Target + operation filter]
     I -->|shared| K[Target filter]
 ```
 
-All operations use the same physical Qdrant database. Query scope is controlled by payload filters, not by creating a
-different database for each target or operation.
+All operations use the same physical Qdrant database and the same `outputs/cyber_autoagent.db` application database.
+Query scope comes from record identity rather than separate databases.
 
 ## Identity and isolation
 
@@ -39,6 +40,10 @@ Every semantic-memory point contains:
 
 Target filtering is mandatory for every list, search, get, and delete operation. Sanitized output-directory names are
 never used as target identity.
+
+SQLite workflow rows are keyed by the exact logical `--target` string and operation ID. This composite identity keeps
+targets distinct even when their strings produce the same sanitized output-directory name. Database-wide tables can
+omit that operation scope when future application features require global state.
 
 The `--memory-mode` option controls only query scope:
 
@@ -72,14 +77,21 @@ No service configuration is required. The default layout is:
 ```text
 outputs/
 ├── qdrant/                         # Semantic memories for every operation
+├── cyber_autoagent.db              # Workflow state for every target and operation
 └── <sanitized-target>/
-    └── memory/
-        └── <operation-id>/
-            └── plan_storage.db     # Authoritative plan/task state
+    └── <operation-id>/              # Reports, logs, artifacts, and tools
 ```
 
-The embedded client is suitable for a single Cyber-AutoAgent process. Use a Qdrant service when multiple processes or
-hosts need concurrent access.
+SQLite schema changes are forward-only SQL files in `src/modules/storage/migrations`, ordered by their four-digit
+prefix. Startup applies each migration transactionally and records its filename and checksum in `schema_migrations`.
+An applied migration must never be edited; add the next numbered file instead.
+
+At assessment finalization, SQLite appends one metrics row per provider/model. Continued operations retain earlier
+captures; reports render every capture in timestamp order rather than combining them. Report-only runs read this
+history without adding metric rows.
+
+The embedded Qdrant client is suitable for a single Cyber-AutoAgent process. Use a Qdrant service when multiple
+processes or hosts need concurrent semantic-memory access.
 
 ### Qdrant service
 

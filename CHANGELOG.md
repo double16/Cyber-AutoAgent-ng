@@ -2,6 +2,7 @@
 
 ### Features
 
+- Consolidate authoritative workflow state into `outputs/cyber_autoagent.db`.
 - Replace semantic-memory backends with Qdrant 1.18, using `outputs/qdrant` by default or a configured service.
 - Change memory modes to 'shared' and 'operation' for clarity.
 - Format Markdown in the React `/docs` viewer and provide runtime repository links when local documentation is unavailable.
@@ -48,6 +49,7 @@
 
 ### Fixes
 
+- Keep the React footer spinner task title within the live terminal width so long task names do not wrap off screen.
 - Remove the obsolete unified-output toggle so all output uses the unified filesystem structure.
 - Ground executive report narratives with explicitly labeled informational observations, resolve endpoint findings to
   registered targets, remove redundant observation metadata, and simplify task-history report tables.

@@ -323,10 +323,36 @@ describe('header and footer components', () => {
                 />
             ).lastFrame();
 
-            expect(frame).toContain('Long task title');
+            expect(frame).toContain('Long task…');
             expect(frame).toContain('123 tokens');
             expect(frame).toContain('[ESC] Kill Switch');
-            expect(frame).not.toContain('should not wrap');
+        } finally {
+            Object.defineProperty(process.stdout, 'columns', {value: originalColumns, configurable: true});
+        }
+    });
+
+    it('truncates the task title before the spinner message at the real terminal width', async () => {
+        const {render, Footer} = await load();
+        const originalColumns = process.stdout.columns;
+
+        try {
+            Object.defineProperty(process.stdout, 'columns', {value: 40, configurable: true});
+            const frame = render(
+                <Footer
+                    isOperationRunning
+                    isInputPaused={false}
+                    thinkingStatus={{
+                        active: true,
+                        context: 'tool_execution',
+                        message: 'Running tool',
+                        taskTitle: 'A task title that is much too long for this terminal',
+                    }}
+                />
+            ).lastFrame();
+
+            expect(frame).toContain('A task title that is… - Running tool');
+            expect(frame).not.toContain('much too long');
+
         } finally {
             Object.defineProperty(process.stdout, 'columns', {value: originalColumns, configurable: true});
         }

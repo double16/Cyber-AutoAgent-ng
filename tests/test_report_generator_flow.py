@@ -189,15 +189,68 @@ def test_format_model_usage_table_and_elapsed_time_fallbacks():
         "fallback-model",
     )
 
-    assert "| Provider | Model | Context Window | Input Tokens | Output Tokens |" in table
+    assert "| Capture Timestamp | Provider | Model | Context Window | Input Tokens | Output Tokens |" in table
     assert (
-        "| ollama | llama3 | 128,000 | 1,200 | 300 | 10 | 5 | 1,500 | $0.123457 | 0 hours 0 minutes | N/A |"
+        "| N/A | ollama | llama3 | 128,000 | 1,200 | 300 | 10 | 5 | 1,500 | $0.123457 | "
+        "0 hours 0 minutes | N/A |"
         in table
     )
     assert "| fallback-model |" not in table
 
     fallback = _format_model_usage_table([], "bedrock", "fallback-model", 200000)
-    assert "| bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in fallback
+    assert "| N/A | bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in fallback
+
+
+def test_report_model_metrics_use_all_persisted_timestamped_rows(monkeypatch):
+    config_manager = MagicMock()
+    config_manager.get_provider.return_value = "litellm"
+    config_manager.get_llm_config.return_value.model_id = "live-model"
+    persisted_rows = [
+        {
+            "captured_at": "2026-08-06T12:00:00.000001+00:00",
+            "provider": "litellm",
+            "model": "model-a",
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 12,
+            "cost": 0.01,
+            "inference_time_ms": 20.0,
+            "context_window_tokens": 48_000,
+            "model_calls": 1,
+            "correction_loops": 0,
+            "efficiency": 100.0,
+        },
+        {
+            "captured_at": "2026-08-06T12:10:00.000001+00:00",
+            "provider": "litellm",
+            "model": "model-a",
+            "input_tokens": 20,
+            "output_tokens": 4,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 24,
+            "cost": 0.02,
+            "inference_time_ms": 40.0,
+            "context_window_tokens": 48_000,
+            "model_calls": 2,
+            "correction_loops": 1,
+            "efficiency": 66.7,
+        },
+    ]
+    monkeypatch.setattr(report_generator_module, "list_persisted_operation_model_metrics", lambda _op: persisted_rows)
+
+    metrics = report_generator_module._resolve_report_model_metrics(
+        config_manager,
+        {"metrics": {"duration": "5m"}},
+        MagicMock(model_usage=lambda: [{"model": "live-model"}]),
+        operation_id="OP_CONTINUED",
+    )
+
+    assert metrics["model_usage"] == persisted_rows
+    table = _format_model_usage_table(metrics["model_usage"], "litellm", "live-model")
+    assert table.index("2026-08-06T12:00:00.000001+00:00") < table.index("2026-08-06T12:10:00.000001+00:00")
 
 
 def test_remove_generated_execution_metrics_preserves_following_appendix_section():
@@ -1695,9 +1748,9 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     assert content.count(metrics_heading) == 1
     assert content.index("## APPENDIX A: ASSESSMENT METHODOLOGY") < content.index(metrics_heading)
     assert content.index(metrics_heading) < content.index("Total Operation Time: N/A")
-    assert content.index("Total Operation Time: N/A") < content.index("| Provider | Model |")
+    assert content.index("Total Operation Time: N/A") < content.index("| Capture Timestamp | Provider | Model |")
     assert content.index(metrics_heading) < content.index("- Report Generated:")
-    assert "| test_provider | test_model | N/A | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in content
+    assert "| N/A | test_provider | test_model | N/A | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in content
     assert content.count("*Efficiency = 100 × model inferences") == 1
     assert (
         content.index("- Report Generated:")

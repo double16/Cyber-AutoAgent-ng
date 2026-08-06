@@ -367,6 +367,7 @@ def create_agent_runtime_resources(
         operation_id,
         target_name,
         has_existing_memories,
+        logical_target=config.target,
     )
     print_status(f"Memory system initialized for operation: {operation_id}", "SUCCESS")
 

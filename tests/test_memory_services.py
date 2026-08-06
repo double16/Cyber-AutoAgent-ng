@@ -48,7 +48,7 @@ def test_shared_semantic_enum_normalization_keeps_unknown_values_invalid(adapter
         TypeAdapter(adapter_type).validate_python("invented-state")
 
 
-class FakePlanStore:
+class FakeApplicationStore:
     def __init__(self):
         self.plan = None
         self.tasks = []
@@ -146,7 +146,7 @@ class FakeMemoryBackend:
 
 @pytest.fixture
 def fake_memory_client(monkeypatch, tmp_path):
-    store = FakePlanStore()
+    store = FakeApplicationStore()
     backend = FakeMemoryBackend()
     client = mod.QdrantMemoryClient.__new__(mod.QdrantMemoryClient)
     client._fake_backend = backend
@@ -170,7 +170,7 @@ def fake_memory_client(monkeypatch, tmp_path):
     client.region = None
 
     monkeypatch.setattr(mod, "_MEMORY_CLIENT", client)
-    monkeypatch.setattr(mod, "_PLAN_STORE", store)
+    monkeypatch.setattr(mod, "_DATABASE_STORE", store)
     monkeypatch.setattr(
         mod,
         "_MEMORY_CONFIG",
@@ -181,7 +181,7 @@ def fake_memory_client(monkeypatch, tmp_path):
             "target_name": "target",
         },
     )
-    monkeypatch.setattr(mod, "_get_plan_store", lambda: store)
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
     monkeypatch.setenv("CYBER_OPERATION_ID", "op1")
     return client, store
 
@@ -270,24 +270,24 @@ def test_get_memory_client_reinitializes_when_environment_operation_changes(fake
     assert mod._MEMORY_CONFIG["operation_id"] == "op2"
 
 
-def test_plan_store_rebinds_when_operation_context_changes(tmp_path, monkeypatch):
+def test_database_store_is_shared_when_operation_context_changes(tmp_path, monkeypatch):
     monkeypatch.setattr(
         mod,
         "_MEMORY_CONFIG",
         {"output_dir": str(tmp_path), "target_name": "target", "operation_id": "op1"},
     )
-    first = mod._get_plan_store()
-    assert first.db_path.endswith("target/memory/op1/plan_storage.db")
+    first = mod._get_database_store()
+    assert first.db_path == str(tmp_path / "cyber_autoagent.db")
 
     monkeypatch.setattr(
         mod,
         "_MEMORY_CONFIG",
         {"output_dir": str(tmp_path), "target_name": "target", "operation_id": "op2"},
     )
-    second = mod._get_plan_store()
+    second = mod._get_database_store()
 
-    assert second is not first
-    assert second.db_path.endswith("target/memory/op2/plan_storage.db")
+    assert second is first
+    assert second.db_path == str(tmp_path / "cyber_autoagent.db")
 
 
 def test_read_only_plan_store_does_not_create_missing_database(tmp_path, monkeypatch):
@@ -302,16 +302,16 @@ def test_read_only_plan_store_does_not_create_missing_database(tmp_path, monkeyp
         },
     )
 
-    with pytest.raises(FileNotFoundError, match="Persisted plan store does not exist"):
-        mod._get_plan_store()
+    with pytest.raises(FileNotFoundError, match="Application database does not exist"):
+        mod._get_database_store()
 
-    assert not (tmp_path / "target" / "memory" / "missing-op" / "plan_storage.db").exists()
+    assert not (tmp_path / "cyber_autoagent.db").exists()
 
 
 def test_read_only_plan_store_preserves_existing_database(tmp_path, monkeypatch):
     config = {"output_dir": str(tmp_path), "target_name": "target", "operation_id": "op1"}
     monkeypatch.setattr(mod, "_MEMORY_CONFIG", config)
-    writable = mod._get_plan_store()
+    writable = mod._get_database_store()
     writable.store_plan(
         "op1",
         mod.OperationPlan(
@@ -323,7 +323,7 @@ def test_read_only_plan_store_preserves_existing_database(tmp_path, monkeypatch)
     )
 
     monkeypatch.setattr(mod, "_MEMORY_CONFIG", {**config, "read_only": True})
-    readonly = mod._get_plan_store()
+    readonly = mod._get_database_store()
 
     assert readonly.read_only is True
     assert readonly.get_plan("op1").objective == "test"
@@ -2035,7 +2035,7 @@ def test_bound_executable_target_corrects_model_copied_port(monkeypatch):
     store = Mock()
     store.get_tasks.return_value = [task]
     monkeypatch.setattr(mod, "_get_active_plan", lambda: plan)
-    monkeypatch.setattr(mod, "_get_plan_store", lambda: store)
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
     monkeypatch.setattr(mod, "_operation_id", lambda: "operation")
 
     assert (

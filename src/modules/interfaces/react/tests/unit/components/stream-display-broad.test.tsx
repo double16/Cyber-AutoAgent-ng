@@ -146,7 +146,7 @@ describe('StreamDisplay broad event rendering', () => {
 
     expect(output).toContain('model invocation started');
     expect(output).toContain('Event loop cycle started');
-    expect(output).toContain('[PROGRESS 40% | 4 tools]');
+    expect(output).toContain('[BUDGET 40% | 4 tools]');
     expect(output).toContain('[FINAL REPORT]');
     expect(output).toContain('[FINAL REPORT 2/5] [REQUIRES VALIDATION] Requires validation: SQL injection');
     expect(output).toContain('[RAGAS EVALUATION 2/5] Operation: Evidence Quality');
@@ -168,6 +168,16 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Need OTP');
     expect(output).toContain('Operation initialization complete');
     expect(output).toContain('report.md');
+  });
+
+  it('keeps step-only progress events labeled as progress', async () => {
+    const { EventLine, render } = await load();
+    const output = render(
+      <EventLine event={{ type: 'progress_update', step: 3, totalTools: 2 }} animationsEnabled={false} />
+    ).lastFrame();
+
+    expect(output).toContain('[PROGRESS 3 | 2 tools]');
+    expect(output).not.toContain('[BUDGET');
   });
 
   it('renders common tool_start variants without throwing', async () => {

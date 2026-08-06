@@ -851,6 +851,7 @@ cyber-autoagent/
 ├── .env.example              # Environment configuration template
 ├── outputs/                  # Unified output directory (auto-created)
 │   ├── qdrant/               # Shared physical semantic-memory database
+│   ├── cyber_autoagent.db    # Shared application/workflow database
 │   └── <target>/             # Target-specific organization
 │       ├── OP_<id>/          # Operation-specific files
 │       │   ├── security_assessment_report.md   # Final assessment report (when generated)
@@ -858,9 +859,6 @@ cyber-autoagent/
 │       │   ├── cyber_operations.log            # Operation log
 │       │   ├── artifacts/  # Ad-hoc files
 │       │   └── tools/      # Custom tools created by agent
-│       └── memory/
-│           └── <operation-id>/
-│               └── plan_storage.db  # Authoritative workflow state
 └── README.md                 # This file
 ```
 

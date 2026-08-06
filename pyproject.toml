@@ -94,6 +94,9 @@ include = ["*"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.setuptools.package-data]
+"modules.storage.migrations" = ["*.sql"]
+
 [tool.black]
 line-length = 120
 target-version = ['py312']

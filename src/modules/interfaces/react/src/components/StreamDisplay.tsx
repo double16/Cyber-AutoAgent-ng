@@ -687,7 +687,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         const agentName = String(eventAgent).toUpperCase().replaceAll('_', ' ');
         const agentTotal = (event as any)['agent_total_actions'] ?? agentSubStep;
         const eventProgress = (event as any).progressPercent;
-        const progress = typeof eventProgress === 'number' ? ` | PROGRESS ${eventProgress}%` : '';
+        const progress = typeof eventProgress === 'number' ? ` | BUDGET ${eventProgress}%` : '';
         stepDisplay = `[AGENT: ${agentName} • ACTION ${agentSubStep} | TOTAL ${agentTotal}${progress}]`;
       } else {
         // Regular progress header with tool count for budget transparency
@@ -695,9 +695,12 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         const eventProgress = (event as any).progressPercent;
         const progress = typeof eventProgress === 'number' ? `${eventProgress}%` : String(event.step || '');
         if (toolCount && toolCount > 0) {
-          stepDisplay = `[PROGRESS ${progress} | ${toolCount} tools]`;
+          const label = typeof eventProgress === 'number' ? 'BUDGET' : 'PROGRESS';
+          stepDisplay = `[${label} ${progress} | ${toolCount} tools]`;
         } else {
-          stepDisplay = `[PROGRESS ${progress}]`;
+          stepDisplay = typeof eventProgress === 'number'
+            ? `[BUDGET ${progress}]`
+            : `[PROGRESS ${progress}]`;
         }
       }
       

@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Protocol, Tuple
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import litellm
@@ -79,6 +79,7 @@ from strands import tool
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
+from modules.storage import SQLiteMigrationRunner
 from modules.tools.semantic_enum import normalize_semantic_enum
 
 # Set up logging
@@ -87,7 +88,7 @@ logger = get_logger("Tools.Memory")
 # Global configuration and client
 _MEMORY_CONFIG: Optional[Dict[str, str]] = None
 _MEMORY_CLIENT: Optional["QdrantMemoryClient"] = None
-_PLAN_STORE: Optional["PlanStore"] = None
+_DATABASE_STORE: Optional["ApplicationStore"] = None
 
 # Local Qdrant clients share one outputs-backed database within this process.
 _QDRANT_WRITE_LOCK = threading.Lock()
@@ -1158,148 +1159,237 @@ def _get_memory_base_path(config: Optional[Dict] = None) -> str:
     return os.path.join(output_dir, "qdrant")
 
 
-class PlanStore:
-    """Persistence for OperationPlan and Task using SQLite.
+def _normalize_model_metric_rows(rows: Any) -> List[Dict[str, Any]]:
+    """Validate report-compatible per-model metrics before durable append."""
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("model metric capture requires at least one model row")
 
-    Plans and tasks remain in a reliable relational store rather than the
-    semantic vector database.
+    normalized_rows: List[Dict[str, Any]] = []
+    seen_models: set[tuple[str, str]] = set()
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            raise ValueError("model metric rows must be objects")
+        provider = str(raw_row.get("provider") or "").strip()
+        model = str(raw_row.get("model") or "").strip()
+        if not provider or not model:
+            raise ValueError("model metric rows require provider and model")
+        identity = (provider, model)
+        if identity in seen_models:
+            raise ValueError("model metric capture contains duplicate provider/model rows")
+        seen_models.add(identity)
+
+        def nonnegative_int(field: str, *, optional: bool = False) -> Optional[int]:
+            value = raw_row.get(field)
+            if value is None and optional:
+                return None
+            if isinstance(value, bool):
+                raise ValueError(f"model metric {field} must be a non-negative integer")
+            try:
+                converted = int(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"model metric {field} must be a non-negative integer") from error
+            if converted < 0:
+                raise ValueError(f"model metric {field} must be a non-negative integer")
+            return converted
+
+        def nonnegative_float(field: str) -> float:
+            value = raw_row.get(field)
+            if isinstance(value, bool):
+                raise ValueError(f"model metric {field} must be a non-negative number")
+            try:
+                converted = float(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"model metric {field} must be a non-negative number") from error
+            if converted < 0:
+                raise ValueError(f"model metric {field} must be a non-negative number")
+            return converted
+
+        input_tokens = nonnegative_int("input_tokens")
+        output_tokens = nonnegative_int("output_tokens")
+        total_tokens = nonnegative_int("total_tokens")
+        if total_tokens != input_tokens + output_tokens:
+            raise ValueError("model metric total_tokens must equal input_tokens plus output_tokens")
+        normalized_rows.append(
+            {
+                "provider": provider,
+                "model": model,
+                "context_window_tokens": nonnegative_int("context_window_tokens", optional=True),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": nonnegative_int("cache_read_tokens"),
+                "cache_write_tokens": nonnegative_int("cache_write_tokens"),
+                "total_tokens": total_tokens,
+                "cost": nonnegative_float("cost"),
+                "inference_time_ms": nonnegative_float("inference_time_ms"),
+                "model_calls": nonnegative_int("model_calls"),
+                "correction_loops": nonnegative_int("correction_loops"),
+                "efficiency": nonnegative_float("efficiency"),
+            }
+        )
+    return normalized_rows
+
+
+class ApplicationStore(Protocol):
+    """Backend-neutral application-state contract used by workflow callers."""
+
+    db_path: str
+    logical_target: str
+    read_only: bool
+
+    def ensure_operation(self, operation_id: str) -> None: ...
+
+    def has_operation(self, operation_id: str) -> bool: ...
+
+    def store_plan(self, operation_id: str, plan: OperationPlan) -> None: ...
+
+    def get_plan(self, operation_id: str) -> Optional[OperationPlan]: ...
+
+    def store_task(self, operation_id: str, task: Task) -> None: ...
+
+    def get_tasks(self, operation_id: str) -> List[Task]: ...
+
+    def append_operation_model_metrics(
+        self, operation_id: str, captured_at: str, rows: List[Dict[str, Any]]
+    ) -> None: ...
+
+    def list_operation_model_metrics(self, operation_id: str) -> List[Dict[str, Any]]: ...
+
+
+class SQLiteApplicationStore:
+    """SQLite persistence for application workflow state.
+
+    Every operation-owned query is scoped by the exact logical target supplied
+    by the user and by operation ID. The database itself is shared by all
+    targets and operations.
     """
 
-    def __init__(self, db_path: str, read_only: bool = False):
+    def __init__(self, db_path: str, logical_target: str, read_only: bool = False):
         self.db_path = db_path
+        self.logical_target = logical_target
         self.read_only = read_only
         self._lock = threading.Lock()
         if self.read_only:
             if not os.path.isfile(self.db_path):
-                raise FileNotFoundError(f"Persisted plan store does not exist: {self.db_path}")
+                raise FileNotFoundError(f"Application database does not exist: {self.db_path}")
         else:
-            self._bootstrap()
-
-    def _bootstrap(self):
-        """Initialize the database schema if it doesn't exist."""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS plans (
-                        operation_id TEXT PRIMARY KEY,
-                        objective TEXT,
-                        current_phase INTEGER,
-                        total_phases INTEGER,
-                        assessment_complete BOOLEAN,
-                        plan_data TEXT,
-                        created_at TEXT,
-                        updated_at TEXT
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tasks (
-                        task_uid TEXT PRIMARY KEY,
-                        operation_id TEXT,
-                        title TEXT,
-                        objective TEXT,
-                        acceptance_contract TEXT NOT NULL,
-                        phase INTEGER,
-                        status TEXT,
-                        status_reason TEXT,
-                        evidence TEXT,
-                        created_at TEXT,
-                        updated_at TEXT,
-                        kind TEXT DEFAULT 'standard',
-                        reference_id TEXT,
-                        target_scope TEXT DEFAULT 'all',
-                        target_ids TEXT DEFAULT '[]'
-                    )
-                """)
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_operation_id ON tasks(operation_id)")
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS operation_preflight_results (
-                        operation_id TEXT NOT NULL,
-                        target_id TEXT NOT NULL,
-                        target TEXT NOT NULL,
-                        target_type TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        checks TEXT NOT NULL,
-                        reason TEXT NOT NULL,
-                        resolved_addresses TEXT NOT NULL,
-                        has_global_address BOOLEAN NOT NULL,
-                        has_private_or_reserved_address BOOLEAN NOT NULL,
-                        route_reachable BOOLEAN NOT NULL,
-                        recorded_at TEXT NOT NULL,
-                        PRIMARY KEY(operation_id, target_id)
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS task_acceptance_results (
-                        operation_id TEXT NOT NULL,
-                        task_uid TEXT NOT NULL,
-                        criterion_id TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        disposition TEXT NOT NULL,
-                        summary TEXT NOT NULL,
-                        evidence_refs TEXT NOT NULL,
-                        coverage TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        PRIMARY KEY(task_uid, criterion_id),
-                        FOREIGN KEY(task_uid) REFERENCES tasks(task_uid)
-                    )
-                """)
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_acceptance_results_operation_id "
-                    "ON task_acceptance_results(operation_id)"
-                )
-                acceptance_columns = {
-                    str(row[1])
-                    for row in conn.execute("PRAGMA table_info(task_acceptance_results)")
-                }
-                if "disposition" not in acceptance_columns:
-                    conn.execute(
-                        "ALTER TABLE task_acceptance_results ADD COLUMN disposition "
-                        "TEXT NOT NULL DEFAULT 'observation'"
-                    )
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS task_acceptance_memory_publications (
-                        operation_id TEXT NOT NULL,
-                        task_uid TEXT NOT NULL,
-                        publication_key TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        PRIMARY KEY(operation_id, task_uid)
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS finding_records (
-                        finding_uid TEXT PRIMARY KEY,
-                        operation_id TEXT NOT NULL,
-                        fingerprint TEXT NOT NULL,
-                        candidate_data TEXT NOT NULL,
-                        verification_task_uid TEXT NOT NULL,
-                        validation_data TEXT,
-                        resolution TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        UNIQUE(operation_id, fingerprint)
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS objective_validation_records (
-                        candidate_uid TEXT PRIMARY KEY,
-                        operation_id TEXT NOT NULL,
-                        fingerprint TEXT NOT NULL,
-                        candidate_data TEXT NOT NULL,
-                        verification_task_uid TEXT NOT NULL,
-                        validation_data TEXT,
-                        resolution TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        UNIQUE(operation_id, fingerprint)
-                    )
-                """)
+            SQLiteMigrationRunner(self.db_path).migrate()
 
     def _connect(self) -> sqlite3.Connection:
-        """Open the plan database, enforcing read-only access when configured."""
+        """Open the application database, enforcing configured access."""
         if self.read_only:
-            return sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True)
-        return sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True)
+        else:
+            conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    def ensure_operation(self, operation_id: str) -> None:
+        """Register an operation in this logical-target scope."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO operations(logical_target, operation_id, created_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(logical_target, operation_id) DO NOTHING",
+                    (self.logical_target, operation_id, datetime.now().isoformat()),
+                )
+
+    def has_operation(self, operation_id: str) -> bool:
+        """Return whether this exact target and operation are registered."""
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM operations WHERE logical_target = ? AND operation_id = ?",
+                    (self.logical_target, operation_id),
+                ).fetchone()
+        return row is not None
+
+    def _register_operation(self, conn: sqlite3.Connection, operation_id: str) -> None:
+        conn.execute(
+            "INSERT INTO operations(logical_target, operation_id, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(logical_target, operation_id) DO NOTHING",
+            (self.logical_target, operation_id, datetime.now().isoformat()),
+        )
+
+    def append_operation_model_metrics(
+        self,
+        operation_id: str,
+        captured_at: str,
+        rows: List[Dict[str, Any]],
+    ) -> None:
+        """Append one immutable, per-model metrics capture for an operation."""
+        normalized_rows = _normalize_model_metric_rows(rows)
+        normalized_captured_at = str(captured_at).strip()
+        if not normalized_captured_at:
+            raise ValueError("model metric capture timestamp is required")
+        with self._lock:
+            with self._connect() as conn:
+                self._register_operation(conn, operation_id)
+                conn.executemany(
+                    """
+                    INSERT INTO operation_model_metrics (
+                        logical_target, operation_id, captured_at, provider, model, context_window_tokens,
+                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost,
+                        inference_time_ms, model_calls, correction_loops, efficiency
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            self.logical_target,
+                            operation_id,
+                            normalized_captured_at,
+                            row["provider"],
+                            row["model"],
+                            row["context_window_tokens"],
+                            row["input_tokens"],
+                            row["output_tokens"],
+                            row["cache_read_tokens"],
+                            row["cache_write_tokens"],
+                            row["total_tokens"],
+                            row["cost"],
+                            row["inference_time_ms"],
+                            row["model_calls"],
+                            row["correction_loops"],
+                            row["efficiency"],
+                        )
+                        for row in normalized_rows
+                    ],
+                )
+
+    def list_operation_model_metrics(self, operation_id: str) -> List[Dict[str, Any]]:
+        """Return every persisted model-metrics capture in report display order."""
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT captured_at, provider, model, context_window_tokens, input_tokens, output_tokens,
+                           cache_read_tokens, cache_write_tokens, total_tokens, cost, inference_time_ms,
+                           model_calls, correction_loops, efficiency
+                    FROM operation_model_metrics
+                    WHERE logical_target = ? AND operation_id = ?
+                    ORDER BY captured_at, provider, model
+                    """,
+                    (self.logical_target, operation_id),
+                ).fetchall()
+        return [
+            {
+                "captured_at": row[0],
+                "provider": row[1],
+                "model": row[2],
+                "context_window_tokens": row[3],
+                "input_tokens": int(row[4]),
+                "output_tokens": int(row[5]),
+                "cache_read_tokens": int(row[6]),
+                "cache_write_tokens": int(row[7]),
+                "total_tokens": int(row[8]),
+                "cost": float(row[9]),
+                "inference_time_ms": float(row[10]),
+                "model_calls": int(row[11]),
+                "correction_loops": int(row[12]),
+                "efficiency": float(row[13]),
+            }
+            for row in rows
+        ]
 
     def store_plan(self, operation_id: str, plan: OperationPlan):
         """Store or update a plan."""
@@ -1311,10 +1401,13 @@ class PlanStore:
 
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.execute("""
-                    INSERT INTO plans (operation_id, objective, current_phase, total_phases, assessment_complete, plan_data, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(operation_id) DO UPDATE SET
+                    INSERT INTO plans (
+                        logical_target, operation_id, objective, current_phase, total_phases,
+                        assessment_complete, plan_data, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(logical_target, operation_id) DO UPDATE SET
                         objective=excluded.objective,
                         current_phase=excluded.current_phase,
                         total_phases=excluded.total_phases,
@@ -1322,6 +1415,7 @@ class PlanStore:
                         plan_data=excluded.plan_data,
                         updated_at=excluded.updated_at
                 """, (
+                    self.logical_target,
                     operation_id,
                     plan.objective,
                     plan.current_phase,
@@ -1336,7 +1430,10 @@ class PlanStore:
         """Retrieve a plan by operation_id."""
         with self._lock:
             with self._connect() as conn:
-                cursor = conn.execute("SELECT plan_data FROM plans WHERE operation_id = ?", (operation_id,))
+                cursor = conn.execute(
+                    "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                    (self.logical_target, operation_id),
+                )
                 row = cursor.fetchone()
                 if row:
                     return OperationPlan.from_obj(json.loads(row[0]))
@@ -1352,9 +1449,11 @@ class PlanStore:
 
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 existing = conn.execute(
-                    "SELECT acceptance_contract FROM tasks WHERE task_uid = ?",
-                    (task.task_uid,),
+                    "SELECT acceptance_contract FROM tasks "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (self.logical_target, operation_id, task.task_uid),
                 ).fetchone()
                 if existing:
                     existing_contract = AcceptanceContract.from_obj(json.loads(existing[0]))
@@ -1363,12 +1462,12 @@ class PlanStore:
                         raise ValueError("acceptance contract is immutable after task creation")
                 conn.execute("""
                     INSERT INTO tasks (
-                        task_uid, operation_id, title, objective, acceptance_contract, phase, status, status_reason,
-                        evidence,
+                        logical_target, task_uid, operation_id, title, objective, acceptance_contract, phase,
+                        status, status_reason, evidence,
                         created_at, updated_at, kind, reference_id, target_scope, target_ids
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(task_uid) DO UPDATE SET
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(logical_target, operation_id, task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
                         acceptance_contract=excluded.acceptance_contract,
@@ -1382,6 +1481,7 @@ class PlanStore:
                         target_ids=excluded.target_ids,
                         updated_at=excluded.updated_at
                 """, (
+                    self.logical_target,
                     task.task_uid,
                     operation_id,
                     task.title,
@@ -1407,8 +1507,8 @@ class PlanStore:
                 cursor = conn.execute(
                     "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
                     "created_at, updated_at, kind, reference_id, target_scope, target_ids "
-                    "FROM tasks WHERE operation_id = ?",
-                    (operation_id,),
+                    "FROM tasks WHERE logical_target = ? AND operation_id = ?",
+                    (self.logical_target, operation_id),
                 )
                 for row in cursor:
                     tasks.append(
@@ -1442,15 +1542,17 @@ class PlanStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.executemany(
                     """
                     INSERT INTO task_acceptance_results (
-                        operation_id, task_uid, criterion_id, status, disposition, summary, evidence_refs, coverage,
-                        updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        logical_target, operation_id, task_uid, criterion_id, status, disposition, summary,
+                        evidence_refs, coverage, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
+                            self.logical_target,
                             operation_id,
                             task_uid,
                             result.criterion_id,
@@ -1472,9 +1574,10 @@ class PlanStore:
             with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT criterion_id, status, disposition, summary, evidence_refs, coverage "
-                    "FROM task_acceptance_results WHERE operation_id = ? AND task_uid = ? "
+                    "FROM task_acceptance_results WHERE logical_target = ? "
+                    "AND operation_id = ? AND task_uid = ? "
                     "ORDER BY criterion_id",
-                    (operation_id, task_uid),
+                    (self.logical_target, operation_id, task_uid),
                 ).fetchall()
         return [
             AcceptanceResult(
@@ -1500,8 +1603,8 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT publication_key FROM task_acceptance_memory_publications "
-                    "WHERE operation_id = ? AND task_uid = ?",
-                    (operation_id, task_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (self.logical_target, operation_id, task_uid),
                 ).fetchone()
         return row is not None and row[0] == publication_key
 
@@ -1515,16 +1618,17 @@ class PlanStore:
 
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.execute(
                     """
                     INSERT INTO task_acceptance_memory_publications (
-                        operation_id, task_uid, publication_key, updated_at
-                    ) VALUES (?, ?, ?, ?)
-                    ON CONFLICT(operation_id, task_uid) DO UPDATE SET
+                        logical_target, operation_id, task_uid, publication_key, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(logical_target, operation_id, task_uid) DO UPDATE SET
                         publication_key=excluded.publication_key,
                         updated_at=excluded.updated_at
                     """,
-                    (operation_id, task_uid, publication_key, datetime.now().isoformat()),
+                    (self.logical_target, operation_id, task_uid, publication_key, datetime.now().isoformat()),
                 )
 
     def store_preflight_results(self, operation_id: str, results: List[Dict[str, Any]]) -> None:
@@ -1533,6 +1637,7 @@ class PlanStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 for result in results:
                     target_id = str(result.get("target_id") or "").strip()
                     if not target_id:
@@ -1540,13 +1645,14 @@ class PlanStore:
                     conn.execute(
                         """
                         INSERT INTO operation_preflight_results (
-                            operation_id, target_id, target, target_type, status, checks, reason,
+                            logical_target, operation_id, target_id, target, target_type, status, checks, reason,
                             resolved_addresses, has_global_address, has_private_or_reserved_address,
                             route_reachable, recorded_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(operation_id, target_id) DO NOTHING
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(logical_target, operation_id, target_id) DO NOTHING
                         """,
                         (
+                            self.logical_target,
                             operation_id,
                             target_id,
                             str(result.get("target") or ""),
@@ -1571,9 +1677,10 @@ class PlanStore:
                     """
                     SELECT target_id, target, target_type, status, checks, reason, resolved_addresses,
                            has_global_address, has_private_or_reserved_address, route_reachable, recorded_at
-                    FROM operation_preflight_results WHERE operation_id = ? ORDER BY target_id
+                    FROM operation_preflight_results
+                    WHERE logical_target = ? AND operation_id = ? ORDER BY target_id
                     """,
-                    (operation_id,),
+                    (self.logical_target, operation_id),
                 ).fetchall()
         return [
             {
@@ -1597,8 +1704,8 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT finding_uid, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM finding_records WHERE operation_id = ? AND fingerprint = ?",
-                    (operation_id, fingerprint),
+                    "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
+                    (self.logical_target, operation_id, fingerprint),
                 ).fetchone()
         if not row:
             return None
@@ -1615,8 +1722,8 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
-                    (operation_id, finding_uid),
+                    "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (self.logical_target, operation_id, finding_uid),
                 ).fetchone()
         if not row:
             return None
@@ -1636,9 +1743,10 @@ class PlanStore:
             with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT finding_uid, fingerprint, candidate_data, verification_task_uid, "
-                    "validation_data, resolution FROM finding_records WHERE operation_id = ? "
+                    "validation_data, resolution FROM finding_records "
+                    "WHERE logical_target = ? AND operation_id = ? "
                     "ORDER BY created_at, finding_uid",
-                    (operation_id,),
+                    (self.logical_target, operation_id),
                 ).fetchall()
         return [
             {
@@ -1663,11 +1771,13 @@ class PlanStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.execute(
                     "INSERT INTO finding_records "
-                    "(finding_uid, operation_id, fingerprint, candidate_data, verification_task_uid, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(logical_target, finding_uid, operation_id, fingerprint, candidate_data, "
+                    "verification_task_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
+                        self.logical_target,
                         finding_uid,
                         operation_id,
                         fingerprint,
@@ -1684,8 +1794,9 @@ class PlanStore:
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
-                    (operation_id, finding_uid),
+                    "SELECT candidate_data FROM finding_records "
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (self.logical_target, operation_id, finding_uid),
                 ).fetchone()
                 if row is None:
                     raise ValueError(f"Unknown finding_uid for source-task link: {finding_uid}")
@@ -1696,8 +1807,14 @@ class PlanStore:
                     candidate_data["source_task_uids"] = source_task_uids
                     conn.execute(
                         "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                        "WHERE operation_id = ? AND finding_uid = ?",
-                        (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                        "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                        (
+                            json.dumps(candidate_data),
+                            datetime.now().isoformat(),
+                            self.logical_target,
+                            operation_id,
+                            finding_uid,
+                        ),
                     )
 
     def store_finding_validation(
@@ -1710,8 +1827,14 @@ class PlanStore:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE finding_records SET validation_data = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND finding_uid = ?",
-                    (json.dumps(validation_data), datetime.now().isoformat(), operation_id, finding_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (
+                        json.dumps(validation_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        finding_uid,
+                    ),
                 )
 
     def update_finding_taxonomy_annotation(
@@ -1724,8 +1847,9 @@ class PlanStore:
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
-                    (operation_id, finding_uid),
+                    "SELECT candidate_data FROM finding_records "
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (self.logical_target, operation_id, finding_uid),
                 ).fetchone()
                 if row is None:
                     raise ValueError(f"Unknown finding_uid for taxonomy annotation: {finding_uid}")
@@ -1737,8 +1861,14 @@ class PlanStore:
                 candidate_data["taxonomy_annotation"] = annotation
                 conn.execute(
                     "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND finding_uid = ?",
-                    (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (
+                        json.dumps(candidate_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        finding_uid,
+                    ),
                 )
         return True
 
@@ -1753,8 +1883,9 @@ class PlanStore:
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
-                    (operation_id, finding_uid),
+                    "SELECT candidate_data FROM finding_records "
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (self.logical_target, operation_id, finding_uid),
                 ).fetchone()
                 if row is None:
                     raise ValueError(f"Unknown finding_uid for ATT&CK enrichment: {finding_uid}")
@@ -1796,8 +1927,14 @@ class PlanStore:
 
                 conn.execute(
                     "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND finding_uid = ?",
-                    (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (
+                        json.dumps(candidate_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        finding_uid,
+                    ),
                 )
         return True
 
@@ -1806,8 +1943,8 @@ class PlanStore:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE finding_records SET resolution = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND finding_uid = ?",
-                    (resolution, datetime.now().isoformat(), operation_id, finding_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (resolution, datetime.now().isoformat(), self.logical_target, operation_id, finding_uid),
                 )
 
     def get_objective_candidate(self, operation_id: str, candidate_uid: str) -> Optional[Dict[str, Any]]:
@@ -1815,8 +1952,9 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM objective_validation_records WHERE operation_id = ? AND candidate_uid = ?",
-                    (operation_id, candidate_uid),
+                    "FROM objective_validation_records "
+                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                    (self.logical_target, operation_id, candidate_uid),
                 ).fetchone()
         if not row:
             return None
@@ -1838,8 +1976,8 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT candidate_uid FROM objective_validation_records "
-                    "WHERE operation_id = ? AND fingerprint = ?",
-                    (operation_id, fingerprint),
+                    "WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
+                    (self.logical_target, operation_id, fingerprint),
                 ).fetchone()
         return self.get_objective_candidate(operation_id, row[0]) if row else None
 
@@ -1847,9 +1985,10 @@ class PlanStore:
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT candidate_uid FROM objective_validation_records WHERE operation_id = ? "
+                    "SELECT candidate_uid FROM objective_validation_records "
+                    "WHERE logical_target = ? AND operation_id = ? "
                     "ORDER BY created_at, candidate_uid",
-                    (operation_id,),
+                    (self.logical_target, operation_id),
                 ).fetchall()
         return [self.get_objective_candidate(operation_id, row[0]) for row in rows]
 
@@ -1864,11 +2003,13 @@ class PlanStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.execute(
                     "INSERT INTO objective_validation_records "
-                    "(candidate_uid, operation_id, fingerprint, candidate_data, verification_task_uid, "
-                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(logical_target, candidate_uid, operation_id, fingerprint, candidate_data, "
+                    "verification_task_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
+                        self.logical_target,
                         candidate_uid,
                         operation_id,
                         fingerprint,
@@ -1889,8 +2030,14 @@ class PlanStore:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE objective_validation_records SET validation_data = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND candidate_uid = ?",
-                    (json.dumps(validation_data), datetime.now().isoformat(), operation_id, candidate_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                    (
+                        json.dumps(validation_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        candidate_uid,
+                    ),
                 )
 
     def resolve_objective_candidate(self, operation_id: str, candidate_uid: str, resolution: str) -> None:
@@ -1898,58 +2045,94 @@ class PlanStore:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE objective_validation_records SET resolution = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND candidate_uid = ?",
-                    (resolution, datetime.now().isoformat(), operation_id, candidate_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                    (resolution, datetime.now().isoformat(), self.logical_target, operation_id, candidate_uid),
                 )
 
 
-def _plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
-    """Return the operation-scoped SQLite plan-store path."""
+def _application_database_path(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the output-root application database path."""
     resolved = config or {}
     output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or resolved.get("output_dir", get_default_base_dir())
-    target_name = str(resolved.get("target_name", "default_target"))
-    operation_id = str(resolved.get("operation_id", "default_operation"))
-    return os.path.join(output_dir, target_name, "memory", operation_id, "plan_storage.db")
+    return os.path.join(output_dir, "cyber_autoagent.db")
 
 
-def get_plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
-    """Return the resolved plan-store path without opening or creating it."""
-    return _plan_store_path(config or _MEMORY_CONFIG)
+def get_application_database_path(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the resolved application database path without opening it."""
+    return _application_database_path(config or _MEMORY_CONFIG)
 
 
-def require_existing_plan_store(
+def require_existing_operation(
     *,
     output_dir: str,
-    target_name: str,
+    logical_target: str,
     operation_id: str,
 ) -> str:
-    """Validate that an operation's persisted plan store exists without creating it."""
-    path = _plan_store_path(
-        {
-            "output_dir": output_dir,
-            "target_name": target_name,
-            "operation_id": operation_id,
-        }
-    )
+    """Validate that an exact target/operation exists without creating it."""
+    path = _application_database_path({"output_dir": output_dir})
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"Persisted plan store does not exist: {path}")
+        raise FileNotFoundError(f"Application database does not exist: {path}")
+    SQLiteMigrationRunner(path).migrate()
+    store = create_application_store(path, logical_target=logical_target, read_only=True)
+    if not store.has_operation(operation_id):
+        raise FileNotFoundError(
+            f"Persisted operation does not exist for target {logical_target!r}: {operation_id}"
+        )
     return path
 
 
-def _get_plan_store(read_only: Optional[bool] = None) -> PlanStore:
-    """Get the plan store for the current memory context and resolved path."""
-    global _PLAN_STORE
+def create_application_store(
+    db_path: str,
+    *,
+    logical_target: str,
+    read_only: bool = False,
+) -> ApplicationStore:
+    """Construct the configured application-state backend.
+
+    SQLite is the only backend today; this boundary allows a remote backend to
+    be selected later without changing workflow and memory callers.
+    """
+    return SQLiteApplicationStore(db_path, logical_target=logical_target, read_only=read_only)
+
+
+def _get_database_store(read_only: Optional[bool] = None) -> ApplicationStore:
+    """Get the application store for the current logical-target context."""
+    global _DATABASE_STORE
     configured_read_only = bool((_MEMORY_CONFIG or {}).get("read_only", False))
     requested_read_only = configured_read_only if read_only is None else read_only
-    db_path = _plan_store_path(_MEMORY_CONFIG)
+    db_path = _application_database_path(_MEMORY_CONFIG)
+    logical_target = str(
+        (_MEMORY_CONFIG or {}).get("logical_target")
+        or (_MEMORY_CONFIG or {}).get("target_name")
+        or "default_target"
+    )
     if (
-        _PLAN_STORE is None
-        or getattr(_PLAN_STORE, "db_path", None) != db_path
-        or bool(getattr(_PLAN_STORE, "read_only", False)) != requested_read_only
+        _DATABASE_STORE is None
+        or _DATABASE_STORE.db_path != db_path
+        or _DATABASE_STORE.logical_target != logical_target
+        or _DATABASE_STORE.read_only != requested_read_only
     ):
-        print(f"[+] Plan Storage: {db_path}")
-        _PLAN_STORE = PlanStore(db_path, read_only=requested_read_only)
-    return _PLAN_STORE
+        print(f"[+] Application Database: {db_path}")
+        _DATABASE_STORE = create_application_store(
+            db_path,
+            logical_target=logical_target,
+            read_only=requested_read_only,
+        )
+    return _DATABASE_STORE
+
+
+def persist_operation_model_metrics(
+    rows: List[Dict[str, Any]],
+    captured_at: str,
+    operation_id: Optional[str] = None,
+) -> None:
+    """Append one normal-assessment model-metrics capture to the application store."""
+    _get_database_store().append_operation_model_metrics(operation_id or _operation_id(), captured_at, rows)
+
+
+def list_persisted_operation_model_metrics(operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Read every model-metrics capture for the current logical target and operation."""
+    return _get_database_store().list_operation_model_metrics(operation_id or _operation_id())
 
 
 def _normalize_evidence(val: Any) -> List[str]:
@@ -2458,7 +2641,7 @@ def store_finding(
         candidate["title"], candidate["claim"], candidate["target"], candidate["technique"]
     )
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     source_task_uid = _active_finding_source_task_uid(store, op_id)
     existing = store.get_finding_by_fingerprint(op_id, fingerprint)
     if existing:
@@ -2578,7 +2761,7 @@ def record_finding_validation(
     """Record the result of the active, dedicated finding-verification task."""
 
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     record = store.get_finding(op_id, finding_uid)
     if not record:
         raise ValueError("Unknown finding_uid for the current operation")
@@ -2641,7 +2824,7 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
     if task.kind != "finding_validation" or not task.reference_id:
         return None
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     record = store.get_finding(op_id, task.reference_id)
     if not record or record.get("resolution"):
         return record.get("resolution") if record else None
@@ -2688,7 +2871,7 @@ def finding_validation_submitted(task: Task) -> bool:
 
     if task.kind != "finding_validation" or not task.reference_id:
         return True
-    record = _get_plan_store().get_finding(_operation_id(), task.reference_id)
+    record = _get_database_store().get_finding(_operation_id(), task.reference_id)
     return bool(record and record.get("validation_data"))
 
 
@@ -2697,7 +2880,7 @@ def finding_validation_outcome(task: Task) -> Optional[str]:
 
     if task.kind != "finding_validation" or not task.reference_id:
         return None
-    record = _get_plan_store().get_finding(_operation_id(), task.reference_id)
+    record = _get_database_store().get_finding(_operation_id(), task.reference_id)
     validation = record.get("validation_data") if record else None
     return str(validation.get("outcome")) if isinstance(validation, dict) else None
 
@@ -2710,7 +2893,7 @@ def _objective_candidate_fingerprint(objective_type: str, candidate_value: str) 
 def _objective_constraints(objective_type: str) -> Dict[str, Any]:
     """Extract deterministic constraints for supported objective types from the operation plan."""
 
-    plan = _get_plan_store().get_plan(_operation_id())
+    plan = _get_database_store().get_plan(_operation_id())
     objective = plan.objective if plan else ""
     constraints: Dict[str, Any] = {}
     if objective_type == "flag":
@@ -2797,7 +2980,7 @@ def store_objective_candidate(
     artifacts = _validated_artifact_paths(evidence_artifacts, require_one=True)
     fingerprint = _objective_candidate_fingerprint(normalized_type, value)
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     existing = store.get_objective_candidate_by_fingerprint(op_id, fingerprint)
     if existing:
         return json.dumps(
@@ -2905,7 +3088,7 @@ def record_objective_validation(
     """Record the result of the active objective-validation task without changing finding status."""
 
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     record = store.get_objective_candidate(op_id, candidate_uid)
     if not record:
         raise ValueError("Unknown objective candidate for the current operation")
@@ -2969,14 +3152,14 @@ def record_objective_validation(
 def objective_validation_submitted(task: Task) -> bool:
     if task.kind != "objective_validation" or not task.reference_id:
         return True
-    record = _get_plan_store().get_objective_candidate(_operation_id(), task.reference_id)
+    record = _get_database_store().get_objective_candidate(_operation_id(), task.reference_id)
     return bool(record and record.get("validation_data"))
 
 
 def objective_validation_outcome(task: Task) -> Optional[str]:
     if task.kind != "objective_validation" or not task.reference_id:
         return None
-    record = _get_plan_store().get_objective_candidate(_operation_id(), task.reference_id)
+    record = _get_database_store().get_objective_candidate(_operation_id(), task.reference_id)
     validation = record.get("validation_data") if record else None
     return str(validation.get("outcome")) if isinstance(validation, dict) else None
 
@@ -2985,7 +3168,7 @@ def finalize_objective_validation(task: Task, evaluator_status: str, evaluator_r
     if task.kind != "objective_validation" or not task.reference_id:
         return None
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     record = store.get_objective_candidate(op_id, task.reference_id)
     if not record or record.get("resolution"):
         return record.get("resolution") if record else None
@@ -3556,7 +3739,7 @@ def resolve_bound_executable_target(requested_target: str) -> str:
     requested = str(requested_target or "").strip()
     try:
         plan = _get_active_plan()
-        active = [task for task in _get_plan_store().get_tasks(_operation_id()) if task.status == "active"]
+        active = [task for task in _get_database_store().get_tasks(_operation_id()) if task.status == "active"]
     except Exception:
         return requested
     if len(active) != 1 or not plan.targets:
@@ -4161,7 +4344,7 @@ def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks
             raise ValueError(f"Procedure acceptance basis contains unknown source references: {', '.join(invalid_refs)}")
         return contract
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     artifact_refs = [ref for ref in basis.source_refs if ref.startswith("artifact:")]
     for reference in basis.source_refs:
         prefix, value = reference.split(":", 1)
@@ -4414,7 +4597,7 @@ def _is_generic_snapshot_proposal(proposal: TaskProposal) -> bool:
 
 def _task_inventory_artifact_refs(task: Task) -> List[str]:
     references = [canonical_artifact_reference(path) for path in sorted(_task_evidence_artifact_paths(task))]
-    store = _get_plan_store()
+    store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
     results = list_results(task.task_uid) if callable(list_results) else store.get_acceptance_results(
         _operation_id(), task.task_uid
@@ -4539,7 +4722,7 @@ def _coverage_route_groups(
 
 def _completed_coverage_item_ids(existing_tasks: List[Task], snapshot_hash: str, phase: int) -> set[str]:
     completed: set[str] = set()
-    store = _get_plan_store()
+    store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
     for task in existing_tasks:
         if (
@@ -4668,7 +4851,7 @@ def _create_tasks_from_proposals(
     plan = _get_active_plan()
     current_phase = plan.current_phase
 
-    existing_tasks = _get_plan_store().get_tasks(op_id)
+    existing_tasks = _get_database_store().get_tasks(op_id)
     staged_tasks: List[Task] = []
     duplicate_count = 0
     snapshot_exhausted = False
@@ -5034,7 +5217,7 @@ def _evidence_reference_kind(reference: str, expected_kind: EvidenceRequirementK
         )
     if reference.startswith("finding:"):
         finding_uid = reference.split(":", 1)[1]
-        record = _get_plan_store().get_finding(op_id, finding_uid)
+        record = _get_database_store().get_finding(op_id, finding_uid)
         if record is None:
             raise ValueError(f"Acceptance evidence finding does not exist: {reference}")
         if expected_kind in {"finding_candidate", "durable_evidence"}:
@@ -5059,7 +5242,7 @@ def _validate_acceptance_result_evidence(
             _evidence_reference_kind(reference, "memory")
         elif reference.startswith("finding:"):
             finding_uid = reference.split(":", 1)[1]
-            if _get_plan_store().get_finding(_operation_id(), finding_uid) is None:
+            if _get_database_store().get_finding(_operation_id(), finding_uid) is None:
                 raise ValueError(f"Acceptance evidence finding does not exist: {reference}")
         else:
             raise _acceptance_evidence_reference_error()
@@ -5183,7 +5366,7 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
         raise ValueError("results must contain unique criterion_id values")
 
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     task = next((item for item in store.get_tasks(op_id) if item.task_uid == normalized_uid), None)
     if task is None:
         raise ValueError("Unknown task_uid for the current operation")
@@ -5331,7 +5514,7 @@ def _publish_task_acceptance_memory(
     """Best-effort publish accepted task information as one replay-safe observation."""
 
     content, metadata, publication_key = _task_acceptance_memory_payload(task, results)
-    store = _get_plan_store()
+    store = _get_database_store()
     op_id = _operation_id()
     if store.has_acceptance_memory_publication(op_id, task.task_uid, publication_key):
         return True, False, ""
@@ -5383,7 +5566,7 @@ def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult])
 def _source_task_finding_refs(task_uid: str) -> List[str]:
     """Return canonical finding references durably linked to one executor task."""
 
-    store = _get_plan_store()
+    store = _get_database_store()
     list_findings = getattr(store, "list_findings", None)
     if not callable(list_findings):
         return []
@@ -5437,7 +5620,7 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
         raise ValueError("task_uid required when binding record_task_acceptance")
 
     task = task or next(
-        (item for item in _get_plan_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
+        (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
         None,
     )
     if task is None:
@@ -6010,7 +6193,7 @@ class QdrantMemoryClient:
 
         # Only successful phase and task states may complete an assessment.  Terminal failures are
         # retained for reporting, but must not be converted into a completed operation.
-        tasks = _get_plan_store().get_tasks(op_id)
+        tasks = _get_database_store().get_tasks(op_id)
         all_done = all(p.status in {"done", "not_applicable"} for p in plan.phases)
         all_tasks_done = all(task.status in {"done", "superseded"} for task in tasks)
         actionable_tasks = [task for task in tasks if task.status in {"active", "pending"}]
@@ -6026,7 +6209,7 @@ class QdrantMemoryClient:
 
         # Warn if extending plan after marking complete
         try:
-            prev_plan = _get_plan_store().get_plan(op_id)
+            prev_plan = _get_database_store().get_plan(op_id)
             if prev_plan:
                 new_total = int(plan.total_phases)
                 if prev_plan.assessment_complete and new_total > int(prev_plan.total_phases):
@@ -6037,7 +6220,7 @@ class QdrantMemoryClient:
         except Exception as e:
             logger.debug(f"Could not check previous plan for extension: {e}")
 
-        _get_plan_store().store_plan(op_id, plan)
+        _get_database_store().store_plan(op_id, plan)
 
         result["status"] = "success"
         result["plan"] = plan.to_toon()
@@ -6067,7 +6250,7 @@ class QdrantMemoryClient:
         op_id = _operation_id(operation_id)
 
         try:
-            return _get_plan_store().get_plan(op_id)
+            return _get_database_store().get_plan(op_id)
         except Exception as e:
             logger.error(f"Error retrieving active plan: {e}")
             return None
@@ -6098,7 +6281,7 @@ class QdrantMemoryClient:
     ) -> List[Task]:
         """Return latest-version task objects for a run_id (operation)"""
         op_id = _operation_id(run_id)
-        tasks = _get_plan_store().get_tasks(op_id)
+        tasks = _get_database_store().get_tasks(op_id)
         # Sort by created_at desc
         tasks.sort(key=lambda x: x.created_at or "", reverse=True)
         return tasks
@@ -6122,7 +6305,7 @@ class QdrantMemoryClient:
         # Enforce only one active task per operation by demoting any existing active task
         if task.status == 'active':
             try:
-                all_tasks = _get_plan_store().get_tasks(op_id)
+                all_tasks = _get_database_store().get_tasks(op_id)
                 for t in all_tasks:
                     if t.task_uid != task.task_uid and t.status == "active":
                         # Demote current active task
@@ -6143,11 +6326,11 @@ class QdrantMemoryClient:
                             target_scope=t.target_scope,
                             target_ids=t.target_ids,
                         )
-                        _get_plan_store().store_task(op_id, demoted)
+                        _get_database_store().store_task(op_id, demoted)
             except Exception as e:
                 logger.debug("Could not enforce single active task: %s", e)
 
-        _get_plan_store().store_task(op_id, task)
+        _get_database_store().store_task(op_id, task)
 
     def advance_task_in_phase(
             self,
@@ -6160,7 +6343,7 @@ class QdrantMemoryClient:
     ) -> Tuple[Optional[Task], Optional[Task]]:
         """Update a task in a given phase and activate the next pending task in that phase."""
         op_id = _operation_id()
-        phase_tasks = _get_plan_store().get_tasks(op_id)
+        phase_tasks = _get_database_store().get_tasks(op_id)
         phase_tasks = [t for t in phase_tasks if int(t.phase) == int(phase)]
 
         # Pick target task: explicit uid, else current active
@@ -6239,7 +6422,7 @@ class QdrantMemoryClient:
         """Return the active task for a phase, or promote the next pending task to active."""
         user_id = _user_id(user_id)
         op_id = _operation_id()
-        phase_tasks = _get_plan_store().get_tasks(op_id)
+        phase_tasks = _get_database_store().get_tasks(op_id)
         phase_tasks = [t for t in phase_tasks if int(t.phase) == int(phase)]
 
         # Prefer existing active
@@ -6283,7 +6466,7 @@ class QdrantMemoryClient:
             operation_id: Optional[str] = None,
     ) -> List[Task]:
         """List tasks for a phase and, when provided, an explicit operation."""
-        tasks = _get_plan_store().get_tasks(_operation_id(operation_id))
+        tasks = _get_database_store().get_tasks(_operation_id(operation_id))
         result = []
         for t in tasks:
             if phase is not None and int(t.phase) != int(phase):
@@ -6299,27 +6482,27 @@ class QdrantMemoryClient:
     ) -> List[AcceptanceResult]:
         """Return the frozen-manifest result ledger for one task and operation."""
 
-        return _get_plan_store().get_acceptance_results(_operation_id(operation_id), task_uid)
+        return _get_database_store().get_acceptance_results(_operation_id(operation_id), task_uid)
 
     def list_finding_records(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return finding records for an explicit or current operation."""
 
-        return _get_plan_store().list_findings(_operation_id(operation_id))
+        return _get_database_store().list_findings(_operation_id(operation_id))
 
     def list_objective_validation_records(self) -> List[Dict[str, Any]]:
         """Return objective-validation records for the current operation."""
 
-        return _get_plan_store().list_objective_candidates(_operation_id())
+        return _get_database_store().list_objective_candidates(_operation_id())
 
     def store_preflight_results(self, results: List[Dict[str, Any]], operation_id: Optional[str] = None) -> None:
         """Persist preflight facts once so later workflow stages do not re-resolve targets."""
 
-        _get_plan_store().store_preflight_results(operation_id or _operation_id(), results)
+        _get_database_store().store_preflight_results(operation_id or _operation_id(), results)
 
     def list_preflight_results(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return persisted preflight facts for an explicit or current operation."""
 
-        return _get_plan_store().list_preflight_results(_operation_id(operation_id))
+        return _get_database_store().list_preflight_results(_operation_id(operation_id))
 
     def update_finding_taxonomy_annotation(
         self,
@@ -6328,7 +6511,7 @@ class QdrantMemoryClient:
     ) -> bool:
         """Persist one controller-owned taxonomy annotation for a finding candidate."""
 
-        return _get_plan_store().update_finding_taxonomy_annotation(
+        return _get_database_store().update_finding_taxonomy_annotation(
             _operation_id(),
             finding_uid,
             annotation,
@@ -6341,7 +6524,7 @@ class QdrantMemoryClient:
     ) -> bool:
         """Persist one controller-owned final ATT&CK enrichment result."""
 
-        return _get_plan_store().update_finding_attack_enrichment(
+        return _get_database_store().update_finding_attack_enrichment(
             _operation_id(),
             finding_uid,
             enrichment,
@@ -6377,12 +6560,12 @@ class QdrantMemoryClient:
                     })
 
             # Add Plan and Task counts from SQLite
-            plan = _get_plan_store().get_plan(op_id)
+            plan = _get_database_store().get_plan(op_id)
             if plan:
                 categories["plan"] = categories.get("plan", 0) + 1
                 total_count += 1
             
-            tasks = _get_plan_store().get_tasks(op_id)
+            tasks = _get_database_store().get_tasks(op_id)
             if tasks:
                 categories["task"] = categories.get("task", 0) + len(tasks)
                 total_count += len(tasks)
@@ -6414,6 +6597,7 @@ def initialize_memory_system(
     target_name: Optional[str] = None,
     has_existing_memories: bool = False,
     silent: bool = False,
+    logical_target: Optional[str] = None,
 ) -> None:
     """Initialize the memory system with custom configuration.
 
@@ -6423,6 +6607,7 @@ def initialize_memory_system(
         target_name: Sanitized target name for organizing memory by target
         has_existing_memories: Whether memories already existed before initialization
         silent: If True, suppress initialization output (used during report generation)
+        logical_target: Exact target string entered by the user for database scoping
     """
     global _MEMORY_CONFIG, _MEMORY_CLIENT
 
@@ -6432,6 +6617,12 @@ def initialize_memory_system(
             operation_id or os.environ.get("CYBER_OPERATION_ID", f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     )
     enhanced_config["target_name"] = target_name or os.environ.get("CYBER_TARGET_NAME", "default_target")
+    enhanced_config["logical_target"] = (
+        logical_target
+        or enhanced_config.get("logical_target")
+        or os.environ.get("CYBER_LOGICAL_TARGET")
+        or enhanced_config["target_name"]
+    )
     enhanced_config["memory_mode"] = str(
         enhanced_config.get("memory_mode") or os.environ.get("CYBER_MEMORY_MODE", "operation")
     ).lower()
@@ -6480,6 +6671,7 @@ def get_memory_client(silent: bool = False) -> QdrantMemoryClient:
             )
             existing_config = dict(_MEMORY_CONFIG or {})
             target_name = existing_config.get("target_name")
+            logical_target = existing_config.get("logical_target")
             has_existing_memories = bool(getattr(_MEMORY_CLIENT, "has_existing_memories", True))
             initialize_memory_system(
                 config=existing_config,
@@ -6487,12 +6679,13 @@ def get_memory_client(silent: bool = False) -> QdrantMemoryClient:
                 target_name=target_name,
                 has_existing_memories=has_existing_memories,
                 silent=silent,
+                logical_target=logical_target,
             )
     return _MEMORY_CLIENT
 
 
 def clear_memory_client() -> None:
-    global _MEMORY_CLIENT, _MEMORY_CONFIG, _PLAN_STORE
+    global _MEMORY_CLIENT, _MEMORY_CONFIG, _DATABASE_STORE
     _MEMORY_CLIENT = None
     _MEMORY_CONFIG = None
-    _PLAN_STORE = None
+    _DATABASE_STORE = None

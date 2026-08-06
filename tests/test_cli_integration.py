@@ -2066,9 +2066,13 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
             return True
 
     monkeypatch.setattr(cyberautoagent.os, "scandir", lambda _path: [DirEntry("OP_20260101_000000"), DirEntry("OP_20260102_000000")])
-    from modules.tools.memory import PlanStore
+    from modules.tools.memory import create_application_store
 
-    PlanStore(str(tmp_path / "example.com" / "memory" / "OP_20260102_000000" / "plan_storage.db"))
+    store = create_application_store(
+        str(tmp_path / "cyber_autoagent.db"),
+        logical_target="example.com",
+    )
+    store.ensure_operation("OP_20260102_000000")
 
     cyberautoagent.main()
 
@@ -2252,8 +2256,8 @@ def test_cli_preflight_persists_without_initializing_qdrant(monkeypatch, tmp_pat
     plan_store_cls = Mock(return_value=plan_store)
     agent = CallableCliAgent()
     _patch_cli_common(monkeypatch, tmp_path, agent, callback)
-    monkeypatch.setattr(cyberautoagent, "PlanStore", plan_store_cls)
-    monkeypatch.setattr(cyberautoagent, "get_plan_store_path", Mock(return_value="/tmp/preflight.db"))
+    monkeypatch.setattr(cyberautoagent, "create_application_store", plan_store_cls)
+    monkeypatch.setattr(cyberautoagent, "get_application_database_path", Mock(return_value="/tmp/preflight.db"))
     semantic_memory = Mock()
     monkeypatch.setattr(cyberautoagent, "get_memory_client", semantic_memory)
     plan_store.store_preflight_results.side_effect = lambda *_args: semantic_memory.assert_not_called()
@@ -2275,7 +2279,7 @@ def test_cli_preflight_persists_without_initializing_qdrant(monkeypatch, tmp_pat
 
     cyberautoagent.main()
 
-    plan_store_cls.assert_called_once_with("/tmp/preflight.db")
+    plan_store_cls.assert_called_once_with("/tmp/preflight.db", logical_target="example.com")
     plan_store.store_preflight_results.assert_called_once()
 
 

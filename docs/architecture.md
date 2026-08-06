@@ -426,7 +426,8 @@ graph TB
 ```
 
 **Memory Storage**:
-1. **Plans and Tasks**: Stored in a local SQLite database (`plan_storage.db`) for each operation.
+1. **Plans, Tasks, and Model Metrics**: Stored in `outputs/cyber_autoagent.db`, scoped by exact logical target and
+   operation ID. Model metrics are append-only per provider/model capture and include their capture timestamps.
 2. **Semantic Memories**: Stored in one Qdrant collection under `outputs/qdrant`, or in the configured Qdrant service.
 3. **Scope**: Exact target values are always criteria; operation ID is additionally required in `operation` mode.
 

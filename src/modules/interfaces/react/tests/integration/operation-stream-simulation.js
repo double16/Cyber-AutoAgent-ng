@@ -114,7 +114,7 @@ function ensureTestConfig() {
     const clean = output.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
 
     const checks = [
-      { name: 'Progress update', ok: /\[TEST_EVENT\] progress_update|\[PROGRESS\s+1|\[PROGRESS|\[SWARM|operation/i.test(clean) },
+      { name: 'Budget update', ok: /\[TEST_EVENT\] progress_update|\[BUDGET\s+1|\[BUDGET|\[SWARM|operation/i.test(clean) },
       { name: 'Reasoning or output present', ok: /\[TEST_EVENT\]\s+(reasoning|output|tool_start|metrics_update)|Analyzing target|Finalizing|HTTP\/1\.1 200 OK|hello/i.test(clean) },
     ];
 

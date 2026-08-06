@@ -8,7 +8,8 @@ Long operations degrade when a single model conversation owns all orchestration.
 
 - **Python controller**: owns plan creation/recovery, active phase selection, task activation, phase advancement, budget checks, and task closure.
 - **Short-lived agents**: create plans, build prompts, execute task objectives, create new tasks when permitted, and evaluate task/phase outcomes.
-- **SQLite plan store**: persists plans and tasks across context pruning, model failures, and continued runs.
+- **SQLite application store**: persists target/operation-scoped workflow state across context pruning, model failures,
+  continued runs, and append-only per-model metric captures in the shared `outputs/cyber_autoagent.db` database.
 - **Qdrant memory**: stores semantic memories such as observations, findings, evidence summaries, and lessons.
 
 This keeps strategic state deterministic while still using agents for security reasoning and prompt tailoring.

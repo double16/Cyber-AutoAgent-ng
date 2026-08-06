@@ -22,7 +22,7 @@ def _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="t
     # isolate global client/config for this test
     memory._MEMORY_CLIENT = None
     memory._MEMORY_CONFIG = None
-    memory._PLAN_STORE = None
+    memory._DATABASE_STORE = None
 
     embedder_model = "mxbai-embed-large:latest"
     ollama_base_url = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
@@ -173,7 +173,7 @@ def test_create_tasks_filesystem_defaults_nonexistent_phase_to_active(tmp_path, 
         assert "task[2]" in tasks
         assert task_1_title in tasks
         assert task_2_title in tasks
-        stored_tasks = memory._PLAN_STORE.get_tasks("test-op-fs")
+        stored_tasks = memory._DATABASE_STORE.get_tasks("test-op-fs")
         assert {task.phase for task in stored_tasks} == {1}
 
     finally:
@@ -413,7 +413,7 @@ def test_store_plan_persistence(tmp_path, monkeypatch):
 
         # Verify it's in SQLite
         op_id = "test-op-persistence"
-        sqlite_plan = memory._PLAN_STORE.get_plan(op_id)
+        sqlite_plan = memory._DATABASE_STORE.get_plan(op_id)
         assert sqlite_plan is not None
         assert sqlite_plan.objective == "Initial Objective"
 
@@ -426,7 +426,7 @@ def test_store_plan_persistence(tmp_path, monkeypatch):
         assert "Updated Objective" in updated_plan
 
         # Verify update in SQLite
-        updated_sqlite_plan = memory._PLAN_STORE.get_plan(op_id)
+        updated_sqlite_plan = memory._DATABASE_STORE.get_plan(op_id)
         assert updated_sqlite_plan.objective == "Updated Objective"
 
     finally:
@@ -484,7 +484,7 @@ def test_create_tasks_does_not_deduplicate_by_fuzzy_similarity(tmp_path, monkeyp
 
         # 5. Check SQLite task count for this operation
         op_id = "test-op-fuzzy-more"
-        tasks = memory._PLAN_STORE.get_tasks(op_id)
+        tasks = memory._DATABASE_STORE.get_tasks(op_id)
         assert len(tasks) == 4
 
     finally:

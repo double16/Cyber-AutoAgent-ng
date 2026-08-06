@@ -110,10 +110,10 @@ from modules.handlers.terminal_tool import (
 from modules.tools import browser, channel_close_all
 from modules.tools.memory import (
     OperationTarget,
-    PlanStore,
+    create_application_store,
     get_memory_client,
-    get_plan_store_path,
-    require_existing_plan_store,
+    get_application_database_path,
+    require_existing_operation,
     resolve_operation_targets,
 )
 from modules.tools.oast import close_oast_providers
@@ -1061,6 +1061,7 @@ def main():
 
     previous_output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR")
     previous_memory_read_only = os.environ.get("CYBER_MEMORY_READ_ONLY")
+    previous_logical_target = os.environ.get("CYBER_LOGICAL_TARGET")
 
     def restore_memory_environment() -> None:
         if previous_output_dir is None:
@@ -1071,6 +1072,10 @@ def main():
             os.environ.pop("CYBER_MEMORY_READ_ONLY", None)
         else:
             os.environ["CYBER_MEMORY_READ_ONLY"] = previous_memory_read_only
+        if previous_logical_target is None:
+            os.environ.pop("CYBER_LOGICAL_TARGET", None)
+        else:
+            os.environ["CYBER_LOGICAL_TARGET"] = previous_logical_target
 
     # Set up signal handlers for Ctrl+C, Ctrl+Z, and SIGTERM (ESC in UI)
     signal.signal(signal.SIGINT, signal_handler)
@@ -1381,6 +1386,7 @@ def main():
 
     # Expose operation ID to tools via environment for consistent evidence tagging
     os.environ["CYBER_OPERATION_ID"] = operation_id
+    os.environ["CYBER_LOGICAL_TARGET"] = args.target
 
     server_config = config_manager.get_server_config(args.provider, **config_overrides)
 
@@ -1420,9 +1426,9 @@ def main():
 
     if args.report:
         try:
-            require_existing_plan_store(
+            require_existing_operation(
                 output_dir=server_config.output.base_dir,
-                target_name=target_sanitized,
+                logical_target=args.target,
                 operation_id=operation_id,
             )
         except FileNotFoundError as error:
@@ -1440,14 +1446,13 @@ def main():
             logger=logger,
         )
         try:
-            preflight_store = PlanStore(
-                get_plan_store_path(
+            preflight_store = create_application_store(
+                get_application_database_path(
                     {
                         "output_dir": server_config.output.base_dir,
-                        "target_name": target_sanitized,
-                        "operation_id": operation_id,
                     }
-                )
+                ),
+                logical_target=args.target,
             )
             preflight_store.store_preflight_results(
                 operation_id,
