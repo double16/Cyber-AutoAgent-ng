@@ -7,7 +7,12 @@ Group findings by attack vector potential:
 
 <finding_organization>
 **Organize by Exploitation Chain Potential**:
-- Chain related vulnerabilities to show compound risk (XSS + CORS → account takeover, SQLi + file write → RCE)
-- Map technical findings to business processes (payment bypass, data exfiltration paths, privilege escalation chains)
-- Highlight where multiple small issues create critical exposure (info disclosure + weak session → full compromise)
+- Explain compound risk only for canonically demonstrated links; label every other transition as hypothetical.
+- Map supplied technical evidence to business-process impact without adding findings or completion claims.
+- Discuss systemic exposure qualitatively; Python owns all finding, severity, and validation summaries.
+
+<observation_context>
+Summarize only the supplied `informational_observations` context under Informational Observations. These records are
+not findings; do not invent, count, assign severity, or promote them to verified risk.
+</observation_context>
 </finding_organization>

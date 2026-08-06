@@ -46,6 +46,8 @@ For the provided finding:
 - Keep the canonical headings in order unless a module-specific report prompt explicitly overrides them.
 - If evidence does not support a mapping or optional detail, write "Not established from supplied evidence" instead
   of inventing content.
+- Produce bounded narrative interpretation for this one canonical finding. Python owns verification state, severity,
+  artifact references, taxonomy, evidence excerpts, and factual tables.
 </output_requirements>
 
 <canonical_markdown_layout format_only="true">

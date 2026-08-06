@@ -359,6 +359,7 @@ class AgentRunResult:
 
     reason: str
     message: str = ""
+    details: dict[str, Any] | None = None
 
 
 RECOVERABLE_AGENT_ERRORS = (
@@ -609,7 +610,11 @@ def run_agent_until_terminal_state(
                         "the latest completed result was reused."
                     )
                 logger.warning(message)
-                return AgentRunResult("repeated_tool_loop", message)
+                return AgentRunResult(
+                    "repeated_tool_loop",
+                    message,
+                    details=dict(repeated_tool_loop),
+                )
 
             tool_total_count = sum(agent_callback_handler.tool_counts.values())
             if tool_total_count > last_tool_call_count:
@@ -1656,7 +1661,9 @@ def main():
                 agent: Any,
                 prompt: str,
                 run_policy: Optional[AgentRunPolicy],
-            ) -> str:
+            ) -> tuple[AgentRunResult, str]:
+                """Run one workflow pass while preserving its structured terminal result."""
+
                 try:
                     message_start = len(agent.messages)
                 except (AttributeError, TypeError):
@@ -1678,10 +1685,10 @@ def main():
                     current_pass_messages = []
                 assistant_text = extract_last_assistant_text(current_pass_messages)
                 if assistant_text:
-                    return assistant_text
+                    return result, assistant_text
                 if run_policy and result.reason == run_policy.terminal_reason:
-                    return ""
-                return result.message or result.reason
+                    return result, ""
+                return result, result.message or result.reason
 
             def workflow_work_runner(
                 role: str,
@@ -1702,7 +1709,8 @@ def main():
                     include_tool_catalog=role != "task_creator",
                 )
                 try:
-                    return run_workflow_agent(agent, prompt, run_policy)
+                    _, worker_text = run_workflow_agent(agent, prompt, run_policy)
+                    return worker_text
                 finally:
                     try:
                         agent.cleanup()
@@ -1733,7 +1741,7 @@ def main():
                         journal = getattr(callback, "tool_outcome_journal", None)
                         snapshot = journal.snapshot() if journal is not None else 0
                         try:
-                            text = run_workflow_agent(agent, prompt, run_policy)
+                            run_result, result_message = run_workflow_agent(agent, prompt, run_policy)
                         except MaxTokensReachedException as error:
                             classification = getattr(error, "max_token_classification", None)
                             kind = getattr(classification, "kind", "output_truncation")
@@ -1751,14 +1759,30 @@ def main():
                                 ),
                             )
                         outcomes = journal.since(snapshot) if journal is not None else []
+                        repeat_loop = (
+                            run_result.details
+                            if run_result.reason == "repeated_tool_loop"
+                            else None
+                        )
                         return TaskExecutorCycleResult(
-                            text=text,
+                            text=result_message,
                             outcomes=outcomes,
                             recovery_required=bool(recovery_hook and recovery_hook.unresolved),
                             recovery_exhausted=bool(recovery_hook and recovery_hook.exhausted),
                             recovery_guidance=_recovery_guidance_with_failed_command_help(
                                 recovery_hook,
                                 config.available_tools or [],
+                            ),
+                            repeat_loop_detected=isinstance(repeat_loop, dict),
+                            repeat_loop_signature=(
+                                str(repeat_loop.get("cycle_signature", ""))
+                                if isinstance(repeat_loop, dict)
+                                else ""
+                            ),
+                            repeat_loop_reason=(
+                                result_message
+                                if isinstance(repeat_loop, dict)
+                                else ""
                             ),
                         )
 

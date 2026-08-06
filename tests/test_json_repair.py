@@ -2,7 +2,12 @@ import json
 
 import pytest
 
-from modules.utils.json_repair import parse_json_response, repair_json_text, strip_js_comments
+from modules.utils.json_repair import (
+    parse_json_response,
+    parse_json_response_with_metadata,
+    repair_json_text,
+    strip_js_comments,
+)
 
 
 def test_parse_json_response_repairs_logged_embedded_quotes_and_invalid_apostrophe_escape():
@@ -60,6 +65,30 @@ def test_parse_json_response_preserves_valid_json_without_repairing():
         "message": 'quoted "text"',
         "items": [1, 2],
     }
+
+
+def test_parse_json_response_extracts_one_object_from_prose_with_metadata():
+    parsed = parse_json_response_with_metadata(
+        'Analysis follows. {"approved": false, "feedback": ["Add evidence"]} End.',
+        require_object=True,
+    )
+
+    assert parsed.value == {"approved": False, "feedback": ["Add evidence"]}
+    assert parsed.metadata.extracted is True
+    assert parsed.metadata.repaired is False
+
+
+def test_parse_json_response_repairs_an_extracted_object():
+    parsed = parse_json_response_with_metadata('Result: {"approved": true,}')
+
+    assert parsed.value == {"approved": True}
+    assert parsed.metadata.extracted is True
+    assert parsed.metadata.repaired is True
+
+
+def test_parse_json_response_rejects_ambiguous_multiple_objects():
+    with pytest.raises(ValueError, match="multiple JSON values"):
+        parse_json_response('{"approved": true} then {"approved": false}', require_object=True)
 
 
 def test_parse_json_response_rejects_truncated_repair_candidate():

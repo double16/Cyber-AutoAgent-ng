@@ -4,11 +4,28 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 
 _JSON_ESCAPES = frozenset('"\\/bfnrtu')
 _CODE_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+
+
+@dataclass(frozen=True)
+class JSONParseMetadata:
+    """Describe how a structured response was accepted without retaining its content."""
+
+    extracted: bool
+    repaired: bool
+
+
+@dataclass(frozen=True)
+class JSONParseResult:
+    """A parsed structured response and non-sensitive parsing metadata."""
+
+    value: Any
+    metadata: JSONParseMetadata
 
 
 def strip_js_comments(text: str) -> str:
@@ -59,6 +76,48 @@ def _candidate(text: str) -> str:
     start = min(starts)
     end = max(text.rfind("}"), text.rfind("]"))
     return text[start : end + 1] if end >= start else text.strip()
+
+
+def _balanced_json_candidates(text: str) -> list[str]:
+    """Return complete top-level JSON object/array candidates embedded in text.
+
+    Braces inside quoted JSON strings do not affect balancing. Nested values are retained
+    as part of their enclosing top-level candidate rather than treated as alternatives.
+    """
+
+    candidates: list[str] = []
+    start: int | None = None
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"' and stack:
+            in_string = True
+            continue
+        if char in "{[":
+            if not stack:
+                start = index
+            stack.append(char)
+            continue
+        if char in "}]" and stack:
+            expected = "{" if char == "}" else "["
+            if stack[-1] != expected:
+                stack.clear()
+                start = None
+                continue
+            stack.pop()
+            if not stack and start is not None:
+                candidates.append(text[start : index + 1])
+                start = None
+    return candidates
 
 
 def _next_significant(text: str, index: int) -> str:
@@ -125,18 +184,45 @@ def repair_json_text(text: str) -> str:
     return re.sub(r",\s*([}\]])", r"\1", repaired)
 
 
-def parse_json_response(text: str, *, require_object: bool = False) -> Any:
-    """Normalize and parse a model response intended to contain JSON."""
+def parse_json_response_with_metadata(text: str, *, require_object: bool = False) -> JSONParseResult:
+    """Parse one unambiguous JSON value from a structured response.
+
+    A full valid response is preferred. Otherwise, exactly one balanced JSON value may
+    be extracted from surrounding prose or a Markdown code fence. This deliberately
+    rejects multiple values so a controller never guesses which decision to trust.
+    """
 
     if not isinstance(text, str):
         raise ValueError("agent response must be text")
-    candidate = _candidate(text).strip()
+
+    stripped = text.strip()
     try:
-        # Do not rewrite payloads that are already valid. Repair is intentionally
-        # best-effort and must not change valid JSON semantics.
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        parsed = json.loads(repair_json_text(text))
+        parsed = json.loads(stripped)
+        extracted = False
+        repaired = False
+    except json.JSONDecodeError as initial_error:
+        candidates = _balanced_json_candidates(text)
+        if len(candidates) != 1:
+            if not candidates:
+                raise initial_error
+            raise ValueError("response contained multiple JSON values")
+        candidate = candidates[0].strip()
+        try:
+            parsed = json.loads(candidate)
+            repaired = False
+        except json.JSONDecodeError:
+            parsed = json.loads(repair_json_text(candidate))
+            repaired = True
+        extracted = True
     if require_object and not isinstance(parsed, dict):
         raise ValueError("agent response must be a JSON object")
-    return parsed
+    return JSONParseResult(
+        value=parsed,
+        metadata=JSONParseMetadata(extracted=extracted, repaired=repaired),
+    )
+
+
+def parse_json_response(text: str, *, require_object: bool = False) -> Any:
+    """Normalize and parse a model response intended to contain JSON."""
+
+    return parse_json_response_with_metadata(text, require_object=require_object).value

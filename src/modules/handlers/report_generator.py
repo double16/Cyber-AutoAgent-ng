@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import tomllib
 from collections import Counter
@@ -35,8 +36,9 @@ from modules.prompts.factory import (
     get_report_finding_system_prompt,
     get_report_next_steps_system_prompt,
     safe_truncate,
+    is_reportable_tool,
 )
-from modules.tools.memory import Task, _artifact_path_from_ref, get_memory_client, memory_is_cross_operation, \
+from modules.tools.memory import _artifact_path_from_ref, get_memory_client, memory_is_cross_operation, \
     OperationTarget
 from modules.utils.json_repair import parse_json_response
 
@@ -521,24 +523,287 @@ def _format_target_coverage(
         verified = [
             item for item in evidence
             if item.get("category") == "finding"
-            and (
-                (item.get("metadata", {}) or {}).get("target") == target.value
-                or target.value in str(item.get("content", ""))
-            )
+            and _evidence_matches_target(item, target)
         ]
         validation_failures = [
             item for item in evidence
             if item.get("category") == "validation_failure"
-            and (
-                (item.get("metadata", {}) or {}).get("target") == target.value
-                or target.value in str(item.get("content", ""))
-            )
+            and _evidence_matches_target(item, target)
         ]
         lines.append(
             f"| {target_id} | {target.type} | `{target.value}` | {len(scoped_tasks)} | "
             f"{len(verified)} | {len(validation_failures)} |"
         )
     return "\n".join(lines)
+
+
+def _target_value_matches(candidate: Any, target_value: str) -> bool:
+    """Match a target URL and its child endpoint to the registered target."""
+
+    candidate_text = str(candidate or "").strip().rstrip("/")
+    target_text = str(target_value or "").strip().rstrip("/")
+    if not candidate_text or not target_text:
+        return False
+    return candidate_text == target_text or candidate_text.startswith(f"{target_text}/")
+
+
+def _evidence_matches_target(item: Dict[str, Any], target: OperationTarget) -> bool:
+    """Resolve evidence to a registered target using IDs, locations, and endpoint URLs."""
+
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    if str(metadata.get("target_id") or "").strip() == str(target.target_id):
+        return True
+    candidates = [
+        metadata.get("target"),
+        metadata.get("location"),
+        (item.get("parsed") or {}).get("where") if isinstance(item.get("parsed"), dict) else None,
+    ]
+    if any(_target_value_matches(candidate, target.value) for candidate in candidates):
+        return True
+    return str(target.value).rstrip("/") in str(item.get("content", ""))
+
+
+def _validate_report_consistency(
+    sections: Dict[str, Any], completion_status: Dict[str, Any]
+) -> List[str]:
+    """Reconcile report summaries against their canonical workflow and evidence inputs."""
+
+    errors: List[str] = []
+    evidence = sections.get("raw_evidence", [])
+    evidence = evidence if isinstance(evidence, list) else []
+    verified_count = sum(1 for item in evidence if isinstance(item, dict) and item.get("category") == "finding")
+    validation_failure_count = sum(
+        1 for item in evidence if isinstance(item, dict) and item.get("category") == "validation_failure"
+    )
+
+    # These values are deterministic report summaries, so correct stale derived values
+    # rather than allowing a narrative prompt to reconcile them later.
+    if int(sections.get("verified_findings_total", 0) or 0) != verified_count:
+        errors.append("Verified finding count did not match canonical finding evidence.")
+    if int(sections.get("validation_failure_count", 0) or 0) != validation_failure_count:
+        errors.append("Validation-failure count did not match canonical validation evidence.")
+    sections["verified_findings_total"] = verified_count
+    sections["finding_count"] = verified_count
+    sections["validation_failure_count"] = validation_failure_count
+    sections["finding_validation_failure_count"] = validation_failure_count
+
+    status_counts = sections.get("task_status_counts", {})
+    status_counts = status_counts if isinstance(status_counts, dict) else {}
+    normalized_counts = {
+        str(status): int(count)
+        for status, count in status_counts.items()
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0
+    }
+    total_tasks = sum(normalized_counts.values())
+    if total_tasks != int(sections.get("total_task_count", 0) or 0):
+        errors.append("Task status totals did not match the reported total task count.")
+        sections["total_task_count"] = total_tasks
+    completed_tasks = normalized_counts.get("done", 0)
+    if completed_tasks != int(sections.get("completed_task_count", 0) or 0):
+        errors.append("Completed task count did not match done task statuses.")
+        sections["completed_task_count"] = completed_tasks
+    sections["task_status_counts"] = dict(sorted(normalized_counts.items()))
+
+    phase_rows = sections.get("phase_coverage", [])
+    phase_rows = phase_rows if isinstance(phase_rows, list) else []
+    phase_totals: dict[str, int] = {}
+    for phase in phase_rows:
+        if not isinstance(phase, dict):
+            errors.append("Phase coverage contained an invalid row.")
+            continue
+        phase_counts = phase.get("task_status_counts", {})
+        if not isinstance(phase_counts, dict):
+            errors.append(f"Phase {phase.get('phase_id', 'unknown')} did not contain task status counts.")
+            continue
+        for status, count in phase_counts.items():
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                phase_totals[str(status)] = phase_totals.get(str(status), 0) + count
+    if phase_rows and phase_totals != normalized_counts:
+        errors.append("Phase task status totals did not match operation task status totals.")
+
+    incomplete_phase_ids = [
+        int(phase["phase_id"])
+        for phase in phase_rows
+        if isinstance(phase, dict)
+        and isinstance(phase.get("phase_id"), int)
+        and str(phase.get("status") or "") not in {"done", "not_applicable"}
+    ]
+    if completion_status.get("assessment_complete") and incomplete_phase_ids:
+        errors.append("Assessment was marked complete while one or more phases were incomplete.")
+        completion_status["assessment_complete"] = False
+        completion_status["workflow_complete"] = False
+        completion_status["incomplete_reason"] = "Report validation found incomplete workflow coverage."
+    if not completion_status.get("assessment_complete"):
+        completion_status["incomplete_phase_ids"] = sorted(set(incomplete_phase_ids))
+
+    for integrity_error in sections.get("evidence_integrity_errors", []) or []:
+        if isinstance(integrity_error, dict):
+            errors.append(
+                f"Evidence artifact reference could not be resolved: {integrity_error.get('reference', 'unknown')}."
+            )
+    return errors
+
+
+def _format_report_consistency_warnings(errors: List[str]) -> str:
+    """Render unresolved deterministic report validation errors without altering evidence."""
+
+    if not errors:
+        return ""
+    lines = [
+        _PAGE_BREAK,
+        '<a name="report-consistency-warnings"></a>',
+        "## Report Consistency Warnings",
+        "",
+        "The following report metadata inconsistencies were detected during deterministic validation. "
+        "Counts were regenerated from canonical workflow and evidence data where possible.",
+        "",
+    ]
+    lines.extend(f"- {error}" for error in errors)
+    return "\n".join(lines) + "\n"
+
+
+def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the Python-owned, JSON-safe contract used to assemble a report.
+
+    This deliberately contains facts and rendered deterministic sections only.  Model
+    output is stored beside it under ``narrative`` and is never merged into this map.
+    """
+    evidence = sections.get("raw_evidence", [])
+    evidence = evidence if isinstance(evidence, list) else []
+    findings = [item for item in evidence if isinstance(item, dict) and item.get("category") == "finding"]
+    validation = [
+        item for item in evidence
+        if isinstance(item, dict) and item.get("category") == "validation_failure"
+    ]
+    observations = [
+        item for item in evidence
+        if isinstance(item, dict) and item.get("category") in {"observation", "signal", "discovery"}
+    ]
+    artifacts = sorted(_artifact_references(evidence))
+    return {
+        "operation": {
+            "operation_id": sections.get("operation_id"),
+            "target": sections.get("target"),
+            "objective": sections.get("objective"),
+            "module": sections.get("module"),
+            "date": sections.get("date"),
+        },
+        "findings": findings,
+        "severity_counts": dict(sections.get("severity_counts") or {}),
+        "verified_findings_total": int(sections.get("verified_findings_total", len(findings)) or 0),
+        "validation_failures": validation,
+        "validation_failure_count": len(validation),
+        "pending_candidates": validation,
+        "observations": observations,
+        "observation_count": len(observations),
+        "task_status_counts": dict(sections.get("task_status_counts") or {}),
+        "total_task_count": int(sections.get("total_task_count", 0) or 0),
+        "completed_task_count": int(sections.get("completed_task_count", 0) or 0),
+        "phase_coverage": sections.get("phase_coverage") or [],
+        "target_coverage": sections.get("target_coverage") or "",
+        "completion_status": sections.get("completion_status") or {},
+        "artifact_references": artifacts,
+        "evidence_integrity_errors": sections.get("evidence_integrity_errors") or [],
+        "execution_history": sections.get("execution_history") or "",
+        "execution_history_rows": sections.get("execution_history_rows") or {},
+        "taxonomy_coverage": sections.get("taxonomy_coverage") or "",
+        "metrics": {
+            key: sections.get(key)
+            for key in ("main_model", "input_tokens", "output_tokens", "total_tokens", "total_duration", "estimated_cost")
+        },
+        "latest_run": sections.get("latest_run") or {},
+        "reportable_tools_used": sections.get("reportable_tools_used") or [],
+        "tools_summary": sections.get("tools_summary") or "",
+        "next_steps": sections.get("next_steps") or {},
+    }
+
+
+def _informational_observation_context(sections: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build explicitly labeled, narrative-only observation context for report agents."""
+
+    observations = [
+        item
+        for item in sections.get("raw_evidence", [])
+        if isinstance(item, dict) and item.get("category") in {"observation", "signal", "discovery"}
+    ]
+    context = []
+    for item in observations:
+        metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        context.append(
+            {
+                "id": item.get("id", ""),
+                "category": "informational_observation",
+                "title": _report_item_title(item, "Informational observation"),
+                "content": item.get("content", ""),
+                "location": metadata.get("target") or metadata.get("location") or "Not recorded",
+                "artifact_references": sorted(_artifact_references(item)),
+            }
+        )
+    return context
+
+
+def _validate_narrative_consistency(text: Any, canonical: Dict[str, Any]) -> List[str]:
+    """Find factual claims in model prose that Python cannot substantiate."""
+    if not isinstance(text, str) or not text.strip():
+        return []
+    warnings: List[str] = []
+    known_findings = {
+        str(item.get("id")) for item in canonical.get("findings", []) if item.get("id")
+    } | {
+        _report_item_title(item, "finding").lower() for item in canonical.get("findings", [])
+    }
+    lowered = text.lower()
+    for match in re.finditer(r"(?:finding|vulnerability)\s+([a-z0-9_-]+)", lowered):
+        token = match.group(1)
+        if token not in known_findings and not token.isdigit():
+            warnings.append(f"Narrative references unknown finding '{token}'.")
+    for raw, normalized in _artifact_reference_matches(text):
+        if normalized not in set(canonical.get("artifact_references", [])):
+            warnings.append(f"Narrative references unregistered artifact '{raw}'.")
+    severity_counts = canonical.get("severity_counts", {})
+    for severity, count in severity_counts.items():
+        if re.search(rf"\b{re.escape(str(count))}\s+{re.escape(str(severity))}\b", lowered):
+            continue
+    complete = bool((canonical.get("completion_status") or {}).get("assessment_complete"))
+    if canonical.get("observations") and re.search(
+        r"\b(?:no|zero)\s+(?:informational\s+)?observations?\b|"
+        r"no informational observations were established",
+        lowered,
+    ):
+        warnings.append("Narrative claims that no informational observations exist while canonical observations are present.")
+    if not complete and re.search(r"\b(?:all|every)\s+(?:planned\s+)?(?:tasks?|phases?)\b|fully\s+complete|no vulnerabilities", lowered):
+        warnings.append("Narrative makes a completion or absence claim while canonical coverage is incomplete.")
+    phase_ids = {str(row.get("phase_id")) for row in canonical.get("phase_coverage", []) if isinstance(row, dict)}
+    for match in re.finditer(r"\bphase\s+(\d+)\b", lowered):
+        if match.group(1) not in phase_ids:
+            warnings.append(f"Narrative references unknown phase '{match.group(1)}'.")
+    return list(dict.fromkeys(warnings))
+
+
+def _canonical_report_json(sections: Dict[str, Any], narratives: Dict[str, Any], warnings: List[str]) -> Dict[str, Any]:
+    """Build the stable JSON report envelope without allowing narrative overrides."""
+    canonical = _canonical_report_data(sections)
+    return {
+        "canonical": canonical,
+        "narrative": narratives,
+        "consistency_warnings": list(dict.fromkeys(warnings)),
+        # Compatibility for existing consumers that read completion status at the
+        # root.  The canonical tree remains authoritative.
+        "completion_status": canonical["completion_status"],
+    }
+
+
+def _format_verified_findings_summary(sections: Dict[str, Any]) -> str:
+    """Render verified counts from canonical values, independent of model prose."""
+    counts = sections.get("severity_counts", {})
+    lines = [
+        "## VERIFIED FINDINGS SUMMARY", "",
+        f"Verified findings: **{int(sections.get('verified_findings_total', 0) or 0)}**", "",
+        "| Severity | Count |", "|---|---:|",
+    ]
+    for severity in ("critical", "high", "medium", "low", "info"):
+        lines.append(f"| {severity.upper()} | {int(counts.get(severity, 0) or 0)} |")
+    return "\n".join(lines) + "\n"
 
 
 _RE_MARKDOWN_XML_HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
@@ -575,19 +840,18 @@ def _format_execution_history(task_rows: List[Dict[str, Any]], acceptance_rows: 
         "",
         "### Task History",
         "",
-        "| Phase | Task | Status | Status Reason | Targets | Acceptance | Manifest |",
-        "|---:|---|---|---|---|---:|---|",
+        "| Phase | Task | Status | Status Reason | Targets | Acceptance |",
+        "|---:|---|---|---|---|---:|",
     ]
     for row in sorted(task_rows, key=lambda item: (int(item.get("phase", 0)), str(item.get("title", "")))):
         lines.append(
-            "| {phase} | {title} | {status} | {reason} | {targets} | {acceptance} | `{manifest}` |".format(
+            "| {phase} | {title} | {status} | {reason} | {targets} | {acceptance} |".format(
                 phase=_markdown_table_cell(row.get("phase")),
                 title=_markdown_table_cell(row.get("title")),
                 status=_markdown_table_cell(row.get("status")),
                 reason=_markdown_table_cell(row.get("status_reason")),
-                targets=_markdown_table_cell(row.get("target_ids")),
+                targets=_markdown_table_cell(row.get("targets") or row.get("target_ids")),
                 acceptance=_markdown_table_cell(row.get("acceptance")),
-                manifest=_markdown_table_cell(row.get("manifest_hash")),
             )
         )
 
@@ -596,26 +860,38 @@ def _format_execution_history(task_rows: List[Dict[str, Any]], acceptance_rows: 
             "",
             "### Acceptance Outcomes",
             "",
-            "| Phase | Task | Criterion | Status | Disposition | Summary | Evidence |",
-            "|---:|---|---|---|---|---|---|",
+            "| Phase | Task | Status | Disposition | Summary |",
+            "|---:|---|---|---|---|",
         ]
     )
     for row in sorted(
         acceptance_rows,
-        key=lambda item: (int(item.get("phase", 0)), str(item.get("title", "")), str(item.get("criterion_id", ""))),
+        key=lambda item: (int(item.get("phase", 0)), str(item.get("title", ""))),
     ):
         lines.append(
-            "| {phase} | {title} | {criterion} | {status} | {disposition} | {summary} | {evidence} |".format(
+            "| {phase} | {title} | {status} | {disposition} | {summary} |".format(
                 phase=_markdown_table_cell(row.get("phase")),
                 title=_markdown_table_cell(row.get("title")),
-                criterion=_markdown_table_cell(row.get("criterion_id")),
                 status=_markdown_table_cell(row.get("status")),
                 disposition=_markdown_table_cell(row.get("disposition")),
                 summary=_markdown_table_cell(row.get("summary")),
-                evidence=_markdown_table_cell(row.get("evidence_refs")),
             )
         )
     return "\n".join(lines)
+
+
+def _clean_observation_detail(content: str) -> str:
+    """Remove acceptance metadata and duplicate evidence labels from observation prose."""
+
+    cleaned = re.sub(
+        r"\bCriterion\s+criterion-[^:]+:\s*",
+        "",
+        content,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s*Evidence:\s*.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    return cleaned.strip()
 
 
 def _format_observation(item: Dict[str, Any], index: int) -> str:
@@ -625,9 +901,10 @@ def _format_observation(item: Dict[str, Any], index: int) -> str:
     title = _report_item_title(item, f"Observation {index + 1}")
     status = item.get("validation_status") or metadata.get("validation_status") or "recorded"
     location = metadata.get("target") or metadata.get("location") or "Not recorded"
-    content = _format_markdown_xml_html_tags(
+    content = _clean_observation_detail(
         str(item.get("content") or "No observation detail was recorded.").strip()
     )
+    content = _format_markdown_xml_html_tags(content)
     text = (
         f"### {title}\n\n"
         f"- **Status:** {status}\n"
@@ -899,6 +1176,7 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
             "model_usage": [],
         },
         "tools_used": [],
+        "reportable_tools_used": [],
         "tool_failures": {},
     }
     first_line = run_text.splitlines()[0] if run_text else ""
@@ -907,6 +1185,8 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
 
     budget_candidate: Dict[str, Any] = {}
     tools_used: List[str] = []
+    shell_command_names: List[str] = []
+    shell_commands_by_tool_id: Dict[str, List[str]] = {}
     tool_failures: Counter[str] = Counter()
     metrics = summary["metrics"]
     model_usage_snapshot_seen = False
@@ -961,10 +1241,20 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
         elif event_type == "termination_reason":
             summary["termination_reason"] = payload.get("reason")
             summary["termination_message"] = payload.get("message")
-        elif event_type == "tool_start":
+        elif event_type in {"tool_start", "tool_input_corrected"}:
             tool_name = str(payload.get("tool_name") or payload.get("name") or "").strip()
             if tool_name:
-                tools_used.append(tool_name)
+                if event_type == "tool_start":
+                    tools_used.append(tool_name)
+                if tool_name.lower() == "shell":
+                    tool_input = payload.get("tool_input", {})
+                    command_value = tool_input.get("command") if isinstance(tool_input, dict) else None
+                    command_values = _normalize_shell_command_names(command_value)
+                    tool_id = str(payload.get("tool_id") or "").strip()
+                    if tool_id:
+                        shell_commands_by_tool_id[tool_id] = command_values
+                    else:
+                        shell_command_names.extend(command_values)
         elif event_type == "tool_end":
             outcome = str(payload.get("outcome") or payload.get("status") or "").strip().lower()
             if outcome and outcome not in {"success", "succeeded", "done"}:
@@ -976,8 +1266,44 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
 
     summary["configured_budget"] = _normalize_budget_config(budget_candidate)
     summary["tools_used"] = tools_used
+    for command_values in shell_commands_by_tool_id.values():
+        shell_command_names.extend(command_values)
+    reportable_tools: List[str] = []
+    for tool_name in list(tools_used) + shell_command_names:
+        normalized = str(tool_name).strip().split(":", 1)[0]
+        if normalized and is_reportable_tool(normalized) and normalized not in reportable_tools:
+            reportable_tools.append(normalized)
+    summary["reportable_tools_used"] = reportable_tools
     summary["tool_failures"] = dict(sorted(tool_failures.items()))
     return summary
+
+
+def _normalize_shell_command_names(value: Any) -> List[str]:
+    """Extract unique executable names from shell tool input."""
+
+    if isinstance(value, (list, tuple)):
+        commands: List[str] = []
+        for item in value:
+            commands.extend(_normalize_shell_command_names(item))
+        return commands
+    text = str(value or "").strip()
+    if not text:
+        return []
+    names: List[str] = []
+    for segment in re.split(r"&&|\|\||[;|]", text):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        while tokens and (tokens[0] in {"sudo", "command", "builtin", "exec", "timeout"}):
+            tokens.pop(0)
+        if tokens and tokens[0] == "env":
+            tokens.pop(0)
+            while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+                tokens.pop(0)
+        if tokens:
+            names.append(tokens[0].rsplit("/", 1)[-1])
+    return list(dict.fromkeys(names))
 
 
 def _is_report_only_session(summary: Dict[str, Any]) -> bool:
@@ -1010,6 +1336,7 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     for key in ("input_tokens", "output_tokens", "total_tokens", "cost"):
         metrics[key] = 0
     tools_used: List[str] = []
+    reportable_tools_used: List[str] = []
     failures: Counter[str] = Counter()
     usage_rows: Dict[tuple[str, str], Dict[str, Any]] = {}
     duration_seconds = 0
@@ -1017,6 +1344,9 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
         for tool_name in session.get("tools_used", []):
             if tool_name not in tools_used:
                 tools_used.append(tool_name)
+        for tool_name in session.get("reportable_tools_used", []):
+            if tool_name not in reportable_tools_used:
+                reportable_tools_used.append(tool_name)
         failures.update(session.get("tool_failures", {}))
         session_metrics = session.get("metrics", {})
         duration_seconds += _duration_seconds(session_metrics.get("duration"))
@@ -1053,6 +1383,7 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     metrics["model_usage"] = list(usage_rows.values())
     summary["metrics"] = metrics
     summary["tools_used"] = tools_used
+    summary["reportable_tools_used"] = reportable_tools_used
     summary["tool_failures"] = dict(sorted(failures.items()))
     return summary
 
@@ -2114,6 +2445,12 @@ def generate_security_report(
             )
             return
 
+        report_consistency_errors = _validate_report_consistency(sections, completion_status)
+        sections["completion_status"] = completion_status
+        sections["report_consistency_errors"] = report_consistency_errors
+        for consistency_error in report_consistency_errors:
+            logger.warning("Report consistency validation: %s", consistency_error)
+
         # Get module report prompt if available for domain guidance
         module_report_prompt = _get_module_report_prompt(module)
         try:
@@ -2135,10 +2472,13 @@ def generate_security_report(
             module_report_agent_appendix_system_prompt = ""
 
         output_path = get_output_path(target_name=sanitize_target_name(target), operation_id=operation_id)
-        
-        # Store report data for processing by other means
+
+        narratives: Dict[str, Any] = {}
+        narrative_warnings: List[str] = []
+        # Persist the contract before model calls so interrupted reports still expose
+        # authoritative facts and an explicit empty narrative envelope.
         with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
-            f.write(json.dumps(sections, indent=2, sort_keys=True))
+            f.write(json.dumps(_canonical_report_json(sections, narratives, narrative_warnings), indent=2, sort_keys=True))
 
         module_str = module or "web"
         module_guidance = (
@@ -2224,6 +2564,8 @@ Module: {module_str}
 Only verified findings may be counted as confirmed risk. If there are zero verified findings, do not label the target
 as "low risk"; state that no findings were verified and list validation failures separately.
 Clearly distinguish verified risk, findings requiring validation, informational observations, and coverage status.
+Summarize the explicitly labeled informational observations supplied below in the Informational Observations section.
+They are narrative context only: do not convert them into findings, assign severity, or recalculate their count.
 Configuration exposure alone is not exploit confirmation. Do not present incomplete coverage as exhaustive.
 Attack chains that were not demonstrated end to end may appear only in a separately titled "Hypothetical Attack
 Paths" section. Label every unsupported transition as a hypothesis, cite the verified findings supporting the chain,
@@ -2235,7 +2577,7 @@ downgrade a verified vulnerability used to obtain it, and an objective candidate
 or severity totals.
 
 Use the following canonical data. Do not invent or recalculate counts:
-{json.dumps({k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'verified_findings_total', 'finding_validation_failure_count', 'objective_validation_status', 'objective_validation_failure_count', 'target_coverage', 'phase_coverage', 'completion_status']})}
+{json.dumps({**{k: sections.get(k) for k in ['overview', 'findings_table', 'risk_assessment', 'severity_counts', 'verified_findings_total', 'finding_validation_failure_count', 'objective_validation_status', 'objective_validation_failure_count', 'target_coverage', 'phase_coverage', 'completion_status']}, 'informational_observations': _informational_observation_context(sections)})}
 
 For the verified-findings distribution, copy severity counts exactly. If verified_findings_total is zero, state that
 there are zero verified findings; never create a nonzero "No Verified Findings" category.
@@ -2266,13 +2608,34 @@ there are zero verified findings; never create a nonzero "No Verified Findings" 
             _cleanup_report_agent(exec_critic, "report executive summary critic")
 
         if exec_content:
-            exec_content = exec_content.rstrip() + "\n\n" + taxonomy_coverage
+            narrative_warnings.extend(_validate_narrative_consistency(exec_content, _canonical_report_data(sections)))
+            narratives["executive"] = exec_content
+            exec_content = (
+                exec_content.rstrip()
+                + "\n\n"
+                + _format_verified_findings_summary(sections)
+                + "\n"
+                + taxonomy_coverage
+            )
             exec_content = _append_inline_review_feedback(exec_content, final_critique)
             # Add anchor for Table of Contents
             exec_content = "<a name=\"executive-summary\"></a>\n" + exec_content
             exec_summary_file = os.path.join(output_path, "report_executive_summary.md")
             with open(exec_summary_file, "w") as f:
                 f.write(exec_content)
+            report_parts_files.append(exec_summary_file)
+        else:
+            # A failed narrative call must not remove the factual executive section.
+            exec_summary_file = os.path.join(output_path, "report_executive_summary.md")
+            with open(exec_summary_file, "w") as f:
+                f.write(
+                    '<a name="executive-summary"></a>\n'
+                    "## EXECUTIVE SUMMARY\n\n"
+                    "No executive narrative was returned by the report agent.\n\n"
+                    + _format_verified_findings_summary(sections)
+                    + "\n"
+                    + taxonomy_coverage
+                )
             report_parts_files.append(exec_summary_file)
 
         # Part 2: Detailed Findings
@@ -2353,6 +2716,8 @@ Finding Data:
                 _cleanup_report_agent(finding_agent, f"report finding {i + 1} actor")
                 _cleanup_report_agent(finding_critic, f"report finding {i + 1} critic")
             if finding_text:
+                narrative_warnings.extend(_validate_narrative_consistency(finding_text, _canonical_report_data(sections)))
+                narratives.setdefault("findings", {})[str(finding.get("id", i))] = finding_text
                 finding_text = _ground_report_item(finding_text, finding)
                 metadata = finding.get("metadata", {}) if isinstance(finding.get("metadata"), dict) else {}
                 finding_text = (
@@ -2370,8 +2735,9 @@ Finding Data:
                 report_parts_files.append(finding_path)
 
         # Persist enrichment results with the canonical report inputs for later audit or re-rendering.
+        sections["next_steps"] = {}
         with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
-            f.write(json.dumps(sections, indent=2, sort_keys=True))
+            f.write(json.dumps(_canonical_report_json(sections, narratives, narrative_warnings), indent=2, sort_keys=True))
 
         # Part 3: Findings Requiring Validation. This section is deterministic so an
         # unverified claim cannot gain invented evidence during report generation.
@@ -2495,6 +2861,14 @@ Finding Data:
             )
         report_parts_files.append(target_coverage_file)
 
+        report_consistency_errors.extend(narrative_warnings)
+        sections["report_consistency_errors"] = report_consistency_errors
+        if report_consistency_errors:
+            consistency_file = os.path.join(output_path, "report_consistency_warnings.md")
+            with open(consistency_file, "w") as report_file:
+                report_file.write(_format_report_consistency_warnings(report_consistency_errors))
+            report_parts_files.append(consistency_file)
+
         execution_history_file = os.path.join(output_path, "report_execution_history.md")
         with open(execution_history_file, "w") as f:
             f.write(
@@ -2547,6 +2921,11 @@ Finding Data:
             report_step_index=report_step_index,
             report_step_total=report_step_total,
         )
+
+        # Re-write the JSON envelope after every narrative and deterministic section
+        # has been assembled.  Canonical values remain a separate, authoritative tree.
+        with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
+            f.write(json.dumps(_canonical_report_json(sections, narratives, report_consistency_errors), indent=2, sort_keys=True))
 
         filename = _assemble_security_assessment_report(
             filename=filename,
@@ -2967,9 +3346,32 @@ def build_report_sections(
             completed_count = sum(
                 1 for criterion in task.acceptance.criteria if criterion.id in completed_ids
             )
+            scoped_target_ids = list(getattr(task, "target_ids", []) or [])
+            if getattr(task, "target_scope", "all") == "all":
+                task_target_values = list(target_values.values())
+            else:
+                task_target_values = [target_values[target_id] for target_id in scoped_target_ids if target_id in target_values]
+
+            def _task_field(value: Any) -> str:
+                return str(value or "").replace(",", ";").replace("\n", " ").strip()
+
             operation_tasks.append(
-                f"{task.to_toon(include_format=False)},acceptance={completed_count}/"
-                f"{len(task.acceptance.criteria)},manifest={task.acceptance.manifest_hash}"
+                ",".join(
+                    [
+                        _task_field(task.title),
+                        _task_field(task.objective),
+                        _task_field(task.acceptance.mode),
+                        _task_field(task.phase),
+                        _task_field(task.status),
+                        _task_field(task.status_reason),
+                        _task_field(task.kind),
+                        _task_field(task.reference_id),
+                        _task_field(task.replacement_of),
+                        _task_field(task.target_scope),
+                        _task_field("|".join(task_target_values)),
+                        _task_field(f"{completed_count}/{len(task.acceptance.criteria)}"),
+                    ]
+                )
             )
             results_by_criterion = {result.criterion_id: result for result in acceptance_results}
             task_history_rows.append(
@@ -2978,9 +3380,8 @@ def build_report_sections(
                     "title": task.title,
                     "status": task.status,
                     "status_reason": task.status_reason or "",
-                    "target_ids": ", ".join(task.target_ids) if task.target_ids else task.target_scope,
+                    "targets": ", ".join(task_target_values) if task_target_values else task.target_scope,
                     "acceptance": f"{completed_count}/{len(task.acceptance.criteria)}",
-                    "manifest_hash": task.acceptance.manifest_hash,
                 }
             )
             for criterion in task.acceptance.criteria:
@@ -3282,7 +3683,8 @@ def build_report_sections(
         if session_started:
             operation_date = session_started[:10]
         if not tools_used:
-            tools_used = latest_run.get("tools_used", [])
+            tools_used = latest_run.get("reportable_tools_used") or latest_run.get("tools_used", [])
+        tools_used = [tool for tool in tools_used if is_reportable_tool(tool)]
 
         # Format tools summary (accepts dict or list); prefer accurate counts if provided
         try:
@@ -3367,7 +3769,10 @@ def build_report_sections(
             "overview": report_content.get("overview", ""),
             "operation_plan": operation_plan.to_dict() if operation_plan else "",
             "operation_tasks": {
-                "columns": Task.csv_format(),
+                "columns": (
+                    "title,objective,acceptance_mode,phase,status,status_reason,kind,reference_id,"
+                    "replacement_of,target_scope,target_values,acceptance"
+                ),
                 "items": operation_tasks,
             },
             "execution_history": _format_execution_history(task_history_rows, acceptance_history_rows),
@@ -3396,6 +3801,7 @@ def build_report_sections(
             "objective_validation_failure_count": objective_validation_failure_count,
             "objective_validation_results": objective_results,
             "tools_summary": tools_summary,
+            "reportable_tools_used": list(tools_used or []),
             "analysis_framework": domain_lens.get("framework", ""),
             "module": module,
             "evidence_count": len(evidence),

@@ -184,11 +184,14 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert "Comprehensive web application security assessment" in out.get("overview")
         assert out.get("operation_plan", "{}") == plan.to_dict()
 
-        assert out.get("operation_tasks", {}).get("columns") == Task.csv_format()
-        assert out.get("operation_tasks", {}).get("items", []) == [
-            f"{task.to_toon(include_format=False)},acceptance=0/1,manifest={task.acceptance.manifest_hash}"
-            for task in tasks
-        ]
+        operation_tasks = out.get("operation_tasks", {})
+        assert operation_tasks.get("columns") == (
+            "title,objective,acceptance_mode,phase,status,status_reason,kind,reference_id,"
+            "replacement_of,target_scope,target_values,acceptance"
+        )
+        assert len(operation_tasks.get("items", [])) == len(tasks)
+        assert all("manifest" not in item for item in operation_tasks["items"])
+        assert all("criterion" not in item.lower() for item in operation_tasks["items"])
 
         evidence_text = out.get("evidence_text")
         assert all([f" /{chr(c)}\n" in evidence_text for c in range(ord('a'), ord('p'))])
@@ -223,7 +226,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert len(list(filter(lambda e: e["severity"] == "LOW", verified))) == 2
         assert len(list(filter(lambda e: e["severity"] == "INFO", verified))) == 0
 
-        assert out.get("tools_summary") == "- shell: 3 uses\n- python_repl: 2 uses"
+        assert out.get("tools_summary") == "- shell\n- python_repl"
         assert "OWASP Top 10 2021" in out.get("analysis_framework")
         assert out.get("module") == "web"
         assert out.get("evidence_count") == 15

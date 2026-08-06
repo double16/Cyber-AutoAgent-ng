@@ -44,6 +44,15 @@ per manifest item. Python resolves typed artifact, memory, observation, and find
 evaluation. This preserves broad, cohesive work under one retained executor without allowing moving completion
 targets.
 
+### Replacement and Supersession
+
+When a task cannot complete and its remaining intent must be split or retried as new work, replacement tasks declare
+`replacement_of` with the parent task UID and identify the parent criteria they resolve in `supersedes_criteria`.
+Python reconciles this lineage before phase closure. The parent becomes `superseded` only after every parent criterion is
+covered and every linked replacement is `done` or `superseded`. The parent record, evidence, and failure reason remain
+available for audit. Unlinked failures remain blocking, and Python does not infer replacement relationships from
+similar wording.
+
 ```mermaid
 flowchart LR
     M[Missing or invalid snapshot] --> R[Reject coverage task batch]
@@ -324,6 +333,7 @@ flowchart TD
     H --> I[Task Evaluator]
     I --> J{Task Status}
     J -->|done / partial_failure / blocked| K[Controller Applies State]
+    K -->|linked replacements resolve all criteria| X[Mark parent superseded]
     
     style A fill:#e3f2fd,stroke:#333,stroke-width:3px
     style K fill:#e3f2fd,stroke:#333,stroke-width:3px

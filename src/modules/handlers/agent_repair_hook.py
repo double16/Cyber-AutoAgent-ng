@@ -9,6 +9,7 @@ from strands.hooks.events import AfterModelCallEvent, BeforeModelCallEvent, Befo
 from modules.config.system.logger import get_logger
 
 from modules.agents.patches import _JSON_FENCE_RE, _JSON_BARE_RE, patch_ollama_model_json_toolcalls
+from modules.utils.tool_call_normalization import normalize_tool_call_payload
 
 
 logger = get_logger("Handlers.AgentRepairHook")
@@ -42,29 +43,28 @@ class AgentRepairHook(HookProvider):
         if tool_use.get("name") != "tool_use":
             return
         wrapper_input = tool_use.get("input", {})
-        if not isinstance(wrapper_input, dict):
-            event.cancel_tool = "Generic tool_use wrappers are invalid; call an available tool directly."
-            return
-
-        nested_name = str(wrapper_input.get("tool_name") or wrapper_input.get("name") or "").strip()
-        nested_input = wrapper_input.get("parameters", wrapper_input.get("arguments", {}))
         registry = getattr(getattr(event.agent, "tool_registry", None), "registry", {})
-        selected_tool = registry.get(nested_name) if isinstance(registry, dict) else None
-        if selected_tool is None or not isinstance(nested_input, dict):
+        try:
+            normalized = normalize_tool_call_payload(
+                {"name": "tool_use", **(wrapper_input if isinstance(wrapper_input, dict) else {})},
+                registered_tool_names=registry.keys() if isinstance(registry, dict) else (),
+            )
+        except ValueError as error:
             available = ", ".join(sorted(registry)) if isinstance(registry, dict) else ""
             event.cancel_tool = (
                 "Generic tool_use wrappers are invalid. Call a registered tool directly. "
-                f"Available tools: {available or 'none'}."
+                f"{error}. Available tools: {available or 'none'}."
             )
             return
 
+        selected_tool = registry[normalized.name]
         event.selected_tool = selected_tool
         event.tool_use = {
             **tool_use,
-            "name": nested_name,
-            "input": nested_input,
+            "name": normalized.name,
+            "input": normalized.arguments,
         }
-        logger.warning("Repaired generic tool_use wrapper to registered tool %s", nested_name)
+        logger.warning("Repaired generic tool_use wrapper to registered tool %s", normalized.name)
 
     def after_model_call_check(self, event: AfterModelCallEvent) -> None:
         """

@@ -21,3 +21,9 @@ General assessments serve diverse stakeholders:
 - **Technical Teams**: Specific vulnerabilities, reproduction steps, patches
 - **Compliance**: Regulatory implications, audit findings, gap analysis
 </audience_adaptation>
+
+<deterministic_reporting_boundary>
+Use this module guidance only for narrative attack-surface interpretation. Python owns observations, findings,
+verification and completion status, coverage, target/task/phase facts, artifact references, taxonomy, and metrics.
+Do not enumerate, deduplicate, calculate, declare, or tabulate those facts.
+</deterministic_reporting_boundary>

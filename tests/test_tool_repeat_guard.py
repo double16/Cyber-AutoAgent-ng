@@ -156,6 +156,7 @@ def test_third_call_reuses_result_and_fourth_stops_normally():
         "repeat_count": 4,
         "tool_name": "shell",
         "tool_names": ["shell"],
+        "cycle_signature": "b82dfef18102249a203eccc88ba1cee22dd63b89b1f95c2021d3688f82dcaa4e",
     }
 
 
@@ -193,6 +194,7 @@ def test_alternating_two_call_cycle_reuses_each_result_then_stops():
         "repeat_count": 3,
         "tool_name": "shell",
         "tool_names": ["shell", "shell"],
+        "cycle_signature": "c5ad00c5020be05d1b586ae0446c13325d5651b7971d269975450304e1c82588",
     }
 
 
@@ -262,6 +264,7 @@ def test_default_three_call_cycle_works_with_failure_recovery_hook():
         "repeat_count": 3,
         "tool_name": "shell",
         "tool_names": ["shell", "shell", "shell"],
+        "cycle_signature": "08140501e147a5b58a1103dc774cfd43a14ca85d3dbe96c53fb6f7171851568d",
     }
 
 
@@ -376,6 +379,7 @@ def test_alternating_canceled_calls_are_detected_but_not_cached():
         "repeat_count": 3,
         "tool_name": "shell",
         "tool_names": ["shell", "shell"],
+        "cycle_signature": "c478f6d8cfbfaa32a9628460a4a336f27101eab092392a7b3abc220ae4545bb1",
     }
 
 

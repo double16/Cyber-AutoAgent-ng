@@ -1131,6 +1131,8 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
         "output_kind",
         "criteria",
         "target_ids",
+        "replacement_of",
+        "supersedes_criteria",
     }
     schema_text = json.dumps(task_schema["properties"])
     for removed in ("acceptance", "phase", "status", "target_scope", "gap_policy", "stop_condition", "basis_kind"):
@@ -1393,6 +1395,81 @@ def test_create_tasks_rejects_task_without_required_title():
 def test_create_tasks_rejects_empty_proposal_list():
     with pytest.raises(ValueError, match="must have at least one task"):
         mod.create_tasks([])
+
+
+def test_create_tasks_preserves_explicit_replacement_lineage(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    parent = mod.Task(
+        task_uid="parent-task",
+        title="Combined test",
+        objective="Test two related behaviors",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(
+                kind="procedure",
+                description="bounded",
+                source_refs=["target:target-1"],
+                procedure={
+                    "methods": ["test"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "inventory_manifest",
+                },
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Resolve the combined test",
+                evidence_requirements=[mod.EvidenceRequirement(kind="inventory_manifest")],
+            )],
+        ),
+        phase=1,
+        status="partial_failure",
+    )
+    store.tasks.append(parent)
+
+    result = mod.create_tasks([{
+        "title": "Cookie follow-up",
+        "objective": "Resolve the cookie portion of the failed combined test",
+        "methods": ["test"],
+        "criteria": [{"description": "Record evidence for the parent intent"}],
+        "target_ids": ["target-1"],
+        "replacement_of": "parent-task",
+        "supersedes_criteria": ["criterion-1"],
+    }])
+
+    assert json.loads(result)["created_count"] == 1
+    replacement = next(task for task in store.tasks if task.task_uid != "parent-task")
+    assert replacement.replacement_of == "parent-task"
+    assert replacement.supersedes_criteria == ["criterion-1"]
+
+
+def test_create_tasks_rejects_unknown_replacement_parent(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+
+    with pytest.raises(ValueError, match="unknown task"):
+        mod.create_tasks([{
+            "title": "Replacement",
+            "objective": "Resolve missing work",
+            "criteria": [{"description": "Record evidence"}],
+            "methods": ["test"],
+            "replacement_of": "missing-parent",
+            "supersedes_criteria": ["criterion-1"],
+        }])
 
 
 def test_create_tasks_compiles_bounded_procedure_proposal(fake_memory_client):
@@ -2559,6 +2636,8 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
         "output_kind",
         "criteria",
         "target_ids",
+        "replacement_of",
+        "supersedes_criteria",
     }
 
 

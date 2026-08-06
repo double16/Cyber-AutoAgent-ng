@@ -36,6 +36,12 @@ from modules.handlers.report_generator import (
     _select_artifact_excerpt,
     _validate_report_critique,
     _validate_next_steps,
+    _validate_report_consistency,
+    _canonical_report_data,
+    _canonical_report_json,
+    _format_verified_findings_summary,
+    _validate_narrative_consistency,
+    _format_report_consistency_warnings,
     build_report_sections,
     generate_security_report,
 )
@@ -43,6 +49,66 @@ from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task
 from tests.helpers.acceptance import make_acceptance
 
 
+def test_canonical_report_data_owns_counts_and_json_separates_narrative():
+    sections = {
+        "operation_id": "OP_TEST",
+        "target": "https://example.test",
+        "severity_counts": {"critical": 1, "high": 0, "medium": 0, "low": 0, "info": 0},
+        "verified_findings_total": 1,
+        "raw_evidence": [{
+            "id": "f-1", "title": "Stored XSS", "category": "finding", "severity": "CRITICAL",
+            "metadata": {"artifacts": ["artifact:artifacts/proof.txt"]},
+        }],
+        "completion_status": {"assessment_complete": False},
+        "phase_coverage": [{"phase_id": 1, "status": "done", "task_status_counts": {}}],
+    }
+    canonical = _canonical_report_data(sections)
+    report = _canonical_report_json(sections, {"executive": "one critical finding"}, [])
+
+    assert canonical["verified_findings_total"] == 1
+    assert canonical["artifact_references"] == ["artifact:artifacts/proof.txt"]
+    assert report["canonical"]["severity_counts"]["critical"] == 1
+    assert report["narrative"]["executive"] == "one critical finding"
+
+
+def test_deterministic_summary_cannot_be_overridden_by_narrative():
+    sections = {"verified_findings_total": 1, "severity_counts": {"critical": 1, "high": 0, "medium": 0, "low": 0, "info": 0}}
+    summary = _format_verified_findings_summary(sections)
+
+    assert "Verified findings: **1**" in summary
+    assert "| CRITICAL | 1 |" in summary
+    assert "| HIGH | 0 |" in summary
+
+
+def test_narrative_consistency_flags_unknown_facts_and_incomplete_completion_claims():
+    canonical = {
+        "findings": [{"id": "f-1", "title": "Stored XSS"}],
+        "artifact_references": ["artifact:artifacts/proof.txt"],
+        "phase_coverage": [{"phase_id": 1}],
+        "completion_status": {"assessment_complete": False},
+    }
+    warnings = _validate_narrative_consistency(
+        "Finding invented-finding cites artifact:artifacts/missing.txt. All planned tasks completed and no vulnerabilities remain.",
+        canonical,
+    )
+
+    assert any("unknown finding" in warning for warning in warnings)
+    assert any("unregistered artifact" in warning for warning in warnings)
+    assert any("incomplete" in warning for warning in warnings)
+
+
+def test_narrative_consistency_flags_false_empty_observation_claim():
+    canonical = {
+        "observations": [{"id": "observation-1", "category": "observation"}],
+        "findings": [],
+        "artifact_references": [],
+        "phase_coverage": [],
+        "completion_status": {"assessment_complete": True},
+    }
+
+    warnings = _validate_narrative_consistency("No informational observations were established.", canonical)
+
+    assert any("no informational observations" in warning.lower() for warning in warnings)
 def test_format_model_usage_table_and_elapsed_time_fallbacks():
     table = _format_model_usage_table(
         [
@@ -87,18 +153,16 @@ def test_format_execution_history_is_stable_and_escapes_markdown_cells():
                 "title": "Second | task",
                 "status": "partial_failure",
                 "status_reason": "Needs\nfollow-up",
-                "target_ids": "target-2",
+                "targets": "http://two.test",
                 "acceptance": "0/1",
-                "manifest_hash": "manifest-two",
             },
             {
                 "phase": 1,
                 "title": "First task",
                 "status": "done",
                 "status_reason": "",
-                "target_ids": "target-1",
+                "targets": "http://one.test",
                 "acceptance": "1/1",
-                "manifest_hash": "manifest-one",
             },
         ],
         [
@@ -126,6 +190,10 @@ def test_format_execution_history_is_stable_and_escapes_markdown_cells():
     assert history.index("| 1 | First task") < history.index("| 2 | Second \\| task")
     assert "Needs follow-up" in history
     assert "### Acceptance Outcomes" in history
+    assert "Manifest" not in history
+    assert "Criterion" not in history
+    assert "Evidence" not in history
+    assert "http://one.test" in history
 
 
 def test_markdown_table_cell_code_formats_xml_html_tags_only():
@@ -141,6 +209,23 @@ def test_observation_recorded_detail_formats_xml_html_tags():
 
     assert "`<input name='user'>`" in content
     assert "`</form>`" in content
+
+
+def test_observation_recorded_detail_removes_acceptance_prefix_and_duplicate_evidence():
+    content = _format_observation(
+        {
+            "title": "Observed technology",
+            "content": (
+                "Task acceptance. Criterion criterion-1 [satisfied; observation]: Apache was identified. "
+                "Evidence: artifact:artifacts/inventory_manifest.json."
+            ),
+        },
+        0,
+    )
+
+    assert "Criterion criterion-1" not in content
+    assert "Evidence: artifact:artifacts/inventory_manifest.json" not in content
+    assert "Apache was identified." in content
 
 
 def test_software_provenance_reads_project_manifest(monkeypatch, tmp_path):
@@ -670,6 +755,51 @@ def test_latest_operation_log_parser_uses_only_final_session(tmp_path):
     assert parsed["tool_failures"] == {"nmap:error": 1}
 
 
+def test_operation_log_parser_filters_bookkeeping_and_extracts_shell_commands(tmp_path):
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-02 11:00:00",
+                event({"type": "tool_start", "tool_name": "create_tasks"}),
+                event(
+                    {
+                        "type": "tool_start",
+                        "tool_name": "shell",
+                        "tool_id": "shell-1",
+                "tool_input": {"command": ["curl -I https://example.test", "python -V"]},
+                    }
+                ),
+                event(
+                    {
+                        "type": "tool_input_corrected",
+                        "tool_name": "shell",
+                        "tool_id": "shell-1",
+                        "tool_input": {"command": "curl -s https://example.test"},
+                    }
+                ),
+                event(
+                    {
+                        "type": "tool_start",
+                        "tool_name": "shell",
+                        "tool_input": {"command": "sudo curl -s https://example.test && env FOO=1 nmap -sV target | grep nmap"},
+                    }
+                ),
+                event({"type": "tool_start", "tool_name": "store_observation"}),
+                event({"type": "tool_start", "tool_name": "http_request"}),
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["tools_used"] == ["create_tasks", "shell", "shell", "store_observation", "http_request"]
+    assert parsed["reportable_tools_used"] == ["shell", "http_request", "curl", "nmap"]
+
+
 def test_latest_operation_log_parser_uses_assessment_model_usage_snapshot(tmp_path):
     usage = [
         {
@@ -781,6 +911,7 @@ def test_operation_log_parser_uses_execution_session_before_report_only_session(
     assert parsed["termination_reason"] == "partial_failure"
     assert parsed["termination_message"] == "Phase 4 failed"
     assert parsed["tools_used"] == ["shell"]
+    assert parsed["reportable_tools_used"] == ["shell"]
     assert parsed["metrics"]["duration"] == "25m"
     assert parsed["metrics"]["model_usage"] == usage
 
@@ -834,6 +965,7 @@ def test_operation_log_parser_aggregates_execution_continuations_before_report_o
     parsed = _parse_latest_operation_log(str(log_path))
 
     assert parsed["tools_used"] == ["shell", "read_artifact"]
+    assert parsed["reportable_tools_used"] == ["shell"]
     assert parsed["metrics"]["total_tokens"] == 170
     assert parsed["metrics"]["duration"] == "15m 0s"
     assert len(parsed["metrics"]["model_usage"]) == 1
@@ -1115,6 +1247,89 @@ def test_format_target_coverage_reconstructs_targets_from_task_ids():
     )
 
     assert "| target-1 | network | `http://target.test` | 1 | 1 | 0 |" in coverage
+
+
+def test_format_target_coverage_counts_child_endpoint_under_registered_target():
+    plan = OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="done")],
+        targets=[OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    tasks = [
+        Task("task-1", "Check endpoint", "Check endpoint", make_acceptance("task-1"), 1, "done"),
+    ]
+    evidence = [
+        {
+            "category": "finding",
+            "metadata": {"target": "http://target.test/login.php"},
+            "content": "confirmed",
+        },
+        {
+            "category": "finding",
+            "metadata": {"target": "http://target.test/account.php"},
+            "content": "confirmed",
+        },
+    ]
+
+    coverage = _format_target_coverage(plan, tasks, evidence)
+
+    assert "| target-1 | network | `http://target.test` | 1 | 2 | 0 |" in coverage
+
+
+def test_report_consistency_reconciles_derived_counts_and_incomplete_coverage():
+    sections = {
+        "raw_evidence": [
+            {"category": "finding"},
+            {"category": "validation_failure"},
+        ],
+        "verified_findings_total": 9,
+        "finding_count": 9,
+        "validation_failure_count": 0,
+        "finding_validation_failure_count": 0,
+        "task_status_counts": {"done": 1, "pending": 1},
+        "total_task_count": 7,
+        "completed_task_count": 4,
+        "phase_coverage": [
+            {"phase_id": 1, "status": "done", "task_status_counts": {"done": 1}},
+            {"phase_id": 2, "status": "partial_failure", "task_status_counts": {"pending": 1}},
+        ],
+        "evidence_integrity_errors": [{"reference": "artifact:missing.txt"}],
+    }
+    completion = {"assessment_complete": True, "workflow_complete": True}
+
+    errors = _validate_report_consistency(sections, completion)
+
+    assert sections["verified_findings_total"] == 1
+    assert sections["validation_failure_count"] == 1
+    assert sections["total_task_count"] == 2
+    assert sections["completed_task_count"] == 1
+    assert completion["assessment_complete"] is False
+    assert completion["incomplete_phase_ids"] == [2]
+    assert len(errors) == 6
+    warning = _format_report_consistency_warnings(errors)
+    assert "Report Consistency Warnings" in warning
+    assert "artifact:missing.txt" in warning
+
+
+def test_report_consistency_accepts_matching_canonical_state():
+    sections = {
+        "raw_evidence": [{"category": "finding"}],
+        "verified_findings_total": 1,
+        "finding_count": 1,
+        "validation_failure_count": 0,
+        "finding_validation_failure_count": 0,
+        "task_status_counts": {"done": 1},
+        "total_task_count": 1,
+        "completed_task_count": 1,
+        "phase_coverage": [{"phase_id": 1, "status": "done", "task_status_counts": {"done": 1}}],
+        "evidence_integrity_errors": [],
+    }
+    completion = {"assessment_complete": True, "workflow_complete": True}
+
+    assert _validate_report_consistency(sections, completion) == []
+    assert _format_report_consistency_warnings([]) == ""
 
 
 @pytest.fixture(autouse=True)
