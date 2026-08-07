@@ -160,6 +160,29 @@ def test_third_call_reuses_result_and_fourth_stops_normally():
     }
 
 
+def test_repeated_uncacheable_call_stops_at_threshold():
+    hook = ToolRepeatGuardHook(repeat_threshold=3)
+    invocation_state = {"request_state": {}}
+
+    for tool_id in ("one", "two"):
+        event = _before(invocation_state, None, tool_id)
+        hook._before_tool(event)
+        hook._after_tool(_after(event, None))
+
+    repeated = _before(invocation_state, None, "three")
+    hook._before_tool(repeated)
+
+    assert invocation_state["request_state"]["stop_event_loop"] is True
+    assert invocation_state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY] == {
+        "cycle_length": 1,
+        "repeat_count": 3,
+        "tool_name": "shell",
+        "tool_names": ["shell"],
+        "cycle_signature": "b82dfef18102249a203eccc88ba1cee22dd63b89b1f95c2021d3688f82dcaa4e",
+        "result_reused": False,
+    }
+
+
 def test_alternating_two_call_cycle_reuses_each_result_then_stops():
     hook = ToolRepeatGuardHook(repeat_threshold=3, max_cycle_length=8)
     invocation_state = {"request_state": {}}

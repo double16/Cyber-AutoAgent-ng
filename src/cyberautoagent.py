@@ -596,20 +596,31 @@ def run_agent_until_terminal_state(
                 tool_name = str(repeated_tool_loop.get("tool_name", "unknown"))
                 repeat_count = int(repeated_tool_loop.get("repeat_count", 0) or 0)
                 cycle_length = int(repeated_tool_loop.get("cycle_length", 1) or 1)
+                result_reused = repeated_tool_loop.get("result_reused", True) is not False
                 if cycle_length > 1:
                     raw_tool_names = repeated_tool_loop.get("tool_names", [])
                     tool_names = list(dict.fromkeys(
                         str(item) for item in raw_tool_names if str(item).strip()
                     )) if isinstance(raw_tool_names, list) else []
                     tool_summary = f" involving {', '.join(tool_names)}" if tool_names else ""
+                    reuse_summary = (
+                        "matching completed results were reused"
+                        if result_reused
+                        else "no reusable completed result was available"
+                    )
                     message = (
                         f"Stopped agent after {repeat_count} repetitions of a {cycle_length}-call tool cycle"
-                        f"{tool_summary}; matching completed results were reused."
+                        f"{tool_summary}; {reuse_summary}."
                     )
                 else:
+                    reuse_summary = (
+                        "the latest completed result was reused"
+                        if result_reused
+                        else "no reusable completed result was available"
+                    )
                     message = (
                         f"Stopped agent after {repeat_count} consecutive identical calls to {tool_name}; "
-                        "the latest completed result was reused."
+                        f"{reuse_summary}."
                     )
                 logger.warning(message)
                 return AgentRunResult(
