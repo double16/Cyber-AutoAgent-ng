@@ -160,7 +160,7 @@ describe('Terminal event processing', () => {
             progressPercent: 5,
         });
         expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({type: 'metrics_update'}));
-        expect(textFromTree(view.toJSON())).toContain('SECURITY ASSESSMENT REPORT');
+        expect(textFromTree(view.toJSON())).not.toContain('SECURITY ASSESSMENT REPORT');
 
         act(() => {
             cleanupRef.current?.();

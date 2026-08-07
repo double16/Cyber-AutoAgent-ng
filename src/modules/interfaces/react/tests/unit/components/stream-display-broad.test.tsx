@@ -43,7 +43,7 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Paths unavailable');
   });
 
-  it('formats streamed report content as Markdown', async () => {
+  it('does not render streamed report content as an inline snippet', async () => {
     const {EventLine, render} = await load();
     const output = render(
       <EventLine
@@ -52,10 +52,7 @@ describe('StreamDisplay broad event rendering', () => {
       />
     ).lastFrame();
 
-    expect(output).toContain('Report');
-    expect(output).toContain('Finding');
-    expect(output).toContain('• Verify the fix');
-    expect(output).not.toContain('**Finding**');
+    expect(output || '').toBe('');
   });
 
   it('treats thinking events as non-rendering stream controls', async () => {
