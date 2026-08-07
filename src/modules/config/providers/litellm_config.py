@@ -244,17 +244,10 @@ def align_litellm_defaults(
     for key in ("memory_llm", "evaluation_llm", "swarm_llm"):
         cfg = defaults.get(key)
         if isinstance(cfg, MemoryLLMConfig):
-            if not env_reader.get("MEM0_LLM_MODEL"):
-                if embed_override and embed_override.startswith("ollama/"):
-                    cfg.model_id = "ollama/llama3.2:3b"
-                    cfg.provider = ModelProvider.LITELLM
-                    cfg.parameters["temperature"] = cfg.temperature
-                    cfg.parameters["max_tokens"] = cfg.max_tokens
-                else:
-                    cfg.model_id = llm_cfg.model_id
-                    cfg.provider = ModelProvider.LITELLM
-                    cfg.parameters["temperature"] = cfg.temperature
-                    cfg.parameters["max_tokens"] = cfg.max_tokens
+            cfg.model_id = "ollama/llama3.2:3b" if embed_override and embed_override.startswith("ollama/") else llm_cfg.model_id
+            cfg.provider = ModelProvider.LITELLM
+            cfg.parameters["temperature"] = cfg.temperature
+            cfg.parameters["max_tokens"] = cfg.max_tokens
         elif isinstance(cfg, LLMConfig):
             cfg.model_id = llm_cfg.model_id
             cfg.provider = ModelProvider.LITELLM
@@ -293,7 +286,7 @@ def align_litellm_defaults(
                     dims = 1536
                     logger.warning(
                         "Could not infer dimensions for '%s', defaulting to 1536. "
-                        "If this is incorrect, the FAISS index will fail to load.",
+                        "If this is incorrect, Qdrant will reject generated vectors.",
                         embed_model,
                     )
         else:

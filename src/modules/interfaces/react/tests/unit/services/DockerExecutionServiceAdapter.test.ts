@@ -19,6 +19,8 @@ class MockDirectDockerService extends EventEmitter {
     stop = jest.fn(async () => undefined);
     cleanup = jest.fn();
     isAssessing = jest.fn(() => false);
+    drainBufferedStartupEvents = jest.fn(() => [{type: 'tool_discovery_start'}]);
+    markStartupEventConsumerAttached = jest.fn();
 
     constructor() {
         super();
@@ -110,6 +112,16 @@ describe('DockerExecutionServiceAdapter', () => {
 
         MockDirectDockerService.checkDocker.mockRejectedValueOnce(new Error('daemon down'));
         await expect(adapter.isSupported(baseConfig)).resolves.toBe(false);
+    });
+
+    it('delegates startup discovery event buffering to the wrapped service', async () => {
+        const {adapter, dockerService} = await loadAdapter();
+
+        expect(adapter.drainBufferedStartupEvents()).toEqual([{type: 'tool_discovery_start'}]);
+        expect(dockerService.drainBufferedStartupEvents).toHaveBeenCalledTimes(1);
+
+        adapter.markStartupEventConsumerAttached();
+        expect(dockerService.markStartupEventConsumerAttached).toHaveBeenCalledTimes(1);
     });
 
     it('returns an early validation error when Docker is unavailable', async () => {

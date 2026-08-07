@@ -54,13 +54,32 @@ def bypass_live_target_preflight(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def bypass_live_memory_client(monkeypatch):
-    """Keep CLI workflow tests independent of local Mem0/Ollama availability."""
+    """Keep CLI workflow tests independent of local Qdrant/Ollama availability."""
 
     monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock())
 
 
 class TestCLIArguments:
     """Test command-line argument parsing"""
+
+    def test_invalid_memory_mode_environment_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("CYBER_MEMORY_MODE", "automatic")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "cyberautoagent.py",
+                "--target",
+                "test.com",
+                "--objective",
+                "test objective",
+            ],
+        )
+
+        with pytest.raises(SystemExit) as error:
+            cyberautoagent.main()
+
+        assert error.value.code == 2
 
     def test_required_arguments(self):
         """Test that required arguments are parsed correctly"""
@@ -2047,9 +2066,13 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
             return True
 
     monkeypatch.setattr(cyberautoagent.os, "scandir", lambda _path: [DirEntry("OP_20260101_000000"), DirEntry("OP_20260102_000000")])
-    from modules.tools.memory import PlanStore
+    from modules.tools.memory import create_application_store
 
-    PlanStore(str(tmp_path / "example.com" / "memory" / "OP_20260102_000000" / "plan_storage.db"))
+    store = create_application_store(
+        str(tmp_path / "cyber_autoagent.db"),
+        logical_target="example.com",
+    )
+    store.ensure_operation("OP_20260102_000000")
 
     cyberautoagent.main()
 
@@ -2227,6 +2250,39 @@ def test_cli_main_runs_workflow_controller(monkeypatch, tmp_path):
     assert Path.cwd() == expected_cwd
 
 
+def test_cli_preflight_persists_without_initializing_qdrant(monkeypatch, tmp_path):
+    callback = CliCallback()
+    plan_store = Mock()
+    plan_store_cls = Mock(return_value=plan_store)
+    agent = CallableCliAgent()
+    _patch_cli_common(monkeypatch, tmp_path, agent, callback)
+    monkeypatch.setattr(cyberautoagent, "create_application_store", plan_store_cls)
+    monkeypatch.setattr(cyberautoagent, "get_application_database_path", Mock(return_value="/tmp/preflight.db"))
+    semantic_memory = Mock()
+    monkeypatch.setattr(cyberautoagent, "get_memory_client", semantic_memory)
+    plan_store.store_preflight_results.side_effect = lambda *_args: semantic_memory.assert_not_called()
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    cyberautoagent.main()
+
+    plan_store_cls.assert_called_once_with("/tmp/preflight.db", logical_target="example.com")
+    plan_store.store_preflight_results.assert_called_once()
+
+
 def test_cli_main_preflight_failure_stops_before_environment_or_workflow(monkeypatch, tmp_path):
     callback = CliCallback()
     config_manager = _patch_cli_common(monkeypatch, tmp_path, CallableCliAgent(), callback)
@@ -2355,6 +2411,43 @@ def test_cli_main_worker_session_reuses_and_cleans_role_agent(
         for call in cyberautoagent.run_agent_until_terminal_state.call_args_list
     ] == ["first pass", "critic guidance"]
     fake_agent.cleanup.assert_called_once()
+
+
+def test_cli_main_retained_executor_preserves_repeated_tool_loop_metadata(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    loop_details = {
+        "cycle_signature": "loop-signature",
+        "cycle_length": 1,
+        "repeat_count": 4,
+        "tool_name": "shell",
+        "tool_names": ["shell"],
+    }
+    runner_result = cyberautoagent.AgentRunResult(
+        "repeated_tool_loop",
+        "Stopped agent after repeated shell calls",
+        details=loop_details,
+    )
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(return_value=runner_result))
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"],
+    )
+
+    def run_workflow():
+        session_factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
+        with session_factory("task_executor", ["shell"], "role system") as run_executor:
+            result = run_executor("perform task", cyberautoagent.AgentRunPolicy())
+        assert result.text == runner_result.message
+        assert result.repeat_loop_detected is True
+        assert result.repeat_loop_signature == "loop-signature"
+        assert result.repeat_loop_reason == runner_result.message
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
 
 
 def test_cli_main_workflow_runner_prefers_agent_final_text_over_policy_message(monkeypatch, tmp_path):

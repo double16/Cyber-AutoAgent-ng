@@ -1,636 +1,187 @@
 # User Guide
 
-Cyber-AutoAgent is an autonomous security assessment tool with a React-based terminal interface providing real-time operation monitoring and interactive configuration.
+Cyber-AutoAgent is an autonomous security assessment tool with a React terminal interface and a Python command-line runner. Use either interface only
+against systems you own or are explicitly authorized to assess.
 
 ## Prerequisites
 
-| Requirement               | Purpose                            |
-|---------------------------|------------------------------------|
-| Node.js 22+               | React interface runtime            |
-| Docker Desktop            | Containerized agent execution      |
-| AWS credentials or Ollama | Model provider access              |
-| Authorization             | Written permission to test targets |
+| Requirement | Purpose |
+|---|---|
+| Node.js 22+ | React terminal interface |
+| Python 3.12+ and `uv` | Python runner and development workflows |
+| Docker | Containerized execution modes |
+| Provider credentials or a running Ollama instance | Model access |
+| Written authorization | Legal and operational scope |
 
 **Legal Notice:** Only test systems you own or have explicit written permission to assess. Unauthorized testing is illegal. Users assume full responsibility for legal and ethical use.
 
-## Installation
+## React terminal
 
 ```bash
-# optional to get runtime dependencies and security tools
-brew bundle
-
 cd src/modules/interfaces/react
 npm install
 npm run build
 npm start
 ```
 
-First launch guides you through Docker setup, deployment mode selection, and provider configuration.
+The first launch guides Docker setup, deployment mode, and provider configuration. The React CLI supports interactive
+commands such as `/config`, `/module`, `/setup`, `/health`, `continue`, and `report`.
 
-## Deployment Modes
+### React CLI options
 
-| Mode             | Execution       | Observability     | Use Case          |
-|------------------|-----------------|-------------------|-------------------|
-| Local CLI        | Direct Python   | None              | Development       |
-| Single Container | Docker isolated | None              | Basic assessments |
-| Full Stack       | Docker Compose  | Langfuse included | Production        |
+The executable is `cyber-react` after the React package is built, or `npm start --` during development. Supported
+options include:
 
-Select during setup or change via `/setup` command.
+| Option | Description |
+|---|---|
+| `--target, -t` | Target system or network |
+| `--objective, -o` | Assessment objective |
+| `--module, -m` | Module name; defaults to `web` |
+| `--max-duration` | Duration budget in minutes |
+| `--max-tokens` / `--max-cost` | Optional token and cost budgets |
+| `--auto-run` | Start an assessment without the interactive UI |
+| `--auto-approve` | Skip interactive tool confirmations |
+| `--memory-mode` | `operation` (current operation only) or `shared` (same target across operations) |
+| `--provider` / `--model` / `--region` | Model configuration |
+| `--continue` / `--report` | Continue or regenerate the latest operation, optionally by ID |
+| `--deployment-mode` | `local-cli`, `single-container`, or `full-stack` |
+| `--mcp-enabled` / `--mcp-conns` | Enable and configure MCP servers |
+| `--headless` / `--recording` / `--debug, -d` | Output and diagnostic modes |
+
+The React help text is the authoritative list for optional flags. Provider availability depends on the Python
+configuration and installed credentials; current Python provider choices are `bedrock`, `ollama`, `litellm`, and
+`gemini`.
+
+## Python command line
+
+Run the Python entry point with `uv`:
+
+```bash
+uv run python src/cyberautoagent.py \
+  --target "https://example.com" \
+  --objective "Authorized web security assessment" \
+  --module web \
+  --provider bedrock
+```
+
+The Python CLI requires `--target` and `--objective` for a new operation unless `--service-mode` is used. Its module
+default is `web`; its provider choices are `bedrock`, `ollama`, `litellm`, and `gemini`.
+
+### Python CLI options
+
+| Option | Description |
+|---|---|
+| `--module` | Operation module; defaults to `web` |
+| `--target` / `--objective` | Required inputs for a new operation |
+| `--service-mode` | Run without a target/objective |
+| `--max-duration` / `--max-tokens` / `--max-cost` | Operation budgets |
+| `--provider` / `--model` / `--region` | Model configuration |
+| `--confirmations` | Enable confirmation prompts |
+| `--memory-path` / `--memory-mode` / `--keep-memory` | Memory configuration |
+| `--output-dir` | Output directory override |
+| `--continue` / `--report` | Continue or regenerate an operation |
+| `--eval-rubric` | Enable evaluation with the selected rubric |
+| `--mcp-enabled` / `--mcp-conns` | Enable and configure MCP servers |
+| `--bug-bounty-header NAME=VALUE` | Add an authorized request header; repeatable |
+| `--verbose` / `--heap-monitor` | Diagnostics |
+
+The Python parser does not provide the React short aliases for these options.
+
+## Deployment modes
+
+The first-run setup wizard asks which environment you want to use. You can select a different environment later with
+`/setup`. The wizard shows friendly names; the values in configuration files and command-line options are shown in
+parentheses below.
+
+| Setup choice | How it runs | Requirements | Choose it when |
+|---|---|---|---|
+| **Python / Local CLI** (`local-cli`) | Runs the agent directly in a local Python process. | Python 3.12+, `uv`, and direct access to your model provider. | You want the smallest setup, local tools, or a development environment. |
+| **Single Container** (`single-container`) | Runs the core agent inside an isolated Docker container. | Docker Desktop or another compatible container runtime. | You want a self-contained assessment environment with the agent and its security tools isolated from the host. |
+| **Full Stack** (`full-stack`) | Runs the agent and supporting services with Docker Compose. | Docker Compose and more disk, memory, and startup time than the other modes. | You want the complete platform with observability, evaluation, service networking, databases, caching, and storage. |
+
+The Full Stack option may be shown as **Enterprise Stack** during setup. Observability and automatic evaluation are
+enabled by default for the full stack; local Python and single-container modes use lighter defaults and do not start
+the built-in supporting service stack. Provider credentials or a running local Ollama server are still required in
+every mode.
+
+To select a mode when starting the React terminal, use its configuration value:
+
+```bash
+cyber-react --deployment-mode local-cli
+cyber-react --deployment-mode single-container
+cyber-react --deployment-mode full-stack
+```
+
+See `docs/deployment.md` for configuration details and troubleshooting when Docker, Compose, or provider connections
+are unavailable.
 
 ## Configuration
 
-Cyber-AutoAgent offers **3 configuration methods**:
+The React configuration editor stores settings in `~/.cyber-autoagent/config.json`. Environment variables and CLI
+options are also supported. CLI values take precedence over saved configuration for the same setting.
 
-### Method 1: Config Editor UI (Recommended)
-
-Launch the React interface to configure via UI:
+Common provider configuration includes:
 
 ```bash
-cd src/modules/interfaces/react
-npm start
-```
-
-**In the Terminal:**
-1. Type `/config` to open Config Editor
-2. Select **Provider**: `litellm` (supports 300+ models)
-3. Configure **LLM Settings**:
-   - Model ID: `azure/gpt-5`, `moonshot/kimi-k2-thinking`, `openrouter/openrouter/polaris-alpha`
-   - Temperature: `0.7` (for reasoning models) or `0.5` (default)
-   - Max Tokens: `12000`
-   - Reasoning Effort: `medium` (for GPT-5/o1 models)
-4. Configure **Embedding Model**: `azure/text-embedding-3-large`
-5. Add **Provider Credentials**:
-   - Azure: API Key, API Base, API Version
-   - Moonshot: API Key
-   - OpenRouter: API Key
-6. Save settings - persists to `~/.cyber-autoagent/config.json`
-7. Type `/help` for available commands
-
-**Using Saved Config:**
-```bash
-# Auto-run uses saved config
-npm start -- --auto-run --target https://example.com --max-duration 60
-```
-
-### Method 2: Environment Variables
-
-Direct configuration for Python CLI:
-
-**Azure OpenAI (GPT-5):**
-```bash
-export AZURE_API_KEY=your_key
-export AZURE_API_BASE=https://your-endpoint.openai.azure.com/
-export AZURE_API_VERSION=2024-12-01-preview
-export CYBER_AGENT_LLM_MODEL=azure/gpt-5
-export CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
-export REASONING_EFFORT=medium
-```
-
-**AWS Bedrock:**
-```bash
-export AWS_ACCESS_KEY_ID=your_key
-export AWS_SECRET_ACCESS_KEY=your_secret
+# Bedrock
 export AWS_REGION=us-east-1
-```
 
-**OpenRouter:**
-```bash
-export OPENROUTER_API_KEY=your_key
-export CYBER_AGENT_LLM_MODEL=openrouter/openrouter/polaris-alpha
-export CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
-```
-
-Finding free compatible models: https://github.com/EvanThomasLuke/Cyber-AutoAgent-OpenRouter-CompatCheck
-
-**Moonshot AI:**
-```bash
-export MOONSHOT_API_KEY=your_key
-export CYBER_AGENT_LLM_MODEL=moonshot/kimi-k2-thinking
-export CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
-export MEM0_LLM_MODEL=azure/gpt-4o  # Separate LLM for memory system
-```
-
-**Ollama (Local):**
-```bash
+# Ollama
 ollama serve
 ollama pull qwen3-coder:30b-a3b-q4_K_M
-ollama pull mxbai-embed-large:latest
-```
 
-**LiteLLM:**
-```bash
+# LiteLLM-compatible providers
 export OPENAI_API_KEY=your_key
-# or
-export ANTHROPIC_API_KEY=your_key
+
+# Gemini
+export GEMINI_API_KEY=your_key
 ```
 
-### Method 3: Config File (Direct Edit)
+See `docs/deployment.md` and `src/modules/config/README.md` for environment-variable details. Do not commit
+credentials to configuration files.
 
-Advanced users can directly edit `~/.cyber-autoagent/config.json`:
+## Operation modules
 
-```json
-{
-  "modelProvider": "litellm",
-  "modelId": "azure/gpt-5",
-  "embeddingModel": "azure/text-embedding-3-large",
-  "temperature": 1.0,
-  "maxTokens": 32000,
-  "reasoningEffort": "medium",
-  "azureApiKey": "your_key",
-  "azureApiBase": "https://your-endpoint.openai.azure.com/",
-  "azureApiVersion": "2024-12-01-preview",
-  "observability": false,
-  "autoEvaluation": false
-}
-```
+Bundled modules are `web`, `web_recon`, `ctf`, `threat_emulation`, `context_navigator`, and `code_security`. Module
+selection is available in both interfaces. See [`operation_plugins.md`](operation_plugins.md) for module manifests,
+prompt inheritance, and custom-tool development.
 
-**Supported Providers:** `bedrock`, `ollama`, `litellm` (300+ models)
+## Memory and outputs
 
-### Configuration Commands
+`operation` memory mode limits retrieval to the current target and operation; `shared` reuses memories from prior
+operations with the same exact target value. Reports and logs are written beneath the configured output directory,
+normally `outputs/<target>/<operation-id>/`.
 
-| Command        | Function              |
-|----------------|-----------------------|
-| `/config`      | View current settings |
-| `/config edit` | Interactive editor    |
-| `/provider`    | Change model provider |
-| `/setup`       | Re-run initial setup  |
-| `/health`      | System status check   |
+## MCP configuration
 
-## Running Assessments
+The React configuration editor and CLI options accept MCP connection data. The JSON value supplied to
+`--mcp-conns` or `CYBER_MCP_CONNECTIONS` is an array of connection objects. Keep credentials in environment-backed
+headers or command values rather than committing secrets.
 
-### Interactive Mode
+## Docker management
+
+From the repository root, use the repository compose file:
 
 ```bash
-# In interface
-/module              # Select web or ctf
-target: https://testphp.vulnweb.com
-objective: Identify SQL injection vulnerabilities
-execute              # Start assessment
-continue             # Continue the latest previous operation for the target
-continue OP_20260320_101501
-report               # Re-generate the latest previous report for the target
-report OP_20260320_101501
+docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml ps
+docker compose -f docker/docker-compose.yml logs -f
+docker compose -f docker/docker-compose.yml down
 ```
 
-### Command Line Mode
-
-```bash
-cyber-react \
-  --target "https://testphp.vulnweb.com" \
-  --objective "Identify OWASP Top 10 vulnerabilities" \
-  --module web \
-  --max-duration 60 \
-  --auto-run
-```
-
-### Command Line Flags
-
-| Flag                              | Default   | Description                                                                        |
-|-----------------------------------|-----------|------------------------------------------------------------------------------------|
-| `--target, -t`                    | Required  | Target system URL or IP                                                            |
-| `--objective, -o`                 | Required  | Assessment objective                                                               |
-| `--module, -m`                    | `web`     | Security module: web, ctf                                                          |
-| `--max-duration`                  | `60`      | Duration budget in minutes                                                         |
-| `--max-tokens`                    | None      | Optional total token budget                                                        |
-| `--max-cost`                      | None      | Optional total cost budget                                                         |
-| `--provider`                      | `bedrock` | Model provider                                                                     |
-| `--auto-run`                      | `false`   | Skip interactive prompts                                                           |
-| `--auto-approve`                  | `false`   | Auto-approve tool executions                                                       |
-| `--memory-mode`                   | `auto`    | Memory: auto or fresh                                                              |
-| `--deployment-mode`               | Auto      | local-cli, single-container, full-stack                                            |
-| `--mcp-enabled`                   | `false`   | Enable MCP Tools                                                                   |
-| `--mcp-conns` '[...]'             | None      | Configure MCP Tools                                                                |
-| `--bug-bounty-header NAME=VALUE`  | None      | Add a marker header to authorized bug bounty traffic; repeat for multiple headers  |
-
-### Target Preflight Validation
-
-Before a new assessment starts, Cyber-AutoAgent validates every executable target resolved from the target and
-objective. Hostnames use the system resolver, including sources such as `/etc/hosts`; IP addresses and CIDRs require a
-route; explicit `host:port` and `scheme://host:port` targets require a TCP connection; and local filesystem paths must
-exist and be readable. CIDRs are never connection-scanned during preflight, URLs without an explicit port do not infer
-one, and target types without a safe deterministic check are skipped.
-
-The terminal reports one `PREFLIGHT PASS`, `PREFLIGHT FAIL`, or `PREFLIGHT SKIP` result per resolved target. Any failed
-check stops the assessment before agents or tools start. Report-only runs do not repeat target preflight validation.
-
-### Bug Bounty Traffic Markers
-
-Some programs require marker headers on every request. Configure them once so the agent applies them to the shared browser context and includes them in prompts for HTTP/MCP/tool usage:
-
-```bash
-cyber-react \
-  --target "https://example.com" \
-  --objective "Authorized bug bounty testing" \
-  --bug-bounty-header X-HackerOne-Research=username \
-  --bug-bounty-header User-Agent=username@wearehackerone.com
-```
-
-### Configuration Loading Priority
-
-When using `--auto-run` mode, configuration is loaded and merged in the following priority order:
-
-1. **Default Configuration** (lowest priority) - Built-in defaults from the application
-2. **Saved Configuration** (medium priority) - User settings from `~/.cyber-autoagent/config.json`
-3. **Command Line Flags** (highest priority) - Flags specified on the command line
-
-This means:
-- Your saved configuration from the React UI is automatically loaded and used
-- Command line flags override any saved settings
-- Defaults are only used for values not specified in saved config or CLI flags
-
-**Example:**
-```bash
-# If your config.json has modelProvider: "ollama" and observability: true
-# This command will use:
-# - modelProvider: "bedrock" (from CLI flag, overrides saved config)
-# - observability: true (from saved config)
-# - duration budget: 60 minutes (from CLI flag)
-# - All other settings from saved config or defaults
-
-cyber-react \
-  --target "https://example.com" \
-  --provider bedrock \
-  --max-duration 60 \
-  --auto-run
-```
-
-## Operation Modules
-
-| Module   | Purpose                  | Key Features                                        |
-|----------|--------------------------|-----------------------------------------------------|
-| **web**  | Web application security | Advanced recon, payload testing, auth analysis      |
-| **ctf**  | CTF challenges           | Flag recognition, exploit chains, success detection |
-
-## Monitoring
-
-### Interface Display
-
-| Section  | Information                                         |
-|----------|-----------------------------------------------------|
-| Header   | Operation ID, target, module, deployment mode       |
-| Main     | Agent reasoning, tool executions, outputs, findings |
-| Footer   | Step progress, tokens, costs, memory ops, time      |
-
-### Observability (Full Stack)
-
-```
-URL: http://localhost:3000
-Login: admin@cyber-autoagent.com / changeme
-```
-
-## Output Structure
-
-```
-outputs/
-└── <target>/
-    ├── OP_<timestamp>/
-    │   ├── security_assessment_report.md    # Assessment report
-    │   ├── security_assessment_report.json  # Assessment report data (can be used in other tools)
-    │   ├── logs/
-    │   │   └── cyber_operations.log
-    │   └── utils/
-    └── memory/                    # Persistent across operations
-```
-
-## Memory System
-
-| Mode      | Behavior                                   | Use Case             |
-|-----------|--------------------------------------------|----------------------|
-| **auto**  | Loads existing memory, stores new findings | Iterative testing    |
-| **fresh** | Empty memory, no historical context        | Baseline assessments |
-
-Control via `/config edit` or `--memory-mode` flag.
-
-## MCP Configuration
-
-The configuration block in `~/.cyber-autoagent/config.json` for MCP servers looks like the following. The terminal UI
-can be used to configure, command line options or environment variables.
-
-```json
-{
-  "mcp": {
-    "enabled": true,
-    "connections": [
-      {
-         "id": "htb-mcp-server",
-         "transport": "stdio",  // or "sse", "streamable-http"
-         "command": ["./htb-mcp-server"],
-         "plugins": ["web"]  // or ["*"]
-      },
-      {
-         "id": "shyhurricane",
-         "transport": "streamable-http",
-         "server_url": "https://127.0.0.1:8000/mcp",
-         "plugins": ["*"], 
-         "timeoutSeconds": 900,
-         "allowed_tools": ["port_scan","register_hostname_address","register_http_headers","directory_buster","deobfuscate_javascript","fetch_web_resource_content","find_domains","find_hosts","find_netloc","find_urls","find_web_resources","spider_website","index_http_url","query_findings"]  // or ["*"]
-      }
-    ]
-  }
-}
-```
-
-Environment variable substitution is performed in the `headers` and `command` values, so that sensitive information is not stored in the configuration.
-
-The command line option `--mcp-conns` or environment variable `CYBER_MCP_CONNECTIONS` provides the `connections` block as a string.
-
-Examples:
-
-- `CYBER_MCP_ENABLED=true`
-- `CYBER_MCP_CONNECTIONS='[{"id":"...","transport":"..."}]'`
-- `--mcp-enabled --mcp-conns '[{"id":"...","transport":"..."}]'`
-
-### HackTheBox CTF MCP Configuration
-
-This is an example configuration for the HackTheBox CTF MCP server. Export your API key before running.
-
-```shell
-export HTB_MCP_TOKEN=xxx.yyy.zzz
-```
-
-```json
-{
-   "mcp": {
-      "enabled": true,
-      "connections": [
-         {
-            "id": "htbctf",
-            "transport": "sse",
-            "server_url": "https://mcp.ai.hackthebox.com/v1/ctf/sse",
-            "plugins": ["ctf"],
-            "headers": {"Authorization": "Bearer ${HTB_MCP_TOKEN}"}
-         }
-      ]
-   }
-}
-```
-
-### HexStrike AI
-
-```json
-{
-   "mcp": {
-      "enabled": true,
-      "connections": [
-         {
-            "id": "hex",
-            "transport": "stdio",
-            "command": ["python3", "/path/to/hexstrike-ai/hexstrike_mcp.py", "--server", "http://localhost:8888"],
-            "plugins": ["web"],
-            "timeoutSeconds": 300
-         }
-      ]
-   }
-}
-```
-
-## Model Rate Limiting
-
-Providers usually rate limit model calls considering both the number of requests and tokens. There are two approaches
-taken. When a call fails due to rate limiting, the request is retried a few times with a delay. This doesn't always
-work. Rate limiting can be configured to be proactive using the following parameters:
-
-- Tokens per minute
-- Requests per minute
-- Maximum concurrent requests
-
-Examples:
-- `CYBER_RATE_LIMIT_TOKENS_PER_MIN=150000`
-- `CYBER_RATE_LIMIT_REQ_PER_MIN=3`
-- `CYBER_RATE_LIMIT_MAX_CONCURRENT=1`
-
-## OAST (Out-of-band Application Security Testing)
-
-OAST is used to capture callbacks from targets, particularly XSS payloads. There are two implementations available
-based on the network of the target. If the target uses a private IP address, an internal implementation is used.
-
-If the target uses a public IP address, https://webhook.site is used. Unauthenticated use is supported, but is limited by
-the number of requests. Providing the API key has unlimited requests and allows configuring responses.
-
-- `WEBHOOK_API_KEY=...`
-
-To effectively use the private address implementation, the agent must be able to bind a listener on the private network. If a VPN
-is used, run the VPN in the `cyber-autoagent` container or use the python CLI in the same host where the VPN is connected.
-
-## Web Search Configuration
-
-The `web_search` tool uses public search engines to query for known vulnerabilities. [Tavily](https://www.tavily.com) is
-a search engine designed for agent use. It requires an API key in the environment variable `TAVILY_API_KEY`. If this
-variable is set, the `tavily_search` tool is used instead of `web_search`.
-
-## Docker Management
-
-```bash
-# Start full stack
-docker-compose up -d
-
-# Check status
-docker-compose ps
-
-# View logs
-docker-compose logs -f
-
-# Stop
-docker-compose down
-
-# Reset all data
-docker-compose down -v
-```
-
-## Alternative Execution
-
-### Python Direct
-
-```bash
-python src/cyberautoagent.py \
-  --target "http://testphp.vulnweb.com" \
-  --objective "SQL injection assessment" \
-  --provider bedrock \
-  --module web \
-  --max-duration 60
-```
-
-Requirements: Python 3.11+, dependencies installed
-
-### Docker Standalone
-
-```bash
-# (optional) docker build --pull -f docker/Dockerfile.tools -t public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest ..
-docker build -t cyber-autoagent -f docker/Dockerfile .
-
-docker run --rm \
-  -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} \
-  -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \
-  -v $(pwd)/outputs:/app/outputs \
-  cyber-autoagent \
-  --target "http://example.com" \
-  --objective "Security assessment"
-```
+## Target preflight
+
+Before a new assessment, the runner resolves executable targets and performs the applicable route, TCP, filesystem, or
+resolver check. Each target produces a `PREFLIGHT PASS`, `PREFLIGHT FAIL`, or `PREFLIGHT SKIP` event. A failed preflight
+stops the assessment before agents and tools start.
 
 ## Troubleshooting
 
-### Application Issues
-
-| Problem               | Solution                                              |
-|-----------------------|-------------------------------------------------------|
-| React app won't start | `rm -rf node_modules && npm install && npm run build` |
-| Configuration errors  | `rm ~/.cyber-autoagent/config.json && cyber-react`    |
-| Docker connectivity   | `docker info` to verify daemon running                |
-| Node version issues   | Verify Node.js 22+ with `node --version`              |
-
-### Provider Issues
-
-| Provider  | Verification Command                      |
-|-----------|-------------------------------------------|
-| Bedrock   | `aws sts get-caller-identity`             |
-| Ollama    | `curl http://localhost:11434/api/version` |
-| LiteLLM   | `echo $OPENAI_API_KEY`                    |
-
-### Operation Issues
-
-| Issue                   | Resolution                                                             |
-|-------------------------|------------------------------------------------------------------------|
-| Assessment not starting | Check provider credentials, Docker status, target accessibility        |
-| Assessment stuck        | Review progress in footer, check tool outputs for errors               |
-| Out of memory           | Reduce token-heavy workloads, use fresh memory mode, clear old outputs |
-| Port conflicts          | Change ports in docker-compose.yml or stop conflicting services        |
-
-## Examples
-
-### Web Application Assessment
-
-```bash
-cyber-react \
-  -m web \
-  -t "https://testphp.vulnweb.com" \
-  -o "OWASP Top 10 assessment" \
-  --max-duration 30
-```
-
-### API Security Testing
-
-```bash
-cyber-react \
-  -m web \
-  -t "https://api.example.com" \
-  -o "Authentication testing" \
-  --max-duration 45 \
-  --auto-approve
-```
-
-### CTF Challenge
-
-```bash
-cyber-react \
-  -m ctf \
-  -t "http://challenge.ctf:8080" \
-  -o "Extract flag" \
-  --max-duration 60
-```
-
-### Automated Scan
-
-```bash
-cyber-react \
-  -t "192.168.1.100" \
-  -o "Network security assessment" \
-  --auto-run \
-  --auto-approve \
-  --headless
-```
-
-### Continue Assessment
-
-```bash
-cyber-react \
-  -t "192.168.1.100" \
-  -o "Network security assessment" \
-  --auto-run \
-  --auto-approve \
-  --continue
-```
-
-```bash
-cyber-react \
-  -t "192.168.1.100" \
-  -o "Network security assessment" \
-  --auto-run \
-  --auto-approve \
-  --continue OP_20260320_101501
-```
-
-### Re-generate Report
-
-```bash
-cyber-react \
-  -t "192.168.1.100" \
-  -o "Network security assessment" \
-  --auto-run \
-  --auto-approve \
-  --report
-```
-
-```bash
-cyber-react \
-  -t "192.168.1.100" \
-  -o "Network security assessment" \
-  --auto-run \
-  --auto-approve \
-  --report OP_20260320_101501
-```
-
-## Best Practices
-
-### Assessment Workflow
-
-| Phase      | Actions                                                                                                     |
-|------------|-------------------------------------------------------------------------------------------------------------|
-| **Before** | Obtain written authorization, verify Docker running, check provider connectivity, test target accessibility |
-| **During** | Monitor real-time outputs, review tool effectiveness, track token usage, check finding severity             |
-| **After**  | Review complete report, verify findings accuracy, document methodology, archive outputs                     |
-
-### Configuration Guidelines
-
-| Setting         | Recommendation                                               |
-|-----------------|--------------------------------------------------------------|
-| Duration budget | Start with 30-60 minutes; add token or cost caps when needed |
-| Module          | Use web for web apps, ctf for competitions                   |
-| Auto-approve    | Only for trusted environments                                |
-| Observability   | Enable for production assessments                            |
-| Memory mode     | Auto for iterative testing, fresh for baselines              |
-
-## Legal and Ethical Use
-
-### Required Before Use
-
-| Requirement           | Description                                      |
-|-----------------------|--------------------------------------------------|
-| Written authorization | Explicit permission to test target systems       |
-| Legal compliance      | Understanding of applicable laws and regulations |
-| Impact assessment     | Ensure testing won't affect production services  |
-| Scope documentation   | Clearly defined testing boundaries               |
-| Disclosure practices  | Responsible vulnerability reporting procedures   |
-
-### Responsible Disclosure
-
-If vulnerabilities are discovered during authorized testing:
-
-| Step  | Action                                                        |
-|-------|---------------------------------------------------------------|
-| 1     | Report to system owner promptly with clear reproduction steps |
-| 2     | Allow reasonable remediation time (typically 90 days)         |
-| 3     | Do not publicly disclose until patched                        |
-| 4     | Follow coordinated disclosure practices                       |
-
-**Open Source Notice:** This software is provided "as is" without warranty. Contributors and maintainers assume no liability for misuse or damages.
-
-## Additional Resources
-
-| Resource              | Location                                     |
-|-----------------------|----------------------------------------------|
-| Architecture Guide    | [architecture.md](architecture.md)           |
-| Memory System         | [memory.md](memory.md)                       |
-| Deployment Guide      | [deployment.md](deployment.md)               |
-| Module Development    | [operation_plugins.md](operation_plugins.md) |
-| Terminal Architecture | [terminal-frontend.md](terminal-frontend.md) |
-| GitHub Issues         | Report bugs and request features             |
+| Problem | Check |
+|---|---|
+| React interface will not start | Confirm Node.js 22+, reinstall dependencies, and run `npm run build` |
+| Docker execution fails | Run `docker info` and inspect the compose service logs |
+| Ollama requests fail | Start Ollama and verify the configured model is installed |
+| Bedrock requests fail | Verify AWS credentials and `AWS_REGION` |
+| Configuration is invalid | Review `~/.cyber-autoagent/config.json` and the active provider settings |
+| Assessment is rejected before starting | Review the target preflight event and authorization scope |

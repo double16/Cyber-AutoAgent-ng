@@ -78,7 +78,7 @@ _STRUCTURED_VALIDATION_PATTERNS = tuple(
         r"\bmust (?:be|contain|describe|include|use)\b",
     )
 )
-_READ_ONLY_TOOLS = {"mem0_retrieve", "read_artifact", "tool_catalog"}
+_READ_ONLY_TOOLS = {"memory_retrieve", "read_artifact", "tool_catalog"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 _SENSITIVE_KEYS = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 TOOL_RECOVERY_EXHAUSTED_STATE_KEY = "tool_recovery_exhausted"

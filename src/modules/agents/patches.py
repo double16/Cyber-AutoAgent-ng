@@ -28,6 +28,7 @@ from strands.hooks.events import AfterToolCallEvent
 from strands.hooks import HookProvider, HookRegistry
 
 from modules.config.system import get_logger
+from modules.utils.tool_call_normalization import normalize_tool_call_payload
 
 
 logger = get_logger("Agents.CyberAutoAgent")
@@ -350,7 +351,8 @@ def patch_model_class_tool_use_id(
     # inline function supports unit tests
     # marker: X - no toolUseId given, N - no tool_name given, E - toolUseId == tool_name, 'U' - unknown
     if id_factory is None:
-        id_factory = lambda marker: f"tooluse_{marker or 'U'}-{uuid4().hex}"
+        def id_factory(marker: str) -> str:
+            return f"tooluse_{marker or 'U'}-{uuid4().hex}"
 
     orig_stream = getattr(model_cls, "stream")
     setattr(model_cls, orig_attr, orig_stream)
@@ -512,19 +514,11 @@ def _extract_json_toolcall(text: str, *, allow_missing_end_brace: bool = False) 
     if not isinstance(obj, dict):
         return None
 
-    if "name" in obj and "arguments" in obj:
-        return obj
-    if "name" in obj and "parameters" in obj:
-        return {"name": obj["name"], "arguments": obj["parameters"]}
-
-    if "tool_call" in obj and isinstance(obj["tool_call"], dict):
-        tc = obj["tool_call"]
-        if "name" in tc and "arguments" in tc:
-            return tc
-        if "name" in tc and "parameters" in tc:
-            return {"name": tc["name"], "arguments": tc["parameters"]}
-
-    return None
+    try:
+        normalized = normalize_tool_call_payload(obj)
+    except ValueError:
+        return None
+    return {"name": normalized.name, "arguments": normalized.arguments}
 
 
 def _to_openai_tool_calls(toolcall_obj: dict, *, id_factory: Optional[Callable[[], str]] = None) -> list[dict]:
@@ -541,7 +535,8 @@ def _to_openai_tool_calls(toolcall_obj: dict, *, id_factory: Optional[Callable[[
         args_json = json.dumps({"_raw": str(args)})
 
     if id_factory is None:
-        id_factory = lambda: f"call_{uuid4().hex}"
+        def id_factory() -> str:
+            return f"call_{uuid4().hex}"
 
     return [
         {

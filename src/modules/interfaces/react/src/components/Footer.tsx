@@ -6,6 +6,7 @@ import { estimateEtaSeconds } from '../utils/duration.js';
 import { formatDuration } from '../utils/toolFormatters.js';
 import { ThinkingIndicator } from './ThinkingIndicator.js';
 import type { ThinkingStatus } from '../types/thinking.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import {
   formatOperationHealth,
   type OperationHealthSnapshot,
@@ -53,6 +54,7 @@ export const Footer: React.FC<FooterProps> = React.memo(({
 }) => {
   const theme = themeManager.getCurrentTheme();
   const { config } = useConfig();
+  const { columns } = useTerminalSize();
 
   // --- Footer Rendering (always visible) ---
   const formatCost = (cost: number) => {
@@ -82,7 +84,9 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   const hasMem = (operationMetrics?.memoryOps || 0) > 0;
   const healthVisual = formatOperationHealth(operationHealth);
   // Build a single-line footer string and hard-truncate to terminal width to avoid Ink layout bugs
-  const cols = Number.isFinite(process.stdout.columns) && process.stdout.columns ? Math.floor(process.stdout.columns) : 80;
+  // Keep one column clear at the right edge so the animated line cannot wrap
+  // when the terminal or renderer accounts for the final cell differently.
+  const cols = Math.max(0, Math.floor(columns) - 1);
   const left = deploymentMode || '';
   const rightParts: string[] = [];
   if (healthVisual) rightParts.push(healthVisual.label);

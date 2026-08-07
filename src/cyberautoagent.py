@@ -110,8 +110,10 @@ from modules.handlers.terminal_tool import (
 from modules.tools import browser, channel_close_all
 from modules.tools.memory import (
     OperationTarget,
+    create_application_store,
     get_memory_client,
-    require_existing_plan_store,
+    get_application_database_path,
+    require_existing_operation,
     resolve_operation_targets,
 )
 from modules.tools.oast import close_oast_providers
@@ -359,6 +361,7 @@ class AgentRunResult:
 
     reason: str
     message: str = ""
+    details: dict[str, Any] | None = None
 
 
 RECOVERABLE_AGENT_ERRORS = (
@@ -609,7 +612,11 @@ def run_agent_until_terminal_state(
                         "the latest completed result was reused."
                     )
                 logger.warning(message)
-                return AgentRunResult("repeated_tool_loop", message)
+                return AgentRunResult(
+                    "repeated_tool_loop",
+                    message,
+                    details=dict(repeated_tool_loop),
+                )
 
             tool_total_count = sum(agent_callback_handler.tool_counts.values())
             if tool_total_count > last_tool_call_count:
@@ -1024,13 +1031,16 @@ def cleanup_operation_resources(
     if agent is not None:
         agent.cleanup()
 
-    should_cleanup = not args.keep_memory and not args.memory_path
+    should_cleanup = not args.keep_memory
 
     if should_cleanup:
         try:
-            target_name = sanitize_target_name(args.target)
-            logger.debug("Calling clean_operation_memory with target_name=%s", target_name)
-            clean_operation_memory(operation_id, target_name)
+            target_values = [
+                target.value
+                for target in resolve_operation_targets(args.target, args.objective)
+            ]
+            logger.debug("Cleaning memory for exact target values: %s", target_values)
+            clean_operation_memory(operation_id, target_values)
             logger.info("Memory cleaned up for operation %s", operation_id)
         except Exception as cleanup_error:
             logger.warning("Error cleaning up memory: %s", cleanup_error)
@@ -1051,6 +1061,7 @@ def main():
 
     previous_output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR")
     previous_memory_read_only = os.environ.get("CYBER_MEMORY_READ_ONLY")
+    previous_logical_target = os.environ.get("CYBER_LOGICAL_TARGET")
 
     def restore_memory_environment() -> None:
         if previous_output_dir is None:
@@ -1061,6 +1072,10 @@ def main():
             os.environ.pop("CYBER_MEMORY_READ_ONLY", None)
         else:
             os.environ["CYBER_MEMORY_READ_ONLY"] = previous_memory_read_only
+        if previous_logical_target is None:
+            os.environ.pop("CYBER_LOGICAL_TARGET", None)
+        else:
+            os.environ["CYBER_LOGICAL_TARGET"] = previous_logical_target
 
     # Set up signal handlers for Ctrl+C, Ctrl+Z, and SIGTERM (ESC in UI)
     signal.signal(signal.SIGINT, signal_handler)
@@ -1154,16 +1169,11 @@ def main():
         help="Enable tool confirmation prompts (default: disabled)",
     )
     parser.add_argument(
-        "--memory-path",
-        type=str,
-        help="Path to existing FAISS memory store to load past memories (e.g., /outputs/target_name/OP_20240320_101530)",
-    )
-    parser.add_argument(
         "--memory-mode",
         type=str,
-        choices=["auto", "fresh"],
-        default="fresh" if os.getenv("MEMORY_ISOLATION") == "operation" else "auto",
-        help="Memory initialization mode: 'auto' loads existing memory if found, 'fresh' starts with new memory",
+        choices=["shared", "operation"],
+        default=os.getenv("CYBER_MEMORY_MODE", "operation"),
+        help="Memory query scope: 'operation' isolates the current run; 'shared' includes prior runs for the target",
     )
     parser.add_argument(
         "--keep-memory",
@@ -1225,6 +1235,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.memory_mode not in {"shared", "operation"}:
+        parser.error("CYBER_MEMORY_MODE must be one of: shared, operation")
 
     if args.heap_monitor or os.getenv("CYBER_HEAP_MONITOR", "").lower() == "true":
         # side effect is the heap monitor starts when imported
@@ -1257,7 +1269,7 @@ def main():
         os.environ["CYBER_BUG_BOUNTY_HEADERS"] = json.dumps(bug_bounty_headers)
 
     if args.cont or args.report:
-        args.memory_mode = "auto"
+        args.memory_mode = "operation"
 
     ensure_workspace_marker_files()
 
@@ -1333,8 +1345,6 @@ def main():
     config_overrides = {}
     if args.output_dir:
         config_overrides["output_dir"] = args.output_dir
-    # Always enable unified output system
-    config_overrides["enable_unified_output"] = True
     if args.model:
         config_overrides["model_id"] = args.model
     # MCP overrides
@@ -1376,6 +1386,7 @@ def main():
 
     # Expose operation ID to tools via environment for consistent evidence tagging
     os.environ["CYBER_OPERATION_ID"] = operation_id
+    os.environ["CYBER_LOGICAL_TARGET"] = args.target
 
     server_config = config_manager.get_server_config(args.provider, **config_overrides)
 
@@ -1386,10 +1397,8 @@ def main():
     else:
         os.environ.pop("CYBER_MEMORY_READ_ONLY", None)
 
-    # Set mem0 environment variables based on configuration
-    os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
-    os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
-    os.environ["MEM0_EMBEDDING_MODEL"] = server_config.embedding.model_id
+    os.environ["CYBER_MEMORY_MODE"] = args.memory_mode
+    os.environ["CYBER_AGENT_EMBEDDING_MODEL"] = server_config.embedding.model_id
 
     mcp_config = config_manager.get_mcp_config(args.provider, **config_overrides)
     if mcp_config.enabled:
@@ -1417,9 +1426,9 @@ def main():
 
     if args.report:
         try:
-            require_existing_plan_store(
+            require_existing_operation(
                 output_dir=server_config.output.base_dir,
-                target_name=target_sanitized,
+                logical_target=args.target,
                 operation_id=operation_id,
             )
         except FileNotFoundError as error:
@@ -1437,9 +1446,17 @@ def main():
             logger=logger,
         )
         try:
-            get_memory_client(silent=True).store_preflight_results(
+            preflight_store = create_application_store(
+                get_application_database_path(
+                    {
+                        "output_dir": server_config.output.base_dir,
+                    }
+                ),
+                logical_target=args.target,
+            )
+            preflight_store.store_preflight_results(
+                operation_id,
                 [result.to_record() for result in preflight_results],
-                operation_id=operation_id,
             )
         except Exception:
             restore_memory_environment()
@@ -1537,8 +1554,7 @@ def main():
         )
 
     # Auto-setup and environment discovery
-    # Pass memory_path to auto_setup to skip cleanup if using existing memory
-    available_tools = auto_setup(skip_mem0_cleanup=bool(args.memory_path))
+    available_tools = auto_setup()
 
     logger.info("Operation %s initiated", operation_id)
     logger.info("Objective: %s", args.objective)
@@ -1637,7 +1653,6 @@ def main():
             model_id=args.model,
             region_name=args.region,
             provider=args.provider,
-            memory_path=args.memory_path,
             memory_mode=args.memory_mode,
             operation_mode=("report_only" if args.report else "continuation" if args.cont else "execution"),
             module=args.module,
@@ -1656,7 +1671,9 @@ def main():
                 agent: Any,
                 prompt: str,
                 run_policy: Optional[AgentRunPolicy],
-            ) -> str:
+            ) -> tuple[AgentRunResult, str]:
+                """Run one workflow pass while preserving its structured terminal result."""
+
                 try:
                     message_start = len(agent.messages)
                 except (AttributeError, TypeError):
@@ -1678,10 +1695,10 @@ def main():
                     current_pass_messages = []
                 assistant_text = extract_last_assistant_text(current_pass_messages)
                 if assistant_text:
-                    return assistant_text
+                    return result, assistant_text
                 if run_policy and result.reason == run_policy.terminal_reason:
-                    return ""
-                return result.message or result.reason
+                    return result, ""
+                return result, result.message or result.reason
 
             def workflow_work_runner(
                 role: str,
@@ -1702,7 +1719,8 @@ def main():
                     include_tool_catalog=role != "task_creator",
                 )
                 try:
-                    return run_workflow_agent(agent, prompt, run_policy)
+                    _, worker_text = run_workflow_agent(agent, prompt, run_policy)
+                    return worker_text
                 finally:
                     try:
                         agent.cleanup()
@@ -1733,7 +1751,7 @@ def main():
                         journal = getattr(callback, "tool_outcome_journal", None)
                         snapshot = journal.snapshot() if journal is not None else 0
                         try:
-                            text = run_workflow_agent(agent, prompt, run_policy)
+                            run_result, result_message = run_workflow_agent(agent, prompt, run_policy)
                         except MaxTokensReachedException as error:
                             classification = getattr(error, "max_token_classification", None)
                             kind = getattr(classification, "kind", "output_truncation")
@@ -1751,14 +1769,30 @@ def main():
                                 ),
                             )
                         outcomes = journal.since(snapshot) if journal is not None else []
+                        repeat_loop = (
+                            run_result.details
+                            if run_result.reason == "repeated_tool_loop"
+                            else None
+                        )
                         return TaskExecutorCycleResult(
-                            text=text,
+                            text=result_message,
                             outcomes=outcomes,
                             recovery_required=bool(recovery_hook and recovery_hook.unresolved),
                             recovery_exhausted=bool(recovery_hook and recovery_hook.exhausted),
                             recovery_guidance=_recovery_guidance_with_failed_command_help(
                                 recovery_hook,
                                 config.available_tools or [],
+                            ),
+                            repeat_loop_detected=isinstance(repeat_loop, dict),
+                            repeat_loop_signature=(
+                                str(repeat_loop.get("cycle_signature", ""))
+                                if isinstance(repeat_loop, dict)
+                                else ""
+                            ),
+                            repeat_loop_reason=(
+                                result_message
+                                if isinstance(repeat_loop, dict)
+                                else ""
                             ),
                         )
 
@@ -1883,14 +1917,7 @@ def main():
 
             # Show where evidence and memories are stored
             # Determine memory location based on backend and unified output structure
-            # FIXME: memory_location should be returned by the initialized memory system, not duplicated here
-            target_name = sanitize_target_name(args.target)
-            if os.getenv("MEM0_API_KEY"):
-                memory_location = "Mem0 Platform (cloud)"
-            elif os.getenv("OPENSEARCH_HOST"):
-                memory_location = f"OpenSearch: {os.getenv('OPENSEARCH_HOST')}"
-            else:
-                memory_location = f"{get_default_base_dir()}/{target_name}/memory"
+            memory_location = os.getenv("QDRANT_URL") or f"{get_default_base_dir()}/qdrant"
 
             # Use unified output paths for evidence storage
             evidence_location = get_output_path(

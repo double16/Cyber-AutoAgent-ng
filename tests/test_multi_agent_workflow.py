@@ -335,6 +335,7 @@ class FakeState:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
         ))
 
     def mark_task(self, task, status, reason=""):
@@ -351,6 +352,7 @@ class FakeState:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
         ))
 
     def defer_task(self, task, reason=""):
@@ -511,7 +513,7 @@ def _runtime(progress=0, env_ints=None, env_floats=None):
         core_tools_list=[
             _tool("shell"),
             _tool("editor"),
-            _tool("mem0_retrieve"),
+            _tool("memory_retrieve"),
             _tool("create_tasks"),
         ],
         optional_tools_list=[_tool("mcp_scan"), _tool("module_probe")],
@@ -604,6 +606,56 @@ def test_task_evaluator_completed_alias_does_not_abort_workflow():
     )
 
     assert decision.status == "done"
+
+
+def test_task_evaluator_retries_schema_valid_non_decision_response():
+    plan = _plan()
+    task = Task(task_uid="schema-retry", title="Assess", objective="run", phase=1, status="active")
+    state = FakeState(plan, tasks=[task])
+    responses = iter([
+        '{"action":"record_task_acceptance","action_input":{}}',
+        '{"status":"done","reason":"acceptance is supported"}',
+    ])
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: next(responses),
+    )
+
+    decision = controller._evaluate_task(plan, plan.phases[0], task)
+
+    assert decision.status == "done"
+    activities = [event for event in controller.runtime.callback_handler.events if event["type"] == "workflow_activity"]
+    assert [(event["status"], event["attempt"]) for event in activities] == [
+        ("started", 1),
+        ("failed", 1),
+        ("started", 2),
+        ("completed", 2),
+    ]
+
+
+def test_task_evaluator_schema_failure_falls_back_to_partial_failure():
+    plan = _plan()
+    task = Task(task_uid="schema-fallback", title="Assess", objective="run", phase=1, status="active")
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: '{"action":"record_task_acceptance","action_input":{}}',
+    )
+
+    decision = controller._evaluate_task(plan, plan.phases[0], task)
+
+    assert decision.status == "partial_failure"
+    assert "received keys: action, action_input" in decision.reason
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["role"] == "task_evaluator"
+    assert event["task_uid"] == "schema-fallback"
+    assert event["source"] == "schema_validation"
+    assert event["received_keys"] == ["action", "action_input"]
 
 
 def test_pending_finding_validation_is_prioritized_and_events_include_scope():
@@ -1190,7 +1242,7 @@ def test_role_tools_exclude_plan_task_mutation_and_gate_create_tasks():
     runtime = _runtime()
 
     default_names = {tool.__name__ for tool in build_role_tools(runtime)}
-    assert {"shell", "mem0_retrieve"}.issubset(default_names)
+    assert {"shell", "memory_retrieve"}.issubset(default_names)
     assert "stop" not in default_names
     assert "prompt_optimizer" not in default_names
     assert "create_tasks" not in default_names
@@ -2403,9 +2455,9 @@ def test_task_executor_appends_selected_memories_from_prompt_spec():
     assert requested_memory_ids == ["m2", "m1"]
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
     assert "## Selected Memory Context\n" in captured["prompt"]
-    assert "memories[2]{id,memory}:" in captured["prompt"]
-    assert "m2,memory for m2" in captured["prompt"]
-    assert "m1,memory for m1" in captured["prompt"]
+    assert "memories[2]{id,category,source,memory}:" in captured["prompt"]
+    assert "m2,general,,memory for m2" in captured["prompt"]
+    assert "m1,general,,memory for m1" in captured["prompt"]
 
 
 def test_task_executor_continues_when_selected_memory_lookup_fails():
@@ -2438,6 +2490,102 @@ def test_task_executor_continues_when_selected_memory_lookup_fails():
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
+
+
+def test_task_prompt_normalization_uses_canonical_memory_indices():
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: [
+            {"id": "memory-1", "memory": "first"},
+            {"id": "memory-2", "memory": "second"},
+        ]
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "execute active",
+            "memory_indices": [1, 1, 99],
+            "memory_ids": ["memory-1", "memory-2-corrupted"],
+            "tools": [],
+            "shell_commands": [],
+        },
+        Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
+    )
+
+    assert normalized["memory_indices"] == [1]
+    assert normalized["memory_ids"] == ["memory-2", "memory-1"]
+
+
+def test_malformed_memory_id_does_not_fail_prompt_build():
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: [
+            {"id": "98d09291-78dc-443c-aba2-f2c4b46dc7fc", "memory": "validated observation"},
+        ]
+    )
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "execute active",
+            "memory_ids": ["98d09291-78dc-443c-aba2-f2c4b467fc"],
+            "tools": [],
+            "shell_commands": [],
+        },
+        task,
+    )
+
+    assert normalized["memory_ids"] == []
+
+
+def test_malformed_memory_id_reaches_prompt_critic_without_false_failure():
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: [
+            {"id": "98d09291-78dc-443c-aba2-f2c4b46dc7fc", "memory": "validated observation"},
+        ]
+    )
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append((role, prompt))
+        if role == "task_prompt_builder":
+            return (
+                '{"prompt":"execute active","memory_ids":'
+                '["98d09291-78dc-443c-aba2-f2c4b467fc"],"tools":[],"shell_commands":[]}'
+            )
+        if role == "task_prompt_critic":
+            assert "98d09291-78dc-443c-aba2-f2c4b467fc" not in prompt
+            return '{"approved":true,"feedback":[]}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    normalized = controller._build_task_prompt(
+        _plan(),
+        _plan().phases[0],
+        Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
+    )
+
+    assert [role for role, _prompt in calls] == ["task_prompt_builder", "task_prompt_critic"]
+    assert normalized["memory_ids"] == []
 
 
 def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
@@ -2494,7 +2642,7 @@ def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
 def test_task_executor_omits_shell_command_context_for_missing_or_invalid_selection():
     runtime = _runtime()
     runtime.config.available_tools = ["httpx"]
-    runtime.core_tools_list = [_tool("mem0_retrieve")]
+    runtime.core_tools_list = [_tool("memory_retrieve")]
     state = FakeState(
         _plan(),
         tasks=[Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")],
@@ -2728,7 +2876,7 @@ def test_task_evaluator_does_not_invent_memory_requirement_for_gathered_informat
         worker_context="Found /login 200 and /admin 403 but did not store observations.",
     )
 
-    assert "memories[0]{id,memory}:" in prompt
+    assert "memories[0]{id,category,source,memory}:" in prompt
     assert "did not store it in memories" not in prompt
     assert "Automatically published acceptance memory supports later tasks" in prompt
 
@@ -2959,6 +3107,115 @@ def test_reasoning_loop_recovery_supersedes_original_and_queues_one_replacement(
     assert replacement.acceptance == task.acceptance
     assert "criterion" in replacement.objective
     assert controller._assessment_is_complete(_plan()) is False
+
+
+def test_partial_failure_is_superseded_when_split_replacements_resolve_all_criteria():
+    parent = Task(
+        task_uid="parent",
+        title="Combined authentication bypass test",
+        objective="Test the security cookie and user token",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacements = [
+        Task(
+            task_uid="cookie-replacement",
+            title="Security cookie test",
+            objective="Test the security cookie",
+            phase=1,
+            status="done",
+            replacement_of="parent",
+            supersedes_criteria=["criterion-1"],
+        ),
+        Task(
+            task_uid="token-replacement",
+            title="User token test",
+            objective="Test the user token",
+            phase=1,
+            status="done",
+            replacement_of="parent",
+            supersedes_criteria=["criterion-1"],
+        ),
+    ]
+    state = FakeState(_plan(), tasks=[parent, *replacements])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    updated_plan = controller._mark_phase(_plan(), 1, "partial_failure")
+
+    updated_parent = next(task for task in state.tasks if task.task_uid == "parent")
+    assert updated_parent.status == "superseded"
+    assert "cookie-replacement" in updated_parent.status_reason
+    assert "token-replacement" in updated_parent.status_reason
+    assert updated_plan.phases[0].status == "done"
+
+
+@pytest.mark.parametrize(
+    "replacement_status",
+    ["active", "pending", "partial_failure", "blocked"],
+)
+def test_partial_failure_remains_blocking_until_all_replacements_succeed(replacement_status):
+    parent = Task(
+        task_uid="parent",
+        title="Combined test",
+        objective="Resolve the test intent",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Replacement test",
+        objective="Resolve the remaining criterion",
+        phase=1,
+        status=replacement_status,
+        replacement_of="parent",
+        supersedes_criteria=["criterion-1"],
+    )
+    state = FakeState(_plan(), tasks=[parent, replacement])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    controller._reconcile_superseded_tasks(1)
+
+    assert next(task for task in state.tasks if task.task_uid == "parent").status == "partial_failure"
+
+
+def test_partial_failure_remains_blocking_when_replacement_omits_parent_criterion():
+    parent = Task(
+        task_uid="parent",
+        title="Combined test",
+        objective="Resolve the test intent",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Unrelated replacement",
+        objective="Resolve another criterion",
+        phase=1,
+        status="done",
+        replacement_of="parent",
+        supersedes_criteria=["other-criterion"],
+    )
+    state = FakeState(_plan(), tasks=[parent, replacement])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    controller._reconcile_superseded_tasks(1)
+
+    assert next(task for task in state.tasks if task.task_uid == "parent").status == "partial_failure"
 
 
 def test_non_loop_max_token_exhaustion_remains_partial_failure():
@@ -3244,11 +3501,16 @@ def test_phase_evaluator_malformed_output_emits_deterministic_partial_failure_fa
     decision = controller._evaluate_phase_with_policy(plan, plan.phases[0])
 
     assert decision.status == "partial_failure"
-    assert "could not be parsed" in decision.reason
     event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    if response == "not json":
+        assert "could not be parsed" in decision.reason
+        assert event["error_type"] == "WorkflowInvariantError"
+    else:
+        assert "required decision schema" in decision.reason
+        assert event["source"] == "schema_validation"
+        assert event["error_type"] == "ValueError"
     assert event["phase_id"] == 1
     assert event["status"] == "partial_failure"
-    assert event["error_type"] == "WorkflowInvariantError"
     assert len(event["error_fingerprint"]) == 64
 
 
@@ -4477,6 +4739,25 @@ def test_task_cycle_progress_signature_changes_only_with_controller_observed_pro
     assert signature != MultiAgentWorkflowController._task_cycle_progress_signature([changed], [acceptance])
 
 
+def test_repeat_loop_recovery_is_bounded_and_requires_changed_action():
+    cycle_result = workflow_mod.TaskExecutorCycleResult(
+        text="Stopped after repeated browser_evaluate_js calls",
+        outcomes=[],
+        repeat_loop_detected=True,
+        repeat_loop_signature="loop-1",
+        repeat_loop_reason="Stopped after repeated browser_evaluate_js calls",
+    )
+
+    assert not MultiAgentWorkflowController._repeat_loop_is_repeated(False, set(), "loop-1")
+    assert MultiAgentWorkflowController._repeat_loop_is_repeated(True, {"loop-1"}, "loop-2")
+    assert MultiAgentWorkflowController._repeat_loop_is_repeated(False, {"loop-1"}, "loop-1")
+
+    guidance = MultiAgentWorkflowController._repeat_loop_recovery_guidance(cycle_result)
+    assert "same normalized input" in guidance
+    assert "same browser expression" in guidance
+    assert "equivalent replacement task" in guidance
+
+
 def test_task_correction_stops_after_repeated_no_progress_cycle():
     runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2})
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
@@ -5476,16 +5757,16 @@ def test_task_prompt_revision_preserves_swarm_contract_rules():
     assert "parent-owned acceptance" in prompt
 
 
-def test_task_prompt_builder_can_select_published_acceptance_memory():
+def test_task_prompt_builder_excludes_published_acceptance_memory():
+    acceptance_memory = {
+        "id": "acceptance-memory-1",
+        "memory": "Task acceptance for route mapping. Criterion routes [satisfied]: /login returned 200.",
+        "metadata": {"category": "observation", "source": "task_acceptance"},
+    }
     state = FakeState(_plan())
     state.client = SimpleNamespace(
-        list_memories=lambda **kwargs: [
-            {
-                "id": "acceptance-memory-1",
-                "memory": "Task acceptance for route mapping. Criterion routes [satisfied]: /login returned 200.",
-                "metadata": {"category": "observation", "source": "task_acceptance"},
-            }
-        ]
+        list_memories=lambda **kwargs: [acceptance_memory],
+        get_memory_by_id=lambda memory_id: acceptance_memory if memory_id == "acceptance-memory-1" else None,
     )
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -5503,8 +5784,9 @@ def test_task_prompt_builder_can_select_published_acceptance_memory():
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "acceptance-memory-1" in prompt
-    assert "/login returned 200" in prompt
+    assert "acceptance-memory-1" not in prompt
+    assert "/login returned 200" not in prompt
+    assert controller._selected_memory_context(["acceptance-memory-1"]) == ""
 
 
 def test_task_prompt_critic_rejects_generic_acceptance_summaries():
@@ -5794,13 +6076,39 @@ def test_task_prompt_spec_filters_runtime_supplied_core_tools_from_both_selectio
     normalized = controller._normalize_task_prompt_spec(
         {
             "prompt": "Store evidence",
-            "tools": ["read_artifact", "shell", "store_observation", "mcp_scan"],
-            "shell_commands": ["shell", "store_observation", "module_probe"],
+            "tools": ["read_artifact", "shell", "store_observation", "record_task_acceptance", "mcp_scan"],
+            "shell_commands": ["shell", "store_observation", "record_task_acceptance", "module_probe"],
         },
         task,
     )
 
     assert normalized["tools"] == ["mcp_scan", "module_probe"]
+    assert normalized["shell_commands"] == []
+
+
+def test_task_prompt_spec_filters_controller_supplied_tools_with_runtime_fallback():
+    runtime = _runtime()
+    runtime.tools_list = [_tool("shell"), _tool("record_finding_validation")]
+    runtime.core_tools_list = []
+    runtime.optional_tools_list = [_tool("mcp_scan")]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Accept", objective="Assess target", phase=1, status="pending")
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Assess target",
+            "tools": ["shell", "record_finding_validation", "record_task_acceptance", "mcp_scan"],
+            "shell_commands": ["record_task_acceptance"],
+        },
+        task,
+    )
+
+    assert normalized["tools"] == ["mcp_scan"]
     assert normalized["shell_commands"] == []
 
 
@@ -5858,13 +6166,13 @@ def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
     assert row.endswith(",scan;validate")
     description = row.split(",", maxsplit=2)[1]
     assert len(description) == 250
-    assert "keys prompt, memory_ids, tools, shell_commands" in prompt
+    assert "keys prompt, memory_indices, memory_ids, tools, shell_commands" in prompt
 
 
 def test_shell_command_catalog_is_empty_without_shell_tool(monkeypatch):
     runtime = _runtime()
     runtime.config.available_tools = ["httpx"]
-    runtime.core_tools_list = [_tool("mem0_retrieve")]
+    runtime.core_tools_list = [_tool("memory_retrieve")]
     command_specs = pytest.fail
     monkeypatch.setattr(workflow_mod, "get_shell_command_specs", command_specs)
     controller = MultiAgentWorkflowController(
@@ -5939,7 +6247,7 @@ def test_phase_evaluator_receives_module_termination_policy():
 
     assert decision.status == "done"
     assert captured["role"] == "phase_evaluator"
-    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "mem0_retrieve"}
+    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "memory_retrieve"}
     assert "## Module Termination Policy" in captured["system_prompt"]
     assert "Require verified exploitability" in captured["system_prompt"]
     assert "Apply the module termination policy" in captured["prompt"]
@@ -5993,7 +6301,7 @@ def test_task_evaluator_does_not_receive_module_termination_policy():
     assert decision.reason == "not enough access"
     assert decision.instructions == ""
     assert captured["role"] == "task_evaluator"
-    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "mem0_retrieve"}
+    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "memory_retrieve"}
     assert "Evaluator Role Boundary" in captured["system_prompt"]
     assert "Module Termination Policy" not in captured["system_prompt"]
     assert "sole evaluation target" in captured["prompt"]
@@ -6046,7 +6354,7 @@ def test_evaluator_tools_exclude_shell_and_optional_execution_tools():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert {tool.__name__ for tool in controller._evaluator_tools()} == {"read_artifact", "mem0_retrieve"}
+    assert {tool.__name__ for tool in controller._evaluator_tools()} == {"read_artifact", "memory_retrieve"}
 
 
 def test_phase_evaluator_prompt_is_review_only():
@@ -6073,7 +6381,7 @@ def test_prompt_builder_context_includes_task_history():
         _plan(),
         tasks=[
             Task(task_uid="done", title="Worked", objective="use working path", phase=1, status="done",
-                 status_reason="evidence stored", evidence=["mem0://finding-1"]),
+                 status_reason="evidence stored", evidence=["memory:finding-1"]),
             Task(task_uid="blocked", title="Blocked", objective="avoid blocked path", phase=1, status="blocked",
                  status_reason="requires credentials"),
             Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
@@ -6351,7 +6659,7 @@ def test_invalid_task_prompt_builder_json_marks_task_partial_failure():
     assert "task_prompt_builder returned invalid JSON" in state.tasks[0].status_reason
 
 
-def test_controller_rejects_invalid_evaluator_status():
+def test_controller_converts_invalid_evaluator_status_to_partial_failure():
     state = FakeState(_plan(), tasks=[Task(task_uid="active", title="Active", objective="run", phase=1, status="active")])
 
     def text_runner(role, prompt, tools, system_prompt):
@@ -6370,8 +6678,11 @@ def test_controller_rejects_invalid_evaluator_status():
         max_iterations=1,
     )
 
-    with pytest.raises(WorkflowInvariantError, match="Invalid workflow decision"):
-        controller.run()
+    decision = controller._evaluate_task(state.plan, state.plan.phases[0], state.tasks[0])
+
+    assert decision.status == "partial_failure"
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["source"] == "schema_validation"
 
 
 def test_json_text_agent_retries_invalid_json_by_default():
@@ -6446,7 +6757,7 @@ def test_json_text_agent_raises_after_configured_retries():
     assert calls == ["task_prompt_builder", "task_prompt_builder", "task_prompt_builder"]
 
 
-def test_json_text_agent_does_not_retry_valid_json_with_invalid_status():
+def test_json_text_agent_retries_valid_json_with_invalid_status_and_falls_back():
     task = Task(task_uid="active", title="Active", objective="run", phase=1, status="active")
     calls = []
 
@@ -6461,10 +6772,10 @@ def test_json_text_agent_does_not_retry_valid_json_with_invalid_status():
         text_runner=text_runner,
     )
 
-    with pytest.raises(WorkflowInvariantError, match="Invalid workflow decision"):
-        controller._evaluate_task(_plan(), _plan().phases[0], task)
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task)
 
-    assert calls == ["task_evaluator"]
+    assert decision.status == "partial_failure"
+    assert calls == ["task_evaluator", "task_evaluator"]
 
 
 def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
@@ -6698,17 +7009,71 @@ def test_memory_summary_returns_compact_memories_and_handles_errors():
     )
 
     memories = controller._memory_summary()
-    assert memories.startswith("memories[2]{id,memory}:\n")
-    assert "  m1," in memories
-    assert "\n  m2,short\n" in memories
+    assert memories.startswith("memories[2]{id,category,source,memory}:\n")
+    assert "  m1,finding,," in memories
+    assert "\n  m2,general,,short\n" in memories
 
     first_line = memories.splitlines()[1]
-    first_parts = first_line.strip().split(",", maxsplit=2)
+    first_parts = first_line.strip().split(",", maxsplit=3)
     assert first_parts[0] == "m1"
-    assert len(first_parts[1]) == 1000
+    assert len(first_parts[3]) == 1000
 
     state.client = SimpleNamespace(list_memories=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("fail")))
-    assert controller._memory_summary() == "memories[0]{id,memory}:"
+    assert controller._memory_summary() == "memories[0]{id,category,source,memory}:"
+
+
+def test_prompt_memory_filter_excludes_bookkeeping_and_retains_evidence():
+    task_acceptance = {
+        "id": "acceptance",
+        "memory": "Task acceptance says route mapping was complete.",
+        "metadata": {"category": "observation", "source": "task_acceptance"},
+    }
+    publication_marker = {
+        "id": "publication",
+        "memory": "Copied acceptance ledger.",
+        "metadata": {"category": "observation", "publication_key": "task_acceptance:task-1:digest"},
+    }
+    records = [
+        task_acceptance,
+        publication_marker,
+        {"id": "plan", "memory": "Plan record", "metadata": {"category": "plan"}},
+        {"id": "task", "memory": "Task record", "metadata": {"source": "task"}},
+        {"id": "observation", "memory": "The login form accepts POST.", "metadata": {"category": "observation"}},
+        {"id": "finding", "memory": "Stored XSS candidate.", "metadata": {"category": "finding"}},
+        {"id": "knowledge", "memory": "Use explicit response status capture.", "metadata": {"category": "knowledge"}},
+        {"id": "validation", "memory": "Candidate needs independent reproduction.", "metadata": {"category": "validation_failure"}},
+    ]
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: records,
+        get_memory_by_id=lambda memory_id: next((item for item in records if item["id"] == memory_id), None),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    assert [record["id"] for record in controller._prompt_memory_records()] == [
+        "observation",
+        "finding",
+        "knowledge",
+        "validation",
+    ]
+    prompt = controller._task_creator_prompt(_plan(), _plan().phases[0])
+    assert "Task acceptance says route mapping was complete" not in prompt
+    assert "Copied acceptance ledger" not in prompt
+    assert "Plan record" not in prompt
+    assert "Task record" not in prompt
+    assert "The login form accepts POST" in prompt
+    assert "Stored XSS candidate" in prompt
+    assert "Use explicit response status capture" in prompt
+    assert "Candidate needs independent reproduction" in prompt
+    assert "Controller-owned task history, acceptance ledgers" in prompt
+    selected = controller._selected_memory_context(["acceptance", "finding"])
+    assert "Task acceptance says route mapping was complete" not in selected
+    assert "Stored XSS candidate" in selected
 
 
 def test_operation_health_provider_predicts_current_phase_from_inventory_fanout(monkeypatch):

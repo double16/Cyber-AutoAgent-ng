@@ -704,7 +704,7 @@ def test_recovery_allows_read_only_diagnostics_and_unrelated_shell():
     assert read_artifact.cancel_tool is False
     hook._after_tool(_after("read", "read_artifact", read_artifact.tool_use["input"], status="success", text="log"))
 
-    retrieve = _before("retrieve", "mem0_retrieve", {"query": "wordlists"})
+    retrieve = _before("retrieve", "memory_retrieve", {"query": "wordlists"})
     hook._before_tool(retrieve)
     assert retrieve.cancel_tool is False
 

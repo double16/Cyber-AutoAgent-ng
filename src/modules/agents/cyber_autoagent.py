@@ -40,8 +40,6 @@ from modules.agents.factory import (
 from modules.agents.patches import ToolUseIdHook
 from modules.config import (
     AgentConfig,
-    align_mem0_config,
-    check_existing_memories,
     configure_sdk_logging,
     get_config_manager,
 )
@@ -109,14 +107,15 @@ from modules.tools.memory import (
     create_tasks,
     get_memory_client,
     initialize_memory_system,
-    mem0_list,
-    mem0_retrieve,
+    memory_list,
+    memory_retrieve,
     record_finding_validation,
     record_objective_validation,
     store_finding,
     store_objective_candidate,
     store_knowledge,
     store_observation,
+    resolve_operation_targets,
 )
 from modules.tools.oast import (
     oast_clear_http_responses,
@@ -279,41 +278,11 @@ def create_agent_runtime_resources(
     os.environ["CYBER_OPERATION_ID"] = operation_id
 
     # Configure memory system using centralized configuration
-    memory_config = config_manager.get_mem0_service_config(config.provider)
-    align_mem0_config(config.model_id, memory_config)
-
-    # Configure vector store with memory path if provided
-    if config.memory_path:
-        # Validate existing memory store path
-        if not os.path.exists(config.memory_path):
-            raise ValueError(f"Memory path does not exist: {config.memory_path}")
-        if not os.path.isdir(config.memory_path):
-            raise ValueError(f"Memory path is not a directory: {config.memory_path}")
-
-        # Override vector store path in centralized config
-        memory_config["vector_store"] = {"config": {"path": config.memory_path}}
-        print_status(f"Loading existing memory from: {config.memory_path}", "SUCCESS")
-
-    # Check for existing memories before initializing to avoid race conditions
-    # Skip check if user explicitly wants fresh memory
-    if config.memory_mode == "fresh":
-        has_existing_memories = False
-        print_status(
-            "Using fresh memory mode - ignoring any existing memories", "WARNING"
-        )
-    else:
-        has_existing_memories = check_existing_memories(config.target, config.provider, operation_id)
-        # Log the result for debugging container vs local issues
-        if has_existing_memories:
-            print_status(
-                f"Previous memories detected for {config.target} - will be loaded",
-                "SUCCESS",
-            )
-        else:
-            print_status(
-                f"No previous memories found for {config.target} - will create new",
-                "INFO",
-            )
+    operation_targets = resolve_operation_targets(config.target, config.objective)
+    memory_config = config_manager.get_qdrant_memory_config(config.provider)
+    memory_config["target_values"] = [target.value for target in operation_targets]
+    memory_config["memory_mode"] = config.memory_mode
+    has_existing_memories = False
 
     # Initialize memory system
     target_name = sanitize_target_name(config.target)
@@ -398,20 +367,19 @@ def create_agent_runtime_resources(
         operation_id,
         target_name,
         has_existing_memories,
+        logical_target=config.target,
     )
     print_status(f"Memory system initialized for operation: {operation_id}", "SUCCESS")
 
     memory_client = get_memory_client(silent=True)
 
     # Get memory overview for system prompt enhancement and UI display
-    memory_overview = None
-    if has_existing_memories or config.memory_path:
-        try:
-            memory_overview = memory_client.get_memory_overview()
-        except Exception as e:
-            agent_logger.debug(
-                "Could not get memory overview for system prompt: %s", str(e)
-            )
+    try:
+        memory_overview = memory_client.get_memory_overview()
+        has_existing_memories = bool(memory_overview.get("has_memories"))
+    except Exception as e:
+        memory_overview = None
+        agent_logger.debug("Could not get memory overview for system prompt: %s", str(e))
 
     tool_count = 0
 
@@ -623,8 +591,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         record_finding_validation,
         store_objective_candidate,
         record_objective_validation,
-        mem0_retrieve,
-        mem0_list,
+        memory_retrieve,
+        memory_list,
         read_artifact,
         create_tasks,
         sleep,
@@ -732,7 +700,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         operation_id=operation_id,
         budget=config.budget,
         provider=config.provider,
-        has_memory_path=bool(config.memory_path),
         has_existing_memories=has_existing_memories,
         memory_overview=memory_overview,
         tools_context=full_tools_context if full_tools_context else None,
@@ -816,24 +783,10 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
             "tools_available": tool_count,
             "memory": {
                 "mode": config.memory_mode,
-                "path": config.memory_path or None,
-                "has_existing": has_existing_memories
-                if "has_existing_memories" in locals()
-                else False,
-                "reused": (
-                    (has_existing_memories and config.memory_mode != "fresh")
-                    if "has_existing_memories" in locals()
-                    else False
-                ),
-                "backend": (
-                    "mem0_cloud"
-                    if config_manager.getenv("MEM0_API_KEY")
-                    else (
-                        "opensearch"
-                        if config_manager.getenv("OPENSEARCH_HOST")
-                        else "faiss"
-                    )
-                ),
+                "path": None if config_manager.getenv("QDRANT_URL") else os.path.join(server_config.output.base_dir, "qdrant"),
+                "has_existing": has_existing_memories,
+                "reused": has_existing_memories,
+                "backend": "qdrant_service" if config_manager.getenv("QDRANT_URL") else "qdrant_local",
                 **(
                     memory_overview
                     if memory_overview and isinstance(memory_overview, dict)
@@ -1004,7 +957,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         "tools.parallel_limit": 8,
         # Memory configuration
         "memory.enabled": True,
-        "memory.path": config.memory_path if config.memory_path else "ephemeral",
+        "memory.path": config_manager.getenv("QDRANT_URL") or os.path.join(server_config.output.base_dir, "qdrant"),
     }
 
     def create_subagent_callback_handler(

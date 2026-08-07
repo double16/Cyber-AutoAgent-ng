@@ -52,9 +52,33 @@ for _var in (
     "MAX_COMPLETION_TOKENS",
     "MAX_TOKENS",
     "ENABLE_OBSERVABILITY",
-    "MEM0_LLM_MODEL",
+    "QDRANT_URL",
+    "QDRANT_API_KEY",
 ):
     os.environ.pop(_var, None)
+
+
+@pytest.fixture(autouse=True)
+def restore_provider_override_environment():
+    """Prevent in-process CLI tests from leaking provider overrides to later tests."""
+    keys = (
+        "CYBER_AGENT_PROVIDER",
+        "CYBER_AGENT_LLM_MODEL",
+        "CYBER_AGENT_EMBEDDING_MODEL",
+        "CYBER_AGENT_SWARM_MODEL",
+        "CYBER_AGENT_EVALUATION_MODEL",
+        "CYBER_MEMORY_MODE",
+        "QDRANT_URL",
+        "QDRANT_API_KEY",
+        "QDRANT_COLLECTION",
+    )
+    original = {key: os.environ.get(key) for key in keys}
+    yield
+    for key, value in original.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 @pytest.fixture
@@ -191,7 +215,7 @@ def mock_ollama_models_missing():
 def mock_memory_tools():
     """Mock memory tools module"""
     with patch("modules.agents.cyber_autoagent.memory_tools") as mock_tools:
-        mock_tools.mem0_instance = None
+        mock_tools.memory_instance = None
         mock_tools.operation_id = None
         yield mock_tools
 

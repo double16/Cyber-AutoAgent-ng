@@ -72,6 +72,14 @@ export class DockerExecutionServiceAdapter extends EventEmitter implements Execu
     return this.mode;
   }
 
+  drainBufferedStartupEvents(): any[] {
+    return this.dockerService.drainBufferedStartupEvents();
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.dockerService.markStartupEventConsumerAttached();
+  }
+
   getCapabilities(): ExecutionCapabilities {
     return {
       canExecute: true,

@@ -127,7 +127,7 @@ describe('EventLine snapshot-style rendering', () => {
     expect(output).toMatch(/\[AGENT:/i);
     expect(output).toMatch(/RECON[ _]SPECIALIST/i);
     expect(output).toMatch(/ACTION\s+2/i);
-    expect(output).toMatch(/PROGRESS\s+20%/i);
+    expect(output).toMatch(/BUDGET\s+20%/i);
   });
 
   it.each(widths)('renders only the compact operation health score and band (width=%s)', async (width) => {

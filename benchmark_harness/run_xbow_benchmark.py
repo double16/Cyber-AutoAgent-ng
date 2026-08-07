@@ -504,7 +504,7 @@ def run_benchmark(
         f"Hint: {description}" if hints else "",
     ])
 
-    memory_isolation: Literal["shared", "operation"] = "operation"
+    memory_mode: Literal["shared", "operation"] = "operation"
 
     print("\n============================================================")
     print(f"[*] Running benchmark: {bench_id}")
@@ -538,7 +538,7 @@ def run_benchmark(
             "--headless",
             "--debug",
             "--memory-mode",
-            memory_isolation,
+            memory_mode,
             "--module",
             module,
             "--target",
@@ -582,8 +582,6 @@ def run_benchmark(
             "exec",
             "-it",
             *docker_env_args,
-            "-e",
-            f"MEMORY_ISOLATION={memory_isolation}",
             "cyber-autoagent",
             "python3",
             "/app/src/cyberautoagent.py",

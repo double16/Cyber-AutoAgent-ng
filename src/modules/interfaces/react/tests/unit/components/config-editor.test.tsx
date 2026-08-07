@@ -104,7 +104,6 @@ describe('ConfigEditor', () => {
             deploymentMode: 'local-cli',
             modelProvider: 'bedrock',
             modelId: 'anthropic.claude-sonnet-4-5',
-            memoryBackend: 'FAISS',
             observability: true,
             autoEvaluation: true,
             langfuseHost: '',
@@ -238,19 +237,19 @@ describe('ConfigEditor', () => {
             deploymentMode: 'full-stack',
             modelProvider: 'litellm',
             modelId: 'gpt-5-reasoning',
-            memoryBackend: 'opensearch',
+            memoryMode: 'shared',
+            qdrantUrl: 'http://localhost:6333',
             observability: true,
             autoEvaluation: true,
             langfuseHost: 'http://localhost:3000',
             langfusePublicKey: 'pk',
             langfuseSecretKey: 'sk',
-            opensearchHost: 'http://localhost:9200',
+            qdrantApiKey: 'secret',
             currentModel: {
                 inputCostPer1k: 0.01,
                 outputCostPer1k: 0.02,
             },
             outputDir: './outputs',
-            unifiedOutput: true,
         };
         inputHandlers.length = 0;
         const {ConfigEditor} = await load();
@@ -272,7 +271,7 @@ describe('ConfigEditor', () => {
         sendInput('', {downArrow: true});
         sendInput('', {return: true});
         output = textFromTree(view.toJSON());
-        expect(output).toContain('OpenSearch Host');
+        expect(output).toContain('Qdrant Service URL');
 
         sendInput('', {escape: true});
         sendInput('', {downArrow: true});
@@ -294,7 +293,7 @@ describe('ConfigEditor', () => {
         sendInput('', {return: true});
         output = textFromTree(view.toJSON());
         expect(output).toContain('Output Directory');
-        expect(output).toContain('Unified Output Structure');
+        expect(output).not.toContain('Unified Output Structure');
     });
 
     it('renders configuration status and deployment description branches', async () => {
@@ -348,7 +347,6 @@ describe('ConfigEditor', () => {
             deploymentMode: 'full-stack',
             modelProvider: 'bedrock',
             modelId: 'claude',
-            memoryBackend: 'FAISS',
             observability: false,
             autoEvaluation: false,
         };

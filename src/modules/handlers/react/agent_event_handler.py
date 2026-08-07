@@ -15,7 +15,7 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -741,12 +741,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             # Best-effort defaults for memory backend if not supplied
             memory_info = op_event.get("memory", {}) or {}
             if "backend" not in memory_info:
-                if os.getenv("MEM0_API_KEY"):
-                    memory_info["backend"] = "mem0_cloud"
-                elif os.getenv("OPENSEARCH_HOST"):
-                    memory_info["backend"] = "opensearch"
-                else:
-                    memory_info["backend"] = "faiss"
+                memory_info["backend"] = "qdrant_service" if os.getenv("QDRANT_URL") else "qdrant_local"
             op_event["memory"] = memory_info
 
             # UI mode hint
@@ -1303,12 +1298,22 @@ class AgentEventHandler(PrintingCallbackHandler):
         totals = self._operation_usage_totals()
         input_tokens = int(totals["input_tokens"])
         output_tokens = int(totals["output_tokens"])
+        model_usage = self.model_usage()
+        captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        if model_usage:
+            try:
+                from modules.tools.memory import persist_operation_model_metrics
+
+                persist_operation_model_metrics(model_usage, captured_at, operation_id=self.operation_id)
+            except Exception as error:
+                logger.warning("Unable to persist assessment model metrics: %s", error)
         self.emit_ui_event(
             {
                 "type": "model_usage_snapshot",
                 "stage": "assessment_complete",
                 "metrics": {
-                    "modelUsage": self.model_usage(),
+                    "capturedAt": captured_at,
+                    "modelUsage": model_usage,
                     "inputTokens": input_tokens,
                     "outputTokens": output_tokens,
                     "totalTokens": input_tokens + output_tokens,
@@ -3346,6 +3351,16 @@ class AgentEventHandler(PrintingCallbackHandler):
             if report_content:
                 self._completed_report_path = report_path
                 self.emit_ui_event({"type": "report_content", "content": report_content})
+                self.emit_ui_event(
+                    {
+                        "type": "report_paths",
+                        "target": target_name,
+                        "output_dir": output_dir,
+                        "report_path": report_path,
+                        "log_path": os.path.join(output_dir, "cyber_operations.log"),
+                        "artifacts_path": os.path.join(output_dir, "artifacts"),
+                    }
+                )
                 self.emit_budget_progress_update()
 
                 # Also emit file path information for reference
@@ -3353,9 +3368,11 @@ class AgentEventHandler(PrintingCallbackHandler):
                     {
                         "type": "output",
                         "content": (
-                            f"\n{'━' * 80}\n\nREPORT GENERATED\n\nREPORT ALSO SAVED TO:\n"
-                            f"  • {report_path}\n\nMEMORY STORED IN:\n  • {output_dir}/memory/\n\n"
-                            f"OPERATION LOGS:\n  • {os.path.join(output_dir, 'cyber_operations.log')}\n\n"
+                            f"\n{'━' * 80}\n\nREPORT GENERATED\n\n"
+                            "REPORT ALSO SAVED TO:\n"
+                            f"  • {report_path}\n\n"
+                            "OPERATION LOGS:\n"
+                            f"  • {os.path.join(output_dir, 'cyber_operations.log')}\n\n"
                             f"{'━' * 80}\n"
                         ),
                     }

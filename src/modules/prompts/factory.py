@@ -1261,40 +1261,59 @@ def format_evidence_for_report(
     return evidence_text.strip()
 
 
+REPORT_BOOKKEEPING_TOOLS = frozenset(
+    {
+        "create_tasks",
+        "get_plan",
+        "list_tasks",
+        "memory_list",
+        "memory_retrieve",
+        "read_artifact",
+        "record_finding_validation",
+        "record_task_acceptance",
+        "store_finding",
+        "store_knowledge",
+        "store_observation",
+        "store_plan",
+        "update_plan",
+    }
+)
+REPORT_EXCLUDED_SHELL_COMMANDS = frozenset(
+    {
+        "awk", "bash", "cat", "cut", "paste", "find", "grep", "head", "jq", "ls", "python", "python3",
+        "sed", "sh", "sort", "tail", "tr", "uniq", "wc", "which", "command", "xargs", "echo", "pwd", "cd", "mkdir",
+        "rm", "cp", "mv", "chmod", "chown", "stat", "ln", "printf", "time", "timeout", "id", "whoami", "sleep",
+    }
+)
+
+
+def is_reportable_tool(tool_name: str) -> bool:
+    """Return whether a tool represents operational work for report presentation."""
+
+    normalized = str(tool_name or "").strip().split(":", 1)[0].lower()
+    return normalized not in REPORT_BOOKKEEPING_TOOLS and normalized not in REPORT_EXCLUDED_SHELL_COMMANDS
+
+
 def format_tools_summary(tools_used: List[str] | Dict[str, int]) -> str:
-    """Format tools into a readable usage summary.
+    """Format a unique reportable-tool list.
 
     Accepts either:
-    - List[str]: a list of tool names (duplicates indicate multiple uses)
-    - Dict[str, int]: mapping of tool name to usage count
+    - List[str]: tool names, with duplicates removed
+    - Dict[str, int]: tool names as keys; values are ignored
     """
     if not tools_used:
         return ""
 
-    # Normalize to a dict of counts
-    tools_summary: Dict[str, int] = {}
+    unique_tools: List[str] = []
     if isinstance(tools_used, dict):
-        for k, v in tools_used.items():
-            try:
-                count = int(v)
-            except Exception:
-                count = 0
-            if count > 0:
-                tools_summary[str(k)] = count
+        candidates = tools_used.keys()
     else:
-        for tool in tools_used:
-            tool_name = str(tool).split(":")[0]
-            tools_summary[tool_name] = tools_summary.get(tool_name, 0) + 1
-
-    # Deterministic order: by descending count then name
-    items = sorted(tools_summary.items(), key=lambda kv: (-kv[1], kv[0]))
-
-    # Use proper pluralization for "use"
-    lines = []
-    for name, count in items:
-        unit = "use" if count == 1 else "uses"
-        lines.append(f"- {name}: {count} {unit}")
-    return "\n".join(lines)
+        candidates = tools_used
+    for tool in candidates:
+        tool_name = str(tool).split(":", 1)[0].strip()
+        if tool_name and is_reportable_tool(tool_name) and tool_name not in unique_tools:
+            unique_tools.append(tool_name)
+    return "\n".join(f"- {tool_name}" for tool_name in unique_tools)
 
 
 def _transform_evidence_to_content(

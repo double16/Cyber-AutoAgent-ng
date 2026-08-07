@@ -188,7 +188,7 @@ def test_store_plan_assessment_complete_reminder():
         mui.return_value = "user"
         mock_client.get_active_plan.return_value = None
 
-        # We'll simulate what Mem0ServiceClient.store_plan does
+        # Simulate what QdrantMemoryClient.store_plan does.
         def side_effect(plan, user_id=None, operation_id=None):
             if all(p.status == "done" for p in plan.phases) and not plan.assessment_complete:
                 # Need to use object.__setattr__ because OperationPlan is frozen=True

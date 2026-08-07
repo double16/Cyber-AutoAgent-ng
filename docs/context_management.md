@@ -419,8 +419,10 @@ Artifact references include immediate context for LLM comprehension:
 The repeat guard is scoped to one agent invocation and detects exact contiguous cycles, including a single unchanged
 call or alternating calls such as `A, B, A, B, A, B`. It reuses the most recent completed result for the matching call
 and allows one model recovery turn. If the model continues the same cycle, the guard reuses the next matching result
-and stops only that agent as a normal completion. A different call resets recovery state, and the surrounding workflow
-continues without an exception.
+and stops only that agent as a normal completion. The workflow carries the exact normalized loop signature across
+retained task-executor cycles, permits at most one materially different recovery action, and terminates the task if
+another loop occurs. A new task is not created unless Python has a separately justified replacement procedure with
+explicit `replacement_of` lineage.
 
 The provider-configured or detected context window is applied directly to every Strands model and is the same value
 used by prompt budgeting and proactive compression. There is no application-level 48,000-token default; 48,000 is one

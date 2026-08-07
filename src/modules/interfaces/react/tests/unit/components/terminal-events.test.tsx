@@ -386,7 +386,7 @@ describe('Terminal event processing', () => {
         });
 
         const text = textFromTree(view.toJSON());
-        expect(text).toContain('[PROGRESS 5%]');
+        expect(text).toContain('[BUDGET 5%]');
         expect(text).toContain('curl http://example.com/ping');
 
         act(() => {

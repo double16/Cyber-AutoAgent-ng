@@ -1,7 +1,7 @@
 """Tools module for Cyber-AutoAgent."""
 
 from modules.tools.memory import (
-    Mem0ServiceClient,
+    QdrantMemoryClient,
     get_memory_client,
     initialize_memory_system,
     store_observation,
@@ -10,8 +10,8 @@ from modules.tools.memory import (
     record_finding_validation,
     store_objective_candidate,
     record_objective_validation,
-    mem0_retrieve,
-    mem0_list,
+    memory_retrieve,
+    memory_list,
     create_tasks,
 )
 from modules.tools.artifact import read_artifact
@@ -54,12 +54,12 @@ __all__ = [
     "store_objective_candidate",
     "record_objective_validation",
     "read_artifact",
-    "mem0_retrieve",
-    "mem0_list",
+    "memory_retrieve",
+    "memory_list",
     "create_tasks",
     "initialize_memory_system",
     "get_memory_client",
-    "Mem0ServiceClient",
+    "QdrantMemoryClient",
     "initialize_browser",
     "browser_set_headers",
     "browser_goto_url",

@@ -21,10 +21,12 @@ import { installAutoRunInterruptFallback } from './utils/autoRunInterrupt.js';
 import { formatAutoRunTerminationEvent } from './utils/autoRunTerminationFormatting.js';
 import { resolveRecordingMode } from './utils/recordingMode.js';
 import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
+import { formatToolDiscoveryEvent } from './utils/toolDiscoveryEventFormatting.js';
 import { formatWorkflowActivityEvent } from './utils/workflowActivityFormatting.js';
 import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
 import { appendOperationHealth } from './utils/operationHealthFormatting.js';
 import { setOperationTerminalTitle } from './utils/terminalTitle.js';
+import { applyMemoryModeOverride } from './utils/cliConfigOverrides.js';
 
 const formatTaskScope = (event: any): string => {
   const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
@@ -87,7 +89,7 @@ const cli = meow(`
     --max-cost          Optional: Total cost budget (e.g., USD)
     --auto-run          Start assessment immediately without UI
     --auto-approve      Auto-approve tool executions (no confirmations)
-    --memory-mode       Memory mode: auto (default) or fresh
+    --memory-mode       Memory scope: operation (default) or shared
     --provider          Model provider: bedrock (default), ollama, or litellm
     --model             Specific model ID to use
     --region            AWS region (default: us-east-1)
@@ -249,6 +251,7 @@ const runAutoAssessment = async () => {
         configOverrides.swarmModel = cli.flags.model;
       }
       if (cli.flags.region) configOverrides.awsRegion = cli.flags.region;
+      applyMemoryModeOverride(configOverrides, cli.flags.memoryMode);
       if (cli.flags.maxDuration) configOverrides.budgetMaxDuration = cli.flags.maxDuration;
       if (cli.flags.maxTokens) configOverrides.budgetMaxTokens = cli.flags.maxTokens;
       if (cli.flags.maxCost) configOverrides.budgetMaxCost = cli.flags.maxCost;
@@ -303,11 +306,9 @@ const runAutoAssessment = async () => {
         maxThreads: 10,
         outputFormat: 'markdown' as const,
         verbose: false,
-        memoryMode: 'auto' as const,
+        memoryMode: 'operation' as const,
         keepMemory: true,
-        memoryBackend: 'FAISS' as const,
         outputDir: './outputs',
-        unifiedOutput: true,
         theme: 'retro' as const,
         showMemoryUsage: false,
         showOperationId: true,
@@ -425,8 +426,12 @@ const runAutoAssessment = async () => {
       // This provides real-time progress visibility during assessment
       executionService.on('event', (event: any) => {
         const memoryEventMessage = formatAutoRunMemoryEvent(event);
+        const toolDiscoveryMessage = formatToolDiscoveryEvent(event);
         if (memoryEventMessage) {
           loggingService.info(memoryEventMessage);
+        }
+        else if (toolDiscoveryMessage) {
+          loggingService.info(toolDiscoveryMessage);
         }
         else if (event.type === 'workflow_activity') {
           const message = formatWorkflowActivityEvent(event);

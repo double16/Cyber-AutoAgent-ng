@@ -1,11 +1,11 @@
 <general_report_structure>
-The module is recon-first: the primary goal is to map the attack surface, then highlight *verified* vulnerabilities as a prioritized manual-testing plan.
+The module is recon-first: provide high-level attack-surface interpretation and manual-investigation context from the
+canonical data. Python renders the authoritative attack-surface, observation, and verified-finding records.
 
 **CRITICAL**
-- Do not invent new observations/findings. Use ONLY the emitted items.
-- Prefer observations over findings when describing the attack surface.
-- Every observation must contribute to attack-surface understanding (what exists, where it is, and what boundary it sits behind).
-- Findings must be ordered to give manual testers a work plan: highest severity and impact first.
+- Do not invent new observations/findings; use supplied canonical context only.
+- Prefer qualitative observation interpretation over vulnerability claims when discussing the attack surface.
+- Do not enumerate, deduplicate, order, or assign severity to observations/findings; Python owns those records.
 </general_report_structure>
 
 <sections_to_generate>
@@ -22,10 +22,8 @@ Additional sections:
   - Data planes: REST/GraphQL, upload/download, exports, webhooks, background jobs
   - Sensitive workflows: account changes, payments, approvals, admin actions
   - Exposure posture: debug routes, error leakage, headers, CDN/WAF signals, storage buckets
-  - Observations (attack-surface evidence):
-     - Organize by Functionality Area & Trust Boundary (see `<finding_organization>`)
-     - Include ALL observations (no filtering). Deduplicate near-identical items by clustering into one observation with multiple evidence artifacts.
-     - For each observation: describe *what exists* and *what it implies* about attack paths (high-level, no weaponization).
+  - Attack-surface interpretation: explain the supplied observations at a high level, without listing or clustering
+    individual records or artifact references.
 
 **User Journeys**: Describe the typical user journeys and how they interact with the identified attack surfaces.
   - Use Mermaid journey diagrams (for each user role)
@@ -46,4 +44,9 @@ Additional sections:
 - Observations describe *attack surface facts* (what is reachable, what endpoints exist, what roles can do what, what boundary checks are visible).
 - Observations MUST NOT be phrased as vulnerabilities unless the run explicitly labeled them as a vulnerability.
 - If an item is ambiguous, keep it as an observation and explain the evidence gap.
+
+<observation_context>
+The `informational_observations` collection is the only source for observation interpretation. Summarize those records
+without counting, assigning severity, or converting attack-surface observations into verified findings.
+</observation_context>
 </finding_organization>

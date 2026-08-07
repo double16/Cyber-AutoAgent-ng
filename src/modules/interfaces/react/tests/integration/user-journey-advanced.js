@@ -46,11 +46,9 @@ function ensureTestConfig() {
     maxThreads: 5,
     outputFormat: 'markdown',
     verbose: false,
-    memoryMode: 'auto',
+    memoryMode: 'operation',
     keepMemory: true,
-    memoryBackend: 'FAISS',
     outputDir: './outputs',
-    unifiedOutput: true,
     theme: 'retro',
     showMemoryUsage: false,
     showOperationId: true,
@@ -138,4 +136,3 @@ function ensureTestConfig() {
     process.exit(1);
   }
 })();
-

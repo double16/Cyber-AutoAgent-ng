@@ -57,12 +57,12 @@ sequenceDiagram
     Strands->>Langfuse: Session Start
     
     loop Tool Execution
-        Agent->>Tools: shell("nmap -sV target")
-        Tools-->>Agent: Scan results
+        Agent->>Tools: Restricted tool execution
+        Tools-->>Agent: Structured result and evidence
         Strands->>Langfuse: Tool execution trace
         
-        Agent->>Tools: store_finding(candidate)
-        Tools-->>Agent: Memory stored
+        Agent->>Tools: Persist evidence
+        Tools-->>Agent: Memory and artifact references
         Strands->>Langfuse: Memory operation
     end
     
@@ -73,7 +73,7 @@ sequenceDiagram
 
 ```bash
 # 1. Start monitoring stack
-docker-compose up -d
+docker compose -f docker/docker-compose.yml up -d
 
 # 2. Run with full observability
 docker run --rm \

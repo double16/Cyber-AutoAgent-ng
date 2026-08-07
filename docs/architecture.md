@@ -44,6 +44,15 @@ per manifest item. Python resolves typed artifact, memory, observation, and find
 evaluation. This preserves broad, cohesive work under one retained executor without allowing moving completion
 targets.
 
+### Replacement and Supersession
+
+When a task cannot complete and its remaining intent must be split or retried as new work, replacement tasks declare
+`replacement_of` with the parent task UID and identify the parent criteria they resolve in `supersedes_criteria`.
+Python reconciles this lineage before phase closure. The parent becomes `superseded` only after every parent criterion is
+covered and every linked replacement is `done` or `superseded`. The parent record, evidence, and failure reason remain
+available for audit. Unlinked failures remain blocking, and Python does not infer replacement relationships from
+similar wording.
+
 ```mermaid
 flowchart LR
     M[Missing or invalid snapshot] --> R[Reject coverage task batch]
@@ -68,7 +77,7 @@ graph TB
     F --> I[AI Models]
     
     G --> J[shell]
-    G --> K[Typed memory tools / mem0_retrieve]
+    G --> K[Typed memory tools / memory_retrieve]
     G --> L[create_tasks when allowed]
     G --> M[Selected Module Tools]
     G --> N[Selected MCP Tools]
@@ -92,7 +101,7 @@ Agents operate through role-specific restricted tool lists.
 - **editor**: Create/modify files and custom tools
 - **swarm**: Deploy parallel agents for complex tasks
 - **http_request**: Make HTTP requests for web testing
-- **mem0_...**: Store/retrieve findings and knowledge
+- **memory_list / memory_retrieve**: List or semantically retrieve findings and knowledge
 - **load_tool**: Dynamically load created tools
 - **create_tasks**: Create durable tasks when a role permits task creation
 
@@ -195,14 +204,8 @@ task work and handles separate advisory checkpoints before pending task activati
 
 ### Security Tool Access
 
-Security tools are accessed **via shell**, not as direct tools:
-
-```python
-# Agent uses shell tool to run security commands
-shell("nmap -sV 192.168.1.1")
-shell("sqlmap -u 'http://target.com?id=1' --batch")
-shell("nikto -h target.com")
-```
+Security utilities are normally reached through the restricted shell capability. The active role receives only the
+capabilities allowed for its task, and command output is captured as operation evidence.
 
 ### MCP Tool Access
 
@@ -215,39 +218,99 @@ sequenceDiagram
     participant User
     participant Controller as Python Controller
     participant State as SQLite Plan/Task Store
-    participant Builder as Prompt Builder Agent
-    participant Worker as Task Worker Agent
-    participant Eval as Evaluator Agent
+    participant PlanActor as Plan Creator Agent
+    participant PlanCritic as Plan Critic Agent
+    participant TaskCreator as Task Creator Agent
+    participant PromptActor as Task Prompt Builder Agent
+    participant PromptCritic as Task Prompt Critic Agent
+    participant Worker as Task Executor Agent
+    participant Eval as Task Evaluator Agent
+    participant PhaseEval as Phase Evaluator Agent
+    participant ReportActor as Report Actor Agent
+    participant ReportCritic as Report Critic Agent
     participant Tools
-    participant Memory as Mem0 Memory
-    
+    participant Memory as Qdrant Semantic Memory
+
     User->>Controller: Start Assessment
-    Controller->>State: Load or create plan
-    
-    loop Assessment Cycle
-        Controller->>State: Select active phase/task
-        alt No task candidates
-            Controller->>Worker: Run task_creator
-            Worker->>Tools: create_tasks when needed
-            Tools-->>State: Persist tasks
-        end
 
-        Controller->>Builder: Build task-execution prompt
-        Builder-->>Controller: Prompt + selected optional tools/memory
-        Controller->>Worker: Execute active task
-        Worker->>Tools: shell/http/MCP/module tools
-        Worker->>Memory: Store observations/findings
-        Controller->>Eval: Evaluate task or phase
-        Eval-->>Controller: Structured status decision
-        Controller->>State: Apply status and advance loop
-
-        alt Phase soft budget reached
-            Controller->>Eval: Evaluate phase before activating more pending tasks
+    Controller->>State: Load existing plan
+    alt No plan exists
+        Controller->>PlanActor: Create structured plan
+        PlanActor-->>Controller: Draft phases and acceptance criteria
+        loop Bounded plan actor/critic refinement
+            Controller->>PlanCritic: Review plan for coverage and constraints
+            PlanCritic-->>Controller: Approve or provide feedback
+            alt Critic rejects and reviews remain
+                Controller->>PlanActor: Revise plan using feedback
+                PlanActor-->>Controller: Revised plan
+            else Critic approves
+                Controller->>State: Persist approved plan
+            end
         end
     end
-    
+
+    loop Python-owned assessment cycle
+        Controller->>State: Select active phase and task
+        alt No actionable task exists
+            Controller->>TaskCreator: Propose missing or follow-up tasks
+            TaskCreator->>Tools: create_tasks when permitted
+            Tools-->>State: Validate and persist tasks
+            opt Task-creation correction required
+                Controller->>TaskCreator: Correct rejected task proposals
+            end
+        else Active task exists
+            Controller->>PromptActor: Build task-execution prompt
+            PromptActor-->>Controller: Draft prompt, memory, and tools
+            loop Bounded prompt actor/critic refinement
+                Controller->>PromptCritic: Review prompt scope and safety
+                PromptCritic-->>Controller: Approve or provide feedback
+                alt Critic rejects and reviews remain
+                    Controller->>PromptActor: Revise prompt using feedback
+                    PromptActor-->>Controller: Revised prompt
+                else Critic approves
+                    Controller->>Worker: Execute approved task prompt
+                end
+            end
+
+            loop Bounded task actor/evaluator cycle
+                Worker->>Tools: Use restricted shell, HTTP, MCP, or module tools
+                Worker->>Memory: Store observations, findings, and evidence
+                Controller->>Eval: Evaluate acceptance, evidence, and status
+                Eval-->>Controller: done, partial_failure, blocked, or correction
+                alt Evaluator requests correction
+                    Controller->>Worker: Continue with bounded evaluator guidance
+                else Evaluator returns terminal status
+                    Controller->>State: Persist task status and evidence
+                end
+            end
+        end
+
+        opt Phase checkpoint or soft budget reached
+            Controller->>PhaseEval: Evaluate phase evidence and remaining work
+            PhaseEval-->>Controller: Continue, close, or partial_failure
+            Controller->>State: Advance or close phase
+        end
+    end
+
+    Controller->>ReportActor: Generate report sections
+    ReportActor-->>Controller: Draft section
+    loop Bounded report actor/critic refinement per section
+        Controller->>ReportCritic: Review report accuracy and requirements
+        ReportCritic-->>Controller: Approve or provide feedback
+        alt Critic rejects and cycles remain
+            Controller->>ReportActor: Revise section using feedback
+            ReportActor-->>Controller: Revised section
+        else Critic approves or cycle limit is reached
+            Controller->>State: Persist final section and critique metadata
+        end
+    end
     Controller->>User: completion termination_reason event + Final Report
 ```
+
+The actor/critic loops are bounded by separate configuration values: plan refinement, task-prompt refinement, task
+execution cycles plus evaluator corrections, and report refinement cycles. The controller remains the source of truth for
+state transitions; agents propose plans, prompts, evidence, evaluations, or revisions but cannot directly activate or
+close phases and tasks.
 
 ## Role-Agent Reasoning
 
@@ -270,6 +333,7 @@ flowchart TD
     H --> I[Task Evaluator]
     I --> J{Task Status}
     J -->|done / partial_failure / blocked| K[Controller Applies State]
+    K -->|linked replacements resolve all criteria| X[Mark parent superseded]
     
     style A fill:#e3f2fd,stroke:#333,stroke-width:3px
     style K fill:#e3f2fd,stroke:#333,stroke-width:3px
@@ -283,7 +347,7 @@ flowchart TD
 - **Focused Reasoning**: Agents receive narrow role prompts and task-specific context
 - **Metacognitive Awareness**: Agents assess confidence within their assigned objective
 - **Dynamic Capability Expansion**: Workers can use shell, selected tools, and swarm when appropriate
-- **Centralized Memory**: Discoveries flow into mem0 and reports query that memory
+- **Centralized Memory**: Discoveries flow into Qdrant and reports query operation-scoped evidence
 
 ## Tool Hierarchy
 
@@ -343,21 +407,17 @@ MCP Tools pre-configured:
 graph TB
     A[Agent Actions] --> B[Finding Discovered]
     B --> C[store_finding / store_observation / store_knowledge]
-    C --> D[Backend Selection]
-
-    D --> E[Mem0 Platform<br/>MEM0_API_KEY]
-    D --> F[OpenSearch<br/>OPENSEARCH_HOST]
-    D --> G[FAISS<br/>Default]
-
-    E --> H[Categorized Storage]
-    F --> H
-    G --> H
+    C --> D[Qdrant Semantic Memory]
+    D --> E[Target values always filtered]
+    E --> F{Memory mode}
+    F -->|operation| H[Target + operation]
+    F -->|shared| H[Target across operations]
 
     H --> I[category: finding]
     H --> J[category: plan]
     H --> K[category: reflection]
 
-    L[Future Decisions] --> M[mem0_retrieve]
+    L[Future Decisions] --> M[memory_retrieve]
     M --> N[Historical Context]
     N --> A
 
@@ -365,12 +425,11 @@ graph TB
     style D fill:#e3f2fd,stroke:#333,stroke-width:2px
 ```
 
-**Memory Backend Selection**:
-1. **Plans and Tasks**: Stored in a local SQLite database (`plan_store.db`).
-2. **Semantic Memories**:
-   - **Mem0 Platform** - If `MEM0_API_KEY` environment variable is set
-   - **OpenSearch** - If `OPENSEARCH_HOST` environment variable is set
-   - **FAISS** - Default local vector storage if neither is configured
+**Memory Storage**:
+1. **Plans, Tasks, and Model Metrics**: Stored in `outputs/cyber_autoagent.db`, scoped by exact logical target and
+   operation ID. Model metrics are append-only per provider/model capture and include their capture timestamps.
+2. **Semantic Memories**: Stored in one Qdrant collection under `outputs/qdrant`, or in the configured Qdrant service.
+3. **Scope**: Exact target values are always criteria; operation ID is additionally required in `operation` mode.
 
 **Evidence Storage Format**:
 ```
@@ -434,7 +493,7 @@ Evaluation triggers automatically after operation completion when `ENABLE_AUTO_E
 1. **Python-Owned Orchestration**: Durable workflow state is managed by code, not by prompt instructions.
 2. **Focused Role Agents**: Each agent receives a short, defined objective and restricted tools.
 3. **Soft Budget Distribution**: Phase progress is evaluated against proportional budget targets.
-4. **Evidence-Focused Memory**: Findings, observations, and proof artifacts are stored in mem0 for retrieval and reporting.
+4. **Evidence-Focused Memory**: Findings, observations, and proof references are stored in Qdrant for retrieval and reporting.
 5. **Swarm Intelligence as a Capability**: Workers may deploy specialized sub-agents when useful, without giving up controller state authority.
 6. **Tool Agnostic Execution**: Shell can access installed tools, while optional MCP/module tools are selected per task.
 7. **Continuous Evaluation**: Automated performance metrics support operational improvement.

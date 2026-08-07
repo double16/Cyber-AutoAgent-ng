@@ -17,6 +17,7 @@ Key Components:
 
 import json
 import os
+from copy import deepcopy
 from functools import lru_cache
 from math import ceil
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,7 +44,6 @@ from modules.config.types import (
     ServerConfig,
     MCPConnection,
     MCPConfig,
-    MEM0_PROVIDER_MAP,
     get_default_base_dir,
     RateLimitConfig,
 )
@@ -321,7 +321,10 @@ class ConfigManager:
             )
             raise ValueError(f"Unsupported provider type: {provider}")
 
-        defaults = self._default_configs[provider].copy()
+        # Environment overrides mutate nested provider configuration objects. A
+        # deep copy prevents one operation's override from changing defaults
+        # used by later operations in this process.
+        defaults = deepcopy(self._default_configs[provider])
 
         # Apply environment variable overrides
         defaults = self._apply_environment_overrides(provider, defaults)
@@ -613,131 +616,17 @@ class ConfigManager:
 
         return os.path.join(output_config.base_dir, sanitized_target, "memory")
 
-    def get_mem0_service_config(self, server: str, **overrides) -> Dict[str, Any]:
-        """Get complete Mem0 service configuration."""
+    def get_qdrant_memory_config(self, server: str, **overrides) -> Dict[str, Any]:
+        """Return the embedding and Qdrant settings used by semantic memory."""
         server_config = self.get_server_config(server, **overrides)
-        memory_config = server_config.memory
-
-        # Build embedder config based on server type
-        if server == "ollama":
-            embedder_config = {
-                "provider": "ollama",
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "ollama_base_url": self.get_ollama_host(),
-                },
-            }
-        elif server == "litellm":
-            prefix, base_model, model_name = self._split_litellm_model_id(
-                memory_config.embedder.model_id
-            )
-            mem0_provider = MEM0_PROVIDER_MAP.get(prefix, "huggingface")
-            embedder_config = {
-                "provider": mem0_provider,
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "embedding_dims": memory_config.embedder.dimensions,
-                },
-            }
-            if mem0_provider == "aws_bedrock":
-                embedder_config["config"]["aws_region"] = (
-                    memory_config.embedder.aws_region
-                )
-            elif mem0_provider == "azure_openai":
-                embedder_config["config"]["model"] = model_name
-                embedder_config["config"]["azure_kwargs"] = {
-                    "api_key": self.getenv("AZURE_API_KEY"),
-                    "azure_deployment": model_name,
-                    "azure_endpoint": self.getenv("AZURE_API_BASE"),
-                    "api_version": self.getenv("AZURE_API_VERSION"),
-                }
-            elif mem0_provider == "ollama":
-                embedder_config["config"]["model"] = model_name
-        elif server == "gemini":
-            raise ValueError(f"Unsupported provider: {server}")
-        elif server == "bedrock":
-            embedder_config = {
-                "provider": "aws_bedrock",
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "aws_region": memory_config.embedder.aws_region,
-                },
-            }
-        else:
-            raise ValueError(f"Unsupported provider: {server}")
-
-        # Build LLM config based on server type
-        if server == "ollama":
-            llm_config = {
-                "provider": "ollama",
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                    "ollama_base_url": self.get_ollama_host(),
-                },
-            }
-        elif server == "litellm":
-            # Map LiteLLM model prefix to a Mem0-supported provider (e.g., azure_openai, openai, aws_bedrock)
-            prefix, base_model, model_name = self._split_litellm_model_id(
-                memory_config.llm.model_id
-            )
-            mem0_llm_provider = MEM0_PROVIDER_MAP.get(prefix, "huggingface")
-            llm_config = {
-                "provider": mem0_llm_provider,
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                },
-            }
-            if mem0_llm_provider == "azure_openai":
-                llm_config["config"]["model"] = model_name
-                llm_config["config"]["azure_kwargs"] = {
-                    "api_key": self.getenv("AZURE_API_KEY"),
-                    "azure_deployment": model_name,
-                    "azure_endpoint": self.getenv("AZURE_API_BASE"),
-                    "api_version": self.getenv("AZURE_API_VERSION"),
-                }
-            if mem0_llm_provider == "ollama":
-                llm_config["config"]["model"] = model_name
-        elif server == "gemini":
-            raise ValueError(f"Unsupported provider: {server}")
-        elif server == "bedrock":
-            llm_config = {
-                "provider": "aws_bedrock",
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                },
-            }
-        else:
-            raise ValueError(f"Unsupported provider: {server}")
-
-        # Build vector store config
-        opensearch_host = self.getenv("OPENSEARCH_HOST")
-        if opensearch_host:
-            vector_store_config = {
-                "provider": "opensearch",
-                "config": memory_config.vector_store.get_config_for_provider(
-                    "opensearch", host=opensearch_host
-                ),
-            }
-        else:
-            vector_store_config = {
-                "provider": "faiss",
-                "config": memory_config.vector_store.get_config_for_provider("faiss"),
-            }
-
-        vector_store_config["config"]["embedding_model_dims"] = (
-            memory_config.embedder.dimensions
-        )
-
+        embedding = server_config.embedding
         return {
-            "embedder": embedder_config,
-            "llm": llm_config,
-            "vector_store": vector_store_config,
+            "embedding_provider": server,
+            "embedding_model": embedding.model_id,
+            "embedding_dimensions": embedding.dimensions,
+            "aws_region": self.get_default_region(),
+            "ollama_base_url": self.get_ollama_host() if server == "ollama" else None,
+            "collection_name": self.getenv("QDRANT_COLLECTION", "cyber_autoagent_memories"),
         }
 
     def validate_requirements(self, provider: str) -> None:
@@ -772,17 +661,9 @@ class ConfigManager:
         return _get_ollama_options_from_env(self.env)
 
     def set_environment_variables(self, server: str) -> None:
-        """Set environment variables for backward compatibility."""
+        """Publish the configured embedding model for memory and evaluation."""
         server_config = self.get_server_config(server)
-
-        if server == "ollama":
-            os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
-            os.environ["MEM0_LLM_PROVIDER"] = "ollama"
-            os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
-            os.environ["MEM0_EMBEDDING_MODEL"] = server_config.memory.embedder.model_id
-        else:
-            os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
-            os.environ["MEM0_EMBEDDING_MODEL"] = server_config.memory.embedder.model_id
+        os.environ["CYBER_AGENT_EMBEDDING_MODEL"] = server_config.embedding.model_id
 
     def _apply_environment_overrides(
         self, _server: str, defaults: Dict[str, Any]
@@ -861,11 +742,6 @@ class ConfigManager:
         if swarm_model and isinstance(defaults.get("swarm_llm"), LLMConfig):
             swarm_cfg = defaults["swarm_llm"]
             swarm_cfg.model_id = swarm_model
-
-        memory_llm_model = self.getenv("MEM0_LLM_MODEL")
-        if memory_llm_model and isinstance(defaults.get("memory_llm"), MemoryLLMConfig):
-            memory_llm_cfg = defaults["memory_llm"]
-            memory_llm_cfg.model_id = memory_llm_model
 
         # Apply AWS_REGION to region and aws_region fields (but not for ollama)
         if _server not in ("ollama",):
@@ -1092,15 +968,9 @@ class ConfigManager:
         # Get operation ID
         operation_id = overrides.get("operation_id")
 
-        # Get feature flags - unified output is now enabled by default
-        enable_unified_output = overrides.get(
-            "enable_unified_output", True
-        ) or self.getenv_bool("CYBER_AGENT_ENABLE_UNIFIED_OUTPUT", True)
-
         return OutputConfig(
             base_dir=base_dir,
             target_name=target_name,
-            enable_unified_output=enable_unified_output,
             operation_id=operation_id,
         )
 
@@ -1126,128 +996,6 @@ class ConfigManager:
             max_concurrent=max_concurrent,
             assume_output_tokens=assume_output_tokens
         )
-
-
-# Memory utility functions
-
-
-def align_mem0_config(model_id: Optional[str], memory_config: dict[str, Any]) -> None:
-    """Align Mem0 memory configuration provider based on model prefix.
-
-    Ensures memory provider matches the LLM provider for LiteLLM configurations.
-    Respects MEM0_LLM_MODEL override for non-Bedrock providers.
-
-    Args:
-        model_id: Model ID to extract provider from (e.g., "azure/gpt-4")
-        memory_config: Memory configuration dict to update in-place
-    """
-    if not model_id or not isinstance(memory_config, dict):
-        return
-    # Respect MEM0_LLM_MODEL override for non-Bedrock providers only. Bedrock configs
-    # still need alignment when switching to Azure/OpenAI-style models for memory LLM.
-    try:
-        if os.getenv("MEM0_LLM_MODEL"):
-            llm_section = memory_config.get("llm")
-            if isinstance(llm_section, dict):
-                current_provider = (llm_section.get("provider") or "").lower()
-                if current_provider and current_provider not in ("aws_bedrock",):
-                    logger.debug(
-                        "Skipping Mem0 alignment because MEM0_LLM_MODEL override is set and provider=%s",
-                        current_provider,
-                    )
-                    return
-    except Exception:
-        # If any issue occurs, continue with alignment logic
-        pass
-
-    # Split model ID to get provider prefix
-    prefix, remainder, remainder_variant = split_litellm_model_id(model_id)
-    if not prefix:
-        return
-    expected = MEM0_PROVIDER_MAP.get(prefix)
-    if not expected:
-        return
-    llm_section = memory_config.get("llm")
-    if not isinstance(llm_section, dict):
-        return
-    current_provider = (llm_section.get("provider") or "").lower()
-    if current_provider != expected.lower():
-        llm_section["provider"] = expected
-    config_section = llm_section.setdefault("config", {})
-    if expected == "azure_openai" and remainder_variant:
-        config_section["model"] = remainder_variant
-
-
-def check_existing_memories(target: str, _provider: str = "bedrock", operation_id: Optional[str] = None) -> bool:
-    """Check if existing memories exist for a target.
-
-    Checks FAISS, OpenSearch, or Mem0 Platform backends for existing memory.
-
-    Args:
-        target: Target system being assessed
-        _provider: Provider type for configuration (currently unused)
-        operation_id: operation ID
-
-    Returns:
-        True if existing memories are detected, False otherwise
-    """
-    try:
-        # Sanitize target name for consistent path handling
-        target_name = sanitize_target_name(target)
-
-        # Check based on backend type
-        if os.environ.get("MEM0_API_KEY"):
-            # Mem0 Platform - always check (cloud-based)
-            return True
-
-        elif os.environ.get("OPENSEARCH_HOST"):
-            # OpenSearch - always check (remote service)
-            return True
-
-        else:
-            from modules.tools.memory import memory_is_cross_operation
-
-            # FAISS - check if local store exists with actual memory content
-            # Use default relative outputs directory for compatibility with tests
-            output_dir = get_default_base_dir()
-            # Keep relative path for compatibility with tests and local runs
-            # Important: tests expect the sanitized target to include dot preserved (test.com)
-            # Our sanitize_target_name preserves dots, so join directly
-            memory_base_path = os.path.join(output_dir, target_name, "memory")
-            if operation_id and not memory_is_cross_operation():
-                memory_base_path = os.path.join(memory_base_path, operation_id)
-
-            # Check if memory directory exists and has FAISS index files
-            if os.path.exists(memory_base_path):
-                faiss_file = os.path.join(memory_base_path, "mem0.faiss")
-                pkl_file = os.path.join(memory_base_path, "mem0.pkl")
-
-                # In some environments, test fixture paths use underscore in sanitized name
-                alt_memory_base_path = os.path.join(
-                    output_dir, target_name.replace(".", "_"), "memory"
-                )
-                if operation_id and not memory_is_cross_operation():
-                    alt_memory_base_path = os.path.join(alt_memory_base_path, operation_id)
-
-                alt_faiss = os.path.join(alt_memory_base_path, "mem0.faiss")
-                alt_pkl = os.path.join(alt_memory_base_path, "mem0.pkl")
-
-                # Verify both FAISS index files exist with non-zero size
-                # In unit tests, getsize is mocked to 100; treat >0 as meaningful
-                has_faiss = (
-                    os.path.exists(faiss_file) and os.path.getsize(faiss_file) > 0
-                ) or (os.path.exists(alt_faiss) and os.path.getsize(alt_faiss) > 0)
-                has_pkl = (
-                    os.path.exists(pkl_file) and os.path.getsize(pkl_file) > 0
-                ) or (os.path.exists(alt_pkl) and os.path.getsize(alt_pkl) > 0)
-                if has_faiss and has_pkl:
-                    return True
-
-        return False
-
-    except Exception as e:
-        logger.debug("Error checking existing memories: %s", str(e))
-        return False
 
 
 # Global configuration manager instance

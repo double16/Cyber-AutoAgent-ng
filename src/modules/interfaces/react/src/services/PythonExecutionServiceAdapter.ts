@@ -56,6 +56,14 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
     return ExecutionMode.PYTHON_CLI;
   }
 
+  drainBufferedStartupEvents(): any[] {
+    return this.pythonService.drainBufferedStartupEvents();
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.pythonService.markStartupEventConsumerAttached();
+  }
+
   getCapabilities(): ExecutionCapabilities {
     return {
       canExecute: true,
@@ -63,7 +71,7 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
       supportsParallel: false, // Python service creates new instances
       maxConcurrent: 1,
       requirements: [
-        'Python 3.11+',
+        'Python 3.12+',
         'Virtual environment support',
         'Pip package manager',
         'Network access for model API calls'
@@ -120,8 +128,8 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
           issues.push({
             type: 'python',
             severity: 'error',
-            message: pythonCheck.error || 'Python 3.11+ is required',
-            suggestion: 'Install Python 3.11 or higher from https://python.org'
+            message: pythonCheck.error || 'Python 3.12+ is required',
+            suggestion: 'Install Python 3.12 or higher from https://python.org'
           });
         }
 

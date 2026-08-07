@@ -8,8 +8,9 @@ Long operations degrade when a single model conversation owns all orchestration.
 
 - **Python controller**: owns plan creation/recovery, active phase selection, task activation, phase advancement, budget checks, and task closure.
 - **Short-lived agents**: create plans, build prompts, execute task objectives, create new tasks when permitted, and evaluate task/phase outcomes.
-- **SQLite plan store**: persists plans and tasks across context pruning, model failures, and continued runs.
-- **Mem0 memory**: stores semantic memories such as observations, findings, evidence summaries, and lessons.
+- **SQLite application store**: persists target/operation-scoped workflow state across context pruning, model failures,
+  continued runs, and append-only per-model metric captures in the shared `outputs/cyber_autoagent.db` database.
+- **Qdrant memory**: stores semantic memories such as observations, findings, evidence summaries, and lessons.
 
 This keeps strategic state deterministic while still using agents for security reasoning and prompt tailoring.
 
@@ -29,7 +30,7 @@ The workflow controller creates focused agents as needed:
 | `phase_evaluator` | Decide whether the active phase should continue or become terminal | No; returns a structured decision |
 
 Task and phase evaluators are review-only roles. They receive only `editor` for reading referenced artifacts and
-`mem0_retrieve` for reviewing existing memories. They do not receive shell or execution tools and must not perform the
+`memory_retrieve` for reviewing existing memories. They do not receive shell or execution tools and must not perform the
 task, phase, or operation objective while classifying existing evidence.
 
 Agents may create follow-up work with `create_tasks` when their role permits it. Plan reads/writes, task activation, active-task lookup, task closure, and uncompleted-task listing are applied directly by Python rather than agent-callable tools.
@@ -72,8 +73,46 @@ Tasks support:
 - `done`: task objective achieved
 - `partial_failure`: task made useful progress but did not fully achieve the objective
 - `blocked`: task cannot proceed because of a missing dependency, authorization, capability, or prerequisite
+- `superseded`: the task was failed or blocked, but explicitly linked replacement tasks resolved its complete
+  acceptance intent
 
-Task evaluators decide terminal task status, but Python stores that status.
+Task evaluators decide execution outcomes, but Python stores terminal status and owns supersession reconciliation.
+Superseded tasks remain in history with their original evidence and failure reason; they are not erased or silently
+converted to `done`.
+
+When a task is split into replacement work, each replacement declares:
+
+- `replacement_of`: the UID of the failed or blocked parent task
+- `supersedes_criteria`: the parent acceptance-criterion IDs resolved by that replacement
+
+Python marks the parent `superseded` only when every parent criterion is covered and all linked replacements are
+`done` or `superseded`. A replacement that is pending, active, failed, or blocked keeps the parent unresolved. Tasks
+without explicit lineage are not treated as replacements based on similar titles or objectives.
+
+For example, one failed combined task can be split into two successful tasks:
+
+```json
+[
+  {
+    "task_uid": "combined-test",
+    "status": "superseded",
+    "status_reason": "Original task intent resolved by successful replacement tasks",
+    "replacement_of": null
+  },
+  {
+    "task_uid": "cookie-test",
+    "status": "done",
+    "replacement_of": "combined-test",
+    "supersedes_criteria": ["criterion-1"]
+  },
+  {
+    "task_uid": "token-test",
+    "status": "done",
+    "replacement_of": "combined-test",
+    "supersedes_criteria": ["criterion-1"]
+  }
+]
+```
 
 ## Data Model
 
@@ -212,10 +251,18 @@ it is negative, observational, a new finding candidate, or evidence for an exist
 and conversation are retained when no valid complete acceptance ledger was
 recorded. Once the atomic ledger passes structural validation, one short-lived semantic evaluator returns the terminal
 `done`, `partial_failure`, or `blocked` verdict; immutable acceptance results are not replayed through another pass.
+Python may later reconcile a failed or blocked task to `superseded` when explicitly linked replacement tasks resolve
+all of its criteria.
 
 Correctable tool invocation failures receive one bounded recovery turn in the same retained executor conversation.
 The executor may inspect or create prerequisites, continue independent work, select another executable, and make a
 bounded number of corrected invocations. A correction must change the failed input; an identical failed call is blocked.
+When the exact tool-repeat guard stops an executor, Python records the normalized loop signature across retained
+executor cycles. The task receives at most one changed-procedure recovery prompt. That prompt prohibits the prior
+tool/input cycle and requires a materially different evidence action. If any tool loop recurs, the task is terminally
+marked `partial_failure`; Python does not create an equivalent replacement task. A replacement is appropriate only
+when a separately planned prerequisite, target state, or method is required, and it must use `replacement_of` and
+declare the parent criteria in `supersedes_criteria`.
 Validation failures from structured memory and acceptance tools are correctable, but repeated equivalent failures are
 counted across retained executor cycles and terminate the task deterministically.
 Acceptance corrections identify prerequisites: executors create a finding before a candidate disposition, create
@@ -306,7 +353,8 @@ Selection happens in two passes:
 2. A prompt-builder agent sees separate `core_tools` and `optional_tools` TOON catalogs, then selects the final
    applicable optional tools and memory references. Core capabilities are supplied automatically and are not returned
    in the prompt-builder's `tools` selection. If a model nevertheless returns a core tool in either selection field,
-   workflow normalization silently removes it because the executor already receives that tool.
+   workflow normalization silently removes it because the executor already receives that tool. The controller-bound
+   `record_task_acceptance` terminal tool is also supplied automatically and is removed from either selection field.
 
 When shell is available, the prompt-builder also receives a compact `shell_commands` TOON catalog containing installed
 command names, bounded descriptions, and capabilities. The builder may select
@@ -338,6 +386,10 @@ basis, source references, unique criteria, and evidence requirements. The rules 
 - do not reduce task coverage based only on likelihood or convenience
 - create prerequisite inventory work before dependent coverage tasks
 - create a follow-up task for discoveries outside an active task's frozen manifest
+- when replacing failed or blocked work, set `replacement_of` to the parent task UID and list the resolved parent
+  criterion IDs in `supersedes_criteria`
+- use replacement lineage only when the new task resolves the parent's acceptance intent; unrelated follow-up work
+  must remain unlinked
 
 Snapshot references use explicit `task:<uid>`, `memory:<id>`, `artifact:<path>`, or `finding:<uid>` namespaces. A
 snapshot that resolves to a canonical inventory automatically becomes coverage work. For procedures, Python generates
@@ -436,7 +488,7 @@ Short-lived agents reduce dependence on preserving one huge conversation. Each w
 - module execution guidance
 - current plan and active phase objective
 - active task objective, when applicable
-- relevant mem0 items
+- relevant Qdrant memory items
 - selected tool names and short descriptions
 
 Conversation pruning still protects useful evidence and memory context, but plan/task authority lives in SQLite and Python helpers rather than prompt state.
@@ -492,4 +544,5 @@ The task system now combines durable state with multi-agent execution:
 - Active tasks run before pending tasks.
 - Budget progress is a soft phase cap.
 - `create_tasks` remains available for durable work capture.
-- Phase and task terminal states are explicit: `done`, `partial_failure`, and `blocked`.
+- Phase terminal states are explicit: `done`, `partial_failure`, and `blocked`. Task terminal states additionally
+  include `superseded` for resolved replacement lineage.

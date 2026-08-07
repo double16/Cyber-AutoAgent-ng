@@ -20,28 +20,25 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: System :: Systems Administration",
     "Environment :: Console"
 ]
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "strands-agents[ollama,otel,litellm]~=1.47.0",
     "strands-agents-tools~=0.8.3",
-    "mem0ai~=1.0.1",
+    "qdrant-client==1.18.0",
     "google-genai~=1.71.0",
     "litellm~=1.92.0",
     "fastapi~=0.136.3",
     "azure-identity~=1.25.0",
     "boto3~=1.43.1",
     "botocore~=1.43.1",
-    "faiss-cpu~=1.14.3",
     "ollama~=0.6.1",
     "requests~=2.34.2",
-    "opensearch-py~=3.2.0",
     "opentelemetry-api~=1.39.1",
     "opentelemetry-sdk~=1.39.1",
     "opentelemetry-exporter-otlp-proto-http~=1.39.1",
@@ -97,9 +94,12 @@ include = ["*"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.setuptools.package-data]
+"modules.storage.migrations" = ["*.sql"]
+
 [tool.black]
 line-length = 120
-target-version = ['py310']
+target-version = ['py312']
 include = '\.pyi?$'
 extend-exclude = '''
 /(

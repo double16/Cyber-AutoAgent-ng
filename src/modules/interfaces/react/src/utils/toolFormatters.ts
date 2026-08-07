@@ -222,9 +222,9 @@ export function getToonPlanPreview(content: unknown): string | null {
   return `${preview.objective}${descriptor}`;
 }
 
-function mem0_formatter(tool_name) {
+function memoryFormatter(tool_name) {
     return (input) => {
-       const action = tool_name.substring(5) || 'unknown';
+       const action = tool_name.substring(7) || 'unknown';
        if (action === 'unknown') return '';
 
         // Handle list/retrieve - show count instead of truncated JSON
@@ -242,7 +242,7 @@ function mem0_formatter(tool_name) {
          try {
            const parsed = JSON.parse(content);
 
-           // Handle mem0 result format: {results: [{memory: "..."}]}
+           // Handle memory result format: {results: [{memory: "..."}]}
            if (parsed.results && Array.isArray(parsed.results) && parsed.results.length > 0) {
              const firstResult = parsed.results[0];
              if (firstResult.memory) {
@@ -277,9 +277,9 @@ function mem0_formatter(tool_name) {
 }
 
 export const toolFormatters: Record<string, ToolFormatter> = {
-  mem0_get: mem0_formatter("mem0_get"),
-  mem0_retrieve: mem0_formatter("mem0_retrieve"),
-  mem0_list: mem0_formatter("mem0_list"),
+  memory_get: memoryFormatter("memory_get"),
+  memory_retrieve: memoryFormatter("memory_retrieve"),
+  memory_list: memoryFormatter("memory_list"),
 
   store_observation: (input) => {
     const content = truncate(toSafeString(input?.content || ''), 60);

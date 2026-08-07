@@ -283,33 +283,7 @@ export function emitStatusEvents(
   const { emitEvent } = handlers;
   const event = createParsedEvent(eventData);
 
-  if (event.type === 'tool_discovery_start') {
-    const message = eventData.message || 'Loading cybersecurity assessment tools';
-    emitEvent({
-      type: 'output',
-      content: `🔎 ${message}`,
-      timestamp: Date.now(),
-    });
-  } else if (event.type === 'tool_available') {
-    emitEvent({
-      type: 'output',
-      content: `  🔧 ${eventData.tool_name} (${eventData.description})`,
-      timestamp: Date.now(),
-    });
-  } else if (event.type === 'tool_unavailable') {
-    emitEvent({
-      type: 'output',
-      content: `  ⛔ ${eventData.tool_name} (${eventData.description || ''}) - unavailable`,
-      timestamp: Date.now(),
-    });
-  } else if (event.type === 'environment_ready') {
-    const message = eventData.message || `Environment ready - ${eventData.tool_count} cybersecurity tools loaded`;
-    emitEvent({
-      type: 'output',
-      content: `🟢 ${message}`,
-      timestamp: Date.now(),
-    });
-  } else if (event.type === 'operation_complete' || event.type === 'assessment_complete') {
+  if (event.type === 'operation_complete' || event.type === 'assessment_complete') {
     handlers.onComplete?.();
   } else if (event.type === 'user_handoff') {
     handlers.onUserHandoff?.();

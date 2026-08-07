@@ -67,6 +67,8 @@ describe('ConfigProvider', () => {
             isConfigured: true,
             confirmations: true,
             autoApprove: false,
+            memoryMode: 'auto',
+            memoryBackend: 'legacy',
             reportSettings: {
                 includeEvidence: false,
             },
@@ -99,6 +101,8 @@ describe('ConfigProvider', () => {
         expect(detectDeployments).toHaveBeenCalledWith(expect.objectContaining({deploymentMode: 'single-container'}));
         expect(ctx.isConfigLoading).toBe(false);
         expect(ctx.config.deploymentMode).toBe('single-container');
+        expect(ctx.config.memoryMode).toBe('shared');
+        expect(ctx.config.memoryBackend).toBeUndefined();
         expect(ctx.config.reportSettings.includeEvidence).toBe(false);
         expect(ctx.config.reportSettings.includeCWE).toBe(defaultConfig.reportSettings.includeCWE);
 
@@ -126,6 +130,7 @@ describe('ConfigProvider', () => {
 
         readFile.mockResolvedValueOnce(JSON.stringify({
             deploymentMode: 'local-cli',
+            memoryMode: 'invalid',
             awsBearerToken: '',
             awsAccessKeyId: '',
             awsSecretAccessKey: '',
@@ -134,6 +139,7 @@ describe('ConfigProvider', () => {
             await ctx.loadConfig();
         });
         expect(ctx.config.deploymentMode).toBe('local-cli');
+        expect(ctx.config.memoryMode).toBe('operation');
         expect(ctx.config.observability).toBe(false);
         expect(ctx.config.autoEvaluation).toBe(false);
         expect(ctx.config.awsBearerToken).toBe('');

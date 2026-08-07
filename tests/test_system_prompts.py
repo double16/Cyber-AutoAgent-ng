@@ -92,7 +92,6 @@ class TestGetSystemPrompt:
             "operation_path": "/custom/operation_path",
             "base_dir": "/custom/output",
             "target_name": "test_target",
-            "enable_unified_output": True,
         }
 
         prompt = get_system_prompt(

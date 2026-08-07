@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Tool for managing memories using Mem0 (store, delete, list, get, and retrieve)
+Tool for managing semantic memories with Qdrant and workflow state with SQLite.
 
-This module provides comprehensive memory management capabilities using
-Mem0 as the backend. It handles all aspects of memory management with
-a user-friendly interface and proper error handling.
+This module provides Qdrant-backed semantic memory and SQLite-backed workflow
+state with explicit target and operation scoping.
 
 Key Features:
 ------------
@@ -28,7 +27,7 @@ Key Features:
    • Semantic search with relevance filtering
    • Rich output formatting
    • Support for both user and agent memories
-   • Multiple vector database backends (OpenSearch, Mem0 Platform, FAISS)
+   • Local filesystem or service-hosted Qdrant storage
 
 5. Error Handling:
    • Memory ID validation
@@ -39,7 +38,7 @@ Key Features:
 6. Configurable Components:
    • Embedder (AWS Bedrock, Ollama, OpenAI)
    • LLM (AWS Bedrock, Ollama, OpenAI)
-   • Vector Store (FAISS, OpenSearch, Mem0 Platform)
+   • Vector Store (Qdrant)
 """
 
 import hashlib
@@ -54,13 +53,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Protocol, Tuple
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
-import boto3
-from mem0 import Memory as Mem0Memory
-from mem0 import MemoryClient
-from opensearchpy import AWSV4SignerAuth, RequestsHttpConnection
+import litellm
+from langchain_aws import BedrockEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -73,12 +72,14 @@ from pydantic import (
     conlist,
     model_validator,
 )
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
 from strands import tool
 
-from modules.config.manager import MEM0_PROVIDER_MAP, get_config_manager
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
+from modules.storage import SQLiteMigrationRunner
 from modules.tools.semantic_enum import normalize_semantic_enum
 
 # Set up logging
@@ -86,11 +87,11 @@ logger = get_logger("Tools.Memory")
 
 # Global configuration and client
 _MEMORY_CONFIG: Optional[Dict[str, str]] = None
-_MEMORY_CLIENT: Optional["Mem0ServiceClient"] = None
-_PLAN_STORE: Optional["PlanStore"] = None
+_MEMORY_CLIENT: Optional["QdrantMemoryClient"] = None
+_DATABASE_STORE: Optional["ApplicationStore"] = None
 
-# Thread lock for FAISS write safety (prevents corruption during concurrent writes)
-_FAISS_WRITE_LOCK = threading.Lock()
+# Local Qdrant clients share one outputs-backed database within this process.
+_QDRANT_WRITE_LOCK = threading.Lock()
 
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
@@ -837,6 +838,7 @@ class Task:
     target_scope: TargetScope = "all"
     target_ids: List[str] = field(default_factory=list)
     replacement_of: Optional[str] = None
+    supersedes_criteria: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -885,6 +887,7 @@ class Task:
             kind=str(obj.get("kind", "standard") or "standard"),
             reference_id=obj.get("reference_id"),
             replacement_of=obj.get("replacement_of"),
+            supersedes_criteria=_normalize_target_ids(obj.get("supersedes_criteria", [])),
             target_scope=str(obj.get("target_scope", "all") or "all"),
             target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
@@ -904,6 +907,7 @@ class Task:
             "kind": self.kind,
             "reference_id": self.reference_id,
             "replacement_of": self.replacement_of,
+            "supersedes_criteria": self.supersedes_criteria,
             "target_scope": self.target_scope,
             "target_ids": self.target_ids,
         })
@@ -916,7 +920,7 @@ class Task:
     def csv_format() -> str:
         return (
             "title,objective,acceptance_mode,acceptance_criteria,evidence,phase,status,status_reason,kind,"
-            "reference_id,replacement_of,target_scope,target_ids"
+            "reference_id,replacement_of,supersedes_criteria,target_scope,target_ids"
         )
 
     def to_toon(self, include_format=True) -> str:
@@ -932,6 +936,7 @@ class Task:
         kind = sanitize_toon_value(self.kind)
         reference_id = sanitize_toon_value(self.reference_id)
         replacement_of = sanitize_toon_value(self.replacement_of)
+        supersedes_criteria = "|".join(sanitize_toon_value(item) for item in self.supersedes_criteria)
         target_ids = "|".join(sanitize_toon_value(target_id) for target_id in self.target_ids)
         lines = []
         if include_format:
@@ -939,7 +944,7 @@ class Task:
         lines.append(
             f"  {title},{objective},{acceptance_mode},{acceptance_criteria},{evidence},{self.phase},{status},"
             f"{status_reason},{kind},"
-            f"{reference_id},{replacement_of},{self.target_scope},{target_ids}"
+            f"{reference_id},{replacement_of},{supersedes_criteria},{self.target_scope},{target_ids}"
         )
         return "\n".join(lines).strip()
 
@@ -1147,178 +1152,244 @@ class OperationPlan:
 
 
 def _get_memory_base_path(config: Optional[Dict] = None) -> str:
-    """Determine the base path for memory storage (FAISS, SQLite)."""
-    # Use provided path or create unified output structure path
-    if config and config.get("vector_store", {}).get("config", {}).get("path"):
-        return config["vector_store"]["config"]["path"]
-
-    # Create memory path using unified output structure
-    target_name = (config or {}).get("target_name", "default_target")
-    operation_id = (config or {}).get("operation_id", "default_operation")
-
-    # Get output directory from environment or config
+    """Return the operation-independent local Qdrant database directory."""
     output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or (config or {}).get(
         "output_dir", get_default_base_dir()
     )
-
-    # Memory isolation strategy (controlled via MEMORY_ISOLATION env var)
-    # Options: "operation" (per-operation, safe for parallel) | "shared" (per-target, cross-learning)
-    isolation_mode = os.environ.get("MEMORY_ISOLATION", "operation")
-
-    if isolation_mode == "shared":
-        # Shared per-target store (enables automatic cross-learning but parallel-unsafe)
-        memory_base_path = os.path.join(output_dir, target_name, "memory")
-        logger.debug("Memory mode: SHARED per-target at %s", memory_base_path)
-    else:
-        # Per-operation isolation (parallel-safe, explicit cross-learning needed)
-        memory_base_path = os.path.join(output_dir, target_name, "memory", operation_id)
-        logger.debug("Memory mode: ISOLATED per-operation at %s", memory_base_path)
-
-    return memory_base_path
+    return os.path.join(output_dir, "qdrant")
 
 
-class PlanStore:
-    """Persistence for OperationPlan and Task using SQLite.
+def _normalize_model_metric_rows(rows: Any) -> List[Dict[str, Any]]:
+    """Validate report-compatible per-model metrics before durable append."""
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("model metric capture requires at least one model row")
 
-    This replaces the use of Mem0 for storing plans and tasks, providing
-    a simpler and more reliable local storage.
+    normalized_rows: List[Dict[str, Any]] = []
+    seen_models: set[tuple[str, str]] = set()
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            raise ValueError("model metric rows must be objects")
+        provider = str(raw_row.get("provider") or "").strip()
+        model = str(raw_row.get("model") or "").strip()
+        if not provider or not model:
+            raise ValueError("model metric rows require provider and model")
+        identity = (provider, model)
+        if identity in seen_models:
+            raise ValueError("model metric capture contains duplicate provider/model rows")
+        seen_models.add(identity)
+
+        def nonnegative_int(field: str, *, optional: bool = False) -> Optional[int]:
+            value = raw_row.get(field)
+            if value is None and optional:
+                return None
+            if isinstance(value, bool):
+                raise ValueError(f"model metric {field} must be a non-negative integer")
+            try:
+                converted = int(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"model metric {field} must be a non-negative integer") from error
+            if converted < 0:
+                raise ValueError(f"model metric {field} must be a non-negative integer")
+            return converted
+
+        def nonnegative_float(field: str) -> float:
+            value = raw_row.get(field)
+            if isinstance(value, bool):
+                raise ValueError(f"model metric {field} must be a non-negative number")
+            try:
+                converted = float(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"model metric {field} must be a non-negative number") from error
+            if converted < 0:
+                raise ValueError(f"model metric {field} must be a non-negative number")
+            return converted
+
+        input_tokens = nonnegative_int("input_tokens")
+        output_tokens = nonnegative_int("output_tokens")
+        total_tokens = nonnegative_int("total_tokens")
+        if total_tokens != input_tokens + output_tokens:
+            raise ValueError("model metric total_tokens must equal input_tokens plus output_tokens")
+        normalized_rows.append(
+            {
+                "provider": provider,
+                "model": model,
+                "context_window_tokens": nonnegative_int("context_window_tokens", optional=True),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": nonnegative_int("cache_read_tokens"),
+                "cache_write_tokens": nonnegative_int("cache_write_tokens"),
+                "total_tokens": total_tokens,
+                "cost": nonnegative_float("cost"),
+                "inference_time_ms": nonnegative_float("inference_time_ms"),
+                "model_calls": nonnegative_int("model_calls"),
+                "correction_loops": nonnegative_int("correction_loops"),
+                "efficiency": nonnegative_float("efficiency"),
+            }
+        )
+    return normalized_rows
+
+
+class ApplicationStore(Protocol):
+    """Backend-neutral application-state contract used by workflow callers."""
+
+    db_path: str
+    logical_target: str
+    read_only: bool
+
+    def ensure_operation(self, operation_id: str) -> None: ...
+
+    def has_operation(self, operation_id: str) -> bool: ...
+
+    def store_plan(self, operation_id: str, plan: OperationPlan) -> None: ...
+
+    def get_plan(self, operation_id: str) -> Optional[OperationPlan]: ...
+
+    def store_task(self, operation_id: str, task: Task) -> None: ...
+
+    def get_tasks(self, operation_id: str) -> List[Task]: ...
+
+    def append_operation_model_metrics(
+        self, operation_id: str, captured_at: str, rows: List[Dict[str, Any]]
+    ) -> None: ...
+
+    def list_operation_model_metrics(self, operation_id: str) -> List[Dict[str, Any]]: ...
+
+
+class SQLiteApplicationStore:
+    """SQLite persistence for application workflow state.
+
+    Every operation-owned query is scoped by the exact logical target supplied
+    by the user and by operation ID. The database itself is shared by all
+    targets and operations.
     """
 
-    def __init__(self, db_path: str, read_only: bool = False):
+    def __init__(self, db_path: str, logical_target: str, read_only: bool = False):
         self.db_path = db_path
+        self.logical_target = logical_target
         self.read_only = read_only
         self._lock = threading.Lock()
         if self.read_only:
             if not os.path.isfile(self.db_path):
-                raise FileNotFoundError(f"Persisted plan store does not exist: {self.db_path}")
+                raise FileNotFoundError(f"Application database does not exist: {self.db_path}")
         else:
-            self._bootstrap()
-
-    def _bootstrap(self):
-        """Initialize the database schema if it doesn't exist."""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS plans (
-                        operation_id TEXT PRIMARY KEY,
-                        objective TEXT,
-                        current_phase INTEGER,
-                        total_phases INTEGER,
-                        assessment_complete BOOLEAN,
-                        plan_data TEXT,
-                        created_at TEXT,
-                        updated_at TEXT
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tasks (
-                        task_uid TEXT PRIMARY KEY,
-                        operation_id TEXT,
-                        title TEXT,
-                        objective TEXT,
-                        acceptance_contract TEXT NOT NULL,
-                        phase INTEGER,
-                        status TEXT,
-                        status_reason TEXT,
-                        evidence TEXT,
-                        created_at TEXT,
-                        updated_at TEXT,
-                        kind TEXT DEFAULT 'standard',
-                        reference_id TEXT,
-                        target_scope TEXT DEFAULT 'all',
-                        target_ids TEXT DEFAULT '[]'
-                    )
-                """)
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_operation_id ON tasks(operation_id)")
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS operation_preflight_results (
-                        operation_id TEXT NOT NULL,
-                        target_id TEXT NOT NULL,
-                        target TEXT NOT NULL,
-                        target_type TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        checks TEXT NOT NULL,
-                        reason TEXT NOT NULL,
-                        resolved_addresses TEXT NOT NULL,
-                        has_global_address BOOLEAN NOT NULL,
-                        has_private_or_reserved_address BOOLEAN NOT NULL,
-                        route_reachable BOOLEAN NOT NULL,
-                        recorded_at TEXT NOT NULL,
-                        PRIMARY KEY(operation_id, target_id)
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS task_acceptance_results (
-                        operation_id TEXT NOT NULL,
-                        task_uid TEXT NOT NULL,
-                        criterion_id TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        disposition TEXT NOT NULL,
-                        summary TEXT NOT NULL,
-                        evidence_refs TEXT NOT NULL,
-                        coverage TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        PRIMARY KEY(task_uid, criterion_id),
-                        FOREIGN KEY(task_uid) REFERENCES tasks(task_uid)
-                    )
-                """)
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_acceptance_results_operation_id "
-                    "ON task_acceptance_results(operation_id)"
-                )
-                acceptance_columns = {
-                    str(row[1])
-                    for row in conn.execute("PRAGMA table_info(task_acceptance_results)")
-                }
-                if "disposition" not in acceptance_columns:
-                    conn.execute(
-                        "ALTER TABLE task_acceptance_results ADD COLUMN disposition "
-                        "TEXT NOT NULL DEFAULT 'observation'"
-                    )
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS task_acceptance_memory_publications (
-                        operation_id TEXT NOT NULL,
-                        task_uid TEXT NOT NULL,
-                        publication_key TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        PRIMARY KEY(operation_id, task_uid)
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS finding_records (
-                        finding_uid TEXT PRIMARY KEY,
-                        operation_id TEXT NOT NULL,
-                        fingerprint TEXT NOT NULL,
-                        candidate_data TEXT NOT NULL,
-                        verification_task_uid TEXT NOT NULL,
-                        validation_data TEXT,
-                        resolution TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        UNIQUE(operation_id, fingerprint)
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS objective_validation_records (
-                        candidate_uid TEXT PRIMARY KEY,
-                        operation_id TEXT NOT NULL,
-                        fingerprint TEXT NOT NULL,
-                        candidate_data TEXT NOT NULL,
-                        verification_task_uid TEXT NOT NULL,
-                        validation_data TEXT,
-                        resolution TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        UNIQUE(operation_id, fingerprint)
-                    )
-                """)
+            SQLiteMigrationRunner(self.db_path).migrate()
 
     def _connect(self) -> sqlite3.Connection:
-        """Open the plan database, enforcing read-only access when configured."""
+        """Open the application database, enforcing configured access."""
         if self.read_only:
-            return sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True)
-        return sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True)
+        else:
+            conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    def ensure_operation(self, operation_id: str) -> None:
+        """Register an operation in this logical-target scope."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO operations(logical_target, operation_id, created_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(logical_target, operation_id) DO NOTHING",
+                    (self.logical_target, operation_id, datetime.now().isoformat()),
+                )
+
+    def has_operation(self, operation_id: str) -> bool:
+        """Return whether this exact target and operation are registered."""
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM operations WHERE logical_target = ? AND operation_id = ?",
+                    (self.logical_target, operation_id),
+                ).fetchone()
+        return row is not None
+
+    def _register_operation(self, conn: sqlite3.Connection, operation_id: str) -> None:
+        conn.execute(
+            "INSERT INTO operations(logical_target, operation_id, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(logical_target, operation_id) DO NOTHING",
+            (self.logical_target, operation_id, datetime.now().isoformat()),
+        )
+
+    def append_operation_model_metrics(
+        self,
+        operation_id: str,
+        captured_at: str,
+        rows: List[Dict[str, Any]],
+    ) -> None:
+        """Append one immutable, per-model metrics capture for an operation."""
+        normalized_rows = _normalize_model_metric_rows(rows)
+        normalized_captured_at = str(captured_at).strip()
+        if not normalized_captured_at:
+            raise ValueError("model metric capture timestamp is required")
+        with self._lock:
+            with self._connect() as conn:
+                self._register_operation(conn, operation_id)
+                conn.executemany(
+                    """
+                    INSERT INTO operation_model_metrics (
+                        logical_target, operation_id, captured_at, provider, model, context_window_tokens,
+                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost,
+                        inference_time_ms, model_calls, correction_loops, efficiency
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            self.logical_target,
+                            operation_id,
+                            normalized_captured_at,
+                            row["provider"],
+                            row["model"],
+                            row["context_window_tokens"],
+                            row["input_tokens"],
+                            row["output_tokens"],
+                            row["cache_read_tokens"],
+                            row["cache_write_tokens"],
+                            row["total_tokens"],
+                            row["cost"],
+                            row["inference_time_ms"],
+                            row["model_calls"],
+                            row["correction_loops"],
+                            row["efficiency"],
+                        )
+                        for row in normalized_rows
+                    ],
+                )
+
+    def list_operation_model_metrics(self, operation_id: str) -> List[Dict[str, Any]]:
+        """Return every persisted model-metrics capture in report display order."""
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT captured_at, provider, model, context_window_tokens, input_tokens, output_tokens,
+                           cache_read_tokens, cache_write_tokens, total_tokens, cost, inference_time_ms,
+                           model_calls, correction_loops, efficiency
+                    FROM operation_model_metrics
+                    WHERE logical_target = ? AND operation_id = ?
+                    ORDER BY captured_at, provider, model
+                    """,
+                    (self.logical_target, operation_id),
+                ).fetchall()
+        return [
+            {
+                "captured_at": row[0],
+                "provider": row[1],
+                "model": row[2],
+                "context_window_tokens": row[3],
+                "input_tokens": int(row[4]),
+                "output_tokens": int(row[5]),
+                "cache_read_tokens": int(row[6]),
+                "cache_write_tokens": int(row[7]),
+                "total_tokens": int(row[8]),
+                "cost": float(row[9]),
+                "inference_time_ms": float(row[10]),
+                "model_calls": int(row[11]),
+                "correction_loops": int(row[12]),
+                "efficiency": float(row[13]),
+            }
+            for row in rows
+        ]
 
     def store_plan(self, operation_id: str, plan: OperationPlan):
         """Store or update a plan."""
@@ -1330,10 +1401,13 @@ class PlanStore:
 
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.execute("""
-                    INSERT INTO plans (operation_id, objective, current_phase, total_phases, assessment_complete, plan_data, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(operation_id) DO UPDATE SET
+                    INSERT INTO plans (
+                        logical_target, operation_id, objective, current_phase, total_phases,
+                        assessment_complete, plan_data, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(logical_target, operation_id) DO UPDATE SET
                         objective=excluded.objective,
                         current_phase=excluded.current_phase,
                         total_phases=excluded.total_phases,
@@ -1341,6 +1415,7 @@ class PlanStore:
                         plan_data=excluded.plan_data,
                         updated_at=excluded.updated_at
                 """, (
+                    self.logical_target,
                     operation_id,
                     plan.objective,
                     plan.current_phase,
@@ -1355,7 +1430,10 @@ class PlanStore:
         """Retrieve a plan by operation_id."""
         with self._lock:
             with self._connect() as conn:
-                cursor = conn.execute("SELECT plan_data FROM plans WHERE operation_id = ?", (operation_id,))
+                cursor = conn.execute(
+                    "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                    (self.logical_target, operation_id),
+                )
                 row = cursor.fetchone()
                 if row:
                     return OperationPlan.from_obj(json.loads(row[0]))
@@ -1371,9 +1449,11 @@ class PlanStore:
 
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 existing = conn.execute(
-                    "SELECT acceptance_contract FROM tasks WHERE task_uid = ?",
-                    (task.task_uid,),
+                    "SELECT acceptance_contract FROM tasks "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (self.logical_target, operation_id, task.task_uid),
                 ).fetchone()
                 if existing:
                     existing_contract = AcceptanceContract.from_obj(json.loads(existing[0]))
@@ -1382,12 +1462,12 @@ class PlanStore:
                         raise ValueError("acceptance contract is immutable after task creation")
                 conn.execute("""
                     INSERT INTO tasks (
-                        task_uid, operation_id, title, objective, acceptance_contract, phase, status, status_reason,
-                        evidence,
+                        logical_target, task_uid, operation_id, title, objective, acceptance_contract, phase,
+                        status, status_reason, evidence,
                         created_at, updated_at, kind, reference_id, target_scope, target_ids
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(task_uid) DO UPDATE SET
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(logical_target, operation_id, task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
                         acceptance_contract=excluded.acceptance_contract,
@@ -1401,6 +1481,7 @@ class PlanStore:
                         target_ids=excluded.target_ids,
                         updated_at=excluded.updated_at
                 """, (
+                    self.logical_target,
                     task.task_uid,
                     operation_id,
                     task.title,
@@ -1426,8 +1507,8 @@ class PlanStore:
                 cursor = conn.execute(
                     "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
                     "created_at, updated_at, kind, reference_id, target_scope, target_ids "
-                    "FROM tasks WHERE operation_id = ?",
-                    (operation_id,),
+                    "FROM tasks WHERE logical_target = ? AND operation_id = ?",
+                    (self.logical_target, operation_id),
                 )
                 for row in cursor:
                     tasks.append(
@@ -1461,15 +1542,17 @@ class PlanStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.executemany(
                     """
                     INSERT INTO task_acceptance_results (
-                        operation_id, task_uid, criterion_id, status, disposition, summary, evidence_refs, coverage,
-                        updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        logical_target, operation_id, task_uid, criterion_id, status, disposition, summary,
+                        evidence_refs, coverage, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
+                            self.logical_target,
                             operation_id,
                             task_uid,
                             result.criterion_id,
@@ -1491,9 +1574,10 @@ class PlanStore:
             with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT criterion_id, status, disposition, summary, evidence_refs, coverage "
-                    "FROM task_acceptance_results WHERE operation_id = ? AND task_uid = ? "
+                    "FROM task_acceptance_results WHERE logical_target = ? "
+                    "AND operation_id = ? AND task_uid = ? "
                     "ORDER BY criterion_id",
-                    (operation_id, task_uid),
+                    (self.logical_target, operation_id, task_uid),
                 ).fetchall()
         return [
             AcceptanceResult(
@@ -1519,8 +1603,8 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT publication_key FROM task_acceptance_memory_publications "
-                    "WHERE operation_id = ? AND task_uid = ?",
-                    (operation_id, task_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (self.logical_target, operation_id, task_uid),
                 ).fetchone()
         return row is not None and row[0] == publication_key
 
@@ -1534,16 +1618,17 @@ class PlanStore:
 
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.execute(
                     """
                     INSERT INTO task_acceptance_memory_publications (
-                        operation_id, task_uid, publication_key, updated_at
-                    ) VALUES (?, ?, ?, ?)
-                    ON CONFLICT(operation_id, task_uid) DO UPDATE SET
+                        logical_target, operation_id, task_uid, publication_key, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(logical_target, operation_id, task_uid) DO UPDATE SET
                         publication_key=excluded.publication_key,
                         updated_at=excluded.updated_at
                     """,
-                    (operation_id, task_uid, publication_key, datetime.now().isoformat()),
+                    (self.logical_target, operation_id, task_uid, publication_key, datetime.now().isoformat()),
                 )
 
     def store_preflight_results(self, operation_id: str, results: List[Dict[str, Any]]) -> None:
@@ -1552,6 +1637,7 @@ class PlanStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 for result in results:
                     target_id = str(result.get("target_id") or "").strip()
                     if not target_id:
@@ -1559,13 +1645,14 @@ class PlanStore:
                     conn.execute(
                         """
                         INSERT INTO operation_preflight_results (
-                            operation_id, target_id, target, target_type, status, checks, reason,
+                            logical_target, operation_id, target_id, target, target_type, status, checks, reason,
                             resolved_addresses, has_global_address, has_private_or_reserved_address,
                             route_reachable, recorded_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(operation_id, target_id) DO NOTHING
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(logical_target, operation_id, target_id) DO NOTHING
                         """,
                         (
+                            self.logical_target,
                             operation_id,
                             target_id,
                             str(result.get("target") or ""),
@@ -1590,9 +1677,10 @@ class PlanStore:
                     """
                     SELECT target_id, target, target_type, status, checks, reason, resolved_addresses,
                            has_global_address, has_private_or_reserved_address, route_reachable, recorded_at
-                    FROM operation_preflight_results WHERE operation_id = ? ORDER BY target_id
+                    FROM operation_preflight_results
+                    WHERE logical_target = ? AND operation_id = ? ORDER BY target_id
                     """,
-                    (operation_id,),
+                    (self.logical_target, operation_id),
                 ).fetchall()
         return [
             {
@@ -1616,8 +1704,8 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT finding_uid, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM finding_records WHERE operation_id = ? AND fingerprint = ?",
-                    (operation_id, fingerprint),
+                    "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
+                    (self.logical_target, operation_id, fingerprint),
                 ).fetchone()
         if not row:
             return None
@@ -1634,8 +1722,8 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
-                    (operation_id, finding_uid),
+                    "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (self.logical_target, operation_id, finding_uid),
                 ).fetchone()
         if not row:
             return None
@@ -1655,9 +1743,10 @@ class PlanStore:
             with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT finding_uid, fingerprint, candidate_data, verification_task_uid, "
-                    "validation_data, resolution FROM finding_records WHERE operation_id = ? "
+                    "validation_data, resolution FROM finding_records "
+                    "WHERE logical_target = ? AND operation_id = ? "
                     "ORDER BY created_at, finding_uid",
-                    (operation_id,),
+                    (self.logical_target, operation_id),
                 ).fetchall()
         return [
             {
@@ -1682,11 +1771,13 @@ class PlanStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.execute(
                     "INSERT INTO finding_records "
-                    "(finding_uid, operation_id, fingerprint, candidate_data, verification_task_uid, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(logical_target, finding_uid, operation_id, fingerprint, candidate_data, "
+                    "verification_task_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
+                        self.logical_target,
                         finding_uid,
                         operation_id,
                         fingerprint,
@@ -1703,8 +1794,9 @@ class PlanStore:
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
-                    (operation_id, finding_uid),
+                    "SELECT candidate_data FROM finding_records "
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (self.logical_target, operation_id, finding_uid),
                 ).fetchone()
                 if row is None:
                     raise ValueError(f"Unknown finding_uid for source-task link: {finding_uid}")
@@ -1715,8 +1807,14 @@ class PlanStore:
                     candidate_data["source_task_uids"] = source_task_uids
                     conn.execute(
                         "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                        "WHERE operation_id = ? AND finding_uid = ?",
-                        (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                        "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                        (
+                            json.dumps(candidate_data),
+                            datetime.now().isoformat(),
+                            self.logical_target,
+                            operation_id,
+                            finding_uid,
+                        ),
                     )
 
     def store_finding_validation(
@@ -1729,8 +1827,14 @@ class PlanStore:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE finding_records SET validation_data = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND finding_uid = ?",
-                    (json.dumps(validation_data), datetime.now().isoformat(), operation_id, finding_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (
+                        json.dumps(validation_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        finding_uid,
+                    ),
                 )
 
     def update_finding_taxonomy_annotation(
@@ -1743,8 +1847,9 @@ class PlanStore:
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
-                    (operation_id, finding_uid),
+                    "SELECT candidate_data FROM finding_records "
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (self.logical_target, operation_id, finding_uid),
                 ).fetchone()
                 if row is None:
                     raise ValueError(f"Unknown finding_uid for taxonomy annotation: {finding_uid}")
@@ -1756,8 +1861,14 @@ class PlanStore:
                 candidate_data["taxonomy_annotation"] = annotation
                 conn.execute(
                     "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND finding_uid = ?",
-                    (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (
+                        json.dumps(candidate_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        finding_uid,
+                    ),
                 )
         return True
 
@@ -1772,8 +1883,9 @@ class PlanStore:
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT candidate_data FROM finding_records WHERE operation_id = ? AND finding_uid = ?",
-                    (operation_id, finding_uid),
+                    "SELECT candidate_data FROM finding_records "
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (self.logical_target, operation_id, finding_uid),
                 ).fetchone()
                 if row is None:
                     raise ValueError(f"Unknown finding_uid for ATT&CK enrichment: {finding_uid}")
@@ -1815,8 +1927,14 @@ class PlanStore:
 
                 conn.execute(
                     "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND finding_uid = ?",
-                    (json.dumps(candidate_data), datetime.now().isoformat(), operation_id, finding_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (
+                        json.dumps(candidate_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        finding_uid,
+                    ),
                 )
         return True
 
@@ -1825,8 +1943,8 @@ class PlanStore:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE finding_records SET resolution = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND finding_uid = ?",
-                    (resolution, datetime.now().isoformat(), operation_id, finding_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (resolution, datetime.now().isoformat(), self.logical_target, operation_id, finding_uid),
                 )
 
     def get_objective_candidate(self, operation_id: str, candidate_uid: str) -> Optional[Dict[str, Any]]:
@@ -1834,8 +1952,9 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM objective_validation_records WHERE operation_id = ? AND candidate_uid = ?",
-                    (operation_id, candidate_uid),
+                    "FROM objective_validation_records "
+                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                    (self.logical_target, operation_id, candidate_uid),
                 ).fetchone()
         if not row:
             return None
@@ -1857,8 +1976,8 @@ class PlanStore:
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT candidate_uid FROM objective_validation_records "
-                    "WHERE operation_id = ? AND fingerprint = ?",
-                    (operation_id, fingerprint),
+                    "WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
+                    (self.logical_target, operation_id, fingerprint),
                 ).fetchone()
         return self.get_objective_candidate(operation_id, row[0]) if row else None
 
@@ -1866,9 +1985,10 @@ class PlanStore:
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT candidate_uid FROM objective_validation_records WHERE operation_id = ? "
+                    "SELECT candidate_uid FROM objective_validation_records "
+                    "WHERE logical_target = ? AND operation_id = ? "
                     "ORDER BY created_at, candidate_uid",
-                    (operation_id,),
+                    (self.logical_target, operation_id),
                 ).fetchall()
         return [self.get_objective_candidate(operation_id, row[0]) for row in rows]
 
@@ -1883,11 +2003,13 @@ class PlanStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                self._register_operation(conn, operation_id)
                 conn.execute(
                     "INSERT INTO objective_validation_records "
-                    "(candidate_uid, operation_id, fingerprint, candidate_data, verification_task_uid, "
-                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(logical_target, candidate_uid, operation_id, fingerprint, candidate_data, "
+                    "verification_task_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
+                        self.logical_target,
                         candidate_uid,
                         operation_id,
                         fingerprint,
@@ -1908,8 +2030,14 @@ class PlanStore:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE objective_validation_records SET validation_data = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND candidate_uid = ?",
-                    (json.dumps(validation_data), datetime.now().isoformat(), operation_id, candidate_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                    (
+                        json.dumps(validation_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        candidate_uid,
+                    ),
                 )
 
     def resolve_objective_candidate(self, operation_id: str, candidate_uid: str, resolution: str) -> None:
@@ -1917,54 +2045,94 @@ class PlanStore:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE objective_validation_records SET resolution = ?, updated_at = ? "
-                    "WHERE operation_id = ? AND candidate_uid = ?",
-                    (resolution, datetime.now().isoformat(), operation_id, candidate_uid),
+                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                    (resolution, datetime.now().isoformat(), self.logical_target, operation_id, candidate_uid),
                 )
 
 
-def _plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
-    """Return the operation-scoped SQLite plan-store path."""
-    return os.path.join(_get_memory_base_path(config), "plan_storage.db")
+def _application_database_path(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the output-root application database path."""
+    resolved = config or {}
+    output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or resolved.get("output_dir", get_default_base_dir())
+    return os.path.join(output_dir, "cyber_autoagent.db")
 
 
-def get_plan_store_path(config: Optional[Dict[str, Any]] = None) -> str:
-    """Return the resolved plan-store path without opening or creating it."""
-    return _plan_store_path(config or _MEMORY_CONFIG)
+def get_application_database_path(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the resolved application database path without opening it."""
+    return _application_database_path(config or _MEMORY_CONFIG)
 
 
-def require_existing_plan_store(
+def require_existing_operation(
     *,
     output_dir: str,
-    target_name: str,
+    logical_target: str,
     operation_id: str,
 ) -> str:
-    """Validate that an operation's persisted plan store exists without creating it."""
-    path = _plan_store_path(
-        {
-            "output_dir": output_dir,
-            "target_name": target_name,
-            "operation_id": operation_id,
-        }
-    )
+    """Validate that an exact target/operation exists without creating it."""
+    path = _application_database_path({"output_dir": output_dir})
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"Persisted plan store does not exist: {path}")
+        raise FileNotFoundError(f"Application database does not exist: {path}")
+    SQLiteMigrationRunner(path).migrate()
+    store = create_application_store(path, logical_target=logical_target, read_only=True)
+    if not store.has_operation(operation_id):
+        raise FileNotFoundError(
+            f"Persisted operation does not exist for target {logical_target!r}: {operation_id}"
+        )
     return path
 
 
-def _get_plan_store(read_only: Optional[bool] = None) -> PlanStore:
-    """Get the plan store for the current memory context and resolved path."""
-    global _PLAN_STORE
+def create_application_store(
+    db_path: str,
+    *,
+    logical_target: str,
+    read_only: bool = False,
+) -> ApplicationStore:
+    """Construct the configured application-state backend.
+
+    SQLite is the only backend today; this boundary allows a remote backend to
+    be selected later without changing workflow and memory callers.
+    """
+    return SQLiteApplicationStore(db_path, logical_target=logical_target, read_only=read_only)
+
+
+def _get_database_store(read_only: Optional[bool] = None) -> ApplicationStore:
+    """Get the application store for the current logical-target context."""
+    global _DATABASE_STORE
     configured_read_only = bool((_MEMORY_CONFIG or {}).get("read_only", False))
     requested_read_only = configured_read_only if read_only is None else read_only
-    db_path = _plan_store_path(_MEMORY_CONFIG)
+    db_path = _application_database_path(_MEMORY_CONFIG)
+    logical_target = str(
+        (_MEMORY_CONFIG or {}).get("logical_target")
+        or (_MEMORY_CONFIG or {}).get("target_name")
+        or "default_target"
+    )
     if (
-        _PLAN_STORE is None
-        or getattr(_PLAN_STORE, "db_path", None) != db_path
-        or bool(getattr(_PLAN_STORE, "read_only", False)) != requested_read_only
+        _DATABASE_STORE is None
+        or _DATABASE_STORE.db_path != db_path
+        or _DATABASE_STORE.logical_target != logical_target
+        or _DATABASE_STORE.read_only != requested_read_only
     ):
-        print(f"[+] Plan Storage: {db_path}")
-        _PLAN_STORE = PlanStore(db_path, read_only=requested_read_only)
-    return _PLAN_STORE
+        print(f"[+] Application Database: {db_path}")
+        _DATABASE_STORE = create_application_store(
+            db_path,
+            logical_target=logical_target,
+            read_only=requested_read_only,
+        )
+    return _DATABASE_STORE
+
+
+def persist_operation_model_metrics(
+    rows: List[Dict[str, Any]],
+    captured_at: str,
+    operation_id: Optional[str] = None,
+) -> None:
+    """Append one normal-assessment model-metrics capture to the application store."""
+    _get_database_store().append_operation_model_metrics(operation_id or _operation_id(), captured_at, rows)
+
+
+def list_persisted_operation_model_metrics(operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Read every model-metrics capture for the current logical target and operation."""
+    return _get_database_store().list_operation_model_metrics(operation_id or _operation_id())
 
 
 def _normalize_evidence(val: Any) -> List[str]:
@@ -2152,10 +2320,11 @@ def memory_create_time(m: Dict[str, Any]) -> str:
 
 
 def memory_is_cross_operation() -> bool:
-    return os.getenv("MEMORY_ISOLATION", "operation").lower() == "shared"
+    configured_mode = (_MEMORY_CONFIG or {}).get("memory_mode")
+    return str(configured_mode or os.getenv("CYBER_MEMORY_MODE", "operation")).lower() == "shared"
 
 
-def _ensure_memory_client() -> "Mem0ServiceClient":
+def _ensure_memory_client() -> "QdrantMemoryClient":
     """Ensure the global memory client is initialized and return it."""
     global _MEMORY_CLIENT
     if _MEMORY_CLIENT is None:
@@ -2242,7 +2411,7 @@ def _clean_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _memory_result_items(result: Any) -> List[Dict[str, Any]]:
-    """Normalize supported Mem0 result envelopes into memory records."""
+    """Normalize supported memory result envelopes into memory records."""
 
     if isinstance(result, dict):
         nested = result.get("results")
@@ -2256,7 +2425,7 @@ def _memory_result_items(result: Any) -> List[Dict[str, Any]]:
 
 
 def _memory_id_from_result(result: Any) -> str:
-    """Return the first non-empty memory ID in a Mem0 result."""
+    """Return the first non-empty memory ID in a storage result."""
 
     for item in _memory_result_items(result):
         memory_id = str(item.get("id") or "").strip()
@@ -2266,7 +2435,7 @@ def _memory_id_from_result(result: Any) -> str:
 
 
 def _exact_memory_match(result: Any, content: str) -> Optional[Dict[str, Any]]:
-    """Return an exact cleaned-content match from a Mem0 search result."""
+    """Return an exact cleaned-content match from a memory search result."""
 
     for item in _memory_result_items(result):
         try:
@@ -2279,12 +2448,12 @@ def _exact_memory_match(result: Any, content: str) -> Optional[Dict[str, Any]]:
 
 
 def _search_memory_entry(client: Any, content: str, user_id: str, operation_id: str, category: str) -> Any:
-    """Search for a category-fixed memory in the current operation."""
+    """Search for a category-fixed memory in the configured memory scope."""
 
-    return client.mem0.search(
+    return client.search(
         query=content,
         user_id=user_id,
-        run_id=operation_id,
+        run_id=None if memory_is_cross_operation() else operation_id,
         limit=5,
         filters={"category": category},
     )
@@ -2472,7 +2641,7 @@ def store_finding(
         candidate["title"], candidate["claim"], candidate["target"], candidate["technique"]
     )
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     source_task_uid = _active_finding_source_task_uid(store, op_id)
     existing = store.get_finding_by_fingerprint(op_id, fingerprint)
     if existing:
@@ -2592,7 +2761,7 @@ def record_finding_validation(
     """Record the result of the active, dedicated finding-verification task."""
 
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     record = store.get_finding(op_id, finding_uid)
     if not record:
         raise ValueError("Unknown finding_uid for the current operation")
@@ -2655,7 +2824,7 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
     if task.kind != "finding_validation" or not task.reference_id:
         return None
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     record = store.get_finding(op_id, task.reference_id)
     if not record or record.get("resolution"):
         return record.get("resolution") if record else None
@@ -2702,7 +2871,7 @@ def finding_validation_submitted(task: Task) -> bool:
 
     if task.kind != "finding_validation" or not task.reference_id:
         return True
-    record = _get_plan_store().get_finding(_operation_id(), task.reference_id)
+    record = _get_database_store().get_finding(_operation_id(), task.reference_id)
     return bool(record and record.get("validation_data"))
 
 
@@ -2711,7 +2880,7 @@ def finding_validation_outcome(task: Task) -> Optional[str]:
 
     if task.kind != "finding_validation" or not task.reference_id:
         return None
-    record = _get_plan_store().get_finding(_operation_id(), task.reference_id)
+    record = _get_database_store().get_finding(_operation_id(), task.reference_id)
     validation = record.get("validation_data") if record else None
     return str(validation.get("outcome")) if isinstance(validation, dict) else None
 
@@ -2724,7 +2893,7 @@ def _objective_candidate_fingerprint(objective_type: str, candidate_value: str) 
 def _objective_constraints(objective_type: str) -> Dict[str, Any]:
     """Extract deterministic constraints for supported objective types from the operation plan."""
 
-    plan = _get_plan_store().get_plan(_operation_id())
+    plan = _get_database_store().get_plan(_operation_id())
     objective = plan.objective if plan else ""
     constraints: Dict[str, Any] = {}
     if objective_type == "flag":
@@ -2811,7 +2980,7 @@ def store_objective_candidate(
     artifacts = _validated_artifact_paths(evidence_artifacts, require_one=True)
     fingerprint = _objective_candidate_fingerprint(normalized_type, value)
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     existing = store.get_objective_candidate_by_fingerprint(op_id, fingerprint)
     if existing:
         return json.dumps(
@@ -2919,7 +3088,7 @@ def record_objective_validation(
     """Record the result of the active objective-validation task without changing finding status."""
 
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     record = store.get_objective_candidate(op_id, candidate_uid)
     if not record:
         raise ValueError("Unknown objective candidate for the current operation")
@@ -2983,14 +3152,14 @@ def record_objective_validation(
 def objective_validation_submitted(task: Task) -> bool:
     if task.kind != "objective_validation" or not task.reference_id:
         return True
-    record = _get_plan_store().get_objective_candidate(_operation_id(), task.reference_id)
+    record = _get_database_store().get_objective_candidate(_operation_id(), task.reference_id)
     return bool(record and record.get("validation_data"))
 
 
 def objective_validation_outcome(task: Task) -> Optional[str]:
     if task.kind != "objective_validation" or not task.reference_id:
         return None
-    record = _get_plan_store().get_objective_candidate(_operation_id(), task.reference_id)
+    record = _get_database_store().get_objective_candidate(_operation_id(), task.reference_id)
     validation = record.get("validation_data") if record else None
     return str(validation.get("outcome")) if isinstance(validation, dict) else None
 
@@ -2999,7 +3168,7 @@ def finalize_objective_validation(task: Task, evaluator_status: str, evaluator_r
     if task.kind != "objective_validation" or not task.reference_id:
         return None
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     record = store.get_objective_candidate(op_id, task.reference_id)
     if not record or record.get("resolution"):
         return record.get("resolution") if record else None
@@ -3126,6 +3295,14 @@ class TaskProposal(_StrictTaskWireModel):
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
     criteria: List[TaskProposalCriterion] = Field(min_length=1, max_length=1)
     target_ids: List[str] = Field(default_factory=list)
+    replacement_of: Optional[str] = Field(
+        default=None,
+        description="UID of a failed task whose acceptance work this task replaces",
+    )
+    supersedes_criteria: List[str] = Field(
+        default_factory=list,
+        description="Parent acceptance criterion IDs resolved by this replacement task",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -3250,6 +3427,11 @@ _TASK_PROPOSAL_FIELD_CORRECTIONS = {
     "output_kind": ('artifact or inventory_manifest', '"output_kind":"artifact"'),
     "criteria": ('array containing exactly one description object', '"criteria":[{"description":"Store evidence"}]'),
     "target_ids": ('array of exact registered target IDs', '"target_ids":["target-1"]'),
+    "replacement_of": ('existing failed task UID when replacing work', '"replacement_of":"task-uid"'),
+    "supersedes_criteria": (
+        'array of parent acceptance criterion IDs when replacing work',
+        '"supersedes_criteria":["criterion-1"]',
+    ),
 }
 
 
@@ -3346,6 +3528,8 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                         "items": {"$ref": "#/$defs/TaskProposalCriterion"},
                     },
                     "target_ids": {"type": "array", "items": {"type": "string"}},
+                    "replacement_of": {"type": ["string", "null"]},
+                    "supersedes_criteria": {"type": "array", "items": {"type": "string"}, "default": []},
                 },
             },
             "TaskProposalCriterion": {
@@ -3555,7 +3739,7 @@ def resolve_bound_executable_target(requested_target: str) -> str:
     requested = str(requested_target or "").strip()
     try:
         plan = _get_active_plan()
-        active = [task for task in _get_plan_store().get_tasks(_operation_id()) if task.status == "active"]
+        active = [task for task in _get_database_store().get_tasks(_operation_id()) if task.status == "active"]
     except Exception:
         return requested
     if len(active) != 1 or not plan.targets:
@@ -4160,7 +4344,7 @@ def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks
             raise ValueError(f"Procedure acceptance basis contains unknown source references: {', '.join(invalid_refs)}")
         return contract
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     artifact_refs = [ref for ref in basis.source_refs if ref.startswith("artifact:")]
     for reference in basis.source_refs:
         prefix, value = reference.split(":", 1)
@@ -4413,7 +4597,7 @@ def _is_generic_snapshot_proposal(proposal: TaskProposal) -> bool:
 
 def _task_inventory_artifact_refs(task: Task) -> List[str]:
     references = [canonical_artifact_reference(path) for path in sorted(_task_evidence_artifact_paths(task))]
-    store = _get_plan_store()
+    store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
     results = list_results(task.task_uid) if callable(list_results) else store.get_acceptance_results(
         _operation_id(), task.task_uid
@@ -4538,7 +4722,7 @@ def _coverage_route_groups(
 
 def _completed_coverage_item_ids(existing_tasks: List[Task], snapshot_hash: str, phase: int) -> set[str]:
     completed: set[str] = set()
-    store = _get_plan_store()
+    store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
     for task in existing_tasks:
         if (
@@ -4667,7 +4851,7 @@ def _create_tasks_from_proposals(
     plan = _get_active_plan()
     current_phase = plan.current_phase
 
-    existing_tasks = _get_plan_store().get_tasks(op_id)
+    existing_tasks = _get_database_store().get_tasks(op_id)
     staged_tasks: List[Task] = []
     duplicate_count = 0
     snapshot_exhausted = False
@@ -4677,6 +4861,25 @@ def _create_tasks_from_proposals(
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
         title = proposal.title.strip()
         objective = proposal.objective.strip()
+        replacement_of = str(proposal.replacement_of or "").strip() or None
+        supersedes_criteria = list(dict.fromkeys(
+            str(criterion_id).strip() for criterion_id in proposal.supersedes_criteria if str(criterion_id).strip()
+        ))
+        if replacement_of is not None:
+            parent = next((task for task in existing_tasks if task.task_uid == replacement_of), None)
+            if parent is None:
+                raise ValueError(f"replacement_of references unknown task {replacement_of}")
+            if parent.phase != current_phase:
+                raise ValueError("replacement task must remain in the parent task's phase")
+            if parent.status not in {"partial_failure", "blocked"}:
+                raise ValueError("replacement_of must reference a partial_failure or blocked task")
+            parent_criteria = {criterion.id for criterion in parent.acceptance.criteria}
+            if not supersedes_criteria or not set(supersedes_criteria).issubset(parent_criteria):
+                raise ValueError(
+                    "supersedes_criteria must identify existing acceptance criteria on the parent task"
+                )
+        elif supersedes_criteria:
+            raise ValueError("supersedes_criteria requires replacement_of")
         proposal_created_count = 0
         proposal_duplicate_count = 0
         target_scope, target_ids = _validate_task_target_scope(
@@ -4900,6 +5103,8 @@ def _create_tasks_from_proposals(
                 status="pending",
                 target_scope=group_target_scope,
                 target_ids=group_target_ids,
+                replacement_of=replacement_of,
+                supersedes_criteria=supersedes_criteria,
             ))
             proposal_created_count += 1
         logger.info(
@@ -5012,7 +5217,7 @@ def _evidence_reference_kind(reference: str, expected_kind: EvidenceRequirementK
         )
     if reference.startswith("finding:"):
         finding_uid = reference.split(":", 1)[1]
-        record = _get_plan_store().get_finding(op_id, finding_uid)
+        record = _get_database_store().get_finding(op_id, finding_uid)
         if record is None:
             raise ValueError(f"Acceptance evidence finding does not exist: {reference}")
         if expected_kind in {"finding_candidate", "durable_evidence"}:
@@ -5037,7 +5242,7 @@ def _validate_acceptance_result_evidence(
             _evidence_reference_kind(reference, "memory")
         elif reference.startswith("finding:"):
             finding_uid = reference.split(":", 1)[1]
-            if _get_plan_store().get_finding(_operation_id(), finding_uid) is None:
+            if _get_database_store().get_finding(_operation_id(), finding_uid) is None:
                 raise ValueError(f"Acceptance evidence finding does not exist: {reference}")
         else:
             raise _acceptance_evidence_reference_error()
@@ -5161,7 +5366,7 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
         raise ValueError("results must contain unique criterion_id values")
 
     op_id = _operation_id()
-    store = _get_plan_store()
+    store = _get_database_store()
     task = next((item for item in store.get_tasks(op_id) if item.task_uid == normalized_uid), None)
     if task is None:
         raise ValueError("Unknown task_uid for the current operation")
@@ -5309,7 +5514,7 @@ def _publish_task_acceptance_memory(
     """Best-effort publish accepted task information as one replay-safe observation."""
 
     content, metadata, publication_key = _task_acceptance_memory_payload(task, results)
-    store = _get_plan_store()
+    store = _get_database_store()
     op_id = _operation_id()
     if store.has_acceptance_memory_publication(op_id, task.task_uid, publication_key):
         return True, False, ""
@@ -5361,7 +5566,7 @@ def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult])
 def _source_task_finding_refs(task_uid: str) -> List[str]:
     """Return canonical finding references durably linked to one executor task."""
 
-    store = _get_plan_store()
+    store = _get_database_store()
     list_findings = getattr(store, "list_findings", None)
     if not callable(list_findings):
         return []
@@ -5415,7 +5620,7 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
         raise ValueError("task_uid required when binding record_task_acceptance")
 
     task = task or next(
-        (item for item in _get_plan_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
+        (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
         None,
     )
     if task is None:
@@ -5586,14 +5791,14 @@ def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:
 
 
 @tool
-def mem0_list() -> str:
+def memory_list() -> str:
     """List operation findings, validation records, observations, and knowledge."""
     try:
         client = _ensure_memory_client()
 
-        # Respect MEM0_LIST_LIMIT if set, default to 100 (matches retrieve/report limits)
+        # Keep list/retrieve output bounded for prompts and reports.
         try:
-            list_limit = int(os.getenv("MEM0_LIST_LIMIT", "100"))
+            list_limit = int(os.getenv("MEMORY_LIST_LIMIT", "100"))
         except Exception:
             list_limit = 100
 
@@ -5621,7 +5826,7 @@ def mem0_list() -> str:
 
 
 @tool
-def mem0_retrieve(
+def memory_retrieve(
     query: str,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -5634,10 +5839,10 @@ def mem0_retrieve(
     - metadata: filter dict applied to metadata (e.g., {"category": "finding", "status": "verified"}).
 
     CROSS-SESSION LEARNING:
-        - mem0_retrieve: Scoped to the current operation by default
+        - memory_retrieve: Scoped according to the configured memory mode
 
         Cross-Learning Query Examples:
-        - Learn from past: mem0_retrieve(query="SQLi techniques")
+        - Learn from past: memory_retrieve(query="SQLi techniques")
         - Skip verified: metadata={"status": "verified"} to find verified findings
         - Learn techniques: metadata={"category": "knowledge"}
         - Avoid failures: query for failed_technique or blocker in metadata
@@ -5695,574 +5900,201 @@ def mem0_retrieve(
         return f"Error: {str(e)}"
 
 
-class Mem0ServiceClient:
-    """Lightweight client for Mem0 operations (store, search, list).
+class _LiteLLMEmbeddings:
+    """Minimal embedding adapter for providers routed through LiteLLM."""
 
-    Supports FAISS, OpenSearch, or Mem0 Platform based on environment.
-    """
+    def __init__(self, model: str) -> None:
+        if not model:
+            raise ValueError("A LiteLLM embedding model is required")
+        self.model = model
 
-    @staticmethod
-    def _remove_inactive(payload: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if payload is None:
-            return []
-        if not isinstance(payload, list):
-            return payload
-        payload[:] = [
-            memory
-            for memory in payload
-            if not isinstance(memory, dict) or bool(memory.get("metadata", {}).get("active", True))
-        ]
-        return payload
+    def embed_query(self, text: str) -> List[float]:
+        response = litellm.embedding(model=self.model, input=[text])
+        data = response.data if hasattr(response, "data") else response["data"]
+        item = data[0]
+        embedding = item.embedding if hasattr(item, "embedding") else item["embedding"]
+        return list(embedding)
 
-    @staticmethod
-    def _coerce_entry(entry: Any) -> Dict[str, Any]:
-        """Ensure every entry behaves like a memory dict."""
-        if isinstance(entry, dict):
-            return entry
-        if isinstance(entry, str):
-            return {"memory": entry, "metadata": {}}
-        if entry is None:
-            return {"memory": "", "metadata": {}}
-        # Fallback stringify for unexpected types (lists/tuples/etc.)
-        try:
-            text = (
-                json.dumps(entry)
-                if isinstance(entry, (list, tuple, set))
-                else str(entry)
-            )
-        except Exception:  # pragma: no cover - defensive conversion
-            text = str(entry)
-        return {"memory": text, "metadata": {}}
 
-    @staticmethod
-    def _normalise_results_list(payload: Any) -> List[Dict[str, Any]]:
-        """Best-effort conversion of Mem0 responses to a list of memory dicts."""
-        if payload is None:
-            return []
-        if isinstance(payload, list):
-            return Mem0ServiceClient._remove_inactive([Mem0ServiceClient._coerce_entry(entry) for entry in payload])
-        if isinstance(payload, dict):
-            for key in ("results", "memories", "data"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return Mem0ServiceClient._remove_inactive([Mem0ServiceClient._coerce_entry(entry) for entry in value])
-        return []
+class QdrantMemoryClient:
+    """Qdrant-backed semantic memory with mandatory target scoping."""
 
-    @staticmethod
-    def get_default_config(server: str = "bedrock") -> Dict:
-        """Get default configuration from ConfigManager."""
-        config_manager = get_config_manager()
-        mem0_config = config_manager.get_mem0_service_config(server)
-
-        # Add RequestsHttpConnection for OpenSearch if needed
-        if mem0_config["vector_store"]["provider"] == "opensearch":
-            mem0_config["vector_store"]["config"]["connection_class"] = (
-                RequestsHttpConnection
-            )
-
-        return mem0_config
+    COLLECTION_NAME = "cyber_autoagent_memories"
 
     def __init__(
         self,
-        config: Optional[Dict] = None,
+        config: Optional[Dict[str, Any]] = None,
         has_existing_memories: bool = False,
         silent: bool = False,
-    ):
-        """Initialize the Mem0 service client.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-                   If provided, it will be merged with the default configuration.
-            has_existing_memories: Whether memories already existed before initialization
-            silent: If True, suppress initialization output (used during report generation)
-
-        The client will use one of three backends based on environment variables:
-        1. Mem0 Platform if MEM0_API_KEY is set
-        2. OpenSearch if OPENSEARCH_HOST is set
-        3. FAISS (default) if neither MEM0_API_KEY nor OPENSEARCH_HOST is set
-        """
-        self.region = None  # Initialize region attribute
-        self.has_existing_memories = has_existing_memories  # Store existing memory info
-        self.silent = silent  # Store silent flag for use in initialization methods
-        self.mem0 = self._initialize_client(config)
-        self.config = config  # Store config for later use
-
-        # Display memory overview if existing memories are detected (unless silent)
+    ) -> None:
+        self.config = dict(config or {})
+        self.has_existing_memories = has_existing_memories
+        self.silent = silent
+        self.collection_name = str(self.config.get("collection_name", self.COLLECTION_NAME))
+        self.embedding_dimensions = int(self.config.get("embedding_dimensions", 1024))
+        self.target_values = self._target_values(self.config)
+        self.operation_id = str(self.config.get("operation_id") or "").strip()
+        if not self.operation_id:
+            raise ValueError("Qdrant memory requires an operation ID")
+        self.memory_mode = self._memory_mode(self.config.get("memory_mode", "operation"))
+        self.embeddings = self.config.get("embeddings") or self._build_embeddings()
+        self.qdrant_url = str(os.getenv("QDRANT_URL", "")).strip()
+        self.qdrant = self._build_client()
+        self._ensure_collection()
         if not silent:
-            self._display_startup_overview()
-
-    def _initialize_client(self, config: Optional[Dict] = None) -> Any:
-        """Initialize the appropriate Mem0 client based on environment variables.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-
-        Returns:
-            An initialized Mem0 client (MemoryClient or Mem0Memory instance).
-        """
-        if os.environ.get("MEM0_API_KEY"):
-            # Ensure base path exists for SQLite
-            _get_memory_base_path(config)
-            if not self.silent:
-                print("[+] Memory Backend: Mem0 Platform (cloud)")
-                print(
-                    f"    API Key: {'*' * 8}{os.environ.get('MEM0_API_KEY', '')[-4:]}"
-                )
-            logger.debug("Using Mem0 Platform backend (MemoryClient)")
-            return MemoryClient()
-
-        # Determine provider type based on environment
-        # When OpenSearch is enabled we default to Bedrock for AWS compatibility,
-        # otherwise align with the active CYBER_AGENT_PROVIDER (fallback to Ollama)
-        active_provider = os.environ.get("CYBER_AGENT_PROVIDER", "ollama").lower()
-        if os.environ.get("OPENSEARCH_HOST"):
-            server_type = "bedrock"
-        elif active_provider in ("litellm", "bedrock", "ollama"):
-            server_type = active_provider
-        elif active_provider == "gemini":
-            server_type = "gemini"
-        else:
-            server_type = "ollama"
-
-        if os.environ.get("OPENSEARCH_HOST"):
-            merged_config = self._merge_config(config, server_type)
-            self._realign_provider_configs(merged_config)
-            config_manager = get_config_manager()
-
-            # Resolve provider labels
-            def _provider_label(p: str) -> str:
-                mapping = {
-                    "aws_bedrock": "AWS Bedrock",
-                    "ollama": "Ollama",
-                    "azure_openai": "Azure OpenAI",
-                    "openai": "OpenAI",
-                    "anthropic": "Anthropic",
-                    "cohere": "Cohere",
-                    "gemini": "Google Gemini",
-                    "huggingface": "Hugging Face",
-                    "sagemaker": "Amazon SageMaker",
-                    "groq": "Groq",
-                }
-                return mapping.get(p, p or "unknown")
-
-            embedder_cfg = merged_config.get("embedder", {})
-            llm_cfg = merged_config.get("llm", {})
-            embedder_provider = embedder_cfg.get("provider", "")
-            llm_provider = llm_cfg.get("provider", "")
-            embedder_model = embedder_cfg.get("config", {}).get("model")
-            llm_model = llm_cfg.get("config", {}).get("model")
-            # Prefer dims from vector_store config if present
-            dims = (
-                merged_config.get("vector_store", {})
-                .get("config", {})
-                .get("embedding_model_dims", 1024)
-            )
-            embedder_region = (
-                embedder_cfg.get("config", {}).get("aws_region")
-                or config_manager.get_default_region()
-            )
-
-            if not self.silent:
-                print("[+] Memory Backend: OpenSearch")
-                print(f"    Host: {os.environ.get('OPENSEARCH_HOST')}")
-                # Only show region for AWS-based providers
-                if embedder_provider == "aws_bedrock" or llm_provider == "aws_bedrock":
-                    print(f"    Region: {embedder_region}")
-                print(
-                    f"    Embedder: {_provider_label(embedder_provider)} - {embedder_model} ({dims} dims)"
-                )
-                print(f"    LLM: {_provider_label(llm_provider)} - {llm_model}")
-            logger.debug("Using OpenSearch backend (Mem0Memory with OpenSearch)")
-            return self._initialize_opensearch_client(config, server_type)
-
-        # FAISS backend
-        logger.debug("Using FAISS backend (Mem0Memory with FAISS)")
-        return self._initialize_faiss_client(
-            config, server_type, self.has_existing_memories
-        )
-
-    def _initialize_opensearch_client(
-        self, config: Optional[Dict] = None, server: str = "bedrock"
-    ) -> Mem0Memory:
-        """Initialize a Mem0 client with OpenSearch backend."""
-        merged_config = self._merge_config(config, server)
-        
-        # Ensure base path exists for SQLite
-        _get_memory_base_path(merged_config)
-        self._realign_provider_configs(merged_config)
-        config_manager = get_config_manager()
-        config_region = (
-            merged_config.get("embedder", {}).get("config", {}).get("aws_region")
-        )
-        self.region = (
-            config_region
-            or os.environ.get("AWS_REGION")
-            or config_manager.get_default_region()
-        )
-
-        if not os.environ.get("AWS_REGION"):
-            os.environ["AWS_REGION"] = self.region
-
-        # Set up AWS credentials
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        auth = AWSV4SignerAuth(credentials, self.region, "es")
-
-        # Prepare configuration
-        merged_config["vector_store"]["config"].update(
-            {"http_auth": auth, "host": os.environ["OPENSEARCH_HOST"]}
-        )
-
-        return Mem0Memory.from_config(config_dict=merged_config)
-
-    def _initialize_faiss_client(
-        self,
-        config: Optional[Dict] = None,
-        server: str = "ollama",
-        has_existing_memories: bool = False,
-    ) -> Mem0Memory:
-        """Initialize a Mem0 client with FAISS backend.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-            server: Server type for configuration.
-
-        Returns:
-            An initialized Mem0Memory instance configured for FAISS.
-
-        Raises:
-            ImportError: If faiss-cpu package is not installed.
-        """
-
-        merged_config = self._merge_config(config, server)
-
-        # Initialize store existence flag
-        store_existed_before = False
-
-        faiss_path = _get_memory_base_path(merged_config)
-        store_existed_before = os.path.exists(faiss_path)
-
-        # Ensure the memory directory exists
-        os.makedirs(faiss_path, exist_ok=True)
-
-        merged_config["vector_store"]["config"]["path"] = faiss_path
-
-        # Display FAISS configuration (unless silent mode for report generation)
-        if not self.silent:
-            print("[+] Memory Backend: FAISS (local)")
-            print(f"    Store Location: {faiss_path}")
-
-            # Display embedder/LLM configuration
-            def _provider_label(p: str) -> str:
-                mapping = {
-                    "aws_bedrock": "AWS Bedrock",
-                    "ollama": "Ollama",
-                    "azure_openai": "Azure OpenAI",
-                    "openai": "OpenAI",
-                    "anthropic": "Anthropic",
-                    "cohere": "Cohere",
-                    "gemini": "Google Gemini",
-                    "huggingface": "Hugging Face",
-                    "sagemaker": "Amazon SageMaker",
-                    "groq": "Groq",
-                    "litellm": "LiteLLM",
-                }
-                return mapping.get(p, p or "unknown")
-
-            embedder_config = merged_config.get("embedder", {})
-            llm_config = merged_config.get("llm", {})
-            embedder_provider = embedder_config.get("provider", "")
-            llm_provider = llm_config.get("provider", "")
-            embedder_model = embedder_config.get("config", {}).get("model")
-            llm_model = llm_config.get("config", {}).get("model")
-            # Prefer dims from vector_store config if present
-            dims = (
-                merged_config.get("vector_store", {})
-                .get("config", {})
-                .get("embedding_model_dims", 1024)
-            )
-
-            # Derive region only for AWS-based providers
-            config_manager = get_config_manager()
-            embedder_region = embedder_config.get("config", {}).get(
-                "aws_region", config_manager.get_default_region()
-            )
-
-            # Show region only when relevant
-            if embedder_provider == "aws_bedrock" or llm_provider == "aws_bedrock":
-                print(f"    Region: {embedder_region}")
-
-            # Pretty print providers
-            print(
-                f"    Embedder: {_provider_label(embedder_provider)} - {embedder_model} ({dims} dims)"
-            )
-
-            # If using LiteLLM for LLM, try to extract actual provider from model prefix for display
-            display_llm_provider = _provider_label(llm_provider)
-            if (
-                llm_provider in ("", "litellm")
-                and isinstance(llm_model, str)
-                and "/" in llm_model
-            ):
-                prefix = llm_model.split("/", 1)[0].lower()
-                display_llm_provider = _provider_label(
-                    {
-                        "bedrock": "aws_bedrock",
-                        "ollama": "ollama",
-                        "azure": "azure_openai",
-                        "openai": "openai",
-                        "anthropic": "anthropic",
-                        "cohere": "cohere",
-                        "gemini": "gemini",
-                        "sagemaker": "sagemaker",
-                        "groq": "groq",
-                        "xai": "huggingface",
-                        "mistral": "huggingface",
-                    }.get(prefix, llm_provider)
-                )
-
-            print(f"    LLM: {display_llm_provider} - {llm_model}")
-
-            # Display appropriate message based on whether store existed before initialization
-            # Use has_existing_memories parameter which includes proper file size validation
-            if has_existing_memories or store_existed_before:
-                print(f"    Loading existing FAISS store from: {faiss_path}")
-                print("    Memory will persist across operations for this target")
-            else:
-                # For fresh starts, just show the persistence message
-                print("    Memory will persist across operations for this target")
-
-        logger.debug("Initializing Mem0Memory with config: %s", merged_config)
-        try:
-            mem0_client = Mem0Memory.from_config(config_dict=merged_config)
-            logger.debug("Mem0Memory client initialized successfully")
-            return mem0_client
-        except Exception as e:
-            # Check if this is an Ollama network error (model may already exist locally)
-            error_msg = str(e)
-            if "connection reset" in error_msg or "pull model manifest" in error_msg:
-                logger.warning(
-                    "Ollama network error during model pull - model may already exist locally, retrying initialization..."
-                )
-                # Retry once without forcing model pull (Mem0 will use existing local model)
-                try:
-                    mem0_client = Mem0Memory.from_config(config_dict=merged_config)
-                    logger.info(
-                        "Mem0Memory initialized successfully on retry (using existing local model)"
-                    )
-                    return mem0_client
-                except Exception as retry_error:
-                    logger.error("Retry failed: %s", retry_error)
-                    raise retry_error
-            elif (
-                "Unknown provider in model" in error_msg
-                or "Unsupported LLM provider" in error_msg
-            ):
-                logger.warning(
-                    "Mem0 provider mismatch detected (%s). Applying OpenAI-compatible fallback.",
-                    error_msg,
-                )
-                self._realign_provider_configs(merged_config, force_openai=True)
-                try:
-                    mem0_client = Mem0Memory.from_config(config_dict=merged_config)
-                    logger.info(
-                        "Mem0Memory initialized successfully after provider fallback"
-                    )
-                    return mem0_client
-                except Exception as retry_error:
-                    logger.error("Provider fallback failed: %s", retry_error)
-                    raise retry_error
-            else:
-                logger.error("Failed to initialize Mem0Memory client: %s", e)
-                raise
-
-    def _merge_config(
-        self, config: Optional[Dict] = None, server: str = "bedrock"
-    ) -> Dict:
-        """Merge user-provided configuration with default configuration.
-
-        Args:
-            config: Optional configuration dictionary to override defaults.
-            server: Server type for configuration.
-
-        Returns:
-            A merged configuration dictionary.
-        """
-        merged_config = self.get_default_config(server).copy()
-        if not config:
-            return merged_config
-
-        # Deep merge the configs
-        for key, value in config.items():
-            if (
-                key in merged_config
-                and isinstance(value, dict)
-                and isinstance(merged_config[key], dict)
-            ):
-                merged_config[key].update(value)
-            else:
-                merged_config[key] = value
-
-        return merged_config
+            location = os.getenv("QDRANT_URL") or _get_memory_base_path(self.config)
+            print(f"[+] Memory Backend: Qdrant ({'service' if os.getenv('QDRANT_URL') else 'local'})")
+            print(f"    Store Location: {location}")
+            print(f"    Query Scope: {self.memory_mode}")
 
     @staticmethod
-    def _split_model_identifier(model_id: Any) -> Tuple[str, str]:
-        if not isinstance(model_id, str):
-            return "", ""
-        if "/" in model_id:
-            prefix, remainder = model_id.split("/", 1)
-            return prefix.lower(), remainder
-        return "", model_id
+    def _memory_mode(value: Any) -> str:
+        mode = str(value or "operation").strip().lower()
+        if mode not in {"operation", "shared"}:
+            raise ValueError("memory_mode must be one of: operation, shared")
+        return mode
 
-    def _inject_azure_defaults(
-        self, section_config: Dict[str, Any], deployment: str
-    ) -> None:
-        section_config["azure_kwargs"] = {
-            "api_key": os.getenv("AZURE_API_KEY", ""),
-            "azure_deployment": deployment,
-            "azure_endpoint": os.getenv("AZURE_API_BASE", ""),
-            "api_version": os.getenv("AZURE_API_VERSION", ""),
-        }
-        azure_kwargs = section_config["azure_kwargs"]
-        if not all(azure_kwargs.values()):
-            logger.warning(
-                "Azure OpenAI credentials appear incomplete. Values set: endpoint=%s, deployment=%s",
-                azure_kwargs.get("azure_endpoint"),
-                azure_kwargs.get("azure_deployment"),
+    @staticmethod
+    def _target_values(config: Dict[str, Any]) -> List[str]:
+        raw_values = config.get("target_values")
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        values = [str(value).strip() for value in (raw_values or []) if str(value).strip()]
+        if not values:
+            fallback = str(config.get("target_value") or config.get("target_name") or "").strip()
+            if fallback and fallback != "default_target":
+                values = [fallback]
+        if not values:
+            raise ValueError("Qdrant memory requires at least one canonical OperationTarget value")
+        return list(dict.fromkeys(values))
+
+    def _build_embeddings(self) -> Any:
+        provider = str(self.config.get("embedding_provider") or os.getenv("CYBER_AGENT_PROVIDER", "bedrock")).lower()
+        model = str(self.config.get("embedding_model") or os.getenv("CYBER_AGENT_EMBEDDING_MODEL", ""))
+        if provider == "ollama":
+            return OllamaEmbeddings(
+                model=model,
+                base_url=str(self.config.get("ollama_base_url") or os.getenv("OLLAMA_HOST", "http://localhost:11434")),
             )
+        if provider == "gemini":
+            return GoogleGenerativeAIEmbeddings(model=model)
+        if provider == "litellm":
+            return _LiteLLMEmbeddings(model)
+        if model.startswith("bedrock/"):
+            model = model.split("/", 1)[1]
+        return BedrockEmbeddings(
+            model_id=model,
+            region_name=str(self.config.get("aws_region") or os.getenv("AWS_REGION", "us-east-1")),
+        )
 
-    def _realign_provider_configs(
-        self, merged_config: Dict[str, Any], *, force_openai: bool = False
-    ) -> None:
-        """Ensure Mem0 provider sections match the selected model identifiers."""
-        if force_openai and not os.getenv("OPENAI_API_KEY"):
-            logger.warning(
-                "Skipping OpenAI provider fallback because OPENAI_API_KEY is not set"
+    def _build_client(self) -> QdrantClient:
+        if self.qdrant_url:
+            return QdrantClient(url=self.qdrant_url, api_key=os.getenv("QDRANT_API_KEY") or None)
+        path = _get_memory_base_path(self.config)
+        os.makedirs(path, exist_ok=True)
+        return QdrantClient(path=path)
+
+    def _ensure_collection(self) -> None:
+        if not self.qdrant.collection_exists(self.collection_name):
+            self.qdrant.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=qdrant_models.VectorParams(
+                    size=self.embedding_dimensions,
+                    distance=qdrant_models.Distance.COSINE,
+                ),
             )
-            force_openai = False
-        for section_key in ("embedder", "llm"):
-            section = merged_config.get(section_key)
-            if not isinstance(section, dict):
-                continue
-            config_section = section.setdefault("config", {})
-            model_id = config_section.get("model")
-            provider = (section.get("provider") or "").lower()
-
-            if force_openai and section_key == "llm":
-                section["provider"] = "openai"
-                if not isinstance(model_id, str) or "/" in model_id or not model_id:
-                    config_section["model"] = os.getenv(
-                        "MEM0_FALLBACK_LLM_MODEL", "gpt-4o-mini"
-                    )
-                continue
-
-            if not isinstance(model_id, str):
-                continue
-            prefix, remainder = self._split_model_identifier(model_id)
-            if not prefix:
-                continue
-            mapped_provider = MEM0_PROVIDER_MAP.get(prefix)
-            if not mapped_provider:
-                continue
-
-            if mapped_provider == provider:
-                if mapped_provider == "azure_openai" and remainder:
-                    config_section["model"] = remainder
-                    self._inject_azure_defaults(config_section, remainder)
-                continue
-
-            if provider not in ("aws_bedrock", "", "ollama", "litellm"):
-                continue
-
-            section["provider"] = mapped_provider
-            if remainder:
-                config_section["model"] = remainder
-            if mapped_provider == "azure_openai":
-                self._inject_azure_defaults(
-                    config_section, remainder or config_section.get("model", "")
+        if not self.qdrant_url:
+            return
+        for field_name in ("target_values", "operation_id", "metadata.category", "metadata.status"):
+            try:
+                self.qdrant.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+                    wait=True,
                 )
-            logger.warning(
-                "Aligned Mem0 %s provider from '%s' to '%s' for model '%s'",
-                section_key,
-                provider or "unknown",
-                mapped_provider,
-                model_id,
+            except Exception as error:  # Local mode may report an existing or unsupported index.
+                logger.debug("Qdrant payload index %s was not created: %s", field_name, error)
+
+    def _scope_filter(
+        self,
+        metadata: Optional[Dict[str, Any]] = None,
+        operation_id: Optional[str] = None,
+    ) -> qdrant_models.Filter:
+        must: List[Any] = [
+            qdrant_models.FieldCondition(
+                key="target_values",
+                match=qdrant_models.MatchAny(any=self.target_values),
             )
+        ]
+        effective_operation = None
+        if self.memory_mode == "operation":
+            effective_operation = operation_id or self.operation_id
+        if effective_operation:
+            must.append(
+                qdrant_models.FieldCondition(
+                    key="operation_id",
+                    match=qdrant_models.MatchValue(value=effective_operation),
+                )
+            )
+        for key, value in (metadata or {}).items():
+            if isinstance(value, list):
+                match: Any = qdrant_models.MatchAny(any=value)
+            elif isinstance(value, (str, int, bool)):
+                match = qdrant_models.MatchValue(value=value)
+            else:
+                raise ValueError(f"Unsupported Qdrant metadata filter value for {key}")
+            must.append(qdrant_models.FieldCondition(key=f"metadata.{key}", match=match))
+        return qdrant_models.Filter(must=must)
+
+    @staticmethod
+    def _point_to_memory(point: Any) -> Dict[str, Any]:
+        payload = dict(point.payload or {})
+        return {
+            "id": str(point.id),
+            "memory": str(payload.get("memory", "")),
+            "metadata": dict(payload.get("metadata") or {}),
+            "created_at": str(payload.get("created_at", "")),
+            "operation_id": str(payload.get("operation_id", "")),
+            "target_values": list(payload.get("target_values") or []),
+            "score": getattr(point, "score", None),
+        }
 
     def store_memory(
         self,
         content: str,
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-        metadata: Optional[Dict] = None,
-    ):
-        """Store a memory in Mem0 with native operation scoping via run_id.
-
-        Uses run_id for mem0's native operation isolation instead of manual metadata filtering.
-        This provides O(log n) indexed lookups vs O(n) local filtering.
-        """
-        user_id = _user_id(user_id)
-        if not user_id and not agent_id:
-            raise ValueError("Either user_id or agent_id must be provided")
-
-        # Default agent_id to user_id to avoid null actor attribution in some backends
-        if user_id and not agent_id:
-            agent_id = user_id
-
-        metadata = metadata or {}
-
-        # Get operation ID for native session scoping
-        op_id = _operation_id()
-
-        messages = [{"role": "user", "content": content}]
-        try:
-            # For cybersecurity findings, use infer=False to ensure all data is stored
-            # regardless of mem0's fact filtering (critical for security assessments)
-            # Use session_id=operation_id for mem0's native operation isolation
-            add_kwargs = {
-                "messages": messages,
-                "user_id": user_id,
-                "agent_id": agent_id,
-                "metadata": metadata,
-                "infer": False,
-            }
-
-            # Add run_id for native operation scoping (mem0 1.0.0 API)
-            if op_id:
-                add_kwargs["run_id"] = op_id
-                metadata["operation_id"] = op_id
-
-            # Platform writes default to asynchronous processing, which may return before a durable
-            # memory ID can be used as acceptance evidence. The local Mem0 API has no async_mode argument.
-            if isinstance(self.mem0, MemoryClient):
-                add_kwargs["async_mode"] = False
-
-            # Debug: Log metadata BEFORE storage
-            logger.debug(
-                "BEFORE mem0.add() - category=%s, metadata=%s",
-                metadata.get("category") if metadata else "none",
-                metadata
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        content = str(content or "").strip()
+        if not content:
+            raise ValueError("memory content is required")
+        memory_id = str(uuid.uuid4())
+        resolved_metadata = dict(metadata or {})
+        resolved_metadata["operation_id"] = self.operation_id
+        payload = {
+            "memory": content,
+            "metadata": resolved_metadata,
+            "created_at": datetime.now().isoformat(),
+            "operation_id": self.operation_id,
+            "target_values": self.target_values,
+            "user_id": _user_id(user_id),
+            "agent_id": agent_id or _user_id(user_id),
+            "active": True,
+        }
+        vector = self.embeddings.embed_query(content)
+        if len(vector) != self.embedding_dimensions:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {self.embedding_dimensions}, received {len(vector)}"
             )
-
-            # Use thread lock for FAISS write safety (prevents index corruption
-            # during concurrent writes from swarm agents)
-            with _FAISS_WRITE_LOCK:
-                result = self.mem0.add(**add_kwargs)
-
-            # Debug: Verify what was actually stored
-            logger.info(
-                "Memory stored successfully - run_id=%s, category=%s, result=%s",
-                op_id or "none",
-                metadata.get("category") if metadata else "none",
-                result
+        with _QDRANT_WRITE_LOCK:
+            self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=[qdrant_models.PointStruct(id=memory_id, vector=vector, payload=payload)],
+                wait=True,
             )
-
-            return result
-        except Exception as e:
-            logger.error("Critical error storing memory: %s", str(e), exc_info=True)
-            logger.error("Exception type: %s", type(e).__name__)
-            logger.error("Exception args: %s", e.args)
-            raise RuntimeError(f"Memory storage failed: {str(e)}") from e
+        return {"results": [{"id": memory_id, "memory": content, "metadata": resolved_metadata}]}
 
     def list_memories(
         self,
@@ -6273,73 +6105,23 @@ class Mem0ServiceClient:
         page: int = 1,
         run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """List memories for a user/agent with safe defaults and pagination.
-
-        Args:
-            user_id: User identifier
-            agent_id: Agent identifier
-            limit: Maximum number of memories to return
-            page: Page number for pagination
-            run_id: Operation/session ID for scoping (None = all operations)
-
-        Falls back gracefully if backend doesn't support limit/page/run_id.
-        """
-        user_id = _user_id(user_id)
-        if not user_id and not agent_id:
-            raise ValueError("Either user_id or agent_id must be provided")
-
-        logger.debug(
-            "Calling mem0.get_all with user_id=%s, agent_id=%s, run_id=%s",
-            user_id, agent_id, run_id
+        del user_id, agent_id
+        effective_limit = max(int(limit or os.getenv("MEMORY_LIST_LIMIT", "100")), 1)
+        effective_page = max(int(page), 1)
+        points, _ = self.qdrant.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=self._scope_filter(operation_id=run_id),
+            limit=effective_limit * effective_page,
+            with_payload=True,
+            with_vectors=False,
         )
-
-        # Determine effective limit from env or passed arg (default 100 for report consistency)
-        try:
-            default_limit = int(os.getenv("MEM0_LIST_LIMIT", "100"))
-        except Exception:
-            default_limit = 100
-        eff_limit = (
-            int(limit) if isinstance(limit, int) and limit > 0 else default_limit
-        )
-
-        # Build base kwargs
-        base_kwargs = {}
-        if user_id:
-            base_kwargs["user_id"] = user_id
-        if agent_id:
-            base_kwargs["agent_id"] = agent_id
-        if run_id:
-            base_kwargs["run_id"] = run_id
-
-        # Try variants: with limit/page, with limit only, then no args
-        # Normalize and slice to eff_limit as a last resort
-        try:
-            try:
-                result = self.mem0.get_all(
-                    **base_kwargs, limit=eff_limit, page=page
-                )
-            except TypeError:
-                try:
-                    result = self.mem0.get_all(
-                        **base_kwargs, limit=eff_limit
-                    )
-                except TypeError:
-                    try:
-                        result = self.mem0.get_all(**base_kwargs)
-                    except TypeError as te:
-                        if "run_id" in base_kwargs:
-                            no_run_id = base_kwargs.copy()
-                            no_run_id.pop("run_id")
-                            result = self.mem0.get_all(**no_run_id)
-                        else:
-                            raise te
-            logger.debug("mem0.get_all returned type: %s", type(result))
-            # Normalize structures
-            normalised = self._normalise_results_list(result)
-            return normalised[:eff_limit]
-        except Exception as e:
-            logger.error("Error in mem0.get_all: %s", e)
-            raise
+        start = (effective_page - 1) * effective_limit
+        page_points = points[start:start + effective_limit]
+        return [
+            self._point_to_memory(point)
+            for point in page_points
+            if bool((point.payload or {}).get("active", True))
+        ]
 
     def get_memory_by_id(
         self,
@@ -6347,76 +6129,29 @@ class Mem0ServiceClient:
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Get a single memory by its Mem0 ID.
-
-        Mem0 backends have used slightly different ``get`` signatures, so this
-        method tries the direct ID form first and then keyword variants. The
-        returned value is normalized to the same dictionary shape used by list
-        and search helpers.
-        """
-
-        memory_id = str(memory_id or "").strip()
-        if not memory_id:
+        del user_id, agent_id
+        points = self.qdrant.retrieve(
+            collection_name=self.collection_name,
+            ids=[str(memory_id)],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
             return None
-        if not hasattr(self.mem0, "get"):
-            raise AttributeError("Mem0 backend does not support get")
-
-        base_kwargs: Dict[str, Any] = {}
-        user_id = _user_id(user_id)
-        if user_id:
-            base_kwargs["user_id"] = user_id
-        if agent_id:
-            base_kwargs["agent_id"] = agent_id
-
-        attempts = [
-            lambda: self.mem0.get(memory_id),
-            lambda: self.mem0.get(memory_id=memory_id, **base_kwargs),
-            lambda: self.mem0.get(id=memory_id, **base_kwargs),
-        ]
-        result: Any = None
-        last_type_error: Optional[TypeError] = None
-        for attempt in attempts:
-            try:
-                result = attempt()
-                break
-            except TypeError as error:
-                last_type_error = error
-        else:
-            if last_type_error:
-                raise last_type_error
-
-        entries = self._normalise_results_list(result)
-        if entries:
-            return entries[0]
-        if isinstance(result, dict):
-            entries = self._remove_inactive([self._coerce_entry(result)])
-            if entries:
-                return entries[0]
-        if isinstance(result, str):
-            return self._coerce_entry(result)
-        return None
+        memory = self._point_to_memory(points[0])
+        allowed = memory["target_values"] and bool(set(memory["target_values"]) & set(self.target_values))
+        if self.memory_mode == "operation":
+            allowed = allowed and memory["operation_id"] == self.operation_id
+        return memory if allowed else None
 
     def search_memories(
-            self,
-            query: str,
-            user_id: Optional[str] = None,
-            agent_id: Optional[str] = None,
-            run_id: Optional[str] = None,
+        self,
+        query: str,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search memories using semantic search."""
-        user_id = _user_id(user_id)
-        if not user_id and not agent_id:
-            raise ValueError("Either user_id or agent_id must be provided")
-
-        # Delegate to the compatibility search helper for normalized results
-        return self.search(
-            query=query,
-            filters=None,
-            limit=20,
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-        )
+        return self.search(query, limit=20, user_id=user_id, agent_id=agent_id, run_id=run_id)
 
     def search(
         self,
@@ -6424,175 +6159,21 @@ class Mem0ServiceClient:
         filters: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         *,
-            user_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Compatibility wrapper providing Mem0-style search with filter support.
-
-        Args:
-            query: Semantic search query
-            filters: Metadata filters (legacy - use run_id for operation scoping)
-            limit: Maximum results to return (default 100 for report consistency)
-            user_id: User identifier
-            agent_id: Agent identifier
-            run_id: Run/operation ID for native mem0 scoping (recommended)
-
-        Returns:
-            List of memory dictionaries with 'memory' and 'metadata' fields
-        """
-
-        user_id = _user_id(user_id)
-        filters = filters or {}
-        top_k = max(int(limit or 100), 1)
-
-        # Try native Mem0 search first (covers FAISS/OpenSearch/Platform backends)
-        if hasattr(self.mem0, "search"):
-            search_kwargs: Dict[str, Any] = {"user_id": user_id}
-            if agent_id:
-                search_kwargs["agent_id"] = agent_id
-
-            # Prefer run_id for operation scoping (mem0 1.0.0 API)
-            if run_id:
-                search_kwargs["run_id"] = run_id
-                logger.debug("Using run_id=%s for native operation scoping", run_id)
-
-            # Pass filters to mem0's native search (supports advanced operators like "in")
-            if filters:
-                search_kwargs["filters"] = filters
-
-            for size_kw in ("top_k", "limit"):
-                try:
-                    search_kwargs[size_kw] = top_k
-                    results = self.mem0.search(query=query, **search_kwargs)
-                    normalised = self._normalise_results_list(results)
-                    if normalised:
-                        return normalised[:top_k]
-                except TypeError:
-                    search_kwargs.pop(size_kw, None)
-                except Exception as exc:  # pragma: no cover - backend specific
-                    logger.debug("Native Mem0 search failed (%s): %s", size_kw, exc)
-                    break
-
-        # Fallback: list memories and apply lightweight filtering locally
-        try:
-            # Pass run_id to list_memories for consistent scoping
-            all_memories = self.list_memories(
-                user_id=user_id, agent_id=agent_id, run_id=run_id
-            )
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Fallback memory listing failed during search: %s", exc)
-            return []
-
-        # If run_id was provided but list_memories didn't filter (backend limitation),
-        # apply local filtering by operation_id in metadata
-        if run_id:
-            all_memories = [
-                e for e in all_memories
-                if e.get("metadata", {}).get("operation_id") == run_id
-                or e.get("run_id") == run_id
-            ]
-
-        def _matches_filters(entry: Dict[str, Any]) -> bool:
-            """Match filters with support for simple list values (FAISS-compatible)."""
-            metadata = entry.get("metadata", {}) or {}
-            for key, value in filters.items():
-                meta_val = metadata.get(key)
-                # Handle list filter values (e.g., {"category": ["finding", "observation"]})
-                if isinstance(value, list):
-                    if meta_val not in value:
-                        return False
-                elif str(meta_val) != str(value):
-                    return False
-            return True
-
-        if query:
-            terms = [term.lower() for term in re.split(r"\s+", query) if term]
-        else:
-            terms = []
-
-        results: List[Dict[str, Any]] = []
-        for entry in all_memories:
-            if filters and not _matches_filters(entry):
-                continue
-
-            if terms:
-                text = " ".join(
-                    str(part)
-                    for part in (
-                        entry.get("memory"),
-                        entry.get("content"),
-                        json.dumps(entry.get("metadata", {}), default=str),
-                    )
-                    if part
-                ).lower()
-                if not all(term in text for term in terms):
-                    continue
-
-            results.append(entry)
-            if len(results) >= top_k:
-                break
-
-        return results
-
-    def _display_startup_overview(self) -> None:
-        """Display memory overview at startup if memories exist."""
-        try:
-            # Ensure _PLAN_STORE is initialized
-            _get_plan_store()
-            
-            # For Mem0 Platform & OpenSearch - always display (remote backends)
-            # For FAISS - only if memories existed before init
-            should_display = (
-                os.environ.get("MEM0_API_KEY")
-                or os.environ.get("OPENSEARCH_HOST")
-                or self.has_existing_memories
-            )
-
-            if not should_display:
-                return
-
-            # Get and display overview
-            overview = self.get_memory_overview(user_id=_user_id())
-
-            if overview.get("error"):
-                print(
-                    f"    Warning: Could not retrieve memory overview: {overview['error']}"
-                )
-                return
-
-            if not overview.get("has_memories"):
-                print("    No existing memories found - starting fresh")
-                return
-
-            # Display overview
-            total = overview.get("total_count", 0)
-            categories = overview.get("categories", {})
-            recent_findings = overview.get("recent_findings", [])
-
-            print(f"    Found {total} existing memories:")
-
-            # Show category breakdown
-            if categories:
-                category_parts = [
-                    f"{count} {category}" for category, count in categories.items()
-                ]
-                print(f"      Categories: {', '.join(category_parts)}")
-
-            # Show recent findings
-            if recent_findings:
-                print("      Recent findings:")
-                for i, finding in enumerate(recent_findings[:3], 1):
-                    content = finding.get("content", "")
-                    if len(content) > 80:
-                        content = content[:77] + "..."
-                    print(f"        {i}. {content}")
-
-            print("    Memory will be loaded as first action to avoid duplicate work")
-
-        except Exception as e:
-            logger.debug("Could not display startup memory overview: %s", str(e))
-            print(f"    Note: Could not check existing memories: {str(e)}")
+        del user_id, agent_id
+        vector = self.embeddings.embed_query(str(query or ""))
+        result = self.qdrant.query_points(
+            collection_name=self.collection_name,
+            query=vector,
+            query_filter=self._scope_filter(filters, run_id),
+            limit=max(int(limit), 1),
+            with_payload=True,
+            with_vectors=False,
+        )
+        return [self._point_to_memory(point) for point in result.points if bool((point.payload or {}).get("active", True))]
 
     def store_plan(
         self,
@@ -6612,7 +6193,7 @@ class Mem0ServiceClient:
 
         # Only successful phase and task states may complete an assessment.  Terminal failures are
         # retained for reporting, but must not be converted into a completed operation.
-        tasks = _get_plan_store().get_tasks(op_id)
+        tasks = _get_database_store().get_tasks(op_id)
         all_done = all(p.status in {"done", "not_applicable"} for p in plan.phases)
         all_tasks_done = all(task.status in {"done", "superseded"} for task in tasks)
         actionable_tasks = [task for task in tasks if task.status in {"active", "pending"}]
@@ -6628,7 +6209,7 @@ class Mem0ServiceClient:
 
         # Warn if extending plan after marking complete
         try:
-            prev_plan = _get_plan_store().get_plan(op_id)
+            prev_plan = _get_database_store().get_plan(op_id)
             if prev_plan:
                 new_total = int(plan.total_phases)
                 if prev_plan.assessment_complete and new_total > int(prev_plan.total_phases):
@@ -6639,7 +6220,7 @@ class Mem0ServiceClient:
         except Exception as e:
             logger.debug(f"Could not check previous plan for extension: {e}")
 
-        _get_plan_store().store_plan(op_id, plan)
+        _get_database_store().store_plan(op_id, plan)
 
         result["status"] = "success"
         result["plan"] = plan.to_toon()
@@ -6669,7 +6250,7 @@ class Mem0ServiceClient:
         op_id = _operation_id(operation_id)
 
         try:
-            return _get_plan_store().get_plan(op_id)
+            return _get_database_store().get_plan(op_id)
         except Exception as e:
             logger.error(f"Error retrieving active plan: {e}")
             return None
@@ -6700,7 +6281,7 @@ class Mem0ServiceClient:
     ) -> List[Task]:
         """Return latest-version task objects for a run_id (operation)"""
         op_id = _operation_id(run_id)
-        tasks = _get_plan_store().get_tasks(op_id)
+        tasks = _get_database_store().get_tasks(op_id)
         # Sort by created_at desc
         tasks.sort(key=lambda x: x.created_at or "", reverse=True)
         return tasks
@@ -6724,7 +6305,7 @@ class Mem0ServiceClient:
         # Enforce only one active task per operation by demoting any existing active task
         if task.status == 'active':
             try:
-                all_tasks = _get_plan_store().get_tasks(op_id)
+                all_tasks = _get_database_store().get_tasks(op_id)
                 for t in all_tasks:
                     if t.task_uid != task.task_uid and t.status == "active":
                         # Demote current active task
@@ -6740,14 +6321,16 @@ class Mem0ServiceClient:
                             created_at=t.created_at,
                             kind=t.kind,
                             reference_id=t.reference_id,
+                            replacement_of=t.replacement_of,
+                            supersedes_criteria=t.supersedes_criteria,
                             target_scope=t.target_scope,
                             target_ids=t.target_ids,
                         )
-                        _get_plan_store().store_task(op_id, demoted)
+                        _get_database_store().store_task(op_id, demoted)
             except Exception as e:
                 logger.debug("Could not enforce single active task: %s", e)
 
-        _get_plan_store().store_task(op_id, task)
+        _get_database_store().store_task(op_id, task)
 
     def advance_task_in_phase(
             self,
@@ -6760,7 +6343,7 @@ class Mem0ServiceClient:
     ) -> Tuple[Optional[Task], Optional[Task]]:
         """Update a task in a given phase and activate the next pending task in that phase."""
         op_id = _operation_id()
-        phase_tasks = _get_plan_store().get_tasks(op_id)
+        phase_tasks = _get_database_store().get_tasks(op_id)
         phase_tasks = [t for t in phase_tasks if int(t.phase) == int(phase)]
 
         # Pick target task: explicit uid, else current active
@@ -6792,6 +6375,7 @@ class Mem0ServiceClient:
                 kind=target.kind,
                 reference_id=target.reference_id,
                 replacement_of=target.replacement_of,
+                supersedes_criteria=target.supersedes_criteria,
                 target_scope=target.target_scope,
                 target_ids=target.target_ids,
             )
@@ -6821,6 +6405,7 @@ class Mem0ServiceClient:
                         kind=p.kind,
                         reference_id=p.reference_id,
                         replacement_of=p.replacement_of,
+                        supersedes_criteria=p.supersedes_criteria,
                         target_scope=p.target_scope,
                         target_ids=p.target_ids,
                     )
@@ -6837,7 +6422,7 @@ class Mem0ServiceClient:
         """Return the active task for a phase, or promote the next pending task to active."""
         user_id = _user_id(user_id)
         op_id = _operation_id()
-        phase_tasks = _get_plan_store().get_tasks(op_id)
+        phase_tasks = _get_database_store().get_tasks(op_id)
         phase_tasks = [t for t in phase_tasks if int(t.phase) == int(phase)]
 
         # Prefer existing active
@@ -6881,7 +6466,7 @@ class Mem0ServiceClient:
             operation_id: Optional[str] = None,
     ) -> List[Task]:
         """List tasks for a phase and, when provided, an explicit operation."""
-        tasks = _get_plan_store().get_tasks(_operation_id(operation_id))
+        tasks = _get_database_store().get_tasks(_operation_id(operation_id))
         result = []
         for t in tasks:
             if phase is not None and int(t.phase) != int(phase):
@@ -6897,27 +6482,27 @@ class Mem0ServiceClient:
     ) -> List[AcceptanceResult]:
         """Return the frozen-manifest result ledger for one task and operation."""
 
-        return _get_plan_store().get_acceptance_results(_operation_id(operation_id), task_uid)
+        return _get_database_store().get_acceptance_results(_operation_id(operation_id), task_uid)
 
     def list_finding_records(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return finding records for an explicit or current operation."""
 
-        return _get_plan_store().list_findings(_operation_id(operation_id))
+        return _get_database_store().list_findings(_operation_id(operation_id))
 
     def list_objective_validation_records(self) -> List[Dict[str, Any]]:
         """Return objective-validation records for the current operation."""
 
-        return _get_plan_store().list_objective_candidates(_operation_id())
+        return _get_database_store().list_objective_candidates(_operation_id())
 
     def store_preflight_results(self, results: List[Dict[str, Any]], operation_id: Optional[str] = None) -> None:
         """Persist preflight facts once so later workflow stages do not re-resolve targets."""
 
-        _get_plan_store().store_preflight_results(operation_id or _operation_id(), results)
+        _get_database_store().store_preflight_results(operation_id or _operation_id(), results)
 
     def list_preflight_results(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return persisted preflight facts for an explicit or current operation."""
 
-        return _get_plan_store().list_preflight_results(_operation_id(operation_id))
+        return _get_database_store().list_preflight_results(_operation_id(operation_id))
 
     def update_finding_taxonomy_annotation(
         self,
@@ -6926,7 +6511,7 @@ class Mem0ServiceClient:
     ) -> bool:
         """Persist one controller-owned taxonomy annotation for a finding candidate."""
 
-        return _get_plan_store().update_finding_taxonomy_annotation(
+        return _get_database_store().update_finding_taxonomy_annotation(
             _operation_id(),
             finding_uid,
             annotation,
@@ -6939,7 +6524,7 @@ class Mem0ServiceClient:
     ) -> bool:
         """Persist one controller-owned final ATT&CK enrichment result."""
 
-        return _get_plan_store().update_finding_attack_enrichment(
+        return _get_database_store().update_finding_attack_enrichment(
             _operation_id(),
             finding_uid,
             enrichment,
@@ -6951,7 +6536,7 @@ class Mem0ServiceClient:
         op_id = _operation_id()
 
         try:
-            # Get all memories for the user from Mem0
+            # Get all memories visible under the current Qdrant scope.
             raw_memories = self.list_memories(user_id=user_id)
 
             # Analyze memories
@@ -6975,12 +6560,12 @@ class Mem0ServiceClient:
                     })
 
             # Add Plan and Task counts from SQLite
-            plan = _get_plan_store().get_plan(op_id)
+            plan = _get_database_store().get_plan(op_id)
             if plan:
                 categories["plan"] = categories.get("plan", 0) + 1
                 total_count += 1
             
-            tasks = _get_plan_store().get_tasks(op_id)
+            tasks = _get_database_store().get_tasks(op_id)
             if tasks:
                 categories["task"] = categories.get("task", 0) + len(tasks)
                 total_count += len(tasks)
@@ -7012,15 +6597,17 @@ def initialize_memory_system(
     target_name: Optional[str] = None,
     has_existing_memories: bool = False,
     silent: bool = False,
+    logical_target: Optional[str] = None,
 ) -> None:
     """Initialize the memory system with custom configuration.
 
     Args:
-        config: Optional configuration dictionary with embedder, llm, vector_store settings
+        config: Optional Qdrant and embedding configuration dictionary
         operation_id: Unique operation identifier
         target_name: Sanitized target name for organizing memory by target
         has_existing_memories: Whether memories already existed before initialization
         silent: If True, suppress initialization output (used during report generation)
+        logical_target: Exact target string entered by the user for database scoping
     """
     global _MEMORY_CONFIG, _MEMORY_CLIENT
 
@@ -7030,6 +6617,15 @@ def initialize_memory_system(
             operation_id or os.environ.get("CYBER_OPERATION_ID", f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     )
     enhanced_config["target_name"] = target_name or os.environ.get("CYBER_TARGET_NAME", "default_target")
+    enhanced_config["logical_target"] = (
+        logical_target
+        or enhanced_config.get("logical_target")
+        or os.environ.get("CYBER_LOGICAL_TARGET")
+        or enhanced_config["target_name"]
+    )
+    enhanced_config["memory_mode"] = str(
+        enhanced_config.get("memory_mode") or os.environ.get("CYBER_MEMORY_MODE", "operation")
+    ).lower()
     enhanced_config["output_dir"] = enhanced_config.get(
         "output_dir", os.environ.get("CYBER_AGENT_OUTPUT_DIR", get_default_base_dir())
     )
@@ -7043,7 +6639,7 @@ def initialize_memory_system(
 
     _MEMORY_CONFIG = enhanced_config
     os.environ["CYBER_OPERATION_ID"] = enhanced_config["operation_id"]
-    _MEMORY_CLIENT = Mem0ServiceClient(enhanced_config, has_existing_memories, silent)
+    _MEMORY_CLIENT = QdrantMemoryClient(enhanced_config, has_existing_memories, silent)
     logger.info(
         "Memory system initialized for operation %s, target: %s, user: %s",
         enhanced_config["operation_id"],
@@ -7052,7 +6648,7 @@ def initialize_memory_system(
     )
 
 
-def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
+def get_memory_client(silent: bool = False) -> QdrantMemoryClient:
     """Get the memory client for the authoritative environment operation.
 
     Args:
@@ -7075,6 +6671,7 @@ def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
             )
             existing_config = dict(_MEMORY_CONFIG or {})
             target_name = existing_config.get("target_name")
+            logical_target = existing_config.get("logical_target")
             has_existing_memories = bool(getattr(_MEMORY_CLIENT, "has_existing_memories", True))
             initialize_memory_system(
                 config=existing_config,
@@ -7082,10 +6679,13 @@ def get_memory_client(silent: bool = False) -> Mem0ServiceClient:
                 target_name=target_name,
                 has_existing_memories=has_existing_memories,
                 silent=silent,
+                logical_target=logical_target,
             )
     return _MEMORY_CLIENT
 
 
 def clear_memory_client() -> None:
-    global _MEMORY_CLIENT
+    global _MEMORY_CLIENT, _MEMORY_CONFIG, _DATABASE_STORE
     _MEMORY_CLIENT = None
+    _MEMORY_CONFIG = None
+    _DATABASE_STORE = None

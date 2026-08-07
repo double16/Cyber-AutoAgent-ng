@@ -69,7 +69,6 @@ const CONFIG_FIELDS: ConfigField[] = [
   },
   { key: 'modelId', label: 'Primary Model', type: 'text', section: 'Models', required: true },
   { key: 'embeddingModel', label: 'Embedding Model', type: 'text', section: 'Models' },
-  { key: 'memoryModel', label: 'Memory Model', type: 'text', section: 'Models', description: 'LLM used for memory processing' },
   { key: 'evaluationModel', label: 'Evaluation Model', type: 'text', section: 'Models' },
   { key: 'swarmModel', label: 'Swarm Model', type: 'text', section: 'Models' },
   { key: 'rateLimitTokensPerMinute', label: 'Limit Tokens/Minute', type: 'number', section: 'Models' },
@@ -207,16 +206,15 @@ const CONFIG_FIELDS: ConfigField[] = [
 
   // Memory
   {
-    key: 'memoryBackend', label: 'Memory Backend', type: 'select', section: 'Memory',
+    key: 'memoryMode', label: 'Memory Scope', type: 'select', section: 'Memory',
     options: [
-      { label: 'FAISS (Local)', value: 'FAISS' },
-      { label: 'Mem0 Platform', value: 'mem0' },
-      { label: 'OpenSearch', value: 'opensearch' }
+      { label: 'Operation', value: 'operation' },
+      { label: 'Shared by Target', value: 'shared' }
     ]
   },
   { key: 'keepMemory', label: 'Keep Memory After Operations', type: 'boolean', section: 'Memory' },
-  { key: 'mem0ApiKey', label: 'Mem0 API Key', type: 'password', section: 'Memory' },
-  { key: 'opensearchHost', label: 'OpenSearch Host', type: 'text', section: 'Memory' },
+  { key: 'qdrantUrl', label: 'Qdrant Service URL', type: 'text', section: 'Memory' },
+  { key: 'qdrantApiKey', label: 'Qdrant API Key', type: 'password', section: 'Memory' },
 
   // Observability
   {
@@ -259,7 +257,6 @@ const CONFIG_FIELDS: ConfigField[] = [
       { label: 'HTML', value: 'html' }
     ]
   },
-  { key: 'unifiedOutput', label: 'Unified Output Structure', type: 'boolean', section: 'Output' }
 ];
 
 const SECTIONS: ConfigSection[] = [
@@ -732,7 +729,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
 
       fields = fields.filter(f => {
         // Always show provider and model fields
-        if (['modelProvider', 'modelId', 'embeddingModel', 'evaluationModel', 'swarmModel', 'memoryModel', 'rateLimitTokensPerMinute', 'rateLimitRequestsPerMinute', 'rateLimitConcurrency'].includes(f.key)) {
+        if (['modelProvider', 'modelId', 'embeddingModel', 'evaluationModel', 'swarmModel', 'rateLimitTokensPerMinute', 'rateLimitRequestsPerMinute', 'rateLimitConcurrency'].includes(f.key)) {
           return true;
         }
 
@@ -771,18 +768,8 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
       });
     }
 
-    // Filter memory fields based on backend
-    if (currentSection.name === 'Memory') {
-      fields = fields.filter(f => {
-        if (['memoryBackend', 'keepMemory'].includes(f.key)) return true;
-        if (config.memoryBackend === 'mem0' && f.key === 'mem0ApiKey') return true;
-        if (config.memoryBackend === 'opensearch' && f.key === 'opensearchHost') return true;
-        return false;
-      });
-    }
-
     return fields;
-  }, [sections, selectedSectionIndex, config.modelProvider, config.memoryBackend, config.modelId, config.memoryModel]);
+  }, [sections, selectedSectionIndex, config.modelProvider, config.modelId]);
 
   // Basic pre-save validation for required fields and dependent settings
   const validateBeforeSave = useCallback(() => {
@@ -1037,7 +1024,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
       'geminiApiKey',
       'xaiApiKey',
       'cohereApiKey',
-      'mem0ApiKey',
+      'qdrantApiKey',
       'langfusePublicKey',
       'langfuseSecretKey',
       'langfuseEncryptionKey'
@@ -1088,7 +1075,6 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         updates.embeddingModel = 'mxbai-embed-large:latest';
         updates.evaluationModel = 'qwen3-coder:30b-a3b-q4_K_M';
         updates.swarmModel = 'qwen3-coder:30b-a3b-q4_K_M';
-        updates.memoryModel = 'llama3.2:3b';
         // Clear temperature to null so backend uses model-specific defaults
         updates.temperature = null;
       } else if (value === 'bedrock') {
@@ -1097,7 +1083,6 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         updates.embeddingModel = 'amazon.titan-embed-text-v2:0';
         updates.evaluationModel = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
         updates.swarmModel = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
-        updates.memoryModel = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
         // Clear temperature to null so backend uses model-specific defaults
         updates.temperature = null;
       } else if (value === 'litellm') {
@@ -1106,7 +1091,6 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
         updates.embeddingModel = 'bedrock/amazon.titan-embed-text-v2:0';
         updates.evaluationModel = 'bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0';
         updates.swarmModel = 'bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0';
-        updates.memoryModel = 'bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0';
         // Clear temperature to null so backend uses model-specific defaults
         updates.temperature = null;
       }

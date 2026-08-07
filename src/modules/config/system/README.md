@@ -10,7 +10,7 @@ Environment setup and initialization functions.
 **Key Functions:**
 - `auto_setup()` - Automatic environment configuration
 - `setup_logging(debug)` - Configure application logging
-- `clean_operation_memory(target, provider)` - Clean memory for target
+- `clean_operation_memory(operation_id, target_values)` - Delete target-scoped Qdrant points for one operation
 
 ### env_reader.py
 Type-safe environment variable reading with change detection.
@@ -62,7 +62,7 @@ logger.info("Processing started")
 ```
 
 ### defaults.py
-Default configurations for all three providers.
+Default configurations for the supported providers, including Bedrock, Ollama, LiteLLM, and Gemini.
 
 **Functions:**
 - `build_default_configs()` - Build all provider defaults
@@ -73,7 +73,7 @@ Default configurations for all three providers.
 **Default Values:**
 - LLM: temperature=0.5, max_tokens=4096
 - Embedding: dimensions=1536 (configurable per provider)
-- Memory: FAISS backend, auto initialization
+- Memory: Qdrant backend with operation-scoped queries by default
 - Evaluation: Ragas with basic metrics
 - Swarm: Small, fast model for specialists
 

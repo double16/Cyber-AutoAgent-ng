@@ -7,8 +7,14 @@ Group findings by kill chain phases:
 
 <finding_organization>
 **Organize by Threat Campaign Narrative**:
-- Map findings to specific APT techniques or emulated threat actor behaviors
-- Detail technical markers (files, registry, network) for blue team verification
-- Highlight detection opportunities for each successfully executed TTP
-- Document blocked attempts as evidence of effective security controls
+- Explain only canonically supplied emulation context; do not create ATT&CK mappings or assert a TTP was executed.
+- Describe detection implications without inventing technical markers or artifact references.
+- Highlight detection opportunities for canonically demonstrated behavior.
+- Discuss recorded blocked attempts without treating them as conclusive control effectiveness or coverage completion.
 </finding_organization>
+
+Python renders ATT&CK mappings, execution/cleanup status, artifacts, and all factual tables separately.
+<observation_context>
+Treat records labeled `category: informational_observation` as narrative-only emulation context. Summarize supplied
+observations, but do not count, assign severity, or promote them to findings or completed techniques.
+</observation_context>

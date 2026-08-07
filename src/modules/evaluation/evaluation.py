@@ -282,7 +282,7 @@ class CyberAgentEvaluator:
             )
             langchain_embeddings = OllamaEmbeddings(
                 model=config_manager.getenv(
-                    "MEM0_EMBEDDING_MODEL", server_config.embedding.model_id
+                    "CYBER_AGENT_EMBEDDING_MODEL", server_config.embedding.model_id
                 ),
                 base_url=ollama_host,
                 client_kwargs=client_kwargs,
@@ -298,7 +298,7 @@ class CyberAgentEvaluator:
 
             # Embeddings for LiteLLM: prefer Bedrock embeddings when model has bedrock/ prefix
             embed_model_id = config_manager.getenv(
-                "MEM0_EMBEDDING_MODEL", server_config.embedding.model_id
+                "CYBER_AGENT_EMBEDDING_MODEL", server_config.embedding.model_id
             )
             if isinstance(embed_model_id, str) and embed_model_id.startswith(
                 "bedrock/"
@@ -323,7 +323,7 @@ class CyberAgentEvaluator:
             )
             langchain_embeddings = GoogleGenerativeAIEmbeddings(
                 model=config_manager.getenv(
-                    "MEM0_EMBEDDING_MODEL", server_config.embedding.model_id
+                    "CYBER_AGENT_EMBEDDING_MODEL", server_config.embedding.model_id
                 )
             )
 
@@ -338,7 +338,7 @@ class CyberAgentEvaluator:
             )
             langchain_embeddings = BedrockEmbeddings(
                 model_id=config_manager.getenv(
-                    "MEM0_EMBEDDING_MODEL", server_config.embedding.model_id
+                    "CYBER_AGENT_EMBEDDING_MODEL", server_config.embedding.model_id
                 ),
                 region_name=config_manager.get_default_region(),
             )
@@ -1988,7 +1988,7 @@ class CyberAgentEvaluator:
             "Gaps: No authenticated endpoints tested.\n\n"
             "Example 2:\n"
             "Objective: Validate core tool functionality against https://target.tld.\n"
-            "Methods: shell (ping, nslookup), http_request (GET /, metrics), python_repl (parse HTML), editor/load_tool (custom tool), mem0 store.\n"
+            "Methods: shell (ping, nslookup), http_request (GET /, metrics), python_repl (parse HTML), editor/load_tool (custom tool), memory store.\n"
             "Evidence: shell ping: rtt avg ~45ms; http_request 200 OK (nginx), bytes_received ~5KB; python_repl extracted 1 form and 5 links; custom tool summary.\n"
             "Findings: Tooling verified; no new vulnerabilities validated this session.\n"
             "Outcomes: Objective achieved (tool testing complete).\n"

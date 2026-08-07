@@ -205,6 +205,20 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
       };
     }
 
+    case 'report_paths': {
+      const outputDir = (e as any).outputDir ?? (e as any).output_dir;
+      const reportPath = (e as any).reportPath ?? (e as any).report_path;
+      const logPath = (e as any).logPath ?? (e as any).log_path;
+      const artifactsPath = (e as any).artifactsPath ?? (e as any).artifacts_path;
+      return {
+        ...e,
+        ...(outputDir ? { outputDir: String(outputDir) } : {}),
+        ...(reportPath ? { reportPath: String(reportPath) } : {}),
+        ...(logPath ? { logPath: String(logPath) } : {}),
+        ...(artifactsPath ? { artifactsPath: String(artifactsPath) } : {}),
+      };
+    }
+
     case 'specialist_progress': {
       // Normalize progress fields
       const gate = (e as any).gate;

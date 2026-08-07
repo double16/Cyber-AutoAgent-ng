@@ -92,7 +92,7 @@ from modules.tools.memory import (
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.config.taxonomy_catalog import get_taxonomy_catalog, validate_taxonomy_mappings
 from modules.tools.tool_catalog import get_shell_command_help_context, get_shell_command_specs
-from modules.utils.json_repair import parse_json_response
+from modules.utils.json_repair import parse_json_response, parse_json_response_with_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,10 @@ WORKFLOW_DECISION_STATUS_ALIASES = {
     "ongoing": "continue",
 }
 WORKER_CONTEXT_LIMIT = 6000
+_PROMPT_MEMORY_EXCLUDED_CATEGORIES = frozenset({"plan", "task", "task_acceptance"})
+_PROMPT_MEMORY_EXCLUDED_SOURCES = frozenset({"plan", "task", "task_acceptance"})
+_PROMPT_MEMORY_FETCH_LIMIT = 100
+_PROMPT_MEMORY_LIMIT = 20
 TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
     {
         "awk",
@@ -140,6 +144,7 @@ TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
         "uniq",
         "wc",
         "which",
+        "command",
         "xargs",
         "echo",
         "pwd",
@@ -161,8 +166,10 @@ TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
         "time",
         "id",
         "whoami",
+        "sleep",
     }
 )
+TASK_PROMPT_CONTROLLER_SUPPLIED_TOOLS = frozenset({"record_task_acceptance"})
 
 
 class WorkflowInvariantError(RuntimeError):
@@ -199,6 +206,9 @@ class TaskExecutorCycleResult:
     max_tokens_exhausted: bool = False
     max_tokens_reason: str = ""
     max_tokens_classification: str = ""
+    repeat_loop_detected: bool = False
+    repeat_loop_signature: str = ""
+    repeat_loop_reason: str = ""
 
 
 FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
@@ -528,6 +538,7 @@ class WorkflowStateStore:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -548,6 +559,7 @@ class WorkflowStateStore:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -568,6 +580,7 @@ class WorkflowStateStore:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -588,6 +601,7 @@ class WorkflowStateStore:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -1081,7 +1095,7 @@ class MultiAgentWorkflowController:
                     self._short(validation_reason),
                 )
                 previous_signature = self._plan_signature(plan)
-                updated_plan = self.state.mark_phase(plan, phase.id, validation_status)
+                updated_plan = self._mark_phase(plan, phase.id, validation_status)
                 self._emit_plan_output("updated", updated_plan, previous_signature)
                 if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                     self._emit_workflow_completion(updated_plan)
@@ -1106,7 +1120,7 @@ class MultiAgentWorkflowController:
                         self._short(decision.reason),
                     )
                     previous_signature = self._plan_signature(plan)
-                    updated_plan = self.state.mark_phase(plan, phase.id, decision.status)
+                    updated_plan = self._mark_phase(plan, phase.id, decision.status)
                     self._emit_plan_output("updated", updated_plan, previous_signature)
                     if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                         self._log_workflow("workflow terminal after phase=%s status=%s", phase.id, decision.status)
@@ -1137,7 +1151,7 @@ class MultiAgentWorkflowController:
                     self._short(reason),
                 )
                 previous_signature = self._plan_signature(plan)
-                updated_plan = self.state.mark_phase(plan, phase.id, "partial_failure")
+                updated_plan = self._mark_phase(plan, phase.id, "partial_failure")
                 self._emit_plan_output("updated", updated_plan, previous_signature)
                 if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                     self._emit_workflow_completion(updated_plan)
@@ -1160,7 +1174,7 @@ class MultiAgentWorkflowController:
                     self._short(final_decision.reason),
                 )
                 previous_signature = self._plan_signature(plan)
-                updated_plan = self.state.mark_phase(plan, phase.id, final_status)
+                updated_plan = self._mark_phase(plan, phase.id, final_status)
                 self._emit_plan_output("updated", updated_plan, previous_signature)
                 if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                     self._emit_workflow_completion(updated_plan)
@@ -1168,7 +1182,7 @@ class MultiAgentWorkflowController:
                 continue
             self._log_workflow("no active/pending tasks after creation; marking phase=%s partial_failure", self._phase_label(phase))
             previous_signature = self._plan_signature(plan)
-            updated_plan = self.state.mark_phase(plan, phase.id, "partial_failure")
+            updated_plan = self._mark_phase(plan, phase.id, "partial_failure")
             self._emit_plan_output("updated", updated_plan, previous_signature)
             if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                 self._log_workflow("workflow terminal after partial_failure phase=%s", phase.id)
@@ -1354,6 +1368,64 @@ class MultiAgentWorkflowController:
             all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
             and all(task.status in {"done", "superseded"} for task in self.state.list_tasks())
         )
+
+    def _mark_phase(self, plan: OperationPlan, phase_id: int, status: str) -> OperationPlan:
+        """Reconcile resolved replacement tasks before applying phase completion rules."""
+
+        reconciled = self._reconcile_superseded_tasks(phase_id)
+        if status == "partial_failure" and reconciled:
+            remaining_failures = self.state.list_tasks(
+                phase=phase_id,
+                status=["active", "pending", "partial_failure", "blocked"],
+            )
+            if not remaining_failures:
+                self._log_workflow(
+                    "promoting phase after replacement reconciliation phase=%s status=done",
+                    phase_id,
+                )
+                status = "done"
+        return self.state.mark_phase(plan, phase_id, status)
+
+    def _reconcile_superseded_tasks(self, phase_id: int) -> List[Task]:
+        """Mark failed tasks superseded when explicitly linked replacements resolve their intent."""
+
+        tasks = self.state.list_tasks(phase=phase_id)
+        reconciled: List[Task] = []
+        for parent in tasks:
+            if parent.status not in {"partial_failure", "blocked"}:
+                continue
+            replacements = [
+                task for task in tasks
+                if task.replacement_of == parent.task_uid
+            ]
+            if not replacements:
+                continue
+            parent_criteria = {criterion.id for criterion in parent.acceptance.criteria}
+            covered_criteria = {
+                criterion_id
+                for replacement in replacements
+                for criterion_id in replacement.supersedes_criteria
+            }
+            if not parent_criteria.issubset(covered_criteria):
+                continue
+            if any(replacement.status not in {"done", "superseded"} for replacement in replacements):
+                continue
+            reason = (
+                f"Original task intent resolved by successful replacement tasks: "
+                f"{', '.join(replacement.task_uid for replacement in replacements)}. "
+                f"Superseded from {parent.status}."
+            )
+            updated = self.state.mark_task(parent, "superseded", reason)
+            reconciled.append(updated)
+            self._emit_task_done(updated)
+            for replacement in replacements:
+                self._emit_task_superseded(updated, replacement)
+            self._log_workflow(
+                "task superseded after replacement reconciliation original=%s replacements=%s",
+                self._task_label(parent),
+                ",".join(self._task_label(replacement) for replacement in replacements),
+            )
+        return reconciled
 
     def _workflow_coverage_summary(self, plan: OperationPlan) -> List[Dict[str, Any]]:
         """Return deterministic per-phase task and frozen-inventory coverage counts."""
@@ -1612,6 +1684,8 @@ class MultiAgentWorkflowController:
         evaluator_corrections = 0
         finding_observation_repairs = 0
         previous_progress_signature: Optional[str] = None
+        repeat_loop_signatures: set[str] = set()
+        repeat_loop_recovery_used = False
         acceptance_correction_limit = self._task_acceptance_correction_count()
         endpoint_evidence_correction_limit = self._task_endpoint_evidence_correction_count()
         evaluator_correction_limit = self._task_evaluator_correction_count()
@@ -1678,6 +1752,34 @@ class MultiAgentWorkflowController:
                 worker_result = run_executor(actor_prompt, task_policy)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
+                repeated_loop = cycle_result.repeat_loop_detected
+                if repeated_loop:
+                    loop_signature = cycle_result.repeat_loop_signature or cycle_result.repeat_loop_reason
+                    if self._repeat_loop_is_repeated(
+                        repeat_loop_recovery_used,
+                        repeat_loop_signatures,
+                        loop_signature,
+                    ):
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                "A tool-call loop recurred after the one bounded changed-action recovery; "
+                                "the task was not replaced with an equivalent task."
+                            ),
+                        )
+                        self._log_workflow(
+                            "task repeated tool loop after changed recovery task=%s signature=%s",
+                            self._task_label(task),
+                            self._short(loop_signature),
+                        )
+                        break
+                    repeat_loop_signatures.add(loop_signature)
+                    repeat_loop_recovery_used = True
+                    self._log_workflow(
+                        "task tool loop recovery task=%s signature=%s action=changed_procedure",
+                        self._task_label(task),
+                        self._short(loop_signature),
+                    )
                 repeated_tool_failure = repeated_correctable_failure(cycle_result.outcomes)
                 failed_acceptance_calls, successful_acceptance_calls, repeated_acceptance = (
                     track_acceptance_outcomes(cycle_result.outcomes)
@@ -2075,6 +2177,11 @@ class MultiAgentWorkflowController:
                         next_cycle=cycle + 1,
                         required_tool=continuation_required_tool,
                         evaluator_instructions=evaluator_instructions,
+                        loop_guidance=(
+                            self._repeat_loop_recovery_guidance(cycle_result)
+                            if repeated_loop and repeat_loop_recovery_used
+                            else ""
+                        ),
                     )
                     self._log_workflow(
                         "task critic requested continuation task=%s cycle=%s status=%s reason=%s",
@@ -2150,6 +2257,7 @@ class MultiAgentWorkflowController:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.task_uid,
+            supersedes_criteria=[criterion.id for criterion in task.acceptance.criteria],
             target_scope=task.target_scope,
             target_ids=list(task.target_ids),
         )
@@ -2194,6 +2302,7 @@ class MultiAgentWorkflowController:
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.task_uid,
+            supersedes_criteria=[criterion.id for criterion in task.acceptance.criteria],
             target_scope=task.target_scope,
             target_ids=list(task.target_ids),
         )
@@ -2208,6 +2317,7 @@ class MultiAgentWorkflowController:
         next_cycle: int,
         required_tool: str = "",
         evaluator_instructions: str = "",
+        loop_guidance: str = "",
     ) -> str:
         required_tool = required_tool or self._validation_tool_name(task) or "record_task_acceptance"
         criteria = ", ".join(missing_criteria) or "the assigned acceptance contract"
@@ -2225,6 +2335,7 @@ class MultiAgentWorkflowController:
                 "Follow the evaluator guidance with the smallest evidence-producing action. Preserve the frozen "
                 "acceptance ledger unless a registered tool requires an update. Do not broaden scope or add criteria."
             )
+        loop_section = f"\n{loop_guidance.strip()}\n" if loop_guidance.strip() else ""
         return f"""## Compact Task Continuation
 Continue actor cycle {next_cycle} for the existing task. Do not replay prior reasoning, task history, or completed
 commands.
@@ -2234,7 +2345,33 @@ Latest artifact/evidence: {latest_artifact}
 {required_tool_section}{evaluator_section}
 
 {completion_instruction}
+{loop_section}
 """
+
+    @staticmethod
+    def _repeat_loop_is_repeated(
+        recovery_used: bool,
+        signatures: set[str],
+        signature: str,
+    ) -> bool:
+        """Return whether a task has already consumed its one loop recovery attempt."""
+
+        return recovery_used or signature in signatures
+
+    @staticmethod
+    def _repeat_loop_recovery_guidance(cycle_result: TaskExecutorCycleResult) -> str:
+        """Require a materially different action after invocation-level loop suppression."""
+
+        reason = cycle_result.repeat_loop_reason or "An exact repeated tool-call cycle was detected."
+        return (
+            "## Mandatory Loop Recovery\n"
+            f"{reason}\n"
+            "The prior tool-call cycle is prohibited. Do not call the same tool with the same normalized input, "
+            "repeat the same URL/method/payload, or repeat the same browser expression. Make one materially "
+            "different evidence-producing action that addresses the missing criterion. If the required page, "
+            "route, artifact, or other prerequisite is unavailable, record that bounded result and terminate "
+            "the task; do not create an equivalent replacement task."
+        )
 
     @staticmethod
     def _task_acceptance_repair_instruction(error: str) -> str:
@@ -2828,10 +2965,13 @@ shell command selections. Do not broaden scope or add criteria.
 ## Draft
 {json.dumps(prompt_spec, indent=2, sort_keys=True)}
 
+## Memory Selection Map
+{self._memory_selection_summary()}
+
 ## Critic feedback
 {json.dumps(feedback, indent=2)}
 
-Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [string],
+Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_ids": [string], "tools": [string],
 "shell_commands": [string]}}.
 """
 
@@ -2842,14 +2982,19 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
         if not isinstance(prompt, str) or not prompt.strip():
             raise TaskPromptBuildError("task prompt must be a non-empty string")
 
-        core_names = {get_tool_name(tool) for tool in self.runtime.core_tools_list}
+        core_tools = self.runtime.core_tools_list or getattr(self.runtime, "tools_list", [])
+        core_names = {get_tool_name(tool) for tool in core_tools}
         optional_names = {get_tool_name(tool) for tool in self.runtime.optional_tools_list}
         selected_tools = self._validated_selection_list(prompt_spec.get("tools", []), "tools")
         selected_shell_commands = self._validated_selection_list(
             prompt_spec.get("shell_commands", []),
             "shell_commands",
         )
-        ignored_selection_names = TASK_PROMPT_IGNORED_SHELL_COMMANDS | core_names
+        ignored_selection_names = (
+            TASK_PROMPT_IGNORED_SHELL_COMMANDS
+            | core_names
+            | TASK_PROMPT_CONTROLLER_SUPPLIED_TOOLS
+        )
         selected_tools = [name for name in selected_tools if name not in ignored_selection_names]
         selected_shell_commands = [
             name for name in selected_shell_commands if name not in ignored_selection_names
@@ -2888,10 +3033,41 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
             + [name for name in selected_tools if name in available_commands]
         ))
 
-        memory_ids = self._coerce_memory_ids(prompt_spec.get("memory_ids", []))
+        memory_records = self._prompt_memory_records()
+        canonical_memory_ids = [self._memory_id(memory) for memory in memory_records]
+        requested_memory_indices = self._coerce_memory_indices(prompt_spec.get("memory_indices", []))
+        memory_indices = [
+            index for index in requested_memory_indices if index < len(canonical_memory_ids)
+        ]
+        invalid_memory_indices = [
+            index for index in requested_memory_indices if index >= len(canonical_memory_ids)
+        ]
+        selected_memory_ids = [canonical_memory_ids[index] for index in memory_indices]
+        legacy_memory_ids = self._coerce_memory_ids(prompt_spec.get("memory_ids", []))
+        if canonical_memory_ids:
+            invalid_memory_ids = [
+                memory_id for memory_id in legacy_memory_ids if memory_id not in canonical_memory_ids
+            ]
+            selected_memory_ids.extend(
+                memory_id for memory_id in legacy_memory_ids
+                if memory_id in canonical_memory_ids and memory_id not in selected_memory_ids
+            )
+            if invalid_memory_ids:
+                self._log_workflow(
+                    "task prompt ignored non-canonical memory ids=%s",
+                    ",".join(invalid_memory_ids),
+                )
+            if invalid_memory_indices:
+                self._log_workflow(
+                    "task prompt ignored out-of-range memory indices=%s",
+                    ",".join(str(index) for index in invalid_memory_indices),
+                )
+        else:
+            selected_memory_ids = legacy_memory_ids
         return {
             "prompt": prompt.strip(),
-            "memory_ids": memory_ids,
+            "memory_indices": memory_indices,
+            "memory_ids": list(dict.fromkeys(selected_memory_ids)),
             "tools": tools,
             "shell_commands": shell_commands,
         }
@@ -2944,6 +3120,9 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
             ),
             self._evaluator_tools(),
             self._task_evaluator_system_prompt(),
+            data_validator=lambda payload: self._validate_evaluator_decision_payload(
+                payload, allowed=("done", "partial_failure", "blocked")
+            ),
             cycle=cycle,
             cycle_total=cycle_total,
             evaluator_fallback_context={
@@ -3135,6 +3314,9 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
                 self._phase_evaluator_prompt(plan, phase) + context,
                 self._evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
+                data_validator=lambda payload: self._validate_evaluator_decision_payload(
+                    payload, allowed=("continue", *EVALUATOR_PLAN_STATUSES)
+                ),
                 evaluator_fallback_context={
                     "phase_id": phase.id,
                     "phase_title": phase.title,
@@ -3172,6 +3354,14 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
                 self._phase_evaluator_prompt(plan, phase, hard_cap=hard_cap),
                 self._evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
+                data_validator=lambda payload: self._validate_evaluator_decision_payload(
+                    payload,
+                    allowed=(
+                        EVALUATOR_PLAN_STATUSES
+                        if hard_cap is not None
+                        else ("continue", *EVALUATOR_PLAN_STATUSES)
+                    ),
+                ),
                 evaluator_fallback_context={
                     "phase_id": phase.id,
                     "phase_title": phase.title,
@@ -3334,7 +3524,7 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
             self._short(decision.reason),
         )
         previous_signature = self._plan_signature(plan)
-        updated_plan = self.state.mark_phase(plan, phase.id, decision.status)
+        updated_plan = self._mark_phase(plan, phase.id, decision.status)
         self._emit_plan_output("updated", updated_plan, previous_signature)
         return updated_plan
 
@@ -3343,7 +3533,7 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
         tools = [
             tool
             for tool in build_role_tools(self.runtime)
-            if get_tool_name(tool) == "mem0_retrieve"
+            if get_tool_name(tool) == "memory_retrieve"
         ]
         return [create_bounded_artifact_reader(), *tools]
 
@@ -3351,7 +3541,7 @@ Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [strin
         return """## Evaluator Role Boundary
 You are an evidence reviewer, not an execution agent. Classify existing work only. Do not perform the task, continue
 the phase, pursue the operation objective, gather new evidence, or change workflow state. Python owns all task, phase,
-and operation transitions. Use read_artifact only to inspect referenced operation artifacts and mem0_retrieve only to
+and operation transitions. Use read_artifact only to inspect referenced operation artifacts and memory_retrieve only to
 review existing memories. Return only the requested JSON decision."""
 
     def _task_evaluator_system_prompt(self) -> str:
@@ -4454,6 +4644,8 @@ Allowed evidence references:
         last_response = ""
         last_error: Optional[Exception] = None
         last_failure_was_parse = False
+        last_failure_was_schema = False
+        last_response_keys: List[str] = []
         for attempt in range(self.json_retries + 1):
             activity_attempt = attempt + 1
             activity_total = self.json_retries + 1
@@ -4479,6 +4671,7 @@ Allowed evidence references:
                 )
                 last_error = error
                 last_failure_was_parse = False
+                last_failure_was_schema = False
                 classification = getattr(error, "max_token_classification", None)
                 kind = getattr(classification, "kind", "output_truncation")
                 ratio = float(getattr(classification, "repetition_ratio", 0.0) or 0.0)
@@ -4495,7 +4688,16 @@ Allowed evidence references:
                 continue
             last_response = response
             try:
-                data = extract_json_object(response)
+                parsed_response = parse_json_response_with_metadata(response, require_object=True)
+                data = parsed_response.value
+                last_response_keys = sorted(data.keys())
+                if parsed_response.metadata.extracted or parsed_response.metadata.repaired:
+                    self._log_workflow(
+                        "json agent role=%s normalized_response extracted=%s repaired=%s",
+                        role,
+                        parsed_response.metadata.extracted,
+                        parsed_response.metadata.repaired,
+                    )
             except (json.JSONDecodeError, ValueError) as error:
                 self._emit_workflow_activity(
                     role,
@@ -4507,6 +4709,7 @@ Allowed evidence references:
                 )
                 last_error = error
                 last_failure_was_parse = True
+                last_failure_was_schema = False
                 if attempt >= self.json_retries:
                     break
                 self._record_efficiency_correction("json_retry")
@@ -4537,6 +4740,7 @@ Allowed evidence references:
                 )
                 last_error = error
                 last_failure_was_parse = False
+                last_failure_was_schema = True
                 if attempt >= self.json_retries:
                     break
                 self._record_efficiency_correction("json_retry")
@@ -4586,6 +4790,21 @@ Allowed evidence references:
                     self._short(evaluator_fallback_context or {}),
                 )
                 return fallback
+        if role in {"phase_evaluator", "task_evaluator"} and last_failure_was_schema:
+            fallback = self._evaluator_schema_fallback(
+                role,
+                last_error,
+                last_response_keys,
+                evaluator_fallback_context,
+            )
+            self._emit_workflow_event(fallback["event"])
+            self._log_workflow(
+                "evaluator schema fallback role=%s status=partial_failure received_keys=%s context=%s",
+                role,
+                ",".join(last_response_keys) or "none",
+                self._short(evaluator_fallback_context or {}),
+            )
+            return fallback["data"]
         self._log_workflow(
             "json agent role=%s failed attempts=%s error=%s response_excerpt=%s",
             role,
@@ -4622,6 +4841,63 @@ Allowed evidence references:
                 f"{compact[:1000]}"
             ),
         }
+
+    @staticmethod
+    def _evaluator_schema_fallback(
+        role: str,
+        error: Optional[Exception],
+        response_keys: List[str],
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return a conservative evaluator result after schema retries are exhausted."""
+        key_text = ", ".join(response_keys) or "none"
+        error_text = str(error or "invalid evaluator decision schema")
+        reason = (
+            f"{role} response failed the required decision schema after bounded retries; received keys: {key_text}. "
+            f"Existing evidence was preserved and the result was marked partial_failure. Error: {error_text}"
+        )
+        fingerprint = hashlib.sha256(error_text.encode("utf-8", errors="replace")).hexdigest()
+        event = {
+            "type": "evaluator_fallback",
+            "role": role,
+            "status": "partial_failure",
+            "source": "schema_validation",
+            "error_type": error.__class__.__name__ if error else "ValueError",
+            "error_fingerprint": fingerprint,
+            "received_keys": response_keys,
+        }
+        event.update(context or {})
+        return {
+            "data": {"status": "partial_failure", "reason": reason, "instructions": ""},
+            "event": event,
+        }
+
+    @staticmethod
+    def _validate_evaluator_decision_payload(
+        data: Dict[str, Any],
+        *,
+        allowed: tuple[str, ...],
+    ) -> None:
+        """Validate evaluator decision shape before accepting syntactically valid JSON."""
+        if not isinstance(data, dict):
+            raise ValueError("workflow evaluator response must be a JSON object")
+        raw_status = str(data.get("status") or "").strip()
+        if not raw_status:
+            keys = ", ".join(sorted(str(key) for key in data)) or "none"
+            raise ValueError(f"workflow evaluator response requires a non-empty status; received keys: {keys}")
+        status = str(
+            normalize_semantic_enum(
+                raw_status,
+                aliases=WORKFLOW_DECISION_STATUS_ALIASES,
+                field_name="workflow_decision_status",
+                logger=logger,
+            )
+        ).strip()
+        if status not in allowed:
+            raise ValueError(
+                f"workflow evaluator status {raw_status!r} normalized to {status!r}; "
+                f"expected one of {', '.join(allowed)}"
+            )
 
     @staticmethod
     def _json_max_token_retry_prompt(original_prompt: str, classification: str) -> str:
@@ -4901,7 +5177,7 @@ while planning.
             "reference the finding returned by `store_finding`; negative and non-finding results use "
             "no_vulnerability or observation."
         )
-        return f"""Build a tailored task execution prompt as JSON with keys prompt, memory_ids, tools, shell_commands. Select optional tool names and likely shell command names that are applicable to the task.
+        return f"""Build a tailored task execution prompt as JSON with keys prompt, memory_indices, memory_ids, tools, shell_commands. Select optional tool names and likely shell command names that are applicable to the task.
 
 The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
@@ -4932,6 +5208,11 @@ The generated prompt must instruct the task-executor agent:
   The controller has already bound the tool to the task, criterion, and coverage IDs, so do not supply or guess them.
   Never add criteria to the active task; create a
   separately contracted follow-up task for discoveries outside the frozen manifest.
+
+Memory selection:
+- Prefer `memory_indices` from the controller-owned Memory Selection Map below.
+- Memory IDs are controller-owned identifiers. Do not reproduce or edit UUIDs from memory text.
+- `memory_ids` is retained only for compatibility; Python canonicalizes it before review and execution.
 
 Tool selection guidance:
 - The `tools` JSON field contains optional-tool names only.
@@ -4973,8 +5254,14 @@ Shell command selection guidance:
 ## Task history
 {self._task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
+
+## Memory Selection Map
+{self._memory_selection_summary()}
 
 ## Available core tools
 {self._core_tool_catalog()}
@@ -5024,7 +5311,8 @@ For task objectives that ask to gather, map, enumerate, identify, inspect, colle
 drafts whose acceptance summaries could be generic completion claims rather than concrete reusable results.
 
 The `tools` field contains optional tools only. Core tools are supplied automatically and must not appear in `tools`;
-never require a core tool to be listed there. Tool overlap is permitted. Do not reject a draft because selections
+the controller-bound `record_task_acceptance` tool is also supplied automatically and must not appear in `tools` or
+`shell_commands`; never require either to be listed there. Tool overlap is permitted. Do not reject a draft because selections
 overlap, appear redundant, include both a native tool and a shell command for the same capability, contain more
 selections than the executor may ultimately use, or omit an overlapping alternative. There is no single-tool,
 exclusivity, or minimal-selection requirement. Reject a selection only when it has no reasonable relationship to the
@@ -5050,8 +5338,14 @@ When approved is false, provide concise, actionable feedback for every material 
 ## Task history
 {self._task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
+
+## Memory Selection Map
+{self._memory_selection_summary()}
 
 ## Available core tools
 {self._core_tool_catalog()}
@@ -5099,8 +5393,14 @@ recording. Remove vague or unnecessary swarm instructions.
 ## Task history
 {self._task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
+
+## Memory Selection Map
+{self._memory_selection_summary()}
 
 ## Available core tools
 {self._core_tool_catalog()}
@@ -5117,7 +5417,7 @@ recording. Remove vague or unnecessary swarm instructions.
 ## Critic feedback
 {json.dumps(feedback, indent=2)}
 
-Return JSON exactly: {{"prompt": string, "memory_ids": [string], "tools": [string],
+Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_ids": [string], "tools": [string],
 "shell_commands": [string]}}.
 
 Output only the revised task prompt:
@@ -5158,6 +5458,9 @@ not be duplicated. Use prior-phase task results as inputs, but create work that 
 distinct objective. When revisiting an earlier endpoint, make the task perform the current phase's materially different
 work and preserve that distinction in its objective and criterion. Do not turn closure, verification, or validation
 phases into another generic assessment batch. Every created task must be executable without violating any plan constraint.
+When resolving an existing `partial_failure` or `blocked` task, set `replacement_of` to that task UID and set
+`supersedes_criteria` to the parent criterion IDs resolved by the replacement. Do not use this metadata for unrelated
+follow-up work.
 For inventory-backed work, preserve protocol-neutral interaction metadata. Use the recorded operation and input location
 when present; do not substitute another HTTP method, filesystem operation, repository action, or service command unless
 the task explicitly tests that difference.
@@ -5184,7 +5487,10 @@ generic replacement for an existing verification task.
 ## Eligible Canonical Snapshot Handles
 {self._eligible_snapshot_handles()}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 
 {self._task_creator_contract(plan, phase, snapshot_only=bool(batch and batch.snapshot_ref))}"""
@@ -5204,7 +5510,7 @@ generic replacement for an existing verification task.
         ]
         lines.append(
             f"task_creation_relevant_tasks[{len(relevant)}]"
-            "{task_uid,phase,title,status,kind,reference_id}:"
+            "{task_uid,phase,title,status,kind,reference_id,replacement_of,supersedes_criteria}:"
         )
         for task in relevant:
             lines.append(
@@ -5216,6 +5522,8 @@ generic replacement for an existing verification task.
                     sanitize_toon_value(task.status),
                     sanitize_toon_value(task.kind),
                     sanitize_toon_value(task.reference_id),
+                    sanitize_toon_value(task.replacement_of),
+                    sanitize_toon_value("|".join(task.supersedes_criteria)),
                 ))
             )
         lines.append(self._task_creator_prior_phase_context(phase))
@@ -5336,7 +5644,7 @@ success condition. Return partial_failure when these claim-specific requirements
         return f"""Review existing evidence and classify the active task. The task below is your sole evaluation target.
 Do not execute or continue the task, perform phase work, pursue the operation objective, modify artifacts, or gather new
 evidence. The operation objective and phase are context only, not instructions. Worker context is evidence to assess,
-not a request to continue its work. Use read_artifact only to read referenced artifacts and mem0_retrieve only to review
+not a request to continue its work. Use read_artifact only to read referenced artifacts and memory_retrieve only to review
 existing memories.
 
 Controller-observed tool outcomes are authoritative and override contradictory worker narration. Never infer output from
@@ -5395,7 +5703,10 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 ## Task history
 {self._task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 {tool_outcome_section}
 {worker_context_section}
@@ -5419,7 +5730,7 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 terminal classification; `continue` is invalid.\n"""
         return f"""Review existing evidence and classify the active phase; do not perform phase work, execute tasks, pursue
 the operation objective, modify artifacts, or gather new evidence. Apply the module termination policy only as decision
-criteria. Use read_artifact only to read referenced artifacts and mem0_retrieve only to review existing memories.
+criteria. Use read_artifact only to read referenced artifacts and memory_retrieve only to review existing memories.
 
 Return JSON only: {{"status":{status_contract},"reason": string}}. Use done only when phase
 criteria are evidence-backed. Use partial_failure when the phase produced useful evidence but should not consume more
@@ -5447,7 +5758,10 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
 ## Task history
 {self._phase_task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 """
 
@@ -5641,12 +5955,57 @@ unless a separate executable host or network target authorizes that scope."""
         return selected
 
     def _memory_summary(self) -> str:
+        return self._render_memories(self._prompt_memory_records())
+
+    def _prompt_memory_records(self) -> List[Dict[str, Any]]:
         try:
-            memories = self.state.client.list_memories(run_id=self.runtime.operation_id, limit=20)[:20]
+            records = list(self.state.client.list_memories(
+                run_id=self.runtime.operation_id,
+                limit=_PROMPT_MEMORY_FETCH_LIMIT,
+            ) or [])
+            eligible = [record for record in records if self._is_prompt_memory_eligible(record)]
+            excluded_count = len(records) - len(eligible)
+            if excluded_count:
+                self._log_workflow(
+                    "filtered prompt memories total=%s excluded=%s retained=%s",
+                    len(records),
+                    excluded_count,
+                    min(len(eligible), _PROMPT_MEMORY_LIMIT),
+                )
+            return eligible[:_PROMPT_MEMORY_LIMIT]
         except Exception as error:
             logger.debug("Unable to load memories for workflow prompt", exc_info=error)
-            return "memories[0]{id,memory}:"
-        return self._render_memories(memories)
+            return []
+
+    @staticmethod
+    def _is_prompt_memory_eligible(memory: Any) -> bool:
+        """Exclude semantic copies of controller-owned workflow state from role prompts."""
+
+        if not isinstance(memory, dict):
+            return False
+        metadata = memory.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        category = str(metadata.get("category") or "").strip().lower()
+        source = str(metadata.get("source") or "").strip().lower()
+        publication_key = str(metadata.get("publication_key") or "").strip().lower()
+        return (
+            category not in _PROMPT_MEMORY_EXCLUDED_CATEGORIES
+            and source not in _PROMPT_MEMORY_EXCLUDED_SOURCES
+            and not publication_key.startswith("task_acceptance:")
+        )
+
+    @staticmethod
+    def _memory_prompt_guidance() -> str:
+        return """Semantic memories are supporting evidence only. Controller-owned task history, acceptance ledgers,
+phase status, and completion state are authoritative. Do not infer that the active task is complete merely because a
+memory describes related evidence or prior work."""
+
+    def _memory_selection_summary(self) -> str:
+        memories = self._prompt_memory_records()
+        lines = [f"memory_options[{len(memories)}]{{index,id}}:"]
+        for index, memory in enumerate(memories):
+            lines.append(f"  {index},{sanitize_toon_value(self._memory_id(memory))}")
+        return "\n".join(lines)
 
     def _selected_memory_context(self, memory_ids: Any) -> str:
         ids = self._coerce_memory_ids(memory_ids)
@@ -5654,6 +6013,7 @@ unless a separate executable host or network target authorizes that scope."""
             return ""
         memories = []
         missing = []
+        filtered = []
         for memory_id in ids:
             try:
                 memory = self.state.client.get_memory_by_id(memory_id)
@@ -5661,14 +6021,17 @@ unless a separate executable host or network target authorizes that scope."""
                 logger.debug("Unable to load selected memory id=%s for task prompt", memory_id, exc_info=True)
                 missing.append(memory_id)
                 continue
-            if memory:
+            if memory and self._is_prompt_memory_eligible(memory):
                 memories.append(memory)
+            elif memory:
+                filtered.append(memory_id)
             else:
                 missing.append(memory_id)
         self._log_workflow(
-            "selected memories requested=%s found=%s missing=%s",
+            "selected memories requested=%s found=%s filtered=%s missing=%s",
             len(ids),
             len(memories),
+            ",".join(filtered),
             ",".join(missing),
         )
         if not memories:
@@ -5690,14 +6053,37 @@ unless a separate executable host or network target authorizes that scope."""
             seen.add(clean_id)
         return selected
 
+    @staticmethod
+    def _coerce_memory_indices(memory_indices: Any) -> List[int]:
+        if not isinstance(memory_indices, list):
+            return []
+        selected = []
+        seen = set()
+        for memory_index in memory_indices:
+            if isinstance(memory_index, bool) or not isinstance(memory_index, int) or memory_index < 0:
+                continue
+            if memory_index not in seen:
+                selected.append(memory_index)
+                seen.add(memory_index)
+        return selected
+
     def _render_memories(self, memories: List[Dict[str, Any]]) -> str:
-        toon = f"memories[{len(memories)}]{{id,memory}}:\n"
+        toon = f"memories[{len(memories)}]{{id,category,source,memory}}:\n"
+        if not memories:
+            return toon.rstrip("\n")
         for memory in memories:
             memory_id = self._memory_id(memory)
+            metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+            category = str(metadata.get("category") or "general")
+            source = str(metadata.get("source") or "")
             memory_text = self._memory_text(memory)[:1000]
             toon += (
                 "  "
                 + sanitize_toon_value(memory_id)
+                + ","
+                + sanitize_toon_value(category)
+                + ","
+                + sanitize_toon_value(source)
                 + ","
                 + sanitize_toon_value(memory_text)
                 + "\n"

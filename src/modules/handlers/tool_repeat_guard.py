@@ -110,6 +110,13 @@ def _tool_use_id(tool_use: ToolUse) -> str:
     return str(tool_use.get("_toolUseId", tool_use.get("toolUseId", "")))
 
 
+def _cycle_signature(cycle: tuple[str, ...]) -> str:
+    """Return a stable identity for an exact normalized tool-call cycle."""
+
+    canonical = json.dumps(cycle, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _get_state(invocation_state: dict[str, Any]) -> _InvocationRepeatState:
     state = invocation_state.get(_INVOCATION_STATE_KEY)
     if isinstance(state, _InvocationRepeatState):
@@ -305,5 +312,6 @@ class ToolRepeatGuardHook(HookProvider):
             "repeat_count": repeat_count,
             "tool_name": str(event.tool_use.get("name", "unknown")),
             "tool_names": [state.tool_names.get(item, "unknown") for item in cycle],
+            "cycle_signature": _cycle_signature(cycle),
         }
         return True

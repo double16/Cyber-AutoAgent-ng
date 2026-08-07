@@ -1,6 +1,6 @@
 """Agents module for Cyber-AutoAgent."""
 
-from modules.agents.cyber_autoagent import check_existing_memories, create_agent
+from modules.agents.cyber_autoagent import create_agent
 from modules.agents.report_agent import ReportGenerator
 from modules.agents.patches import patch_model_class_tool_use_id
 
@@ -9,7 +9,7 @@ from strands.models.litellm import LiteLLMModel
 from modules.config.models.ollama import OllamaModel
 from strands.models.gemini import GeminiModel
 
-__all__ = ["create_agent", "check_existing_memories", "ReportGenerator"]
+__all__ = ["create_agent", "ReportGenerator"]
 
 patch_model_class_tool_use_id(BedrockModel)
 patch_model_class_tool_use_id(LiteLLMModel)

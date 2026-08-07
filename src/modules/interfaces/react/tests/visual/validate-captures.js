@@ -228,20 +228,20 @@ class CaptureValidator {
 
   /**
    * Validate progress update format
-   * Required format: [PROGRESS X%] • [AGENT_INFO] ─────────────────
+   * Required format: [BUDGET X%] • [AGENT_INFO] ─────────────────
    */
   validateProgressUpdateFormat(content) {
     const issues = [];
     
     const stepLines = content.split('\n').filter(line => 
-      line.includes('PROGRESS') && (line.includes('/') || line.includes('FINAL'))
+      line.includes('BUDGET') && (line.includes('/') || line.includes('FINAL'))
     );
     
     stepLines.forEach(line => {
       const trimmed = line.trim();
       
       // Check for proper progress update format
-      if (!trimmed.match(/\[(?:PROGRESS \d+%|FINAL REPORT)\]/)) {
+      if (!trimmed.match(/\[(?:BUDGET \d+%|FINAL REPORT)\]/)) {
         issues.push({
           type: 'PROGRESS_UPDATE_FORMAT',
           severity: 'HIGH',

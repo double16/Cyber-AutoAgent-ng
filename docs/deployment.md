@@ -2,6 +2,51 @@
 
 This guide covers deployment options for Cyber-AutoAgent in various environments.
 
+## How each mode works
+
+The React terminal uses one of three execution profiles. The setup wizard uses friendly display names, while the
+configuration and `--deployment-mode` option use the canonical values shown below.
+
+```text
+React UI
+├── Python / Local CLI (local-cli)
+│   └── Local Python agent process
+├── Single Container (single-container)
+│   └── Docker agent container
+└── Full Stack (full-stack)
+    └── Docker Compose: agent + supporting services
+```
+
+### Python / Local CLI (`local-cli`)
+
+The React UI starts the Python agent directly on the host through the local Python execution service. The host Python
+environment supplies the agent runtime, installed dependencies, and host-local security tools. Provider credentials,
+model configuration, and output paths are passed to that process, and no Docker services are started.
+
+The Python process emits structured execution events that the React UI consumes for progress, tool activity, metrics,
+reports, and terminal completion. This mode has the smallest footprint and is suited to development or environments
+where the required Python tools are already installed locally.
+
+### Single Container (`single-container`)
+
+The React UI uses the Docker execution service to start one isolated agent container. The container supplies the Python
+runtime and bundled assessment tools, while the UI passes the selected configuration, provider credentials, target
+information, and output mounts into the container.
+
+The container runs the assessment and exits when the operation completes. This mode does not start the persistent
+observability and evaluation service stack from Docker Compose. If observability is configured for this mode, it must
+use an externally available service.
+
+### Full Stack (`full-stack`)
+
+The React UI starts the Docker Compose deployment and communicates with the agent service over the Compose network.
+Alongside the agent, the stack provides the supporting services required for the complete platform experience,
+including observability, evaluation, service networking, databases, caching, and object storage.
+
+The supporting services remain available across agent processes and provide the infrastructure used for Langfuse
+tracing, evaluation workflows, and persisted service data. This mode has the largest disk, memory, startup-time, and
+operational requirements, but is the recommended profile when the complete platform is needed.
+
 ## Invocation Methods
 
 Cyber-AutoAgent supports **4 invocation methods**, each with different use cases:
@@ -126,18 +171,12 @@ Cyber-AutoAgent supports **300+ LLM providers** via LiteLLM. Examples:
 **Moonshot AI:**
 ```bash
 -e MOONSHOT_API_KEY=your_key
--e OPENAI_API_KEY=your_key  # Required for Mem0 OpenAI-compatible providers
 -e CYBER_AGENT_LLM_MODEL=moonshot/kimi-k2-thinking
 -e CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
--e MEM0_LLM_MODEL=azure/gpt-4o  # Memory system LLM (use Azure/Anthropic/Bedrock for Mem0)
--e AZURE_API_KEY=azure_key  # Required for embeddings and Mem0
+-e AZURE_API_KEY=azure_key  # Required for Azure embeddings
 -e AZURE_API_BASE=https://your-endpoint.openai.azure.com/
 -e AZURE_API_VERSION=2024-12-01-preview
 ```
-
-**Note:** When using OpenAI-compatible providers (Moonshot, OpenRouter, etc.) with Mem0, you must:
-1. Set `OPENAI_API_KEY` to the provider's API key for Mem0 compatibility
-2. Use a supported Mem0 provider (Azure, OpenAI, Anthropic, Bedrock) for `MEM0_LLM_MODEL`
 
 **Mixed Providers:** You can combine any LLM with any embedding model!
 
@@ -152,7 +191,7 @@ cd cyber-autoagent
 
 # Build and run with Docker Compose (includes observability)
 cd docker
-docker-compose up -d
+docker compose -f docker-compose.yml up -d
 
 # Run a penetration test
 docker run --rm \
@@ -312,7 +351,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 
 | Variable                                           | Description                                                | Required                                                        |
 |----------------------------------------------------|------------------------------------------------------------|-----------------------------------------------------------------|
-| `CYBER_AGENT_PROVIDER`                             | Provider choice (bedrock/ollama/litellm)                   | No (auto-detected)                                              |
+| `CYBER_AGENT_PROVIDER`                             | Provider choice (bedrock/ollama/litellm/gemini)             | No (default: bedrock)                                           |
 | `CYBER_AGENT_LLM_MODEL`                            | Main LLM model ID                                          | Yes                                                             |
 | `CYBER_AGENT_EMBEDDING_MODEL`                      | Embedding model ID                                         | No (provider default)                                           |
 | `REASONING_EFFORT`                                 | Reasoning effort (low/medium/high)                         | No (default: medium)                                            |
@@ -349,9 +388,10 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `AZURE_API_KEY`                                    | Azure OpenAI API key                                       | For Azure/LiteLLM                                               |
 | `AZURE_API_BASE`                                   | Azure endpoint URL                                         | For Azure/LiteLLM                                               |
 | `AZURE_API_VERSION`                                | Azure API version                                          | For Azure/LiteLLM                                               |
-| `MEM0_API_KEY`                                     | Mem0 Platform API key                                      | For cloud memory backend                                        |
-| `MEM0_LLM_MODEL`                                   | Memory system LLM                                          | No (auto-aligned)                                               |
-| `OPENSEARCH_HOST`                                  | OpenSearch endpoint                                        | For OpenSearch memory backend                                   |
+| `CYBER_MEMORY_MODE`                                | Memory query scope: `operation` or `shared`                | No (default: `operation`)                                       |
+| `QDRANT_URL`                                       | Qdrant service endpoint; unset uses `outputs/qdrant`       | No                                                              |
+| `QDRANT_API_KEY`                                   | Optional Qdrant service API key                            | Only for authenticated services                                 |
+| `QDRANT_COLLECTION`                                | Qdrant semantic-memory collection                          | No (default: `cyber_autoagent_memories`)                        |
 | `LANGFUSE_HOST`                                    | Langfuse observability endpoint                            | For observability                                               |
 | `LANGFUSE_PUBLIC_KEY`                              | Langfuse API public key                                    | For observability                                               |
 | `LANGFUSE_SECRET_KEY`                              | Langfuse API secret key                                    | For observability                                               |
@@ -431,7 +471,7 @@ npm start
 # The interface will guide you through:
 # 1. Docker environment setup
 # 2. Deployment mode selection (local-cli, single-container, full-stack)
-# 3. Model provider configuration (Bedrock, Ollama, LiteLLM)
+# 3. Model provider configuration (Bedrock, Ollama, LiteLLM, Gemini)
 # 4. First assessment execution
 ```
 
@@ -439,15 +479,10 @@ Access the interface at `http://localhost:3000` when using full-stack deployment
 
 ## Memory Backend Configuration
 
-Cyber-AutoAgent supports three memory backends with automatic selection:
-
-| Backend       | Priority  | Environment Variable | Use Case                             |
-|---------------|-----------|----------------------|--------------------------------------|
-| Mem0 Platform | 1         | `MEM0_API_KEY`       | Cloud-hosted, managed service        |
-| OpenSearch    | 2         | `OPENSEARCH_HOST`    | AWS managed search, production scale |
-| FAISS         | 3         | None (default)       | Local vector storage, development    |
-
-Memory persists in `outputs/<target>/memory/` for cross-operation learning.
+Qdrant is the semantic-memory backend. With no service variables it uses filesystem storage at `outputs/qdrant`.
+Set `QDRANT_URL` and, when required, `QDRANT_API_KEY` to connect to a service. Every point is tagged with exact target
+values and operation ID. `CYBER_MEMORY_MODE=operation` queries both fields; `shared` omits only the operation criterion.
+See the [memory guide](memory.md) for the complete model.
 
 ## Configuration Examples
 
@@ -467,7 +502,7 @@ export MAX_TOKENS=8000  # Optional: Override default
 export AWS_REGION=us-east-1
 export CYBER_AGENT_LLM_MODEL=us.anthropic.claude-sonnet-4-5-20250929-v1:0
 export CYBER_AGENT_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0
-export MEM0_API_KEY=your_mem0_key  # Cloud memory backend
+export QDRANT_URL=http://localhost:6333  # Optional; omit for filesystem storage
 export REASONING_EFFORT=medium
 ```
 
@@ -479,8 +514,7 @@ export CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
 export AZURE_API_KEY=your_azure_key  # For embeddings
 export AZURE_API_BASE=https://your-endpoint.openai.azure.com/
 export AZURE_API_VERSION=2024-12-01-preview
-export MEM0_LLM_MODEL=azure/gpt-4o  # Memory system uses Azure
-export OPENAI_API_KEY=your_moonshot_key  # Mem0 compatibility
+export QDRANT_URL=http://localhost:6333  # Optional memory service
 ```
 
 ### Ollama with Context Window Fallbacks

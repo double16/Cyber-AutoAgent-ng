@@ -222,7 +222,7 @@ def test_auto_setup_discovers_available_and_unavailable_tools(monkeypatch, tmp_p
     monkeypatch.setattr(mod.shutil, "which", lambda binary: "/usr/bin/nmap" if binary == "nmap" else None)
     monkeypatch.setattr(mod.os, "access", lambda *args: False)
 
-    available = mod.auto_setup(skip_mem0_cleanup=True)
+    available = mod.auto_setup()
 
     assert available == ["nmap"]
     output = capsys.readouterr().out

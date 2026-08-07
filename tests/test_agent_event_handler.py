@@ -4,7 +4,7 @@ import threading
 import time
 from collections import OrderedDict
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -739,7 +739,8 @@ def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
         SimpleNamespace(accumulated_usage={"inputTokens": 12, "outputTokens": 4})
     )
 
-    handler.emit_model_usage_snapshot()
+    with patch("modules.tools.memory.persist_operation_model_metrics") as persist_metrics:
+        handler.emit_model_usage_snapshot()
 
     assert len(handler._events) == 1
     snapshot = handler._events[0]
@@ -747,11 +748,17 @@ def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
     assert snapshot["stage"] == "assessment_complete"
     metrics = snapshot["metrics"]
     assert metrics["modelUsage"] == handler.model_usage()
+    assert metrics["capturedAt"].endswith("+00:00")
     assert metrics["inputTokens"] == 12
     assert metrics["outputTokens"] == 4
     assert metrics["totalTokens"] == 16
     assert metrics["cost"] >= 0.0
     assert metrics["duration"] == "0s"
+    persist_metrics.assert_called_once_with(
+        handler.model_usage(),
+        metrics["capturedAt"],
+        operation_id="OP_TEST",
+    )
     handler.emitter.flush_immediate.assert_called_once()
 
 
@@ -759,10 +766,26 @@ def test_emit_model_usage_snapshot_skips_report_only_handlers():
     handler = make_handler()
     handler.operation_mode = "report_only"
 
-    handler.emit_model_usage_snapshot()
+    with patch("modules.tools.memory.persist_operation_model_metrics") as persist_metrics:
+        handler.emit_model_usage_snapshot()
 
     assert handler._events == []
+    persist_metrics.assert_not_called()
     handler.emitter.flush_immediate.assert_not_called()
+
+
+def test_emit_model_usage_snapshot_continues_when_metric_persistence_fails():
+    handler = make_handler()
+    handler.process_metrics(SimpleNamespace(accumulated_usage={"inputTokens": 12, "outputTokens": 4}))
+
+    with patch(
+        "modules.tools.memory.persist_operation_model_metrics",
+        side_effect=RuntimeError("database unavailable"),
+    ):
+        handler.emit_model_usage_snapshot()
+
+    assert handler._events[0]["type"] == "model_usage_snapshot"
+    handler.emitter.flush_immediate.assert_called_once()
 
 
 def test_model_efficiency_is_higher_when_corrections_are_lower():
@@ -1268,7 +1291,7 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
     assert handler.budget_max_duration == 60
 
     events.clear()
-    monkeypatch.setenv("MEM0_API_KEY", "token")
+    monkeypatch.setenv("QDRANT_URL", "http://qdrant:6333")
     AgentEventHandler(
         operation_id="OP_MEM0",
         provider_id="litellm",
@@ -1276,11 +1299,11 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
         emitter=emitter,
         init_context={},
     )
-    assert any(event.get("memory", {}).get("backend") == "mem0_cloud" for event in events)
+    assert any(event.get("memory", {}).get("backend") == "qdrant_service" for event in events)
 
     events.clear()
-    monkeypatch.delenv("MEM0_API_KEY", raising=False)
-    monkeypatch.setenv("OPENSEARCH_HOST", "https://opensearch.example")
+    monkeypatch.delenv("QDRANT_URL", raising=False)
+    monkeypatch.setenv("LEGACY_MEMORY_HOST", "https://ignored.example")
     AgentEventHandler(
         operation_id="OP_OPENSEARCH",
         provider_id="litellm",
@@ -1288,7 +1311,7 @@ def test_constructor_budget_context_and_memory_fallback_branches(monkeypatch):
         emitter=emitter,
         init_context={},
     )
-    assert any(event.get("memory", {}).get("backend") == "opensearch" for event in events)
+    assert any(event.get("memory", {}).get("backend") == "qdrant_local" for event in events)
 
 
 def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
@@ -1369,8 +1392,16 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
     types = event_types(handler)
     assert "report_content" in types
     report_index = types.index("report_content")
-    assert handler._events[report_index + 1]["type"] == "progress_update"
-    assert handler._events[report_index + 1]["progressPercent"] == handler.get_budget_progress()
+    assert handler._events[report_index + 1] == {
+        "type": "report_paths",
+        "target": "example_com",
+        "output_dir": str(output_dir),
+        "report_path": str(output_dir / "security_assessment_report.md"),
+        "log_path": str(output_dir / "cyber_operations.log"),
+        "artifacts_path": str(output_dir / "artifacts"),
+    }
+    assert handler._events[report_index + 2]["type"] == "progress_update"
+    assert handler._events[report_index + 2]["progressPercent"] == handler.get_budget_progress()
     assert "assessment_complete" not in types
     assert output_dir.joinpath("security_assessment_report.md").exists()
     handler.emit_assessment_complete()
