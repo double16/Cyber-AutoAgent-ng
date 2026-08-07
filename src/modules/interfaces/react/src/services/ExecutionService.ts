@@ -69,6 +69,7 @@ export interface ExecutionHandle {
   stop(): Promise<void>;
   /** Check if execution is still active */
   isActive(): boolean;
+
 }
 
 /**
@@ -169,6 +170,16 @@ export interface ExecutionService extends EventEmitter {
    * Get current status of the service
    */
   isActive(): boolean;
+
+  /**
+   * Return structured startup events emitted before the terminal listener attached.
+   */
+  drainBufferedStartupEvents?(): any[];
+
+  /**
+   * Mark the terminal listener as ready so future startup events are emitted live only.
+   */
+  markStartupEventConsumerAttached?(): void;
 }
 
 /**

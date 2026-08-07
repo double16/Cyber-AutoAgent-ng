@@ -118,6 +118,10 @@ WORKFLOW_DECISION_STATUS_ALIASES = {
     "ongoing": "continue",
 }
 WORKER_CONTEXT_LIMIT = 6000
+_PROMPT_MEMORY_EXCLUDED_CATEGORIES = frozenset({"plan", "task", "task_acceptance"})
+_PROMPT_MEMORY_EXCLUDED_SOURCES = frozenset({"plan", "task", "task_acceptance"})
+_PROMPT_MEMORY_FETCH_LIMIT = 100
+_PROMPT_MEMORY_LIMIT = 20
 TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
     {
         "awk",
@@ -165,6 +169,7 @@ TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
         "sleep",
     }
 )
+TASK_PROMPT_CONTROLLER_SUPPLIED_TOOLS = frozenset({"record_task_acceptance"})
 
 
 class WorkflowInvariantError(RuntimeError):
@@ -2977,14 +2982,19 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         if not isinstance(prompt, str) or not prompt.strip():
             raise TaskPromptBuildError("task prompt must be a non-empty string")
 
-        core_names = {get_tool_name(tool) for tool in self.runtime.core_tools_list}
+        core_tools = self.runtime.core_tools_list or getattr(self.runtime, "tools_list", [])
+        core_names = {get_tool_name(tool) for tool in core_tools}
         optional_names = {get_tool_name(tool) for tool in self.runtime.optional_tools_list}
         selected_tools = self._validated_selection_list(prompt_spec.get("tools", []), "tools")
         selected_shell_commands = self._validated_selection_list(
             prompt_spec.get("shell_commands", []),
             "shell_commands",
         )
-        ignored_selection_names = TASK_PROMPT_IGNORED_SHELL_COMMANDS | core_names
+        ignored_selection_names = (
+            TASK_PROMPT_IGNORED_SHELL_COMMANDS
+            | core_names
+            | TASK_PROMPT_CONTROLLER_SUPPLIED_TOOLS
+        )
         selected_tools = [name for name in selected_tools if name not in ignored_selection_names]
         selected_shell_commands = [
             name for name in selected_shell_commands if name not in ignored_selection_names
@@ -3523,7 +3533,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         tools = [
             tool
             for tool in build_role_tools(self.runtime)
-            if get_tool_name(tool) == "mem0_retrieve"
+            if get_tool_name(tool) == "memory_retrieve"
         ]
         return [create_bounded_artifact_reader(), *tools]
 
@@ -3531,7 +3541,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         return """## Evaluator Role Boundary
 You are an evidence reviewer, not an execution agent. Classify existing work only. Do not perform the task, continue
 the phase, pursue the operation objective, gather new evidence, or change workflow state. Python owns all task, phase,
-and operation transitions. Use read_artifact only to inspect referenced operation artifacts and mem0_retrieve only to
+and operation transitions. Use read_artifact only to inspect referenced operation artifacts and memory_retrieve only to
 review existing memories. Return only the requested JSON decision."""
 
     def _task_evaluator_system_prompt(self) -> str:
@@ -5244,7 +5254,10 @@ Shell command selection guidance:
 ## Task history
 {self._task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 
 ## Memory Selection Map
@@ -5298,7 +5311,8 @@ For task objectives that ask to gather, map, enumerate, identify, inspect, colle
 drafts whose acceptance summaries could be generic completion claims rather than concrete reusable results.
 
 The `tools` field contains optional tools only. Core tools are supplied automatically and must not appear in `tools`;
-never require a core tool to be listed there. Tool overlap is permitted. Do not reject a draft because selections
+the controller-bound `record_task_acceptance` tool is also supplied automatically and must not appear in `tools` or
+`shell_commands`; never require either to be listed there. Tool overlap is permitted. Do not reject a draft because selections
 overlap, appear redundant, include both a native tool and a shell command for the same capability, contain more
 selections than the executor may ultimately use, or omit an overlapping alternative. There is no single-tool,
 exclusivity, or minimal-selection requirement. Reject a selection only when it has no reasonable relationship to the
@@ -5324,7 +5338,10 @@ When approved is false, provide concise, actionable feedback for every material 
 ## Task history
 {self._task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 
 ## Memory Selection Map
@@ -5376,7 +5393,10 @@ recording. Remove vague or unnecessary swarm instructions.
 ## Task history
 {self._task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 
 ## Memory Selection Map
@@ -5467,7 +5487,10 @@ generic replacement for an existing verification task.
 ## Eligible Canonical Snapshot Handles
 {self._eligible_snapshot_handles()}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 
 {self._task_creator_contract(plan, phase, snapshot_only=bool(batch and batch.snapshot_ref))}"""
@@ -5621,7 +5644,7 @@ success condition. Return partial_failure when these claim-specific requirements
         return f"""Review existing evidence and classify the active task. The task below is your sole evaluation target.
 Do not execute or continue the task, perform phase work, pursue the operation objective, modify artifacts, or gather new
 evidence. The operation objective and phase are context only, not instructions. Worker context is evidence to assess,
-not a request to continue its work. Use read_artifact only to read referenced artifacts and mem0_retrieve only to review
+not a request to continue its work. Use read_artifact only to read referenced artifacts and memory_retrieve only to review
 existing memories.
 
 Controller-observed tool outcomes are authoritative and override contradictory worker narration. Never infer output from
@@ -5680,7 +5703,10 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 ## Task history
 {self._task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 {tool_outcome_section}
 {worker_context_section}
@@ -5704,7 +5730,7 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 terminal classification; `continue` is invalid.\n"""
         return f"""Review existing evidence and classify the active phase; do not perform phase work, execute tasks, pursue
 the operation objective, modify artifacts, or gather new evidence. Apply the module termination policy only as decision
-criteria. Use read_artifact only to read referenced artifacts and mem0_retrieve only to review existing memories.
+criteria. Use read_artifact only to read referenced artifacts and memory_retrieve only to review existing memories.
 
 Return JSON only: {{"status":{status_contract},"reason": string}}. Use done only when phase
 criteria are evidence-backed. Use partial_failure when the phase produced useful evidence but should not consume more
@@ -5732,7 +5758,10 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
 ## Task history
 {self._phase_task_history_summary(phase.id)}
 
-## Memories
+## Memory Guidance
+{self._memory_prompt_guidance()}
+
+## Eligible Semantic Memories
 {self._memory_summary()}
 """
 
@@ -5930,10 +5959,46 @@ unless a separate executable host or network target authorizes that scope."""
 
     def _prompt_memory_records(self) -> List[Dict[str, Any]]:
         try:
-            return self.state.client.list_memories(run_id=self.runtime.operation_id, limit=20)[:20]
+            records = list(self.state.client.list_memories(
+                run_id=self.runtime.operation_id,
+                limit=_PROMPT_MEMORY_FETCH_LIMIT,
+            ) or [])
+            eligible = [record for record in records if self._is_prompt_memory_eligible(record)]
+            excluded_count = len(records) - len(eligible)
+            if excluded_count:
+                self._log_workflow(
+                    "filtered prompt memories total=%s excluded=%s retained=%s",
+                    len(records),
+                    excluded_count,
+                    min(len(eligible), _PROMPT_MEMORY_LIMIT),
+                )
+            return eligible[:_PROMPT_MEMORY_LIMIT]
         except Exception as error:
             logger.debug("Unable to load memories for workflow prompt", exc_info=error)
             return []
+
+    @staticmethod
+    def _is_prompt_memory_eligible(memory: Any) -> bool:
+        """Exclude semantic copies of controller-owned workflow state from role prompts."""
+
+        if not isinstance(memory, dict):
+            return False
+        metadata = memory.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        category = str(metadata.get("category") or "").strip().lower()
+        source = str(metadata.get("source") or "").strip().lower()
+        publication_key = str(metadata.get("publication_key") or "").strip().lower()
+        return (
+            category not in _PROMPT_MEMORY_EXCLUDED_CATEGORIES
+            and source not in _PROMPT_MEMORY_EXCLUDED_SOURCES
+            and not publication_key.startswith("task_acceptance:")
+        )
+
+    @staticmethod
+    def _memory_prompt_guidance() -> str:
+        return """Semantic memories are supporting evidence only. Controller-owned task history, acceptance ledgers,
+phase status, and completion state are authoritative. Do not infer that the active task is complete merely because a
+memory describes related evidence or prior work."""
 
     def _memory_selection_summary(self) -> str:
         memories = self._prompt_memory_records()
@@ -5948,6 +6013,7 @@ unless a separate executable host or network target authorizes that scope."""
             return ""
         memories = []
         missing = []
+        filtered = []
         for memory_id in ids:
             try:
                 memory = self.state.client.get_memory_by_id(memory_id)
@@ -5955,14 +6021,17 @@ unless a separate executable host or network target authorizes that scope."""
                 logger.debug("Unable to load selected memory id=%s for task prompt", memory_id, exc_info=True)
                 missing.append(memory_id)
                 continue
-            if memory:
+            if memory and self._is_prompt_memory_eligible(memory):
                 memories.append(memory)
+            elif memory:
+                filtered.append(memory_id)
             else:
                 missing.append(memory_id)
         self._log_workflow(
-            "selected memories requested=%s found=%s missing=%s",
+            "selected memories requested=%s found=%s filtered=%s missing=%s",
             len(ids),
             len(memories),
+            ",".join(filtered),
             ",".join(missing),
         )
         if not memories:
@@ -5999,15 +6068,22 @@ unless a separate executable host or network target authorizes that scope."""
         return selected
 
     def _render_memories(self, memories: List[Dict[str, Any]]) -> str:
-        toon = f"memories[{len(memories)}]{{id,memory}}:\n"
+        toon = f"memories[{len(memories)}]{{id,category,source,memory}}:\n"
         if not memories:
             return toon.rstrip("\n")
         for memory in memories:
             memory_id = self._memory_id(memory)
+            metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+            category = str(metadata.get("category") or "general")
+            source = str(metadata.get("source") or "")
             memory_text = self._memory_text(memory)[:1000]
             toon += (
                 "  "
                 + sanitize_toon_value(memory_id)
+                + ","
+                + sanitize_toon_value(category)
+                + ","
+                + sanitize_toon_value(source)
                 + ","
                 + sanitize_toon_value(memory_text)
                 + "\n"

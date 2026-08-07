@@ -33,6 +33,31 @@ const load = async () => {
 };
 
 describe('StreamDisplay broad event rendering', () => {
+  it('shows a diagnostic when report paths are unavailable', async () => {
+    const { EventLine, render } = await load();
+    const output = render(
+      <EventLine event={{ type: 'report_paths' } as any} animationsEnabled={false} />
+    ).lastFrame();
+
+    expect(output).toContain('ARTIFACTS AND LOGS');
+    expect(output).toContain('Paths unavailable');
+  });
+
+  it('formats streamed report content as Markdown', async () => {
+    const {EventLine, render} = await load();
+    const output = render(
+      <EventLine
+        event={{type: 'report_content', content: '# Report\n\n**Finding**\n\n- Verify the fix'} as any}
+        animationsEnabled={false}
+      />
+    ).lastFrame();
+
+    expect(output).toContain('Report');
+    expect(output).toContain('Finding');
+    expect(output).toContain('• Verify the fix');
+    expect(output).not.toContain('**Finding**');
+  });
+
   it('treats thinking events as non-rendering stream controls', async () => {
     const { EventLine, render } = await load();
     const startup = render(
@@ -50,6 +75,29 @@ describe('StreamDisplay broad event rendering', () => {
 
     expect(startup || '').toBe('');
     expect(normal || '').toBe('');
+  });
+
+  it('renders structured tool-discovery events without generic output labels', async () => {
+    const { EventLine, render } = await load();
+    const events: any[] = [
+      { type: 'tool_discovery_start', message: 'Discovering tools' },
+      { type: 'tool_available', tool_name: 'scanner', description: 'Scan hosts' },
+      { type: 'tool_unavailable', tool_name: 'browser' },
+      { type: 'environment_ready', tool_count: 2 },
+    ];
+
+    const output = events.map(event => (
+      render(<EventLine event={event} animationsEnabled={false} />).lastFrame()
+    )).join('\n');
+
+    expect(output).toContain('TOOL DISCOVERY');
+    expect(output).toContain('Discovering tools');
+    expect(output).toContain('scanner');
+    expect(output).toContain('Scan hosts');
+    expect(output).toContain('browser');
+    expect(output).toContain('unavailable');
+    expect(output).toContain('Environment ready - 2 cybersecurity tools loaded');
+    expect(output).not.toContain('output');
   });
 
   it('renders SDK, lifecycle, reasoning, termination, and metadata event variants', async () => {
@@ -139,14 +187,14 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'separator', content: 'phase break' },
       { type: 'user_handoff', message: 'Need OTP', breakout: true },
       { type: 'operation_init', operation_id: 'op1', target: 'https://example.com', objective: 'audit', memory: { enabled: true } },
-      { type: 'report_paths', operation_id: 'op1', target: 'example.com', reportPath: '/app/outputs/example.com/op1/report.md' },
+      { type: 'report_paths', operation_id: 'op1', target: 'example.com', reportPath: '/app/outputs/example.com/op1/report.md', logPath: '/app/outputs/example.com/op1/cyber_operations.log', artifactsPath: '/app/outputs/example.com/op1/artifacts' },
     ];
 
     const output = events.map(event => render(<EventLine event={event} animationsEnabled={false} />).lastFrame()).join('\n');
 
     expect(output).toContain('model invocation started');
     expect(output).toContain('Event loop cycle started');
-    expect(output).toContain('[PROGRESS 40% | 4 tools]');
+    expect(output).toContain('[BUDGET 40% | 4 tools]');
     expect(output).toContain('[FINAL REPORT]');
     expect(output).toContain('[FINAL REPORT 2/5] [REQUIRES VALIDATION] Requires validation: SQL injection');
     expect(output).toContain('[RAGAS EVALUATION 2/5] Operation: Evidence Quality');
@@ -168,6 +216,18 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Need OTP');
     expect(output).toContain('Operation initialization complete');
     expect(output).toContain('report.md');
+    expect(output).toContain('cyber_operations.log');
+    expect(output).toContain('artifacts');
+  });
+
+  it('keeps step-only progress events labeled as progress', async () => {
+    const { EventLine, render } = await load();
+    const output = render(
+      <EventLine event={{ type: 'progress_update', step: 3, totalTools: 2 }} animationsEnabled={false} />
+    ).lastFrame();
+
+    expect(output).toContain('[PROGRESS 3 | 2 tools]');
+    expect(output).not.toContain('[BUDGET');
   });
 
   it('renders common tool_start variants without throwing', async () => {
@@ -178,7 +238,7 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'tool_start', tool_name: 'store_knowledge', tool_input: { content: 'reuse negative controls' } },
       { type: 'tool_start', tool_name: 'store_finding', tool_input: { title: 'SQLi', severity: 'HIGH', target: '/search' } },
       { type: 'tool_start', tool_name: 'record_finding_validation', tool_input: { finding_uid: 'abc', outcome: 'confirmed' } },
-      { type: 'tool_start', tool_name: 'mem0_get', tool_input: { query: 'finding' } },
+      { type: 'tool_start', tool_name: 'memory_get', tool_input: { query: 'finding' } },
       { type: 'tool_start', tool_name: 'shell', tool_input: { command: 'nmap -sV example.com' } },
       { type: 'tool_start', tool_name: 'http_request', tool_input: { method: 'GET', url: 'https://example.com' } },
       { type: 'tool_start', tool_name: 'browser_goto_url', tool_input: { url: 'https://example.com/login' } },

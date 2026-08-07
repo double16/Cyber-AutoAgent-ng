@@ -38,8 +38,13 @@ from modules.prompts.factory import (
     safe_truncate,
     is_reportable_tool,
 )
-from modules.tools.memory import _artifact_path_from_ref, get_memory_client, memory_is_cross_operation, \
-    OperationTarget
+from modules.tools.memory import (
+    OperationTarget,
+    _artifact_path_from_ref,
+    get_memory_client,
+    list_persisted_operation_model_metrics,
+    memory_is_cross_operation,
+)
 from modules.utils.json_repair import parse_json_response
 
 logger = get_logger("Handlers.ReportGenerator")
@@ -76,6 +81,12 @@ _GENERIC_PATH_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 _EXCERPT_TOKEN = re.compile(r"[A-Za-z0-9_'-]{4,}")
+_INFORMATIONAL_OBSERVATION_CATEGORIES = frozenset({"observation", "signal", "discovery"})
+_WORKFLOW_BOOKKEEPING_SOURCES = frozenset({"plan", "task", "task_acceptance"})
+_NARRATIVE_FINDING_REFERENCE_STOPWORDS = frozenset({
+    "discovery",
+    "validation",
+})
 _EXCERPT_STOPWORDS = {
     "about",
     "after",
@@ -662,6 +673,21 @@ def _format_report_consistency_warnings(errors: List[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _is_reportable_informational_observation(item: Any) -> bool:
+    """Return whether an evidence item belongs in report observations.
+
+    Task acceptance and plan/task records remain in raw evidence for auditability,
+    but they duplicate deterministic workflow tables and are not informational
+    observations for either report agents or the rendered report.
+    """
+    if not isinstance(item, dict) or item.get("category") not in _INFORMATIONAL_OBSERVATION_CATEGORIES:
+        return False
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source = str(metadata.get("source") or "").strip().lower()
+    publication_key = str(metadata.get("publication_key") or "").strip().lower()
+    return source not in _WORKFLOW_BOOKKEEPING_SOURCES and not publication_key.startswith("task_acceptance:")
+
+
 def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
     """Return the Python-owned, JSON-safe contract used to assemble a report.
 
@@ -677,7 +703,7 @@ def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
     ]
     observations = [
         item for item in evidence
-        if isinstance(item, dict) and item.get("category") in {"observation", "signal", "discovery"}
+        if _is_reportable_informational_observation(item)
     ]
     artifacts = sorted(_artifact_references(evidence))
     return {
@@ -724,7 +750,7 @@ def _informational_observation_context(sections: Dict[str, Any]) -> List[Dict[st
     observations = [
         item
         for item in sections.get("raw_evidence", [])
-        if isinstance(item, dict) and item.get("category") in {"observation", "signal", "discovery"}
+        if _is_reportable_informational_observation(item)
     ]
     context = []
     for item in observations:
@@ -755,7 +781,11 @@ def _validate_narrative_consistency(text: Any, canonical: Dict[str, Any]) -> Lis
     lowered = text.lower()
     for match in re.finditer(r"(?:finding|vulnerability)\s+([a-z0-9_-]+)", lowered):
         token = match.group(1)
-        if token not in known_findings and not token.isdigit():
+        if (
+            token not in known_findings
+            and not token.isdigit()
+            and token not in _NARRATIVE_FINDING_REFERENCE_STOPWORDS
+        ):
             warnings.append(f"Narrative references unknown finding '{token}'.")
     for raw, normalized in _artifact_reference_matches(text):
         if normalized not in set(canonical.get("artifact_references", [])):
@@ -990,12 +1020,16 @@ def _format_model_usage_table(
         ]
 
     lines = [
-        "| Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time | Efficiency |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Capture Timestamp | Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time | Efficiency |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in sorted(
         normalized_rows,
-        key=lambda item: (str(item.get("provider") or "unknown"), str(item.get("model") or "unknown")),
+        key=lambda item: (
+            str(item.get("captured_at") or ""),
+            str(item.get("provider") or "unknown"),
+            str(item.get("model") or "unknown"),
+        ),
     ):
         input_tokens = int(row.get("input_tokens", row.get("inputTokens", 0)) or 0)
         output_tokens = int(row.get("output_tokens", row.get("outputTokens", 0)) or 0)
@@ -1005,10 +1039,11 @@ def _format_model_usage_table(
         cost = float(row.get("cost", 0.0) or 0.0)
         context_window = row.get("context_window_tokens", row.get("contextWindowTokens"))
         context_window_display = f"{int(context_window):,}" if isinstance(context_window, int) else "N/A"
+        captured_at = str(row.get("captured_at") or row.get("capturedAt") or "N/A")
         efficiency = row.get("efficiency")
         efficiency_display = f"{float(efficiency):.1f}%" if isinstance(efficiency, (int, float)) else "N/A"
         lines.append(
-            f"| {row.get('provider') or 'unknown'} | {row.get('model') or 'unknown'} | "
+            f"| {captured_at} | {row.get('provider') or 'unknown'} | {row.get('model') or 'unknown'} | "
             f"{context_window_display} | {input_tokens:,} | {output_tokens:,} | {cache_read:,} | {cache_write:,} | "
             f"{total_tokens:,} | ${cost:.6f} | "
             f"{_format_inference_time(row.get('inference_time_ms', row.get('inferenceTimeMs')))} | "
@@ -1031,6 +1066,7 @@ def _resolve_report_model_metrics(
     config_manager: Any,
     latest_run: Dict[str, Any],
     callback_handler: Any,
+    operation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve model metrics once, preferring live callback data when available."""
     main_provider = config_manager.get_provider()
@@ -1038,7 +1074,14 @@ def _resolve_report_model_metrics(
     model_usage = []
     fallback_context_window = _fallback_context_window(main_provider, main_model)
     total_operation_time = latest_run.get("metrics", {}).get("duration", "N/A")
-    if callback_handler is not None:
+    if operation_id:
+        try:
+            persisted_usage = list_persisted_operation_model_metrics(operation_id)
+            if isinstance(persisted_usage, list) and persisted_usage:
+                model_usage = persisted_usage
+        except Exception:
+            logger.debug("Unable to read persisted operation model metrics", exc_info=True)
+    if not _has_meaningful_model_usage(model_usage) and callback_handler is not None:
         try:
             callback_usage = callback_handler.model_usage()
             if _has_meaningful_model_usage(callback_usage):
@@ -2435,7 +2478,12 @@ def generate_security_report(
             configured_budget = fallback_budget
         latest_run["configured_budget"] = configured_budget
         sections["latest_run"] = latest_run
-        model_metrics = _resolve_report_model_metrics(config_manager, latest_run, callback_handler)
+        model_metrics = _resolve_report_model_metrics(
+            config_manager,
+            latest_run,
+            callback_handler,
+            operation_id=operation_id,
+        )
 
         # Validate evidence collection - skip report only if truly no memories
         if not sections or int(sections.get("evidence_count", 0)) == 0:
@@ -2505,7 +2553,7 @@ def generate_security_report(
         report_observations = [
             (i, finding)
             for i, finding in enumerate(raw_findings)
-            if finding.get("category") in ["signal", "observation", "discovery"]
+            if _is_reportable_informational_observation(finding)
         ]
         report_validation_failures = [
             (i, finding)
@@ -3608,7 +3656,13 @@ def build_report_sections(
         evidence.sort(key=lambda entry: _SEVERITY_ORDER.get(str(entry.get("severity", "")).upper(), 5))
         evidence = _trim_evidence_for_report(evidence, MAX_REPORT_FINDINGS)
         vulnerability_evidence = [
-            item for item in evidence if not str(item.get("category", "")).startswith("objective_")
+            item
+            for item in evidence
+            if not str(item.get("category", "")).startswith("objective_")
+            and (
+                item.get("category") not in _INFORMATIONAL_OBSERVATION_CATEGORIES
+                or _is_reportable_informational_observation(item)
+            )
         ]
         evidence_text = format_evidence_for_report(vulnerability_evidence)
 
@@ -3734,7 +3788,7 @@ def build_report_sections(
                     )
         finding_count = sum(1 for item in evidence if item.get("category") == "finding")
         observation_count = sum(
-            1 for item in evidence if item.get("category") in {"signal", "observation", "discovery"}
+            1 for item in evidence if _is_reportable_informational_observation(item)
         )
         validation_failure_count = sum(
             1 for item in evidence if item.get("category") == "validation_failure"

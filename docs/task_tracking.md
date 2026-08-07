@@ -8,8 +8,9 @@ Long operations degrade when a single model conversation owns all orchestration.
 
 - **Python controller**: owns plan creation/recovery, active phase selection, task activation, phase advancement, budget checks, and task closure.
 - **Short-lived agents**: create plans, build prompts, execute task objectives, create new tasks when permitted, and evaluate task/phase outcomes.
-- **SQLite plan store**: persists plans and tasks across context pruning, model failures, and continued runs.
-- **Mem0 memory**: stores semantic memories such as observations, findings, evidence summaries, and lessons.
+- **SQLite application store**: persists target/operation-scoped workflow state across context pruning, model failures,
+  continued runs, and append-only per-model metric captures in the shared `outputs/cyber_autoagent.db` database.
+- **Qdrant memory**: stores semantic memories such as observations, findings, evidence summaries, and lessons.
 
 This keeps strategic state deterministic while still using agents for security reasoning and prompt tailoring.
 
@@ -29,7 +30,7 @@ The workflow controller creates focused agents as needed:
 | `phase_evaluator` | Decide whether the active phase should continue or become terminal | No; returns a structured decision |
 
 Task and phase evaluators are review-only roles. They receive only `editor` for reading referenced artifacts and
-`mem0_retrieve` for reviewing existing memories. They do not receive shell or execution tools and must not perform the
+`memory_retrieve` for reviewing existing memories. They do not receive shell or execution tools and must not perform the
 task, phase, or operation objective while classifying existing evidence.
 
 Agents may create follow-up work with `create_tasks` when their role permits it. Plan reads/writes, task activation, active-task lookup, task closure, and uncompleted-task listing are applied directly by Python rather than agent-callable tools.
@@ -352,7 +353,8 @@ Selection happens in two passes:
 2. A prompt-builder agent sees separate `core_tools` and `optional_tools` TOON catalogs, then selects the final
    applicable optional tools and memory references. Core capabilities are supplied automatically and are not returned
    in the prompt-builder's `tools` selection. If a model nevertheless returns a core tool in either selection field,
-   workflow normalization silently removes it because the executor already receives that tool.
+   workflow normalization silently removes it because the executor already receives that tool. The controller-bound
+   `record_task_acceptance` terminal tool is also supplied automatically and is removed from either selection field.
 
 When shell is available, the prompt-builder also receives a compact `shell_commands` TOON catalog containing installed
 command names, bounded descriptions, and capabilities. The builder may select
@@ -486,7 +488,7 @@ Short-lived agents reduce dependence on preserving one huge conversation. Each w
 - module execution guidance
 - current plan and active phase objective
 - active task objective, when applicable
-- relevant mem0 items
+- relevant Qdrant memory items
 - selected tool names and short descriptions
 
 Conversation pruning still protects useful evidence and memory context, but plan/task authority lives in SQLite and Python helpers rather than prompt state.

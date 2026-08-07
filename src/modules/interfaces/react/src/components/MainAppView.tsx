@@ -148,7 +148,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
     }
     if (hasStreamBegunRef.current) return;
     // Mark as begun on first meaningful content
-    if (eventType === 'reasoning' || eventType === 'model_stream_delta' || eventType === 'content_block_delta' || eventType === 'output' || eventType === 'command' || eventType === 'tool_start' || eventType === 'tool_invocation_start') {
+    if (eventType === 'reasoning' || eventType === 'model_stream_delta' || eventType === 'content_block_delta' || eventType === 'output' || eventType === 'command' || eventType === 'tool_start' || eventType === 'tool_invocation_start' || eventType === 'tool_discovery_start' || eventType === 'tool_available' || eventType === 'tool_unavailable' || eventType === 'environment_ready') {
       hasStreamBegunRef.current = true;
       setHasStreamBegun(true);
     }

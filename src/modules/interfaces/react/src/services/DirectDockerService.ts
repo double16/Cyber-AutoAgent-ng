@@ -141,6 +141,8 @@ export class DirectDockerService extends EventEmitter {
   private _currentToolName: string | undefined = undefined;
   private pendingTimers = new Set<NodeJS.Timeout>();
   private eventParser?: Transform;
+  private bufferedStartupEvents: any[] = [];
+  private startupEventConsumerAttached = false;
 
   /**
    * Initialize the Docker service with connection to Docker daemon
@@ -149,6 +151,28 @@ export class DirectDockerService extends EventEmitter {
   constructor() {
     super();
     this.dockerClient = new Dockerode(getDockerConnectionOptions());
+  }
+
+  drainBufferedStartupEvents(): any[] {
+    const events = this.bufferedStartupEvents;
+    this.bufferedStartupEvents = [];
+    return events;
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.startupEventConsumerAttached = true;
+  }
+
+  private emitParsedEvent(event: any): void {
+    if (!this.startupEventConsumerAttached && [
+      'tool_discovery_start',
+      'tool_available',
+      'tool_unavailable',
+      'environment_ready',
+    ].includes(event?.type)) {
+      this.bufferedStartupEvents.push(event);
+    }
+    this.emit('event', event);
   }
 
   private scheduleTimer(callback: () => void, delayMs: number): NodeJS.Timeout {
@@ -242,6 +266,7 @@ export class DirectDockerService extends EventEmitter {
         '--target', params.target,
         '--max-duration', String(config.budgetMaxDuration),
         '--provider', config.modelProvider || 'bedrock',
+        '--memory-mode', config.memoryMode || 'operation',
       ];
 
       if (config.budgetMaxTokens) {
@@ -275,37 +300,11 @@ export class DirectDockerService extends EventEmitter {
       args.push('--output-dir', '/app/outputs');
       args.push('--keep-memory');  // Always keep memory for continuity
       
-      // Check for existing memory and use it if found
-      const sanitizedTarget = sanitizeTargetName(params.target);
       const outputPath = path.resolve(config.outputDir || './outputs');
-      const targetMemoryPath = path.join(outputPath, sanitizedTarget, 'memory');
-      
+
       // Ensure output directory exists
       if (!fs.existsSync(outputPath)) {
         fs.mkdirSync(outputPath, { recursive: true });
-      }
-      
-      // Check if memory exists for this target
-      const faissPath = path.join(targetMemoryPath, 'mem0.faiss');
-      const pklPath = path.join(targetMemoryPath, 'mem0.pkl');
-      
-      // Check for existing memory files
-      
-      if (fs.existsSync(faissPath) && fs.existsSync(pklPath)) {
-        // Count memory entries for better context
-        const faissSize = fs.statSync(faissPath).size;
-        const memoryContext = faissSize > 1000 ? 'knowledge base' : 'previous findings';
-        
-        this.emit('event', {
-          type: 'output',
-          content: `▶ MEMORY: Loading existing ${memoryContext} for ${params.target}`,
-          timestamp: Date.now()
-        });
-        this.emit('event', {
-          type: 'output',
-          content: `◆ Memory path: ${targetMemoryPath}`,
-          timestamp: Date.now()
-        });
       }
 
       // Add standard environment variables
@@ -462,9 +461,8 @@ export class DirectDockerService extends EventEmitter {
       if (config.evaluationModel) {
         env.push(`CYBER_AGENT_EVALUATION_MODEL=${config.evaluationModel}`);
       }
-      if (config.memoryModel) {
-        env.push(`MEM0_LLM_MODEL=${config.memoryModel}`);
-      }
+      if (config.qdrantUrl) env.push(`QDRANT_URL=${config.qdrantUrl}`);
+      if (config.qdrantApiKey) env.push(`QDRANT_API_KEY=${config.qdrantApiKey}`);
 
       // MCP Servers
       if (config.mcp.enabled && config.mcp.connections) {
@@ -944,7 +942,7 @@ export class DirectDockerService extends EventEmitter {
 
   private handleParsedDockerEvent(eventData: any): void {
     emitStatusEvents(eventData, {
-      emitEvent: event => this.emit('event', event),
+      emitEvent: event => this.emitParsedEvent(event),
       onComplete: () => {
         this.seenOperationComplete = true;
         this.emit('complete');

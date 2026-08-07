@@ -165,7 +165,7 @@ def test_evaluator_setup_models_all_providers(monkeypatch):
             evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model")),
             embedding=SimpleNamespace(model_id="embed-model"),
         ),
-        getenv=lambda name, default=None: {"OLLAMA_HOST": "http://ollama", "MEM0_EMBEDDING_MODEL": "bedrock/embed"}.get(name, default),
+        getenv=lambda name, default=None: {"OLLAMA_HOST": "http://ollama", "CYBER_AGENT_EMBEDDING_MODEL": "bedrock/embed"}.get(name, default),
         get_default_region=lambda: "us-east-1",
     )
     monkeypatch.setattr(eval_mod, "get_config_manager", lambda: manager)

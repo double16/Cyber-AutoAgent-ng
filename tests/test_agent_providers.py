@@ -57,10 +57,8 @@ def test_agent_creation_litellm(
     mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
-    mock_cfg.get_mem0_service_config.return_value = {
-        "vector_store": {"provider": "faiss", "config": {"path": "test"}},
-        "embedder": {"provider": "aws_bedrock", "config": {"model": "test"}},
-        "llm": {"provider": "aws_bedrock", "config": {"model": "test"}},
+    mock_cfg.get_qdrant_memory_config.return_value = {
+        "embedding_provider": "bedrock", "embedding_model": "test", "embedding_dimensions": 1024,
     }
     mock_get_cfg.return_value = mock_cfg
 
@@ -97,10 +95,8 @@ def test_agent_creation_unsupported_provider_raises(
     mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
-    mock_cfg.get_mem0_service_config.return_value = {
-        "vector_store": {"provider": "faiss", "config": {"path": "test"}},
-        "embedder": {"provider": "aws_bedrock", "config": {"model": "test"}},
-        "llm": {"provider": "aws_bedrock", "config": {"model": "test"}},
+    mock_cfg.get_qdrant_memory_config.return_value = {
+        "embedding_provider": "bedrock", "embedding_model": "test", "embedding_dimensions": 1024,
     }
     mock_get_cfg.return_value = mock_cfg
     mock_hooks.side_effect = FakeReactHooks

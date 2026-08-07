@@ -73,7 +73,7 @@ const truncateText = (value: string, maxWidth?: number): string => {
   if (maxWidth <= 1) {
     return value.slice(0, maxWidth);
   }
-  return `${value.slice(0, maxWidth - 1)}…`;
+  return `${value.slice(0, maxWidth - 1).trimEnd()}…`;
 };
 
 export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
@@ -133,10 +133,15 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
   };
 
   const statusSuffix = (startTime && !isRecordingMode) ? ` [${formatElapsed(elapsedSeconds)}]` : '';
-  const displayMessage = (taskTitle ? `${taskTitle} - ` : '') + (message || getContextMessage(context, phraseIndex));
+  const statusMessage = (message || getContextMessage(context, phraseIndex)) + statusSuffix;
   const spinnerWidth = enabled ? 1 : '[BUSY]'.length;
   const textWidth = maxWidth ? Math.max(0, maxWidth - spinnerWidth - 1) : undefined;
-  const displayText = truncateText(`${displayMessage}${statusSuffix}`, textWidth);
+  const titleWidth = taskTitle && textWidth !== undefined
+    ? Math.max(0, textWidth - statusMessage.length - 3)
+    : undefined;
+  const displayTitle = taskTitle ? truncateText(taskTitle, titleWidth) : '';
+  const displayMessage = displayTitle ? `${displayTitle} - ${statusMessage}` : statusMessage;
+  const displayText = truncateText(displayMessage, textWidth);
 
   return (
     <Box>

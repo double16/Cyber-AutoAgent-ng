@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 import yaml
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
 
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import print_status
@@ -26,55 +28,55 @@ from modules.config.system.logger import (
 )
 
 
-def clean_operation_memory(operation_id: str, target_name: str = None):
-    """Clean up memory data for a specific operation.
-
-    Args:
-        operation_id: The operation identifier
-        target_name: The sanitized target name (optional, for unified output structure)
-    """
+def clean_operation_memory(operation_id: str, target_values: Optional[List[str]] = None):
+    """Delete semantic-memory points for one operation without removing the database."""
     logger = get_logger("Config.Environment")
+    raw_targets = [target_values] if isinstance(target_values, str) else (target_values or [])
+    resolved_targets = [
+        str(value).strip()
+        for value in raw_targets
+        if str(value).strip()
+    ]
     logger.debug(
-        "clean_operation_memory called with operation_id=%s, target_name=%s",
+        "Cleaning Qdrant memory for operation_id=%s target_values=%s",
         operation_id,
-        target_name,
+        resolved_targets,
     )
-
-    if not target_name:
-        logger.warning("No target_name provided, skipping memory cleanup")
+    if not operation_id:
+        logger.warning("No operation ID provided, skipping memory cleanup")
         return
-
-    # Unified output structure - per-target memory
-    output_dir = get_default_base_dir()
-    memory_path = os.path.join(
-        output_dir, target_name, "memory", f"mem0_faiss_{target_name}"
-    )
-    logger.debug("Checking memory path: %s", memory_path)
-
-    if os.path.exists(memory_path):
-        try:
-            # Safety check - ensure we're only removing memory directories
-            if "mem0_faiss_" not in memory_path:
-                logger.error(
-                    "SAFETY CHECK FAILED: Path does not contain expected memory patterns: %s",
-                    memory_path,
-                )
-                return
-
-            logger.debug("About to remove memory path: %s", memory_path)
-            if os.path.isdir(memory_path):
-                shutil.rmtree(memory_path)
-            else:
-                os.remove(memory_path)
-
-            logger.info("Cleaned up operation memory: %s", memory_path)
-            print_status(f"Cleaned up operation memory: {memory_path}", "SUCCESS")
-
-        except Exception as e:
-            logger.error("Failed to clean %s: %s", memory_path, e)
-            print_status(f"Failed to clean {memory_path}: {e}", "ERROR")
-    else:
-        logger.debug("Memory path does not exist: %s", memory_path)
+    if not resolved_targets:
+        logger.warning("No target values provided, skipping memory cleanup")
+        return
+    try:
+        url = str(os.getenv("QDRANT_URL", "")).strip()
+        client = (
+            QdrantClient(url=url, api_key=os.getenv("QDRANT_API_KEY") or None)
+            if url
+            else QdrantClient(path=os.path.join(get_default_base_dir(), "qdrant"))
+        )
+        collection = os.getenv("QDRANT_COLLECTION", "cyber_autoagent_memories")
+        if not client.collection_exists(collection):
+            logger.debug("Qdrant collection %s does not exist; no memory to clean", collection)
+            return
+        selector = qdrant_models.FilterSelector(
+            filter=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="target_values",
+                        match=qdrant_models.MatchAny(any=resolved_targets),
+                    ),
+                    qdrant_models.FieldCondition(
+                        key="operation_id",
+                        match=qdrant_models.MatchValue(value=operation_id),
+                    )
+                ]
+            )
+        )
+        client.delete(collection_name=collection, points_selector=selector, wait=True)
+        logger.info("Cleaned Qdrant memory for operation %s", operation_id)
+    except Exception as error:
+        logger.error("Failed to clean Qdrant memory for %s: %s", operation_id, error)
 
 
 _STARTUP_FAILURE_PATTERNS = tuple(
@@ -202,21 +204,8 @@ def _get_shell_command_path(command: str, canary: Any = None) -> Optional[str]:
     return health.path if health.available else None
 
 
-def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
+def auto_setup() -> List[str]:
     """Setup directories and discover available cyber tools"""
-    # Disable Mem0 telemetry to prevent PostHog connection attempts
-    os.environ.setdefault("MEM0_TELEMETRY", "false")
-    try:
-        import mem0.memory.telemetry as _mem0_telemetry
-        if hasattr(_mem0_telemetry, "MEM0_TELEMETRY"):
-            setattr(_mem0_telemetry, "MEM0_TELEMETRY", False)
-        if hasattr(_mem0_telemetry, "client_telemetry"):
-            client_telemetry = _mem0_telemetry.client_telemetry
-            if hasattr(client_telemetry, "posthog"):
-                client_telemetry.posthog.disabled = True
-    except Exception:
-        pass
-
     # Disable RAGAS evaluator tracking
     os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
@@ -242,10 +231,6 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
     except Exception as e:
         # Log any other issues but continue
         print_status(f"Issue with tools directory: {e} - continuing", "WARNING")
-
-    # Each operation uses its own isolated memory path: /tmp/mem0_{operation_id}
-    if skip_mem0_cleanup:
-        print_status("Using existing memory store", "INFO")
 
     # httpx has two packages: python and projectdiscovery, we want projectdiscovery
     try:

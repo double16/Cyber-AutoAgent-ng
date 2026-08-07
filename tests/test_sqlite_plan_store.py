@@ -3,13 +3,13 @@ import sqlite3
 
 import pytest
 
-from modules.tools.memory import AcceptanceResult, CoverageResult, OperationPlan, PlanPhase, PlanStore, Task
+from modules.tools.memory import AcceptanceResult, CoverageResult, OperationPlan, PlanPhase, SQLiteApplicationStore, Task
 from tests.helpers.acceptance import make_acceptance
 
 
 def test_sqlite_plan_store_init(tmp_path):
     db_path = str(tmp_path / "test.db")
-    PlanStore(db_path)
+    SQLiteApplicationStore(db_path, "target")
     assert os.path.exists(db_path)
 
     # Check if tables were created
@@ -26,7 +26,7 @@ def test_sqlite_plan_store_init(tmp_path):
 
 
 def test_sqlite_plan_store_persists_immutable_preflight_results(tmp_path):
-    store = PlanStore(str(tmp_path / "test.db"))
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
     initial = {
         "target_id": "target-1",
         "target": "service.example",
@@ -48,7 +48,18 @@ def test_sqlite_plan_store_persists_immutable_preflight_results(tmp_path):
 
 
 def test_sqlite_plan_store_tracks_acceptance_memory_publication(tmp_path):
-    store = PlanStore(str(tmp_path / "test.db"))
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
+    store.store_task(
+        "op-1",
+        Task(
+            task_uid="task-1",
+            title="Task",
+            objective="Test publication tracking",
+            acceptance=make_acceptance("task-1"),
+            phase=1,
+            status="pending",
+        ),
+    )
 
     assert store.has_acceptance_memory_publication("op-1", "task-1", "publication-1") is False
 
@@ -64,7 +75,7 @@ def test_sqlite_plan_store_tracks_acceptance_memory_publication(tmp_path):
 
 def test_sqlite_plan_store_plan_operations(tmp_path):
     db_path = str(tmp_path / "test.db")
-    store = PlanStore(db_path)
+    store = SQLiteApplicationStore(db_path, "target")
     operation_id = "test-op"
 
     phases = [
@@ -119,7 +130,7 @@ def test_sqlite_plan_store_plan_operations(tmp_path):
 
 def test_sqlite_plan_store_task_operations(tmp_path):
     db_path = str(tmp_path / "test.db")
-    store = PlanStore(db_path)
+    store = SQLiteApplicationStore(db_path, "target")
     operation_id = "test-op"
 
     task = Task(
@@ -167,7 +178,7 @@ def test_sqlite_plan_store_task_operations(tmp_path):
 
 
 def test_sqlite_finding_ledger_operations(tmp_path):
-    store = PlanStore(str(tmp_path / "test.db"))
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
     store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
     store.link_finding_source_task("op", "finding-1", "source-task")
     store.link_finding_source_task("op", "finding-1", "source-task")
@@ -187,7 +198,7 @@ def test_sqlite_finding_ledger_operations(tmp_path):
 
 
 def test_sqlite_objective_validation_ledger_operations(tmp_path):
-    store = PlanStore(str(tmp_path / "objective.db"))
+    store = SQLiteApplicationStore(str(tmp_path / "objective.db"), "target")
     candidate = {"objective_type": "flag", "candidate_value": "FLAG{abc}"}
     store.store_objective_candidate("op", "candidate-1", "fingerprint", candidate, "task-1")
 
@@ -204,7 +215,7 @@ def test_sqlite_objective_validation_ledger_operations(tmp_path):
 
 
 def test_sqlite_finding_ledger_persists_one_taxonomy_annotation(tmp_path):
-    store = PlanStore(str(tmp_path / "test.db"))
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
     store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
     annotation = {
         "status": "completed",
@@ -221,7 +232,7 @@ def test_sqlite_finding_ledger_persists_one_taxonomy_annotation(tmp_path):
 
 
 def test_sqlite_finding_ledger_merges_final_attack_enrichment_without_changing_cwe(tmp_path):
-    store = PlanStore(str(tmp_path / "test.db"))
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
     store.store_finding_candidate(
         "op",
         "finding-1",
@@ -260,7 +271,7 @@ def test_sqlite_finding_ledger_merges_final_attack_enrichment_without_changing_c
 
 
 def test_sqlite_finding_ledger_allows_failed_attack_enrichment_retry(tmp_path):
-    store = PlanStore(str(tmp_path / "test.db"))
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
     store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
 
     assert store.update_finding_attack_enrichment("op", "finding-1", {"status": "failed"}) is True
@@ -276,7 +287,7 @@ def test_sqlite_finding_ledger_allows_failed_attack_enrichment_retry(tmp_path):
 
 def test_sqlite_plan_store_multiple_tasks(tmp_path):
     db_path = str(tmp_path / "test.db")
-    store = PlanStore(db_path)
+    store = SQLiteApplicationStore(db_path, "target")
     operation_id = "test-op"
 
     for i in range(3):
@@ -297,7 +308,7 @@ def test_sqlite_plan_store_multiple_tasks(tmp_path):
 
 
 def test_sqlite_plan_store_persists_acceptance_results_and_freezes_active_contract(tmp_path):
-    store = PlanStore(str(tmp_path / "acceptance.db"))
+    store = SQLiteApplicationStore(str(tmp_path / "acceptance.db"), "target")
     task = Task(
         task_uid="task-acceptance",
         title="Map endpoints",
@@ -366,6 +377,92 @@ def test_sqlite_plan_store_persists_acceptance_results_and_freezes_active_contra
 
 def test_sqlite_plan_store_get_nonexistent(tmp_path):
     db_path = str(tmp_path / "test.db")
-    store = PlanStore(db_path)
+    store = SQLiteApplicationStore(db_path, "target")
     assert store.get_plan("nonexistent") is None
     assert store.get_tasks("nonexistent") == []
+
+
+def test_sqlite_application_store_scopes_same_operation_to_exact_logical_target(tmp_path):
+    db_path = str(tmp_path / "cyber_autoagent.db")
+    first = SQLiteApplicationStore(db_path, "https://example.com/first")
+    second = SQLiteApplicationStore(db_path, "https://example.com/second")
+    operation_id = "OP_SAME"
+    first.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="First target",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(id=1, title="First", status="pending")],
+        ),
+    )
+    second.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Second target",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(id=1, title="Second", status="pending")],
+        ),
+    )
+
+    assert first.get_plan(operation_id).objective == "First target"
+    assert second.get_plan(operation_id).objective == "Second target"
+    assert first.has_operation(operation_id) is True
+    assert SQLiteApplicationStore(db_path, "https://example.com/missing").has_operation(operation_id) is False
+
+
+def _model_metric_row(**overrides):
+    row = {
+        "provider": "litellm",
+        "model": "test-model",
+        "context_window_tokens": 48_000,
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "cache_read_tokens": 20,
+        "cache_write_tokens": 5,
+        "total_tokens": 150,
+        "cost": 0.123,
+        "inference_time_ms": 456.0,
+        "model_calls": 3,
+        "correction_loops": 1,
+        "efficiency": 75.0,
+    }
+    return {**row, **overrides}
+
+
+def test_sqlite_application_store_appends_timestamped_model_metric_captures(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "https://example.com")
+    operation_id = "OP_CONTINUED"
+    store.append_operation_model_metrics(
+        operation_id,
+        "2026-08-06T12:00:00.000001+00:00",
+        [_model_metric_row()],
+    )
+    store.append_operation_model_metrics(
+        operation_id,
+        "2026-08-06T12:10:00.000001+00:00",
+        [_model_metric_row(input_tokens=200, output_tokens=50, total_tokens=250)],
+    )
+
+    rows = store.list_operation_model_metrics(operation_id)
+    assert [row["captured_at"] for row in rows] == [
+        "2026-08-06T12:00:00.000001+00:00",
+        "2026-08-06T12:10:00.000001+00:00",
+    ]
+    assert [row["total_tokens"] for row in rows] == [150, 250]
+
+
+def test_sqlite_application_store_model_metrics_are_target_scoped_and_validated(tmp_path):
+    db_path = str(tmp_path / "cyber_autoagent.db")
+    first = SQLiteApplicationStore(db_path, "https://example.com/one")
+    second = SQLiteApplicationStore(db_path, "https://example.com/two")
+    first.append_operation_model_metrics("OP_1", "2026-08-06T12:00:00.000001+00:00", [_model_metric_row()])
+
+    assert second.list_operation_model_metrics("OP_1") == []
+    with pytest.raises(ValueError, match="total_tokens"):
+        second.append_operation_model_metrics(
+            "OP_1",
+            "2026-08-06T12:00:00.000001+00:00",
+            [_model_metric_row(total_tokens=1)],
+        )

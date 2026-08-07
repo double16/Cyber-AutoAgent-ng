@@ -18,51 +18,20 @@ from modules.handlers.utils import get_output_path, sanitize_target_name
 class TestOutputDisplayIntegration:
     """Test output display integration with unified output structure."""
 
-    def test_memory_location_display_faiss(self):
-        """Test memory location display for FAISS backend."""
-        target_name = "example.com"
-
+    def test_memory_location_display_local_qdrant(self):
+        """Test the default filesystem-backed Qdrant location."""
         with patch.dict(os.environ, {}, clear=True):
-            # Simulate cyberautoagent.py logic
-            if os.getenv("MEM0_API_KEY"):
-                memory_location = "Mem0 Platform (cloud)"
-            elif os.getenv("OPENSEARCH_HOST"):
-                memory_location = f"OpenSearch: {os.getenv('OPENSEARCH_HOST')}"
-            else:
-                memory_location = f"./outputs/{target_name}/memory"
+            memory_location = os.getenv("QDRANT_URL") or "./outputs/qdrant"
 
-            assert memory_location == f"./outputs/{target_name}/memory"
+        assert memory_location == "./outputs/qdrant"
 
-    def test_memory_location_display_mem0_platform(self):
-        """Test memory location display for Mem0 Platform."""
-        target_name = "example.com"
+    def test_memory_location_display_qdrant_service(self):
+        """Test configured Qdrant service location."""
+        qdrant_url = "http://qdrant:6333"
+        with patch.dict(os.environ, {"QDRANT_URL": qdrant_url}, clear=True):
+            memory_location = os.getenv("QDRANT_URL") or "./outputs/qdrant"
 
-        with patch.dict(os.environ, {"MEM0_API_KEY": "test-key"}, clear=True):
-            # Simulate cyberautoagent.py logic
-            if os.getenv("MEM0_API_KEY"):
-                memory_location = "Mem0 Platform (cloud)"
-            elif os.getenv("OPENSEARCH_HOST"):
-                memory_location = f"OpenSearch: {os.getenv('OPENSEARCH_HOST')}"
-            else:
-                memory_location = f"./outputs/{target_name}/memory"
-
-            assert memory_location == "Mem0 Platform (cloud)"
-
-    def test_memory_location_display_opensearch(self):
-        """Test memory location display for OpenSearch."""
-        target_name = "example.com"
-        opensearch_host = "https://search-domain.region.es.amazonaws.com"
-
-        with patch.dict(os.environ, {"OPENSEARCH_HOST": opensearch_host}, clear=True):
-            # Simulate cyberautoagent.py logic
-            if os.getenv("MEM0_API_KEY"):
-                memory_location = "Mem0 Platform (cloud)"
-            elif os.getenv("OPENSEARCH_HOST"):
-                memory_location = f"OpenSearch: {os.getenv('OPENSEARCH_HOST')}"
-            else:
-                memory_location = f"./outputs/{target_name}/memory"
-
-            assert memory_location == f"OpenSearch: {opensearch_host}"
+        assert memory_location == qdrant_url
 
     def test_evidence_location_display(self):
         """Test evidence location display with unified output structure."""
@@ -142,24 +111,17 @@ class TestEnvironmentLoggingIntegration:
             target_name = "example.com"
             operation_id = "OP_20250718_123456"
 
-            # Create memory directory
-            memory_dir = os.path.join(temp_dir, "outputs", target_name, "memory")
-            faiss_dir = os.path.join(memory_dir, f"mem0_faiss_{target_name}")
-            os.makedirs(faiss_dir, exist_ok=True)
-
-            # Create test file
-            test_file = os.path.join(faiss_dir, "test.faiss")
-            with open(test_file, "w") as f:
-                f.write("test data")
-
             original_cwd = os.getcwd()
             os.chdir(temp_dir)
 
             try:
                 # Capture log messages
-                with patch("modules.config.system.environment.get_logger") as mock_logger:
+                with patch("modules.config.system.environment.get_logger") as mock_logger, patch(
+                    "modules.config.system.environment.QdrantClient"
+                ) as mock_client_cls:
                     mock_log = MagicMock()
                     mock_logger.return_value = mock_log
+                    mock_client_cls.return_value.collection_exists.return_value = True
 
                     # Call cleanup
                     clean_operation_memory(operation_id, target_name)
@@ -180,21 +142,43 @@ class TestEnvironmentLoggingIntegration:
             finally:
                 os.chdir(original_cwd)
 
-    def test_clean_operation_memory_no_target_warning(self):
-        """Test that cleanup logs warning when no target_name provided."""
+    def test_clean_operation_memory_requires_target_values(self):
+        """Cleanup fails closed when mandatory target scope is unavailable."""
         operation_id = "OP_20250718_123456"
 
-        with patch("modules.config.system.environment.get_logger") as mock_logger:
+        with patch("modules.config.system.environment.get_logger") as mock_logger, patch(
+            "modules.config.system.environment.QdrantClient"
+        ) as mock_client_cls:
             mock_log = MagicMock()
             mock_logger.return_value = mock_log
-
-            # Call cleanup without target_name
+            # Call cleanup without target values.
             clean_operation_memory(operation_id, None)
 
-            # Verify warning was logged
+            mock_client_cls.assert_not_called()
             mock_log.warning.assert_called_once()
-            warning_call = mock_log.warning.call_args[0][0]
-            assert "No target_name provided" in warning_call
+
+    def test_clean_operation_memory_requires_operation_id(self):
+        """Cleanup fails closed when operation provenance is unavailable."""
+        with patch("modules.config.system.environment.get_logger") as mock_logger, patch(
+            "modules.config.system.environment.QdrantClient"
+        ) as mock_client_cls:
+            clean_operation_memory("", ["example.com"])
+
+            mock_client_cls.assert_not_called()
+            mock_logger.return_value.warning.assert_called_once()
+
+    def test_clean_operation_memory_missing_collection_is_noop(self, monkeypatch):
+        """An empty service does not create a collection during cleanup."""
+        monkeypatch.setenv("QDRANT_URL", "http://qdrant:6333")
+        with patch("modules.config.system.environment.get_logger") as mock_logger, patch(
+            "modules.config.system.environment.QdrantClient"
+        ) as mock_client_cls:
+            mock_client_cls.return_value.collection_exists.return_value = False
+            clean_operation_memory("OP_1", ["example.com"])
+
+            mock_client_cls.assert_called_once_with(url="http://qdrant:6333", api_key=None)
+            mock_client_cls.return_value.delete.assert_not_called()
+            mock_logger.return_value.debug.assert_called()
 
     def test_clean_operation_memory_error_logging(self):
         """Test that cleanup logs errors properly."""
@@ -205,23 +189,16 @@ class TestEnvironmentLoggingIntegration:
             mock_log = MagicMock()
             mock_logger.return_value = mock_log
 
-            # Mock shutil.rmtree to raise an exception
             with patch(
-                "modules.config.system.environment.shutil.rmtree",
+                "modules.config.system.environment.QdrantClient",
                 side_effect=OSError("Permission denied"),
             ):
-                with patch(
-                    "modules.config.system.environment.os.path.exists", return_value=True
-                ):
-                    # Call cleanup
-                    clean_operation_memory(operation_id, target_name)
+                clean_operation_memory(operation_id, target_name)
 
-                    # Verify error was logged
-                    mock_log.error.assert_called()
-                    error_call = mock_log.error.call_args[0]
-                    assert "Failed to clean" in error_call[0]
-                    # The actual error may be different depending on the mock setup
-                    assert len(error_call) >= 2  # Should have path and error message
+            mock_log.error.assert_called()
+            error_call = mock_log.error.call_args[0]
+            assert "Failed to clean" in error_call[0]
+            assert len(error_call) >= 2
 
 
 class TestPathConsistency:
@@ -229,21 +206,11 @@ class TestPathConsistency:
 
     def test_memory_path_consistency(self):
         """Test that memory paths are consistent between modules."""
-        target_name = "example.com"
+        memory_tools_path = os.path.join("outputs", "qdrant")
+        cleanup_path = os.path.join("outputs", "qdrant")
+        display_path = "./outputs/qdrant"
 
-        # Path from memory_tools logic
-        memory_tools_path = os.path.join("outputs", target_name, "memory")
-
-        # Path from cleanup logic
-        cleanup_path = os.path.join(
-            "outputs", target_name, "memory", f"mem0_faiss_{target_name}"
-        )
-
-        # Path from display logic
-        display_path = f"./outputs/{target_name}/memory"
-
-        # Verify they're all consistent
-        assert memory_tools_path in cleanup_path
+        assert memory_tools_path == cleanup_path
         assert memory_tools_path == display_path.lstrip("./")
 
     def test_operation_path_consistency(self):

@@ -29,7 +29,7 @@ from tests.helpers.acceptance import make_acceptance
 def memory_client():
     with patch("src.modules.tools.memory._ensure_memory_client") as ensure:
         client = MagicMock()
-        client.mem0.search.return_value = {"results": []}
+        client.search.return_value = []
         client.store_memory.return_value = {"results": [{"id": "m-new"}]}
         ensure.return_value = client
         yield client
@@ -66,9 +66,9 @@ def test_store_knowledge_is_internal_category(memory_client, operation_ids):
 
 
 def test_typed_memory_cleaning_and_duplicates(memory_client, operation_ids):
-    memory_client.mem0.search.return_value = {
-        "results": [{"id": "m-existing", "memory": "Line one Line two", "score": 0.01}]
-    }
+    memory_client.search.return_value = [
+        {"id": "m-existing", "memory": "Line one Line two", "score": 0.01}
+    ]
 
     result = json.loads(store_observation("Line one\nLine two"))
 
@@ -81,7 +81,7 @@ def test_typed_memory_cleaning_and_duplicates(memory_client, operation_ids):
 
 
 def test_duplicate_without_id_creates_referenceable_memory(memory_client, operation_ids):
-    memory_client.mem0.search.return_value = {"results": [{"memory": "Same observation"}]}
+    memory_client.search.return_value = [{"memory": "Same observation"}]
 
     result = json.loads(store_observation("Same observation"))
 
@@ -100,9 +100,9 @@ def test_store_memory_entry_accepts_direct_id_envelope(memory_client, operation_
 
 def test_store_memory_entry_recovers_missing_write_id(memory_client, operation_ids):
     memory_client.store_memory.return_value = {"results": []}
-    memory_client.mem0.search.side_effect = [
-        {"results": []},
-        {"results": [{"id": "m-recovered", "memory": "Recover this observation"}]},
+    memory_client.search.side_effect = [
+        [],
+        [{"id": "m-recovered", "memory": "Recover this observation"}],
     ]
 
     result = json.loads(store_observation("Recover this observation"))
@@ -119,7 +119,7 @@ def test_store_memory_entry_rejects_unrecoverable_id(memory_client, operation_id
 
 def test_store_memory_entry_reports_recovery_search_failure(memory_client, operation_ids):
     memory_client.store_memory.return_value = {"results": []}
-    memory_client.mem0.search.side_effect = [{"results": []}, RuntimeError("search unavailable")]
+    memory_client.search.side_effect = [[], RuntimeError("search unavailable")]
 
     with pytest.raises(RuntimeError, match="durable ID could not be recovered"):
         store_observation("Recovery search failure")
@@ -155,7 +155,7 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     )
     plan_store.get_tasks.return_value = [source_task]
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._get_plan_current_phase", return_value=3),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
@@ -207,7 +207,7 @@ def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Pat
     )
     plan_store.get_tasks.return_value = [source_task]
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         result = json.loads(
@@ -250,7 +250,7 @@ def test_store_finding_leaves_taxonomy_annotation_to_the_workflow(memory_client,
     plan_store.get_finding_by_fingerprint.return_value = None
     plan_store.get_tasks.return_value = []
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._get_plan_current_phase", return_value=1),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
@@ -322,7 +322,7 @@ def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, o
         lambda _op_id, _task_uid, results: acceptance_results.extend(results)
     )
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
@@ -346,7 +346,7 @@ def test_differential_confirmation_requires_control(tmp_path: Path, operation_id
     plan_store.get_finding.return_value = {"verification_task_uid": "task-1"}
     plan_store.get_tasks.return_value = [SimpleNamespace(status="active", task_uid="task-1")]
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         with pytest.raises(ValueError, match="negative-control"):
@@ -380,7 +380,7 @@ def test_not_confirmed_validation_materializes_negative_acceptance(tmp_path: Pat
         lambda _op_id, _task_uid, results: stored_results.extend(results)
     )
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
@@ -427,7 +427,7 @@ def test_store_objective_candidate_creates_separate_validation_task(memory_clien
         objective="Find the flag. Flag format is: FLAG{...} and has length 9."
     )
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._get_plan_current_phase", return_value=5),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
@@ -465,7 +465,7 @@ def test_store_objective_candidate_validates_inputs_and_is_idempotent(
     plan_store = MagicMock()
     plan_store.get_objective_candidate_by_fingerprint.return_value = existing
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         result = json.loads(store_objective_candidate(
@@ -494,7 +494,7 @@ def test_store_objective_candidate_rejects_unproven_or_constraint_violating_valu
         objective="Find the flag. Flag format is: FLAG{...} and has length 9."
     )
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         with pytest.raises(ValueError, match="evidence_artifacts"):
@@ -511,7 +511,7 @@ def test_store_objective_candidate_rejects_unproven_or_constraint_violating_valu
 def test_objective_constraint_helpers_cover_optional_constraints(operation_ids):
     plan_store = MagicMock()
     plan_store.get_plan.return_value = SimpleNamespace(objective="Capture a flag without a prescribed shape")
-    with patch("src.modules.tools.memory._get_plan_store", return_value=plan_store):
+    with patch("src.modules.tools.memory._get_database_store", return_value=plan_store):
         assert mod._objective_constraints("flag") == {}
         assert mod._objective_constraints("custom") == {}
 
@@ -567,7 +567,7 @@ def test_objective_validation_rejects_format_mismatch_without_changing_finding(
         lambda _op_id, _task_uid, results: stored_results.extend(results)
     )
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
@@ -631,7 +631,7 @@ def test_objective_validation_requires_eighty_percent_confidence(
     plan_store.get_tasks.return_value = [task]
     plan_store.get_acceptance_results.return_value = []
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
@@ -681,7 +681,7 @@ def test_objective_validation_rejects_candidate_absent_from_evidence(
     plan_store.get_tasks.return_value = [task]
     plan_store.get_acceptance_results.return_value = []
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
@@ -728,7 +728,7 @@ def test_objective_validation_accepts_valid_candidate(memory_client, operation_i
     plan_store.get_tasks.return_value = [task]
     plan_store.get_acceptance_results.return_value = []
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
@@ -748,7 +748,7 @@ def test_objective_validation_rejects_unknown_candidate_wrong_owner_and_bad_valu
     artifact.write_text("FLAG{abc}", encoding="utf-8")
     plan_store = MagicMock()
     plan_store.get_objective_candidate.return_value = None
-    with patch("src.modules.tools.memory._get_plan_store", return_value=plan_store):
+    with patch("src.modules.tools.memory._get_database_store", return_value=plan_store):
         with pytest.raises(ValueError, match="Unknown objective candidate"):
             record_objective_validation("missing", "confirmed", 90, "Valid", [str(artifact)], "validator")
 
@@ -758,7 +758,7 @@ def test_objective_validation_rejects_unknown_candidate_wrong_owner_and_bad_valu
     }
     plan_store.get_tasks.return_value = [SimpleNamespace(status="active", task_uid="other-task")]
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         with pytest.raises(ValueError, match="active verification task"):
@@ -766,7 +766,7 @@ def test_objective_validation_rejects_unknown_candidate_wrong_owner_and_bad_valu
 
     plan_store.get_tasks.return_value = [SimpleNamespace(status="active", task_uid="task-1")]
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         with pytest.raises(ValueError, match="outcome must"):
@@ -808,7 +808,7 @@ def test_finalize_objective_validation_uses_objective_category(operation_ids):
         "resolution": None,
     }
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
     ):
         resolution = finalize_objective_validation(task, "done", "Objective confirmed")
@@ -849,7 +849,7 @@ def test_rejected_objective_validation_creates_one_actionable_follow_up(
     }
     plan_store.get_tasks.return_value = [task]
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
         resolution = finalize_objective_validation(task, "done", "Format mismatch")
@@ -883,7 +883,7 @@ def test_objective_validation_helpers_and_existing_resolution_are_idempotent(ope
         "validation_data": {"outcome": "inconclusive"},
         "resolution": "objective_rejected",
     }
-    with patch("src.modules.tools.memory._get_plan_store", return_value=plan_store):
+    with patch("src.modules.tools.memory._get_database_store", return_value=plan_store):
         assert mod.objective_validation_submitted(validation_task) is True
         assert mod.objective_validation_outcome(validation_task) == "inconclusive"
         assert finalize_objective_validation(validation_task, "done", "Done") == "objective_rejected"
@@ -910,7 +910,7 @@ def test_finalize_finding_validation_promotes_only_approved_confirmation(operati
         "resolution": None,
     }
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
     ):
         resolution = finalize_finding_validation(task, "done", "Evidence approved")
@@ -937,7 +937,7 @@ def test_finalize_rejected_confirmation_becomes_validation_failure(operation_ids
         "resolution": None,
     }
     with (
-        patch("src.modules.tools.memory._get_plan_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
     ):
         resolution = finalize_finding_validation(task, "partial_failure", "Artifact did not support the claim")

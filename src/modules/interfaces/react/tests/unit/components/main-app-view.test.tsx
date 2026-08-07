@@ -49,6 +49,9 @@ jest.unstable_mockModule('../../../src/components/Terminal.js', () => ({
                 onEvent({type: 'task_started', title: 'Late task title'});
             }}>terminal:late-task</button>
             <button onClick={() => {
+                onEvent({type: 'tool_discovery_start', message: 'Discovering tools'});
+            }}>terminal:discovery</button>
+            <button onClick={() => {
                 onEvent({type: 'task_done', title: 'Late task title'});
             }}>terminal:task-done</button>
             <button onClick={() => {
@@ -313,6 +316,32 @@ describe('MainAppView', () => {
             view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:task-deferred'))!.props.onClick();
         });
         expect(textFromTree(view.toJSON())).not.toContain('Late task title');
+    });
+
+    it('treats a tool-discovery event as the start of stream activity', async () => {
+        const {MainAppView} = await load();
+        const props = createProps({
+            appState: {
+                activeOperation: {id: 'op-discovery', status: 'running', description: 'Discovering tools'},
+                executionService: {name: 'service'},
+                isDockerServiceAvailable: true,
+            },
+        });
+
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(<MainAppView {...props as any}/>);
+            await Promise.resolve();
+        });
+        await act(async () => {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        });
+        expect(textFromTree(view.toJSON())).toContain('footer:Discovering tools:connected');
+
+        act(() => {
+            view.root.findAllByType('button').find(button => textFromTree(button.props.children).includes('terminal:discovery'))!.props.onClick();
+        });
+        expect(textFromTree(view.toJSON())).toContain('footer::connected');
     });
 
     it('clears deferred stream mount timer on unmount', async () => {

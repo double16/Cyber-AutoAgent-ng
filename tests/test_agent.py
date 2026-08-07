@@ -4,7 +4,6 @@ import os
 
 # Add src to path for imports
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -15,7 +14,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from modules.agents.cyber_autoagent import (
     AgentRuntimeResources,
-    check_existing_memories,
     create_agent,
 )
 import modules.agents.cyber_autoagent as cyber_agent_module
@@ -188,10 +186,10 @@ class TestMemoryConfig:
         mock_init_memory.assert_called_once()
         config = mock_init_memory.call_args[0][0]
 
-        # Verify local config structure
-        assert config["embedder"]["provider"] == "ollama"
-        assert config["llm"]["provider"] == "ollama"
-        assert "ollama_base_url" in config["embedder"]["config"]
+        assert config["embedding_provider"] == "ollama"
+        assert config["ollama_base_url"]
+        assert config["target_values"] == ["test.com"]
+        assert config["memory_mode"] == "operation"
 
     @patch("modules.agents.cyber_autoagent.initialize_memory_system")
     @patch("modules.agents.cyber_autoagent.get_memory_client")
@@ -226,10 +224,9 @@ class TestMemoryConfig:
         mock_init_memory.assert_called_once()
         config = mock_init_memory.call_args[0][0]
 
-        # Verify remote config structure
-        assert config["embedder"]["provider"] == "aws_bedrock"
-        assert config["llm"]["provider"] == "aws_bedrock"
-        assert "aws_region" in config["embedder"]["config"]
+        assert config["embedding_provider"] == "bedrock"
+        assert config["aws_region"] == "us-east-1"
+        assert config["target_values"] == ["test.com"]
 
 
 class TestServerValidation:
@@ -457,116 +454,6 @@ class TestCreateAgent:
             create_agent(target="test.com", objective="test objective", config=config)
 
         mock_handle_error.assert_called_once()
-
-
-class TestCheckExistingMemories:
-    """Test the check_existing_memories function"""
-
-    @patch("modules.agents.cyber_autoagent.os.environ.get")
-    def test_check_existing_memories_mem0_platform(self, mock_env_get):
-        """Test check_existing_memories with Mem0 Platform"""
-        mock_env_get.side_effect = lambda key, default=None: (
-            "test-key" if key == "MEM0_API_KEY" else default
-        )
-
-        result = check_existing_memories("test.com", "bedrock")
-        assert result is True
-
-    @patch("modules.agents.cyber_autoagent.os.environ.get")
-    def test_check_existing_memories_opensearch(self, mock_env_get):
-        """Test check_existing_memories with OpenSearch"""
-        mock_env_get.side_effect = lambda key, default=None: (
-            "test-host" if key == "OPENSEARCH_HOST" else default
-        )
-
-        result = check_existing_memories("test.com", "bedrock")
-        assert result is True
-
-    @patch("modules.agents.cyber_autoagent.os.environ.get")
-    @patch("modules.agents.cyber_autoagent.os.path.exists")
-    @patch("modules.agents.cyber_autoagent.os.path.getsize")
-    def test_check_existing_memories_faiss_exists(
-        self, mock_getsize, mock_exists, mock_env_get
-    ):
-        """Test check_existing_memories with FAISS backend - directory exists with content"""
-        mock_env_get.return_value = None  # No Mem0 or OpenSearch
-        mock_exists.side_effect = lambda path: True  # All paths exist
-        mock_getsize.return_value = 100  # Non-zero file size
-
-        result = check_existing_memories("test.com", "ollama")
-        assert result is True
-
-    @patch("modules.agents.cyber_autoagent.os.environ.get")
-    @patch("modules.agents.cyber_autoagent.os.path.exists")
-    def test_check_existing_memories_faiss_not_exists(self, mock_exists, mock_env_get):
-        """Test check_existing_memories with FAISS backend - directory doesn't exist"""
-        mock_env_get.return_value = None  # No Mem0 or OpenSearch
-        mock_exists.return_value = False
-
-        result = check_existing_memories("test.com", "ollama")
-        assert result is False
-
-    @patch("modules.agents.cyber_autoagent.os.environ.get")
-    @patch("modules.agents.cyber_autoagent.os.path.exists")
-    @patch("modules.agents.cyber_autoagent.os.path.getsize")
-    def test_check_existing_memories_faiss_empty(
-        self, mock_getsize, mock_exists, mock_env_get
-    ):
-        """Test check_existing_memories with FAISS backend - directory exists but empty"""
-        mock_env_get.return_value = None  # No Mem0 or OpenSearch
-
-        # Directory exists but no FAISS files
-        def exists_side_effect(path):
-            if "outputs/test_com/memory" in path and not path.endswith(
-                (".faiss", ".pkl")
-            ):
-                return True
-            return False
-
-        mock_exists.side_effect = exists_side_effect
-        mock_getsize.return_value = 0
-
-        result = check_existing_memories("test.com", "ollama")
-        assert result is False
-
-    @patch("modules.agents.cyber_autoagent.os.environ.get")
-    @patch("modules.agents.cyber_autoagent.os.path.exists")
-    @patch("modules.agents.cyber_autoagent.os.path.getsize")
-    def test_check_existing_memories_faiss_zero_size_files(
-        self, mock_getsize, mock_exists, mock_env_get
-    ):
-        """Test check_existing_memories with FAISS backend - files exist but are zero size"""
-        mock_env_get.return_value = None  # No Mem0 or OpenSearch
-        mock_exists.side_effect = lambda path: True  # All paths exist
-        mock_getsize.return_value = 0  # Zero file size
-
-        result = check_existing_memories("test.com", "ollama")
-        assert result is False  # Should return False for zero-size files
-
-    @patch("modules.agents.cyber_autoagent.os.environ.get")
-    @patch("modules.agents.cyber_autoagent.os.path.exists")
-    def test_check_existing_memories_sanitizes_target(self, mock_exists, mock_env_get):
-        """Test check_existing_memories properly sanitizes target names"""
-        mock_env_get.return_value = None  # No Mem0 or OpenSearch
-        mock_exists.side_effect = lambda path: path.endswith("pyproject.toml")
-
-        result = check_existing_memories("https://test.com/path", "ollama")
-        assert result is False
-        mock_exists.assert_called_with(str((Path.cwd() / "outputs" / "test.com" / "memory").resolve()))
-
-    @patch("modules.config.manager.os.environ.get")
-    @patch("modules.config.manager.os.path.exists")
-    def test_check_existing_memories_exception_handling(
-        self, mock_exists, mock_env_get
-    ):
-        """Test check_existing_memories handles exceptions gracefully"""
-        mock_env_get.return_value = None  # No Mem0 or OpenSearch
-        mock_exists.side_effect = Exception("File system error")
-
-        with patch("modules.config.manager.logger") as mock_logger:
-            result = check_existing_memories("test.com", "ollama")
-            assert result is False
-            mock_logger.debug.assert_called_once()
 
 
 def test_create_tool_repeat_guard_uses_threshold_and_max_cycle_configuration():

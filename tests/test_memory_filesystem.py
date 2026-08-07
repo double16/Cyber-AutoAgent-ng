@@ -19,16 +19,14 @@ def _task_create(memory, *args, **kwargs):
 
 
 def _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-create-tasks"):
-    faiss_path = tmp_path / "mem0_faiss"
-
     # isolate global client/config for this test
     memory._MEMORY_CLIENT = None
     memory._MEMORY_CONFIG = None
-    memory._PLAN_STORE = None
+    memory._DATABASE_STORE = None
 
     embedder_model = "mxbai-embed-large:latest"
     ollama_base_url = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-    monkeypatch.setenv("MEMORY_ISOLATION", "operation")
+    monkeypatch.setenv("CYBER_MEMORY_MODE", "operation")
     monkeypatch.setenv("CYBER_OPERATION_ID", operation_id)
     monkeypatch.setenv("CYBER_AGENT_PROVIDER", "ollama")
     monkeypatch.setenv("CYBER_AGENT_EMBEDDING_MODEL", embedder_model)
@@ -36,29 +34,13 @@ def _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="t
 
     memory.initialize_memory_system(
         config={
-            "embedder": {
-                "provider": "ollama",
-                "config": {
-                    "model": embedder_model,
-                    "ollama_base_url": ollama_base_url,
-                },
-            },
-            "llm": {
-                "provider": "ollama",
-                "config": {
-                    "model": "llama3.2:3b",
-                    "temperature": 0.1,
-                    "max_tokens": 2000,
-                    "ollama_base_url": ollama_base_url,
-                },
-            },
-            "vector_store": {
-                "provider": "faiss",
-                "config": {
-                    "path": str(faiss_path),
-                    "embedding_model_dims": 1024,
-                },
-            },
+            "embedding_provider": "ollama",
+            "embedding_model": embedder_model,
+            "embedding_dimensions": 1024,
+            "ollama_base_url": ollama_base_url,
+            "target_values": ["test-target"],
+            "memory_mode": "operation",
+            "output_dir": str(tmp_path),
         },
     )
 
@@ -191,7 +173,7 @@ def test_create_tasks_filesystem_defaults_nonexistent_phase_to_active(tmp_path, 
         assert "task[2]" in tasks
         assert task_1_title in tasks
         assert task_2_title in tasks
-        stored_tasks = memory._PLAN_STORE.get_tasks("test-op-fs")
+        stored_tasks = memory._DATABASE_STORE.get_tasks("test-op-fs")
         assert {task.phase for task in stored_tasks} == {1}
 
     finally:
@@ -431,7 +413,7 @@ def test_store_plan_persistence(tmp_path, monkeypatch):
 
         # Verify it's in SQLite
         op_id = "test-op-persistence"
-        sqlite_plan = memory._PLAN_STORE.get_plan(op_id)
+        sqlite_plan = memory._DATABASE_STORE.get_plan(op_id)
         assert sqlite_plan is not None
         assert sqlite_plan.objective == "Initial Objective"
 
@@ -444,7 +426,7 @@ def test_store_plan_persistence(tmp_path, monkeypatch):
         assert "Updated Objective" in updated_plan
 
         # Verify update in SQLite
-        updated_sqlite_plan = memory._PLAN_STORE.get_plan(op_id)
+        updated_sqlite_plan = memory._DATABASE_STORE.get_plan(op_id)
         assert updated_sqlite_plan.objective == "Updated Objective"
 
     finally:
@@ -502,7 +484,7 @@ def test_create_tasks_does_not_deduplicate_by_fuzzy_similarity(tmp_path, monkeyp
 
         # 5. Check SQLite task count for this operation
         op_id = "test-op-fuzzy-more"
-        tasks = memory._PLAN_STORE.get_tasks(op_id)
+        tasks = memory._DATABASE_STORE.get_tasks(op_id)
         assert len(tasks) == 4
 
     finally:
@@ -511,7 +493,7 @@ def test_create_tasks_does_not_deduplicate_by_fuzzy_similarity(tmp_path, monkeyp
 
 
 @pytest.mark.ollama
-def test_mem0_task_lifecycle(tmp_path, monkeypatch):
+def test_memory_task_lifecycle(tmp_path, monkeypatch):
     from modules.tools import memory
 
     _initialize_filesystem_memory(memory, tmp_path, monkeypatch, operation_id="test-op-lifecycle")

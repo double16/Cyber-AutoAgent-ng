@@ -23,7 +23,7 @@ export const mockConfiguredState = {
   // Operation settings  
   maxToolExecutions: 50,
   maxSwarmAgents: 3,
-  memoryMode: 'auto',
+  memoryMode: 'operation',
   
   // Observability
   observability: {

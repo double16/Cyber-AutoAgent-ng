@@ -65,6 +65,8 @@ export class PythonExecutionService extends EventEmitter {
   private pythonCommand: string = 'python3'; // Will be updated by checkPythonVersion
   private stderrBuffer: string = '';
   private startupTimers = new Set<NodeJS.Timeout>();
+  private bufferedStartupEvents: any[] = [];
+  private startupEventConsumerAttached = false;
   
   constructor() {
     super();
@@ -87,6 +89,28 @@ export class PythonExecutionService extends EventEmitter {
     this.pipPath = path.join(this.venvPath, venvBinDir, pipExecutable);
     this.requirementsPath = path.join(this.projectRoot, 'pyproject.toml');
     // Note: Python version detection is performed in checkPythonVersion(), not in the constructor
+  }
+
+  drainBufferedStartupEvents(): any[] {
+    const events = this.bufferedStartupEvents;
+    this.bufferedStartupEvents = [];
+    return events;
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.startupEventConsumerAttached = true;
+  }
+
+  private emitParsedEvent(event: any): void {
+    if (!this.startupEventConsumerAttached && [
+      'tool_discovery_start',
+      'tool_available',
+      'tool_unavailable',
+      'environment_ready',
+    ].includes(event?.type)) {
+      this.bufferedStartupEvents.push(event);
+    }
+    this.emit('event', event);
   }
 
   private scheduleStartupTimer(callback: () => void, delayMs: number): NodeJS.Timeout {
@@ -645,6 +669,7 @@ export class PythonExecutionService extends EventEmitter {
         '--target', params.target,
         '--max-duration', String(config.budgetMaxDuration),
         '--provider', config.modelProvider || 'bedrock',
+        '--memory-mode', config.memoryMode || 'operation',
       ];
 
       if (config.budgetMaxTokens) {
@@ -748,7 +773,8 @@ export class PythonExecutionService extends EventEmitter {
         // Model Configuration - pass separate models from config
         ...(config.swarmModel ? { CYBER_AGENT_SWARM_MODEL: config.swarmModel } : {}),
         ...(config.evaluationModel ? { CYBER_AGENT_EVALUATION_MODEL: config.evaluationModel } : {}),
-        ...(config.memoryModel ? { MEM0_LLM_MODEL: config.memoryModel } : {}),
+        ...(config.qdrantUrl ? { QDRANT_URL: config.qdrantUrl } : {}),
+        ...(config.qdrantApiKey ? { QDRANT_API_KEY: config.qdrantApiKey } : {}),
         // Model rate limits
         ...(config.rateLimitTokensPerMinute ? { CYBER_RATE_LIMIT_TOKENS_PER_MIN: String(config.rateLimitTokensPerMinute) } : {}),
         ...(config.bugBountyHeaders && Object.keys(config.bugBountyHeaders).length > 0
@@ -882,19 +908,8 @@ export class PythonExecutionService extends EventEmitter {
         this.emit('event', { type: 'output', content: `✓ Target: ${params.target}`, timestamp: Date.now() });
         this.emit('event', { type: 'output', content: `✓ Provider: ${config.modelProvider || 'unknown'} (${config.modelId || 'default-model'})`, timestamp: Date.now() });
         this.emit('event', { type: 'output', content: `✓ Region: ${env.AWS_REGION || 'unknown'}` , timestamp: Date.now() });
-        // Memory presence
-        const sanitizedTarget = params.target
-          .replace(/^https?:\/\//, '')  // Remove protocol
-          .replace(/^ftp:\/\//, '')     // Remove ftp protocol
-          .replace(/\/.*$/, '')         // Remove path components
-          .replace(/[^a-zA-Z0-9.-]/g, '_'); // Replace invalid chars
-        const memoryPath = path.join(resolvedOutputDir, sanitizedTarget, 'memory');
-        const faissPath = path.join(memoryPath, 'mem0.faiss');
-        if (fs.existsSync(faissPath)) {
-          this.emit('event', { type: 'output', content: `✓ Existing memory found: ${memoryPath}`, timestamp: Date.now() });
-        } else {
-          this.emit('event', { type: 'output', content: `○ No existing memory found for ${params.target}`, timestamp: Date.now() });
-        }
+        const memoryLocation = config.qdrantUrl || path.join(resolvedOutputDir, 'qdrant');
+        this.emit('event', { type: 'output', content: `✓ Qdrant memory: ${memoryLocation}`, timestamp: Date.now() });
       }, 900);
       
       this.scheduleStartupTimer(() => {
@@ -1092,7 +1107,7 @@ export class PythonExecutionService extends EventEmitter {
 
   private handleParsedPythonEvent(eventData: any): void {
     emitStatusEvents(eventData, {
-      emitEvent: event => this.emit('event', event),
+      emitEvent: event => this.emitParsedEvent(event),
       onComplete: () => this.emit('complete')
     });
   }

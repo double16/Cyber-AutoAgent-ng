@@ -41,7 +41,7 @@ const path = require('path');
     }
 
     // Look for minimal signs of progress (operation id or step markers)
-    const ok = /OP_\d{8}_\d{6}/.test(output) || /PROGRESS\s+\d|\[PROGRESS/i.test(output);
+    const ok = /OP_\d{8}_\d{6}/.test(output) || /BUDGET\s+\d|\[BUDGET/i.test(output);
     if (!ok) {
       console.log('Python CLI ran but expected output markers were not found.');
       console.log(output.slice(0, 2000));

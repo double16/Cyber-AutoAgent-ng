@@ -214,7 +214,7 @@ describe('useCommandHandler', () => {
         expect(props.requestExit).toHaveBeenCalled();
         expect(process.env.CYBER_SHOW_SETUP).toBe('true');
         expect(history.map(entry => entry.content).join('\n')).toContain('Cyber-AutoAgent Command Reference');
-        expect(history.map(entry => entry.content).join('\n')).toContain('Memory operations require');
+        expect(history.map(entry => entry.content).join('\n')).toContain('Memory operations are available');
 
         hook.unmount();
     });

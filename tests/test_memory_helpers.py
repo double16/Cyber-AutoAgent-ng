@@ -76,7 +76,7 @@ def test_has_valid_proof_pack_finds_existing_paths(monkeypatch, tmp_path):
     assert mod._has_valid_proof_pack({"artifact": "anything"}) is False
 
 
-def test_memory_base_path_respects_isolation_modes(monkeypatch, tmp_path):
+def test_memory_base_path_is_shared_database_for_all_query_modes(monkeypatch, tmp_path):
     config = {
         "target_name": "target",
         "operation_id": "OP1",
@@ -84,10 +84,10 @@ def test_memory_base_path_respects_isolation_modes(monkeypatch, tmp_path):
     }
 
     monkeypatch.delenv("CYBER_AGENT_OUTPUT_DIR", raising=False)
-    monkeypatch.setenv("MEMORY_ISOLATION", "operation")
-    assert mod._get_memory_base_path(config).endswith("target/memory/OP1")
+    config["memory_mode"] = "operation"
+    assert mod._get_memory_base_path(config) == str(tmp_path / "qdrant")
 
-    monkeypatch.setenv("MEMORY_ISOLATION", "shared")
-    assert mod._get_memory_base_path(config).endswith("target/memory")
+    config["memory_mode"] = "shared"
+    assert mod._get_memory_base_path(config) == str(tmp_path / "qdrant")
 
-    assert mod._get_memory_base_path({"vector_store": {"config": {"path": "/custom"}}}) == "/custom"
+    assert mod._get_memory_base_path({"output_dir": str(tmp_path / "other")}) == str(tmp_path / "other" / "qdrant")

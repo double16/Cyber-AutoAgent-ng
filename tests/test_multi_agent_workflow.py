@@ -513,7 +513,7 @@ def _runtime(progress=0, env_ints=None, env_floats=None):
         core_tools_list=[
             _tool("shell"),
             _tool("editor"),
-            _tool("mem0_retrieve"),
+            _tool("memory_retrieve"),
             _tool("create_tasks"),
         ],
         optional_tools_list=[_tool("mcp_scan"), _tool("module_probe")],
@@ -1242,7 +1242,7 @@ def test_role_tools_exclude_plan_task_mutation_and_gate_create_tasks():
     runtime = _runtime()
 
     default_names = {tool.__name__ for tool in build_role_tools(runtime)}
-    assert {"shell", "mem0_retrieve"}.issubset(default_names)
+    assert {"shell", "memory_retrieve"}.issubset(default_names)
     assert "stop" not in default_names
     assert "prompt_optimizer" not in default_names
     assert "create_tasks" not in default_names
@@ -2455,9 +2455,9 @@ def test_task_executor_appends_selected_memories_from_prompt_spec():
     assert requested_memory_ids == ["m2", "m1"]
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
     assert "## Selected Memory Context\n" in captured["prompt"]
-    assert "memories[2]{id,memory}:" in captured["prompt"]
-    assert "m2,memory for m2" in captured["prompt"]
-    assert "m1,memory for m1" in captured["prompt"]
+    assert "memories[2]{id,category,source,memory}:" in captured["prompt"]
+    assert "m2,general,,memory for m2" in captured["prompt"]
+    assert "m1,general,,memory for m1" in captured["prompt"]
 
 
 def test_task_executor_continues_when_selected_memory_lookup_fails():
@@ -2642,7 +2642,7 @@ def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
 def test_task_executor_omits_shell_command_context_for_missing_or_invalid_selection():
     runtime = _runtime()
     runtime.config.available_tools = ["httpx"]
-    runtime.core_tools_list = [_tool("mem0_retrieve")]
+    runtime.core_tools_list = [_tool("memory_retrieve")]
     state = FakeState(
         _plan(),
         tasks=[Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")],
@@ -2876,7 +2876,7 @@ def test_task_evaluator_does_not_invent_memory_requirement_for_gathered_informat
         worker_context="Found /login 200 and /admin 403 but did not store observations.",
     )
 
-    assert "memories[0]{id,memory}:" in prompt
+    assert "memories[0]{id,category,source,memory}:" in prompt
     assert "did not store it in memories" not in prompt
     assert "Automatically published acceptance memory supports later tasks" in prompt
 
@@ -5757,16 +5757,16 @@ def test_task_prompt_revision_preserves_swarm_contract_rules():
     assert "parent-owned acceptance" in prompt
 
 
-def test_task_prompt_builder_can_select_published_acceptance_memory():
+def test_task_prompt_builder_excludes_published_acceptance_memory():
+    acceptance_memory = {
+        "id": "acceptance-memory-1",
+        "memory": "Task acceptance for route mapping. Criterion routes [satisfied]: /login returned 200.",
+        "metadata": {"category": "observation", "source": "task_acceptance"},
+    }
     state = FakeState(_plan())
     state.client = SimpleNamespace(
-        list_memories=lambda **kwargs: [
-            {
-                "id": "acceptance-memory-1",
-                "memory": "Task acceptance for route mapping. Criterion routes [satisfied]: /login returned 200.",
-                "metadata": {"category": "observation", "source": "task_acceptance"},
-            }
-        ]
+        list_memories=lambda **kwargs: [acceptance_memory],
+        get_memory_by_id=lambda memory_id: acceptance_memory if memory_id == "acceptance-memory-1" else None,
     )
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -5784,8 +5784,9 @@ def test_task_prompt_builder_can_select_published_acceptance_memory():
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "acceptance-memory-1" in prompt
-    assert "/login returned 200" in prompt
+    assert "acceptance-memory-1" not in prompt
+    assert "/login returned 200" not in prompt
+    assert controller._selected_memory_context(["acceptance-memory-1"]) == ""
 
 
 def test_task_prompt_critic_rejects_generic_acceptance_summaries():
@@ -6075,13 +6076,39 @@ def test_task_prompt_spec_filters_runtime_supplied_core_tools_from_both_selectio
     normalized = controller._normalize_task_prompt_spec(
         {
             "prompt": "Store evidence",
-            "tools": ["read_artifact", "shell", "store_observation", "mcp_scan"],
-            "shell_commands": ["shell", "store_observation", "module_probe"],
+            "tools": ["read_artifact", "shell", "store_observation", "record_task_acceptance", "mcp_scan"],
+            "shell_commands": ["shell", "store_observation", "record_task_acceptance", "module_probe"],
         },
         task,
     )
 
     assert normalized["tools"] == ["mcp_scan", "module_probe"]
+    assert normalized["shell_commands"] == []
+
+
+def test_task_prompt_spec_filters_controller_supplied_tools_with_runtime_fallback():
+    runtime = _runtime()
+    runtime.tools_list = [_tool("shell"), _tool("record_finding_validation")]
+    runtime.core_tools_list = []
+    runtime.optional_tools_list = [_tool("mcp_scan")]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Accept", objective="Assess target", phase=1, status="pending")
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Assess target",
+            "tools": ["shell", "record_finding_validation", "record_task_acceptance", "mcp_scan"],
+            "shell_commands": ["record_task_acceptance"],
+        },
+        task,
+    )
+
+    assert normalized["tools"] == ["mcp_scan"]
     assert normalized["shell_commands"] == []
 
 
@@ -6145,7 +6172,7 @@ def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
 def test_shell_command_catalog_is_empty_without_shell_tool(monkeypatch):
     runtime = _runtime()
     runtime.config.available_tools = ["httpx"]
-    runtime.core_tools_list = [_tool("mem0_retrieve")]
+    runtime.core_tools_list = [_tool("memory_retrieve")]
     command_specs = pytest.fail
     monkeypatch.setattr(workflow_mod, "get_shell_command_specs", command_specs)
     controller = MultiAgentWorkflowController(
@@ -6220,7 +6247,7 @@ def test_phase_evaluator_receives_module_termination_policy():
 
     assert decision.status == "done"
     assert captured["role"] == "phase_evaluator"
-    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "mem0_retrieve"}
+    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "memory_retrieve"}
     assert "## Module Termination Policy" in captured["system_prompt"]
     assert "Require verified exploitability" in captured["system_prompt"]
     assert "Apply the module termination policy" in captured["prompt"]
@@ -6274,7 +6301,7 @@ def test_task_evaluator_does_not_receive_module_termination_policy():
     assert decision.reason == "not enough access"
     assert decision.instructions == ""
     assert captured["role"] == "task_evaluator"
-    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "mem0_retrieve"}
+    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "memory_retrieve"}
     assert "Evaluator Role Boundary" in captured["system_prompt"]
     assert "Module Termination Policy" not in captured["system_prompt"]
     assert "sole evaluation target" in captured["prompt"]
@@ -6327,7 +6354,7 @@ def test_evaluator_tools_exclude_shell_and_optional_execution_tools():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert {tool.__name__ for tool in controller._evaluator_tools()} == {"read_artifact", "mem0_retrieve"}
+    assert {tool.__name__ for tool in controller._evaluator_tools()} == {"read_artifact", "memory_retrieve"}
 
 
 def test_phase_evaluator_prompt_is_review_only():
@@ -6354,7 +6381,7 @@ def test_prompt_builder_context_includes_task_history():
         _plan(),
         tasks=[
             Task(task_uid="done", title="Worked", objective="use working path", phase=1, status="done",
-                 status_reason="evidence stored", evidence=["mem0://finding-1"]),
+                 status_reason="evidence stored", evidence=["memory:finding-1"]),
             Task(task_uid="blocked", title="Blocked", objective="avoid blocked path", phase=1, status="blocked",
                  status_reason="requires credentials"),
             Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
@@ -6982,17 +7009,71 @@ def test_memory_summary_returns_compact_memories_and_handles_errors():
     )
 
     memories = controller._memory_summary()
-    assert memories.startswith("memories[2]{id,memory}:\n")
-    assert "  m1," in memories
-    assert "\n  m2,short\n" in memories
+    assert memories.startswith("memories[2]{id,category,source,memory}:\n")
+    assert "  m1,finding,," in memories
+    assert "\n  m2,general,,short\n" in memories
 
     first_line = memories.splitlines()[1]
-    first_parts = first_line.strip().split(",", maxsplit=2)
+    first_parts = first_line.strip().split(",", maxsplit=3)
     assert first_parts[0] == "m1"
-    assert len(first_parts[1]) == 1000
+    assert len(first_parts[3]) == 1000
 
     state.client = SimpleNamespace(list_memories=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("fail")))
-    assert controller._memory_summary() == "memories[0]{id,memory}:"
+    assert controller._memory_summary() == "memories[0]{id,category,source,memory}:"
+
+
+def test_prompt_memory_filter_excludes_bookkeeping_and_retains_evidence():
+    task_acceptance = {
+        "id": "acceptance",
+        "memory": "Task acceptance says route mapping was complete.",
+        "metadata": {"category": "observation", "source": "task_acceptance"},
+    }
+    publication_marker = {
+        "id": "publication",
+        "memory": "Copied acceptance ledger.",
+        "metadata": {"category": "observation", "publication_key": "task_acceptance:task-1:digest"},
+    }
+    records = [
+        task_acceptance,
+        publication_marker,
+        {"id": "plan", "memory": "Plan record", "metadata": {"category": "plan"}},
+        {"id": "task", "memory": "Task record", "metadata": {"source": "task"}},
+        {"id": "observation", "memory": "The login form accepts POST.", "metadata": {"category": "observation"}},
+        {"id": "finding", "memory": "Stored XSS candidate.", "metadata": {"category": "finding"}},
+        {"id": "knowledge", "memory": "Use explicit response status capture.", "metadata": {"category": "knowledge"}},
+        {"id": "validation", "memory": "Candidate needs independent reproduction.", "metadata": {"category": "validation_failure"}},
+    ]
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: records,
+        get_memory_by_id=lambda memory_id: next((item for item in records if item["id"] == memory_id), None),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    assert [record["id"] for record in controller._prompt_memory_records()] == [
+        "observation",
+        "finding",
+        "knowledge",
+        "validation",
+    ]
+    prompt = controller._task_creator_prompt(_plan(), _plan().phases[0])
+    assert "Task acceptance says route mapping was complete" not in prompt
+    assert "Copied acceptance ledger" not in prompt
+    assert "Plan record" not in prompt
+    assert "Task record" not in prompt
+    assert "The login form accepts POST" in prompt
+    assert "Stored XSS candidate" in prompt
+    assert "Use explicit response status capture" in prompt
+    assert "Candidate needs independent reproduction" in prompt
+    assert "Controller-owned task history, acceptance ledgers" in prompt
+    selected = controller._selected_memory_context(["acceptance", "finding"])
+    assert "Task acceptance says route mapping was complete" not in selected
+    assert "Stored XSS candidate" in selected
 
 
 def test_operation_health_provider_predicts_current_phase_from_inventory_fanout(monkeypatch):

@@ -23,7 +23,7 @@ def memory_client_clear():
     clear_memory_client()
 
 
-@patch("modules.tools.memory.Mem0ServiceClient")
+@patch("modules.tools.memory.QdrantMemoryClient")
 def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
     op_id = "OP_ALLOFIT"
 
@@ -242,7 +242,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
     finally:
         os.environ.pop("CYBER_AGENT_OUTPUT_DIR")
 
-@patch("modules.tools.memory.Mem0ServiceClient")
+@patch("modules.tools.memory.QdrantMemoryClient")
 def test_report_builder_filters_by_operation_id(mock_client_cls):
     """Report builder should filter evidence by operation_id for per-operation reports."""
     op_id = "OP_123"
@@ -287,8 +287,8 @@ def test_report_builder_filters_by_operation_id(mock_client_cls):
     assert out.get("module") == "custom_module"
 
 
-@patch("modules.tools.memory.Mem0ServiceClient")
-@patch.dict(os.environ, {"MEMORY_ISOLATION": "shared"})
+@patch("modules.tools.memory.QdrantMemoryClient")
+@patch.dict(os.environ, {"CYBER_MEMORY_MODE": "shared"})
 def test_report_builder_cross_operation(mock_client_cls):
     """Report builder should filter evidence by operation_id for per-operation reports."""
     op_id = "OP_123"
@@ -332,7 +332,7 @@ def test_report_builder_cross_operation(mock_client_cls):
     assert out["validation_failure_count"] == 3
 
 
-@patch("modules.tools.memory.Mem0ServiceClient")
+@patch("modules.tools.memory.QdrantMemoryClient")
 def test_report_builder_includes_untagged_evidence(mock_client_cls):
     op_id = "OP_456"
     mock_client = mock_client_cls.return_value
@@ -359,7 +359,7 @@ def test_report_builder_includes_untagged_evidence(mock_client_cls):
     assert out["validation_failure_count"] == 1
 
 
-@patch("modules.tools.memory.Mem0ServiceClient")
+@patch("modules.tools.memory.QdrantMemoryClient")
 def test_report_builder_only_has_info_evidence(mock_client_cls):
     """Report builder should include info evidence."""
     op_id = "OP_789"

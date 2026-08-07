@@ -147,25 +147,39 @@ describe('shared cyber event stream parsing behavior', () => {
   it.each([
     ['DirectDockerService', () => new DirectDockerService(), 'parseEvents'],
     ['PythonExecutionService', () => new PythonExecutionService(), 'processOutputStream'],
-  ])('%s uses Docker-preferred status event formatting and pass-through', (_name, createService, method) => {
+  ])('%s passes tool-discovery status events through without synthetic output', (_name, createService, method) => {
     const service: any = createService();
     const emitted = captureEvents(service);
 
-    service[method](wrapEvent({ type: 'tool_unavailable', tool_name: 'scanner', timestamp: 5 }));
+    service[method](wrapEvent({ type: 'tool_discovery_start', timestamp: 1 }));
+    service[method](wrapEvent({ type: 'tool_available', tool_name: 'scanner', description: 'Scan hosts', timestamp: 2 }));
+    service[method](wrapEvent({ type: 'tool_unavailable', tool_name: 'browser', timestamp: 3 }));
+    service[method](wrapEvent({ type: 'environment_ready', tool_count: 2, timestamp: 4 }));
 
-    expect(emitted).toEqual([
-      expect.objectContaining({
-        type: 'output',
-        content: '  ⛔ scanner () - unavailable',
-      }),
-      expect.objectContaining({
-        type: 'tool_unavailable',
-        tool_name: 'scanner',
-        data: {},
-        metadata: {},
-        sessionId: '',
-      }),
+    expect(emitted).toHaveLength(4);
+    expect(emitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'tool_discovery_start', data: {}, metadata: {}, sessionId: '' }),
+      expect.objectContaining({ type: 'tool_available', tool_name: 'scanner', description: 'Scan hosts' }),
+      expect.objectContaining({ type: 'tool_unavailable', tool_name: 'browser' }),
+      expect.objectContaining({ type: 'environment_ready', tool_count: 2 }),
+    ]));
+    expect(emitted.some(event => event.type === 'output')).toBe(false);
+  });
+
+  it.each([
+    ['DirectDockerService', () => new DirectDockerService(), 'parseEvents'],
+    ['PythonExecutionService', () => new PythonExecutionService(), 'processOutputStream'],
+  ])('%s replays only discovery events emitted before the terminal attaches', (_name, createService, method) => {
+    const service: any = createService();
+
+    service[method](wrapEvent({ type: 'tool_discovery_start', timestamp: 1 }));
+    expect(service.drainBufferedStartupEvents()).toEqual([
+      expect.objectContaining({ type: 'tool_discovery_start' }),
     ]);
+
+    service.markStartupEventConsumerAttached();
+    service[method](wrapEvent({ type: 'environment_ready', tool_count: 1, timestamp: 2 }));
+    expect(service.drainBufferedStartupEvents()).toEqual([]);
   });
 
   it.each([

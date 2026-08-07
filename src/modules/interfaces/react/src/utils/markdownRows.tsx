@@ -72,3 +72,26 @@ export const renderInlineMarkdown = (value: string): React.ReactNode[] => {
   if (lastIndex < value.length) result.push(value.slice(lastIndex));
   return result;
 };
+
+export const renderMarkdownRow = (row: MarkdownRow, key: string, foreground = "white") => {
+  if (row.kind === "code") return <Text key={key} color="cyan">  {row.text}</Text>;
+  if (row.kind === "rule") return <Text key={key} color="gray">{row.text}</Text>;
+  if (row.kind === "heading") {
+    const marker = row.level === 1 ? "═" : row.level === 2 ? "─" : "•";
+    return <Text key={key} color="yellow" bold>{marker} {renderInlineMarkdown(row.text)}</Text>;
+  }
+  if (row.kind === "quote") return <Text key={key} color="gray">{renderInlineMarkdown(row.text)}</Text>;
+  if (row.kind === "table") return <Text key={key} color="cyan">{renderInlineMarkdown(row.text)}</Text>;
+  return <Text key={key} color={foreground}>{renderInlineMarkdown(row.text)}</Text>;
+};
+
+export interface MarkdownRendererProps {
+  content: string;
+  foreground?: string;
+}
+
+export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({content, foreground = "white"}) => (
+  <>
+    {tokenizeMarkdown(content).map((row, index) => renderMarkdownRow(row, `markdown-row-${index}`, foreground))}
+  </>
+);

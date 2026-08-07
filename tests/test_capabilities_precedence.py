@@ -82,7 +82,7 @@ class TestTokenLimitPrecedence:
     def test_azure_gpt5_context_limit(self):
         """Verify GPT-5 context limit from models.dev."""
         limit = get_model_input_limit("azure/gpt-5")
-        assert limit == 272000, "GPT-5 has 272K context window"
+        assert limit == 400000, "GPT-5 has a 400K context window in the bundled models.dev snapshot"
 
     def test_output_limit_from_models_dev(self):
         """Verify output limit retrieved from models.dev."""

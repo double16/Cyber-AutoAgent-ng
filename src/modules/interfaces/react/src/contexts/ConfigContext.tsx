@@ -2,7 +2,7 @@
  * Cyber-AutoAgent Configuration Context - Settings Management
  * 
  * Provides centralized configuration management for all application settings including
- * AI model providers, Docker execution parameters, memory backends, observability,
+ * AI model providers, Docker execution parameters, memory scope, observability,
  * and security assessment preferences. Supports persistent configuration storage
  * with automatic environment variable integration.
  * 
@@ -17,7 +17,7 @@
  * - Model Provider Settings: AI models, regions, authentication
  * - Docker Execution: Container settings, volumes, timeouts
  * - Assessment Parameters: duration/token/cost budgets, confirmations, output formats
- * - Memory Management: backends, paths, retention policies
+ * - Memory Management: Qdrant service settings, query scope, and retention
  * - Observability: Langfuse integration, evaluation metrics
  * - UI Preferences: themes, display options, debugging
  * 
@@ -49,9 +49,7 @@ export interface Config {
   modelProvider: 'bedrock' | 'ollama' | 'litellm' | 'gemini';
   /** Main assessment model identifier (e.g., 'claude-sonnet-4', 'llama3.1:8b') */
   modelId: string;
-  /** LLM model used for memory operations */
-  memoryModel?: string;
-  /** Vector embedding model for memory operations */
+  /** Vector embedding model for semantic memory and evaluation */
   embeddingModel?: string;
   /** Quality evaluation model for assessment validation */
   evaluationModel?: string;
@@ -195,18 +193,13 @@ export interface Config {
   allowExecutionFallback: boolean;
 
   // Memory Settings
-  memoryPath?: string; // Path to existing FAISS memory store to load
-  memoryMode: 'auto' | 'fresh'; // Memory initialization mode
+  memoryMode: 'shared' | 'operation'; // Qdrant query scope
   keepMemory: boolean; // Keep memory data after operation completes
-  memoryBackend: 'FAISS' | 'mem0' | 'opensearch'; // Memory storage backend
-  mem0ApiKey?: string; // Mem0 Platform API key
-  opensearchHost?: string; // OpenSearch host URL
-  opensearchUsername?: string;
-  opensearchPassword?: string;
+  qdrantUrl?: string; // Optional Qdrant service URL; local filesystem storage is the default
+  qdrantApiKey?: string;
 
   // Output Settings
   outputDir: string; // Base directory for output artifacts
-  unifiedOutput: boolean; // Enable unified output directory structure
 
   // UI Settings
   theme: 'default' | 'dark' | 'light' | 'hacker' | 'retro';
@@ -352,7 +345,6 @@ export const defaultConfig: Config = {
   modelId: 'global.anthropic.claude-opus-4-5-20251101-v1:0',
   embeddingModel: 'amazon.titan-embed-text-v2:0',
   evaluationModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
-  memoryModel: process.env.MEM0_LLM_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   swarmModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   temperature: 0.5,
   awsRegion: process.env.AWS_REGION || 'us-east-1',
@@ -414,18 +406,13 @@ export const defaultConfig: Config = {
   allowExecutionFallback: true, // Allow fallback modes by default
 
   // Memory Settings
-  memoryPath: undefined, // No existing memory path by default
-  memoryMode: 'auto', // Auto-load existing memory if found
+  memoryMode: 'operation', // Restrict retrieval to this operation by default
   keepMemory: true, // Keep memory data after operation (default from Python CLI)
-  memoryBackend: 'FAISS', // Default to local FAISS
-  mem0ApiKey: process.env.MEM0_API_KEY,
-  opensearchHost: process.env.OPENSEARCH_HOST,
-  opensearchUsername: process.env.OPENSEARCH_USERNAME,
-  opensearchPassword: process.env.OPENSEARCH_PASSWORD,
+  qdrantUrl: process.env.QDRANT_URL,
+  qdrantApiKey: process.env.QDRANT_API_KEY,
 
   // Output Settings
   outputDir: './outputs', // Default base directory for output artifacts
-  unifiedOutput: true, // Enable unified output by default
 
   // UI Settings
   theme: 'retro', // Default to retro theme for 80s aesthetic
@@ -487,6 +474,22 @@ export const defaultConfig: Config = {
 };
 
 export const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
+
+const normalizeMemoryConfig = (loaded: any): any => {
+  const normalized = { ...loaded };
+  if (normalized.memoryMode === 'auto') normalized.memoryMode = 'shared';
+  if (normalized.memoryMode === 'fresh') normalized.memoryMode = 'operation';
+  if (normalized.memoryMode !== 'shared' && normalized.memoryMode !== 'operation') {
+    normalized.memoryMode = 'operation';
+  }
+  delete normalized.memoryPath;
+  delete normalized.memoryBackend;
+  delete normalized.opensearchHost;
+  delete normalized.opensearchUsername;
+  delete normalized.opensearchPassword;
+  delete normalized.memoryModel;
+  return normalized;
+};
 
 /**
  * ConfigProvider - Enterprise Configuration Management Provider
@@ -573,7 +576,7 @@ export const ConfigProvider: FC<{ children: ReactNode }> = ({ children }) => {
     setIsConfigLoading(true);
     try {
       const data = await fs.readFile(configFilePath, 'utf-8');
-      const loadedConfig = JSON.parse(data);
+      const loadedConfig = normalizeMemoryConfig(JSON.parse(data));
 
       // Preserve saved confirmations/autoApprove exactly as-is
       if (loadedConfig.confirmations !== undefined) {
@@ -622,7 +625,7 @@ export const ConfigProvider: FC<{ children: ReactNode }> = ({ children }) => {
     let loadedConfig: Partial<Config> = {};
     try {
       const data = await fs.readFile(configFilePath, 'utf-8');
-      loadedConfig = JSON.parse(data);
+      loadedConfig = normalizeMemoryConfig(JSON.parse(data));
     } catch (error) {
       // File not found or invalid, proceed with defaults
     }
