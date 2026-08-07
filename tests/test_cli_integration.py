@@ -2065,7 +2065,6 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
         def is_dir(self):
             return True
 
-    monkeypatch.setattr(cyberautoagent.os, "scandir", lambda _path: [DirEntry("OP_20260101_000000"), DirEntry("OP_20260102_000000")])
     from modules.tools.memory import create_application_store
 
     store = create_application_store(
@@ -2073,6 +2072,19 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
         logical_target="example.com",
     )
     store.ensure_operation("OP_20260102_000000")
+    original_scandir = os.scandir
+    operation_dir = os.path.join(str(tmp_path), cyberautoagent.sanitize_target_name("example.com"))
+
+    def scandir(path):
+        if path == operation_dir:
+            return [DirEntry("OP_20260101_000000"), DirEntry("OP_20260102_000000")]
+        return original_scandir(path)
+
+    monkeypatch.setattr(
+        cyberautoagent.os,
+        "scandir",
+        scandir,
+    )
 
     cyberautoagent.main()
 
