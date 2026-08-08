@@ -659,7 +659,8 @@ class MultiAgentWorkflowController:
         :param state_store:
         :param text_runner:
         :param work_runner:
-        :param executor_session_factory: Creates one retained worker conversation for bounded continuation turns.
+        :param executor_session_factory: Creates isolated worker sessions; task creator corrections retain one session
+            per creation batch, while task-executor actor cycles use fresh sessions with compact controller context.
         :param max_iterations: Present to prevent unit tests from running in an infinite loop. Production code is expected to be sys.maxsize.
         """
         self.runtime = runtime
@@ -2318,6 +2319,9 @@ class MultiAgentWorkflowController:
         required_tool = required_tool or self._validation_tool_name(task) or "record_task_acceptance"
         criteria = ", ".join(missing_criteria) or "the assigned acceptance contract"
         latest_artifact = artifact_refs[-1] if artifact_refs else "No new canonical artifact reference is available."
+        frozen_criteria = "; ".join(
+            f"{criterion.id}: {criterion.description}" for criterion in task.acceptance.criteria
+        )
         evaluator_section = ""
         required_tool_section = f"Required tool call: {required_tool}\n"
         completion_instruction = (
@@ -2333,8 +2337,11 @@ class MultiAgentWorkflowController:
             )
         loop_section = f"\n{loop_guidance.strip()}\n" if loop_guidance.strip() else ""
         return f"""## Compact Task Continuation
-Continue actor cycle {next_cycle} for the existing task. Do not replay prior reasoning, task history, or completed
-commands.
+Start a fresh actor cycle {next_cycle} for the existing task. Do not replay prior reasoning, task history, or
+completed commands. The controller intentionally did not retain earlier conversation messages.
+
+Assigned objective: {task.objective}
+Frozen acceptance criteria: {frozen_criteria}
 
 Missing criterion: {criteria}
 Latest artifact/evidence: {latest_artifact}
@@ -3977,6 +3984,10 @@ Acceptance basis rules:
 {procedure_rules if not snapshot_only else snapshot_rules}
 - If the required snapshot does not exist, create a bounded procedure-based prerequisite inventory task in this
   active phase instead of creating dependent assessment tasks.
+- Replacement lineage is allowed only for a `partial_failure` or `blocked` parent listed in
+  `replacement_parent_criteria` below. Copy `replacement_of` from that parent row and include one or more of that
+  row's exact criterion IDs in `supersedes_criteria`. Do not guess criterion IDs or use replacement metadata for
+  ordinary follow-up work.
 
 Correction rules:
 - Preserve every valid proposal intent from a rejected submission; one invalid proposal must not erase the others.
@@ -4001,9 +4012,18 @@ A list of tasks is required, including the case of one task being provided.
 
 {shape}
 
+Replacement shape (use only a listed failed or blocked parent):
+```json
+{{"tasks":[{{"title":"Focused replacement","objective":"Complete the unresolved bounded work",
+"methods":["verify"],"limits":{{"max_requests":10}},"snapshot_refs":[],
+"criteria":[{{"description":"Store evidence for the unresolved bounded result"}}],"target_ids":["target-1"],
+"replacement_of":"parent-task-uid","supersedes_criteria":["criterion-1"]}}]}}
+```
+
 Before calling the tool, verify every proposal against this checklist: all required fields are present; exactly one
 basis mode is selected; procedure bounds are finite positive integers; snapshot references are canonical; and moving
-inventory-wide scope is used only with a snapshot reference.
+inventory-wide scope is used only with a snapshot reference. For a replacement, also verify that every submitted
+`supersedes_criteria` value occurs verbatim in its parent's `replacement_parent_criteria` row.
 """
 
     @staticmethod
@@ -4078,6 +4098,9 @@ discard it. Do not restart the proposal, repeat completed reasoning, explain, ex
 Every `tasks[i]` must contain its own `objective` and `limits`. Never put `objective` beside `tasks`, and never emit
 `work_type`. The only canonical `output_kind` values are `artifact` and `inventory_manifest`; map report-like
 deliverables to `artifact`. Do not invent missing objectives, methods, criteria, targets, or bounds.
+If the error mentions `supersedes_criteria`, either use only the exact parent criterion IDs supplied in
+`replacement_parent_criteria`, or remove both `replacement_of` and `supersedes_criteria` for unrelated follow-up
+work. Do not spend this correction turn reconstructing parent contracts from prior reasoning.
 {batch_repair}
 {proposal_context}"""
 
@@ -4146,8 +4169,13 @@ deliverables to `artifact`. Do not invent missing objectives, methods, criteria,
         system_prompt: str,
     ) -> Iterator[AgentExecutorSession]:
         if self.executor_session_factory:
-            with self.executor_session_factory(role, tools, system_prompt) as run_executor:
-                yield run_executor
+            def run_executor(prompt: str, run_policy: Optional[AgentRunPolicy]) -> Any:
+                """Run one executor actor cycle without retaining prior tool transcripts."""
+
+                with self.executor_session_factory(role, tools, system_prompt) as session_runner:
+                    return session_runner(prompt, run_policy)
+
+            yield run_executor
             return
 
         def run_executor(prompt: str, run_policy: Optional[AgentRunPolicy]) -> Any:
@@ -5602,6 +5630,25 @@ generic replacement for an existing verification task.
                     sanitize_toon_value("|".join(task.supersedes_criteria)),
                 ))
             )
+        replacement_parents = [
+            task
+            for task in relevant
+            if task.phase == phase.id and task.status in {"partial_failure", "blocked"}
+        ]
+        lines.append(
+            f"replacement_parent_criteria[{sum(len(task.acceptance.criteria) for task in replacement_parents)}]"
+            "{parent_task_uid,criterion_id,description}:"
+        )
+        for task in replacement_parents:
+            for criterion in task.acceptance.criteria:
+                lines.append(
+                    "  "
+                    + ",".join((
+                        sanitize_toon_value(task.task_uid),
+                        sanitize_toon_value(criterion.id),
+                        sanitize_toon_value(criterion.description),
+                    ))
+                )
         lines.append(self._task_creator_prior_phase_context(phase))
         return "\n".join(lines)
 
@@ -5817,6 +5864,13 @@ For mapping criteria, artifact-backed captured 404, 403, 401, 405, empty respons
 explicit-rejection responses count as assessed negative results rather than unassessed work. Bare `curl -s` output with
 no captured response status is not proof of absence. The reason must distinguish confirmed present, confirmed absent or
 inaccessible, and not assessed; cite confirmed absent or inaccessible evidence directly.
+Apply this precedence table exactly:
+- `done`: every applicable phase criterion is terminal and evidence-backed.
+- `blocked`: a concrete external prerequisite, authorization, or capability prevents progress.
+- `partial_failure`: useful evidence exists, but a hard cap, unresolved non-runnable work, or evidenced guardrail
+  violation prevents further phase work now.
+- `continue`: only when runnable pending work remains, no hard cap applies, and no concrete blocker prevents it.
+Do not return `continue` merely because work is incomplete when the task history shows it cannot proceed.
 {budget_policy}
 
 ## Evaluation target: active phase
@@ -5917,8 +5971,16 @@ inaccessible, and not assessed; cite confirmed absent or inaccessible evidence d
         disposition_instruction = (
             ""
             if validation_tool
-            else "Confirmed security behavior requires finding_candidate or existing_finding disposition and a "
-            "finding reference; negative and informational results use no_vulnerability or observation."
+            else "## Acceptance Disposition Decision Table\n"
+            "Use canonical dispositions in the tool call; common semantic synonyms are normalized before strict "
+            "validation, but unknown values remain invalid.\n"
+            "- `finding_candidate`: only after this task successfully calls `store_finding`; include the returned "
+            "current-task finding reference (or its accepted placeholder).\n"
+            "- `existing_finding`: use only when the evidence supports a finding that already exists; include its "
+            "canonical finding reference.\n"
+            "- `no_vulnerability`: use for assessed-negative results.\n"
+            "- `observation`: use for informational, non-security-impacting results.\n"
+            "Never use `finding_candidate` merely because this task confirmed a pre-existing finding."
         )
         finding_validation_methodology = (
             "\n\n## Finding Validation Methodology\n"

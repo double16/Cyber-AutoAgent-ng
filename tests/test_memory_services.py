@@ -1463,6 +1463,17 @@ def test_create_tasks_preserves_explicit_replacement_lineage(fake_memory_client)
     assert replacement.replacement_of == "parent-task"
     assert replacement.supersedes_criteria == ["criterion-1"]
 
+    with pytest.raises(ValueError, match=r"allowed criterion IDs: criterion-1"):
+        mod.create_tasks([{
+            "title": "Invalid replacement",
+            "objective": "Attempt to resolve the failed combined test",
+            "methods": ["test"],
+            "criteria": [{"description": "Record evidence for the parent intent"}],
+            "target_ids": ["target-1"],
+            "replacement_of": "parent-task",
+            "supersedes_criteria": ["unknown-criterion"],
+        }])
+
 
 def test_create_tasks_rejects_unknown_replacement_parent(fake_memory_client):
     _client, store = fake_memory_client

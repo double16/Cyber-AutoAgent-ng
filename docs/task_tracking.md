@@ -461,6 +461,20 @@ created by that task. Multiple source-task findings require an unambiguous canon
 `existing_finding` remains explicit. `create_tasks` remains
 limited to new follow-up work and never completes or records acceptance for the assigned task.
 
+### Acceptance disposition selection
+
+Use the canonical acceptance dispositions as follows. Common semantic synonyms are normalized before strict runtime
+validation, but the tool schema advertises only canonical values and unknown values remain invalid.
+
+| Disposition | Use when |
+|---|---|
+| `finding_candidate` | The current task successfully called `store_finding` and records that new finding. |
+| `existing_finding` | The evidence supports an already-recorded finding. |
+| `no_vulnerability` | The assigned work produced an assessed-negative result. |
+| `observation` | The result is informational and not a security finding. |
+
+Do not use `finding_candidate` solely because a task confirmed a finding created by another task.
+
 `task_evaluator` returns:
 
 ```json
@@ -493,6 +507,11 @@ Short-lived agents reduce dependence on preserving one huge conversation. Each w
 - active task objective, when applicable
 - relevant Qdrant memory items
 - selected tool names and short descriptions
+
+Task-executor correction cycles start a fresh worker session. Their compact continuation prompt carries the assigned
+objective, frozen criterion, latest durable evidence, and required corrective action instead of replaying the prior
+tool transcript. Task-creator corrections remain retained within a single creation batch so schema repairs preserve
+the rejected proposal intent.
 
 Conversation pruning still protects useful evidence and memory context, but plan/task authority lives in SQLite and Python helpers rather than prompt state.
 

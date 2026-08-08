@@ -1709,12 +1709,14 @@ def test_task_execution_retries_actionable_semantic_evaluator_feedback():
 
     assert len(actor_prompts) == 2
     assert actor_prompts[0].startswith("execute active")
-    assert "Continue actor cycle 2" in actor_prompts[1]
+    assert "Start a fresh actor cycle 2" in actor_prompts[1]
     assert "Run endpoint validation and store the artifact path." in actor_prompts[1]
     assert "Required tool call:" not in actor_prompts[1]
     assert "Cycle 1: actor result 1" in evaluator_prompts[0]
     assert "Cycle 2: actor result 2" in evaluator_prompts[1]
     assert lifecycle == [
+        ("created", "task_executor", "base prompt"),
+        ("cleaned", "task_executor"),
         ("created", "task_executor", "base prompt"),
         ("cleaned", "task_executor"),
     ]
@@ -2945,6 +2947,54 @@ def test_task_executor_recovers_in_same_session_and_evaluator_receives_authorita
     assert "Could not open /missing.txt" in captured["evaluator_prompt"]
     assert "200 /login.php" in captured["evaluator_prompt"]
     assert state.tasks[0].status == "done"
+
+
+def test_task_executor_uses_fresh_sessions_for_compact_continuations():
+    lifecycle = []
+
+    @contextmanager
+    def session(role, tools, system_prompt):
+        lifecycle.append(("open", role))
+        try:
+            yield lambda prompt, policy: SimpleNamespace(prompt=prompt, policy=policy)
+        finally:
+            lifecycle.append(("close", role))
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        executor_session_factory=session,
+    )
+
+    with controller._task_executor_session("task_executor", [], "system") as run_executor:
+        run_executor("initial", None)
+        run_executor("continuation", None)
+
+    task = Task(
+        task_uid="task",
+        title="Task",
+        objective="Assess one behavior",
+        phase=1,
+        status="active",
+        acceptance=_acceptance("criterion-1"),
+    )
+    prompt = controller._task_executor_critic_guidance(
+        task,
+        ["criterion-1"],
+        ["artifact:artifacts/result.txt"],
+        next_cycle=2,
+    )
+
+    assert lifecycle == [
+        ("open", "task_executor"),
+        ("close", "task_executor"),
+        ("open", "task_executor"),
+        ("close", "task_executor"),
+    ]
+    assert "Start a fresh actor cycle 2" in prompt
+    assert "Assigned objective: Assess one behavior" in prompt
+    assert "Frozen acceptance criteria: criterion-1:" in prompt
 
 
 def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval():
@@ -5468,6 +5518,54 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
     assert "without violating any plan constraint" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
     assert "Stay within the authorized target scope" in prompt
+
+
+def test_task_creator_prompt_exposes_replacement_parent_criteria():
+    parent = Task(
+        task_uid="failed-parent",
+        title="Failed bounded task",
+        objective="Complete one bounded check",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-parent"),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[parent]),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    prompt = controller._task_creator_prompt(_plan(), _plan().phases[0])
+
+    assert "replacement_parent_criteria[1]{parent_task_uid,criterion_id,description}:" in prompt
+    assert "failed-parent,criterion-parent" in prompt
+    assert "Do not guess criterion IDs" in prompt
+    assert '"replacement_of":"parent-task-uid"' in prompt
+
+
+def test_executor_and_phase_prompts_define_canonical_decision_tables():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    executor_prompt = controller._task_executor_contract(Task(
+        task_uid="task",
+        title="Task",
+        objective="Assess one behavior",
+        phase=1,
+        status="active",
+    ))
+    phase_prompt = controller._phase_evaluator_prompt(_plan(), _plan().phases[0])
+
+    assert "Acceptance Disposition Decision Table" in executor_prompt
+    assert "only after this task successfully calls `store_finding`" in executor_prompt
+    assert "Never use `finding_candidate` merely because this task confirmed a pre-existing finding" in executor_prompt
+    assert "Apply this precedence table exactly" in phase_prompt
+    assert "`continue`: only when runnable pending work remains" in phase_prompt
 
 
 def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():

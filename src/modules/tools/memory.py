@@ -4875,8 +4875,10 @@ def _create_tasks_from_proposals(
                 raise ValueError("replacement_of must reference a partial_failure or blocked task")
             parent_criteria = {criterion.id for criterion in parent.acceptance.criteria}
             if not supersedes_criteria or not set(supersedes_criteria).issubset(parent_criteria):
+                allowed_criteria = ", ".join(sorted(parent_criteria)) or "none"
                 raise ValueError(
-                    "supersedes_criteria must identify existing acceptance criteria on the parent task"
+                    "supersedes_criteria must identify existing acceptance criteria on the parent task; "
+                    f"allowed criterion IDs: {allowed_criteria}"
                 )
         elif supersedes_criteria:
             raise ValueError("supersedes_criteria requires replacement_of")
