@@ -13,6 +13,7 @@ import pytest
 from modules.config.manager import (
     ConfigManager,
     get_config_manager,
+    get_report_refinement_cycles,
     get_default_model_configs,
     get_model_config,
     get_ollama_host, MAX_TOKENS_REASONING_LIMIT,
@@ -952,6 +953,14 @@ class TestGlobalFunctions:
         manager1 = get_config_manager()
         manager2 = get_config_manager()
         assert manager1 is manager2
+
+    def test_get_report_refinement_cycles_clamps_invalid_values(self):
+        manager = MagicMock()
+        manager.getenv_int.side_effect = [3, -1, True]
+
+        assert get_report_refinement_cycles(manager) == 3
+        assert get_report_refinement_cycles(manager) == 0
+        assert get_report_refinement_cycles(manager) == 2
 
     def test_get_model_config(self):
         """Test get_model_config function."""

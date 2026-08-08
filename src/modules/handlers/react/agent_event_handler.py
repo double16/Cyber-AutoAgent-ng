@@ -28,7 +28,7 @@ from modules.handlers.utils import (
     sanitize_target_name, format_duration,
 )
 
-from ...config import get_config_manager
+from ...config import get_config_manager, get_report_refinement_cycles
 from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
@@ -50,6 +50,16 @@ logger = get_logger("Handlers.AgentEvent")
 _DEFAULT_REASONING_DEDUPE_TTL_S = 20.0
 _AGENT_USAGE_CACHE_SIZE = 128
 _AGENT_USAGE_UUID_ATTR = "_caa_agent_event_usage_uuid"
+_REPORT_SAFETY_MARGIN = 1.15
+
+# Calibrated from report regeneration
+_REPORT_ACTOR_INPUT_TOKENS = 2_600
+_REPORT_ACTOR_OUTPUT_TOKENS = 1_800
+_REPORT_CRITIC_INPUT_TOKENS = 3_200
+_REPORT_CRITIC_OUTPUT_TOKENS = 1_600
+_REPORT_REVISION_INPUT_TOKENS = 22_000
+_REPORT_REVISION_OUTPUT_TOKENS = 15_200
+_REPORT_GLOBAL_NARRATIVE_SECTIONS = 3
 
 EVALUATION_RESULT_STATUS_ALIASES = {
     "complete": "completed",
@@ -165,6 +175,7 @@ class OperationEventCoordinator:
         self._report_observation_content_token_items: List[int] = []
         self._report_exact_counts = False
         self._report_steps_started = 0
+        self._report_refinement_cycles = get_report_refinement_cycles()
         self._operation_health_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
     def next_agent_run_id(self, agent_name: str) -> str:
@@ -322,7 +333,7 @@ class OperationEventCoordinator:
 
             normalized_category = str(category or "").strip().lower()
             content_tokens = token_calc(max(0, int(content_length or 0)), model_id=model_id)
-            if normalized_category in {"finding", "finding_candidate", "validation_failure"}:
+            if normalized_category == "finding":
                 self.report_findings += 1
                 self.report_finding_content_tokens += content_tokens
                 self._report_finding_content_token_items.append(content_tokens)
@@ -331,7 +342,12 @@ class OperationEventCoordinator:
                 self.report_observation_content_tokens += content_tokens
                 self._report_observation_content_token_items.append(content_tokens)
 
-    def set_report_items(self, items: List[Dict[str, Any]], model_id: Optional[str] = None) -> None:
+    def set_report_items(
+        self,
+        items: List[Dict[str, Any]],
+        model_id: Optional[str] = None,
+        refinement_cycles: int = 2,
+    ) -> None:
         findings = 0
         observations = 0
         finding_content_tokens = 0
@@ -342,10 +358,9 @@ class OperationEventCoordinator:
             if not isinstance(item, dict):
                 continue
             category = str(item.get("category") or "").strip().lower()
-            severity = str(item.get("severity") or "").strip().upper()
             content = item.get("content") or item.get("memory") or ""
             content_tokens = token_calc(len(str(content)), model_id=model_id)
-            if category == "finding" or severity in {"CRITICAL", "HIGH"}:
+            if category == "finding":
                 findings += 1
                 finding_content_tokens += content_tokens
                 finding_items.append(content_tokens)
@@ -362,10 +377,11 @@ class OperationEventCoordinator:
             self._report_observation_content_token_items = observation_items
             self._report_exact_counts = True
             self._report_steps_started = 0
+            self._report_refinement_cycles = max(0, int(refinement_cycles))
 
     def mark_report_step_started(self) -> None:
         with self._lock:
-            total_steps = 2 + self.report_findings + self.report_observations
+            total_steps = _REPORT_GLOBAL_NARRATIVE_SECTIONS + self.report_findings
             self._report_steps_started = min(total_steps, self._report_steps_started + 1)
 
     def report_budget_estimate(
@@ -379,32 +395,26 @@ class OperationEventCoordinator:
         with self._lock:
             findings = int(self.report_findings)
             observations = int(self.report_observations)
-            finding_content_tokens = int(self.report_finding_content_tokens)
-            observation_content_tokens = int(self.report_observation_content_tokens)
-            finding_items = list(self._report_finding_content_token_items)
-            observation_items = list(self._report_observation_content_token_items)
             steps_started = int(self._report_steps_started)
+            refinement_cycles = int(self._report_refinement_cycles)
 
-        remaining_steps = max(0, 2 + findings + observations - steps_started)
+        remaining_steps = max(0, _REPORT_GLOBAL_NARRATIVE_SECTIONS + findings - steps_started)
         if remaining_steps <= 0:
             return ReportBudgetEstimate(findings=findings, observations=observations, remaining_steps=0)
 
-        if len(finding_items) != findings:
-            finding_items = [0] * findings
-            if findings > 0:
-                finding_items[-1] = finding_content_tokens
-        if len(observation_items) != observations:
-            observation_items = [0] * observations
-            if observations > 0:
-                observation_items[-1] = observation_content_tokens
-
-        step_costs: List[tuple[int, int]] = [(2500, 1500)]
-        step_costs.extend((1800 + content_tokens, 1800) for content_tokens in finding_items)
-        step_costs.extend((1400 + content_tokens, 900) for content_tokens in observation_items)
-        step_costs.append((2200, 1200))
-        remaining_costs = step_costs[steps_started:]
-        input_tokens = math.ceil(sum(item[0] for item in remaining_costs) * 1.15)
-        output_tokens = math.ceil(sum(item[1] for item in remaining_costs) * 1.15)
+        base_input_tokens = _REPORT_ACTOR_INPUT_TOKENS
+        base_output_tokens = _REPORT_ACTOR_OUTPUT_TOKENS
+        if refinement_cycles:
+            base_input_tokens += _REPORT_CRITIC_INPUT_TOKENS
+            base_output_tokens += _REPORT_CRITIC_OUTPUT_TOKENS
+        input_tokens = math.ceil(
+            remaining_steps * (base_input_tokens + (refinement_cycles * _REPORT_REVISION_INPUT_TOKENS))
+            * _REPORT_SAFETY_MARGIN
+        )
+        output_tokens = math.ceil(
+            remaining_steps * (base_output_tokens + (refinement_cycles * _REPORT_REVISION_OUTPUT_TOKENS))
+            * _REPORT_SAFETY_MARGIN
+        )
         cost = self._estimate_report_cost(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -1286,9 +1296,13 @@ class AgentEventHandler(PrintingCallbackHandler):
             "report_estimate": estimate,
         }
 
-    def set_report_items(self, items: List[Dict[str, Any]]) -> None:
+    def set_report_items(self, items: List[Dict[str, Any]], refinement_cycles: int = 2) -> None:
         if self.coordinator is not None:
-            self.coordinator.set_report_items(items, model_id=self.model_id)
+            self.coordinator.set_report_items(
+                items,
+                model_id=self.model_id,
+                refinement_cycles=refinement_cycles,
+            )
 
     def model_usage(self) -> List[Dict[str, Any]]:
         """Return provider/model usage rows for final report rendering."""

@@ -11,6 +11,7 @@ from modules.handlers.report_generator import (
     _cleanup_report_agent,
     _configured_nonnegative_int,
     _extract_text_from_result,
+    _emit_report_progress,
     _format_artifact_excerpt,
     _format_execution_history,
     _format_executive_deterministic_sections,
@@ -168,6 +169,17 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
         {"phases": [{"id": 1, "title": "Mapping", "status": "done", "criteria": "Inventory routes"}]}
     )
     assert "| 1 | done | **Mapping:** Inventory routes |" in plan
+
+
+def test_report_progress_counts_only_llm_authored_sections():
+    callback = MagicMock()
+
+    _emit_report_progress(callback, "OP_TEST", 1, 4, "validation_failure", "Requires validation")
+    _emit_report_progress(callback, "OP_TEST", 2, 4, "observation", "Observation")
+    _emit_report_progress(callback, "OP_TEST", 3, 4, "executive", "Executive summary")
+
+    callback.mark_report_step_started.assert_called_once_with()
+    assert callback.emit_ui_event.call_count == 3
 
 
 def test_report_observations_exclude_workflow_bookkeeping_but_retain_real_observations():
@@ -2170,7 +2182,10 @@ def test_generate_security_report_emits_indexed_report_progress(
     ]
     assert all(event["operation_stage"] == "final_report" for event in progress_events)
     assert progress_events[1]["report_step_label"] == "Finding: High Finding"
-    callback_handler.set_report_items.assert_called_once_with(mock_build_sections.return_value["raw_evidence"])
+    callback_handler.set_report_items.assert_called_once_with(
+        mock_build_sections.return_value["raw_evidence"],
+        refinement_cycles=0,
+    )
     assert len(created_agents) == 5
     assert len({id(agent) for agent in created_agents}) == 5
     assert all(agent.cleanup.call_count == 1 for agent in created_agents)

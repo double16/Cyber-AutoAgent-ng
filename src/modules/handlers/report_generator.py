@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from modules.agents.report_agent import ReportGenerator
-from modules.config import get_config_manager
+from modules.config import get_config_manager, get_report_refinement_cycles
 from modules.config.system.logger import get_logger
 from modules.config.types import DEFAULT_MAX_DURATION
 from modules.handlers.utils import duration_max, get_output_path, sanitize_target_name, format_duration
@@ -560,7 +560,10 @@ def _emit_report_progress(
         return
 
     try:
-        if hasattr(callback_handler, "mark_report_step_started"):
+        if kind in {"executive", "finding", "methodology", "next_steps"} and hasattr(
+            callback_handler,
+            "mark_report_step_started",
+        ):
             callback_handler.mark_report_step_started()
         callback_handler.emit_ui_event(
             {
@@ -2964,7 +2967,7 @@ def generate_security_report(
         model_id = config_params.get("model_id")
         module = config_params.get("module")
         completion_status = _normalize_completion_status(config_params.get("completion_status"))
-        refinement_cycles = _configured_nonnegative_int(config_manager, "CYBER_REPORT_REFINEMENT_CYCLES", 2)
+        refinement_cycles = get_report_refinement_cycles(config_manager)
         json_retries = _configured_nonnegative_int(config_manager, "CYBER_WORKFLOW_JSON_RETRIES", 1)
 
         sections = build_report_sections(
@@ -3067,7 +3070,7 @@ def generate_security_report(
         raw_findings = sections.get("raw_evidence", [])
         if callback_handler and hasattr(callback_handler, "set_report_items"):
             try:
-                callback_handler.set_report_items(raw_findings)
+                callback_handler.set_report_items(raw_findings, refinement_cycles=refinement_cycles)
             except Exception:
                 logger.debug("Unable to set exact report item counts", exc_info=True)
         report_metrics_callback = _ReportMetricsCallback(callback_handler)

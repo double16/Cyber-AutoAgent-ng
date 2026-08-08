@@ -187,13 +187,33 @@ def test_report_budget_estimator_zero_evidence_and_pricing_fallback(monkeypatch)
         pricing_fallback={"input": 1.0, "output": 2.0},
     )
 
-    assert estimate.input_tokens == 5405
-    assert estimate.output_tokens == 3105
-    assert estimate.total_tokens == 8510
-    assert estimate.cost == pytest.approx((5405 + (3105 * 2)) / 1_000_000)
+    expected_input = math.ceil(
+        (rb._REPORT_ACTOR_INPUT_TOKENS + rb._REPORT_CRITIC_INPUT_TOKENS + (2 * rb._REPORT_REVISION_INPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    expected_output = math.ceil(
+        (rb._REPORT_ACTOR_OUTPUT_TOKENS + rb._REPORT_CRITIC_OUTPUT_TOKENS + (2 * rb._REPORT_REVISION_OUTPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.input_tokens == expected_input
+    assert estimate.output_tokens == expected_output
+    assert estimate.total_tokens == expected_input + expected_output
+    assert estimate.cost == pytest.approx((expected_input + (expected_output * 2)) / 1_000_000)
     assert estimate.findings == 0
     assert estimate.observations == 0
-    assert estimate.remaining_steps == 2
+    assert estimate.remaining_steps == 3
+
+
+def test_report_budget_estimator_reads_refinement_cycles_from_configuration(monkeypatch):
+    configured_cycles = Mock(return_value=3)
+    monkeypatch.setattr(rb, "get_report_refinement_cycles", configured_cycles)
+
+    coordinator = OperationEventCoordinator("OP_EST_CONFIG", MagicMock())
+
+    assert coordinator._report_refinement_cycles == 3
+    configured_cycles.assert_called_once_with()
 
 
 def test_report_budget_estimator_pricing_override_precedes_model_pricing():
@@ -210,7 +230,17 @@ def test_report_budget_estimator_pricing_override_precedes_model_pricing():
         pricing_override=True,
     )
 
-    assert estimate.cost == pytest.approx((5405 + (3105 * 2)) / 1_000_000)
+    expected_input = math.ceil(
+        (rb._REPORT_ACTOR_INPUT_TOKENS + rb._REPORT_CRITIC_INPUT_TOKENS + (2 * rb._REPORT_REVISION_INPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    expected_output = math.ceil(
+        (rb._REPORT_ACTOR_OUTPUT_TOKENS + rb._REPORT_CRITIC_OUTPUT_TOKENS + (2 * rb._REPORT_REVISION_OUTPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.cost == pytest.approx((expected_input + (expected_output * 2)) / 1_000_000)
     models_client.get_pricing.assert_not_called()
 
 
@@ -230,9 +260,17 @@ def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
 
     assert estimate.findings == 1
     assert estimate.observations == 2
-    assert estimate.input_tokens == math.ceil((2500 + 1900 + 1440 + 1425 + 2200) * 1.15)
-    assert estimate.output_tokens == math.ceil((1500 + 1800 + 900 + 900 + 1200) * 1.15)
-    assert estimate.remaining_steps == 5
+    assert estimate.input_tokens == math.ceil(
+        (rb._REPORT_ACTOR_INPUT_TOKENS + rb._REPORT_CRITIC_INPUT_TOKENS + (2 * rb._REPORT_REVISION_INPUT_TOKENS))
+        * 4
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.output_tokens == math.ceil(
+        (rb._REPORT_ACTOR_OUTPUT_TOKENS + rb._REPORT_CRITIC_OUTPUT_TOKENS + (2 * rb._REPORT_REVISION_OUTPUT_TOKENS))
+        * 4
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.remaining_steps == 4
 
     coordinator.set_report_items(
         [
@@ -247,7 +285,33 @@ def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
     assert tightened.findings == 1
     assert tightened.observations == 1
     assert tightened.remaining_steps == 3
-    assert tightened.input_tokens == math.ceil((1810 + 1420 + 2200) * 1.15)
+    assert tightened.input_tokens == math.ceil(
+        (rb._REPORT_ACTOR_INPUT_TOKENS + rb._REPORT_CRITIC_INPUT_TOKENS + (2 * rb._REPORT_REVISION_INPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+
+
+def test_report_budget_estimator_without_refinement_reserves_actor_calls_only():
+    coordinator = OperationEventCoordinator("OP_EST_NO_REFINEMENT", MagicMock())
+    coordinator.set_report_items(
+        [{"category": "finding", "severity": "HIGH", "content": "confirmed"}],
+        refinement_cycles=0,
+    )
+
+    estimate = coordinator.report_budget_estimate(
+        provider_id="litellm",
+        model_id="test-model",
+        pricing_fallback={"input": 0.0, "output": 0.0},
+    )
+
+    assert estimate.remaining_steps == 4
+    assert estimate.input_tokens == math.ceil(
+        rb._REPORT_ACTOR_INPUT_TOKENS * 4 * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.output_tokens == math.ceil(
+        rb._REPORT_ACTOR_OUTPUT_TOKENS * 4 * rb._REPORT_SAFETY_MARGIN
+    )
 
 
 def test_reasoning_termination_metrics_and_basic_helpers():
@@ -358,7 +422,7 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert "task_started" not in types
     assert handler.memory_ops == 1
     assert handler.evidence_count == 1
-    assert handler.coordinator.report_findings == 1
+    assert handler.coordinator.report_findings == 0
 
 
 def test_shell_help_text_with_timeout_option_is_not_reported_as_timeout():
@@ -983,14 +1047,14 @@ def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
 
     assert progress_event["agent_name"] == "evidence_reviewer"
     assert progress_event["duration"] == "5m 0s"
-    assert progress_event["progressPercent"] == 869
+    assert progress_event["progressPercent"] == 28860
     assert metrics_event["metrics"]["inputTokens"] == 125
     assert metrics_event["metrics"]["outputTokens"] == 60
     assert metrics_event["metrics"]["totalTokens"] == 185
     assert metrics_event["metrics"]["cost"] == pytest.approx(0.000245)
     assert metrics_event["metrics"]["duration"] == "5m 0s"
-    assert metrics_event["metrics"]["progressPercent"] == 869
-    assert metrics_event["metrics"]["reportEstimate"]["totalTokens"] == 8510
+    assert metrics_event["metrics"]["progressPercent"] == 28860
+    assert metrics_event["metrics"]["reportEstimate"]["totalTokens"] == 288420
 
 
 def test_constructor_emits_init_and_metrics(monkeypatch):

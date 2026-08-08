@@ -17,6 +17,7 @@ from modules.config.types import (
 from modules.config.manager import (
     ConfigManager,
     get_config_manager,
+    get_report_refinement_cycles,
 )
 from modules.config.models import (
     create_bedrock_model,
@@ -28,6 +29,7 @@ from modules.config.models import (
 __all__ = [
     # Configuration management
     "get_config_manager",
+    "get_report_refinement_cycles",
     "ConfigManager",
     # Types
     "ModelProvider",
