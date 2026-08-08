@@ -13,6 +13,10 @@ from modules.handlers.report_generator import (
     _extract_text_from_result,
     _format_artifact_excerpt,
     _format_execution_history,
+    _format_executive_deterministic_sections,
+    _format_finding_with_narrative,
+    _format_operation_plan,
+    _format_operation_tasks,
     _format_observation,
     _markdown_table_cell,
     _format_model_usage_table,
@@ -42,6 +46,8 @@ from modules.handlers.report_generator import (
     _informational_observation_context,
     _is_reportable_informational_observation,
     _format_verified_findings_summary,
+    _compact_finding_context,
+    _compact_next_steps_source,
     _validate_narrative_consistency,
     _format_report_consistency_warnings,
     build_report_sections,
@@ -72,6 +78,79 @@ def test_canonical_report_data_owns_counts_and_json_separates_narrative():
     assert canonical["artifact_references"] == ["artifact:artifacts/proof.txt"]
     assert report["canonical"]["severity_counts"]["critical"] == 1
     assert report["narrative"]["executive"] == "one critical finding"
+
+
+def test_compact_finding_context_excludes_raw_metadata_and_bounds_evidence():
+    finding = {
+        "title": "Stored XSS",
+        "severity": "HIGH",
+        "content": "evidence " * 500,
+        "metadata": {"artifacts": ["artifact:artifacts/proof.txt"], "secret": "do-not-send"},
+    }
+
+    context = _compact_finding_context(finding, "https://example.test")
+
+    assert context["target"] == "https://example.test"
+    assert context["artifact_references"] == ["artifact:artifacts/proof.txt"]
+    assert len(context["evidence_summary"]) <= 1200
+    assert "secret" not in context
+
+
+def test_compact_next_steps_source_excludes_raw_history_and_tools_used():
+    source = _compact_next_steps_source(
+        target="https://example.test",
+        objective="Assess the target",
+        completion_status={"assessment_complete": False},
+        sections={
+            "phase_coverage": [{"phase_id": 1, "title": "Mapping", "status": "done", "raw": "omit"}],
+            "task_status_counts": {"done": 1},
+            "total_task_count": 2,
+            "completed_task_count": 1,
+            "execution_history": "large raw history",
+        },
+        latest_run={
+            "metrics": {"duration": "10m", "total_tokens": 100},
+            "tools_used": ["shell"],
+            "tool_failures": {"shell:error": 2},
+        },
+        configured_budget={"duration": 30},
+        validation_candidates=[],
+    )
+
+    assert source["phase_coverage"] == [{"phase_id": 1, "title": "Mapping", "status": "done"}]
+    assert "execution_history" not in source
+    assert "tools_used" not in source
+    assert source["tool_failure_counts"] == {"shell:error": 2}
+
+
+def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
+    sections = {
+        "summary_table": "| Finding |\n|---|\n| SQLi |",
+        "severity_counts": {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+        "verified_findings_total": 1,
+        "finding_validation_failure_count": 2,
+        "observation_count": 3,
+        "completion_status": {"assessment_complete": False, "incomplete_reason": "Coverage remains partial."},
+    }
+    finding = {
+        "title": "SQL injection",
+        "severity": "HIGH",
+        "content": "Differential response observed.",
+        "metadata": {"artifacts": ["artifact:artifacts/proof.txt"]},
+    }
+
+    executive = _format_executive_deterministic_sections(sections)
+    detail = _format_finding_with_narrative(finding, 0, "#### Impact\n\nSupported impact.\n\n#### Remediation\n\nPatch it.\n\n#### TECHNICAL APPENDIX\n\nNotes.")
+    tasks = _format_operation_tasks({"items": ["Task,Test target,outcome,2,done,,,,,,https://example.test,1/1"]})
+
+    assert "### Key Findings" in executive
+    assert "### Claim Status" in executive
+    assert "#### Evidence" in detail
+    assert "#### Attack Path Analysis\n\nNot established from supplied evidence" in detail
+    assert "| 2 | Task | done | https://example.test | 1/1 |" in tasks
+    assert _format_operation_plan({"phases": [{"title": "Mapping", "objective": "Inventory routes"}]}) == (
+        "- **Mapping:** Inventory routes"
+    )
 
 
 def test_report_observations_exclude_workflow_bookkeeping_but_retain_real_observations():
