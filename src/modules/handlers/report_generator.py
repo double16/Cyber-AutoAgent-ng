@@ -14,6 +14,7 @@ import re
 import shlex
 import subprocess
 import tomllib
+from copy import deepcopy
 from csv import reader as csv_reader
 from collections import Counter
 from datetime import datetime
@@ -75,6 +76,22 @@ _ARTIFACT_REFERENCE = re.compile(
     r"(?:artifacts|outputs)/[A-Za-z0-9._~+/=-]+)"
     r"(?=$|[\s`\"'\])},;:])",
     re.IGNORECASE,
+)
+_INVENTORY_ENDPOINT_ID = re.compile(r"\bendpoint-\d+\b")
+_INVENTORY_IDENTIFIER_FIELDS = frozenset(
+    {
+        "id",
+        "target_id",
+        "task_uid",
+        "finding_uid",
+        "candidate_uid",
+        "item_id",
+        "source_refs",
+        "evidence_refs",
+        "artifacts",
+        "evidence_artifacts",
+        "snapshot_hash",
+    }
 )
 _GENERIC_PATH_REFERENCE = re.compile(
     r"(?:artifact:(?:artifacts/)?[^\s\"'\])]+|"
@@ -270,6 +287,58 @@ def _file_artifact_references(value: Any) -> List[str]:
     return sorted(reference for reference in _artifact_references(value) if reference.startswith("artifact:"))
 
 
+def _inventory_endpoint_values(task_records: List[Any]) -> Dict[str, str]:
+    """Load unambiguous endpoint display values from task-attached inventory manifests."""
+    references: set[str] = set()
+    for task in task_records:
+        acceptance = getattr(task, "acceptance", None)
+        basis = getattr(acceptance, "basis", None)
+        references.update(_file_artifact_references(getattr(basis, "source_refs", ())))
+        references.update(_file_artifact_references(getattr(task, "evidence", ())))
+
+    candidates: Dict[str, set[str]] = {}
+    for reference in sorted(references):
+        try:
+            with open(_artifact_path_from_ref(reference), "r", encoding="utf-8") as manifest_file:
+                manifest = json.load(manifest_file)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        items = manifest.get("items") if isinstance(manifest, dict) else None
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            value = str(item.get("value") or "").strip()
+            if _INVENTORY_ENDPOINT_ID.fullmatch(item_id) and value:
+                candidates.setdefault(item_id, set()).add(value)
+
+    resolved = {item_id: next(iter(values)) for item_id, values in candidates.items() if len(values) == 1}
+    conflicts = sorted(item_id for item_id, values in candidates.items() if len(values) > 1)
+    if conflicts:
+        logger.warning("Leaving ambiguous inventory endpoint IDs unresolved: %s", ", ".join(conflicts))
+    return resolved
+
+
+def _resolve_inventory_ids_for_display(value: Any, endpoint_values: Dict[str, str], field_name: str = "") -> Any:
+    """Resolve known inventory endpoint IDs in display text without changing canonical identifiers."""
+    if not endpoint_values or field_name in _INVENTORY_IDENTIFIER_FIELDS:
+        return deepcopy(value)
+    if isinstance(value, str):
+        return _INVENTORY_ENDPOINT_ID.sub(lambda match: endpoint_values.get(match.group(0), match.group(0)), value)
+    if isinstance(value, list):
+        return [_resolve_inventory_ids_for_display(item, endpoint_values, field_name) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_resolve_inventory_ids_for_display(item, endpoint_values, field_name) for item in value)
+    if isinstance(value, dict):
+        return {
+            key: _resolve_inventory_ids_for_display(item, endpoint_values, str(key))
+            for key, item in value.items()
+        }
+    return deepcopy(value)
+
+
 def _artifact_excerpt_keywords(item: Dict[str, Any]) -> set[str]:
     """Build compact relevance terms from one report item without adding external facts."""
     parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
@@ -345,7 +414,7 @@ def _format_artifact_excerpt(reference: str, excerpt: List[tuple[int, str]]) -> 
     ranges.append(str(start) if start == previous else f"{start}-{previous}")
     content = "\n".join(f"{line_number}: {line}" for line_number, line in excerpt)
     return (
-        f"**`{reference}` (lines {', '.join(ranges)})**\n\n"
+        f"**`{_escape_markdown_text(reference)}` (lines {', '.join(ranges)})**\n\n"
         f"````text\n{content}\n````\n"
     )
 
@@ -543,7 +612,8 @@ def _format_target_coverage(
             and _evidence_matches_target(item, target)
         ]
         lines.append(
-            f"| {target_id} | {target.type} | `{target.value}` | {len(scoped_tasks)} | "
+            f"| {_markdown_table_cell(target_id)} | {_markdown_table_cell(target.type)} | "
+            f"`{_escape_markdown_text(target.value)}` | {len(scoped_tasks)} | "
             f"{len(verified)} | {len(validation_failures)} |"
         )
     return "\n".join(lines)
@@ -837,12 +907,71 @@ def _format_verified_findings_summary(sections: Dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _item_artifact_count(item: Dict[str, Any]) -> int:
+    """Return the number of recorded artifact references for one report item."""
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    artifacts = metadata.get("artifacts") or metadata.get("evidence_artifacts") or []
+    if not isinstance(artifacts, list):
+        artifacts = [artifacts]
+    return len([artifact for artifact in artifacts if str(artifact).strip()])
+
+
+def _format_validation_failures_table(items: List[Dict[str, Any]]) -> str:
+    """Render validation-required claims from canonical records."""
+    if not items:
+        return "No validation-required claims were recorded."
+    lines = [
+        "| Finding | Claimed Severity | Validation Status | Reason | Artifacts |",
+        "|---|---|---|---|---:|",
+    ]
+    for index, item in enumerate(items):
+        metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        lines.append(
+            "| {title} | {severity} | {status} | {reason} | {artifacts} |".format(
+                title=_markdown_table_cell(_report_item_title(item, f"Validation item {index + 1}")),
+                severity=_markdown_table_cell(
+                    metadata.get("claimed_severity") or metadata.get("severity") or "Unknown"
+                ),
+                status=_markdown_table_cell(item.get("validation_status") or metadata.get("validation_status") or "failed"),
+                reason=_markdown_table_cell(_compact_text(metadata.get("validation_reason"), 240)),
+                artifacts=_item_artifact_count(item),
+            )
+        )
+    return "\n".join(lines)
+
+
+def _format_observations_table(items: List[Dict[str, Any]]) -> str:
+    """Render informational observations from canonical records."""
+    if not items:
+        return "No informational observations were recorded."
+    lines = [
+        "| Observation | Location | Status | Recorded Detail | Artifacts |",
+        "|---|---|---|---|---:|",
+    ]
+    for index, item in enumerate(items):
+        metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        lines.append(
+            "| {title} | {location} | {status} | {detail} | {artifacts} |".format(
+                title=_markdown_table_cell(_report_item_title(item, f"Observation {index + 1}")),
+                location=_markdown_table_cell(metadata.get("target") or metadata.get("location") or "Not recorded"),
+                status=_markdown_table_cell(item.get("validation_status") or metadata.get("validation_status") or "recorded"),
+                detail=_markdown_table_cell(_compact_text(_clean_observation_detail(str(item.get("content") or "")), 240)),
+                artifacts=_item_artifact_count(item),
+            )
+        )
+    return "\n".join(lines)
+
+
 def _format_executive_deterministic_sections(sections: Dict[str, Any]) -> str:
     """Render executive facts after the model-authored interpretation."""
     completion = sections.get("completion_status", {})
     status = "Complete" if completion.get("assessment_complete") else "Incomplete"
     validation_failures = int(sections.get("finding_validation_failure_count", 0) or 0)
     observations = int(sections.get("observation_count", 0) or 0)
+    raw_evidence = sections.get("raw_evidence", [])
+    raw_evidence = raw_evidence if isinstance(raw_evidence, list) else []
+    validation_items = [item for item in raw_evidence if isinstance(item, dict) and item.get("category") == "validation_failure"]
+    observation_items = [item for item in raw_evidence if _is_reportable_informational_observation(item)]
     return (
         "### Key Findings\n\n"
         + str(sections.get("summary_table") or "No verified findings were recorded.")
@@ -851,8 +980,12 @@ def _format_executive_deterministic_sections(sections: Dict[str, Any]) -> str:
         + _format_verified_findings_summary(sections)
         + "\n#### Findings Requiring Validation\n\n"
         + f"Recorded validation-required claims: **{validation_failures}**\n\n"
+        + _format_validation_failures_table(validation_items)
+        + "\n\n"
         + "#### Informational Observations\n\n"
         + f"Recorded informational observations: **{observations}**\n\n"
+        + _format_observations_table(observation_items)
+        + "\n\n"
         + "#### Coverage Status\n\n"
         + f"Assessment status: **{status}**. "
         + (str(completion.get("incomplete_reason") or "") if status == "Incomplete" else "")
@@ -863,9 +996,9 @@ def _format_executive_deterministic_sections(sections: Dict[str, Any]) -> str:
 def _format_finding_with_narrative(item: Dict[str, Any], index: int, narrative: str) -> str:
     """Combine Python-owned finding facts with a bounded LLM interpretation."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
-    title = _report_item_title(item, f"Finding {index + 1}")
-    severity = item.get("severity") or metadata.get("severity") or "Unknown"
-    status = item.get("validation_status") or metadata.get("validation_status") or "verified"
+    title = _escape_markdown_text(_report_item_title(item, f"Finding {index + 1}"))
+    severity = _escape_markdown_text(item.get("severity") or metadata.get("severity") or "Unknown")
+    status = _escape_markdown_text(item.get("validation_status") or metadata.get("validation_status") or "verified")
     content = _format_markdown_xml_html_tags(str(item.get("content") or "No finding detail was recorded.").strip())
     parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
     steps = _compact_text(parsed.get("steps") or metadata.get("steps"), 1200) or "Not established from supplied evidence"
@@ -885,22 +1018,19 @@ def _format_finding_with_narrative(item: Dict[str, Any], index: int, narrative: 
     )
 
 
-_RE_MARKDOWN_XML_HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
+def _escape_markdown_text(value: Any) -> str:
+    """Escape externally recorded text without altering intentional report Markdown."""
+    text = str(value or "")
+    text = text.replace("\\", "\\\\")
+    for character in ("`", "*", "_", "[", "]", "<", ">", "!"):
+        text = text.replace(character, f"\\{character}")
+    text = re.sub(r"(?m)^(\s*)([#>+\-])(?=\s)", r"\1\\\2", text)
+    return re.sub(r"(?m)^(\s*)(\d+)\.(?=\s)", r"\1\2\\.", text)
 
 
 def _format_markdown_xml_html_tags(text: str) -> str:
-    """Surround XML/HTML tags with inline-code delimiters for safe Markdown rendering."""
-
-    def _format_tag(match: re.Match[str]) -> str:
-        already_code = (
-            match.start() > 0
-            and text[match.start() - 1] == "`"
-            and match.end() < len(text)
-            and text[match.end()] == "`"
-        )
-        return match.group(0) if already_code else f"`{match.group(0)}`"
-
-    return _RE_MARKDOWN_XML_HTML_TAG.sub(_format_tag, text)
+    """Backward-compatible external-text escaping for report prose."""
+    return _escape_markdown_text(text)
 
 
 def _markdown_table_cell(value: Any) -> str:
@@ -1039,14 +1169,16 @@ def _format_operation_plan(plan: Any) -> str:
     phases = plan.get("phases", [])
     if not isinstance(phases, list) or not phases:
         return "No operation plan phases were recorded."
-    lines = []
+    lines = ["| Phase | Status | Success Criterion |", "|---:|---|---|"]
     for phase in phases:
         if not isinstance(phase, dict):
             continue
+        phase_id = _markdown_table_cell(phase.get("id") or "—")
         title = _markdown_table_cell(phase.get("title") or phase.get("name") or "Unnamed phase")
-        objective = _markdown_table_cell(phase.get("objective") or phase.get("description"))
-        lines.append(f"- **{title}:** {objective}")
-    return "\n".join(lines) or "No operation plan phases were recorded."
+        status = _markdown_table_cell(phase.get("status") or "Not recorded")
+        criteria = _markdown_table_cell(phase.get("criteria") or "Not recorded")
+        lines.append(f"| {phase_id} | {status} | **{title}:** {criteria} |")
+    return "\n".join(lines) if len(lines) > 2 else "No operation plan phases were recorded."
 
 
 def _format_operation_tasks(operation_tasks: Any) -> str:
@@ -1096,9 +1228,9 @@ def _format_observation(item: Dict[str, Any], index: int) -> str:
     """Render an informational observation without model-generated interpretation."""
 
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
-    title = _report_item_title(item, f"Observation {index + 1}")
-    status = item.get("validation_status") or metadata.get("validation_status") or "recorded"
-    location = metadata.get("target") or metadata.get("location") or "Not recorded"
+    title = _escape_markdown_text(_report_item_title(item, f"Observation {index + 1}"))
+    status = _escape_markdown_text(item.get("validation_status") or metadata.get("validation_status") or "recorded")
+    location = _escape_markdown_text(metadata.get("target") or metadata.get("location") or "Not recorded")
     content = _clean_observation_detail(
         str(item.get("content") or "No observation detail was recorded.").strip()
     )
@@ -2573,9 +2705,9 @@ def _assemble_security_assessment_report(
 def _format_deterministic_finding(item: Dict[str, Any], index: int) -> str:
     """Render a stored finding without model-authored analysis."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
-    title = _report_item_title(item, f"Finding {index + 1}")
-    severity = item.get("severity") or metadata.get("severity") or "Unknown"
-    status = item.get("validation_status") or metadata.get("validation_status") or "verified"
+    title = _escape_markdown_text(_report_item_title(item, f"Finding {index + 1}"))
+    severity = _escape_markdown_text(item.get("severity") or metadata.get("severity") or "Unknown")
+    status = _escape_markdown_text(item.get("validation_status") or metadata.get("validation_status") or "verified")
     content = _format_markdown_xml_html_tags(str(item.get("content") or "No finding detail was recorded.").strip())
     text = (
         f"### {title}\n\n"
@@ -2709,9 +2841,10 @@ def generate_deterministic_fallback_report(
         "This report contains only recorded evidence and workflow data.\n\n",
         _completion_status_notice(completion_status),
         "## REPORT GENERATION STATUS\n\n",
-        f"- **Status:** fallback\n- **Reason:** `{error_text}`\n\n",
+        f"- **Status:** fallback\n- **Reason:** `{_escape_markdown_text(error_text)}`\n\n",
         '<a name="executive-summary"></a>\n## EXECUTIVE SUMMARY\n\n',
         _format_verified_findings_summary(sections),
+        _format_executive_deterministic_sections(sections),
         sections["taxonomy_coverage"],
         _PAGE_BREAK + '<a name="detailed-vulnerability-analysis"></a>\n## DETAILED VULNERABILITY ANALYSIS\n\n',
         "### Findings Summary\n\n" + str(sections.get("summary_table") or "No verified findings were recorded.") + "\n\n",
@@ -2730,11 +2863,11 @@ def generate_deterministic_fallback_report(
             if not isinstance(artifacts, list):
                 artifacts = [artifacts]
             parts.append(
-                f"### {_report_item_title(item, f'Validation item {index + 1}')}\n\n"
-                f"- **Claimed severity:** {metadata.get('claimed_severity') or metadata.get('severity') or 'Unknown'}\n"
-                f"- **Validation status:** {item.get('validation_status') or metadata.get('validation_status') or 'failed'}\n"
-                f"- **Why validation failed:** {metadata.get('validation_reason') or 'Verification was incomplete.'}\n\n"
-                f"**Claim:** {item.get('content', '')}\n\n"
+                f"### {_escape_markdown_text(_report_item_title(item, f'Validation item {index + 1}'))}\n\n"
+                f"- **Claimed severity:** {_escape_markdown_text(metadata.get('claimed_severity') or metadata.get('severity') or 'Unknown')}\n"
+                f"- **Validation status:** {_escape_markdown_text(item.get('validation_status') or metadata.get('validation_status') or 'failed')}\n"
+                f"- **Why validation failed:** {_escape_markdown_text(metadata.get('validation_reason') or 'Verification was incomplete.')}\n\n"
+                f"**Claim:** {_escape_markdown_text(item.get('content', ''))}\n\n"
                 "**Available artifacts:**\n"
                 + ("\n".join(f"- `{artifact}`" for artifact in artifacts if artifact) or "- No valid artifact was recorded.")
                 + "\n\n"
@@ -3180,19 +3313,23 @@ Finding narrative context:
             report_parts_files.append(validation_header_file)
             for i, item in report_validation_failures:
                 report_step_index += 1
-                title = _report_item_title(item, f"Validation item {i + 1}")
+                title = _escape_markdown_text(_report_item_title(item, f"Validation item {i + 1}"))
                 metadata = item.get("metadata", {}) or {}
-                reason = metadata.get("validation_reason") or "Verification was incomplete or evidence requirements failed."
+                reason = _escape_markdown_text(
+                    metadata.get("validation_reason") or "Verification was incomplete or evidence requirements failed."
+                )
                 artifacts = metadata.get("artifacts") or metadata.get("evidence_artifacts") or []
                 if not isinstance(artifacts, list):
                     artifacts = [artifacts]
-                artifact_lines = "\n".join(f"- `{path}`" for path in artifacts if path) or "- No valid artifact was recorded."
+                artifact_lines = "\n".join(
+                    f"- `{_escape_markdown_text(path)}`" for path in artifacts if path
+                ) or "- No valid artifact was recorded."
                 text = (
                     f"### {title}\n\n"
-                    f"- **Claimed severity:** {metadata.get('claimed_severity') or metadata.get('severity') or 'Unknown'}\n"
-                    f"- **Validation status:** {item.get('validation_status') or metadata.get('validation_status') or 'failed'}\n"
+                    f"- **Claimed severity:** {_escape_markdown_text(metadata.get('claimed_severity') or metadata.get('severity') or 'Unknown')}\n"
+                    f"- **Validation status:** {_escape_markdown_text(item.get('validation_status') or metadata.get('validation_status') or 'failed')}\n"
                     f"- **Why validation failed:** {reason}\n\n"
-                    f"**Claim:** {item.get('content', '')}\n\n"
+                    f"**Claim:** {_escape_markdown_text(item.get('content', ''))}\n\n"
                     f"**Available artifacts:**\n{artifact_lines}\n\n"
                     "**Required follow-up:** Reproduce this claim in a dedicated task and capture decisive direct "
                     "evidence or a test/control comparison before treating it as a vulnerability.\n"
@@ -3744,6 +3881,7 @@ def build_report_sections(
 
         operation_plan = memory_client.get_active_plan(operation_id=operation_id)
         task_records = memory_client.list_tasks(operation_id=operation_id)
+        endpoint_values = _inventory_endpoint_values(task_records)
         target_values = {
             str(item.target_id): str(item.value)
             for item in list(getattr(operation_plan, "targets", []) or [])
@@ -3778,7 +3916,8 @@ def build_report_sections(
                 task_target_values = [target_values[target_id] for target_id in scoped_target_ids if target_id in target_values]
 
             def _task_field(value: Any) -> str:
-                return str(value or "").replace(",", ";").replace("\n", " ").strip()
+                display_value = _resolve_inventory_ids_for_display(value, endpoint_values)
+                return str(display_value or "").replace(",", ";").replace("\n", " ").strip()
 
             operation_tasks.append(
                 ",".join(
@@ -3802,9 +3941,9 @@ def build_report_sections(
             task_history_rows.append(
                 {
                     "phase": task.phase,
-                    "title": task.title,
+                    "title": _resolve_inventory_ids_for_display(task.title, endpoint_values),
                     "status": task.status,
-                    "status_reason": task.status_reason or "",
+                    "status_reason": _resolve_inventory_ids_for_display(task.status_reason or "", endpoint_values),
                     "targets": ", ".join(task_target_values) if task_target_values else task.target_scope,
                     "acceptance": f"{completed_count}/{len(task.acceptance.criteria)}",
                 }
@@ -3814,11 +3953,14 @@ def build_report_sections(
                 acceptance_history_rows.append(
                     {
                         "phase": task.phase,
-                        "title": task.title,
+                        "title": _resolve_inventory_ids_for_display(task.title, endpoint_values),
                         "criterion_id": criterion.id,
                         "status": result.status if result else "not_recorded",
                         "disposition": result.disposition if result else "—",
-                        "summary": result.summary if result else criterion.description,
+                        "summary": _resolve_inventory_ids_for_display(
+                            result.summary if result else criterion.description,
+                            endpoint_values,
+                        ),
                         "evidence_refs": ", ".join(result.evidence_refs) if result else "—",
                     }
                 )
@@ -3884,8 +4026,8 @@ def build_report_sections(
         suppressed_acceptance_observation_count = 0
 
         for memory_item in raw_memories:
-            memory_content = memory_item.get("memory", "")
-            metadata = memory_item.get("metadata", {}) or {}
+            memory_content = _resolve_inventory_ids_for_display(memory_item.get("memory", ""), endpoint_values)
+            metadata = _resolve_inventory_ids_for_display(memory_item.get("metadata", {}) or {}, endpoint_values)
             logger.info(
                 f"Checking memory item: id={memory_item.get('id')}, category={metadata.get('category')}, op_id={metadata.get('operation_id')}")
             if not metadata:
@@ -4187,8 +4329,8 @@ def build_report_sections(
         )
         sections = {
             "operation_id": operation_id,
-            "target": target,
-            "objective": objective,
+            "target": _resolve_inventory_ids_for_display(target, endpoint_values),
+            "objective": _resolve_inventory_ids_for_display(objective, endpoint_values),
             "date": operation_date,
             "severity_counts": severity_counts,
             "verified_findings_total": verified_findings_total,
@@ -4198,7 +4340,10 @@ def build_report_sections(
             "low_count": severity_counts["low"],
             "info_count": severity_counts["info"],
             "overview": report_content.get("overview", ""),
-            "operation_plan": operation_plan.to_dict() if operation_plan else "",
+            "operation_plan": _resolve_inventory_ids_for_display(
+                operation_plan.to_dict() if operation_plan else "",
+                endpoint_values,
+            ),
             "operation_tasks": {
                 "columns": (
                     "title,objective,acceptance_mode,phase,status,status_reason,kind,reference_id,"
@@ -4451,7 +4596,7 @@ def _format_summary_table(findings: List[Dict[str, Any]]) -> str:
     for i, finding in enumerate(
             findings[:MAX_REPORT_FINDINGS], 1
     ):  # Include up to 50 findings in summary
-        severity = finding.get("severity", "MEDIUM")
+        severity = _markdown_table_cell(finding.get("severity", "MEDIUM"))
         # Extract title and location
         if "parsed" in finding and any(finding["parsed"].values()):
             parsed = finding["parsed"]
@@ -4462,7 +4607,9 @@ def _format_summary_table(findings: List[Dict[str, Any]]) -> str:
             title = content.split("[WHERE]")[0] if "[WHERE]" in content else content
             location = "See appendix"
 
-        table.append(f"| {i} | {severity} | {title} | {location} |")
+        table.append(
+            f"| {i} | {severity} | {_markdown_table_cell(title)} | {_markdown_table_cell(location)} |"
+        )
 
     # Include all findings count if more than shown
     if len(findings) > MAX_REPORT_FINDINGS:

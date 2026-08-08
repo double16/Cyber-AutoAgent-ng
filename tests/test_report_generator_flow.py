@@ -44,7 +44,9 @@ from modules.handlers.report_generator import (
     _canonical_report_data,
     _canonical_report_json,
     _informational_observation_context,
+    _inventory_endpoint_values,
     _is_reportable_informational_observation,
+    _resolve_inventory_ids_for_display,
     _format_verified_findings_summary,
     _compact_finding_context,
     _compact_next_steps_source,
@@ -131,6 +133,18 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
         "finding_validation_failure_count": 2,
         "observation_count": 3,
         "completion_status": {"assessment_complete": False, "incomplete_reason": "Coverage remains partial."},
+        "raw_evidence": [
+            {
+                "title": "Unverified [claim]",
+                "category": "validation_failure",
+                "metadata": {"validation_reason": "<script>alert(1)</script>"},
+            },
+            {
+                "title": "Observed [header]",
+                "category": "observation",
+                "content": "<script>alert(1)</script>",
+            },
+        ],
     }
     finding = {
         "title": "SQL injection",
@@ -148,9 +162,12 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
     assert "#### Evidence" in detail
     assert "#### Attack Path Analysis\n\nNot established from supplied evidence" in detail
     assert "| 2 | Task | done | https://example.test | 1/1 |" in tasks
-    assert _format_operation_plan({"phases": [{"title": "Mapping", "objective": "Inventory routes"}]}) == (
-        "- **Mapping:** Inventory routes"
+    assert "Unverified \\[claim\\]" in executive
+    assert "\\<script\\>alert(1)\\</script\\>" in executive
+    plan = _format_operation_plan(
+        {"phases": [{"id": 1, "title": "Mapping", "status": "done", "criteria": "Inventory routes"}]}
     )
+    assert "| 1 | done | **Mapping:** Inventory routes |" in plan
 
 
 def test_report_observations_exclude_workflow_bookkeeping_but_retain_real_observations():
@@ -390,19 +407,81 @@ def test_format_execution_history_is_stable_and_escapes_markdown_cells():
     assert "http://one.test" in history
 
 
-def test_markdown_table_cell_code_formats_xml_html_tags_only():
-    assert _markdown_table_cell("<input name='username'> | plain") == "`<input name='username'>` \\| plain"
-    assert _markdown_table_cell("already `code` and plain") == "already `code` and plain"
+def test_markdown_table_cell_escapes_external_markdown_and_html():
+    assert _markdown_table_cell("<input name='username'> | [plain]") == "\\<input name='username'\\> \\| \\[plain\\]"
+    assert _markdown_table_cell("already `code` and *plain*") == "already \\`code\\` and \\*plain\\*"
 
 
-def test_observation_recorded_detail_formats_xml_html_tags():
+def test_inventory_endpoint_resolution_uses_manifest_values_and_preserves_identifiers(tmp_path):
+    manifest = tmp_path / "inventory_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "endpoint-1",
+                        "target_id": "target-1",
+                        "kind": "service",
+                        "value": "https://target.test",
+                    }
+                ]
+            }
+        )
+    )
+    task = MagicMock()
+    task.acceptance.basis.source_refs = ("artifact:artifacts/inventory_manifest.json",)
+    task.evidence = []
+
+    with patch("modules.handlers.report_generator._artifact_path_from_ref", return_value=str(manifest)):
+        endpoint_values = _inventory_endpoint_values([task])
+
+    displayed = _resolve_inventory_ids_for_display(
+        {
+            "id": "endpoint-1",
+            "content": "Created hypotheses for endpoint-1; endpoint-99 remains unknown.",
+            "metadata": {"target_id": "target-1", "validation_reason": "Endpoint endpoint-1 responded."},
+        },
+        endpoint_values,
+    )
+
+    assert endpoint_values == {"endpoint-1": "https://target.test"}
+    assert displayed["id"] == "endpoint-1"
+    assert displayed["metadata"]["target_id"] == "target-1"
+    assert displayed["content"] == "Created hypotheses for https://target.test; endpoint-99 remains unknown."
+    assert displayed["metadata"]["validation_reason"] == "Endpoint https://target.test responded."
+
+
+def test_inventory_endpoint_resolution_leaves_conflicting_values_unresolved(tmp_path):
+    first = tmp_path / "first_manifest.json"
+    second = tmp_path / "second_manifest.json"
+    for path, value in ((first, "https://one.test"), (second, "https://two.test")):
+        path.write_text(json.dumps({"items": [{"id": "endpoint-1", "value": value}]}))
+
+    first_task = MagicMock()
+    first_task.acceptance.basis.source_refs = ("artifact:artifacts/first_manifest.json",)
+    first_task.evidence = []
+    second_task = MagicMock()
+    second_task.acceptance.basis.source_refs = ("artifact:artifacts/second_manifest.json",)
+    second_task.evidence = []
+
+    with patch(
+        "modules.handlers.report_generator._artifact_path_from_ref",
+        side_effect=[str(first), str(second)],
+    ):
+        endpoint_values = _inventory_endpoint_values([first_task, second_task])
+
+    assert endpoint_values == {}
+    assert _resolve_inventory_ids_for_display("endpoint-1", endpoint_values) == "endpoint-1"
+
+
+def test_observation_recorded_detail_escapes_xml_html_tags_and_links():
     content = _format_observation(
         {"title": "Observed markup", "content": "Response contained <input name='user'> and </form>."},
         0,
     )
 
-    assert "`<input name='user'>`" in content
-    assert "`</form>`" in content
+    assert "\\<input name='user'\\>" in content
+    assert "\\</form\\>" in content
 
 
 def test_observation_recorded_detail_removes_acceptance_prefix_and_duplicate_evidence():
