@@ -185,6 +185,42 @@ describe('Terminal event processing', () => {
         expect(cleanupRef.current).toBeNull();
     });
 
+    it('renders one authoritative artifacts panel after report content', async () => {
+        const {Terminal} = await load();
+        const service = new MockExecutionService();
+        let view!: ReactTestRenderer;
+
+        await act(async () => {
+            view = TestRenderer.create(
+                <Terminal executionService={service as any} sessionId="report-paths" terminalWidth={120} animationsEnabled={false}/>
+            );
+        });
+
+        await act(async () => {
+            service.emit('event', {type: 'operation_init', operation_id: 'OP_1', target: 'dvwa'});
+            service.emit('event', {type: 'progress_update', step: 'FINAL REPORT'});
+            service.emit('event', {type: 'report_content', content: '# SECURITY ASSESSMENT REPORT\nFinal body'});
+            service.emit('event', {
+                type: 'report_paths',
+                operation_id: 'OP_1',
+                target: 'dvwa',
+                output_dir: '/app/outputs/dvwa/OP_1',
+                report_path: '/app/outputs/dvwa/OP_1/security_assessment_report.md',
+                log_path: '/app/outputs/dvwa/OP_1/cyber_operations.log',
+                artifacts_path: '/app/outputs/dvwa/OP_1/artifacts',
+            });
+            jest.advanceTimersByTime(34);
+            await Promise.resolve();
+        });
+
+        const output = textFromTree(view.toJSON());
+        expect(output.match(/ARTIFACTS AND LOGS/g)).toHaveLength(1);
+        expect(output).toContain('OP_1/security_assessment_report.md');
+        expect(output).not.toContain('Paths unavailable');
+
+        act(() => view.unmount());
+    });
+
     it('publishes only valid progress health snapshots to the application', async () => {
         const {Terminal} = await load();
         const service = new MockExecutionService();
