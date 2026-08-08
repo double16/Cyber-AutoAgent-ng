@@ -33,7 +33,8 @@ Common event categories include:
 | `progress_update` | Operation progress and budget metrics |
 | `task_*` / `phase_*` | Workflow state |
 | `finding_*` / `report_*` | Finding and report progress |
-| `operation_complete` / `assessment_complete` | Terminal completion |
+| `operation_terminated` | Execution stopped; includes authoritative coverage and assessment-only model usage |
+| `operation_finalized` | Report/evaluation post-processing finished |
 | `user_handoff` | Request for user input |
 
 The parser accepts compatible field spellings from backend and SDK events. Normalization is implemented in

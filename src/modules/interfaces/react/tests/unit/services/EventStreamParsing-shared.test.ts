@@ -185,18 +185,27 @@ describe('shared cyber event stream parsing behavior', () => {
   it.each([
     ['DirectDockerService', () => new DirectDockerService(), 'parseEvents'],
     ['PythonExecutionService', () => new PythonExecutionService(), 'processOutputStream'],
-  ])('%s emits completion for operation_complete events', (_name, createService, method) => {
+  ])('%s emits completion for operation_finalized events', (_name, createService, method) => {
     const service: any = createService();
     const emitted = captureEvents(service);
     let completeCount = 0;
     service.on('complete', () => completeCount += 1);
 
-    service[method](wrapEvent({ type: 'operation_complete', timestamp: 7 }));
+    service[method](wrapEvent({ type: 'operation_terminated', timestamp: 6 }));
+    expect(completeCount).toBe(0);
+
+    service[method](wrapEvent({ type: 'operation_finalized', timestamp: 7 }));
 
     expect(completeCount).toBe(1);
     expect(emitted).toEqual([
       expect.objectContaining({
-        type: 'operation_complete',
+        type: 'operation_terminated',
+        data: {},
+        metadata: {},
+        sessionId: '',
+      }),
+      expect.objectContaining({
+        type: 'operation_finalized',
         data: {},
         metadata: {},
         sessionId: '',

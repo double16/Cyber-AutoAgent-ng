@@ -179,10 +179,18 @@ class WorkflowInvariantError(RuntimeError):
 class TaskPromptBuildError(WorkflowInvariantError):
     """Raised when the workflow cannot build a usable task execution prompt."""
 
-    def __init__(self, message: str, *, repairable: bool = False, feedback: Optional[List[str]] = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        repairable: bool = False,
+        feedback: Optional[List[str]] = None,
+        failure_source: str = "task_prompt_builder",
+    ):
         super().__init__(message)
         self.repairable = repairable
         self.feedback = list(feedback or [])
+        self.failure_source = failure_source
 
 
 @dataclass
@@ -652,7 +660,7 @@ class MultiAgentWorkflowController:
         :param text_runner:
         :param work_runner:
         :param executor_session_factory: Creates one retained worker conversation for bounded continuation turns.
-        :param max_iterations: Present to prevent unit tests from running in an infinite loop.
+        :param max_iterations: Present to prevent unit tests from running in an infinite loop. Production code is expected to be sys.maxsize.
         """
         self.runtime = runtime
         self.budget = budget
@@ -1552,30 +1560,18 @@ class MultiAgentWorkflowController:
         try:
             prompt_spec = self._build_task_prompt(plan, phase, task)
         except TaskPromptBuildError as error:
-            reason = f"Unable to build an approved task prompt: {self._short(error, 500)}"
+            if not error.repairable:
+                reason = f"Unable to build an approved task prompt: {self._short(error, 500)}"
+                updated_task = self.state.mark_task(task, "partial_failure", reason)
+                self._emit_task_done(updated_task)
+                return
+            self._emit_task_prompt_fallback(task, error)
             self._log_workflow(
-                "task prompt build failed task=%s status=partial_failure reason=%s",
+                "task prompt build failed task=%s; using deterministic fallback reason=%s",
                 self._task_label(task),
-                self._short(reason),
+                self._short(error),
             )
-            if error.repairable:
-                replacement = self._create_prompt_replacement_task(task, error)
-                if replacement is not None:
-                    updated_task = self.state.mark_task(
-                        task,
-                        "superseded",
-                        f"{reason} Superseded by replacement task {replacement.task_uid}.",
-                    )
-                    self._emit_task_done(updated_task)
-                    self._log_workflow(
-                        "task prompt superseded original=%s replacement=%s",
-                        self._task_label(task),
-                        self._task_label(replacement),
-                    )
-                    return
-            updated_task = self.state.mark_task(task, "partial_failure", reason)
-            self._emit_task_done(updated_task)
-            return
+            prompt_spec = self._deterministic_task_prompt_spec(plan, phase, task, error)
 
         selected_tools = prompt_spec.get("tools", [])
         selected_tools = list(selected_tools) if isinstance(selected_tools, list) else []
@@ -2687,6 +2683,18 @@ Return exactly one decision for each candidate.
             event["finding_resolution"] = str(finding_resolution)
         self._emit_workflow_event(event)
 
+    def _emit_task_prompt_fallback(self, task: Task, error: TaskPromptBuildError) -> None:
+        """Make deterministic task-prompt recovery visible to terminal consumers."""
+
+        self._emit_workflow_event({
+            "type": "task_prompt_fallback",
+            "task_uid": str(task.task_uid or ""),
+            "title": str(task.title or ""),
+            "phase": int(task.phase),
+            "reason": self._task_prompt_fallback_reason(error),
+            "fallback": "deterministic_controller_template",
+        })
+
     def _emit_task_superseded(self, task: Task, replacement: Task) -> None:
         """Emit durable lineage when a replacement assumes a looped task's coverage."""
 
@@ -2788,8 +2796,8 @@ Return exactly one decision for each candidate.
     def _build_task_prompt(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> Dict[str, Any]:
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
         cycle_total = max(1, self.task_prompt_refinement_iterations)
-        repairable_failure = False
         repair_context_feedback: List[str] = []
+        active_role = "task_prompt_builder"
         try:
             prompt_spec = self._run_json_text_agent(
                 "task_prompt_builder",
@@ -2802,8 +2810,8 @@ Return exactly one decision for each candidate.
             prompt_spec = self._normalize_task_prompt_spec(prompt_spec, task)
             repair_feedback: List[str] = []
             repair_critique: Optional[Dict[str, Any]] = None
-            initial_repairable = False
             for iteration in range(1, self.task_prompt_refinement_iterations + 1):
+                active_role = "task_prompt_critic"
                 critique = self._run_json_text_agent(
                     "task_prompt_critic",
                     self._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
@@ -2822,8 +2830,7 @@ Return exactly one decision for each candidate.
                     break
                 self._record_efficiency_correction("task_prompt_critic_cycle")
                 if iteration == self.task_prompt_refinement_iterations:
-                    initial_repairable = self._task_prompt_feedback_repairable(critique)
-                    repairable_failure = initial_repairable
+                    initial_repairable = not self._task_prompt_critique_is_hard_scope_violation(critique)
                     if initial_repairable:
                         repair_feedback = critique["feedback"]
                         repair_context_feedback = list(repair_feedback)
@@ -2833,6 +2840,7 @@ Return exactly one decision for each candidate.
                             iteration,
                             len(repair_feedback),
                         )
+                        active_role = "task_prompt_builder"
                         prompt_spec = self._run_json_text_agent(
                             "task_prompt_builder",
                             self._task_prompt_bounded_repair_prompt(
@@ -2846,6 +2854,7 @@ Return exactly one decision for each candidate.
                         prompt_spec = self._normalize_task_prompt_spec(
                             self._filter_repairable_shell_selections(prompt_spec), task
                         )
+                        active_role = "task_prompt_critic"
                         repair_critique = self._run_json_text_agent(
                             "task_prompt_critic",
                             self._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
@@ -2874,10 +2883,11 @@ Return exactly one decision for each candidate.
                     raise TaskPromptBuildError(
                         f"Task prompt critic rejected the prompt after {iteration} review(s): "
                         + "; ".join(repair_feedback or critique["feedback"]),
-                        repairable=initial_repairable or self._task_prompt_feedback_repairable(
+                        repairable=not self._task_prompt_critique_is_hard_scope_violation(
                             repair_critique or critique
                         ),
                         feedback=repair_feedback or critique["feedback"],
+                        failure_source="task_prompt_critic",
                     )
                 self._log_workflow(
                     "task prompt critic requested revision task=%s iteration=%s feedback_count=%s",
@@ -2885,6 +2895,7 @@ Return exactly one decision for each candidate.
                     iteration,
                     len(critique["feedback"]),
                 )
+                active_role = "task_prompt_builder"
                 prompt_spec = self._run_json_text_agent(
                     "task_prompt_builder",
                     self._task_prompt_revision_prompt(plan, phase, task, prompt_spec, critique["feedback"]),
@@ -2894,13 +2905,18 @@ Return exactly one decision for each candidate.
                     cycle_total=cycle_total,
                 )
                 prompt_spec = self._normalize_task_prompt_spec(prompt_spec, task)
-        except WorkflowInvariantError as error:
-            if isinstance(error, TaskPromptBuildError):
+        except Exception as error:
+            if (
+                isinstance(error, TaskPromptBuildError)
+                and error.failure_source == "task_prompt_critic"
+                and not error.repairable
+            ):
                 raise
             raise TaskPromptBuildError(
                 str(error),
-                repairable=repairable_failure,
-                feedback=repair_context_feedback,
+                repairable=True,
+                feedback=error.feedback if isinstance(error, TaskPromptBuildError) else repair_context_feedback,
+                failure_source=active_role,
             ) from error
         self._log_workflow(
             "task prompt spec role=task_prompt_builder task=%s keys=%s",
@@ -2910,30 +2926,28 @@ Return exactly one decision for each candidate.
         return prompt_spec
 
     @staticmethod
-    def _task_prompt_feedback_repairable(critique: Dict[str, Any]) -> bool:
-        """Classify prompt feedback without allowing scope failures to reopen execution."""
+    def _task_prompt_critique_is_hard_scope_violation(critique: Dict[str, Any]) -> bool:
+        """Only a valid critic's explicit scope objection may block deterministic recovery."""
 
-        explicit = critique.get("repairable")
-        if isinstance(explicit, bool):
-            return explicit
         feedback = " ".join(str(item).lower() for item in critique.get("feedback", []))
-        if any(token in feedback for token in ("scope", "outside target", "broaden", "contradict")):
-            return False
-        return any(
-            token in feedback
-            for token in (
-                "url",
-                "protocol",
-                "scheme",
-                "response body",
-                "/dev/null",
-                "unavailable",
-                "shell",
-                "evidence",
-                "artifact",
-                "schema",
-            )
-        )
+        return any(token in feedback for token in ("scope", "outside target", "broaden"))
+
+    @staticmethod
+    def _task_prompt_fallback_reason(error: TaskPromptBuildError) -> str:
+        """Return a stable, non-prose reason for task-prompt fallback telemetry."""
+
+        source = error.failure_source if error.failure_source in {
+            "task_prompt_builder",
+            "task_prompt_critic",
+        } else "task_prompt_builder"
+        message = str(error).lower()
+        if "invalid json" in message:
+            suffix = "invalid_json"
+        elif "max_tokens" in message or "token limit" in message:
+            suffix = "max_tokens"
+        else:
+            suffix = "unavailable"
+        return f"{source}_{suffix}"
 
     def _filter_repairable_shell_selections(self, prompt_spec: Dict[str, Any]) -> Dict[str, Any]:
         """Drop unavailable shell selections during the one bounded repair pass."""
@@ -3036,9 +3050,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         memory_records = self._prompt_memory_records()
         canonical_memory_ids = [self._memory_id(memory) for memory in memory_records]
         requested_memory_indices = self._coerce_memory_indices(prompt_spec.get("memory_indices", []))
-        memory_indices = [
-            index for index in requested_memory_indices if index < len(canonical_memory_ids)
-        ]
+        memory_indices = [index for index in requested_memory_indices if index < len(canonical_memory_ids)]
         invalid_memory_indices = [
             index for index in requested_memory_indices if index >= len(canonical_memory_ids)
         ]
@@ -3048,20 +3060,27 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             invalid_memory_ids = [
                 memory_id for memory_id in legacy_memory_ids if memory_id not in canonical_memory_ids
             ]
-            selected_memory_ids.extend(
-                memory_id for memory_id in legacy_memory_ids
-                if memory_id in canonical_memory_ids and memory_id not in selected_memory_ids
-            )
             if invalid_memory_ids:
-                self._log_workflow(
-                    "task prompt ignored non-canonical memory ids=%s",
-                    ",".join(invalid_memory_ids),
+                raise TaskPromptBuildError(
+                    "task prompt memory_ids contains unknown selection(s): " + ", ".join(invalid_memory_ids),
+                    repairable=True,
                 )
             if invalid_memory_indices:
-                self._log_workflow(
-                    "task prompt ignored out-of-range memory indices=%s",
-                    ",".join(str(index) for index in invalid_memory_indices),
+                raise TaskPromptBuildError(
+                    "task prompt memory_indices contains out-of-range selection(s): "
+                    + ", ".join(str(index) for index in invalid_memory_indices),
+                    repairable=True,
                 )
+            canonical_selected_ids = list(dict.fromkeys(selected_memory_ids))
+            if legacy_memory_ids and memory_indices and set(legacy_memory_ids) != set(canonical_selected_ids):
+                raise TaskPromptBuildError(
+                    "task prompt memory_ids and memory_indices must select the same canonical memories",
+                    repairable=True,
+                )
+            if legacy_memory_ids and not memory_indices:
+                memory_indices = [canonical_memory_ids.index(memory_id) for memory_id in legacy_memory_ids]
+                canonical_selected_ids = list(legacy_memory_ids)
+            selected_memory_ids = canonical_selected_ids
         else:
             selected_memory_ids = legacy_memory_ids
         return {
@@ -3070,6 +3089,36 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             "memory_ids": list(dict.fromkeys(selected_memory_ids)),
             "tools": tools,
             "shell_commands": shell_commands,
+        }
+
+    def _deterministic_task_prompt_spec(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        task: Task,
+        error: Exception,
+    ) -> Dict[str, Any]:
+        """Build a controller-owned prompt after bounded model prompt repair fails."""
+
+        records = self._prompt_memory_records()
+        memory_ids = [self._memory_id(record) for record in records]
+        memory_indices = list(range(len(memory_ids)))
+        return {
+            "prompt": (
+                "Execute only the assigned task using the controller-provided tools. Preserve plan constraints and "
+                "target scope. Create durable evidence before recording each acceptance result. Do not create new "
+                "tasks or change plan state.\n\n"
+                f"## Operation objective\n{plan.objective}\n\n"
+                f"## Active phase\n{json.dumps(phase.to_dict(), sort_keys=True)}\n\n"
+                f"## Assigned task\n{json.dumps(task.to_dict(), sort_keys=True)}\n\n"
+                f"## Prompt-build fallback reason\n{self._short(error, 500)}\n\n"
+                "## Eligible memory references\n"
+                f"{self._memory_selection_summary()}"
+            ),
+            "memory_indices": memory_indices,
+            "memory_ids": memory_ids,
+            "tools": [],
+            "shell_commands": [],
         }
 
     @staticmethod
@@ -3370,7 +3419,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             allowed = EVALUATOR_PLAN_STATUSES if hard_cap is not None else ("continue", *EVALUATOR_PLAN_STATUSES)
             decision = self._decision_from_data(data, allowed=allowed)
         except WorkflowInvariantError as error:
-            return self._phase_evaluator_fallback(phase, error)
+            return self._phase_evaluator_fallback(phase, error, hard_cap=hard_cap)
         decision = self._guard_phase_terminal_decision(
             phase,
             decision,
@@ -3388,31 +3437,54 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         self,
         phase: PlanPhase,
         error: WorkflowInvariantError,
+        *,
+        hard_cap: Optional[float] = None,
     ) -> WorkflowDecision:
-        """Degrade malformed phase-evaluator output without inferring successful completion."""
+        """Classify a phase from durable state after evaluator parsing is exhausted."""
 
         bounded_error = self._short(error, 500)
         fingerprint = hashlib.sha256(str(error).encode("utf-8", errors="replace")).hexdigest()
+        tasks = self.state.list_tasks(phase=phase.id)
+        status_counts = Counter(task.status for task in tasks)
+        if status_counts.get("blocked", 0):
+            status = "blocked"
+            classification_reason = "one or more phase tasks are blocked"
+        elif status_counts.get("active", 0) or status_counts.get("pending", 0):
+            status = "continue"
+            classification_reason = "actionable phase tasks remain"
+        elif tasks and all(task.status in {"done", "superseded"} for task in tasks):
+            status = "done"
+            classification_reason = "all phase tasks reached successful terminal states"
+        else:
+            status = "partial_failure"
+            classification_reason = "no actionable work remains but the phase has incomplete task outcomes"
+        if status == "continue" and hard_cap is not None:
+            status = "partial_failure"
+            classification_reason = "actionable phase tasks remain after the mandatory phase budget cap"
         reason = (
-            "Phase evaluation could not be parsed after bounded retries. The controller preserved existing task "
-            f"evidence and closed the phase as partial_failure rather than inferring completion. Error: {bounded_error}"
+            "Phase evaluator parsing failed after bounded retries; controller applied deterministic durable-state "
+            f"classification ({classification_reason}; task_status_counts={dict(sorted(status_counts.items()))}). "
+            f"Error: {bounded_error}"
         )
         self._emit_workflow_event({
             "type": "evaluator_fallback",
             "role": "phase_evaluator",
             "phase_id": phase.id,
             "phase_title": phase.title,
-            "status": "partial_failure",
+            "status": status,
+            "source": "deterministic_phase_state",
+            "task_status_counts": dict(sorted(status_counts.items())),
             "error_type": error.__class__.__name__,
             "error_fingerprint": fingerprint,
             "message": bounded_error,
         })
         self._log_workflow(
-            "phase evaluator fallback phase=%s status=partial_failure error_fingerprint=%s",
+            "phase evaluator fallback phase=%s status=%s error_fingerprint=%s",
             self._phase_label(phase),
+            status,
             fingerprint,
         )
-        return WorkflowDecision(status="partial_failure", reason=reason)
+        return WorkflowDecision(status=status, reason=reason)
 
     def _guard_phase_terminal_decision(
         self,
@@ -4812,6 +4884,10 @@ Allowed evidence references:
             self._short(last_error),
             self._short(excerpt),
         )
+        if isinstance(last_error, MaxTokensReachedException):
+            raise WorkflowInvariantError(
+                f"{role} reached its max_tokens limit after {self.json_retries + 1} attempt(s): {last_error}"
+            )
         raise WorkflowInvariantError(
             f"{role} returned invalid JSON after {self.json_retries + 1} attempt(s): {last_error}. "
             f"Response excerpt: {excerpt}"

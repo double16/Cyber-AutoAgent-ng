@@ -2,6 +2,8 @@
 
 ### Features
 
+- Add a Langfuse session exporter that produces a redacted, LLM-ready prompt and reasoning review packet in JSON or
+  YAML.
 - Consolidate authoritative workflow state into `outputs/cyber_autoagent.db`.
 - Replace semantic-memory backends with Qdrant 1.18, using `outputs/qdrant` by default or a configured service.
 - Change memory modes to 'shared' and 'operation' for clarity.

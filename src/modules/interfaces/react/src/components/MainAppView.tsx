@@ -178,7 +178,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
 
   const handleLifecycleEvent = useCallback((event: any) => {
     const type = event?.type;
-    if (type === 'operation_complete' || type === 'stopped' || type === 'complete') {
+    if (type === 'operation_terminated' || type === 'operation_finalized' || type === 'operation_complete' || type === 'stopped' || type === 'complete') {
       setHasAnyOperationEnded(true);
       setThinkingStatus({ active: false });
       setCurrentTaskTitle(null);

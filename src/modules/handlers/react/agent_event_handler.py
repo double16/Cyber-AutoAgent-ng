@@ -698,7 +698,12 @@ class AgentEventHandler(PrintingCallbackHandler):
         self._report_generation_active = False
         self._evaluation_report_path: Optional[str] = None
         self._completed_report_path: Optional[str] = None
+        self._report_status = "not_started"
         self._assessment_completion_emitted = False
+        self._operation_terminated_emitted = False
+        self._operation_finalized_emitted = False
+        self._model_usage_snapshot_emitted = False
+        self._model_usage_snapshot: Optional[Dict[str, Any]] = None
 
         # Termination tracking (workflow completion, user abort, or budget limit)
         self._termination_emitted = False
@@ -1291,35 +1296,95 @@ class AgentEventHandler(PrintingCallbackHandler):
             return []
         return self.coordinator.model_usage()
 
-    def emit_model_usage_snapshot(self) -> None:
-        """Persist assessment model usage before report generation adds its own calls."""
-        if self.operation_mode == "report_only":
-            return
+    def emit_model_usage_snapshot(self) -> Dict[str, Any]:
+        """Persist and freeze assessment-only model usage at operation termination."""
+        existing_snapshot = getattr(self, "_model_usage_snapshot", None)
+        if existing_snapshot is not None:
+            return existing_snapshot
         totals = self._operation_usage_totals()
         input_tokens = int(totals["input_tokens"])
         output_tokens = int(totals["output_tokens"])
+        cache_read_tokens = int(totals["cache_read_tokens"])
+        cache_write_tokens = int(totals["cache_write_tokens"])
         model_usage = self.model_usage()
         captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-        if model_usage:
+        persisted = False
+        persistence_error = None
+        for attempt in range(3):
             try:
                 from modules.tools.memory import persist_operation_model_metrics
 
                 persist_operation_model_metrics(model_usage, captured_at, operation_id=self.operation_id)
+                persisted = True
+                break
             except Exception as error:
-                logger.warning("Unable to persist assessment model metrics: %s", error)
+                persistence_error = str(error)
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+        if not persisted:
+            logger.warning("Unable to persist assessment model metrics after retries: %s", persistence_error)
+        self._model_usage_snapshot = {
+            "type": "model_usage_snapshot",
+            "stage": "operation_terminated",
+            "snapshot_persisted": persisted,
+            "persistence_error": persistence_error if not persisted else None,
+            "metrics": {
+                "capturedAt": captured_at,
+                "modelUsage": model_usage,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "cacheReadTokens": cache_read_tokens,
+                "cacheWriteTokens": cache_write_tokens,
+                "totalTokens": input_tokens + output_tokens,
+                "cost": float(totals["cost"]),
+                "duration": format_duration(self.total_operation_time_seconds()),
+            },
+        }
+        self._model_usage_snapshot_emitted = True
+        self.emit_ui_event(self._model_usage_snapshot)
+        if hasattr(self.emitter, "flush_immediate"):
+            self.emitter.flush_immediate()
+        return self._model_usage_snapshot
+
+    def emit_operation_terminated(
+        self,
+        completion_status: Dict[str, Any],
+        workflow_coverage_summary: List[Dict[str, Any]],
+    ) -> None:
+        """Emit the authoritative post-execution lifecycle event exactly once."""
+        if getattr(self, "_operation_terminated_emitted", False):
+            return
+        snapshot = self.emit_model_usage_snapshot()
+        self._operation_terminated_emitted = True
+        self._stop_metrics_thread()
         self.emit_ui_event(
             {
-                "type": "model_usage_snapshot",
-                "stage": "assessment_complete",
-                "metrics": {
-                    "capturedAt": captured_at,
-                    "modelUsage": model_usage,
-                    "inputTokens": input_tokens,
-                    "outputTokens": output_tokens,
-                    "totalTokens": input_tokens + output_tokens,
-                    "cost": float(totals["cost"]),
-                    "duration": format_duration(self.total_operation_time_seconds()),
-                },
+                "type": "operation_terminated",
+                "operation_id": self.operation_id,
+                "termination_reason": completion_status.get("termination_reason"),
+                "termination_message": completion_status.get("termination_message"),
+                "completion_status": completion_status,
+                "workflow_coverage_summary": workflow_coverage_summary,
+                "model_usage_snapshot": snapshot,
+                "health": self.operation_health_snapshot(),
+            }
+        )
+        if hasattr(self.emitter, "flush_immediate"):
+            self.emitter.flush_immediate()
+
+    def emit_operation_finalized(self, *, report_status: str, evaluation_status: str = "not_run") -> None:
+        """Emit the authoritative post-report/evaluation lifecycle event exactly once."""
+        if getattr(self, "_operation_finalized_emitted", False):
+            return
+        self._operation_finalized_emitted = True
+        self.emit_ui_event(
+            {
+                "type": "operation_finalized",
+                "operation_id": self.operation_id,
+                "termination_reason": self.termination_reason,
+                "report_status": report_status,
+                "report_path": self._completed_report_path,
+                "evaluation_status": evaluation_status,
             }
         )
         if hasattr(self.emitter, "flush_immediate"):
@@ -3065,40 +3130,9 @@ class AgentEventHandler(PrintingCallbackHandler):
         # This method only updates the internal counters
 
     def _handle_completion(self) -> None:
-        """Handle completion events."""
+        """Flush transient execution state; lifecycle events are emitted by finalization."""
         self._emit_accumulated_reasoning(force=True)
-
-        # End any active thinking indicator
         self.emit_ui_event({"type": "thinking_end"})
-
-        # Emit explicit completion summary for UI/logs
-        try:
-            totals = self._operation_usage_totals()
-            input_tokens = int(totals["input_tokens"])
-            output_tokens = int(totals["output_tokens"])
-            total_tokens = input_tokens + output_tokens
-            cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
-            self.emit_ui_event(
-                {
-                    "type": "operation_complete",
-                    "operation": self.operation_id,
-                    "duration": format_duration(self._operation_elapsed_seconds()),
-                    "metrics": {
-                        "inputTokens": input_tokens,
-                        "outputTokens": output_tokens,
-                        "totalTokens": total_tokens,
-                        "cost": cost,
-                        # Cache metrics for prompt caching cost calculation
-                        "cacheReadTokens": int(totals["cache_read_tokens"]),
-                        "cacheWriteTokens": int(totals["cache_write_tokens"]),
-                        "modelUsage": self.coordinator.model_usage(),
-                        "memoryOps": self.coordinator.memory_ops,
-                        "evidence": self.coordinator.evidence_count,
-                    },
-                }
-            )
-        except Exception:
-            pass
 
     def _is_valid_input(self, tool_input: Any) -> bool:
         """Check if tool input is valid."""
@@ -3350,6 +3384,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             # Accept any non-empty report content
             if report_content:
                 self._completed_report_path = report_path
+                self._report_status = "generated"
                 self.emit_ui_event({"type": "report_content", "content": report_content})
                 self.emit_ui_event(
                     {
@@ -3383,24 +3418,88 @@ class AgentEventHandler(PrintingCallbackHandler):
 
                 logger.info("Report saved to %s", report_path)
             else:
-                logger.info(
-                    "Report generation skipped - no evidence collected during operation"
-                )
-                try:
-                    self.emit_ui_event(
-                        {
-                            "type": "output",
-                            "content": "No memories or evidence were collected during this operation. Skipping report generation.",
-                        }
+                if isinstance(completion_status, dict) and not completion_status.get("assessment_complete"):
+                    self._emit_deterministic_fallback_report(
+                        target=target,
+                        objective=objective,
+                        completion_status=completion_status,
+                        config_params=config_params,
+                        report_path=report_path,
+                        error=RuntimeError(
+                            "Normal report generation produced no report for an incomplete operation."
+                        ),
                     )
-                except Exception:
-                    pass
+                else:
+                    self._report_status = "skipped"
+                    logger.info(
+                        "Report generation skipped - no evidence collected during operation"
+                    )
+                    try:
+                        self.emit_ui_event(
+                            {
+                                "type": "output",
+                                "content": "No memories or evidence were collected during this operation. Skipping report generation.",
+                            }
+                        )
+                    except Exception:
+                        pass
 
         except Exception as e:
             logger.error("Error generating final report: %s", e)
+            try:
+                self._emit_deterministic_fallback_report(
+                    target=target,
+                    objective=objective,
+                    completion_status=completion_status,
+                    config_params=locals().get("config_params", {"completion_status": completion_status}),
+                    report_path=locals().get("report_path"),
+                    error=e,
+                )
+            except Exception as fallback_error:
+                logger.error("Unable to generate deterministic fallback report: %s", fallback_error)
+                self._report_status = "failed"
             self.emit_ui_event(
                 {"type": "error", "content": f"Error generating report: {str(e)}"}
             )
+
+    def _emit_deterministic_fallback_report(
+        self,
+        *,
+        target: str,
+        objective: str,
+        completion_status: Optional[Dict[str, Any]],
+        config_params: Dict[str, Any],
+        report_path: Optional[str],
+        error: Exception,
+    ) -> None:
+        """Generate fallback artifacts and publish their paths without rendering report content here."""
+        from modules.handlers.report_generator import generate_deterministic_fallback_report
+
+        fallback = generate_deterministic_fallback_report(
+            target=target,
+            objective=objective,
+            operation_id=self.operation_id,
+            config_params=config_params,
+            callback_handler=self,
+            filename=report_path,
+            error=error,
+        )
+        output_dir = os.path.dirname(fallback["report_path"])
+        self._completed_report_path = fallback["report_path"]
+        self._evaluation_report_path = fallback["report_path"]
+        self._report_status = fallback["status"]
+        self.emit_ui_event({"type": "report_content", "content": fallback["content"][:15000]})
+        self.emit_ui_event(
+            {
+                "type": "report_paths",
+                "target": sanitize_target_name(target),
+                "output_dir": output_dir,
+                "report_path": fallback["report_path"],
+                "report_json_path": fallback["report_json_path"],
+                "log_path": os.path.join(output_dir, "cyber_operations.log"),
+                "artifacts_path": os.path.join(output_dir, "artifacts"),
+            }
+        )
 
     def emit_assessment_complete(self) -> None:
         """Emit the terminal assessment event once report and evaluation work has ended."""

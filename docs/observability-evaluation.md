@@ -206,6 +206,22 @@ curl -I http://localhost:3000/api/public/otel/v1/traces
 docker logs cyber-autoagent 2>&1 | grep -i evaluation
 ```
 
+## Prompt Review Export
+
+Export one session as a compact JSON or YAML packet for an LLM to review prompt clarity, effectiveness, and
+improvements.
+The exporter reads `LANGFUSE_HOST` and defaults to `http://localhost:3000`; it uses the existing
+`LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` credentials.
+
+```bash
+caa-export-langfuse-session --session-id OP_20250712_155132 --output prompt-review.yaml
+```
+
+The packet contains system and user prompts, explicitly recorded reasoning, model responses, and tool decisions. It
+excludes tool outputs, scores, token/cost data, and unrelated trace metadata. Common credentials and authorization
+values are always replaced with `[REDACTED]`. Use `--format json` or `--format yaml` to select a format explicitly;
+otherwise `.json`, `.yaml`, and `.yml` output filenames select their matching format and YAML is the fallback.
+
 ## Advanced
 
 - **Custom metrics**: Extend `CyberAgentEvaluator` in `src/modules/evaluation/evaluation.py`

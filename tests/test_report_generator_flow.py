@@ -45,6 +45,7 @@ from modules.handlers.report_generator import (
     _validate_narrative_consistency,
     _format_report_consistency_warnings,
     build_report_sections,
+    generate_deterministic_fallback_report,
     generate_security_report,
 )
 from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task, clear_memory_client
@@ -1800,6 +1801,117 @@ def test_generate_security_report_no_evidence(mock_build_sections, tmp_path):
     
     assert not report_file.exists()
     callback_handler.emit_ui_event.assert_not_called()
+
+
+def test_deterministic_fallback_report_renders_canonical_sections_without_narrative(tmp_path, monkeypatch):
+    mock_config = MagicMock()
+    mock_config.get_provider.return_value = "ollama"
+    mock_config.get_llm_config.return_value.model_id = "test-model"
+    monkeypatch.setattr(report_generator_module, "get_config_manager", lambda: mock_config)
+    monkeypatch.setattr(report_generator_module, "get_output_path", lambda **_kwargs: str(tmp_path))
+    monkeypatch.setattr(report_generator_module, "list_persisted_operation_model_metrics", lambda _operation_id: [])
+    monkeypatch.setattr(
+        report_generator_module,
+        "build_report_sections",
+        lambda **_kwargs: {
+            "operation_id": "OP_FALLBACK",
+            "target": "https://example.test",
+            "objective": "Assess the target",
+            "module": "web",
+            "raw_evidence": [
+                {
+                    "id": "finding-1",
+                    "title": "Stored XSS",
+                    "category": "finding",
+                    "severity": "HIGH",
+                    "content": "Verified script execution.",
+                    "metadata": {"artifacts": ["artifact:artifacts/proof.txt"]},
+                },
+                {
+                    "id": "candidate-1",
+                    "title": "Possible SQL injection",
+                    "category": "validation_failure",
+                    "content": "Candidate was not reproduced.",
+                    "metadata": {"validation_reason": "No decisive evidence."},
+                },
+                {
+                    "id": "observation-1",
+                    "title": "Server banner",
+                    "category": "observation",
+                    "content": "Server disclosed its version.",
+                    "metadata": {"target": "https://example.test"},
+                },
+            ],
+            "severity_counts": {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+            "verified_findings_total": 1,
+            "validation_failure_count": 1,
+            "task_status_counts": {"done": 1, "partial_failure": 1},
+            "total_task_count": 2,
+            "completed_task_count": 1,
+            "phase_coverage": [{"phase_id": 1, "status": "partial_failure", "task_status_counts": {"done": 1, "partial_failure": 1}}],
+            "target_coverage": "| Target | Coverage |\n|---|---|\n| example.test | partial |",
+            "execution_history": "## EXECUTION HISTORY\n\nRecorded task history.",
+            "summary_table": "| Severity | Count |\n|---|---:|\n| HIGH | 1 |",
+            "latest_run": {"metrics": {"duration": "2m"}, "configured_budget": {"duration": 60}},
+            "reportable_tools_used": ["nmap"],
+        },
+    )
+
+    result = generate_deterministic_fallback_report(
+        target="https://example.test",
+        objective="Assess the target",
+        operation_id="OP_FALLBACK",
+        config_params={"completion_status": {"assessment_complete": False, "termination_reason": "budget_limit"}},
+        error=RuntimeError("report agent unavailable"),
+    )
+
+    markdown = (tmp_path / "security_assessment_report.md").read_text()
+    payload = json.loads((tmp_path / "security_assessment_report.json").read_text())
+    assert result["status"] == "fallback"
+    assert "Deterministic fallback report" in markdown
+    assert "Stored XSS" in markdown
+    assert "Possible SQL injection" in markdown
+    assert "Server banner" in markdown
+    assert "## TARGET COVERAGE" in markdown
+    assert "## EXECUTION HISTORY" in markdown
+    assert "## APPENDIX A: ASSESSMENT METHODOLOGY" in markdown
+    assert "## APPENDIX B: RECOMMENDED NEXT STEPS" in markdown
+    assert "### Execution Metrics" in markdown
+    assert "model-authored methodology prose" in markdown
+    assert "AI-Generated Content Disclaimer" not in markdown
+    assert "report agent unavailable" in markdown
+    assert payload["report_status"] == "fallback"
+    assert payload["narrative"] == {}
+    assert payload["canonical"]["verified_findings_total"] == 1
+
+
+def test_sanitize_mermaid_diagrams_quotes_supported_node_and_edge_labels():
+    source = """```mermaid
+graph TD
+A((double \"quote))
+B(single)
+C[square]
+D{brace}
+E>angle]
+A -- edge label --> B
+A -->|pipe label| B
+Alice->>Bob: sequence label
+subgraph group label
+end
+```"""
+
+    rendered = report_generator_module._sanitize_mermaid_diagrams(source)
+
+    assert 'A(("double &#34;quote"))' in rendered
+    assert 'B("single")' in rendered
+    assert 'C["square"]' in rendered
+    assert 'D{"brace"}' in rendered
+    assert 'E>"angle"]' in rendered
+    assert '-- "edge label" -->' in rendered
+    assert '|"pipe label"|' in rendered
+    assert 'Alice->>Bob: "sequence label"' in rendered
+    assert 'subgraph "group label"' in rendered
+    assert report_generator_module._sanitize_mermaid_diagrams("No diagram") == "No diagram"
 
 
 @patch("modules.handlers.report_generator.ReportGenerator")

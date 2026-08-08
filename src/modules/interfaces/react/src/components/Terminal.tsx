@@ -562,7 +562,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     )) ||
     String((event as any).type) === 'evaluation_step_complete' ||
     String((event as any).type) === 'evaluation_complete' ||
-    String((event as any).type) === 'assessment_complete'
+    String((event as any).type) === 'assessment_complete' ||
+    String((event as any).type) === 'operation_finalized'
   );
 
   // Unified helpers for delayed thinking spinner scheduling/cancellation
@@ -1680,6 +1681,21 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           appendCompletionPhaseEvent(acEvent);
           completionPhaseActiveRef.current = false;
         }
+        deactivateThinking();
+        break;
+      }
+
+      case 'operation_terminated': {
+        const terminatedEvent = event as DisplayStreamEvent;
+        results.push(terminatedEvent);
+        deactivateThinking();
+        break;
+      }
+
+      case 'operation_finalized': {
+        const finalizedEvent = event as DisplayStreamEvent;
+        results.push(finalizedEvent);
+        if (completionPhaseActiveRef.current) completionPhaseActiveRef.current = false;
         deactivateThinking();
         break;
       }

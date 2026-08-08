@@ -237,9 +237,12 @@ that findings, observations, validation counts, and target coverage are partial.
 unchanged from budget utilization.
 
 Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS`, which defaults to two
-critic reviews. Setting it to `0` uses the initial builder output without critique. A final rejection or invalid
-builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
-evaluator are not invoked for that task.
+critic reviews. Setting it to `0` uses the initial builder output without critique. After the configured JSON retries,
+an unavailable or malformed builder/critic response, or a non-scope prompt defect that survives one bounded repair,
+uses a controller-owned deterministic task template. That template selects no model-proposed optional tools or shell
+commands and uses only canonical memory references. It emits `task_prompt_fallback` with a stable reason such as
+`task_prompt_critic_invalid_json`. A valid critic response that explicitly identifies a hard target-scope violation
+remains `partial_failure`; the executor and evaluator are not invoked for that task.
 
 Task execution cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three normal
 executor passes and has a minimum of one. `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS` independently allows one

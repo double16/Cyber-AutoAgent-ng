@@ -31,6 +31,31 @@
 - For multi-line strings, use triple quotes and limit each line to 100 characters.
 - Environment variables used for configuration must be given an example in .env.example and forwarded through docker-compose.yml.
 
+### uv in the sandbox
+- Configure `uv` to use the persistent project-local `.uv-cache` directory. The default user cache may be outside the
+  sandbox's writable paths and can cause `uv` to fail before Python starts.
+- From the repository root, initialize and synchronize the environment with:
+
+  ```bash
+  mkdir -p .uv-cache
+  UV_CACHE_DIR="$PWD/.uv-cache" uv sync --all-extras
+  ```
+
+- Prefix subsequent `uv` commands with the same cache setting. Use the repository's `.venv` through `uv run`; do not
+  activate a different virtual environment or invoke tools from a system Python.
+- Examples:
+
+  ```bash
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run python3 --version
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest tests/test_multi_agent_workflow.py -q --tb=short
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest tests/test_multi_agent_workflow.py -q
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
+  ```
+
+- If `.uv-cache` is not present, create it before running commands. Keep it project-local and persistent between agent
+  turns; do not use a temporary directory unless the project-local path is unavailable.
+
 ## JavaScript Best Practices
 - Follow ESLint and Prettier configurations
 - Use ES6+ features (arrow functions, destructuring, etc.)
@@ -71,3 +96,5 @@
 - Distinguish logical completion from resource termination. Compare elapsed duration with `maxDurationMinutes`, and inspect token/cost limits and `termination_reason`; `progressPercent` is budget/utilization progress, not phase completion.
 - Do not recommend changing task fan-out based on lack of budget. Lack of budget is for the user to control.
 - Broken or missing tools are acceptable, the operation will remove them from consideration, do not flag or offer plans to address.
+- Do not complain or recommend changes because reporting or evaluation taking time and that it should be budgeted.
+- Do not complain or recommend changes because an operation continues to run when it knows from the health status that it will not finish. Coverage is most important, the user can continue the operation later, and the report already recommends to the user how much more budget to allocate.

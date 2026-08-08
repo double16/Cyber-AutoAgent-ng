@@ -987,11 +987,13 @@ export class PythonExecutionService extends EventEmitter {
             duration: durationStr
           });
           
-          // Emit a terminal stream event indicating operation completion
+          // Emit the compatibility terminal event when a legacy Python runner exits without one.
           this.emit('event', {
-            type: 'operation_complete',
+            type: 'operation_finalized',
             duration: durationStr,
-            metrics: { duration: durationStr }
+            metrics: { duration: durationStr },
+            report_status: 'unknown',
+            evaluation_status: 'not_run',
           });
           
           this.emit('complete');

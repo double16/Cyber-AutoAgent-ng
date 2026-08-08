@@ -591,11 +591,12 @@ def test_callback_events_use_agent_attached_metadata(monkeypatch):
 
     handler(agent=agent, complete=True)
 
-    complete_event = [event for event in events if event["type"] == "operation_complete"][-1]
-    assert complete_event["agent_type"] == "task_executor"
-    assert complete_event["agent_name"] == "Cyber-AutoAgent task_executor"
-    assert complete_event["agent_run_id"] == "task_executor-1"
-    assert complete_event["parent_agent_run_id"] == "operation-1"
+    completion_event = [event for event in events if event["type"] == "thinking_end"][-1]
+    assert completion_event["agent_type"] == "task_executor"
+    assert completion_event["agent_name"] == "Cyber-AutoAgent task_executor"
+    assert completion_event["agent_run_id"] == "task_executor-1"
+    assert completion_event["parent_agent_run_id"] == "operation-1"
+    assert not any(event["type"] == "operation_complete" for event in events)
     assert handler.agent_type == "operation_controller"
 
 
@@ -736,7 +737,14 @@ def test_process_metrics_captures_provider_reported_inference_latency():
 def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
     handler = make_handler()
     handler.process_metrics(
-        SimpleNamespace(accumulated_usage={"inputTokens": 12, "outputTokens": 4})
+        SimpleNamespace(
+            accumulated_usage={
+                "inputTokens": 12,
+                "outputTokens": 4,
+                "cacheReadInputTokens": 3,
+                "cacheWriteInputTokens": 2,
+            }
+        )
     )
 
     with patch("modules.tools.memory.persist_operation_model_metrics") as persist_metrics:
@@ -745,13 +753,15 @@ def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
     assert len(handler._events) == 1
     snapshot = handler._events[0]
     assert snapshot["type"] == "model_usage_snapshot"
-    assert snapshot["stage"] == "assessment_complete"
+    assert snapshot["stage"] == "operation_terminated"
     metrics = snapshot["metrics"]
     assert metrics["modelUsage"] == handler.model_usage()
     assert metrics["capturedAt"].endswith("+00:00")
     assert metrics["inputTokens"] == 12
     assert metrics["outputTokens"] == 4
     assert metrics["totalTokens"] == 16
+    assert metrics["cacheReadTokens"] == 3
+    assert metrics["cacheWriteTokens"] == 2
     assert metrics["cost"] >= 0.0
     assert metrics["duration"] == "0s"
     persist_metrics.assert_called_once_with(
@@ -762,16 +772,16 @@ def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
     handler.emitter.flush_immediate.assert_called_once()
 
 
-def test_emit_model_usage_snapshot_skips_report_only_handlers():
+def test_emit_model_usage_snapshot_persists_report_only_handlers_at_termination():
     handler = make_handler()
     handler.operation_mode = "report_only"
 
     with patch("modules.tools.memory.persist_operation_model_metrics") as persist_metrics:
         handler.emit_model_usage_snapshot()
 
-    assert handler._events == []
-    persist_metrics.assert_not_called()
-    handler.emitter.flush_immediate.assert_not_called()
+    assert handler._events[0]["stage"] == "operation_terminated"
+    persist_metrics.assert_called_once()
+    handler.emitter.flush_immediate.assert_called_once()
 
 
 def test_emit_model_usage_snapshot_continues_when_metric_persistence_fails():
@@ -785,7 +795,105 @@ def test_emit_model_usage_snapshot_continues_when_metric_persistence_fails():
         handler.emit_model_usage_snapshot()
 
     assert handler._events[0]["type"] == "model_usage_snapshot"
+    assert handler._events[0]["snapshot_persisted"] is False
     handler.emitter.flush_immediate.assert_called_once()
+
+
+def test_operation_lifecycle_emits_one_termination_snapshot_and_one_finalization():
+    handler = make_handler()
+    handler._stop_metrics_thread = Mock()
+    completion = {"assessment_complete": False, "termination_reason": "budget_limit"}
+
+    with patch("modules.tools.memory.persist_operation_model_metrics"):
+        handler.emit_operation_terminated(completion, [{"phase_id": 1, "status": "partial_failure"}])
+        handler.emit_operation_terminated(completion, [])
+    handler.emit_operation_finalized(report_status="fallback", evaluation_status="attempted")
+    handler.emit_operation_finalized(report_status="generated")
+
+    assert [event["type"] for event in handler._events].count("model_usage_snapshot") == 1
+    terminal = next(event for event in handler._events if event["type"] == "operation_terminated")
+    assert terminal["workflow_coverage_summary"] == [{"phase_id": 1, "status": "partial_failure"}]
+    assert terminal["model_usage_snapshot"]["stage"] == "operation_terminated"
+    finalized = [event for event in handler._events if event["type"] == "operation_finalized"]
+    assert finalized == [
+        {
+            "type": "operation_finalized",
+            "operation_id": "OP_TEST",
+            "termination_reason": None,
+            "report_status": "fallback",
+            "report_path": None,
+            "evaluation_status": "attempted",
+        }
+    ]
+
+
+def test_report_error_delegates_to_report_generator_fallback(tmp_path, monkeypatch):
+    handler = make_handler()
+    handler.memory_ops = 1
+    monkeypatch.setattr(rb, "get_output_path", lambda *_args: str(tmp_path))
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.generate_security_report",
+        Mock(side_effect=RuntimeError("cancel scope failed")),
+    )
+    fallback = Mock(
+        return_value={
+            "report_path": str(tmp_path / "security_assessment_report.md"),
+            "report_json_path": str(tmp_path / "security_assessment_report.json"),
+            "content": "# Deterministic fallback",
+            "status": "fallback",
+        }
+    )
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.generate_deterministic_fallback_report",
+        fallback,
+    )
+
+    handler.ensure_report_generated(
+        SimpleNamespace(model=SimpleNamespace()),
+        "target",
+        "objective",
+        "web",
+        completion_status={"termination_reason": "budget_limit", "assessment_complete": False},
+    )
+
+    assert handler._report_status == "fallback"
+    fallback.assert_called_once()
+    assert any(event["type"] == "report_content" for event in handler._events)
+    report_paths = next(event for event in handler._events if event["type"] == "report_paths")
+    assert report_paths["report_json_path"].endswith("security_assessment_report.json")
+
+
+def test_incomplete_operation_without_evidence_emits_fallback_artifact_paths(tmp_path, monkeypatch):
+    handler = make_handler()
+    monkeypatch.setattr(rb, "get_output_path", lambda *_args: str(tmp_path))
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.generate_security_report",
+        Mock(),
+    )
+    fallback = Mock(
+        return_value={
+            "report_path": str(tmp_path / "security_assessment_report.md"),
+            "report_json_path": str(tmp_path / "security_assessment_report.json"),
+            "content": "# Deterministic fallback",
+            "status": "fallback",
+        }
+    )
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.generate_deterministic_fallback_report",
+        fallback,
+    )
+
+    handler.ensure_report_generated(
+        agent=None,
+        target="target",
+        objective="objective",
+        module="web",
+        completion_status={"assessment_complete": False, "termination_reason": "error"},
+    )
+
+    assert handler._report_status == "fallback"
+    fallback.assert_called_once()
+    assert any(event["type"] == "report_paths" for event in handler._events)
 
 
 def test_model_efficiency_is_higher_when_corrections_are_lower():
@@ -1423,6 +1531,37 @@ def test_assessment_complete_stops_metrics_when_event_emission_fails():
     handler._stop_metrics_thread.assert_called_once_with()
 
 
+def test_shell_and_http_output_handlers_emit_completion_and_deduplicate_results():
+    handler = make_handler()
+    handler.tool_name_buffer["shell-empty"] = "shell"
+    handler._process_shell_output("", [], "success", tool_use_id="shell-empty")
+
+    handler._process_shell_output(
+        "Execution Summary:\nCommand: id\nStatus: success\nOutput:\nuid=1000",
+        [],
+        "success",
+        tool_use_id="shell-result",
+    )
+    emitted_count = len(handler._events)
+    handler._process_shell_output(
+        "Execution Summary:\nCommand: id\nStatus: success\nOutput:\nuid=1000",
+        [],
+        "success",
+        tool_use_id="shell-result",
+    )
+
+    handler.tool_name_buffer["http-empty"] = "http_request"
+    handler._process_http_output("", [], "success", tool_use_id="http-empty")
+    handler._process_http_output("HTTP/1.1 200 OK\n\nbody", [], "success", tool_use_id="http-result")
+
+    outputs = [event for event in handler._events if event["type"] == "output"]
+    assert outputs[0]["content"] == "Command completed"
+    assert any(event["content"] == "uid=1000" for event in outputs)
+    assert any(event["content"] == "Request completed" for event in outputs)
+    assert any(event["content"] == "HTTP/1.1 200 OK\n\nbody" for event in outputs)
+    assert len(handler._events) == emitted_count + 2
+
+
 def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     handler = make_handler()
     handler.memory_ops = 1
@@ -1591,7 +1730,8 @@ def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatc
     assert handler.sdk_input_tokens == 12
     assert handler.sdk_output_tokens == 7
     assert "error" in event_types(handler)
-    assert "operation_complete" in event_types(handler)
+    assert "operation_complete" not in event_types(handler)
+    assert "thinking_end" in event_types(handler)
 
     handler._process_tool_announcement(
         {"name": "handoff_to_agent", "id": "h2", "input": {"handoff_to": "web", "message": "go"}}

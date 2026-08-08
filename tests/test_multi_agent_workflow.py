@@ -1233,7 +1233,7 @@ def test_json_agent_stops_at_configured_limit_after_max_tokens():
         text_runner=text_runner,
     )
 
-    with pytest.raises(WorkflowInvariantError, match="returned invalid JSON after 2 attempt"):
+    with pytest.raises(WorkflowInvariantError, match="reached its max_tokens limit after 2 attempt"):
         controller._run_json_text_agent("phase_evaluator", "original", [], "system")
     assert extract_result_text(SimpleNamespace(content=[{"text": "c"}])) == "c"
 
@@ -2492,7 +2492,7 @@ def test_task_executor_continues_when_selected_memory_lookup_fails():
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
 
 
-def test_task_prompt_normalization_uses_canonical_memory_indices():
+def test_task_prompt_normalization_rejects_conflicting_memory_references():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
@@ -2507,22 +2507,20 @@ def test_task_prompt_normalization_uses_canonical_memory_indices():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    normalized = controller._normalize_task_prompt_spec(
-        {
-            "prompt": "execute active",
-            "memory_indices": [1, 1, 99],
-            "memory_ids": ["memory-1", "memory-2-corrupted"],
-            "tools": [],
-            "shell_commands": [],
-        },
-        Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
-    )
-
-    assert normalized["memory_indices"] == [1]
-    assert normalized["memory_ids"] == ["memory-2", "memory-1"]
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="unknown selection"):
+        controller._normalize_task_prompt_spec(
+            {
+                "prompt": "execute active",
+                "memory_indices": [1, 1, 99],
+                "memory_ids": ["memory-1", "memory-2-corrupted"],
+                "tools": [],
+                "shell_commands": [],
+            },
+            Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
+        )
 
 
-def test_malformed_memory_id_does_not_fail_prompt_build():
+def test_malformed_memory_id_fails_prompt_prevalidation():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
@@ -2537,20 +2535,19 @@ def test_malformed_memory_id_does_not_fail_prompt_build():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    normalized = controller._normalize_task_prompt_spec(
-        {
-            "prompt": "execute active",
-            "memory_ids": ["98d09291-78dc-443c-aba2-f2c4b467fc"],
-            "tools": [],
-            "shell_commands": [],
-        },
-        task,
-    )
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="unknown selection"):
+        controller._normalize_task_prompt_spec(
+            {
+                "prompt": "execute active",
+                "memory_ids": ["98d09291-78dc-443c-aba2-f2c4b467fc"],
+                "tools": [],
+                "shell_commands": [],
+            },
+            task,
+        )
 
-    assert normalized["memory_ids"] == []
 
-
-def test_malformed_memory_id_reaches_prompt_critic_without_false_failure():
+def test_malformed_memory_id_does_not_reach_prompt_critic():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
@@ -2566,9 +2563,6 @@ def test_malformed_memory_id_reaches_prompt_critic_without_false_failure():
                 '{"prompt":"execute active","memory_ids":'
                 '["98d09291-78dc-443c-aba2-f2c4b467fc"],"tools":[],"shell_commands":[]}'
             )
-        if role == "task_prompt_critic":
-            assert "98d09291-78dc-443c-aba2-f2c4b467fc" not in prompt
-            return '{"approved":true,"feedback":[]}'
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -2578,24 +2572,23 @@ def test_malformed_memory_id_reaches_prompt_critic_without_false_failure():
         text_runner=text_runner,
     )
 
-    normalized = controller._build_task_prompt(
-        _plan(),
-        _plan().phases[0],
-        Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
-    )
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="unknown selection"):
+        controller._build_task_prompt(
+            _plan(),
+            _plan().phases[0],
+            Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
+        )
+    assert [role for role, _prompt in calls] == ["task_prompt_builder"]
 
-    assert [role for role, _prompt in calls] == ["task_prompt_builder", "task_prompt_critic"]
-    assert normalized["memory_ids"] == []
 
-
-def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
+def test_task_executor_uses_deterministic_template_for_unknown_selected_shell_commands(monkeypatch):
     runtime = _runtime()
     runtime.config.available_tools = ["httpx", "nmap"]
     state = FakeState(
         _plan(),
         tasks=[Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")],
     )
-    worker_called = False
+    worker_prompts = []
     monkeypatch.setattr(
         workflow_mod,
         "get_shell_command_specs",
@@ -2621,8 +2614,7 @@ def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
         raise AssertionError(role)
 
     def work_runner(role, prompt, tools, system_prompt, run_policy):
-        nonlocal worker_called
-        worker_called = True
+        worker_prompts.append(prompt)
 
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -2634,9 +2626,14 @@ def test_task_executor_rejects_unknown_selected_shell_commands(monkeypatch):
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert worker_called is False
-    assert state.tasks[0].status == "partial_failure"
-    assert "unavailable tool or command(s): unknown" in state.tasks[0].status_reason
+    assert worker_prompts
+    assert "Prompt-build fallback reason" in worker_prompts[0]
+    assert "Supplemental Shell Commands" not in worker_prompts[0]
+    fallback = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "task_prompt_fallback"
+    )
+    assert fallback["reason"] == "task_prompt_builder_unavailable"
 
 
 def test_task_executor_omits_shell_command_context_for_missing_or_invalid_selection():
@@ -3503,7 +3500,7 @@ def test_phase_evaluator_malformed_output_emits_deterministic_partial_failure_fa
     assert decision.status == "partial_failure"
     event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
     if response == "not json":
-        assert "could not be parsed" in decision.reason
+        assert "deterministic durable-state" in decision.reason
         assert event["error_type"] == "WorkflowInvariantError"
     else:
         assert "required decision schema" in decision.reason
@@ -6514,7 +6511,7 @@ def test_task_prompt_final_rejection_marks_task_partial_failure_without_executio
         if role == "task_prompt_builder":
             return '{"prompt":"unsafe draft","tools":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":false,"feedback":["Honor the task boundary"]}'
+            return '{"approved":false,"feedback":["Prompt broadens scope outside target boundary"]}'
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -6529,7 +6526,7 @@ def test_task_prompt_final_rejection_marks_task_partial_failure_without_executio
 
     assert calls == ["task_prompt_builder", "task_prompt_critic"]
     assert state.tasks[0].status == "partial_failure"
-    assert "Honor the task boundary" in state.tasks[0].status_reason
+    assert "Prompt broadens scope outside target boundary" in state.tasks[0].status_reason
     assert controller.runtime.callback_handler.events[-1] == {
         "type": "task_done",
         "task_uid": "active",
@@ -6572,7 +6569,7 @@ def test_task_prompt_repairable_rejection_runs_one_bounded_repair():
     assert calls == ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_critic"]
 
 
-def test_task_prompt_repairable_rejection_queues_one_replacement_task():
+def test_task_prompt_repairable_rejection_uses_deterministic_template():
     task = Task(task_uid="active", title="Active", objective="capture response evidence", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task])
     calls = []
@@ -6590,22 +6587,22 @@ def test_task_prompt_repairable_rejection_queues_one_replacement_task():
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
         text_runner=text_runner,
-        work_runner=lambda *args: pytest.fail("task executor must not run"),
     )
 
-    controller._run_task(_plan(), _plan().phases[0], task)
+    with pytest.raises(workflow_mod.TaskPromptBuildError) as error:
+        controller._build_task_prompt(_plan(), _plan().phases[0], task)
+    fallback = controller._deterministic_task_prompt_spec(_plan(), _plan().phases[0], task, error.value)
 
-    original = next(candidate for candidate in state.tasks if candidate.task_uid == "active")
-    replacement = next(candidate for candidate in state.tasks if candidate.replacement_of == "active")
-    assert original.status == "superseded"
-    assert replacement.status == "pending"
-    assert replacement.acceptance == task.acceptance
-    assert replacement.phase == task.phase
-    assert replacement.objective == task.objective
+    assert fallback["memory_ids"] == []
+    assert fallback["memory_indices"] == []
+    assert fallback["tools"] == []
+    assert fallback["shell_commands"] == []
+    assert "Assigned task" in fallback["prompt"]
+    assert len(state.tasks) == 1
     assert calls == ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_critic"]
 
 
-def test_invalid_task_prompt_critic_json_retries_then_marks_partial_failure():
+def test_invalid_task_prompt_critic_json_retries_then_uses_deterministic_template():
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task])
     calls = []
@@ -6626,19 +6623,28 @@ def test_invalid_task_prompt_critic_json_retries_then_marks_partial_failure():
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
         text_runner=text_runner,
-        work_runner=lambda *args: pytest.fail("task executor must not run"),
+        work_runner=lambda role, prompt, tools, system_prompt: calls.append(("executor", prompt)),
     )
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert calls == ["task_prompt_builder", "task_prompt_critic", "task_prompt_critic"]
+    assert calls[:3] == ["task_prompt_builder", "task_prompt_critic", "task_prompt_critic"]
+    assert calls[3][0] == "executor"
+    assert "Prompt-build fallback reason" in calls[3][1]
+    assert "Supplemental Shell Commands" not in calls[3][1]
     assert state.tasks[0].status == "partial_failure"
-    assert "task_prompt_critic returned invalid JSON" in state.tasks[0].status_reason
+    fallback = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "task_prompt_fallback"
+    )
+    assert fallback["reason"] == "task_prompt_critic_invalid_json"
+    assert fallback["fallback"] == "deterministic_controller_template"
 
 
-def test_invalid_task_prompt_builder_json_marks_task_partial_failure():
+def test_invalid_task_prompt_builder_json_uses_deterministic_template():
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task])
+    executed_prompts = []
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(
@@ -6649,14 +6655,93 @@ def test_invalid_task_prompt_builder_json_marks_task_partial_failure():
         ),
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
-        text_runner=lambda role, prompt, tools, system_prompt: "not json",
-        work_runner=lambda *args: pytest.fail("task executor must not run"),
+        text_runner=lambda role, prompt, tools, system_prompt: (
+            '{"status":"partial_failure","reason":"no acceptance recorded"}'
+            if role == "task_evaluator" else "not json"
+        ),
+        work_runner=lambda role, prompt, tools, system_prompt: executed_prompts.append(prompt),
     )
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
+    assert executed_prompts
+    assert "Assigned task" in executed_prompts[0]
     assert state.tasks[0].status == "partial_failure"
-    assert "task_prompt_builder returned invalid JSON" in state.tasks[0].status_reason
+    fallback = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "task_prompt_fallback"
+    )
+    assert fallback["reason"] == "task_prompt_builder_invalid_json"
+
+
+def test_task_prompt_critic_max_tokens_uses_deterministic_template():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    executed_prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"draft","tools":[]}'
+        if role == "task_prompt_critic":
+            raise MaxTokensReachedException("max_tokens")
+        return '{"status":"partial_failure","reason":"no acceptance recorded"}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(
+            env_ints={
+                "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1,
+                "CYBER_WORKFLOW_JSON_RETRIES": 0,
+            }
+        ),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda role, prompt, tools, system_prompt: executed_prompts.append(prompt),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert executed_prompts
+    fallback = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "task_prompt_fallback"
+    )
+    assert fallback["reason"] == "task_prompt_critic_max_tokens"
+
+
+def test_task_prompt_critic_transport_failure_uses_deterministic_template():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    executed_prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"draft","tools":[]}'
+        if role == "task_prompt_critic":
+            raise RuntimeError("event loop unavailable")
+        return '{"status":"partial_failure","reason":"no acceptance recorded"}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(
+            env_ints={
+                "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1,
+                "CYBER_WORKFLOW_JSON_RETRIES": 0,
+            }
+        ),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda role, prompt, tools, system_prompt: executed_prompts.append(prompt),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert executed_prompts
+    fallback = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "task_prompt_fallback"
+    )
+    assert fallback["reason"] == "task_prompt_critic_unavailable"
 
 
 def test_controller_converts_invalid_evaluator_status_to_partial_failure():

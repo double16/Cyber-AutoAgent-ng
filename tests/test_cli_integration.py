@@ -1921,6 +1921,7 @@ def test_finalize_report_and_evaluation_runs_once(monkeypatch):
         "incomplete_reason": None,
         "unresolved_task_count": None,
         "incomplete_phase_ids": [],
+        "workflow_coverage_summary": [],
     }
     callback.trigger_evaluation_on_completion.assert_called_once()
     callback.emit_assessment_complete.assert_called_once()
@@ -2067,7 +2068,7 @@ def test_finalize_report_and_evaluation_handles_missing_handler_and_errors(monke
     )
 
     logger.warning.assert_called_with(
-        "Unable to determine or emit assessment completion: %s",
+        "Unable to emit operation finalization: %s",
         callback.emit_assessment_complete.side_effect,
     )
 

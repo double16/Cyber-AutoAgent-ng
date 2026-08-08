@@ -283,7 +283,7 @@ export function emitStatusEvents(
   const { emitEvent } = handlers;
   const event = createParsedEvent(eventData);
 
-  if (event.type === 'operation_complete' || event.type === 'assessment_complete') {
+  if (event.type === 'operation_finalized' || event.type === 'operation_complete' || event.type === 'assessment_complete') {
     handlers.onComplete?.();
   } else if (event.type === 'user_handoff') {
     handlers.onUserHandoff?.();

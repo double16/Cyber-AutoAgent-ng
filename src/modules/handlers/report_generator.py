@@ -2389,6 +2389,218 @@ def _assemble_security_assessment_report(
     return report_filename
 
 
+def _format_deterministic_finding(item: Dict[str, Any], index: int) -> str:
+    """Render a stored finding without model-authored analysis."""
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    title = _report_item_title(item, f"Finding {index + 1}")
+    severity = item.get("severity") or metadata.get("severity") or "Unknown"
+    status = item.get("validation_status") or metadata.get("validation_status") or "verified"
+    content = _format_markdown_xml_html_tags(str(item.get("content") or "No finding detail was recorded.").strip())
+    text = (
+        f"### {title}\n\n"
+        f"- **Severity:** {severity}\n"
+        f"- **Validation status:** {status}\n\n"
+        "#### Recorded Evidence\n\n"
+        f"{content}\n\n"
+        + _format_taxonomy_mappings(metadata.get("taxonomy", {}), metadata.get("taxonomy_annotation"))
+    )
+    return _append_artifact_evidence(text, item)
+
+
+def _format_deterministic_methodology(
+    sections: Dict[str, Any],
+    model_metrics: Dict[str, Any],
+) -> str:
+    """Render methodology facts without LLM-generated explanatory prose."""
+    latest_run = sections.get("latest_run", {}) if isinstance(sections.get("latest_run"), dict) else {}
+    tools = sections.get("reportable_tools_used", [])
+    tools = tools if isinstance(tools, list) else []
+    tool_text = ", ".join(f"`{tool}`" for tool in tools) or "No reportable tools were recorded."
+    return (
+        _PAGE_BREAK
+        + '<a name="appendix-a-assessment-methodology"></a>\n'
+        + "## APPENDIX A: ASSESSMENT METHODOLOGY\n\n"
+        + "This appendix contains recorded assessment metadata only; no model-authored methodology prose was "
+        + "available.\n\n"
+        + f"- **Objective:** {sections.get('objective') or 'Not recorded'}\n"
+        + f"- **Target:** {sections.get('target') or 'Not recorded'}\n"
+        + f"- **Module:** {sections.get('module') or 'Not recorded'}\n"
+        + f"- **Recorded tools:** {tool_text}\n"
+        + f"- **Configured budget:** `{latest_run.get('configured_budget') or 'Not recorded'}`\n\n"
+        + "### Execution Metrics\n\n"
+        + f"Total Operation Time: {model_metrics['total_operation_time']}\n\n"
+        + _format_model_usage_table(
+            model_metrics["model_usage"],
+            model_metrics["main_provider"],
+            model_metrics["main_model"],
+            model_metrics["fallback_context_window"],
+        )
+        + "\n\n*Efficiency = 100 × model inferences ÷ (model inferences + correction loops).*\n"
+    )
+
+
+def generate_deterministic_fallback_report(
+    target: str,
+    objective: str,
+    operation_id: str,
+    config_params: Optional[Dict[str, Any]] = None,
+    callback_handler: Any = None,
+    filename: Optional[str] = None,
+    error: Optional[Exception] = None,
+) -> Dict[str, Any]:
+    """Write a factual report when model-authored report generation cannot complete.
+
+    The fallback deliberately reuses the normal report pipeline's canonical data and
+    deterministic renderers. It excludes every report-agent narrative and critic
+    response, so the resulting report remains useful without implying model review.
+    """
+    config_params = config_params or {}
+    completion_status = _normalize_completion_status(config_params.get("completion_status"))
+    output_path = get_output_path(
+        target_name=sanitize_target_name(target),
+        operation_id=operation_id,
+    )
+    Path(output_path).mkdir(parents=True, exist_ok=True)
+    report_filename = filename or os.path.join(output_path, "security_assessment_report.md")
+    json_filename = os.path.join(output_path, "security_assessment_report.json")
+    sections = build_report_sections(
+        operation_id=operation_id,
+        target=target,
+        objective=objective,
+        module=config_params.get("module"),
+        tools_used=config_params.get("tools_used", []),
+    )
+    sections["completion_status"] = completion_status
+    completion_status.update(
+        {
+            "total_task_count": int(sections.get("total_task_count", 0) or 0),
+            "completed_task_count": int(sections.get("completed_task_count", 0) or 0),
+            "task_status_counts": sections.get("task_status_counts", {}),
+        }
+    )
+    latest_run = sections.get("latest_run") if isinstance(sections.get("latest_run"), dict) else {}
+    if not completion_status.get("termination_reason") and latest_run.get("termination_reason"):
+        completion_status["termination_reason"] = str(latest_run["termination_reason"])
+        completion_status["termination_message"] = latest_run.get("termination_message")
+    fallback_budget = _normalize_budget_config(
+        config_params.get("budget"),
+        default_duration=DEFAULT_MAX_DURATION,
+    )
+    latest_run["configured_budget"] = _normalize_budget_config(
+        latest_run.get("configured_budget"),
+        default_duration=int(fallback_budget["duration"]),
+    )
+    sections["latest_run"] = latest_run
+
+    config_manager = get_config_manager()
+    model_metrics = _resolve_report_model_metrics(
+        config_manager,
+        latest_run,
+        callback_handler,
+        operation_id=operation_id,
+    )
+    raw_evidence = sections.get("raw_evidence", [])
+    raw_evidence = raw_evidence if isinstance(raw_evidence, list) else []
+    findings = [item for item in raw_evidence if isinstance(item, dict) and item.get("category") == "finding"]
+    validation_failures = [
+        item for item in raw_evidence if isinstance(item, dict) and item.get("category") == "validation_failure"
+    ]
+    observations = [item for item in raw_evidence if _is_reportable_informational_observation(item)]
+    objective_results = [
+        item
+        for item in raw_evidence
+        if isinstance(item, dict) and item.get("category") in {"objective_result", "objective_validation_failure"}
+    ]
+    sections["taxonomy_coverage"] = _format_taxonomy_coverage_tables(findings)
+    report_consistency_errors = _validate_report_consistency(sections, completion_status)
+    sections["report_consistency_errors"] = report_consistency_errors
+    next_steps = _next_steps_fallback(
+        latest_run["configured_budget"],
+        sections,
+        str(error or "model-authored report generation did not complete"),
+    )
+    sections["next_steps"] = next_steps
+
+    error_text = str(error or "Model-authored report generation did not complete.")
+    parts = [
+        "# SECURITY ASSESSMENT REPORT\n\n",
+        "> **Deterministic fallback report:** Model-authored report content was unavailable. "
+        "This report contains only recorded evidence and workflow data.\n\n",
+        _completion_status_notice(completion_status),
+        "## REPORT GENERATION STATUS\n\n",
+        f"- **Status:** fallback\n- **Reason:** `{error_text}`\n\n",
+        '<a name="executive-summary"></a>\n## EXECUTIVE SUMMARY\n\n',
+        _format_verified_findings_summary(sections),
+        sections["taxonomy_coverage"],
+        _PAGE_BREAK + '<a name="detailed-vulnerability-analysis"></a>\n## DETAILED VULNERABILITY ANALYSIS\n\n',
+        "### Findings Summary\n\n" + str(sections.get("summary_table") or "No verified findings were recorded.") + "\n\n",
+    ]
+    parts.extend(_format_deterministic_finding(item, index) + "\n" for index, item in enumerate(findings))
+    if validation_failures:
+        parts.append(
+            _PAGE_BREAK
+            + '<a name="findings-requiring-validation"></a>\n'
+            + "## FINDINGS REQUIRING VALIDATION\n\n"
+            + "These claims were not verified and are not confirmed vulnerabilities.\n\n"
+        )
+        for index, item in enumerate(validation_failures):
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+            artifacts = metadata.get("artifacts") or metadata.get("evidence_artifacts") or []
+            if not isinstance(artifacts, list):
+                artifacts = [artifacts]
+            parts.append(
+                f"### {_report_item_title(item, f'Validation item {index + 1}')}\n\n"
+                f"- **Claimed severity:** {metadata.get('claimed_severity') or metadata.get('severity') or 'Unknown'}\n"
+                f"- **Validation status:** {item.get('validation_status') or metadata.get('validation_status') or 'failed'}\n"
+                f"- **Why validation failed:** {metadata.get('validation_reason') or 'Verification was incomplete.'}\n\n"
+                f"**Claim:** {item.get('content', '')}\n\n"
+                "**Available artifacts:**\n"
+                + ("\n".join(f"- `{artifact}`" for artifact in artifacts if artifact) or "- No valid artifact was recorded.")
+                + "\n\n"
+            )
+    if objective_results:
+        parts.append(_PAGE_BREAK + '<a name="objective-validation"></a>\n## OBJECTIVE VALIDATION\n\n')
+        for index, item in enumerate(objective_results):
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+            status = "Confirmed" if item.get("category") == "objective_result" else "Rejected or unresolved"
+            parts.append(
+                f"### {metadata.get('objective_type', 'Objective').title()} candidate {index + 1}\n\n"
+                f"- **Status:** {status}\n"
+                f"- **Confidence:** {metadata.get('confidence', 'N/A')}\n"
+                f"- **Reason:** {metadata.get('validation_reason') or metadata.get('summary') or 'Not recorded'}\n\n"
+            )
+    if observations:
+        parts.append(_PAGE_BREAK + '<a name="observations-and-discoveries"></a>\n## OBSERVATIONS AND DISCOVERIES\n\n')
+        parts.extend(_format_observation(item, index) + "\n" for index, item in enumerate(observations))
+    parts.extend(
+        [
+            _PAGE_BREAK + '<a name="target-coverage"></a>\n## TARGET COVERAGE\n\n',
+            str(sections.get("target_coverage") or "No target coverage data was recorded.") + "\n\n",
+            _format_report_consistency_warnings(report_consistency_errors),
+            _PAGE_BREAK + '<a name="execution-history"></a>\n',
+            str(sections.get("execution_history") or "## EXECUTION HISTORY\n\nNo task history was recorded.") + "\n\n",
+            _format_deterministic_methodology(sections, model_metrics),
+            _format_next_steps_appendix(next_steps),
+            f"\n- Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
+            f"- Operation ID: {operation_id}\n",
+        ]
+    )
+    markdown = "".join(parts)
+    with open(report_filename, "w", encoding="utf-8") as report_file:
+        report_file.write(markdown)
+    payload = _canonical_report_json(sections, {}, report_consistency_errors)
+    payload.update({"report_status": "fallback", "report_generation_error": error_text})
+    with open(json_filename, "w", encoding="utf-8") as json_file:
+        json.dump(payload, json_file, indent=2, sort_keys=True)
+        json_file.write("\n")
+    return {
+        "report_path": report_filename,
+        "report_json_path": json_filename,
+        "content": markdown,
+        "status": "fallback",
+    }
+
+
 def generate_security_report(
     target: str,
     objective: str,
@@ -2991,8 +3203,7 @@ Finding Data:
 
     except Exception as e:
         logger.error("Error generating security report: %s", e, exc_info=True)
-        # Don't expose internal error details to user
-        return
+        raise
 
 
 _RE_MARKDOWN_INDENTED_HEADER = re.compile(r"^[ \t]+(#+ )", re.MULTILINE)

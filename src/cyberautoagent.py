@@ -32,6 +32,7 @@ import threading
 import time
 import traceback
 import warnings
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -900,6 +901,7 @@ def finalize_report_and_evaluation(
         logger.warning("No callback_handler available for evaluation trigger")
         return
     completion_status: dict[str, Any] | None = None
+    evaluation_status = "not_run"
     try:
         try:
             plan = get_memory_client(silent=True).get_active_plan()
@@ -907,10 +909,18 @@ def finalize_report_and_evaluation(
             logger.warning("Unable to determine workflow completion before report generation: %s", error)
             plan = None
         completion_status = _build_report_completion_status(plan, callback_handler)
-        try:
-            callback_handler.emit_model_usage_snapshot()
-        except Exception as error:
-            logger.warning("Unable to persist model usage before report generation: %s", error)
+        coverage = _workflow_coverage_summary(plan)
+        completion_status["workflow_coverage_summary"] = coverage
+        termination_emitter = getattr(callback_handler, "emit_operation_terminated", None)
+        if callable(termination_emitter):
+            termination_emitter(completion_status, coverage)
+        else:
+            legacy_snapshot = getattr(callback_handler, "emit_model_usage_snapshot", None)
+            if callable(legacy_snapshot):
+                try:
+                    legacy_snapshot()
+                except Exception as error:
+                    logger.warning("Unable to persist model usage before report generation: %s", error)
         callback_handler.ensure_report_generated(
             agent,
             target,
@@ -920,6 +930,7 @@ def finalize_report_and_evaluation(
         )
         logger.info("Triggering evaluation on completion")
         callback_handler.trigger_evaluation_on_completion()
+        evaluation_status = "attempted"
     except Exception as error:
         logger.warning("Error in final report/evaluation: %s", error)
     finally:
@@ -927,18 +938,61 @@ def finalize_report_and_evaluation(
             if completion_status is None:
                 plan = get_memory_client(silent=True).get_active_plan()
                 completion_status = _build_report_completion_status(plan, callback_handler)
-            workflow_complete = bool(completion_status.get("workflow_complete"))
-            termination_complete = completion_status.get("termination_reason") == "complete"
-            if workflow_complete and termination_complete:
-                callback_handler.emit_assessment_complete()
-            else:
-                logger.info(
-                    "Skipping assessment_complete: workflow_complete=%s termination_reason=%s",
-                    workflow_complete,
-                    completion_status.get("termination_reason"),
+                coverage = _workflow_coverage_summary(plan)
+                completion_status["workflow_coverage_summary"] = coverage
+                termination_emitter = getattr(callback_handler, "emit_operation_terminated", None)
+                if callable(termination_emitter):
+                    termination_emitter(completion_status, coverage)
+                else:
+                    legacy_snapshot = getattr(callback_handler, "emit_model_usage_snapshot", None)
+                    if callable(legacy_snapshot):
+                        try:
+                            legacy_snapshot()
+                        except Exception as snapshot_error:
+                            logger.warning("Unable to persist model usage before report generation: %s", snapshot_error)
+            finalization_emitter = getattr(callback_handler, "emit_operation_finalized", None)
+            if callable(finalization_emitter):
+                finalization_emitter(
+                    report_status=getattr(callback_handler, "_report_status", "failed"),
+                    evaluation_status=evaluation_status,
                 )
+            elif (
+                completion_status.get("workflow_complete")
+                and completion_status.get("termination_reason") == "complete"
+            ):
+                callback_handler.emit_assessment_complete()
         except Exception as error:
-            logger.warning("Unable to determine or emit assessment completion: %s", error)
+            logger.warning("Unable to emit operation finalization: %s", error)
+
+
+def _workflow_coverage_summary(plan: Any) -> list[dict[str, Any]]:
+    """Build the authoritative terminal coverage view from durable workflow state."""
+    if plan is None:
+        return []
+    phases = getattr(plan, "phases", [])
+    if not isinstance(phases, (list, tuple)):
+        return []
+    try:
+        state = get_memory_client(silent=True)
+    except Exception:
+        return []
+    rows = []
+    for phase in phases:
+        try:
+            tasks = state.list_tasks(phase=phase.id)
+        except Exception:
+            tasks = []
+        counts = Counter(str(task.status) for task in tasks)
+        rows.append(
+            {
+                "phase_id": phase.id,
+                "title": phase.title,
+                "status": phase.status,
+                "task_count": len(tasks),
+                "task_status_counts": dict(sorted(counts.items())),
+            }
+        )
+    return rows
 
 
 def _build_report_completion_status(plan: Any, callback_handler: Any) -> dict[str, Any]:
@@ -1840,17 +1894,6 @@ def main():
                         callback_handler.emit_termination(
                             "max_tokens",
                             "Model token limit reached. Switching to final report.",
-                        )
-                        try:
-                            plan = get_memory_client(silent=True).get_active_plan()
-                        except Exception:
-                            plan = None
-                        callback_handler.ensure_report_generated(
-                            None,
-                            args.target,
-                            args.objective,
-                            args.module,
-                            completion_status=_build_report_completion_status(plan, callback_handler),
                         )
                 except Exception as max_tokens_finish_error:
                     logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)

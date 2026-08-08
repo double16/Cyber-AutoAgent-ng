@@ -43,6 +43,27 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Paths unavailable');
   });
 
+  it('renders backend snake-case report paths without prior event normalization', async () => {
+    const { EventLine, render } = await load();
+    const output = render(
+      <EventLine
+        event={{
+          type: 'report_paths',
+          output_dir: '/app/outputs/dvwa/OP_1',
+          report_path: '/app/outputs/dvwa/OP_1/security_assessment_report.md',
+          log_path: '/app/outputs/dvwa/OP_1/cyber_operations.log',
+          artifacts_path: '/app/outputs/dvwa/OP_1/artifacts',
+        } as any}
+        animationsEnabled={false}
+      />
+    ).lastFrame();
+
+    expect(output).toContain('OP_1/security_assessment_report.md');
+    expect(output).toContain('OP_1/cyber_operations.log');
+    expect(output).toContain('OP_1/artifacts');
+    expect(output).not.toContain('Paths unavailable');
+  });
+
   it('does not render streamed report content as an inline snippet', async () => {
     const {EventLine, render} = await load();
     const output = render(
