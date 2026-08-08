@@ -205,6 +205,70 @@ export const mapContainerReportPath = (
   }
 };
 
+type ReportDetails = {
+  path: string | null;
+  content: string | null;
+};
+
+export const deriveReportDetails = (
+  events: DisplayStreamEvent[],
+  outputBaseDir?: string | null
+): ReportDetails => {
+  let latestPath: string | null = null;
+  let fallback: string | null = null;
+
+  events.forEach(event => {
+    if (event.type === 'report_paths') {
+      const candidate =
+        (event as any).reportPath ??
+        (event as any).report_path ??
+        (event as any).report ??
+        null;
+      if (candidate) {
+        latestPath = mapContainerReportPath(String(candidate), outputBaseDir);
+      }
+    } else if ((event as any).type === 'assessment_complete') {
+      const raw = (event as any).report_path;
+      if (typeof raw === 'string' && raw) {
+        latestPath = mapContainerReportPath(raw, outputBaseDir);
+      }
+    } else if (event.type === 'report_content') {
+      if ('content' in event && typeof (event as any).content === 'string') {
+        fallback = (event as any).content;
+      } else if ('content' in event && (event as any).content) {
+        try {
+          fallback = JSON.stringify((event as any).content);
+        } catch {
+          fallback = String((event as any).content);
+        }
+      }
+    }
+  });
+
+  return { path: latestPath, content: fallback };
+};
+
+export const deriveOperationContext = (
+  events: DisplayStreamEvent[],
+  reportPath: string | null
+): OperationContext => {
+  let operationId: string | null = null;
+  let target: string | null = null;
+
+  events.forEach(event => {
+    if (event.type === 'operation_init') {
+      if ('operation_id' in event && (event as any).operation_id) {
+        operationId = String((event as any).operation_id);
+      }
+      if ('target' in event && (event as any).target) {
+        target = String((event as any).target);
+      }
+    }
+  });
+
+  return { operationId, target, reportPath };
+};
+
 export const getReportPathCandidates = (
   ctx: OperationContext,
   reportPath: string | null | undefined,
@@ -2501,52 +2565,15 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
-  const reportDetails = React.useMemo(() => {
-    let latestPath: string | null = null;
-    let fallback: string | null = null;
+  const reportDetails = React.useMemo(
+    () => deriveReportDetails(events, outputBaseDir),
+    [events, outputBaseDir]
+  );
 
-    events.forEach(event => {
-      if (event.type === 'report_paths') {
-        const candidate =
-          (event as any).reportPath ??
-          (event as any).report_path ??
-          (event as any).report ??
-          null;
-        if (candidate) {
-          latestPath = String(candidate);
-        }
-      } else if ((event as any).type === 'assessment_complete') {
-        const raw = (event as any).report_path;
-        if (typeof raw === 'string' && raw) {
-          latestPath = mapContainerReportPath(raw, outputBaseDir);
-        }
-      } else if (event.type === 'report_content') {
-        if ('content' in event && typeof (event as any).content === 'string') {
-          fallback = (event as any).content as string;
-        } else if ('content' in event && (event as any).content) {
-          try {
-            fallback = JSON.stringify((event as any).content);
-          } catch {
-            fallback = String((event as any).content);
-          }
-        }
-      }
-    });
-    return { path: latestPath, content: fallback };
-  }, [events, outputBaseDir]);
-
-  // Capture operation context (operation_id and target) from events for artifact resolution
-  const operationContext = React.useMemo<OperationContext>(() => {
-    let opId: string | null = null;
-    let target: string | null = null;
-    for (const e of events) {
-      if (e.type === 'operation_init') {
-        if ('operation_id' in e && (e as any).operation_id) opId = String((e as any).operation_id);
-        if ('target' in e && (e as any).target) target = String((e as any).target);
-      }
-    }
-    return { operationId: opId, target, reportPath: reportDetails.path };
-  }, [events, reportDetails.path]);
+  const operationContext = React.useMemo(
+    () => deriveOperationContext(events, reportDetails.path),
+    [events, reportDetails.path]
+  );
 
   // Soft virtualization: render only the most recent N groups to cap Ink/Yoga node count
   // This dramatically reduces memory pressure after long sessions while preserving recent context.
@@ -2686,51 +2713,15 @@ export const StaticStreamDisplay: React.FC<{
     }
   }, [config.outputDir, projectRoot]);
 
-  const reportDetails = React.useMemo(() => {
-    let latestPath: string | null = null;
-    let fallback: string | null = null;
-    events.forEach(event => {
-      if (event.type === 'report_paths') {
-        const candidate =
-          (event as any).reportPath ??
-          (event as any).report_path ??
-          (event as any).report ??
-          null;
-        if (candidate) {
-          latestPath = mapContainerReportPath(String(candidate), outputBaseDir);
-        }
-      } else if ((event as any).type === 'assessment_complete') {
-        const raw = (event as any).report_path;
-        if (typeof raw === 'string' && raw) {
-          latestPath = mapContainerReportPath(raw, outputBaseDir);
-        }
-      } else if (event.type === 'report_content') {
-        if ('content' in event && typeof (event as any).content === 'string') {
-          fallback = (event as any).content as string;
-        } else if ('content' in event && (event as any).content) {
-          try {
-            fallback = JSON.stringify((event as any).content);
-          } catch {
-            fallback = String((event as any).content);
-          }
-        }
-      }
-    });
-    return { path: latestPath, content: fallback };
-  }, [events, outputBaseDir]);
+  const reportDetails = React.useMemo(
+    () => deriveReportDetails(events, outputBaseDir),
+    [events, outputBaseDir]
+  );
 
-  // Capture operation context (operation_id and target) for artifact resolution
-  const operationContext = React.useMemo<OperationContext>(() => {
-    let opId: string | null = null;
-    let target: string | null = null;
-    for (const e of events) {
-      if (e.type === 'operation_init') {
-        if ('operation_id' in e && (e as any).operation_id) opId = String((e as any).operation_id);
-        if ('target' in e && (e as any).target) target = String((e as any).target);
-      }
-    }
-    return { operationId: opId, target, reportPath: reportDetails.path };
-  }, [events, reportDetails.path]);
+  const operationContext = React.useMemo(
+    () => deriveOperationContext(events, reportDetails.path),
+    [events, reportDetails.path]
+  );
 
   // Flatten groups into discrete render items with stable keys.
   type Item = { key: string; render: () => React.ReactNode };
