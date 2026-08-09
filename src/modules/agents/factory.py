@@ -13,7 +13,11 @@ from strands.hooks import HookProvider
 from strands.agent.conversation_manager import ConversationManager
 
 from modules.config import get_config_manager
-from modules.config.models import create_strands_model, get_capabilities
+from modules.config.models import (
+    allows_reasoning_content_replay,
+    create_strands_model,
+    get_capabilities,
+)
 from modules.config.system import get_logger
 from modules.handlers.conversation_budget import get_shared_conversation_manager
 from modules.config.models.factory import _resolve_prompt_token_limit
@@ -55,7 +59,9 @@ def create_agent_with_stateful_retry(
     try:
         return agent_cls(**agent_kwargs)
     except ValueError as exc:
-        if _is_stateful_model_manager_error(exc) and "conversation_manager" in agent_kwargs:
+        if _is_stateful_model_manager_error(exc) and (
+            "conversation_manager" in agent_kwargs or "context_manager" in agent_kwargs
+        ):
             logger.info(
                 "Retrying agent creation without local conversation manager for stateful model '%s'.",
                 model_id,
@@ -115,6 +121,7 @@ def patch_toolregistry_register_tool() -> None:
 class AgentFactoryConfig:
     hooks: Optional[List[HookProvider]] = None
     callback_handler: Optional[Callable[..., Any]] = None
+    callback_handler_factory: Optional[Callable[..., Any]] = None
     conversation_manager: Optional[ConversationManager] = None
     context_manager: Optional[str] = None
     base_trace_attributes: Optional[Dict[str, Any]] = None
@@ -162,7 +169,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
         agent_type = agent_type or name
 
         kwargs = kwargs.copy()
-        if not "load_tools_from_directory" in kwargs:
+        if "load_tools_from_directory" not in kwargs:
             kwargs["load_tools_from_directory"] = True
 
         # Configure model provider
@@ -200,7 +207,11 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
 
         try:
             caps = get_capabilities(provider, swarm_model_id)
-            allow_reasoning_content = bool(caps.supports_reasoning)
+            allow_reasoning_content = allows_reasoning_content_replay(
+                provider,
+                swarm_model_id,
+                caps,
+            )
         except Exception:
             allow_reasoning_content = False
 
@@ -239,10 +250,19 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
             # we must have this for providers whose toolUseId is broken
             agent_hooks.append(ToolUseIdHook())
 
-        agent_kwargs = {
+        callback_handler = config.callback_handler
+        if config.callback_handler_factory is not None:
+            callback_handler = config.callback_handler_factory(
+                name=name,
+                agent_type=agent_type,
+                model_id=swarm_model_id,
+                provider_id=provider,
+            )
+
+        agent_kwargs: Dict[str, Any] = {
             "model": strands_model,
             "name": name,
-            "callback_handler": config.callback_handler,
+            "callback_handler": callback_handler,
             "trace_attributes": trace_attributes,
             "hooks": agent_hooks,
             **kwargs,

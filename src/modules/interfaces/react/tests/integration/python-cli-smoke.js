@@ -21,8 +21,8 @@ const path = require('path');
     // Prefer uv, fallback to python if available
     const cmd = process.env.CYBER_USE_UV === '0' ? 'python' : 'uv';
     const args = process.env.CYBER_USE_UV === '0'
-      ? [script, '--target', 'http://testphp.vulnweb.com', '--objective', 'quick check', '--iterations', '1']
-      : ['run', 'python', script, '--target', 'http://testphp.vulnweb.com', '--objective', 'quick check', '--iterations', '1'];
+      ? [script, '--target', 'http://testphp.vulnweb.com', '--objective', 'quick check', '--max-duration', '1']
+      : ['run', 'python', script, '--target', 'http://testphp.vulnweb.com', '--objective', 'quick check', '--max-duration', '1'];
 
     const env = { ...process.env, NO_COLOR: '1', CI: 'true' };
 
@@ -41,7 +41,7 @@ const path = require('path');
     }
 
     // Look for minimal signs of progress (operation id or step markers)
-    const ok = /OP_\d{8}_\d{6}/.test(output) || /STEP\s+1|\[STEP/i.test(output);
+    const ok = /OP_\d{8}_\d{6}/.test(output) || /BUDGET\s+\d|\[BUDGET/i.test(output);
     if (!ok) {
       console.log('Python CLI ran but expected output markers were not found.');
       console.log(output.slice(0, 2000));

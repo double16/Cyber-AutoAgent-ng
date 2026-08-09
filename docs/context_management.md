@@ -107,13 +107,12 @@ Intercepts tool execution events to manage output sizes before conversation inte
 | Attribute                | Value                                       |
 |--------------------------|---------------------------------------------|
 | **Location**             | `modules/handlers/tool_router.py`           |
-| **SDK Events**           | `BeforeToolCallEvent`, `AfterToolCallEvent` |
+| **SDK Events**           | `AfterToolCallEvent`                        |
 | **Truncation Threshold** | 30,000 characters                           |
 | **Artifact Threshold**   | 10,000 characters                           |
 | **Artifact Retention**   | 100 most recent per session                 |
 
 **Responsibilities**:
-- Route unregistered tool invocations to shell executor
 - Truncate oversized tool outputs with size metadata
 - Externalize large outputs to timestamped artifact files
 - Inject inline preview (4KB head) for immediate LLM context
@@ -232,6 +231,20 @@ Ratios are resolved dynamically via models.dev integration with result caching.
 | Warning (no reductions) | 80% of token limit | Diagnostic logging               |
 | Escalation              | 90% of token limit | Additional reduction passes      |
 | Maximum                 | 98% of token limit | Hard ceiling                     |
+
+### Output Exhaustion and Reasoning Loops
+
+Prompt-window overflow and output exhaustion are separate conditions:
+
+- `ContextWindowOverflowException` means the model input exceeded its resolved context window. Conversation-budget
+  reduction handles this condition.
+- `MaxTokensReachedException` means one model response exhausted its configured output allowance. The workflow
+  classifies the incomplete response as ordinary truncation or a repetitive reasoning loop.
+
+Incomplete max-token responses are untrusted and are not compressed back into conversation history. JSON-producing
+roles retry from the original contract, task creators use bounded turns in one retained conversation, and task executors
+retain completed tool interactions while discarding only the incomplete assistant tail. A task executor receives one
+controller-directed retry; repeated exhaustion becomes a task `partial_failure` rather than ending the operation.
 
 ## Multi-Layer Reduction System
 
@@ -391,11 +404,34 @@ Artifact references include immediate context for LLM comprehension:
 
 #### Tool Result Handling
 
-| Variable                               | Default | Description                           |
-|----------------------------------------|---------|---------------------------------------|
-| `CYBER_TOOL_COMPRESS_TRUNCATE`         | 8,000   | Compression target size (characters)  |
-| `CYBER_TOOL_MAX_RESULT_CHARS`          | 30,000  | Conversation truncation limit         |
-| `CYBER_TOOL_RESULT_ARTIFACT_THRESHOLD` | 10,000  | Artifact externalization trigger      |
+| Variable                                    | Default | Description                                                                               |
+|---------------------------------------------|---------|-------------------------------------------------------------------------------------------|
+| `CYBER_TOOL_COMPRESS_TRUNCATE`              | 8,000   | Compression target size (characters)                                                      |
+| `CYBER_TOOL_MAX_RESULT_CHARS`               | 30,000  | Conversation truncation limit                                                             |
+| `CYBER_TOOL_RESULT_ARTIFACT_THRESHOLD`      | 10,000  | Artifact externalization trigger                                                          |
+| `CYBER_TOOL_REPEAT_THRESHOLD`               | 3       | Reuse results after this many exact cycle repetitions; `0` disables the guard.            |
+| `CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH`        | 8       | Maximum number of calls in a detected repeating cycle; must be at least `1`.              |
+| `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS` | 2       | Repeated blocked recovery calls before the task executor is stopped; minimum `1`.         |
+| `CYBER_TOOL_RECOVERY_MAX_CORRECTIONS`       | 2       | Changed retries allowed for one failed task invocation; minimum `1`.                      |
+| `CYBER_TASK_CREATOR_MAX_CORRECTIONS`        | 6       | Retained task-creation correction turns after the initial rejected call; minimum `0`.     |
+| `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS`     | 2       | Retained acceptance correction turns after the initial rejected call; minimum `0`.        |
+
+The repeat guard is scoped to one agent invocation and detects exact contiguous cycles, including a single unchanged
+call or alternating calls such as `A, B, A, B, A, B`. It reuses the most recent completed result for the matching call
+and allows one model recovery turn. If the model continues the same cycle, the guard reuses the next matching result
+and stops only that agent as a normal completion. The workflow carries the exact normalized loop signature across
+retained task-executor cycles, permits at most one materially different recovery action, and terminates the task if
+another loop occurs. A new task is not created unless Python has a separately justified replacement procedure with
+explicit `replacement_of` lineage.
+
+The provider-configured or detected context window is applied directly to every Strands model and is the same value
+used by prompt budgeting and proactive compression. There is no application-level 48,000-token default; 48,000 is one
+possible configured or detected model capacity. Ollama requests also receive the resolved value as `num_ctx`.
+
+Calls canceled by policy hooks remain in repeat detection but are excluded from cached-result reuse because their error
+result describes a controller decision rather than an executed tool. A canceled cycle stops at the configured repeat
+threshold; executed cycles retain the cached-result recovery turn. Tool completion events expose `outcome` and
+`executed` fields so consumers can distinguish command errors from input validation failures and policy blocks.
 
 #### Conversation Preservation
 
@@ -404,7 +440,7 @@ Artifact references include immediate context for LLM comprehension:
 | `CYBER_CONVERSATION_WINDOW`          | 100     | Sliding window size (messages)                                            |
 | `CYBER_CONVERSATION_PRESERVE_FIRST`  | 1       | Initial messages to preserve                                              |
 | `CYBER_CONVERSATION_PRESERVE_LAST`   | 5       | Recent messages to preserve (reduced from 12 to prevent pruning deadlock) |
-| `CYBER_SDK_CONTEXT_MANAGER`          | `auto`  | Strands SDK context facade for stateless models.                          |
+| `CYBER_SDK_CONTEXT_MANAGER`          | `false` | Strands SDK context facade for stateless models.                          |
 
 ## Prompt Caching Integration
 

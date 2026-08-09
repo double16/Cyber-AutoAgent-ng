@@ -34,7 +34,7 @@ def test_register_filter_and_summary():
 
 
 async def _fake_scores(trace_id, _max_retries):
-    if trace_id == "s1":
+    if trace_id in {"s1", "OP_TEST"}:
         return {"plain": 0.5, "tuple": (0.75, {"reason": "ok"}), "bad": "skip"}
     return {}
 
@@ -42,8 +42,11 @@ async def _fake_scores(trace_id, _max_retries):
 @pytest.mark.asyncio
 async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeypatch):
     class FakeEvaluator:
-        def __init__(self, emitter):
+        def __init__(self, emitter, report_path=None, usage_callback=None, progress_callback=None):
             self.emitter = emitter
+            self.report_path = report_path
+            self.usage_callback = usage_callback
+            self.progress_callback = progress_callback
 
         async def evaluate_trace(self, trace_id, _max_retries):
             return await _fake_scores(trace_id, _max_retries)
@@ -55,10 +58,10 @@ async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeyp
 
     results = await manager.evaluate_all_traces()
 
-    assert results == {"t1": {"plain": 0.5, "tuple": 0.75}}
+    assert results == {"OP_TEST": {"plain": 0.5, "tuple": 0.75}}
     assert manager.traces["t1"].evaluated is True
     assert manager.traces["t1"].evaluation_scores == {"plain": 0.5, "tuple": 0.75}
-    assert manager.traces["t2"].evaluated is False
+    assert manager.traces["t2"].evaluated is True
 
 
 def test_wait_for_completion_without_thread_returns_true():
@@ -153,6 +156,7 @@ def test_evaluator_setup_models_all_providers(monkeypatch):
     class FakeEvaluator(eval_mod.CyberAgentEvaluator):
         def __init__(self):
             self._emitter = SimpleNamespace(emit=Mock())
+            self._usage_callback = None
 
     manager = SimpleNamespace(
         provider="ollama",
@@ -161,7 +165,7 @@ def test_evaluator_setup_models_all_providers(monkeypatch):
             evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model")),
             embedding=SimpleNamespace(model_id="embed-model"),
         ),
-        getenv=lambda name, default=None: {"OLLAMA_HOST": "http://ollama", "MEM0_EMBEDDING_MODEL": "bedrock/embed"}.get(name, default),
+        getenv=lambda name, default=None: {"OLLAMA_HOST": "http://ollama", "CYBER_AGENT_EMBEDDING_MODEL": "bedrock/embed"}.get(name, default),
         get_default_region=lambda: "us-east-1",
     )
     monkeypatch.setattr(eval_mod, "get_config_manager", lambda: manager)

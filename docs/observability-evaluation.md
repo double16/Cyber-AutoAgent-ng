@@ -57,12 +57,12 @@ sequenceDiagram
     Strands->>Langfuse: Session Start
     
     loop Tool Execution
-        Agent->>Tools: shell("nmap -sV target")
-        Tools-->>Agent: Scan results
+        Agent->>Tools: Restricted tool execution
+        Tools-->>Agent: Structured result and evidence
         Strands->>Langfuse: Tool execution trace
         
-        Agent->>Tools: mem0_store(finding)
-        Tools-->>Agent: Memory stored
+        Agent->>Tools: Persist evidence
+        Tools-->>Agent: Memory and artifact references
         Strands->>Langfuse: Memory operation
     end
     
@@ -73,7 +73,7 @@ sequenceDiagram
 
 ```bash
 # 1. Start monitoring stack
-docker-compose up -d
+docker compose -f docker/docker-compose.yml up -d
 
 # 2. Run with full observability
 docker run --rm \
@@ -95,7 +95,45 @@ docker run --rm \
 
 ## Evaluation Metrics
 
-The system automatically evaluates 6 core metrics after each operation to assess cybersecurity agent performance:
+When enabled, the system performs at most two Ragas evaluations per operation:
+
+1. An operation evaluation combining task-executor, swarm-agent, and validation-specialist traces while excluding
+   planning, prompt-building, task-creation, and evaluator roles.
+2. A report evaluation of the assembled `security_assessment_report.md` artifact, when the report exists.
+
+The operation evaluation uses all 6 core metrics. The report evaluation uses only evidence quality, goal accuracy, and
+topic adherence because tool selection and execution methodology do not apply to a completed report artifact. Scores
+are written to dedicated Langfuse traces using `operation/` and `report/` prefixes instead of being attached to the
+last role-agent call.
+
+The existing `ENABLE_OBSERVABILITY` and `ENABLE_AUTO_EVALUATION` variables remain authoritative. If either required
+gate is disabled, trace discovery, evaluator initialization, Ragas model calls, and score uploads are skipped.
+
+While evaluation is enabled and running, each scheduled Ragas metric emits an indexed `progress_update` event before
+the metric call. The event uses `operation_stage: "ragas_evaluation"` and includes `evaluation_step_index`,
+`evaluation_step_total`, `evaluation_scope`, `evaluation_metric`, and `evaluation_step_label`. The total spans the
+bounded operation and optional report metric sets; progress reporting does not add model calls. No evaluation progress
+events are emitted when the existing evaluation gates disable evaluation.
+
+Multi-turn evaluation also emits an unindexed preparation event immediately before reference-topic generation. It uses
+`step: "RAGAS_PREPARATION"` and `evaluation_step_kind: "reference_topics"`, along with the current scope and a display
+label. Evaluation-data assembly, rubric judging, and policy calibration use the same event shape with
+`evaluation_step_kind` set to `evaluation_data`, `rubric_judge`, or `evaluation_policy`. Preparation events do not
+change the metric `evaluation_step_index` or `evaluation_step_total` values.
+
+Each announced metric or preparation stage emits one `evaluation_step_complete` event with a `completed`, `skipped`,
+or `failed` status. Skipped and failed events include a short user-safe message. After an attempted evaluation,
+`evaluation_complete` carries finalized policy-adjusted scores, their average, and an overall status. Evaluation
+internals never emit synthetic `tool_start` or `tool_end` events; those remain reserved for actual agent tools.
+After every evaluation model response with provider usage metadata, the evaluator publishes its cumulative usage into
+the operation-wide accounting. The existing `metrics_update` event then reports assessment, reporting, and evaluation
+tokens and cost as one running total; evaluation does not define a separate cost event. When an integration supplies
+LangChain `input_token_details`, `cache_read` and `cache_creation` are reported as `cacheReadTokens` and
+`cacheWriteTokens`. The event handler prices all evaluation usage with the same precedence as assessment and reporting:
+configured `CYBER_AGENT_PRICING_INPUT`, `CYBER_AGENT_PRICING_OUTPUT`, `CYBER_AGENT_PRICING_CACHE_READ`, and
+`CYBER_AGENT_PRICING_CACHE_WRITE` overrides first, then models.dev rates, then the configured zero-cost fallback.
+
+### Core Metrics
 
 ### Core Metrics Overview
 
@@ -145,6 +183,9 @@ LANGFUSE_SECRET_KEY=cyber-secret
 export LANGFUSE_ENCRYPTION_KEY=$(openssl rand -hex 32)
 export LANGFUSE_ADMIN_PASSWORD=$(openssl rand -base64 32)
 ```
+
+When remote observability is enabled but the Langfuse health check or OTLP exporter setup fails, the assessment
+continues with local Strands token and cost telemetry. A warning identifies the unavailable remote exporter.
 
 **Model Support:**
 - AWS Bedrock: `-e SERVER=remote` (default)

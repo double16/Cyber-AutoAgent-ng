@@ -31,6 +31,8 @@ interface UnifiedInputPromptProps {
   suggestions?: Suggestion[];
   availableModules?: string[];
   recentTargets?: string[];
+  commandHistory?: string[];
+  onCommandHistoryPush?: (command: string) => void;
 }
 
 export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
@@ -40,7 +42,9 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
   userHandoffActive = false,
   suggestions = [],
   availableModules = ['web'],
-  recentTargets = []
+  recentTargets = [],
+  commandHistory,
+  onCommandHistoryPush
 }) => {
   // Access global app state via a lightweight event bridge to avoid circular deps
   // We'll read from process.env-like bridge exposed on actions; App passes actions down
@@ -60,20 +64,20 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
   const previousStep = useRef(flowState.step);
 
   // Command history (fallback to local if global not available)
-  const [history, setHistory] = useState<string[]>(() => appStateRef?.getCommandHistory?.() || []);
+  const [history, setHistory] = useState<string[]>(() => commandHistory || appStateRef?.getCommandHistory?.() || []);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const draftBeforeHistoryRef = useRef<string>('');
 
   // Keep local history in sync with global command history when it changes
   useEffect(() => {
-    const globalHist = appStateRef?.getCommandHistory?.();
+    const globalHist = commandHistory || appStateRef?.getCommandHistory?.();
     if (Array.isArray(globalHist)) {
       setHistory(prev => {
         // Only update if different to avoid cursor reset while editing
         return JSON.stringify(prev) !== JSON.stringify(globalHist) ? globalHist : prev;
       });
     }
-  }, [appStateRef?.getCommandHistory?.()]);
+  }, [commandHistory, appStateRef?.getCommandHistory?.()]);
 
   // Generate smart suggestions based on flow state and input
   const generateSuggestions = (input: string): Suggestion[] => {
@@ -107,7 +111,7 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
           break;
         case 'module':
           suggestions.push(
-            { text: '/plugins', description: 'Browse available security modules', type: 'command' }
+            { text: '/modules', description: 'Browse available security modules', type: 'command' }
           );
           break;
         case 'target':
@@ -151,7 +155,7 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
         { text: '/help', description: 'Show all available commands', type: 'command' },
         { text: '/docs', description: 'Browse documentation interactively', type: 'command' },
         { text: '/config', description: 'View and edit configuration', type: 'command' },
-        { text: '/plugins', description: 'Select security assessment module', type: 'command' },
+        { text: '/modules', description: 'Select security assessment module', type: 'command' },
         { text: '/health', description: 'Check system and container status', type: 'command' },
         { text: '/setup', description: 'Deployment mode configuration', type: 'command' },
 
@@ -239,7 +243,7 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
     
     switch (flowState.step) {
       case 'module':
-        return '/plugins to select security plugin';
+        return '/modules to select a security module';
       case 'target':
         return 'target https://your-authorized-target.com';
       case 'objective':
@@ -251,7 +255,7 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
         if (currentModule) {
           return 'target <url> or type "execute" after setting target';
         }
-        return 'target <url> or /plugins or /help';
+        return 'target <url> or /modules or /help';
     }
   };
 
@@ -339,11 +343,14 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
     // Allow submission during user handoff even if otherwise disabled
     if (!disabled || userHandoffActive) {
       const trimmed = submittedValue.trim();
-      if (trimmed.length > 0) {
+      if (trimmed.length > 0 && !trimmed.startsWith('/')) {
         // Local history update
-        setHistory(prev => (prev.length === 0 || prev[prev.length - 1] !== submittedValue) ? [...prev, submittedValue] : prev);
+        setHistory(prev => (prev.length === 0 || prev[prev.length - 1] !== trimmed) ? [...prev, trimmed] : prev);
         // Push into global application history (used by other components)
-        try { (global as any).CYBER_APP_STATE_ACTIONS?.pushCommandHistory?.(submittedValue); } catch {}
+        try {
+          const pushHistory = onCommandHistoryPush || (global as any).CYBER_APP_STATE_ACTIONS?.pushCommandHistory;
+          pushHistory?.(trimmed);
+        } catch {}
       }
       setHistoryIndex(null);
       draftBeforeHistoryRef.current = '';
@@ -363,6 +370,8 @@ export const UnifiedInputPrompt: React.FC<UnifiedInputPromptProps> = ({
   // Simplified handleChange - MultiLineTextInput manages the split internally
   const handleChange = React.useCallback((newValue: string) => {
     setValue(newValue);
+    setHistoryIndex(null);
+    draftBeforeHistoryRef.current = '';
   }, []);
 
   return (

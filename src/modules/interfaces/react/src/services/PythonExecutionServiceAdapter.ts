@@ -30,6 +30,7 @@ const logger = createLogger('PythonExecutionServiceAdapter');
 export class PythonExecutionServiceAdapter extends EventEmitter implements ExecutionService {
   private pythonService: PythonExecutionService;
   private activeHandle?: ExecutionHandle;
+  private completed = false;
 
   constructor() {
     super();
@@ -55,6 +56,14 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
     return ExecutionMode.PYTHON_CLI;
   }
 
+  drainBufferedStartupEvents(): any[] {
+    return this.pythonService.drainBufferedStartupEvents();
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.pythonService.markStartupEventConsumerAttached();
+  }
+
   getCapabilities(): ExecutionCapabilities {
     return {
       canExecute: true,
@@ -62,7 +71,7 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
       supportsParallel: false, // Python service creates new instances
       maxConcurrent: 1,
       requirements: [
-        'Python 3.11+',
+        'Python 3.12+',
         'Virtual environment support',
         'Pip package manager',
         'Network access for model API calls'
@@ -119,8 +128,8 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
           issues.push({
             type: 'python',
             severity: 'error',
-            message: pythonCheck.error || 'Python 3.11+ is required',
-            suggestion: 'Install Python 3.11 or higher from https://python.org'
+            message: pythonCheck.error || 'Python 3.12+ is required',
+            suggestion: 'Install Python 3.12 or higher from https://python.org'
           });
         }
 
@@ -221,6 +230,7 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
       throw new Error('Python execution already active');
     }
 
+    this.completed = false;
     const startTime = Date.now();
     const handleId = `python-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -267,9 +277,18 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
     return this.pythonService.sendUserInput(input);
   }
 
+  async stop(): Promise<void> {
+    await this.pythonService.stop();
+  }
+
   cleanup(): void {
     if (this.pythonService) {
-      this.pythonService.cleanup();
+      if (this.completed) {
+        this.pythonService.clearRuntimeState();
+        this.pythonService.removeAllListeners();
+      } else {
+        this.pythonService.cleanup();
+      }
     }
     this.removeAllListeners();
   }
@@ -282,6 +301,7 @@ export class PythonExecutionServiceAdapter extends EventEmitter implements Execu
     if (this.activeHandle) {
       this.activeHandle = undefined;
     }
+    this.completed = true;
     this.emit('complete', {
       success: true,
       durationMs: 0 // Will be calculated by handle

@@ -37,7 +37,8 @@ export const DISPLAY_LIMITS = {
 // Event types for consistency
 export const EVENT_TYPES = {
   // Core events
-  STEP_HEADER: 'step_header',
+  PROGRESS_UPDATE: 'progress_update',
+  WORKFLOW_ACTIVITY: 'workflow_activity',
   REASONING: 'reasoning',
   THINKING: 'thinking',
   THINKING_END: 'thinking_end',
@@ -48,11 +49,6 @@ export const EVENT_TYPES = {
   METADATA: 'metadata',
   DIVIDER: 'divider',
   RATE_LIMIT: 'rate_limit',
-
-  // Swarm events
-  SWARM_START: 'swarm_start',
-  SWARM_HANDOFF: 'swarm_handoff',
-  SWARM_COMPLETE: 'swarm_complete',
 
   // User interaction
   USER_HANDOFF: 'user_handoff',

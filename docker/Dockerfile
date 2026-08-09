@@ -3,7 +3,7 @@
 
 ARG APT_PROXY
 
-FROM public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:latest
+FROM public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:0.9.1
 
 LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"
@@ -19,6 +19,9 @@ ENV UV_LINK_MODE=copy
 
 COPY docker/apt_proxy_configure.sh docker/apt_proxy_clean.sh /tmp/
 RUN /tmp/apt_proxy_configure.sh
+
+# Force bash as the default shell
+RUN ln -sf /bin/bash /bin/sh
 
 # Set working directory
 WORKDIR /app
@@ -62,7 +65,8 @@ RUN /tmp/apt_proxy_clean.sh && \
 # Environment
 ENV GOPATH="/home/cyberagent/go"
 ENV GOCACHE="/home/cyberagent/go/.cache"
-ENV PATH="/app/.venv/bin:/home/cyberagent/go/bin:$PATH"
+# Starting with /usr/local ensures custom tools are first
+ENV PATH="/usr/local/sbin:/usr/local/bin:/app/.venv/bin:/home/cyberagent/go/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH="/home/cyberagent/.cache/ms-playwright"
 ENV PYTHONPATH="/usr/lib/python3/dist-packages:/app/src"
 
@@ -73,5 +77,4 @@ VOLUME ["/app/outputs", "/app/tools", "/app/external_plugins", "/app/home_plugin
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD bash -c "exit 0"
 
-# Default entrypoint: React terminal (which spawns Python agent as subprocess)
-ENTRYPOINT ["node", "/app/src/modules/interfaces/react/dist/index.js"]
+ENTRYPOINT ["tail", "-f", "/dev/null"]

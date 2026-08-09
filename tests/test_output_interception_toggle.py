@@ -35,7 +35,7 @@ def _minimal_server_config():
 @patch("modules.agents.cyber_autoagent.get_config_manager")
 @patch("modules.config.models.factory.create_bedrock_model")
 @patch("modules.handlers.react.hooks.ReactHooks")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
 @patch("modules.agents.cyber_autoagent.get_memory_client", return_value=None)
 def test_output_interception_react_only(
@@ -58,10 +58,8 @@ def test_output_interception_react_only(
     mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
-    mock_cfg.get_mem0_service_config.return_value = {
-        "vector_store": {"provider": "faiss", "config": {"path": "test"}},
-        "embedder": {"provider": "aws_bedrock", "config": {"model": "test"}},
-        "llm": {"provider": "aws_bedrock", "config": {"model": "test"}},
+    mock_cfg.get_qdrant_memory_config.return_value = {
+        "embedding_provider": "bedrock", "embedding_model": "test", "embedding_dimensions": 1024,
     }
     mock_get_cfg.return_value = mock_cfg
 

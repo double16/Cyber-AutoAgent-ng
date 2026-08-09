@@ -95,7 +95,7 @@ def install_fake_toolregistry(monkeypatch):
 
     # Ensure parent module `strands.tools` exists in sys.modules
     try:
-        import strands.tools  # type: ignore
+        importlib.import_module("strands.tools")
     except Exception:
         # If strands.tools isn't importable for some reason, create a placeholder.
         tools_mod = types.ModuleType("strands.tools")
@@ -272,6 +272,22 @@ def test_agent_factory_allow_reasoning_content_true(monkeypatch):
 
     agent = make_agent("sub")
     assert getattr(agent, "_allow_reasoning_content") is True
+
+
+def test_agent_factory_disables_reasoning_replay_for_litellm(monkeypatch):
+    install_fake_tooluseidhook(monkeypatch)
+    fake_cm = FakeConfigManager(provider="litellm")
+
+    monkeypatch.setattr(factory, "get_config_manager", lambda: fake_cm)
+    monkeypatch.setattr(factory, "Agent", FakeAgent)
+    monkeypatch.setattr(factory, "create_strands_model", lambda provider, model_id, _: ("MODEL", provider, model_id))
+    monkeypatch.setattr(factory, "get_shared_conversation_manager", lambda: object())
+    monkeypatch.setattr(factory, "get_capabilities", lambda provider, model_id: FakeCaps(supports_reasoning=True))
+    monkeypatch.setattr(factory, "_resolve_prompt_token_limit", lambda provider, model_id: 1)
+
+    agent = factory.init_agent_factory(factory.AgentFactoryConfig())("sub")
+
+    assert getattr(agent, "_allow_reasoning_content") is False
 
 
 def test_agent_factory_allow_reasoning_content_false_on_exception(monkeypatch):

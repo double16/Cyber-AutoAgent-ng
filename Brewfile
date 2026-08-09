@@ -1,4 +1,4 @@
-brew "python@3.12"
+brew "python@3.13"
 brew "virtualenv"
 brew "node@22"
 
@@ -51,4 +51,5 @@ brew "dalfox"
 brew "trufflehog"
 brew "sqlite3"
 brew "openvpn"
+brew "testssl"
 #brew "wpscanteam/tap/wpscan"

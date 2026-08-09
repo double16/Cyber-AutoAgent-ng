@@ -8,22 +8,23 @@ Tests for tools summary formatting.
 from modules.prompts.factory import format_tools_summary
 
 
-def test_format_tools_summary_from_list_counts_and_sorts():
-    tools = ["shell", "shell", "mem0_store", "python_repl", "shell"]
+def test_format_tools_summary_from_list_is_unique_and_filters_bookkeeping():
+    tools = ["shell", "shell", "store_observation", "python_repl", "shell"]
     summary = format_tools_summary(tools)
     lines = summary.splitlines()
-    # shell appears first with 3 uses
-    assert lines[0] == "- shell: 3 uses"
-    # then mem0_store and python_repl with 1 use each (alphabetical)
-    assert "- mem0_store: 1 use" in summary
-    assert "- python_repl: 1 use" in summary
+    assert lines == ["- shell", "- python_repl"]
+    assert "store_observation" not in summary
 
 
-def test_format_tools_summary_from_dict_counts_and_sorts():
-    tools = {"python_repl": 2, "shell": 5, "mem0_store": 2}
+def test_format_tools_summary_from_dict_uses_unique_keys():
+    tools = {"python_repl": 2, "shell": 5, "store_finding": 2}
     summary = format_tools_summary(tools)
     lines = summary.splitlines()
-    assert lines[0] == "- shell: 5 uses"
-    # 2-use tools are sorted by name
-    two_use_lines = [line for line in lines if line.endswith("2 uses")]
-    assert two_use_lines == ["- mem0_store: 2 uses", "- python_repl: 2 uses"]
+    assert lines == ["- python_repl", "- shell"]
+
+
+def test_format_tools_summary_is_one_unified_unique_list():
+    summary = format_tools_summary(["shell", "record_task_acceptance", "http_request", "curl", "curl"])
+
+    assert summary.splitlines() == ["- shell", "- http_request", "- curl"]
+    assert "record_task_acceptance" not in summary

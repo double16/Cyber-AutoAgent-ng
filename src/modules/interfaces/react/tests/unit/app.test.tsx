@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from './test-renderer.js';
 import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -188,7 +188,7 @@ describe('App', () => {
 
     it('wires providers, hooks, module discovery, initialization completion, and modal controls', async () => {
         const {App} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(
@@ -197,7 +197,7 @@ describe('App', () => {
                     target="example.com"
                     objective="audit"
                     autoRun
-                    iterations={2}
+                    maxDuration={62}
                     provider="bedrock"
                     model="claude"
                     region="us-east-1"
@@ -222,7 +222,7 @@ describe('App', () => {
             target: 'example.com',
             module: 'web',
             objective: 'audit',
-            iterations: 2,
+            maxDuration: 62,
         }));
         expect(useKeyboardHandlers).toHaveBeenCalledWith(expect.objectContaining({
             activeOperation: null,
@@ -267,7 +267,7 @@ describe('App', () => {
 
         try {
             const {App} = await load();
-            let view!: TestRenderer.ReactTestRenderer;
+            let view!: ReactTestRenderer;
 
             await act(async () => {
                 view = TestRenderer.create(<App/>);
@@ -319,6 +319,33 @@ describe('App', () => {
             }
             Object.defineProperty(process, 'exit', {value: originalExit, configurable: true});
             Object.defineProperty(process, 'stdin', {value: originalStdin, configurable: true});
+            jest.useRealTimers();
+        }
+    });
+
+    it('routes idle keyboard ESC through the forced process exit path', async () => {
+        jest.useFakeTimers();
+        const originalExit = (process as any).exit;
+        const exitProcess = jest.fn();
+        Object.defineProperty(process, 'exit', {value: exitProcess, configurable: true});
+
+        try {
+            const {App} = await load();
+
+            await act(async () => {
+                TestRenderer.create(<App/>);
+                await Promise.resolve();
+            });
+
+            const keyboardArgs = useKeyboardHandlers.mock.calls.at(-1)![0];
+            act(() => {
+                keyboardArgs.onEscapeExit();
+                jest.advanceTimersByTime(300);
+            });
+
+            expect(exitProcess).toHaveBeenCalledWith(0);
+        } finally {
+            Object.defineProperty(process, 'exit', {value: originalExit, configurable: true});
             jest.useRealTimers();
         }
     });

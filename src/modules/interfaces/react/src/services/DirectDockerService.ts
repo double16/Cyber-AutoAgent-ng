@@ -126,6 +126,7 @@ export class DirectDockerService extends EventEmitter {
   private containerStream?: any;
   private isExecutionActive = false;
   private streamEventBuffer = '';
+  private discardingTruncatedEvent = false;
   private abortController?: AbortController;
   private activeExec?: Dockerode.Exec;
   private activeExecRunId?: string;
@@ -138,6 +139,10 @@ export class DirectDockerService extends EventEmitter {
   private toolOutputBuffer = '';
   private sawBackendToolOutput = false;
   private _currentToolName: string | undefined = undefined;
+  private pendingTimers = new Set<NodeJS.Timeout>();
+  private eventParser?: Transform;
+  private bufferedStartupEvents: any[] = [];
+  private startupEventConsumerAttached = false;
 
   /**
    * Initialize the Docker service with connection to Docker daemon
@@ -148,6 +153,73 @@ export class DirectDockerService extends EventEmitter {
     this.dockerClient = new Dockerode(getDockerConnectionOptions());
   }
 
+  drainBufferedStartupEvents(): any[] {
+    const events = this.bufferedStartupEvents;
+    this.bufferedStartupEvents = [];
+    return events;
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.startupEventConsumerAttached = true;
+  }
+
+  private emitParsedEvent(event: any): void {
+    if (!this.startupEventConsumerAttached && [
+      'tool_discovery_start',
+      'tool_available',
+      'tool_unavailable',
+      'environment_ready',
+    ].includes(event?.type)) {
+      this.bufferedStartupEvents.push(event);
+    }
+    this.emit('event', event);
+  }
+
+  private scheduleTimer(callback: () => void, delayMs: number): NodeJS.Timeout {
+    const timer = setTimeout(() => {
+      this.pendingTimers.delete(timer);
+      callback();
+    }, delayMs) as NodeJS.Timeout;
+    this.pendingTimers.add(timer);
+    return timer;
+  }
+
+  private clearPendingTimers(): void {
+    for (const timer of this.pendingTimers) {
+      clearTimeout(timer);
+    }
+    this.pendingTimers.clear();
+  }
+
+  private releaseContainerStream(destroy = false): void {
+    const stream = this.containerStream;
+    const parser = this.eventParser;
+
+    if (stream && parser) {
+      try {
+        stream.unpipe?.(parser);
+      } catch {}
+    }
+
+    if (parser) {
+      try {
+        parser.removeAllListeners();
+        parser.destroy?.();
+      } catch {}
+      this.eventParser = undefined;
+    }
+
+    if (stream) {
+      try {
+        stream.removeAllListeners?.();
+        if (destroy) {
+          stream.destroy?.();
+        }
+      } catch {}
+      this.containerStream = undefined;
+    }
+  }
+
   /**
    * Execute assessment directly via Docker
    */
@@ -155,13 +227,12 @@ export class DirectDockerService extends EventEmitter {
     params: AssessmentParams,
     config: Config
   ): Promise<void> {
-    // Reset per-run state to ensure clean behavior when reusing the service in the same app session
-    this.resetSessionState();
-    this.abortController = new AbortController();
     if (this.isExecutionActive) {
       throw new Error('Assessment already running');
     }
 
+    // Reset per-run state to ensure clean behavior when reusing the service in the same app session
+    this.resetSessionState();
     this.isExecutionActive = true;
     this.abortController = new AbortController();
 
@@ -193,9 +264,17 @@ export class DirectDockerService extends EventEmitter {
         '--module', params.module,
         '--objective', 'via environment',  // Placeholder, actual value comes from env
         '--target', params.target,
-        '--iterations', String(config.iterations || 100),
+        '--max-duration', String(config.budgetMaxDuration),
         '--provider', config.modelProvider || 'bedrock',
+        '--memory-mode', config.memoryMode || 'operation',
       ];
+
+      if (config.budgetMaxTokens) {
+        args.push('--max-tokens', String(config.budgetMaxTokens));
+      }
+      if (config.budgetMaxCost) {
+        args.push('--max-cost', String(config.budgetMaxCost));
+      }
 
       if (params.continueOperation === true || params.continueOperation === "") {
         args.push('--continue');
@@ -221,37 +300,11 @@ export class DirectDockerService extends EventEmitter {
       args.push('--output-dir', '/app/outputs');
       args.push('--keep-memory');  // Always keep memory for continuity
       
-      // Check for existing memory and use it if found
-      const sanitizedTarget = sanitizeTargetName(params.target);
       const outputPath = path.resolve(config.outputDir || './outputs');
-      const targetMemoryPath = path.join(outputPath, sanitizedTarget, 'memory');
-      
+
       // Ensure output directory exists
       if (!fs.existsSync(outputPath)) {
         fs.mkdirSync(outputPath, { recursive: true });
-      }
-      
-      // Check if memory exists for this target
-      const faissPath = path.join(targetMemoryPath, 'mem0.faiss');
-      const pklPath = path.join(targetMemoryPath, 'mem0.pkl');
-      
-      // Check for existing memory files
-      
-      if (fs.existsSync(faissPath) && fs.existsSync(pklPath)) {
-        // Count memory entries for better context
-        const faissSize = fs.statSync(faissPath).size;
-        const memoryContext = faissSize > 1000 ? 'knowledge base' : 'previous findings';
-        
-        this.emit('event', {
-          type: 'output',
-          content: `▶ MEMORY: Loading existing ${memoryContext} for ${params.target}`,
-          timestamp: Date.now()
-        });
-        this.emit('event', {
-          type: 'output',
-          content: `◆ Memory path: ${targetMemoryPath}`,
-          timestamp: Date.now()
-        });
       }
 
       // Add standard environment variables
@@ -408,9 +461,8 @@ export class DirectDockerService extends EventEmitter {
       if (config.evaluationModel) {
         env.push(`CYBER_AGENT_EVALUATION_MODEL=${config.evaluationModel}`);
       }
-      if (config.memoryModel) {
-        env.push(`MEM0_LLM_MODEL=${config.memoryModel}`);
-      }
+      if (config.qdrantUrl) env.push(`QDRANT_URL=${config.qdrantUrl}`);
+      if (config.qdrantApiKey) env.push(`QDRANT_API_KEY=${config.qdrantApiKey}`);
 
       // MCP Servers
       if (config.mcp.enabled && config.mcp.connections) {
@@ -648,7 +700,7 @@ export class DirectDockerService extends EventEmitter {
       this.activeContainerOwner = true;
 
       // Emit preflight details before attaching streams
-      setTimeout(() => {
+      this.scheduleTimer(() => {
         this.emit('event', { type: 'output', content: '▶ Preflight checks', timestamp: Date.now() });
         this.emit('event', { type: 'output', content: `✓ Execution mode: Docker (${currentDeploymentMode})`, timestamp: Date.now() });
         this.emit('event', { type: 'output', content: `✓ Docker image: ${dockerImage}`, timestamp: Date.now() });
@@ -675,6 +727,7 @@ export class DirectDockerService extends EventEmitter {
           callback();
         },
       });
+      this.eventParser = eventParser;
 
       // Handle stream - With Tty:true, stream is NOT multiplexed
       // We get a single stream, not separate stdout/stderr
@@ -705,8 +758,13 @@ export class DirectDockerService extends EventEmitter {
       stream.on('end', () => {
         this.isExecutionActive = false;
         this.abortController = undefined;
+        this.clearPendingTimers();
         // Clear stream buffer to prevent stale prompt detection
         this.streamEventBuffer = '';
+        this.discardingTruncatedEvent = false;
+        this.releaseContainerStream(false);
+        this.activeContainer = undefined;
+        this.activeContainerOwner = false;
         // Only emit "complete" when backend signaled operation_complete
         if (this.seenOperationComplete) this.emit('complete');
         else this.emit('stopped');
@@ -750,7 +808,7 @@ export class DirectDockerService extends EventEmitter {
       await this.activeContainer.start();
       
       // Initial startup messages based on deployment mode
-      setTimeout(() => {
+      this.scheduleTimer(() => {
         if (deploymentMode === 'local-cli') {
           this.emit('event', {
             type: 'output',
@@ -766,7 +824,7 @@ export class DirectDockerService extends EventEmitter {
         }
       }, 500);
 
-      setTimeout(() => {
+      this.scheduleTimer(() => {
         if (deploymentMode === 'local-cli') {
           this.emit('event', {
             type: 'output', 
@@ -792,7 +850,7 @@ export class DirectDockerService extends EventEmitter {
       // Provider is already emitted in preflight checks (✓ Provider: ... at ~900ms).
       // Avoid emitting here to prevent interleaving with tool discovery output.
 
-      setTimeout(() => {
+      this.scheduleTimer(() => {
         if (deploymentMode === 'local-cli') {
           this.emit('event', {
             type: 'output',
@@ -832,6 +890,7 @@ export class DirectDockerService extends EventEmitter {
           // Container completed successfully - ensure cleanup
           this.isExecutionActive = false;
           this.streamEventBuffer = '';
+          this.discardingTruncatedEvent = false;
         }
       });
     } catch (error) {
@@ -868,6 +927,8 @@ export class DirectDockerService extends EventEmitter {
     return {
       get streamEventBuffer() { return service.streamEventBuffer; },
       set streamEventBuffer(value: string) { service.streamEventBuffer = value; },
+      get discardingTruncatedEvent() { return service.discardingTruncatedEvent; },
+      set discardingTruncatedEvent(value: boolean | undefined) { service.discardingTruncatedEvent = value ?? false; },
       get inToolExecution() { return service.inToolExecution; },
       set inToolExecution(value: boolean) { service.inToolExecution = value; },
       get toolOutputBuffer() { return service.toolOutputBuffer; },
@@ -881,7 +942,7 @@ export class DirectDockerService extends EventEmitter {
 
   private handleParsedDockerEvent(eventData: any): void {
     emitStatusEvents(eventData, {
-      emitEvent: event => this.emit('event', event),
+      emitEvent: event => this.emitParsedEvent(event),
       onComplete: () => {
         this.seenOperationComplete = true;
         this.emit('complete');
@@ -896,15 +957,15 @@ export class DirectDockerService extends EventEmitter {
     }
 
     logger.info('Auto-confirming user_handoff');
-    setTimeout(() => {
+    this.scheduleTimer(() => {
       if (this.containerStream && this.isExecutionActive) {
         try {
           this.containerStream.write('\r\n');
           logger.info('stdin write (auto-confirm)', { data: '\r\\n' });
-          setTimeout(() => {
+          this.scheduleTimer(() => {
             try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('\r\n'); } catch {}
           }, 200);
-          setTimeout(() => {
+          this.scheduleTimer(() => {
             try { if (this.containerStream && this.isExecutionActive) this.containerStream.write('execute\r\n'); } catch {}
           }, 1200);
         } catch (err) {
@@ -932,7 +993,7 @@ export class DirectDockerService extends EventEmitter {
     if (executePromptPattern.test(this.streamEventBuffer)) {
       logger.info('Prompt detected: auto-sending Enter', { bufferLength: this.streamEventBuffer.length });
       // Give a brief delay to ensure the container is ready for input
-      setTimeout(() => {
+      this.scheduleTimer(() => {
         if (this.containerStream && this.isExecutionActive) {
           try {
             // Send execute command directly for exec sessions
@@ -940,7 +1001,7 @@ export class DirectDockerService extends EventEmitter {
             logger.info('stdin write sent', { data: 'execute\\r\\n' });
             this.autoExecuteSent = true;
             // Safety resend Enter after 500ms in case first is missed
-            setTimeout(() => {
+            this.scheduleTimer(() => {
               try {
                 if (this.containerStream && this.isExecutionActive) {
                   this.containerStream.write('\r\n');
@@ -970,6 +1031,7 @@ export class DirectDockerService extends EventEmitter {
     }
 
     try {
+      this.clearPendingTimers();
       if (this.activeExec) {
         await this.stopActiveExecProcess();
         this.activeExec = undefined;
@@ -981,13 +1043,7 @@ export class DirectDockerService extends EventEmitter {
         this.activeContainerOwner = false;
       }
 
-      // Clean up container/exec stream if exists
-      if (this.containerStream) {
-        try {
-          this.containerStream.destroy();
-        } catch {}
-        this.containerStream = undefined;
-      }
+      this.releaseContainerStream(true);
 
       this.isExecutionActive = false;
       this.abortController = undefined;
@@ -995,6 +1051,7 @@ export class DirectDockerService extends EventEmitter {
       // Don't log here - let the App component handle user-facing messages
     } catch {
       // Force cleanup even if termination fails
+      this.releaseContainerStream(true);
       this.activeExec = undefined;
       this.activeExecRunId = undefined;
       this.activeContainer = undefined;
@@ -1225,9 +1282,12 @@ export class DirectDockerService extends EventEmitter {
    * Reset lightweight per-run flags and buffers
    */
   private resetSessionState(): void {
+    this.clearPendingTimers();
+    this.releaseContainerStream(false);
     this.autoExecuteSent = false;
     this.seenOperationComplete = false;
     this.streamEventBuffer = '';
+    this.discardingTruncatedEvent = false;
     this.activeExecRunId = undefined;
   }
 
@@ -1235,6 +1295,7 @@ export class DirectDockerService extends EventEmitter {
    * Cleanup resources and remove all event listeners
    */
   cleanup(): void {
+    this.clearPendingTimers();
     // Stop any active container
     if (this.activeContainer && this.activeContainerOwner) {
       this.stopContainer().catch(error => {
@@ -1242,15 +1303,7 @@ export class DirectDockerService extends EventEmitter {
       });
     }
     
-    // Destroy stream if exists
-    if (this.containerStream) {
-      try {
-        this.containerStream.destroy();
-      } catch (error) {
-        // Silently handle cleanup errors - not critical for user experience
-      }
-      this.containerStream = undefined;
-    }
+    this.releaseContainerStream(true);
     
     // Abort any pending operations
     this.abortController?.abort();
@@ -1264,7 +1317,6 @@ export class DirectDockerService extends EventEmitter {
     this.activeContainerOwner = false;
     this.activeExec = undefined;
     this.activeExecRunId = undefined;
-    this.containerStream = undefined;
     this.abortController = undefined;
     
     // DirectDockerService cleaned up - emit event instead of console.log
@@ -1369,6 +1421,7 @@ export class DirectDockerService extends EventEmitter {
     this.seenOperationComplete = false;
     // Clear any residual buffer so prompt detection is fresh
     this.streamEventBuffer = '';
+    this.discardingTruncatedEvent = false;
 
     // Don't send initial input - let the auto-response handler deal with prompts
 
@@ -1380,6 +1433,7 @@ export class DirectDockerService extends EventEmitter {
     const eventParser = new Transform({
       transform: (chunk, _enc, cb) => { this.parseEvents(chunk.toString()); cb(); }
     });
+    this.eventParser = eventParser;
     stream.pipe(eventParser);
 
     eventParser.on('error', (error) => {
@@ -1393,9 +1447,14 @@ export class DirectDockerService extends EventEmitter {
     stream.on('end', () => {
       this.isExecutionActive = false;
       this.abortController = undefined;
+      this.clearPendingTimers();
       this.activeExec = undefined;
       this.activeExecRunId = undefined;
       this.streamEventBuffer = '';
+      this.discardingTruncatedEvent = false;
+      this.releaseContainerStream(false);
+      this.activeContainer = undefined;
+      this.activeContainerOwner = false;
       logger.info('Exec stream ended', { seenOperationComplete: this.seenOperationComplete });
       if (this.seenOperationComplete) this.emit('complete');
       else this.emit('stopped');
@@ -1408,7 +1467,7 @@ export class DirectDockerService extends EventEmitter {
       timestamp: Date.now()
     });
 
-    setTimeout(() => {
+    this.scheduleTimer(() => {
       this.emit('event', { type: 'output', content: '◆ Container ready (exec)', timestamp: Date.now() });
     }, 500);
 

@@ -40,7 +40,7 @@ const originalHome = process.env.HOME;
 let tempRoot: string | undefined;
 
 const baseConfig = {
-    iterations: 9,
+    budgetMaxDuration: 60,
     modelProvider: 'litellm',
     modelId: 'gpt-test',
     awsRegion: 'us-east-2',

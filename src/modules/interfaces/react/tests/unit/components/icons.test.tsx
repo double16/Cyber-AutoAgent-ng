@@ -1,6 +1,6 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
+import {describe, expect, it, jest} from '@jest/globals';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -50,30 +50,11 @@ describe('icon components', () => {
         expect(render(<icons.ProgressIndicator current={1} total={2}
                                                showPercentage={false}/>).lastFrame()).not.toContain('%');
 
-        for (const status of ['connected', 'connecting', 'disconnected', 'error'] as const) {
-            expect(render(<icons.ConnectionStatus status={status}/>).lastFrame().length).toBeGreaterThan(0);
-            expect(render(<icons.ConnectionStatus status={status}
-                                                  showLabel={false}/>).lastFrame()).not.toContain('Connected');
-        }
-
         expect(render(<icons.Bullet level={3}/>).lastFrame()).toContain('[ ]');
         expect(render(<icons.Divider width={4} char="="/>).lastFrame()).toContain('====');
 
         for (const level of ['info', 'success', 'warning', 'error', 'debug'] as const) {
             expect(render(<icons.LogLevelIcon level={level}/>).lastFrame()).toContain('[');
         }
-    });
-
-    it('renders security and step indicators', async () => {
-        const {render, icons} = await load();
-
-        for (const type of ['scanning', 'vulnerable', 'secure', 'unknown'] as const) {
-            expect(render(<icons.SecurityIcon type={type}/>).lastFrame().length).toBeGreaterThan(0);
-        }
-
-        expect(render(<icons.StepIndicator current={2} total={5}/>).lastFrame()).toContain('Step 2/5');
-        expect(render(<icons.StepIndicator current={5} total={5}
-                                           status="completed"/>).lastFrame()).toContain('Step 5/5');
-        expect(render(<icons.StepIndicator current={1} total={5} status="pending"/>).lastFrame()).toContain('Step 1/5');
     });
 });

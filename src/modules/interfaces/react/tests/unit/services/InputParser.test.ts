@@ -40,6 +40,30 @@ describe('InputParser', () => {
             type: 'flow',
             command: 'execute',
         }));
+
+        expect(parser.parse('continue')).toEqual(expect.objectContaining({
+            type: 'flow',
+            command: 'continue',
+            args: [],
+        }));
+
+        expect(parser.parse('continue OP_20260320_101501')).toEqual(expect.objectContaining({
+            type: 'flow',
+            command: 'continue',
+            args: ['OP_20260320_101501'],
+        }));
+
+        expect(parser.parse('report')).toEqual(expect.objectContaining({
+            type: 'flow',
+            command: 'report',
+            args: [],
+        }));
+
+        expect(parser.parse('report OP_20260320_101501')).toEqual(expect.objectContaining({
+            type: 'flow',
+            command: 'report',
+            args: ['OP_20260320_101501'],
+        }));
     });
 
     it('normalizes natural language domain targets and keeps explicit URL targets', () => {

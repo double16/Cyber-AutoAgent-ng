@@ -1,6 +1,106 @@
 # Cyber-AutoAgent-ng Changelog
 
-- Cleanup React CLI logging.
+### Features
+
+- Consolidate authoritative workflow state into `outputs/cyber_autoagent.db`.
+- Replace semantic-memory backends with Qdrant 1.18, using `outputs/qdrant` by default or a configured service.
+- Change memory modes to 'shared' and 'operation' for clarity.
+- Format Markdown in the React `/docs` viewer and provide runtime repository links when local documentation is unavailable.
+- Render report observations and execution-history/acceptance tables deterministically, reducing report model calls
+  while preserving LLM synthesis for executive, finding, methodology, and next-step sections.
+- Add a CTF-only artifact scanner that discovers braced and SHA-256/SHA-512-style flag candidates, creates opaque
+  objective-validation references, and does not require the objective to repeat a flag format.
+- Add deterministic report model execution metrics to Appendix A, including provider/model usage grouped by context
+  window, input/output/cache tokens, cost, human-readable inference time, per-model efficiency, and total operation
+  time; retain operation metadata, software version, and Git repository provenance in Footer.
+- Resolve SecLists once per operation and provide its verified root to wordlist-capable agents through the tools guide.
+- Add a final ATT&CK enrichment pass that uses linked terminal task evidence, preserves first-pass CWE mappings,
+  persists retryable results, and overlays the merged taxonomy into final and report-only output.
+- Add a task-trace taxonomy annotator that catalog-validates and persists CWE and MITRE ATT&CK mappings after finding
+  capture, with bundled fallback taxonomy data, optional cached refreshes, confidence labels, executive-summary
+  coverage tables, and auditable catalog references.
+- Refine generated report sections with a configurable actor/critic cycle, retain the latest actor revision with prose
+  critic feedback when review remains unresolved, and add AI-generated-content disclaimers to final reports.
+- Validate resolved hosts, IPs, explicit TCP services, CIDRs, and local filesystem targets before assessment startup,
+  and emit a pass/fail/skip preflight event for every target.
+- Show the latest operation health score, band, and entered target in the terminal title for interactive and headless TTY sessions.
+- Add deterministic operation-health scoring to progress events, including inventory-based phase fan-out prediction,
+  and show the compact score and band with a distinguishing stethoscope marker in interactive stream output, the
+  persistent footer, and headless output.
+- Quarantine unavailable or broken shell commands per operation.
+- Present shell commands solely by capability and applicability, without ranking metadata.
+- Detect exact repeating tool-call cycles, reuse matching completed results, and gracefully stop an agent that ignores
+  the cached-result guidance.
+- Add executable target registries and per-task target scopes so logical `--target` names can coexist with concrete
+  URLs, hosts, CIDRs, and filesystem paths from the objective.
+- Rename the React terminal `/plugins` command to `/modules`.
+- Replace the persistent main orchestrator loop with a Python-owned multi-agent workflow that creates focused role agents for planning, task execution, and evaluation. Actor/critic refinement for improved quality.
+- Add interactive React terminal `continue` and `report` commands for previous operations.
+- Add readline-style editing shortcuts to the React terminal command entry.
+- Move React thinking/spinner status into a persistent footer line above the existing metrics footer.
+- Add recording-aware terminal mode with `--recording` override and automatic parent-process detection for `asciinema`.
+- Maintain an `outputs/<target>/latest` pointer to the current operation directory.
+- Show indexed progress for each final report agent call in both the React terminal UI and headless output.
+- Replace iteration-based operation limits with duration, token, and cost budgets; progress reports the highest utilization across configured budgets.
+- Correct token and cost metrics by aggregating usage across multiple agents and apply per-agent model pricing.
+- Generalize React event handling for multi-agent workflows with per-agent handlers and operation-wide metric aggregation.
+- Add persistent command history recall to the React terminal input, excluding slash commands.
+- Add React footer ETA display after duration using progress percentage and formatted remaining time.
+
+### Fixes
+
+- Format inline React TUI report previews as terminal-friendly Markdown.
+- Emit explicit report, log, and artifacts paths so the React TUI populates the ARTIFACTS AND LOGS section reliably.
+- Keep the React footer spinner task title within the live terminal width so long task names do not wrap off screen.
+- Remove the obsolete unified-output toggle so all output uses the unified filesystem structure.
+- Ground executive report narratives with explicitly labeled informational observations, resolve endpoint findings to
+  registered targets, remove redundant observation metadata, and simplify task-history report tables.
+- Include a unique reportable operational-tool list in methodology reports, including shell executable names while
+  excluding bookkeeping and low-value shell utility names.
+- Persist operation preflight resolution and route-check facts for taxonomy and later workflow policy checks, clarify
+  configured taxonomy refresh URLs in finding reports, and require a globally routable resolved target before T1190
+  can be recorded.
+- Run verified-finding taxonomy annotation once at terminal workflow completion before final ATT&CK enrichment,
+  use compact flattened TOON catalogs and complete mapping schemas, and feed rejected taxonomy responses back to the
+  annotator for targeted correction without inheriting assessment or module prompts.
+- Harden React terminal event framing against chunk-split and truncated JSON,
+  isolate Python stderr from structured stdout events, and show an `output truncated`
+  notice instead of attempting to parse discarded frames.
+- Make incomplete-operation report budgets recommend continuing the existing operation for missing tasks, unless the
+  report explicitly recommends a rerun as a new operation.
+- Use the shared workflow activity formatter in the React stream display while preserving status colors.
+- Normalize logged taxonomy response envelopes and add opt-in Ollama compatibility tests for taxonomy annotations.
+- Seed high-signal CWE candidates for path traversal, SSRF, XXE, CSRF, IDOR/BOLA, SSTI, unsafe deserialization,
+  file upload, open redirect, and common injection variants using industry terminology and aliases.
+- Seed SQL-injection and XSS taxonomy candidates deterministically and require exact artifact references and confidence
+  thresholds in annotator prompts.
+- Use short task-scoped ordinal acceptance criterion IDs so detailed acceptance descriptions do not confuse models.
+- Rank taxonomy candidates by high-signal technique aliases, retry schema and semantic annotation failures after
+  finding validation, and report annotation failures separately from unsupported mappings.
+- Replace compound module phase names with distinct, industry-aligned capabilities for hypothesis generation,
+  vulnerability testing, exploit-chain analysis, finding validation, impact assessment, and coverage closure.
+- Generate canonical next-step guidance for incomplete operations when the Appendix B model output is invalid.
+- Prevent objective prose and remote exploit-path hints from being inferred as executable preflight targets.
+- Retry transient `httpx.ReadTimeout` failures through the shared model rate-limit backoff policy.
+- Clarify that concise plans should avoid redundant phases rather than minimize phase count, and add advisory module
+  minimum phase contracts to guide complete phase decomposition without enforcing a fixed plan shape.
+- Add module-specific advisory phase contracts for code security, context navigation, CTF, threat emulation, and web
+  reconnaissance planning.
+- Align CTF planning with inventory, hypothesis testing, and impact/flag-confirmation phases while preserving
+  evidence for each vulnerability-chain link and branch.
+- Harden model JSON parsing by preserving valid payloads, preventing malformed-response echoing during retries, and
+  rejecting unrecoverable truncated responses instead of accepting ambiguous repairs.
+- Restore canonical MITRE ATT&CK and CWE mapping headings in finding report prompts.
+- Update taxonomy refresh to use MITRE CWE's current XML ZIP feed, parse XML records, and report the actual failed source URL.
+- Use the operation output directory as the process working directory so relative files stay in its workspace.
+- Mark final reports incomplete when workflow completion gating has not passed, without clamping progress status.
+- Keep unverified security claims in a dedicated report section instead of silently downgrading them to observations.
+- Stop active XBOW benchmark containers when the benchmark runner is interrupted with Ctrl-C.
+- Show final report progress labels as the React terminal thinking task title while reporting.
+- Skip public OSINT recon tools for non-public hostnames in `specialized_recon_orchestrator`.
+- Bound React inline final-report file reads to a preview so very large reports cannot spike heap on operation completion or exit.
+- Harden React terminal early-cancel and exit cleanup so stuck execution shutdown cannot leave the npm process hanging.
+- Stop active Python or Docker assessment processes when headless auto-run receives SIGINT/SIGTERM/SIGHUP.
 
 ## v0.9.0
 
@@ -97,7 +197,7 @@ Prompt budget consider output tokens (#62)
 - add back erroneously removed `python_repl` and `sleep` tools
 - fix incorrect model parameters (i.e., max output tokens) when swarm model == main model
 - validate swarm agent model and fall back to primary model
-- fix broken tool calling (ollama, gemini) in report, validation_specialist agents
+- fix broken tool calling (ollama, gemini) in report and specialist agents
 - relax prompt optimizer validation for line count increase
 - minor efficiency updates
 
@@ -167,4 +267,3 @@ Key Changes:
 ## v0.1
 
 First release of Cyber-AutoAgent
-

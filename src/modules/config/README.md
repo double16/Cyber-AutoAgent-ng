@@ -57,7 +57,7 @@ agent_config = AgentConfig(
 The configuration system uses a **three-tier precedence hierarchy**:
 
 1. **CLI/API Arguments** (Highest priority)
-   - Command-line flags: `--provider`, `--model`, `--iterations`
+   - Command-line flags: `--provider`, `--model`, `--max-duration`
    - Direct API parameters passed to configuration methods
 
 2. **Environment Variables** (Override defaults)
@@ -123,7 +123,7 @@ Provider requirement validation:
 ## Environment Variables
 
 ### Core Configuration
-- `CYBER_AGENT_PROVIDER` - Provider choice (bedrock/ollama/litellm)
+- `CYBER_AGENT_PROVIDER` - Provider choice (bedrock/ollama/litellm/gemini)
 - `CYBER_AGENT_LLM_MODEL` - Main LLM model ID
 - `CYBER_AGENT_EMBEDDING_MODEL` - Embedding model ID
 - `REASONING_EFFORT` - Reasoning configuration (low/medium/high)
@@ -134,10 +134,10 @@ Provider requirement validation:
 - `CYBER_CONTEXT_WINDOW_FALLBACKS` - Model fallback mappings (JSON)
 
 ### Memory Configuration
-- `MEM0_API_KEY` - Mem0 Platform API key
-- `MEM0_LLM_MODEL` - Memory system LLM
-- `OPENSEARCH_HOST` - OpenSearch endpoint
-- `MEMORY_BACKEND` - Force backend (mem0/opensearch/faiss)
+- `CYBER_MEMORY_MODE` - Qdrant query scope (`operation` or `shared`)
+- `QDRANT_URL` - Optional Qdrant service endpoint
+- `QDRANT_API_KEY` - Optional Qdrant service API key
+- `QDRANT_COLLECTION` - Semantic-memory collection name
 
 ### Runtime Diagnostics
 - `CYBER_HEAP_MONITOR_AUTOSTART` - Auto-start heap monitor thread (`1` by default; set to `0`, `false`, or `no` to disable)

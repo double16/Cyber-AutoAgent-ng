@@ -134,52 +134,6 @@ function normalizeToolInput(toolName: string, input: any): any {
     return cloneInput;
   }
 
-  if (name === 'prompt_optimizer') {
-    const cloneInput: any = { ...toolInput };
-    const normalized: any = {};
-    const action = cloneInput.action ?? cloneInput.Action;
-    normalized.action = action ? String(action) : 'apply';
-
-    if (cloneInput.trigger) normalized.trigger = String(cloneInput.trigger);
-    if (cloneInput.reviewer) normalized.reviewer = String(cloneInput.reviewer);
-    if (cloneInput.note) normalized.note = clampString(String(cloneInput.note), 400);
-    if (cloneInput.context) normalized.context = clampString(String(cloneInput.context), 400);
-    if (cloneInput.prompt) normalized.prompt = clampString(String(cloneInput.prompt), 400);
-    if (cloneInput.current_step != null) normalized.current_step = Number(cloneInput.current_step);
-    if (cloneInput.expires_after_steps != null) {
-      normalized.expires_after_steps = Number(cloneInput.expires_after_steps);
-    }
-
-    const overlayRaw = cloneInput.overlay;
-    let overlayObj: any = overlayRaw;
-    if (typeof overlayRaw === 'string') {
-      try { overlayObj = JSON.parse(overlayRaw); } catch { overlayObj = undefined; }
-    }
-    if (overlayObj && typeof overlayObj === 'object') {
-      const payload = overlayObj.payload && typeof overlayObj.payload === 'object' ? overlayObj.payload : overlayObj;
-      const directives = payload.directives;
-      if (Array.isArray(directives) && directives.length > 0) {
-        const cleaned = directives
-          .map((item: any) => String(item).trim())
-          .filter((item: string) => Boolean(item));
-        if (cleaned.length > 0) {
-          const slice = cleaned.slice(0, 4);
-          const preview = slice.join(', ');
-          normalized.directives = cleaned.length > 4
-            ? `${preview}, ... (+${cleaned.length - 4} more)`
-            : preview;
-        }
-      }
-      if (payload.trajectory) normalized.trajectory = sanitizeAllStrings(payload.trajectory);
-      if (payload.metadata && typeof payload.metadata === 'object') {
-        normalized.metadata = sanitizeAllStrings(payload.metadata);
-      }
-    }
-
-    return normalized;
-  }
-
-
   // editor/python_repl/etc.: leave as-is except shallow clone done above
   return toolInput;
 }
@@ -222,6 +176,21 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
   }
 
   switch (e.type) {
+    case 'preflight_check': {
+      const checks = Array.isArray(e.checks) ? e.checks.map(String) : [];
+      const resolvedAddresses = Array.isArray(e.resolved_addresses)
+        ? e.resolved_addresses.map(String)
+        : [];
+      return {
+        ...e,
+        status: String(e.status || 'skip').toLowerCase(),
+        target: String(e.target || ''),
+        target_type: String(e.target_type || ''),
+        checks,
+        resolved_addresses: resolvedAddresses,
+      };
+    }
+
     case 'specialist_start': {
       // Normalize specialist start payload fields (snake_case -> camelCase)
       const specialist = (e.specialist || e.name || '').toString() || 'validation';
@@ -233,6 +202,20 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
         ...e,
         specialist,
         ...(artifactPaths ? { artifactPaths } : {}),
+      };
+    }
+
+    case 'report_paths': {
+      const outputDir = (e as any).outputDir ?? (e as any).output_dir;
+      const reportPath = (e as any).reportPath ?? (e as any).report_path;
+      const logPath = (e as any).logPath ?? (e as any).log_path;
+      const artifactsPath = (e as any).artifactsPath ?? (e as any).artifacts_path;
+      return {
+        ...e,
+        ...(outputDir ? { outputDir: String(outputDir) } : {}),
+        ...(reportPath ? { reportPath: String(reportPath) } : {}),
+        ...(logPath ? { logPath: String(logPath) } : {}),
+        ...(artifactsPath ? { artifactsPath: String(artifactsPath) } : {}),
       };
     }
 
@@ -299,6 +282,15 @@ export function normalizeEvent(event: AnyEvent): AnyEvent {
       // Standardize shape: tool, status, output.text
       if (e.output && typeof e.output === 'string') {
         e.output = { text: e.output };
+      } else if (e.output && typeof e.output === 'object' && typeof e.output.text !== 'string') {
+        const stdout = typeof e.output.stdout === 'string' ? e.output.stdout : '';
+        const stderr = typeof e.output.stderr === 'string' ? e.output.stderr : '';
+        if (stdout || stderr) {
+          e.output = {
+            ...e.output,
+            text: [stdout, stderr].filter(Boolean).join('\n'),
+          };
+        }
       }
       if (!e.status) e.status = 'success';
       return e;

@@ -20,27 +20,25 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: System :: Systems Administration",
     "Environment :: Console"
 ]
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.12,<3.14"
 dependencies = [
-    "strands-agents[ollama,otel,litellm]~=1.45.0",
-    "strands-agents-tools~=0.8.2",
-    "mem0ai~=1.0.1",
-    "google-genai~=2.10.0",
-    #"litellm~=1.80.0",  # let strands pull in the correct version
+    "strands-agents[ollama,otel,litellm]~=1.47.0",
+    "strands-agents-tools~=0.8.3",
+    "qdrant-client==1.18.0",
+    "google-genai~=1.71.0",
+    "litellm~=1.92.0",
+    "fastapi~=0.136.3",
     "azure-identity~=1.25.0",
-    "boto3~=1.42.4",
-    "botocore~=1.42.4",
-    "faiss-cpu~=1.14.3",
+    "boto3~=1.43.1",
+    "botocore~=1.43.1",
     "ollama~=0.6.1",
     "requests~=2.34.2",
-    "opensearch-py~=3.2.0",
     "opentelemetry-api~=1.39.1",
     "opentelemetry-sdk~=1.39.1",
     "opentelemetry-exporter-otlp-proto-http~=1.39.1",
@@ -60,6 +58,7 @@ dependencies = [
     "validators~=0.35.0",
     "ddgs~=9.14.1",
     "rapidfuzz~=3.14.3",
+    "psutil~=7.2.2",
 ]
 
 [project.optional-dependencies]
@@ -72,6 +71,11 @@ dev = [
     "flake8",
     "mypy"
 ]
+
+[tool.uv]
+# Stagehand 0.5.x is retained for its local-browser behavior but caps LiteLLM at 1.80.
+# Override that transitive cap for the explicitly requested LiteLLM 1.92 compatibility assessment.
+override-dependencies = ["litellm~=1.92.0"]
 
 [project.urls]
 Homepage = "https://github.com/double16/Cyber-AutoAgent-ng"
@@ -90,9 +94,12 @@ include = ["*"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.setuptools.package-data]
+"modules.storage.migrations" = ["*.sql"]
+
 [tool.black]
 line-length = 120
-target-version = ['py310']
+target-version = ['py312']
 include = '\.pyi?$'
 extend-exclude = '''
 /(

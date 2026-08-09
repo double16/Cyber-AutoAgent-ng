@@ -69,7 +69,7 @@ class BatchingEmitter:
             "error",
             "user_handoff",
             "assessment_complete",
-            "step_header",
+            "progress_update",
             "report_content",
         }
         return event.get("type") in critical_types

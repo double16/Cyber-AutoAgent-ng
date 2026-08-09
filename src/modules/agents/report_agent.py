@@ -13,14 +13,15 @@ from strands import Agent
 from strands.handlers import PrintingCallbackHandler
 from strands.models import BedrockModel
 from strands.models.litellm import LiteLLMModel
-from strands_tools.editor import editor
-from modules.config.models.ollama import OllamaModel
 
-from modules.config.manager import get_config_manager
-from modules.config.models.factory import create_gemini_model, get_capabilities
-from modules.config.system.logger import get_logger
-from modules.agents.patches import ToolUseIdHook
 from modules import __version__
+from modules.agents.factory import create_agent_with_stateful_retry
+from modules.agents.patches import ToolUseIdHook
+from modules.config.manager import get_config_manager
+from modules.config.models.factory import apply_model_context_window, create_gemini_model, get_capabilities
+from modules.config.models.ollama import OllamaModel
+from modules.config.system.logger import get_logger
+from modules.tools.artifact import create_bounded_artifact_reader
 
 logger = get_logger("Agents.ReportAgent")
 
@@ -47,6 +48,7 @@ class ReportGenerator:
         operation_id: Optional[str] = None,
         target: Optional[str] = None,
         callback_handler = None,
+        agent_role: str = "report_actor",
     ) -> Agent:
         """
         Create a clean agent instance for report generation.
@@ -61,6 +63,7 @@ class ReportGenerator:
             operation_id: Operation ID for trace continuity
             target: Target system for trace metadata
             system_prompt: Optional custom system prompt
+            agent_role: Reporting actor or critic role used for trace metadata
 
         Returns:
             Configured Agent instance for report generation
@@ -94,6 +97,7 @@ class ReportGenerator:
                 region_name=region,
                 temperature=_REPORT_TEMPERATURE if capabilities.supports_temperature else None,
                 boto_client_config=boto_config,
+                streaming=False,
             )
         elif prov == "gemini":
             # Always use the primary model from config
@@ -126,6 +130,7 @@ class ReportGenerator:
                 },
                 keep_alive=cfg.get_ollama_keep_alive(),
                 options=cfg.get_ollama_options(),
+                stream=False,
             )
         else:  # litellm
             llm_cfg = cfg.get_llm_config("litellm")
@@ -140,7 +145,10 @@ class ReportGenerator:
                 "num_retries": 5,
                 "timeout": 1200,
             }
-            model = LiteLLMModel(model_id=mid, params=params, client_args=client_args)
+            model = LiteLLMModel(model_id=mid, params=params, client_args=client_args, stream=False)
+
+        apply_model_context_window(model, prov, mid)
+        is_critic = agent_role == "report_critic"
 
         # Create agent with report-specific configuration
         trace_attrs = {
@@ -162,10 +170,10 @@ class ReportGenerator:
             "session.id": operation_id,
             "user.id": f"cyber-agent-{target}",
             # Agent identification
-            "langfuse.agent.type": "report_generator",
-            "agent.name": "Cyber-ReportGenerator",
+            "langfuse.agent.type": "report_critic" if is_critic else "report_generator",
+            "agent.name": "Cyber-ReportCritic" if is_critic else "Cyber-ReportGenerator",
             "agent.version": __version__,
-            "agent.role": "report_generation",
+            "agent.role": "report_critic" if is_critic else "report_generation",
             "gen_ai.agent.name": "Cyber-AutoAgent",
             "gen_ai.system": "Cyber-AutoAgent",
             # Operation context
@@ -183,12 +191,18 @@ class ReportGenerator:
 
         # Create a silent callback handler to prevent duplicate output
         # The report will be returned and handled by the caller
-        return Agent(
-            model=model,
-            name=f"Cyber-ReportGenerator {operation_id}",
-            system_prompt=system_prompt,
-            tools=[editor],
-            trace_attributes=trace_attrs if operation_id else None,
-            callback_handler=callback_handler or NoOpCallbackHandler(),
-            hooks=[ToolUseIdHook()],
+        agent_kwargs = {
+            "model": model,
+            "name": f"Cyber-{'ReportCritic' if is_critic else 'ReportGenerator'} {operation_id}",
+            "system_prompt": system_prompt,
+            "tools": [create_bounded_artifact_reader()],
+            "trace_attributes": trace_attrs if operation_id else None,
+            "callback_handler": callback_handler or NoOpCallbackHandler(),
+            "hooks": [ToolUseIdHook()],
+            "context_manager": "auto",
+        }
+        return create_agent_with_stateful_retry(
+            agent_kwargs,
+            model_id=mid,
+            agent_cls=Agent,
         )

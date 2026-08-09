@@ -14,11 +14,12 @@ export interface Operation {
   objective: string;
   startTime: Date;
   endTime?: Date;
-  currentStep: number;
-  totalSteps: number;
+  progressPercentage: number;
   status: 'running' | 'paused' | 'completed' | 'error' | 'cancelled';
   description: string;
   findings: number;
+  memoryOps: number;
+  evidence: number;
   logs: OperationLog[];
   cost: CostInfo;
   model: string;
@@ -59,6 +60,8 @@ export class OperationManager {
   private operations: Map<string, Operation> = new Map();
   private currentOperation: Operation | null = null;
   private config: Config;
+  private readonly maxOperationLogs: number;
+  private readonly maxOperationLogMessageChars: number;
   private sessionCost: CostInfo = {
     tokensUsed: 0,
     estimatedCost: 0,
@@ -70,6 +73,14 @@ export class OperationManager {
 
   constructor(config: Config) {
     this.config = config;
+    const configuredMaxLogs = Number(process.env.CYBER_MAX_OPERATION_LOGS);
+    this.maxOperationLogs = Number.isFinite(configuredMaxLogs) && configuredMaxLogs > 20
+      ? Math.floor(configuredMaxLogs)
+      : 500;
+    const configuredMaxMessageChars = Number(process.env.CYBER_MAX_OPERATION_LOG_MESSAGE_CHARS);
+    this.maxOperationLogMessageChars = Number.isFinite(configuredMaxMessageChars) && configuredMaxMessageChars > 1000
+      ? Math.floor(configuredMaxMessageChars)
+      : 12000;
     // Load session data if available
     this.loadSessionData();
   }
@@ -244,11 +255,12 @@ export class OperationManager {
       target,
       objective,
       startTime: new Date(),
-      currentStep: 0,
-      totalSteps: 50, // Default, will be updated
+      progressPercentage: 0,
       status: 'running',
       description: 'Initializing operation...',
       findings: 0,
+      memoryOps: 0,
+      evidence: 0,
       logs: [],
       cost: {
         tokensUsed: 0,
@@ -272,15 +284,14 @@ export class OperationManager {
   }
 
   // Update operation progress
-  updateProgress(operationId: string, step: number, totalSteps: number, description: string): void {
+  updateProgress(operationId: string, progressPercentage: number, description: string): void {
     const operation = this.operations.get(operationId);
     if (!operation) return;
 
-    operation.currentStep = step;
-    operation.totalSteps = totalSteps;
+    operation.progressPercentage = progressPercentage;
     operation.description = description;
     
-    this.addLog(operationId, 'info', `Step ${step}/${totalSteps}: ${description}`);
+    this.addLog(operationId, 'info', `Progress ${progressPercentage}%: ${description}`);
   }
 
   // Update operation with partial updates
@@ -383,13 +394,21 @@ export class OperationManager {
     const operation = this.operations.get(operationId);
     if (!operation) return;
 
+    const normalizedMessage = String(message ?? '');
+    const trimmedMessage = normalizedMessage.length > this.maxOperationLogMessageChars
+      ? `${normalizedMessage.slice(0, this.maxOperationLogMessageChars)}\n... (operation log truncated)`
+      : normalizedMessage;
+
     operation.logs.push({
       timestamp: new Date(),
       level,
-      message,
+      message: trimmedMessage,
       tool,
-      step: operation.currentStep
+      step: operation.progressPercentage
     });
+    if (operation.logs.length > this.maxOperationLogs) {
+      operation.logs.splice(0, operation.logs.length - this.maxOperationLogs);
+    }
   }
 
   // Get current operation
@@ -422,11 +441,12 @@ export class OperationManager {
       target.target = op.target || target.target;
       target.objective = op.objective || target.objective;
       target.startTime = op.startTime || target.startTime;
-      target.currentStep = op.currentStep || target.currentStep;
-      target.totalSteps = op.totalSteps || target.totalSteps;
+      target.progressPercentage = op.progressPercentage || target.progressPercentage;
       target.status = op.status || target.status;
       target.description = op.description || target.description;
       target.findings = Math.max(op.findings, target.findings);
+      target.memoryOps = Math.max(op.memoryOps ?? 0, target.memoryOps ?? 0);
+      target.evidence = Math.max(op.evidence ?? 0, target.evidence ?? 0);
       target.logs = op.logs.length > target.logs.length ? op.logs : target.logs;
       this.operations.delete(oldId);
       if (this.currentOperation?.id === oldId) this.currentOperation = target;

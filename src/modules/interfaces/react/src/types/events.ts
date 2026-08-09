@@ -91,6 +91,12 @@ export enum EventType {
   SECTION = 'section',
   /** AI reasoning and thought process */
   REASONING = 'reasoning',
+  /** Progress update with percentage of budget used */
+  PROGRESS_UPDATE = 'progress_update',
+  /** Controller-owned planning, prompt-building, and evaluation activity */
+  WORKFLOW_ACTIVITY = 'workflow_activity',
+  /** Pre-operation validation result for one resolved target */
+  PREFLIGHT_CHECK = 'preflight_check',
   
   // =============================================================================
   // SPECIALIZED TOOL EVENTS - Specific security assessment tools
@@ -102,18 +108,6 @@ export enum EventType {
   /** Shell command error output */
   SHELL_ERROR = 'shell_error',
   
-  // =============================================================================
-  // MULTI-AGENT COORDINATION EVENTS - Swarm intelligence system
-  // =============================================================================
-  /** Multi-agent swarm session initiated */
-  SWARM_START = 'swarm_start',
-  /** Individual agent activity */
-  SWARM_AGENT = 'swarm_agent',
-  /** Agent handoff with context transfer */
-  SWARM_HANDOFF = 'swarm_handoff',
-  /** Multi-agent swarm session completed */
-  SWARM_END = 'swarm_end',
-
   // =============================================================================
   // SPECIALIST SUB-AGENT EVENTS - Validation and specialized analysis
   // =============================================================================
@@ -312,6 +306,12 @@ export interface ToolEvent extends BaseEvent {
   error?: string;
   /** Tool execution duration in milliseconds */
   duration?: number;
+  /** Backward-compatible success indicator */
+  success?: boolean;
+  /** Controller-observed completion classification */
+  outcome?: 'success' | 'error' | 'validation_error' | 'blocked';
+  /** Whether the selected tool reached execution */
+  executed?: boolean;
   /** Visual emphasis level for UI rendering */
   emphasis?: 'high' | 'medium' | 'low';
 }
@@ -334,16 +334,6 @@ export interface ShellEvent extends BaseEvent {
   exitCode?: number;
   /** Whether output is being streamed in real-time */
   isStreaming?: boolean;
-}
-
-// Swarm events
-export interface SwarmEvent extends BaseEvent {
-  type: EventType.SWARM_START | EventType.SWARM_AGENT | EventType.SWARM_HANDOFF | EventType.SWARM_END;
-  agentName?: string;
-  agentId?: string;
-  handoffTo?: string;
-  handoffReason?: string;
-  result?: any;
 }
 
 // Specialist sub-agent events
@@ -421,6 +411,19 @@ export interface SystemEvent extends BaseEvent {
   details?: any;
 }
 
+/** Pre-operation validation result for one resolved executable target. */
+export interface PreflightCheckEvent extends BaseEvent {
+  type: EventType.PREFLIGHT_CHECK;
+  operation_id: string;
+  target_id: string;
+  target: string;
+  target_type: string;
+  status: 'pass' | 'fail' | 'skip';
+  checks: string[];
+  reason?: string;
+  resolved_addresses?: string[];
+}
+
 // Connection events
 export interface ConnectionEvent extends BaseEvent {
   type: EventType.CONNECTION_OPEN | EventType.CONNECTION_CLOSE | EventType.CONNECTION_ERROR;
@@ -463,18 +466,32 @@ export interface ReportContentEvent {
   timestamp?: string;
 }
 
+export interface ReportPathsEvent {
+  type: 'report_paths';
+  operation_id?: string;
+  target?: string;
+  output_dir?: string;
+  report_path?: string;
+  log_path?: string;
+  artifacts_path?: string;
+  outputDir?: string;
+  reportPath?: string;
+  logPath?: string;
+  artifactsPath?: string;
+}
+
 /**
  * Termination Reason Event Interface
  * 
  * Event emitted when an operation terminates, indicating the reason
- * (e.g., step limit reached, stop tool invoked, network timeout, token limit)
+ * (e.g., workflow completion, budget limit reached, network timeout, token limit)
  */
 export interface TerminationReasonEvent {
   type: 'termination_reason';
   // Known reasons from backend + forward-compatible string type
   reason:
-    | 'step_limit'
-    | 'stop_tool'
+    | 'complete'
+    | 'budget_limit'
     | 'network_timeout'
     | 'network_error'
     | 'timeout'
@@ -482,8 +499,6 @@ export interface TerminationReasonEvent {
     | 'rate_limited'
     | 'model_error';
   message: string;
-  current_step?: number;
-  max_steps?: number;
   id?: string;
   timestamp?: string;
 }
@@ -505,12 +520,12 @@ export type StreamEvent =
   // Legacy Events (backward compatibility)
   | ToolEvent
   | ShellEvent
-  | SwarmEvent
   | SpecialistEvent
   | HttpEvent
   | MemoryEvent
   | ThinkEvent
   | SystemEvent
+  | PreflightCheckEvent
   | ConnectionEvent
   | AgentEvent
   | PythonSystemEvent

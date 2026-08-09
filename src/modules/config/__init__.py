@@ -17,8 +17,6 @@ from modules.config.types import (
 from modules.config.manager import (
     ConfigManager,
     get_config_manager,
-    align_mem0_config,
-    check_existing_memories,
 )
 from modules.config.models import (
     create_bedrock_model,
@@ -46,9 +44,6 @@ __all__ = [
     "create_bedrock_model",
     "create_ollama_model",
     "create_litellm_model",
-    # Memory utilities
-    "align_mem0_config",
-    "check_existing_memories",
     # Model capabilities
     "get_capabilities",
     # Logging

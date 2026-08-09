@@ -1,8 +1,8 @@
 import React, {useEffect} from 'react';
 import {PassThrough} from 'stream';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -58,7 +58,7 @@ describe('keypress handling', () => {
             return <span>ready</span>;
         };
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <KeypressProvider>
@@ -116,7 +116,7 @@ describe('keypress handling', () => {
             return <span>hook</span>;
         };
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(<Consumer active/>);
         });

@@ -36,7 +36,7 @@ describe('PythonExecutionService pricing env override', () => {
     // Avoid background logging from preflight checks after test completes
     (svc as any).preflightChecks = jest.fn(async () => true);
     const cfg: any = {
-      iterations: 1,
+      budgetMaxDuration: 60,
       modelProvider: 'openai',
       modelId: 'gpt-4o',
       modelPricing: {

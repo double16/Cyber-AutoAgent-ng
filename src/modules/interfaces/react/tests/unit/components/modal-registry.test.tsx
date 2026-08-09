@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {describe, expect, it, jest} from '@jest/globals';
 import {ModalType} from '../../../src/hooks/useModalManager.js';
 
@@ -38,7 +38,7 @@ const load = async () => {
 describe('ModalRegistry', () => {
     it('renders nothing for none and memory search modals', async () => {
         const {ModalRegistry} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <ModalRegistry activeModal={ModalType.NONE} modalContext={{}} onClose={jest.fn()} terminalWidth={100}/>
@@ -62,7 +62,7 @@ describe('ModalRegistry', () => {
         const setIsConfigurationModalOpen = jest.fn();
         const onModuleSelect = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <ModalRegistry
@@ -143,7 +143,7 @@ describe('ModalRegistry', () => {
         const originalColumns = (process as any).stdout?.columns;
         Object.defineProperty(process.stdout, 'columns', {value: 30, configurable: true});
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <ModalRegistry

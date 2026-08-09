@@ -1,90 +1,211 @@
 #!/usr/bin/env python3
 
 import atexit
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
-import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Any, List, Optional
 
 import yaml
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
 
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import print_status
-from modules.config.system.logger import get_logger, initialize_logger_factory
+from modules.config.system.logger import (
+    configure_provider_diagnostic_logging,
+    get_logger,
+    initialize_logger_factory,
+    unsafe_diagnostic_logging_enabled,
+)
 
 
-def clean_operation_memory(operation_id: str, target_name: str = None):
-    """Clean up memory data for a specific operation.
-
-    Args:
-        operation_id: The operation identifier
-        target_name: The sanitized target name (optional, for unified output structure)
-    """
+def clean_operation_memory(operation_id: str, target_values: Optional[List[str]] = None):
+    """Delete semantic-memory points for one operation without removing the database."""
     logger = get_logger("Config.Environment")
+    raw_targets = [target_values] if isinstance(target_values, str) else (target_values or [])
+    resolved_targets = [
+        str(value).strip()
+        for value in raw_targets
+        if str(value).strip()
+    ]
     logger.debug(
-        "clean_operation_memory called with operation_id=%s, target_name=%s",
+        "Cleaning Qdrant memory for operation_id=%s target_values=%s",
         operation_id,
-        target_name,
+        resolved_targets,
     )
-
-    if not target_name:
-        logger.warning("No target_name provided, skipping memory cleanup")
+    if not operation_id:
+        logger.warning("No operation ID provided, skipping memory cleanup")
         return
-
-    # Unified output structure - per-target memory
-    output_dir = get_default_base_dir()
-    memory_path = os.path.join(
-        output_dir, target_name, "memory", f"mem0_faiss_{target_name}"
-    )
-    logger.debug("Checking memory path: %s", memory_path)
-
-    if os.path.exists(memory_path):
-        try:
-            # Safety check - ensure we're only removing memory directories
-            if "mem0_faiss_" not in memory_path:
-                logger.error(
-                    "SAFETY CHECK FAILED: Path does not contain expected memory patterns: %s",
-                    memory_path,
-                )
-                return
-
-            logger.debug("About to remove memory path: %s", memory_path)
-            if os.path.isdir(memory_path):
-                shutil.rmtree(memory_path)
-            else:
-                os.remove(memory_path)
-
-            logger.info("Cleaned up operation memory: %s", memory_path)
-            print_status(f"Cleaned up operation memory: {memory_path}", "SUCCESS")
-
-        except Exception as e:
-            logger.error("Failed to clean %s: %s", memory_path, e)
-            print_status(f"Failed to clean {memory_path}: {e}", "ERROR")
-    else:
-        logger.debug("Memory path does not exist: %s", memory_path)
-
-
-def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
-    """Setup directories and discover available cyber tools"""
-    # Disable Mem0 telemetry to prevent PostHog connection attempts
-    os.environ.setdefault("MEM0_TELEMETRY", "false")
+    if not resolved_targets:
+        logger.warning("No target values provided, skipping memory cleanup")
+        return
     try:
-        import mem0.memory.telemetry as _mem0_telemetry
-        if hasattr(_mem0_telemetry, "MEM0_TELEMETRY"):
-            setattr(_mem0_telemetry, "MEM0_TELEMETRY", False)
-        if hasattr(_mem0_telemetry, "client_telemetry"):
-            client_telemetry = _mem0_telemetry.client_telemetry
-            if hasattr(client_telemetry, "posthog"):
-                client_telemetry.posthog.disabled = True
-    except Exception:
-        pass
+        url = str(os.getenv("QDRANT_URL", "")).strip()
+        client = (
+            QdrantClient(url=url, api_key=os.getenv("QDRANT_API_KEY") or None)
+            if url
+            else QdrantClient(path=os.path.join(get_default_base_dir(), "qdrant"))
+        )
+        collection = os.getenv("QDRANT_COLLECTION", "cyber_autoagent_memories")
+        if not client.collection_exists(collection):
+            logger.debug("Qdrant collection %s does not exist; no memory to clean", collection)
+            return
+        selector = qdrant_models.FilterSelector(
+            filter=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="target_values",
+                        match=qdrant_models.MatchAny(any=resolved_targets),
+                    ),
+                    qdrant_models.FieldCondition(
+                        key="operation_id",
+                        match=qdrant_models.MatchValue(value=operation_id),
+                    )
+                ]
+            )
+        )
+        client.delete(collection_name=collection, points_selector=selector, wait=True)
+        logger.info("Cleaned Qdrant memory for operation %s", operation_id)
+    except Exception as error:
+        logger.error("Failed to clean Qdrant memory for %s: %s", operation_id, error)
 
+
+_STARTUP_FAILURE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:module|package)notfounderror\b",
+        r"\bimporterror\b",
+        r"\bno module named\b",
+        r"\berror while loading shared libraries\b",
+        r"\b(?:shared object|dynamic library) .* (?:not found|cannot open)\b",
+        r"\btraceback \(most recent call last\)\b",
+    )
+)
+
+_SECLISTS_ENV_VAR = "CYBER_SECLISTS_DIR"
+_SECLISTS_ROOT_CANDIDATES = (
+    Path("/usr/share/seclists"),
+    Path("/usr/share/SecLists"),
+    Path("/opt/seclists"),
+    Path("/opt/SecLists"),
+    Path.home() / "seclists",
+    Path.home() / "SecLists",
+    Path.home() / "wordlists" / "seclists",
+    Path.home() / "wordlists" / "SecLists",
+)
+_SECLISTS_ROOT_MARKERS = ("Discovery", "Fuzzing", "Passwords", "Usernames", "Miscellaneous")
+
+
+def _is_seclists_root(path: Path) -> bool:
+    """Return whether ``path`` has the expected SecLists root structure."""
+
+    try:
+        return path.is_dir() and any((path / marker).is_dir() for marker in _SECLISTS_ROOT_MARKERS)
+    except OSError:
+        return False
+
+
+def resolve_seclists_root() -> Optional[str]:
+    """Resolve the local SecLists root without performing a filesystem-wide search."""
+
+    configured_root = os.getenv(_SECLISTS_ENV_VAR, "").strip()
+    candidate_roots = [Path(configured_root)] if configured_root else []
+    candidate_roots.extend(_SECLISTS_ROOT_CANDIDATES)
+
+    for candidate in candidate_roots:
+        if _is_seclists_root(candidate):
+            try:
+                return str(candidate.resolve())
+            except OSError:
+                return str(candidate.absolute())
+    return None
+
+
+@dataclass(frozen=True)
+class ToolHealth:
+    """Result of deterministic executable discovery and optional startup verification."""
+
+    state: str
+    path: Optional[str]
+    reason: str = ""
+
+    @property
+    def available(self) -> bool:
+        return self.state in {"available_verified", "available_unverified"}
+
+
+def _bounded_probe_reason(value: Any, limit: int = 300) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _probe_config(canary: Any) -> tuple[list[str], int, set[int]]:
+    if not isinstance(canary, dict):
+        raise ValueError("canary must be an object")
+    args = canary.get("args")
+    if not isinstance(args, list) or not all(isinstance(arg, str) and arg for arg in args):
+        raise ValueError("canary.args must be a list of non-empty strings")
+    timeout_seconds = canary.get("timeout_seconds", 5)
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 60:
+        raise ValueError("canary.timeout_seconds must be an integer from 1 through 60")
+    exit_codes = canary.get("accepted_exit_codes", [0])
+    if not isinstance(exit_codes, list) or not exit_codes or not all(
+        isinstance(code, int) and not isinstance(code, bool) for code in exit_codes
+    ):
+        raise ValueError("canary.accepted_exit_codes must be a non-empty list of integers")
+    return args, timeout_seconds, set(exit_codes)
+
+
+def check_shell_command(command: str, canary: Any = None) -> ToolHealth:
+    """Resolve a command and optionally verify that it starts without generic dependency failures."""
+
+    tool_path = shutil.which(command)
+    if not tool_path:
+        return ToolHealth("missing", None, "executable not found in PATH")
+    if canary is None:
+        return ToolHealth("available_unverified", tool_path)
+    try:
+        args, timeout_seconds, accepted_exit_codes = _probe_config(canary)
+        result = subprocess.run(
+            [tool_path, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, ValueError) as error:
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(error))
+    except subprocess.TimeoutExpired:
+        return ToolHealth("broken", tool_path, "canary timed out")
+
+    output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+    startup_failure = next((pattern.pattern for pattern in _STARTUP_FAILURE_PATTERNS if pattern.search(output)), "")
+    if startup_failure:
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(output))
+    if result.returncode not in accepted_exit_codes:
+        reason = output or f"canary exited with code {result.returncode}"
+        return ToolHealth("broken", tool_path, _bounded_probe_reason(reason))
+    return ToolHealth("available_verified", tool_path)
+
+
+def _get_shell_command_path(command: str, canary: Any = None) -> Optional[str]:
+    """Return the path for an available command, preserving the historical helper contract."""
+
+    health = check_shell_command(command, canary)
+    return health.path if health.available else None
+
+
+def auto_setup() -> List[str]:
+    """Setup directories and discover available cyber tools"""
     # Disable RAGAS evaluator tracking
     os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
@@ -110,10 +231,6 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
     except Exception as e:
         # Log any other issues but continue
         print_status(f"Issue with tools directory: {e} - continuing", "WARNING")
-
-    # Each operation uses its own isolated memory path: /tmp/mem0_{operation_id}
-    if skip_mem0_cleanup:
-        print_status("Using existing memory store", "INFO")
 
     # httpx has two packages: python and projectdiscovery, we want projectdiscovery
     try:
@@ -153,8 +270,9 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
         description = tool_info.get("description", "")
         binary = tool_info.get("command", tool_name)
 
-        tool_path = shutil.which(binary)
-        is_available = tool_path is not None
+        health = check_shell_command(binary, tool_info.get("canary"))
+        tool_path = health.path
+        is_available = health.available
 
         if is_available:
             available_tools.append(tool_name)
@@ -167,13 +285,14 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
                 "tool_name": tool_name,
                 "description": description,
                 "status": "available",
+                "health": health.state,
                 "binary": binary,
                 "path": tool_path,
             }
             print(f"__CYBER_EVENT__{json.dumps(tool_event)}__CYBER_EVENT_END__")
         else:
             print_status(
-                f"○ {tool_name:<12} - {description} (not available)", "WARNING"
+                f"○ {tool_name:<12} - {description} ({health.state}: {health.reason})", "WARNING"
             )
 
             # Emit structured event for React UI
@@ -183,6 +302,8 @@ def auto_setup(skip_mem0_cleanup: bool = False) -> List[str]:
                 "tool_name": tool_name,
                 "description": description,
                 "status": "unavailable",
+                "health": health.state,
+                "reason": health.reason,
                 "binary": binary,
                 "path": None,
             }
@@ -326,9 +447,15 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # File handler - log INFO and above to file
+    operation_file_level = (
+        logging.DEBUG
+        if verbose and unsafe_diagnostic_logging_enabled()
+        else logging.INFO
+    )
+
+    # Operation logs keep structured events plus INFO-and-above Python records.
     file_handler = logging.FileHandler(log_file, mode="a")
-    file_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    file_handler.setLevel(operation_file_level)
     file_handler.setFormatter(formatter)
 
     # Console handler - only show warnings and above unless verbose
@@ -350,11 +477,12 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
         logging.CRITICAL
     )  # Only show critical errors, not our expected StopIteration
 
-    # Capture all other loggers at INFO level to file
+    # Capture all other loggers at INFO level to file. Verbose mode may still
+    # enable component diagnostics elsewhere, but does not expand operation logs.
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     root_file_handler = logging.FileHandler(log_file, mode="a")
-    root_file_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    root_file_handler.setLevel(operation_file_level)
     root_file_handler.setFormatter(formatter)
     root_logger.addHandler(root_file_handler)
 
@@ -362,5 +490,6 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
     logging.getLogger("boto3").setLevel(logging.WARNING)
     logging.getLogger("botocore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    configure_provider_diagnostic_logging(enable_debug=verbose)
 
     return cyber_logger

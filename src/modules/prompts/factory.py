@@ -17,12 +17,12 @@ from functools import lru_cache
 import yaml
 from datetime import datetime
 from pathlib import Path
-from textwrap import dedent
 from typing import Any, Dict, List, Optional, Tuple
 from urllib import parse as _urlparse
 from urllib import request as _urlreq
 
 from modules.config.system.logger import get_logger
+from modules.config.types import BudgetConfig
 from modules.tools.memory import OperationPlan
 
 logger = get_logger("Prompts.Factory")
@@ -41,9 +41,11 @@ _LF_TEMPLATE_TO_NAME = {
     "tools_guide.md": "cyber/system/tools_guide",
     "report_generation_prompt.md": "cyber/report/report_generation_prompt",
     "report_agent_appendix_system_prompt.md": "cyber/report/report_agent_appendix_system_prompt",
+    "report_agent_critic_system_prompt.md": "cyber/report/report_agent_critic_system_prompt",
     "report_agent_executive_system_prompt.md": "cyber/report/report_agent_executive_system_prompt",
     "report_agent_finding_system_prompt.md": "cyber/report/report_agent_finding_system_prompt",
     "report_agent_observation_system_prompt.md": "cyber/report/report_agent_observation_system_prompt",
+    "report_agent_next_steps_system_prompt.md": "cyber/report/report_agent_next_steps_system_prompt",
 }
 
 OVERLAY_FILENAME = "adaptive_prompt.json"
@@ -396,41 +398,6 @@ def _extract_domain_lens(module_prompt: str) -> Dict[str, str]:
     return domain_lens
 
 
-def get_memory_context_guidance(
-    *,
-    has_memory_path: bool,
-    has_existing_memories: bool,
-    memory_overview: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Return memory context guidance text used in system prompts."""
-    # Determine memory count if available
-    total_count = 0
-    if isinstance(memory_overview, dict):
-        if memory_overview.get("has_memories"):
-            try:
-                total_count = int(memory_overview.get("total_count") or 0)
-            except Exception:
-                total_count = 0
-
-    if not has_memory_path and not has_existing_memories:
-        # Fresh operation guidance
-        return """**CRITICAL FIRST ACTION**: Create a strategic plan via `store_plan()`.
-"""
-    else:
-        # Continuing assessment guidance
-        count_str = str(total_count) if total_count else "0"
-        return f"""Continuing assessment with {count_str} existing memories.
-**CRITICAL FIRST ACTIONS**
-  1. Load all memories: `mem0_list()`.
-  2. Load the plan: `get_plan()`. If none, create it immediately via `store_plan()` before other tools.
-  3. Perform a Memory Intake Pass:
-    - Summarize what’s already known (key facts + evidence paths).
-    - Identify unknown / next questions.
-    - Mark duplicates and do not recreate tasks/work already completed.
-    - Create tasks based on prior discoveries.
-"""
-
-
 def _format_overlay_directives(payload: Any) -> List[str]:
     directives: List[str] = []
     if isinstance(payload, dict):
@@ -459,7 +426,7 @@ def _format_overlay_directives(payload: Any) -> List[str]:
 def _render_overlay_block(
     output_config: Optional[Dict[str, Any]],
     operation_id: str,
-    current_step: int,
+    current_progress: int,
 ) -> str:
     overlay_path = _get_overlay_file(output_config, operation_id)
     if not overlay_path:
@@ -469,15 +436,15 @@ def _render_overlay_block(
     if not overlay_data:
         return ""
 
-    expires_after = overlay_data.get("expires_after_steps")
-    applied_step = overlay_data.get("current_step")
+    expires_after = overlay_data.get("expires_after_progress")
+    applied_progress = overlay_data.get("budget_progress")
 
     try:
         if (
             isinstance(expires_after, int)
             and expires_after > 0
-            and isinstance(applied_step, int)
-            and current_step >= applied_step + expires_after
+            and isinstance(applied_progress, int)
+            and current_progress >= applied_progress + expires_after
         ):
             overlay_path.unlink(missing_ok=True)
             return ""
@@ -494,10 +461,10 @@ def _render_overlay_block(
         header_meta.append(f"origin={overlay_data['origin']}")
     if overlay_data.get("reviewer"):
         header_meta.append(f"reviewer={overlay_data['reviewer']}")
-    if isinstance(applied_step, int):
-        header_meta.append(f"applied_step={applied_step}")
+    if isinstance(applied_progress, int):
+        header_meta.append(f"applied_progress={applied_progress}%")
     if isinstance(expires_after, int):
-        header_meta.append(f"expires_after_steps={expires_after}")
+        header_meta.append(f"expires_after_progress={expires_after}%")
 
     title = "## ADAPTIVE DIRECTIVES"
     if header_meta:
@@ -519,35 +486,33 @@ def get_system_prompt(
     target: str,
     objective: str,
     operation_id: str,
-    current_step: int = 0,
-    max_steps: int = 100,
-    remaining_steps: Optional[int] = None,
+    budget: Optional[BudgetConfig] = None,
+    progress_percent: int = 0,
     has_existing_memories: bool = False,
     memory_overview: Optional[Dict[str, Any]] = None,
     # Extended, centralized parameters
     provider: Optional[str] = None,
     has_memory_path: bool = False,
     tools_context: Optional[str] = None,
+    seclists_root: Optional[str] = None,
     output_config: Optional[Dict[str, Any]] = None,
     plan_snapshot: Optional[OperationPlan] = None,
     plan_current_phase: Optional[int] = None,
 ) -> str:
     """Build the system prompt using the master template."""
 
-    if remaining_steps is None:
-        remaining_steps = max(0, max_steps - current_step)
-
-    # 1. Calculate Reflection Snapshot (Budget & Checkpoints)
-    reflection_snapshot = get_reflection_snapshot(current_step, max_steps, plan_current_phase)
-
-    # 2. Extract and format operation directories from output_config
+    # Extract and format operation directories from output_config
     operation_paths_block = ""
     if isinstance(output_config, dict):
         artifacts_path = output_config.get("artifacts_path", "")
         tools_path = output_config.get("tools_path", "")
+        operation_path = output_config.get("operation_path", "")
 
         # Use absolute paths, LLMs can get confused with relative paths and prepend a false root
         path_lines = []
+        if isinstance(operation_path, str) and operation_path:
+            path_lines.append(f"**ROOT DIRECTORY**: `{operation_path}`")
+
         if isinstance(artifacts_path, str) and artifacts_path:
             path_lines.append(f"**ARTIFACTS DIRECTORY**: `{artifacts_path}`")
 
@@ -557,37 +522,31 @@ def get_system_prompt(
         if path_lines:
             operation_paths_block = "\n".join(path_lines)
 
-    # 3. Generate Memory Context
-    memory_context_text = get_memory_context_guidance(
-        has_memory_path=has_memory_path,
-        has_existing_memories=has_existing_memories,
-        memory_overview=memory_overview,
-    )
-    if plan_snapshot:
-        memory_context_text += f"\n\n## PLAN SNAPSHOT\n{plan_snapshot.to_toon()}"
-
-    # 4. Load Tools Guide
-    tools_guide_text = ""
+    # Load Tools Guide
     try:
         tools_guide_text = load_prompt_template("tools_guide.md")
     except Exception:
         tools_guide_text = ""
+    seclists_context = ""
+    if isinstance(seclists_root, str) and seclists_root:
+        seclists_context = (
+            "\n## SecLists Wordlists\n"
+            f"SecLists root: `{seclists_root}`\n"
+            "When a task requires a SecLists wordlist, prefix its canonical SecLists-relative path with this root.\n"
+        )
+    tools_guide_text = tools_guide_text.replace("{{ seclists_context }}", seclists_context)
 
-    # 5. Load System Template
+    # Load System Template
     system_template = load_prompt_template("system_prompt.md")
     if not system_template:
         # Fallback if template missing
         return f"# CRITICAL ERROR\nSystem prompt template missing.\nTarget: {target}\nObjective: {objective}"
 
-    # 6. Inject Variables
+    # Inject Variables
+    # Be REALLY careful where {{ target }} is placed, the agent may mistake that for a hostname, etc.
     prompt = system_template.replace("{{ target }}", str(target))
     prompt = prompt.replace("{{ objective }}", str(objective))
     prompt = prompt.replace("{{ operation_id }}", str(operation_id))
-    prompt = prompt.replace("{{ current_step }}", str(current_step))
-    prompt = prompt.replace("{{ max_steps }}", str(max_steps))
-    prompt = prompt.replace("{{ remaining_steps }}", str(remaining_steps))
-    prompt = prompt.replace("{{ memory_context }}", memory_context_text)
-    prompt = prompt.replace("{{ reflection_snapshot }}", reflection_snapshot)  # reflection_snapshot is done with each step, not necessary in the system prompt
     prompt = prompt.replace("{{ tools_guide }}", tools_guide_text)
     prompt = prompt.replace("{{ operation_paths }}", operation_paths_block)
 
@@ -598,7 +557,7 @@ def get_system_prompt(
     prompt = prompt.replace("{{ environmental_context }}", env_context_str)
 
     # 7. Append Overlay (Adaptive Directives)
-    overlay_block = _render_overlay_block(output_config, operation_id, current_step)
+    overlay_block = _render_overlay_block(output_config, operation_id, progress_percent)
     if overlay_block:
         prompt += f"\n\n{overlay_block}"
 
@@ -607,55 +566,6 @@ def get_system_prompt(
         logger.warning("System prompt has unknown variables: %s ", ", ".join(missing_variables))
 
     return prompt
-
-
-def get_reflection_snapshot(current_step: int, max_steps: int, plan_current_phase: int | None) -> str:
-    reflection_snapshot = ""
-    try:
-        _budget_pct = int((current_step / max_steps) * 100) if max_steps > 0 else 0
-        _checkpoints = [int(max_steps * pct) for pct in [0.2, 0.4, 0.6, 0.8]]
-        _next_checkpoint = next((cp for cp in _checkpoints if cp > current_step), max_steps)
-        _steps_until = max(0, _next_checkpoint - current_step)
-        remaining_steps = max(0, max_steps - current_step)
-
-        lines = [f"Budget Used: {_budget_pct}%, step {current_step}/{max_steps}, {remaining_steps} remaining steps"]
-
-        # Checkpoint-specific actionable guidance
-        if current_step in _checkpoints or (current_step > 0 and current_step == _checkpoints[0]):
-            checkpoint_idx = _checkpoints.index(current_step) if current_step in _checkpoints else 0
-            checkpoint_pct = [20, 40, 60, 80][checkpoint_idx]
-            lines.append(f"**CHECKPOINT {checkpoint_pct}% REACHED**")
-
-            if checkpoint_pct == 20:
-                lines.append("ACTION: Call `get_plan`. Evaluate: What capabilities gained? Phase 1 criteria met?")
-            elif checkpoint_pct == 40:
-                lines.append("ACTION: Call `get_plan`. Evaluate: Confidence trend rising/flat/falling? Flat = pivot NOW.")
-            elif checkpoint_pct == 60:
-                lines.append(
-                    "ACTION: Call `get_plan`. If stuck (no findings), deploy swarm with different approach classes.")
-            elif checkpoint_pct == 80:
-                lines.append("ACTION: Call `get_plan`. Focus ONLY on highest-confidence path. No new exploration.")
-        else:
-            lines.append(f"Next Checkpoint: Step {_next_checkpoint} (in {_steps_until} steps)")
-            # Add warning if close to checkpoint
-            if 3 >= _steps_until > 0:
-                lines.append(f"Checkpoint approaching. Prepare to evaluate plan.")
-
-        if plan_current_phase is not None:
-            lines.append(f"Current Phase: {plan_current_phase}")
-
-        # Budget-based urgency
-        if _budget_pct >= 90:
-            lines.append("FINAL: Budget >90%. Verify objective complete before stop(). Check termination_policy.")
-        elif _budget_pct >= 80:
-            lines.append("CRITICAL: Budget >80%. Focus on single highest-confidence path only.")
-        elif _budget_pct >= 60:
-            lines.append("WARNING: Budget >60%. If no findings yet, deploy specialists/swarm NOW.")
-
-        reflection_snapshot = "\n".join(lines)
-    except Exception:
-        reflection_snapshot = "Budget: Unknown"
-    return reflection_snapshot
 
 
 def get_report_generation_prompt(
@@ -716,6 +626,22 @@ def get_report_appendix_system_prompt() -> str:
     return "You are a technical documentation specialist. Focus on appendix and methodology."
 
 
+def get_report_critic_system_prompt() -> str:
+    """System prompt for report-section critic calls."""
+    template = load_prompt_template("report_agent_critic_system_prompt.md")
+    if template:
+        return template
+    return "Review report-section drafts for evidence grounding and return only the requested JSON object."
+
+
+def get_report_next_steps_system_prompt() -> str:
+    """System prompt for structured recommended-next-steps generation."""
+    template = load_prompt_template("report_agent_next_steps_system_prompt.md")
+    if template:
+        return template
+    return "Generate grounded recommended next steps as only the requested JSON object."
+
+
 class ModulePromptLoader:
     """Lightweight loader for module-specific prompts (execution/report)."""
 
@@ -751,6 +677,7 @@ class ModulePromptLoader:
         self.plugin_dirs = plugin_dirs
         # Track sources for observability
         self.last_loaded_execution_prompt_source: Optional[str] = None
+        self.last_loaded_termination_policy_source: Optional[str] = None
         self.last_loaded_report_prompt_source: Optional[str] = None
 
 
@@ -953,30 +880,19 @@ class ModulePromptLoader:
         """Load a module-specific execution prompt if available.
 
         Order of resolution:
-        1) Operation-specific optimized version (if operation_root provided):
-           <operation_root>/execution_prompt_optimized.txt
-        2) Langfuse-managed module prompt (when enabled): cyber/module/<module>/<kind>_prompt
+        1) Langfuse-managed module prompt (when enabled): cyber/module/<module>/<kind>_prompt
            - If missing remotely, seed from local file if present
-        3) Local file under <module_dir>/<module>/<filename>
+        2) Local file under <module_dir>/<module>/<filename>
         Returns empty string if not found.
         """
         # Reset tracker
         self.last_loaded_execution_prompt_source = None
 
-        # Check for operation-specific optimized version FIRST
-        if operation_root:
-            try:
-                optimized_path = Path(operation_root) / "execution_prompt_optimized.txt"
-                if optimized_path.exists() and optimized_path.is_file():
-                    content = optimized_path.read_text(encoding="utf-8").strip()
-                    if content:
-                        self.last_loaded_execution_prompt_source = f"optimized:{optimized_path}"
-                        logger.debug("Loaded optimized execution prompt from %s", optimized_path)
-                        return content
-            except Exception as e:
-                logger.debug("Failed to load optimized execution prompt: %s", e)
-
         content, self.last_loaded_execution_prompt_source = self.load_module_prompt(module_name, "execution", "execution_prompt.md")
+        return content
+
+    def load_module_termination_policy(self, module_name: str) -> str:
+        content, self.last_loaded_termination_policy_source = self.load_module_prompt(module_name, "termination_policy", "termination_policy.md")
         return content
 
     def load_module_report_prompt(self, module_name: str) -> str:
@@ -1070,13 +986,12 @@ def _get_current_date() -> str:
 def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
     """Generate an actionable KEY FINDINGS table from structured evidence.
 
-    Columns: Severity | Count | Canonical Finding (anchor) | Primary Location | Verified | Confidence (range)
+    Columns: Severity | Count | Canonical Finding (anchor) | Primary Location | Verified
     - Canonical Finding links to the first detailed finding within that severity section
       by constructing a markdown anchor from the detailed heading text
       (format: "#### 1. <vulnerability> - <where>")
     - Primary Location is the parsed [WHERE] of the canonical finding, or "Multiple" if diverse
     - Verified reflects the canonical finding's validation_status when available
-    - Confidence shows min–max range across findings in the severity group using numeric confidences
     """
     # Helper: slugify heading text to markdown anchor (GitHub-style best effort)
     def _slugify(text: str) -> str:
@@ -1085,20 +1000,6 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
         s = re.sub(r"\s+", "-", s)
         s = re.sub(r"-+", "-", s)
         return s.strip("-")
-
-    def _parse_num_conf(val: str) -> Optional[float]:
-        if not val:
-            return None
-        m = re.search(r"([0-9]+(?:\.[0-9]+)?)", str(val))
-        if not m:
-            return None
-        try:
-            num = float(m.group(1))
-            if 0 <= num <= 100:
-                return num
-        except Exception:
-            return None
-        return None
 
     # Group evidence by severity using parsed fields when available
     groups: Dict[str, List[Dict[str, Any]]] = {
@@ -1116,8 +1017,8 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             groups[sev].append(item)
 
     header = (
-        "| Severity | Count | Canonical Finding | Primary Location | Verified | Confidence |\n"
-        "|----------|-------|-------------------|------------------|----------|------------|\n"
+        "| Severity | Count | Canonical Finding | Primary Location | Verified |\n"
+        "|----------|-------|-------------------|------------------|----------|\n"
     )
 
     rows: List[str] = []
@@ -1133,13 +1034,31 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             parsed.get("vulnerability")
             or safe_truncate(str(top.get("content", "")), 60)
         ).strip()
-        where = (parsed.get("where") or "").strip()
+        top_metadata = top.get("metadata", {}) if isinstance(top.get("metadata"), dict) else {}
+        where = str(
+            parsed.get("where")
+            or top.get("location")
+            or top.get("target")
+            or top_metadata.get("target")
+            or top_metadata.get("location")
+            or top_metadata.get("where")
+            or ""
+        ).strip()
         if not where:
             # Derive primary location across the group if available
             wheres = []
             for it in items:
                 p = it.get("parsed", {}) if isinstance(it.get("parsed"), dict) else {}
-                w = (p.get("where") or "").strip()
+                metadata = it.get("metadata", {}) if isinstance(it.get("metadata"), dict) else {}
+                w = str(
+                    p.get("where")
+                    or it.get("location")
+                    or it.get("target")
+                    or metadata.get("target")
+                    or metadata.get("location")
+                    or metadata.get("where")
+                    or ""
+                ).strip()
                 if w:
                     wheres.append(w)
             where = (
@@ -1154,22 +1073,6 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
             "Verified" if vstat == "verified" else ("Unverified" if vstat else "-")
         )
 
-        # Confidence range across group
-        nums: List[float] = []
-        for it in items:
-            c = it.get("confidence") or (it.get("metadata", {}) or {}).get("confidence")
-            n = _parse_num_conf(c)
-            if n is not None:
-                nums.append(n)
-        if nums:
-            cmin, cmax = min(nums), max(nums)
-            if abs(cmin - cmax) < 1e-9:
-                conf_str = f"{cmin:.1f}%"
-            else:
-                conf_str = f"{cmin:.1f}%–{cmax:.1f}%"
-        else:
-            conf_str = "-"
-
         # Build anchor link to detailed heading: "#### 1. {vuln} - {where}"
         heading_text = (
             f"1. {vuln} - {where}"
@@ -1181,16 +1084,16 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
         canonical_link = f"[{link_text}](#{anchor})"
 
         rows.append(
-            f"| {sev} | {count} | {canonical_link} | {where or '-'} | {verified} | {conf_str} |"
+            f"| {sev} | {count} | {canonical_link} | {where or '-'} | {verified} |"
         )
 
     return (
         header + "\n".join(rows)
         if rows
         else (
-            "| Severity | Count | Canonical Finding | Primary Location | Verified | Confidence |\n"
-            "|----------|-------|-------------------|------------------|----------|------------|\n"
-            "| NONE | 0 | - | - | - | - |"
+            "| Severity | Count | Canonical Finding | Primary Location | Verified |\n"
+            "|----------|-------|-------------------|------------------|----------|\n"
+            "| NONE | 0 | - | - | - |"
         )
     )
 
@@ -1229,10 +1132,18 @@ def format_evidence_for_report(
     Format evidence list into structured text for the report.
 
     Processes full evidence content including parsed components for detailed reporting.
-    Normalizes severity casing and confidence display, and includes status badges when available.
+    Normalizes severity casing and includes status badges when available.
     """
     if not evidence:
         return ""
+
+    def _without_finding_confidence(content: str) -> str:
+        return re.sub(
+            r"\s*\[CONFIDENCE\].*?(?=\s*\[(?:VULNERABILITY|FINDING|WHERE|IMPACT|EVIDENCE|STEPS|REMEDIATION)\]|\s*$)",
+            "",
+            content,
+            flags=re.IGNORECASE | re.DOTALL,
+        ).strip()
 
     evidence_text = ""
     severity_groups = {"CRITICAL": [], "HIGH": [], "MEDIUM": [], "LOW": [], "INFO": []}
@@ -1254,7 +1165,6 @@ def format_evidence_for_report(
             evidence_text += f"\n### {severity.capitalize()} Findings\n\n"
             for item in severity_groups[severity]:
                 category = str(item.get("category", "unknown")).upper()
-                confidence = str(item.get("confidence", "N/A"))
                 status = str(item.get("validation_status") or "").strip()
 
                 # Format the finding with parsed evidence if available
@@ -1268,7 +1178,7 @@ def format_evidence_for_report(
 
                     # Display raw item severity if available, otherwise use group label
                     disp_sev = item.get("severity", severity)
-                    line = f"**Severity:** {disp_sev} | **Confidence:** {confidence}"
+                    line = f"**Severity:** {disp_sev}"
                     if status:
                         st_norm = (
                             "Verified" if status.lower() == "verified" else "Unverified"
@@ -1305,6 +1215,8 @@ def format_evidence_for_report(
                 else:
                     # Use full content without truncation
                     content = item.get("content", "")
+                    if item.get("category") == "finding":
+                        content = _without_finding_confidence(content)
 
                     # If content has inline markers, format them better
                     if "[VULNERABILITY]" in content and "[WHERE]" in content:
@@ -1317,7 +1229,6 @@ def format_evidence_for_report(
                             "[EVIDENCE]",
                             "[STEPS]",
                             "[REMEDIATION]",
-                            "[CONFIDENCE]",
                         ]:
                             formatted_content = formatted_content.replace(
                                 f" {marker}", f"\n{marker}"
@@ -1330,9 +1241,7 @@ def format_evidence_for_report(
                     if item.get("category") == "finding":
                         evidence_text += f"#### {finding_number}. Finding\n"
                         disp_sev = item.get("severity", severity)
-                        line = (
-                            f"**Severity:** {disp_sev} | **Confidence:** {confidence}"
-                        )
+                        line = f"**Severity:** {disp_sev}"
                         if status:
                             st_norm = (
                                 "Verified"
@@ -1352,40 +1261,59 @@ def format_evidence_for_report(
     return evidence_text.strip()
 
 
+REPORT_BOOKKEEPING_TOOLS = frozenset(
+    {
+        "create_tasks",
+        "get_plan",
+        "list_tasks",
+        "memory_list",
+        "memory_retrieve",
+        "read_artifact",
+        "record_finding_validation",
+        "record_task_acceptance",
+        "store_finding",
+        "store_knowledge",
+        "store_observation",
+        "store_plan",
+        "update_plan",
+    }
+)
+REPORT_EXCLUDED_SHELL_COMMANDS = frozenset(
+    {
+        "awk", "bash", "cat", "cut", "paste", "find", "grep", "head", "jq", "ls", "python", "python3",
+        "sed", "sh", "sort", "tail", "tr", "uniq", "wc", "which", "command", "xargs", "echo", "pwd", "cd", "mkdir",
+        "rm", "cp", "mv", "chmod", "chown", "stat", "ln", "printf", "time", "timeout", "id", "whoami", "sleep",
+    }
+)
+
+
+def is_reportable_tool(tool_name: str) -> bool:
+    """Return whether a tool represents operational work for report presentation."""
+
+    normalized = str(tool_name or "").strip().split(":", 1)[0].lower()
+    return normalized not in REPORT_BOOKKEEPING_TOOLS and normalized not in REPORT_EXCLUDED_SHELL_COMMANDS
+
+
 def format_tools_summary(tools_used: List[str] | Dict[str, int]) -> str:
-    """Format tools into a readable usage summary.
+    """Format a unique reportable-tool list.
 
     Accepts either:
-    - List[str]: a list of tool names (duplicates indicate multiple uses)
-    - Dict[str, int]: mapping of tool name to usage count
+    - List[str]: tool names, with duplicates removed
+    - Dict[str, int]: tool names as keys; values are ignored
     """
     if not tools_used:
         return ""
 
-    # Normalize to a dict of counts
-    tools_summary: Dict[str, int] = {}
+    unique_tools: List[str] = []
     if isinstance(tools_used, dict):
-        for k, v in tools_used.items():
-            try:
-                count = int(v)
-            except Exception:
-                count = 0
-            if count > 0:
-                tools_summary[str(k)] = count
+        candidates = tools_used.keys()
     else:
-        for tool in tools_used:
-            tool_name = str(tool).split(":")[0]
-            tools_summary[tool_name] = tools_summary.get(tool_name, 0) + 1
-
-    # Deterministic order: by descending count then name
-    items = sorted(tools_summary.items(), key=lambda kv: (-kv[1], kv[0]))
-
-    # Use proper pluralization for "use"
-    lines = []
-    for name, count in items:
-        unit = "use" if count == 1 else "uses"
-        lines.append(f"- {name}: {count} {unit}")
-    return "\n".join(lines)
+        candidates = tools_used
+    for tool in candidates:
+        tool_name = str(tool).split(":", 1)[0].strip()
+        if tool_name and is_reportable_tool(tool_name) and tool_name not in unique_tools:
+            unique_tools.append(tool_name)
+    return "\n".join(f"- {tool_name}" for tool_name in unique_tools)
 
 
 def _transform_evidence_to_content(

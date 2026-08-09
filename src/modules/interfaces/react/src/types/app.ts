@@ -4,6 +4,7 @@
  */
 
 import { Operation } from '../services/OperationManager.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 
 /**
  * Application state actions interface
@@ -17,6 +18,7 @@ export interface ApplicationActions {
   setCompletedOperation: (operation: Operation | null) => void;
   clearCompletedOperation: () => void;
   updateMetrics: (metrics: OperationMetrics | null) => void;
+  updateHealth: (health: OperationHealthSnapshot | null) => void;
   resetErrorCount: () => void;
   setStaticKey: (key: number) => void;
 }
@@ -30,6 +32,7 @@ export interface OperationMetrics {
   duration: string;
   memoryOps: number;
   evidence: number;
+  progressPercent: number;
 }
 
 /**
@@ -96,5 +99,20 @@ export interface StreamEvent {
   context?: string;
   startTime?: number;
   delay?: number;
+  operation_stage?: string;
+  evaluation_step_index?: number;
+  evaluation_step_total?: number;
+  evaluation_step_kind?: string;
+  evaluation_scope?: string;
+  evaluation_metric?: string;
+  evaluation_step_label?: string;
+  report_step_index?: number;
+  report_step_total?: number;
+  report_step_kind?: string;
+  report_step_label?: string;
+  status?: string;
+  scores?: Record<string, number>;
+  metrics_evaluated?: number;
+  average_score?: number | null;
   [key: string]: any;
 }

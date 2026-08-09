@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hook that reroutes unknown tools to shell and externalizes large outputs.
+"""Hook that externalizes large tool outputs.
 
 SDK Contract Compliance:
 - AfterToolCallEvent.result is the ONLY writable field
@@ -9,14 +9,13 @@ SDK Contract Compliance:
 
 import logging
 import re
-import json
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider  # type: ignore
+from strands.hooks import AfterToolCallEvent, HookProvider  # type: ignore
 from strands.types.tools import ToolResultContent
 
 from modules.handlers import sanitize_target_name
@@ -25,10 +24,9 @@ logger = logging.getLogger(__name__)
 
 
 class ToolRouterHook(HookProvider):
-    """BeforeToolCall hook that maps unknown tool names to shell and truncates large results.
+    """AfterToolCall hook that truncates and externalizes large results.
 
     SDK Contract:
-    - BeforeToolCallEvent: Can write to selected_tool, tool_use, cancel_tool
     - AfterToolCallEvent: Can ONLY write to result (must REPLACE, not mutate)
     """
 
@@ -37,12 +35,10 @@ class ToolRouterHook(HookProvider):
 
     def __init__(
         self,
-        shell_tool: Any,
         max_result_chars: int = 30000,
         artifacts_dir: Optional[str | Path] = None,
         artifact_threshold: Optional[int] = None,
     ) -> None:
-        self._shell_tool = shell_tool
         self._max_result_chars = max_result_chars
         if isinstance(artifacts_dir, Path):
             self._artifact_dir = artifacts_dir
@@ -58,71 +54,18 @@ class ToolRouterHook(HookProvider):
             logger.warning("artifact_threshold > max_result_chars, truncation will occur without persisting output")
 
     def register_hooks(self, registry) -> None:  # type: ignore[no-untyped-def]
-        registry.add_callback(BeforeToolCallEvent, self._on_before_tool_async)
         registry.add_callback(AfterToolCallEvent, self._truncate_large_results_async)
 
-    async def _on_before_tool_async(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Route unknown tools to shell executor."""
-        if event is None:
-            logger.warning("Received None event in _on_before_tool")
-            return
+    def _artifact_reference(self, artifact_path: Path) -> str:
+        """Return a stable reference relative to the operation output directory."""
 
-        if getattr(event, "selected_tool", None) is not None:
-            return
-
-        tool_use = getattr(event, "tool_use", {}) or {}
-        if not isinstance(tool_use, dict):
-            logger.warning("Invalid tool_use type: %s", type(tool_use))
-            return
-
-        tool_name = str(tool_use.get("name", "")).strip()
-        if not tool_name:
-            return
-
-        raw_input = tool_use.get("input", {})
-        if isinstance(raw_input, dict):
-            params: dict[str, Any] = raw_input
-        else:
-            params = {"options": str(raw_input)}
-            if isinstance(raw_input, str) and raw_input.strip().startswith("{"):
-                try:
-                    maybe = json.loads(raw_input)
-                    if isinstance(maybe, dict):
-                        params = maybe
-                except Exception:
-                    pass
-
-        options = _s(params.get("options"))
-        target = _first(
-            params.get("target"),
-            params.get("host"),
-            params.get("url"),
-            params.get("ip"),
-        )
-
-        known = {"options", "target", "host", "url", "ip"}
-        extras: list[str] = []
-        for key, value in params.items():
-            if key in known:
-                continue
-            if isinstance(value, (str, int, float)):
-                value_str = _s(value)
-                if not value_str:
-                    continue
-                flag = ("-" if len(key) == 1 else "--") + key.replace("_", "-")
-                extras.append(f"{flag} {value_str}")
-
-        parts = [tool_name]
-        if options:
-            parts.append(options)
-        if target:
-            parts.append(target)
-        if extras:
-            parts.extend(extras)
-        command = " ".join(p for p in parts if p)
-
-        event.selected_tool = self._shell_tool  # type: ignore[attr-defined]
-        tool_use["input"] = {"command": command}
+        if self._artifact_dir is None:
+            raise ValueError("artifact directory is not configured")
+        try:
+            relative = artifact_path.resolve().relative_to(self._artifact_dir.resolve().parent)
+        except ValueError:
+            relative = artifact_path.name
+        return f"artifact:{relative.as_posix()}"
 
     async def _truncate_large_results_async(self, event) -> None:
         """Truncate large tool results and externalize to artifacts.
@@ -190,9 +133,10 @@ class ToolRouterHook(HookProvider):
                 artifact_path = self._persist_artifact(tool_name, payload_bytes, ext)
 
                 if artifact_path is not None:
-                    # use absolute paths, some models will hallucinate filesystem roots
+                    artifact_ref = self._artifact_reference(artifact_path)
                     summary_lines.append(
-                        f"[Tool output: {artifact_path.stat().st_size} bytes | File: {artifact_path}]"
+                        f"[Tool output: {artifact_path.stat().st_size} bytes | "
+                        f"Artifact ID: artifact_id:{artifact_path.name} | Artifact ref: {artifact_ref}]"
                     )
                     logger.debug("saved tool output file to %s", artifact_path)
                 else:
@@ -277,14 +221,15 @@ class ToolRouterHook(HookProvider):
                 snippet = text[:truncate_target]
 
                 if externalized and artifact_path is not None:
-                    # use absolute paths, some models will hallucinate filesystem roots
+                    artifact_ref = self._artifact_reference(artifact_path)
                     summary_lines.extend(
                         [
-                            f"[Tool output: {original_size:,} chars | Inline: {len(snippet):,} chars | Full: {artifact_path}]",
+                            f"[Tool output: {original_size:,} chars | Inline: {len(snippet):,} chars | "
+                            f"Artifact ID: artifact_id:{artifact_path.name} | Artifact ref: {artifact_ref}]",
                             "",
                             snippet,
                             "",
-                            f"[Complete output saved to: {artifact_path}]",
+                            f"[Complete output: {artifact_ref}]",
                         ]
                     )
                 else:
@@ -454,30 +399,3 @@ class ToolRouterHook(HookProvider):
             )
         except Exception as e:
             logger.warning("Failed to cleanup old artifacts: %s", e, exc_info=True)
-
-
-def _s(value: Any) -> str:
-    """Safe string conversion with proper error handling."""
-    try:
-        if value is None:
-            return ""
-        # Handle potential encoding issues
-        result = str(value).strip()
-        # Validate result is valid string
-        if not isinstance(result, str):
-            return ""
-        return result
-    except (UnicodeDecodeError, UnicodeEncodeError) as e:
-        logger.debug("Unicode error in string conversion: %s", e)
-        return ""
-    except Exception as e:
-        logger.debug("Failed to convert value to string: %s", e)
-        return ""
-
-
-def _first(*values: Any) -> str:
-    for value in values:
-        converted = _s(value)
-        if converted:
-            return converted
-    return ""

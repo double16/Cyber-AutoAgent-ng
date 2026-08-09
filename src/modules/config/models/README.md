@@ -175,6 +175,10 @@ CYBER_REASONING_DENY="model-name"    # Force disable reasoning
 
 **Note:** UI config editor sets `MAX_COMPLETION_TOKENS` automatically when you configure `maxCompletionTokens` in settings.
 
+LiteLLM reasoning-capable models may still generate reasoning and receive supported reasoning parameters. Because the
+Strands LiteLLM integration uses Chat Completions, prior `reasoningContent` blocks are removed before later turns rather
+than replayed to that API.
+
 ### 2. Models.dev (Authoritative Source)
 - 500+ models across 58+ providers
 - Weekly updates with new models

@@ -27,7 +27,7 @@ def test_report_emission_flow():
 
         # Simulate the exact events emitted during report generation
         events = [
-            {"type": "step_header", "step": "FINAL REPORT", "operation": "TEST_OP"},
+            {"type": "progress_update", "step": "FINAL REPORT", "operation": "TEST_OP"},
             {"type": "output", "content": "Generating report..."},
             {"type": "report_content", "content": "# SECURITY REPORT\n\n..."},
             {
@@ -55,8 +55,8 @@ def test_report_emission_flow():
 
     # Check which events made it to stdout
     results = {
-        "step_header": "__CYBER_EVENT__" in output
-        and '"type": "step_header"' in output,
+        "progress_update": "__CYBER_EVENT__" in output
+        and '"type": "progress_update"' in output,
         "report_content": '"type": "report_content"' in output,
         "assessment_complete": '"type": "assessment_complete"' in output,
     }
@@ -75,7 +75,7 @@ def test_report_emission_flow():
         print("❌ ISSUE CONFIRMED: Critical events missing from stdout")
         print("\nLikely cause:")
         print("  - assessment_complete is marked as critical (bypasses batch)")
-        print("  - step_header is NOT marked as critical (gets batched)")
+        print("  - progress_update is NOT marked as critical (gets batched)")
         print("  - If process terminates before batch flush → events lost")
     else:
         print("✓ All events successfully emitted")
@@ -97,7 +97,7 @@ def test_critical_types_configuration():
         {"type": "error", "expected_critical": True},
         {"type": "user_handoff", "expected_critical": True},
         {"type": "assessment_complete", "expected_critical": True},
-        {"type": "step_header", "expected_critical": False},  # THIS IS THE BUG
+        {"type": "progress_update", "expected_critical": False},  # THIS IS THE BUG
         {"type": "report_content", "expected_critical": False},
         {"type": "output", "expected_critical": False},
     ]
@@ -113,8 +113,8 @@ def test_critical_types_configuration():
 
         print(f"{event['type']:20} {str(is_critical):10} {str(expected):10} {status}")
 
-        if event["type"] == "step_header" and not is_critical:
-            issues.append("step_header should be critical for FINAL REPORT visibility")
+        if event["type"] == "progress_update" and not is_critical:
+            issues.append("progress_update should be critical for FINAL REPORT visibility")
         if event["type"] == "report_content" and not is_critical:
             issues.append("report_content should be critical to avoid loss")
 
@@ -141,10 +141,10 @@ if __name__ == "__main__":
     print("=" * 70)
 
     if not test1_pass:
-        print("\n❌ BUG CONFIRMED: step_header not marked as critical")
-        print("\nFIX: Add 'step_header' to critical_types in batch_emitter.py:63")
+        print("\n❌ BUG CONFIRMED: progress_update not marked as critical")
+        print("\nFIX: Add 'progress_update' to critical_types in batch_emitter.py:63")
         print(
-            "     critical_types = {'error', 'user_handoff', 'assessment_complete', 'step_header'}"
+            "     critical_types = {'error', 'user_handoff', 'assessment_complete', 'progress_update'}"
         )
 
     if not test2_pass:

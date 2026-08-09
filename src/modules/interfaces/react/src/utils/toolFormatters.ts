@@ -222,9 +222,9 @@ export function getToonPlanPreview(content: unknown): string | null {
   return `${preview.objective}${descriptor}`;
 }
 
-function mem0_formatter(tool_name) {
+function memoryFormatter(tool_name) {
     return (input) => {
-       const action = tool_name.substring(5) || 'unknown';
+       const action = tool_name.substring(7) || 'unknown';
        if (action === 'unknown') return '';
 
         // Handle list/retrieve - show count instead of truncated JSON
@@ -242,7 +242,7 @@ function mem0_formatter(tool_name) {
          try {
            const parsed = JSON.parse(content);
 
-           // Handle mem0 result format: {results: [{memory: "..."}]}
+           // Handle memory result format: {results: [{memory: "..."}]}
            if (parsed.results && Array.isArray(parsed.results) && parsed.results.length > 0) {
              const firstResult = parsed.results[0];
              if (firstResult.memory) {
@@ -276,45 +276,56 @@ function mem0_formatter(tool_name) {
      }
 }
 
-function plan_formatter(input) {
-  let content = input.plan || '';
-
-  // Normalize content for display
-  const normalizedContent = typeof content === 'string'
-      ? content
-      : isObject(content)
-          ? (() => { try { return JSON.stringify(content); } catch { return toSafeString(content); } })()
-          : toSafeString(content);
-
-  // Try to extract TOON plan preview
-  const planPreview = getToonPlanPreview(normalizedContent);
-  const preview = planPreview ?? truncate(normalizedContent, 60);
-
-  return `plan: ${preview}`;
-}
-
 export const toolFormatters: Record<string, ToolFormatter> = {
-  mem0_store: mem0_formatter("mem0_store"),
-  mem0_get: mem0_formatter("mem0_get"),
-  mem0_retrieve: mem0_formatter("mem0_retrieve"),
-  mem0_list: mem0_formatter("mem0_list"),
-  store_plan: plan_formatter,
-  get_plan: plan_formatter,
+  memory_get: memoryFormatter("memory_get"),
+  memory_retrieve: memoryFormatter("memory_retrieve"),
+  memory_list: memoryFormatter("memory_list"),
 
-  validation_specialist: (input) => {
-    if (!input || typeof input !== 'object') {
-      return 'validating finding | 0 artifacts: ';
-    }
-
-    const finding = input.finding_description || input.finding || '';
-    const artifacts = input.artifact_paths || input.artifactPaths || [];
-    const artifactCount = Array.isArray(artifacts) ? artifacts.length : 0;
-
-    const findingPreview = finding.length > 60 ? finding.substring(0, 60) + '...' : finding;
-
-    return `validating finding | ${artifactCount} artifacts: ${findingPreview}`;
+  store_observation: (input) => {
+    const content = truncate(toSafeString(input?.content || ''), 60);
+    const artifactCount = Array.isArray(input?.artifacts) ? input.artifacts.length : 0;
+    return `storing observation | ${artifactCount} artifact${artifactCount === 1 ? '' : 's'}`
+      + (content ? ` | content: ${content}` : '');
   },
-  
+
+  store_knowledge: (input) => {
+    const content = truncate(toSafeString(input?.content || ''), 60);
+    return `storing knowledge${content ? ` | content: ${content}` : ''}`;
+  },
+
+  store_finding: (input) => {
+    const severity = toSafeString(input?.severity || 'UNKNOWN').toUpperCase();
+    const title = truncate(toSafeString(input?.title || ''), 60);
+    const target = truncate(toSafeString(input?.target || ''), 60);
+    const artifactCount = Array.isArray(input?.artifacts) ? input.artifacts.length : 0;
+    const details = [
+      `submitting finding for verification | severity: ${severity}`,
+      title ? `title: ${title}` : '',
+      target ? `target: ${target}` : '',
+      `${artifactCount} artifact${artifactCount === 1 ? '' : 's'}`,
+    ].filter(Boolean);
+    return details.join(' | ');
+  },
+
+  record_finding_validation: (input) => {
+    const findingUid = toSafeString(input?.finding_uid || '');
+    const shortUid = findingUid.length > 8 ? findingUid.slice(0, 8) : findingUid;
+    const outcome = toSafeString(input?.outcome || 'unknown').replaceAll('_', ' ');
+    const strategy = toSafeString(input?.evidence_strategy || 'direct');
+    const evidenceCount = Array.isArray(input?.evidence_artifacts) ? input.evidence_artifacts.length : 0;
+    const controlCount = Array.isArray(input?.control_artifacts) ? input.control_artifacts.length : 0;
+    const summary = truncate(toSafeString(input?.summary || ''), 60);
+    const details = [
+      `recording finding validation | outcome: ${outcome}`,
+      `strategy: ${strategy}`,
+      shortUid ? `finding: ${shortUid}` : '',
+      `evidence: ${evidenceCount}`,
+      `controls: ${controlCount}`,
+      summary ? `summary: ${summary}` : '',
+    ].filter(Boolean);
+    return details.join(' | ');
+  },
+
   shell: (input) => {
     const rawInput = input || {};
     // Prefer the most common fields in order of likelihood
@@ -377,7 +388,6 @@ export const toolFormatters: Record<string, ToolFormatter> = {
     // Build suffix flags and extras
     const flags: string[] = [];
     if (rawInput.parallel === true) flags.push('parallel');
-    if (rawInput.ignore_errors === true) flags.push('ignore_errors');
     if (rawInput.non_interactive === true) flags.push('non_interactive');
 
     const extras: string[] = [];

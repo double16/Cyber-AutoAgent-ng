@@ -1,7 +1,8 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
-import {useEventGroups, useEventStream, useSwarmTracking} from '../../../src/hooks/useEventStream.js';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
+import {useEventGroups, useEventStream} from '../../../src/hooks/useEventStream.js';
 import {EVENT_TYPES} from '../../../src/constants/config.js';
+import {describe, expect, it} from "@jest/globals";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -12,7 +13,7 @@ function renderHook<T>(hook: () => T) {
         return null;
     };
 
-    let renderer: TestRenderer.ReactTestRenderer;
+    let renderer: ReactTestRenderer;
     act(() => {
         renderer = TestRenderer.create(<Harness/>);
     });
@@ -44,7 +45,7 @@ describe('useEventStream hooks', () => {
         expect(hook.current[0].events).toHaveLength(1);
 
         act(() => {
-            hook.current[1].processEvent({type: EVENT_TYPES.STEP_HEADER, step: 3, maxSteps: 12} as any);
+            hook.current[1].processEvent({type: EVENT_TYPES.PROGRESS_UPDATE, step: 1, progressPercent: 30} as any);
             hook.current[1].processEvent({type: EVENT_TYPES.THINKING} as any);
             hook.current[1].processEvent({type: EVENT_TYPES.TOOL_START, tool_name: 'http_request'} as any);
             hook.current[1].processEvent({type: EVENT_TYPES.REASONING, content: 'first '} as any);
@@ -53,8 +54,7 @@ describe('useEventStream hooks', () => {
         });
 
         expect(hook.current[0]).toEqual(expect.objectContaining({
-            currentStep: 3,
-            maxSteps: 12,
+            progressPercentage: 30,
             isThinking: false,
             lastToolName: 'http_request',
             reasoningBuffer: ['first ', 'second'],
@@ -74,7 +74,7 @@ describe('useEventStream hooks', () => {
         });
         expect(hook.current[0]).toEqual(expect.objectContaining({
             events: [],
-            currentStep: 0,
+            progressPercentage: 0,
             reasoningBuffer: [],
             lastToolName: null,
         }));
@@ -109,45 +109,6 @@ describe('useEventStream hooks', () => {
             {type: 'single', events: [events[2]], startIdx: 2},
             {type: 'reasoning_group', events: [events[3]], startIdx: 3},
         ]);
-        hook.unmount();
-    });
-
-    it('tracks swarm operations and ignores handoffs without an active swarm', () => {
-        const hook = renderHook(() => useSwarmTracking());
-
-        act(() => {
-            hook.current.handoffAgent('none', 'ignored');
-        });
-        expect(hook.current.getActiveSwarm()).toBeNull();
-
-        act(() => {
-            hook.current.startSwarm('swarm-1', ['planner', 'tester']);
-        });
-        expect(hook.current.activeSwarmId).toBe('swarm-1');
-        expect(hook.current.getActiveSwarm()).toEqual(expect.objectContaining({
-            id: 'swarm-1',
-            currentAgent: 'planner',
-            handoffCount: 0,
-            status: 'running',
-        }));
-
-        act(() => {
-            hook.current.handoffAgent('planner', 'tester');
-        });
-        expect(hook.current.getActiveSwarm()).toEqual(expect.objectContaining({
-            currentAgent: 'tester',
-            handoffCount: 1,
-        }));
-
-        act(() => {
-            hook.current.completeSwarm('swarm-1', 'failed');
-        });
-        expect(hook.current.activeSwarmId).toBeNull();
-        expect(hook.current.swarmOperations.get('swarm-1')).toEqual(expect.objectContaining({
-            status: 'failed',
-            endTime: expect.any(Number),
-        }));
-
         hook.unmount();
     });
 });

@@ -17,6 +17,7 @@ Key Components:
 
 import json
 import os
+from copy import deepcopy
 from functools import lru_cache
 from math import ceil
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,7 +44,6 @@ from modules.config.types import (
     ServerConfig,
     MCPConnection,
     MCPConfig,
-    MEM0_PROVIDER_MAP,
     get_default_base_dir,
     RateLimitConfig,
 )
@@ -321,7 +321,10 @@ class ConfigManager:
             )
             raise ValueError(f"Unsupported provider type: {provider}")
 
-        defaults = self._default_configs[provider].copy()
+        # Environment overrides mutate nested provider configuration objects. A
+        # deep copy prevents one operation's override from changing defaults
+        # used by later operations in this process.
+        defaults = deepcopy(self._default_configs[provider])
 
         # Apply environment variable overrides
         defaults = self._apply_environment_overrides(provider, defaults)
@@ -344,7 +347,7 @@ class ConfigManager:
             ):
                 defaults["evaluation_llm"].model_id = user_model
             # Don't override swarm LLM with user model - keep swarm using v2 for better performance
-            # Swarm model can be overridden via CYBER_AGENT_SWARM_MODEL env var if needed
+            # Sub-agent model can be overridden via env var if needed
             # For Ollama, also use the same model for embeddings if mxbai-embed-large:latest is not available
             if (
                 provider == "ollama"
@@ -379,25 +382,26 @@ class ConfigManager:
         )
 
         # Build evaluation configuration (with env-aware defaults)
+        evaluation_config_default = EvaluationConfig(llm=None, embedding=None)
         evaluation_config = EvaluationConfig(
             llm=self._get_evaluation_llm_config(provider, defaults),
             embedding=self._get_evaluation_embedding_config(provider, defaults),
-            min_tool_calls=self.getenv_int("EVAL_MIN_TOOL_CALLS", 3),
-            min_evidence=self.getenv_int("EVAL_MIN_EVIDENCE", 1),
-            max_wait_secs=self.getenv_int("EVALUATION_MAX_WAIT_SECS", 30),
-            poll_interval_secs=self.getenv_int("EVALUATION_POLL_INTERVAL_SECS", 5),
-            summary_max_chars=self.getenv_int("EVAL_SUMMARY_MAX_CHARS", 8000),
-            rubric_enabled=self.getenv_bool("EVAL_RUBRIC_ENABLED", False),
-            judge_temperature=self.getenv_float("EVAL_JUDGE_TEMPERATURE", 0.2),
-            judge_max_tokens=self.getenv_int("EVAL_JUDGE_MAX_TOKENS", 800),
-            rubric_profile=self.getenv("EVAL_RUBRIC_PROFILE", "default"),
+            min_tool_calls=self.getenv_int("EVAL_MIN_TOOL_CALLS", evaluation_config_default.min_tool_calls),
+            min_evidence=self.getenv_int("EVAL_MIN_EVIDENCE", evaluation_config_default.min_evidence),
+            max_wait_secs=self.getenv_int("EVALUATION_MAX_WAIT_SECS", evaluation_config_default.max_wait_secs),
+            poll_interval_secs=self.getenv_int("EVALUATION_POLL_INTERVAL_SECS", evaluation_config_default.poll_interval_secs),
+            summary_max_chars=self.getenv_int("EVAL_SUMMARY_MAX_CHARS", evaluation_config_default.summary_max_chars),
+            rubric_enabled=self.getenv_bool("EVAL_RUBRIC_ENABLED", evaluation_config_default.rubric_enabled),
+            judge_temperature=self.getenv_float("EVAL_JUDGE_TEMPERATURE", evaluation_config_default.judge_temperature),
+            judge_max_tokens=self.getenv_int("EVAL_JUDGE_MAX_TOKENS", evaluation_config_default.judge_max_tokens),
+            rubric_profile=self.getenv("EVAL_RUBRIC_PROFILE", evaluation_config_default.rubric_profile),
             judge_system_prompt=self.getenv("EVAL_JUDGE_SYSTEM_PROMPT"),
             judge_user_template=self.getenv("EVAL_JUDGE_USER_TEMPLATE"),
             skip_if_insufficient_evidence=self.getenv_bool(
-                "EVAL_SKIP_IF_INSUFFICIENT_EVIDENCE", True
+                "EVAL_SKIP_IF_INSUFFICIENT_EVIDENCE", evaluation_config_default.skip_if_insufficient_evidence
             ),
             rationale_persist_mode=self.getenv(
-                "EVAL_RATIONALE_PERSIST_MODE", "metadata"
+                "EVAL_RATIONALE_PERSIST_MODE", evaluation_config_default.rationale_persist_mode
             ),
         )
 
@@ -414,14 +418,24 @@ class ConfigManager:
         host = self.get_ollama_host() if provider == "ollama" else None
 
         # Build SDK configuration with environment overrides
+        sdk_config_default = SDKConfig()
         sdk_config = SDKConfig(
-            enable_hooks=overrides.get("enable_hooks", True),
-            enable_streaming=overrides.get("enable_streaming", True),
+            enable_hooks=overrides.get(
+                "enable_hooks",
+                self.getenv_bool("CYBER_SDK_ENABLE_HOOKS", sdk_config_default.enable_hooks)
+            ),
+            enable_streaming=overrides.get(
+                "enable_streaming",
+                self.getenv_bool("CYBER_SDK_ENABLE_STREAMING", sdk_config_default.enable_streaming)
+            ),
             conversation_window_size=overrides.get(
                 "conversation_window_size",
-                self.getenv_int("CYBER_CONVERSATION_WINDOW", 100)
+                self.getenv_int("CYBER_CONVERSATION_WINDOW", sdk_config_default.conversation_window_size)
             ),
-            enable_telemetry=self.getenv_bool("ENABLE_SDK_TELEMETRY", True),
+            enable_telemetry=overrides.get(
+                "enable_telemetry",
+                self.getenv_bool("ENABLE_SDK_TELEMETRY", sdk_config_default.enable_telemetry),
+            )
         )
 
         config = ServerConfig(
@@ -560,7 +574,7 @@ class ConfigManager:
         - artifacts: outputs/<target>/<operation_id>/artifacts/
         - tools: outputs/<target>/<operation_id>/tools/ (for editor+load_tool meta-tooling)
 
-        Safe to call multiple times. Also copies master execution_prompt.md for optimization.
+        Safe to call multiple times.
 
         Returns:
             Dict[str, str]: Absolute paths to {'root', 'artifacts', 'tools'}
@@ -580,66 +594,9 @@ class ConfigManager:
             os.makedirs(artifacts, exist_ok=True)
             os.makedirs(tools, exist_ok=True)
 
-            # Copy master execution prompt to operation folder for optimization
-            self._copy_execution_prompt(root, module)
-
         except Exception as e:
             logger.debug("ensure_operation_output_dirs: could not create dirs: %s", e)
         return {"root": root, "artifacts": artifacts, "tools": tools}
-
-    def _copy_execution_prompt(self, operation_root: str, module: str) -> None:
-        """Copy master execution prompt to operation folder if not already present.
-
-        Args:
-            operation_root: Root directory of the operation
-            module: Module name (e.g., 'web', 'ctf')
-        """
-        from pathlib import Path
-
-        optimized_path = Path(operation_root) / "execution_prompt_optimized.txt"
-
-        # If optimized prompt already exists and has meaningful content, keep it
-        if optimized_path.exists():
-            file_size = optimized_path.stat().st_size
-            if file_size > 100:  # Anything over 100 bytes is likely real content
-                logger.debug(
-                    "Execution prompt already exists at %s (size: %d bytes)",
-                    optimized_path,
-                    file_size,
-                )
-                return
-
-        # Use the existing ModulePromptLoader to get correct paths
-        from modules.prompts import get_module_loader
-
-        module_loader = get_module_loader()
-
-        # Try to find the execution prompt file using the loader's plugins directory
-        candidate_content = module_loader.load_module_execution_prompt(module)
-
-        # If module-specific prompt not found and not already trying web, fall back
-        if (candidate_content is None or len(candidate_content) < 100) and module != "web":
-            logger.warning(
-                "Module %s execution prompt not found, falling back to web", module
-            )
-            candidate_content = module_loader.load_module_execution_prompt("web")
-
-        if candidate_content is None or len(candidate_content) < 100:
-            logger.error("No execution prompt found for module %s", module)
-            # Create a minimal prompt instead of failing silently
-            optimized_path.write_text(
-                f"# {module.upper()} Module Execution Prompt\n# No master prompt found - using minimal template\n"
-            )
-            return
-
-        try:
-            optimized_path.write_text(candidate_content)
-            logger.info(
-                "Copied master execution prompt to %s",
-                optimized_path,
-            )
-        except Exception as e:
-            logger.error("Failed to copy execution prompt: %s", e)
 
     def get_unified_memory_path(
         self, server: str, target_name: str, **overrides
@@ -659,131 +616,17 @@ class ConfigManager:
 
         return os.path.join(output_config.base_dir, sanitized_target, "memory")
 
-    def get_mem0_service_config(self, server: str, **overrides) -> Dict[str, Any]:
-        """Get complete Mem0 service configuration."""
+    def get_qdrant_memory_config(self, server: str, **overrides) -> Dict[str, Any]:
+        """Return the embedding and Qdrant settings used by semantic memory."""
         server_config = self.get_server_config(server, **overrides)
-        memory_config = server_config.memory
-
-        # Build embedder config based on server type
-        if server == "ollama":
-            embedder_config = {
-                "provider": "ollama",
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "ollama_base_url": self.get_ollama_host(),
-                },
-            }
-        elif server == "litellm":
-            prefix, base_model, model_name = self._split_litellm_model_id(
-                memory_config.embedder.model_id
-            )
-            mem0_provider = MEM0_PROVIDER_MAP.get(prefix, "huggingface")
-            embedder_config = {
-                "provider": mem0_provider,
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "embedding_dims": memory_config.embedder.dimensions,
-                },
-            }
-            if mem0_provider == "aws_bedrock":
-                embedder_config["config"]["aws_region"] = (
-                    memory_config.embedder.aws_region
-                )
-            elif mem0_provider == "azure_openai":
-                embedder_config["config"]["model"] = model_name
-                embedder_config["config"]["azure_kwargs"] = {
-                    "api_key": self.getenv("AZURE_API_KEY"),
-                    "azure_deployment": model_name,
-                    "azure_endpoint": self.getenv("AZURE_API_BASE"),
-                    "api_version": self.getenv("AZURE_API_VERSION"),
-                }
-            elif mem0_provider == "ollama":
-                embedder_config["config"]["model"] = model_name
-        elif server == "gemini":
-            raise ValueError(f"Unsupported provider: {server}")
-        elif server == "bedrock":
-            embedder_config = {
-                "provider": "aws_bedrock",
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "aws_region": memory_config.embedder.aws_region,
-                },
-            }
-        else:
-            raise ValueError(f"Unsupported provider: {server}")
-
-        # Build LLM config based on server type
-        if server == "ollama":
-            llm_config = {
-                "provider": "ollama",
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                    "ollama_base_url": self.get_ollama_host(),
-                },
-            }
-        elif server == "litellm":
-            # Map LiteLLM model prefix to a Mem0-supported provider (e.g., azure_openai, openai, aws_bedrock)
-            prefix, base_model, model_name = self._split_litellm_model_id(
-                memory_config.llm.model_id
-            )
-            mem0_llm_provider = MEM0_PROVIDER_MAP.get(prefix, "huggingface")
-            llm_config = {
-                "provider": mem0_llm_provider,
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                },
-            }
-            if mem0_llm_provider == "azure_openai":
-                llm_config["config"]["model"] = model_name
-                llm_config["config"]["azure_kwargs"] = {
-                    "api_key": self.getenv("AZURE_API_KEY"),
-                    "azure_deployment": model_name,
-                    "azure_endpoint": self.getenv("AZURE_API_BASE"),
-                    "api_version": self.getenv("AZURE_API_VERSION"),
-                }
-            if mem0_llm_provider == "ollama":
-                llm_config["config"]["model"] = model_name
-        elif server == "gemini":
-            raise ValueError(f"Unsupported provider: {server}")
-        elif server == "bedrock":
-            llm_config = {
-                "provider": "aws_bedrock",
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                },
-            }
-        else:
-            raise ValueError(f"Unsupported provider: {server}")
-
-        # Build vector store config
-        opensearch_host = self.getenv("OPENSEARCH_HOST")
-        if opensearch_host:
-            vector_store_config = {
-                "provider": "opensearch",
-                "config": memory_config.vector_store.get_config_for_provider(
-                    "opensearch", host=opensearch_host
-                ),
-            }
-        else:
-            vector_store_config = {
-                "provider": "faiss",
-                "config": memory_config.vector_store.get_config_for_provider("faiss"),
-            }
-
-        vector_store_config["config"]["embedding_model_dims"] = (
-            memory_config.embedder.dimensions
-        )
-
+        embedding = server_config.embedding
         return {
-            "embedder": embedder_config,
-            "llm": llm_config,
-            "vector_store": vector_store_config,
+            "embedding_provider": server,
+            "embedding_model": embedding.model_id,
+            "embedding_dimensions": embedding.dimensions,
+            "aws_region": self.get_default_region(),
+            "ollama_base_url": self.get_ollama_host() if server == "ollama" else None,
+            "collection_name": self.getenv("QDRANT_COLLECTION", "cyber_autoagent_memories"),
         }
 
     def validate_requirements(self, provider: str) -> None:
@@ -818,17 +661,9 @@ class ConfigManager:
         return _get_ollama_options_from_env(self.env)
 
     def set_environment_variables(self, server: str) -> None:
-        """Set environment variables for backward compatibility."""
+        """Publish the configured embedding model for memory and evaluation."""
         server_config = self.get_server_config(server)
-
-        if server == "ollama":
-            os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
-            os.environ["MEM0_LLM_PROVIDER"] = "ollama"
-            os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
-            os.environ["MEM0_EMBEDDING_MODEL"] = server_config.memory.embedder.model_id
-        else:
-            os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
-            os.environ["MEM0_EMBEDDING_MODEL"] = server_config.memory.embedder.model_id
+        os.environ["CYBER_AGENT_EMBEDDING_MODEL"] = server_config.embedding.model_id
 
     def _apply_environment_overrides(
         self, _server: str, defaults: Dict[str, Any]
@@ -907,11 +742,6 @@ class ConfigManager:
         if swarm_model and isinstance(defaults.get("swarm_llm"), LLMConfig):
             swarm_cfg = defaults["swarm_llm"]
             swarm_cfg.model_id = swarm_model
-
-        memory_llm_model = self.getenv("MEM0_LLM_MODEL")
-        if memory_llm_model and isinstance(defaults.get("memory_llm"), MemoryLLMConfig):
-            memory_llm_cfg = defaults["memory_llm"]
-            memory_llm_cfg.model_id = memory_llm_model
 
         # Apply AWS_REGION to region and aws_region fields (but not for ollama)
         if _server not in ("ollama",):
@@ -1138,15 +968,9 @@ class ConfigManager:
         # Get operation ID
         operation_id = overrides.get("operation_id")
 
-        # Get feature flags - unified output is now enabled by default
-        enable_unified_output = overrides.get(
-            "enable_unified_output", True
-        ) or self.getenv_bool("CYBER_AGENT_ENABLE_UNIFIED_OUTPUT", True)
-
         return OutputConfig(
             base_dir=base_dir,
             target_name=target_name,
-            enable_unified_output=enable_unified_output,
             operation_id=operation_id,
         )
 
@@ -1172,128 +996,6 @@ class ConfigManager:
             max_concurrent=max_concurrent,
             assume_output_tokens=assume_output_tokens
         )
-
-
-# Memory utility functions
-
-
-def align_mem0_config(model_id: Optional[str], memory_config: dict[str, Any]) -> None:
-    """Align Mem0 memory configuration provider based on model prefix.
-
-    Ensures memory provider matches the LLM provider for LiteLLM configurations.
-    Respects MEM0_LLM_MODEL override for non-Bedrock providers.
-
-    Args:
-        model_id: Model ID to extract provider from (e.g., "azure/gpt-4")
-        memory_config: Memory configuration dict to update in-place
-    """
-    if not model_id or not isinstance(memory_config, dict):
-        return
-    # Respect MEM0_LLM_MODEL override for non-Bedrock providers only. Bedrock configs
-    # still need alignment when switching to Azure/OpenAI-style models for memory LLM.
-    try:
-        if os.getenv("MEM0_LLM_MODEL"):
-            llm_section = memory_config.get("llm")
-            if isinstance(llm_section, dict):
-                current_provider = (llm_section.get("provider") or "").lower()
-                if current_provider and current_provider not in ("aws_bedrock",):
-                    logger.debug(
-                        "Skipping Mem0 alignment because MEM0_LLM_MODEL override is set and provider=%s",
-                        current_provider,
-                    )
-                    return
-    except Exception:
-        # If any issue occurs, continue with alignment logic
-        pass
-
-    # Split model ID to get provider prefix
-    prefix, remainder, remainder_variant = split_litellm_model_id(model_id)
-    if not prefix:
-        return
-    expected = MEM0_PROVIDER_MAP.get(prefix)
-    if not expected:
-        return
-    llm_section = memory_config.get("llm")
-    if not isinstance(llm_section, dict):
-        return
-    current_provider = (llm_section.get("provider") or "").lower()
-    if current_provider != expected.lower():
-        llm_section["provider"] = expected
-    config_section = llm_section.setdefault("config", {})
-    if expected == "azure_openai" and remainder_variant:
-        config_section["model"] = remainder_variant
-
-
-def check_existing_memories(target: str, _provider: str = "bedrock", operation_id: Optional[str] = None) -> bool:
-    """Check if existing memories exist for a target.
-
-    Checks FAISS, OpenSearch, or Mem0 Platform backends for existing memory.
-
-    Args:
-        target: Target system being assessed
-        _provider: Provider type for configuration (currently unused)
-        operation_id: operation ID
-
-    Returns:
-        True if existing memories are detected, False otherwise
-    """
-    try:
-        # Sanitize target name for consistent path handling
-        target_name = sanitize_target_name(target)
-
-        # Check based on backend type
-        if os.environ.get("MEM0_API_KEY"):
-            # Mem0 Platform - always check (cloud-based)
-            return True
-
-        elif os.environ.get("OPENSEARCH_HOST"):
-            # OpenSearch - always check (remote service)
-            return True
-
-        else:
-            from modules.tools.memory import memory_is_cross_operation
-
-            # FAISS - check if local store exists with actual memory content
-            # Use default relative outputs directory for compatibility with tests
-            output_dir = get_default_base_dir()
-            # Keep relative path for compatibility with tests and local runs
-            # Important: tests expect the sanitized target to include dot preserved (test.com)
-            # Our sanitize_target_name preserves dots, so join directly
-            memory_base_path = os.path.join(output_dir, target_name, "memory")
-            if operation_id and not memory_is_cross_operation():
-                memory_base_path = os.path.join(memory_base_path, operation_id)
-
-            # Check if memory directory exists and has FAISS index files
-            if os.path.exists(memory_base_path):
-                faiss_file = os.path.join(memory_base_path, "mem0.faiss")
-                pkl_file = os.path.join(memory_base_path, "mem0.pkl")
-
-                # In some environments, test fixture paths use underscore in sanitized name
-                alt_memory_base_path = os.path.join(
-                    output_dir, target_name.replace(".", "_"), "memory"
-                )
-                if operation_id and not memory_is_cross_operation():
-                    alt_memory_base_path = os.path.join(alt_memory_base_path, operation_id)
-
-                alt_faiss = os.path.join(alt_memory_base_path, "mem0.faiss")
-                alt_pkl = os.path.join(alt_memory_base_path, "mem0.pkl")
-
-                # Verify both FAISS index files exist with non-zero size
-                # In unit tests, getsize is mocked to 100; treat >0 as meaningful
-                has_faiss = (
-                    os.path.exists(faiss_file) and os.path.getsize(faiss_file) > 0
-                ) or (os.path.exists(alt_faiss) and os.path.getsize(alt_faiss) > 0)
-                has_pkl = (
-                    os.path.exists(pkl_file) and os.path.getsize(pkl_file) > 0
-                ) or (os.path.exists(alt_pkl) and os.path.getsize(alt_pkl) > 0)
-                if has_faiss and has_pkl:
-                    return True
-
-        return False
-
-    except Exception as e:
-        logger.debug("Error checking existing memories: %s", str(e))
-        return False
 
 
 # Global configuration manager instance

@@ -1,5 +1,5 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {jest} from '@jest/globals';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -32,7 +32,7 @@ function renderHook<T>(hook: () => T) {
         return null;
     };
 
-    let renderer: TestRenderer.ReactTestRenderer;
+    let renderer: ReactTestRenderer;
     act(() => {
         renderer = TestRenderer.create(<Harness/>);
     });
@@ -63,7 +63,7 @@ describe('useSlashCommands', () => {
             '/help',
             '/health',
             '/docs',
-            '/plugins',
+            '/modules',
             '/config',
             '/setup',
             '/region',
@@ -92,8 +92,11 @@ describe('useSlashCommands', () => {
         await expect(hook.current.executeSlashCommand('/docs 2')).rejects.toThrow(
             'Error executing /docs: Documentation command should be handled by useCommandHandler'
         );
-        await expect(hook.current.executeSlashCommand('/plugins web')).rejects.toThrow(
-            'Error executing /plugins: Plugins command should be handled by useCommandHandler'
+        await expect(hook.current.executeSlashCommand('/modules web')).rejects.toThrow(
+            'Error executing /modules: Modules command should be handled by useCommandHandler'
+        );
+        await expect(hook.current.executeSlashCommand('/plugins')).rejects.toThrow(
+            'Unknown command: /plugins. Type /help for available commands.'
         );
         await expect(hook.current.executeSlashCommand('/config')).rejects.toThrow(
             'Error executing /config: Config command should be handled by useCommandHandler'

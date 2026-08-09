@@ -42,7 +42,9 @@ interface AppProps {
   target?: string;
   objective?: string;
   autoRun?: boolean;
-  iterations?: number;
+  maxDuration?: number;
+  maxTokens?: number;
+  maxCost?: number;
   provider?: string;
   model?: string;
   region?: string;
@@ -56,7 +58,9 @@ const AppContent: React.FC<AppProps> = ({
   target, 
   objective, 
   autoRun, 
-  iterations, 
+  maxDuration,
+  maxTokens,
+  maxCost,
   provider, 
   model, 
   region 
@@ -170,23 +174,7 @@ const AppContent: React.FC<AppProps> = ({
     escSuppressUntilRef.current = Date.now() + 1500; // Suppress for 1.5s
     try { await operationManager.handleAssessmentCancel(); } catch {}
   }, [operationManager]);
-  
-  const handleEscapeExit = useCallback(() => {
-    // Immediate exit at main screen (no operation running, no modal, not in setup)
-    // Avoid logging or delays to honor user expectation of instant exit
-    exit();
-  }, [exit]);
-  
-  useKeyboardHandlers({
-    activeOperation: appState.activeOperation,
-    isTerminalInteractive: isTerminalInteractive,
-    onAssessmentPause: operationManager.handleAssessmentPause,
-    onAssessmentCancel: cancelAndSuppress, // Kill switch with notification + ESC suppression
-    onScreenClear: handleScreenClear,
-    onEscapeExit: handleEscapeExit,
-    allowGlobalEscape: allowGlobalEscape // Only allow ESC to exit when no modals are open
-  });
-  
+
   // Request-exit helper: add notification to application log area, then exit
   const escExitTriggeredRef = React.useRef(false);
   const requestExitWithLog = React.useCallback(() => {
@@ -203,6 +191,20 @@ const AppContent: React.FC<AppProps> = ({
       try { (process as any).exit?.(0); } catch { exit(); }
     }, 300);
   }, [actions, appState, exit, modalManager]);
+
+  const handleEscapeExit = useCallback(() => {
+    requestExitWithLog();
+  }, [requestExitWithLog]);
+
+  useKeyboardHandlers({
+    activeOperation: appState.activeOperation,
+    isTerminalInteractive: isTerminalInteractive,
+    onAssessmentPause: operationManager.handleAssessmentPause,
+    onAssessmentCancel: cancelAndSuppress, // Kill switch with notification + ESC suppression
+    onScreenClear: handleScreenClear,
+    onEscapeExit: handleEscapeExit,
+    allowGlobalEscape: allowGlobalEscape // Only allow ESC to exit when no modals are open
+  });
 
   // Global ESC safety net: exit immediately at main screen even if another handler misses ESC
   useInput((input, key) => {
@@ -427,7 +429,9 @@ const AppContent: React.FC<AppProps> = ({
     target,
     module,
     objective,
-    iterations,
+    maxDuration,
+    maxTokens,
+    maxCost,
     provider,
     model,
     region,

@@ -19,6 +19,9 @@ import { ModalRegistry } from './ModalRegistry.js';
 import { ApplicationState } from '../hooks/useApplicationState.js';
 import { OperationHistoryEntry } from '../hooks/useOperationManager.js';
 import { ModalType } from '../hooks/useModalManager.js';
+import type { ThinkingStatus } from '../types/thinking.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
+import { setOperationTerminalTitle } from '../utils/terminalTitle.js';
 
 interface MainAppViewProps {
   appState: ApplicationState;
@@ -42,6 +45,13 @@ interface MainAppViewProps {
   applicationConfig?: any; // Application configuration
   terminalCleanupRef?: React.MutableRefObject<(() => void) | null>;
 }
+
+const formatTaskScope = (event: any): string => {
+  const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
+  const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
+  if (!scope || scope === 'all') return '';
+  return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
 
 export const MainAppView: React.FC<MainAppViewProps> = ({
   appState,
@@ -77,7 +87,17 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
   const { stdout } = useStdout();
   const [deferStreamMount, setDeferStreamMount] = useState(false);
   const prevShowStreamRef = useRef<boolean>(false);
+  const deferStreamMountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hasStreamBegun, setHasStreamBegun] = useState(false);
+  const [thinkingStatus, setThinkingStatus] = useState<ThinkingStatus>({ active: false });
+  const [currentTaskTitle, setCurrentTaskTitle] = useState<string | null>(null);
+
+  const clearDeferStreamMountTimer = useCallback(() => {
+    if (deferStreamMountTimerRef.current) {
+      clearTimeout(deferStreamMountTimerRef.current);
+      deferStreamMountTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     const prev = prevShowStreamRef.current;
@@ -87,7 +107,11 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
       // causing the viewport to jump to the top and the footer to disappear briefly.
       // Instead, only defer the stream mount so the header paints first on this tick.
       setDeferStreamMount(true);
-      setTimeout(() => setDeferStreamMount(false), 0);
+      clearDeferStreamMountTimer();
+      deferStreamMountTimerRef.current = setTimeout(() => {
+        deferStreamMountTimerRef.current = null;
+        setDeferStreamMount(false);
+      }, 0);
       // A new stream is starting; allow header for this run
       setHasAnyOperationEnded(false);
     }
@@ -97,10 +121,16 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
       // We keep scrollback so users can review the previous operation's output
       // while returning to the main screen. If duplicate headers are a concern,
       // we can address them by adjusting header rendering, not by clearing.
+      clearDeferStreamMountTimer();
+      setDeferStreamMount(false);
     }
 
     prevShowStreamRef.current = showOperationStream;
-  }, [showOperationStream, stdout]);
+  }, [showOperationStream, stdout, clearDeferStreamMountTimer]);
+
+  useEffect(() => () => {
+    clearDeferStreamMountTimer();
+  }, [clearDeferStreamMountTimer]);
 
   // Reset flag when operation changes
   useEffect(() => {
@@ -109,10 +139,16 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
 
   const hasStreamBegunRef = useRef(false);
   const handleStreamEvent = useCallback((event: any) => {
-    if (hasStreamBegunRef.current) return;
     const eventType = event?.type;
+    if (eventType === 'task_started') {
+      const title = typeof event?.title === 'string' ? event.title.trim() : '';
+      setCurrentTaskTitle(title ? `${title}${formatTaskScope(event)}` : null);
+    } else if (eventType === 'task_done' || eventType === 'task_deferred') {
+      setCurrentTaskTitle(null);
+    }
+    if (hasStreamBegunRef.current) return;
     // Mark as begun on first meaningful content
-    if (eventType === 'reasoning' || eventType === 'model_stream_delta' || eventType === 'content_block_delta' || eventType === 'output' || eventType === 'command' || eventType === 'tool_start' || eventType === 'tool_invocation_start') {
+    if (eventType === 'reasoning' || eventType === 'model_stream_delta' || eventType === 'content_block_delta' || eventType === 'output' || eventType === 'command' || eventType === 'tool_start' || eventType === 'tool_invocation_start' || eventType === 'tool_discovery_start' || eventType === 'tool_available' || eventType === 'tool_unavailable' || eventType === 'environment_ready') {
       hasStreamBegunRef.current = true;
       setHasStreamBegun(true);
     }
@@ -120,10 +156,32 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
 
   // Once any operation completes or is stopped (ESC), suppress showing the header again
   const [hasAnyOperationEnded, setHasAnyOperationEnded] = useState(false);
+
+  useEffect(() => {
+    const operationRunning = appState.activeOperation?.status === 'running' && !hasAnyOperationEnded;
+    setOperationTerminalTitle(
+      operationRunning ? appState.operationHealth : null,
+      operationRunning ? appState.activeOperation?.target : null,
+      stdout,
+    );
+  }, [
+    appState.activeOperation?.status,
+    appState.activeOperation?.target,
+    appState.operationHealth,
+    hasAnyOperationEnded,
+    stdout,
+  ]);
+
+  useEffect(() => () => {
+    setOperationTerminalTitle(null, null, stdout);
+  }, [stdout]);
+
   const handleLifecycleEvent = useCallback((event: any) => {
     const type = event?.type;
     if (type === 'operation_complete' || type === 'stopped' || type === 'complete') {
       setHasAnyOperationEnded(true);
+      setThinkingStatus({ active: false });
+      setCurrentTaskTitle(null);
     }
   }, []);
 
@@ -142,6 +200,14 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
   const handleMetricsUpdate = useCallback((metrics: any) => {
     actionsRef.current.updateMetrics?.(metrics);
   }, []); // No dependencies - uses ref to prevent re-creation
+
+  const handleHealthUpdate = useCallback((health: OperationHealthSnapshot) => {
+    actionsRef.current.updateHealth?.(health);
+  }, []);
+
+  const handleThinkingUpdate = useCallback((status: ThinkingStatus) => {
+    setThinkingStatus(status);
+  }, []);
 
   // Also reset header suppression when a brand-new activeOperation appears in running state
   useEffect(() => {
@@ -162,6 +228,20 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
       });
     }
   }, [appState.activeOperation?.id, appState.activeOperation?.status]);
+
+  useEffect(() => {
+    setThinkingStatus({ active: false });
+    setCurrentTaskTitle(null);
+  }, [appState.activeOperation?.id]);
+
+  useEffect(() => {
+    if (!showOperationStream || activeModal !== ModalType.NONE) {
+      setThinkingStatus({ active: false });
+      if (!showOperationStream) {
+        setCurrentTaskTitle(null);
+      }
+    }
+  }, [activeModal, showOperationStream]);
 
   // Minimal cosmetic autoscroll toggle (UI only for now)
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
@@ -273,6 +353,8 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
               collapsed={activeModal !== ModalType.NONE}
               onEvent={handleEvent}
               onMetricsUpdate={handleMetricsUpdate}
+              onHealthUpdate={handleHealthUpdate}
+              onThinkingUpdate={handleThinkingUpdate}
               animationsEnabled={isAutoScrollEnabled && activeModal === ModalType.NONE}
               cleanupRef={terminalCleanupRef}
             />
@@ -288,6 +370,8 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
             onInput={onInput}
             disabled={!isTerminalInteractive && !appState.userHandoffActive}
             userHandoffActive={appState.userHandoffActive}
+            commandHistory={appState.commandHistory}
+            onCommandHistoryPush={actions.pushCommandHistory}
           />
         )}
         
@@ -302,12 +386,15 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
           <Footer 
             model={appState.activeOperation?.model || ""}
             operationMetrics={appState.operationMetrics}
+            operationHealth={appState.operationHealth}
             connectionStatus={appState.isDockerServiceAvailable ? 'connected' : 'offline'}
             modelProvider={applicationConfig?.modelProvider}
             deploymentMode={applicationConfig?.deploymentMode}
             isOperationRunning={appState.activeOperation ? appState.activeOperation.status === 'running' : false}
             isInputPaused={appState.userHandoffActive}
             operationName={!hasStreamBegun && appState.activeOperation ? (appState.activeOperation.description || 'Running assessment') : undefined}
+            thinkingStatus={thinkingStatus.active ? {...thinkingStatus, taskTitle: thinkingStatus.taskTitle ?? currentTaskTitle} : thinkingStatus}
+            animationsEnabled={isAutoScrollEnabled && activeModal === ModalType.NONE}
           />
         )}
       </Box>

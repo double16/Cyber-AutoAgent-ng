@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import urllib3
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -30,9 +30,13 @@ def _coerce_str(arg: bytes | str | None) -> str:
 
 
 @tool
-def auth_chain_analyzer(target_url: str, auth_type: str = "auto") -> str:
+def auth_chain_analyzer(
+        target_url: str,
+        auth_type: str = "auto",
+        output_file: Optional[str] = None
+) -> str:
     """
-    Map auth flows + identify/validate auth bypass surfaces for a target. Returns JSON ONLY.
+    Map auth flows + identify/validate auth bypass surfaces for a target. Supported: JWT, OAuth, SAML, cookies, sessions.
 
     CALL WHEN
     - Auth blocks progress (30x→login/SSO, 401/403 on key pages/APIs), or you need auth-flow mapping.
@@ -49,6 +53,7 @@ def auth_chain_analyzer(target_url: str, auth_type: str = "auto") -> str:
     ARGS
     - target_url: base URL/domain (scheme optional; https assumed)
     - auth_type: "jwt"|"oauth"|"saml"|"session"|"auto" (use specific type to reduce noise)
+    - output_file: path to write results to disk
 
     RETURNS (JSON)
     - summary: mechanism/token types, confirmed_exploits count
@@ -246,6 +251,10 @@ def auth_chain_analyzer(target_url: str, auth_type: str = "auto") -> str:
             indent=2,
         )
 
+    if output_file:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(output)
     return output
 
 
@@ -1820,9 +1829,10 @@ def main() -> int:
         choices=["jwt", "oauth", "saml", "session", "auto"],
         help="Authentication type to focus on (default: auto)",
     )
+    parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
 
     args = parser.parse_args()
-    print(auth_chain_analyzer(args.target_url, auth_type=args.auth_type))
+    print(auth_chain_analyzer(args.target_url, auth_type=args.auth_type, output_file=args.output_file))
     return 0
 
 

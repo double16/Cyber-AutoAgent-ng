@@ -3,10 +3,12 @@
 import argparse
 import json
 import os
+import re
 import signal
 import sys
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from strands.types.exceptions import MaxTokensReachedException
@@ -17,10 +19,67 @@ from strands.types.exceptions import MaxTokensReachedException
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import cyberautoagent
+from modules.handlers.tool_recovery import ToolOutcomeJournal
+
+
+@pytest.fixture(autouse=True)
+def restore_working_directory_after_test():
+    """Prevent operation-scoped CLI working directories from leaking between tests."""
+
+    original_cwd = Path.cwd()
+    yield
+    os.chdir(original_cwd)
+
+
+@pytest.fixture(autouse=True)
+def bypass_live_target_preflight(monkeypatch):
+    """Keep CLI integration tests deterministic and free of host-network dependencies."""
+
+    def successful_preflight(*, logical_target, objective, operation_id, logger, **_kwargs):
+        targets = cyberautoagent.resolve_operation_targets(logical_target, objective)
+        results = [
+            cyberautoagent.TargetValidationResult(
+                target.target_id,
+                target.value,
+                target.type,
+                "pass",
+                ("test_bypass",),
+            )
+            for target in targets
+        ]
+        return targets, results
+
+    monkeypatch.setattr(cyberautoagent, "run_target_preflight", successful_preflight)
+
+
+@pytest.fixture(autouse=True)
+def bypass_live_memory_client(monkeypatch):
+    """Keep CLI workflow tests independent of local Qdrant/Ollama availability."""
+
+    monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock())
 
 
 class TestCLIArguments:
     """Test command-line argument parsing"""
+
+    def test_invalid_memory_mode_environment_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("CYBER_MEMORY_MODE", "automatic")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "cyberautoagent.py",
+                "--target",
+                "test.com",
+                "--objective",
+                "test objective",
+            ],
+        )
+
+        with pytest.raises(SystemExit) as error:
+            cyberautoagent.main()
+
+        assert error.value.code == 2
 
     def test_required_arguments(self):
         """Test that required arguments are parsed correctly"""
@@ -38,7 +97,7 @@ class TestCLIArguments:
             with (
                 patch("cyberautoagent.setup_logging"),
                 patch("cyberautoagent.auto_setup", return_value=[]),
-                patch("cyberautoagent.create_agent", return_value=(Mock(), Mock())),
+                patch("cyberautoagent.create_agent", return_value=Mock()),
                 patch("cyberautoagent.get_initial_prompt"),
                 patch("cyberautoagent.print_banner"),
                 patch("cyberautoagent.print_section"),
@@ -48,19 +107,19 @@ class TestCLIArguments:
                 parser = argparse.ArgumentParser()
                 parser.add_argument("--objective", type=str, required=True)
                 parser.add_argument("--target", type=str, required=True)
-                parser.add_argument("--iterations", type=int, default=100)
+                parser.add_argument("--max-duration", type=int, required=True)
                 parser.add_argument("--verbose", action="store_true")
                 parser.add_argument("--model", type=str)
                 parser.add_argument("--region", type=str, default="us-east-1")
                 parser.add_argument("--server", type=str, choices=["remote", "local"], default="remote")
                 parser.add_argument("--confirmations", action="store_true")
 
-                args = parser.parse_args(["--target", "test.com", "--objective", "test objective"])
+                args = parser.parse_args(["--target", "test.com", "--objective", "test objective", "--max-duration", "300"])
 
                 assert args.target == "test.com"
                 assert args.objective == "test objective"
                 assert args.server == "remote"  # default
-                assert args.iterations == 100  # default
+                assert args.max_duration == 300
                 assert not args.verbose  # default
                 assert not args.confirmations  # default
 
@@ -85,7 +144,7 @@ class TestCLIArguments:
         parser = argparse.ArgumentParser()
         parser.add_argument("--objective", type=str, required=True)
         parser.add_argument("--target", type=str, required=True)
-        parser.add_argument("--iterations", type=int, default=100)
+        parser.add_argument("--max-duration", type=int, required=True)
         parser.add_argument("--verbose", action="store_true")
         parser.add_argument("--model", type=str)
         parser.add_argument("--region", type=str, default="us-east-1")
@@ -100,8 +159,8 @@ class TestCLIArguments:
                 "test objective",
                 "--server",
                 "local",
-                "--iterations",
-                "50",
+                "--max-duration",
+                "120",
                 "--verbose",
                 "--model",
                 "custom-model",
@@ -114,7 +173,7 @@ class TestCLIArguments:
         assert args.target == "test.com"
         assert args.objective == "test objective"
         assert args.server == "local"
-        assert args.iterations == 50
+        assert args.max_duration == 120
         assert args.verbose is True
         assert args.model == "custom-model"
         assert args.region == "us-west-2"
@@ -144,12 +203,71 @@ class TestCLIArguments:
         assert args.output_dir == "/custom/output"
         assert args.keep_memory is True  # Default is now True
 
+    def test_budget_arguments(self):
+        """Test that token and cost budget arguments are properly parsed"""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--target", type=str, required=True)
+        parser.add_argument("--objective", type=str, required=True)
+        parser.add_argument("--max-duration", type=int, required=True)
+        parser.add_argument("--max-tokens", dest="max_tokens", type=int, default=None)
+        parser.add_argument("--max-cost", dest="max_cost", type=float, default=None)
+
+        args = parser.parse_args(
+            [
+                "--target",
+                "test.com",
+                "--objective",
+                "test objective",
+                "--max-duration",
+                "60",
+                "--max-tokens",
+                "250000",
+                "--max-cost",
+                "12.34",
+            ]
+        )
+
+        assert args.max_duration == 60
+        assert args.max_tokens == 250000
+        assert args.max_cost == 12.34
+
+    @pytest.mark.parametrize(
+        "flag,value",
+        [
+            ("--max-tokens", "not-an-int"),
+            ("--max-cost", "not-a-float"),
+        ],
+    )
+    def test_budget_arguments_reject_invalid_types(self, flag, value):
+        """Test that token and cost budget arguments reject invalid values"""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--target", type=str, required=True)
+        parser.add_argument("--objective", type=str, required=True)
+        parser.add_argument("--max-duration", type=int, required=True)
+        parser.add_argument("--max-tokens", dest="max_tokens", type=int, default=None)
+        parser.add_argument("--max-cost", dest="max_cost", type=float, default=None)
+
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "--target",
+                    "test.com",
+                    "--objective",
+                    "test objective",
+                    "--max-duration",
+                    "60",
+                    flag,
+                    value,
+                ]
+            )
+
 
 class TestMainFunction:
     """Test main function execution flow"""
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -163,6 +281,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "bedrock",
         ],
@@ -174,6 +294,7 @@ class TestMainFunction:
         mock_print_banner,
         mock_get_prompt,
         mock_create_agent,
+        mock_create_agent_runtime_resources,
         mock_auto_setup,
         mock_setup_logging,
     ):
@@ -182,20 +303,19 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
             "capability_expansion": ["tool1", "tool2"],
         }
-        mock_handler.get_evidence_summary.return_value = []
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = ["nmap", "nikto"]
         mock_get_prompt.return_value = "test prompt"
 
@@ -203,14 +323,18 @@ class TestMainFunction:
         mock_agent.return_value = "Agent response"
 
         # This should not raise any exceptions
-        try:
-            cyberautoagent.main()
-        except SystemExit as e:
-            # main() calls sys.exit(0) on success, which is expected
-            assert e.code in [None, 0]
+        with patch("cyberautoagent.MultiAgentWorkflowController") as mock_workflow_controller:
+            try:
+                cyberautoagent.main()
+            except SystemExit as e:
+                # main() calls sys.exit(0) on success, which is expected
+                assert e.code in [None, 0]
+
+        mock_workflow_controller.return_value.run.assert_called_once()
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -224,6 +348,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "ollama",
         ],
@@ -235,6 +361,7 @@ class TestMainFunction:
         mock_print_banner,
         mock_get_prompt,
         mock_create_agent,
+        mock_create_agent_runtime_resources,
         mock_auto_setup,
         mock_setup_logging,
     ):
@@ -243,34 +370,37 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
             "capability_expansion": ["tool1", "tool2"],
         }
-        mock_handler.get_evidence_summary.return_value = []
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = []
         mock_get_prompt.return_value = "test prompt"
 
         # Mock agent execution to return normally, then trigger completion
         mock_agent.return_value = "Agent response"
 
-        try:
-            cyberautoagent.main()
-        except SystemExit as e:
-            # main() calls sys.exit(0) on success, which is expected
-            assert e.code in [None, 0]
+        with patch("cyberautoagent.MultiAgentWorkflowController") as mock_workflow_controller:
+            try:
+                cyberautoagent.main()
+            except SystemExit as e:
+                # main() calls sys.exit(0) on success, which is expected
+                assert e.code in [None, 0]
+
+        mock_workflow_controller.return_value.run.assert_called_once()
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -284,6 +414,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "ollama",
             "--continue",
@@ -297,6 +429,7 @@ class TestMainFunction:
             mock_print_banner,
             mock_get_prompt,
             mock_create_agent,
+            mock_create_agent_runtime_resources,
             mock_auto_setup,
             mock_setup_logging,
     ):
@@ -305,34 +438,37 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
             "capability_expansion": ["tool1", "tool2"],
         }
-        mock_handler.get_evidence_summary.return_value = []
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = []
         mock_get_prompt.return_value = "test prompt"
 
         # Mock agent execution to return normally, then trigger completion
         mock_agent.return_value = "Agent response"
 
-        try:
-            cyberautoagent.main()
-        except SystemExit as e:
-            # main() calls sys.exit(0) on success, which is expected
-            assert e.code in [None, 0]
+        with patch("cyberautoagent.MultiAgentWorkflowController") as mock_workflow_controller:
+            try:
+                cyberautoagent.main()
+            except SystemExit as e:
+                # main() calls sys.exit(0) on success, which is expected
+                assert e.code in [None, 0]
+
+        mock_workflow_controller.return_value.run.assert_called_once()
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -346,6 +482,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "ollama",
             "--report",
@@ -359,6 +497,7 @@ class TestMainFunction:
             mock_print_banner,
             mock_get_prompt,
             mock_create_agent,
+            mock_create_agent_runtime_resources,
             mock_auto_setup,
             mock_setup_logging,
     ):
@@ -367,44 +506,55 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
             "capability_expansion": ["tool1", "tool2"],
         }
-        mock_handler.get_evidence_summary.return_value = []
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = []
         mock_get_prompt.return_value = "test prompt"
 
         # Mock agent execution to return normally, then trigger completion
         mock_agent.return_value = "Agent response"
 
-        try:
-            cyberautoagent.main()
-        except SystemExit as e:
-            # main() calls sys.exit(0) on success, which is expected
-            assert e.code in [None, 0]
+        with patch("cyberautoagent.MultiAgentWorkflowController") as mock_workflow_controller:
+            try:
+                cyberautoagent.main()
+            except SystemExit as e:
+                # main() calls sys.exit(0) on success, which is expected
+                assert e.code in [None, 0]
+
+        mock_workflow_controller.return_value.run.assert_called_once()
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.print_status")
     @patch(
         "sys.argv",
-        ["cyberautoagent.py", "--target", "test.com", "--objective", "test objective"],
+        ["cyberautoagent.py", "--target", "test.com", "--objective", "test objective", "--max-duration", "60"],
     )
-    def test_main_create_agent_failure(self, mock_print_status, mock_create_agent, mock_auto_setup, mock_setup_logging):
+    def test_main_create_agent_failure(
+        self,
+        mock_print_status,
+        mock_create_agent,
+        mock_create_agent_runtime_resources,
+        mock_auto_setup,
+        mock_setup_logging,
+    ):
         """Test main function when create_agent fails"""
 
         mock_create_agent.side_effect = Exception("Agent creation failed")
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=Mock())
         mock_auto_setup.return_value = []
 
         with pytest.raises(SystemExit) as exc_info:
@@ -414,6 +564,7 @@ class TestMainFunction:
 
     @patch("cyberautoagent.setup_logging")
     @patch("cyberautoagent.auto_setup")
+    @patch("cyberautoagent.create_agent_runtime_resources")
     @patch("cyberautoagent.create_agent")
     @patch("cyberautoagent.get_initial_prompt")
     @patch("cyberautoagent.print_banner")
@@ -427,6 +578,8 @@ class TestMainFunction:
             "test.com",
             "--objective",
             "test objective",
+            "--max-duration",
+            "60",
             "--provider",
             "ollama",
             "--mcp-enabled",
@@ -441,6 +594,7 @@ class TestMainFunction:
             mock_print_banner,
             mock_get_prompt,
             mock_create_agent,
+            mock_create_agent_runtime_resources,
             mock_auto_setup,
             mock_setup_logging,
     ):
@@ -449,31 +603,33 @@ class TestMainFunction:
         # Setup mocks
         mock_agent = Mock()
         mock_handler = Mock()
-        mock_handler.steps = 5
         mock_handler.has_reached_limit.return_value = False
         mock_handler.get_summary.return_value = {
-            "total_steps": 5,
+            "total_actions": 0,
             "tools_created": 2,
             "evidence_collected": 3,
             "memory_operations": 4,
             "capability_expansion": ["tool1", "tool2"],
         }
-        mock_handler.get_evidence_summary.return_value = []
         mock_handler.tool_counts.return_value = {}
         mock_handler.tool_counts.values.return_value = []
 
-        mock_create_agent.return_value = (mock_agent, mock_handler)
+        mock_create_agent.return_value = mock_agent
+        mock_create_agent_runtime_resources.return_value = SimpleNamespace(callback_handler=mock_handler)
         mock_auto_setup.return_value = []
         mock_get_prompt.return_value = "test prompt"
 
         # Mock agent execution to return normally, then trigger completion
         mock_agent.return_value = "Agent response"
 
-        try:
-            cyberautoagent.main()
-        except SystemExit as e:
-            # main() calls sys.exit(0) on success, which is expected
-            assert e.code in [None, 0]
+        with patch("cyberautoagent.MultiAgentWorkflowController") as mock_workflow_controller:
+            try:
+                cyberautoagent.main()
+            except SystemExit as e:
+                # main() calls sys.exit(0) on success, which is expected
+                assert e.code in [None, 0]
+
+        mock_workflow_controller.return_value.run.assert_called_once()
 
 
 class TestEnvironmentVariables:
@@ -552,8 +708,33 @@ def test_cli_helpers_signal_and_workspace_markers(monkeypatch, tmp_path):
         cyberautoagent.signal_handler(signal.SIGINT, None)
 
 
+def test_recovery_guidance_with_failed_command_help_uses_catalog_context(monkeypatch):
+    recovery_hook = SimpleNamespace(
+        unresolved=True,
+        failed_executable="feroxbuster",
+        recovery_guidance=Mock(return_value="guidance with help"),
+    )
+    catalog_context = Mock(return_value="command: feroxbuster\nUsage: feroxbuster --help")
+    monkeypatch.setattr(cyberautoagent, "get_shell_command_help_context", catalog_context)
+
+    guidance = cyberautoagent._recovery_guidance_with_failed_command_help(recovery_hook, ["feroxbuster"])
+
+    catalog_context.assert_called_once_with("feroxbuster", ["feroxbuster"])
+    recovery_hook.recovery_guidance.assert_called_once_with("command: feroxbuster\nUsage: feroxbuster --help")
+    assert guidance == "guidance with help"
+
+
+def test_recovery_guidance_with_failed_command_help_omits_resolved_hook(monkeypatch):
+    recovery_hook = SimpleNamespace(unresolved=False, failed_executable="feroxbuster")
+    catalog_context = Mock()
+    monkeypatch.setattr(cyberautoagent, "get_shell_command_help_context", catalog_context)
+
+    assert cyberautoagent._recovery_guidance_with_failed_command_help(recovery_hook, ["feroxbuster"]) == ""
+    catalog_context.assert_not_called()
+
+
 def test_cli_deployment_telemetry_and_signal_variants(monkeypatch):
-    logger = SimpleNamespace(info=Mock(), debug=Mock())
+    logger = SimpleNamespace(info=Mock(), debug=Mock(), warning=Mock())
 
     monkeypatch.setattr(cyberautoagent, "is_docker", lambda: True)
     monkeypatch.setattr(cyberautoagent.requests, "get", Mock(side_effect=RuntimeError("down")))
@@ -565,6 +746,7 @@ def test_cli_deployment_telemetry_and_signal_variants(monkeypatch):
     telemetry = SimpleNamespace(setup_otlp_exporter=Mock())
     monkeypatch.setattr(cyberautoagent, "StrandsTelemetry", lambda: telemetry)
     monkeypatch.setattr(cyberautoagent, "detect_deployment_mode", lambda: "compose")
+    monkeypatch.setattr(cyberautoagent, "is_langfuse_available", lambda: True)
     monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
     monkeypatch.setenv("CYBER_UI_MODE", "cli")
     assert cyberautoagent.setup_telemetry(logger) is telemetry
@@ -587,6 +769,41 @@ def test_cli_deployment_telemetry_and_signal_variants(monkeypatch):
         cyberautoagent.signal_handler(999, None)
 
 
+def test_setup_telemetry_falls_back_when_langfuse_is_unavailable(monkeypatch):
+    logger = SimpleNamespace(info=Mock(), debug=Mock(), warning=Mock())
+    telemetry = SimpleNamespace(setup_otlp_exporter=Mock())
+    monkeypatch.setattr(cyberautoagent, "StrandsTelemetry", lambda: telemetry)
+    monkeypatch.setattr(cyberautoagent, "detect_deployment_mode", lambda: "compose")
+    monkeypatch.setattr(cyberautoagent, "is_langfuse_available", lambda: False)
+    monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("CYBER_UI_MODE", "cli")
+
+    assert cyberautoagent.setup_telemetry(logger) is telemetry
+
+    telemetry.setup_otlp_exporter.assert_not_called()
+    logger.warning.assert_called_once_with(
+        "Langfuse is unavailable; continuing with local telemetry only"
+    )
+
+
+def test_setup_telemetry_falls_back_when_exporter_setup_fails(monkeypatch):
+    logger = SimpleNamespace(info=Mock(), debug=Mock(), warning=Mock())
+    error = RuntimeError("missing exporter")
+    telemetry = SimpleNamespace(setup_otlp_exporter=Mock(side_effect=error))
+    monkeypatch.setattr(cyberautoagent, "StrandsTelemetry", lambda: telemetry)
+    monkeypatch.setattr(cyberautoagent, "detect_deployment_mode", lambda: "compose")
+    monkeypatch.setattr(cyberautoagent, "is_langfuse_available", lambda: True)
+    monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("CYBER_UI_MODE", "cli")
+
+    assert cyberautoagent.setup_telemetry(logger) is telemetry
+
+    logger.warning.assert_called_once_with(
+        "Unable to configure OTLP exporter; continuing with local telemetry only: %s",
+        error,
+    )
+
+
 def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
     class Provider:
         value = "ollama"
@@ -606,43 +823,33 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
 
     class FakeCallback:
         def __init__(self):
-            self.current_step = 0
-            self.max_steps = 2
             self.tool_counts = {}
-            self.pending_step_header = False
             self._emitted_any_reasoning = False
-            self.stop_tool_used = False
             self.termination_reason = None
 
         def process_metrics(self, metrics):
             self.metrics = metrics.accumulated_usage
 
         def should_stop(self):
-            return self.current_step >= 1
+            return hasattr(self, "metrics")
 
         def has_reached_limit(self):
             return False
 
         def get_summary(self):
             return {
-                "total_steps": self.current_step,
+                "duration": "1s",
                 "tools_created": 0,
                 "evidence_collected": 0,
                 "memory_operations": 0,
                 "capability_expansion": [],
             }
 
-        def get_evidence_summary(self):
-            return []
-
-        def ensure_report_generated(self, *_args):
+        def ensure_report_generated(self, *_args, **_kwargs):
             self.report_generated = True
 
         def trigger_evaluation_on_completion(self):
             self.evaluation_triggered = True
-
-        def wait_for_evaluation_completion(self, timeout):
-            self.evaluation_timeout = timeout
 
         def emit_termination(self, reason, message):
             self.termination_reason = reason
@@ -666,7 +873,7 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
 
     monkeypatch.setenv("CYBER_UI_MODE", "react")
     monkeypatch.setenv("CYBERAGENT_NO_BANNER", "1")
-    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--iterations", "2", "--provider", "ollama"])
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"])
     monkeypatch.setattr(cyberautoagent.signal, "signal", Mock())
     monkeypatch.setattr(cyberautoagent, "ensure_workspace_marker_files", Mock())
     monkeypatch.setattr(cyberautoagent, "get_config_manager", lambda: config_manager)
@@ -677,9 +884,12 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
     monkeypatch.setattr(cyberautoagent.atexit, "register", Mock())
     monkeypatch.setattr(cyberautoagent, "configure_model_rate_limits", Mock())
     monkeypatch.setattr(cyberautoagent, "auto_setup", Mock(return_value=["shell"]))
-    monkeypatch.setattr(cyberautoagent, "create_agent", Mock(return_value=(fake_agent, callback)))
+    workflow = Mock()
+    workflow_controller = Mock(return_value=workflow)
+    monkeypatch.setattr(cyberautoagent, "MultiAgentWorkflowController", workflow_controller)
+    monkeypatch.setattr(cyberautoagent, "create_agent_runtime_resources", Mock(return_value=SimpleNamespace(callback_handler=callback)))
+    monkeypatch.setattr(cyberautoagent, "create_agent", Mock(return_value=fake_agent))
     monkeypatch.setattr(cyberautoagent, "print_status", Mock())
-    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
     monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
     monkeypatch.setattr(cyberautoagent.browser, "close_browser", Mock())
     monkeypatch.setattr(cyberautoagent, "channel_close_all", AsyncMock(return_value={"closed": 0}))
@@ -691,8 +901,7 @@ def test_cli_main_runs_mocked_react_operation(monkeypatch, tmp_path):
 
     cyberautoagent.main()
 
-    assert fake_agent.last_message.startswith("Conduct security assessment")
-    assert fake_agent.cleanup.called
+    workflow.run.assert_called_once()
     assert callback.report_generated is True
     assert os.environ["CYBER_OPERATION_ID"].startswith("OP_")
 
@@ -725,9 +934,12 @@ def _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback):
     monkeypatch.setattr(cyberautoagent.atexit, "register", Mock())
     monkeypatch.setattr(cyberautoagent, "configure_model_rate_limits", Mock())
     monkeypatch.setattr(cyberautoagent, "auto_setup", Mock(return_value=["shell"]))
-    monkeypatch.setattr(cyberautoagent, "create_agent", Mock(return_value=(fake_agent, callback)))
+    workflow = Mock()
+    workflow_controller = Mock(return_value=workflow)
+    monkeypatch.setattr(cyberautoagent, "MultiAgentWorkflowController", workflow_controller)
+    monkeypatch.setattr(cyberautoagent, "create_agent_runtime_resources", Mock(return_value=SimpleNamespace(callback_handler=callback)))
+    monkeypatch.setattr(cyberautoagent, "create_agent", Mock(return_value=fake_agent))
     monkeypatch.setattr(cyberautoagent, "print_status", Mock())
-    monkeypatch.setattr(cyberautoagent, "strip_reflection_snapshot_messages", Mock())
     monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
     monkeypatch.setattr(cyberautoagent.browser, "close_browser", Mock())
     monkeypatch.setattr(cyberautoagent, "channel_close_all", AsyncMock(return_value={"closed": 0}))
@@ -736,21 +948,22 @@ def _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback):
     monkeypatch.setattr(cyberautoagent, "get_model_timeout", Mock(return_value=300))
     monkeypatch.setattr(cyberautoagent, "is_docker", Mock(return_value=False))
     monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    config_manager.workflow = workflow
+    config_manager.workflow_controller = workflow_controller
     return config_manager
 
 
 class CliCallback:
     def __init__(self):
-        self.current_step = 0
-        self.max_steps = 2
+        # Removed step-based control in budget-only model
         self.tool_counts = {}
-        self.pending_step_header = False
+        self.pending_progress_update = False
         self._emitted_any_reasoning = False
-        self.stop_tool_used = False
         self.termination_reason = None
+        self.emit_model_usage_snapshot = Mock()
         self.ensure_report_generated = Mock()
         self.trigger_evaluation_on_completion = Mock()
-        self.wait_for_evaluation_completion = Mock()
+        self.emit_assessment_complete = Mock()
         self.emit_termination = Mock()
 
     def process_metrics(self, _metrics):
@@ -764,15 +977,1066 @@ class CliCallback:
 
     def get_summary(self):
         return {
-            "total_steps": self.current_step,
+            "duration": "1s",
             "tools_created": 0,
             "evidence_collected": 0,
             "memory_operations": 0,
             "capability_expansion": [],
         }
 
-    def get_evidence_summary(self):
-        return []
+
+class CallableCliAgent:
+    def __init__(self):
+        self.messages = []
+        self.model = SimpleNamespace()
+        self.cleanup = Mock()
+
+    def __call__(self, _message):
+        return SimpleNamespace(metrics=SimpleNamespace(accumulated_usage={"inputTokens": 1}))
+
+
+def _run_agent_helper(agent, callback, logger=None, **kwargs):
+    return cyberautoagent.run_agent_until_terminal_state(
+        agent=agent,
+        callback_handler=callback,
+        current_message=kwargs.pop("current_message", "initial"),
+        initial_prompt=kwargs.pop("initial_prompt", "initial"),
+        budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+        operation_start=kwargs.pop("operation_start", cyberautoagent.time.time()),
+        max_duration=kwargs.pop("max_duration", 60),
+        logger=logger or SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock()),
+        **kwargs,
+    )
+
+
+def test_run_agent_until_terminal_state_retries_recoverable_error(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    callback.has_reached_limit = Mock(return_value=False)
+    callback.process_metrics = Mock()
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class RetryAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = 0
+
+        def __call__(self, _message):
+            self.calls += 1
+            if self.calls == 1:
+                raise cyberautoagent.RequestsReadTimeout("read timed out")
+            callback.should_stop.return_value = True
+            return SimpleNamespace(metrics=SimpleNamespace(accumulated_usage={"inputTokens": 1}))
+
+    agent = RetryAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent.time, "sleep", Mock())
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = cyberautoagent.run_agent_until_terminal_state(
+        agent=agent,
+        callback_handler=callback,
+        current_message="initial",
+        initial_prompt="initial",
+        budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+        operation_start=cyberautoagent.time.time(),
+        max_duration=60,
+        logger=logger,
+    )
+
+    assert result.reason == "callback_stop"
+    assert agent.calls == 2
+    callback.process_metrics.assert_called_once()
+
+
+def test_run_agent_until_terminal_state_callback_budget_limit(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=True)
+    callback.has_reached_limit = Mock(return_value=True)
+    agent = CallableCliAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    with pytest.raises(cyberautoagent.BudgetLimitReached):
+        _run_agent_helper(agent, callback)
+
+
+def test_run_agent_until_terminal_state_no_actions(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+
+    class QuietAgent:
+        messages = []
+
+        def __call__(self, _message):
+            return SimpleNamespace(metrics=None)
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(QuietAgent(), callback)
+
+    assert result.reason == "no_actions"
+
+
+def test_retained_executor_cycle_stalls_with_sticky_reasoning_and_no_new_tools(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    role_callback._emitted_any_reasoning = True
+    role_callback.tool_counts = {"shell": 12}
+
+    class TextOnlyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            return SimpleNamespace(metrics=None)
+
+    agent = TextOnlyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            actionless_mode="task_progress",
+            max_actionless_calls=3,
+        ),
+    )
+
+    assert result.reason == "stalled"
+    assert result.message == "No actions taken after 3 attempts"
+    assert len(agent.calls) == 3
+    assert "Call the next registered tool needed" in agent.calls[1]
+    assert "required completion tool(s) (record_task_acceptance) as completion conditions" in agent.calls[1]
+    assert "only after their prerequisite work and evidence are complete" in agent.calls[1]
+    assert "call the next registered tool" in agent.calls[2]
+    assert "required completion tool(s) (record_task_acceptance) only when their prerequisites" in agent.calls[2]
+    assert "final answer" not in agent.calls[2]
+    role_callback.emit_termination.assert_called_once_with("stalled", result.message)
+
+
+def test_run_agent_until_terminal_state_has_absolute_agent_call_bound(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+
+    class AlwaysActingAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            role_callback.tool_counts["shell"] = len(self.calls)
+            return SimpleNamespace(metrics=None)
+
+    agent = AlwaysActingAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(max_agent_calls=4),
+    )
+
+    assert result.reason == "stalled"
+    assert result.message == "Stopped after 4 agent calls without reaching the role contract"
+    assert len(agent.calls) == 4
+    role_callback.emit_termination.assert_called_once_with("stalled", result.message)
+
+
+def test_run_agent_until_terminal_state_passes_sdk_turn_limit(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+
+    class LimitedAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+
+        def __call__(self, message, **kwargs):
+            self.calls.append((message, kwargs))
+            return SimpleNamespace(metrics=None, stop_reason="limit_turns")
+
+    agent = LimitedAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        callback,
+        run_policy=cyberautoagent.AgentRunPolicy(max_model_turns=7),
+    )
+
+    assert result.reason == "stalled"
+    assert result.message == "Agent stopped at its configured SDK limit: limit_turns"
+    assert agent.calls == [("initial", {"limits": {"turns": 7}})]
+    callback.emit_termination.assert_called_once_with("stalled", result.message)
+
+
+def test_run_agent_until_terminal_state_uses_agent_callback_for_role_tool_calls(monkeypatch):
+    root_callback = CliCallback()
+    root_callback.should_stop = Mock(return_value=False)
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(side_effect=[False, True])
+    role_callback.process_metrics = Mock()
+
+    class TaskCreatorAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            role_callback.tool_counts["create_tasks"] = role_callback.tool_counts.get("create_tasks", 0) + 1
+            return SimpleNamespace(metrics=SimpleNamespace(accumulated_usage={"inputTokens": 1}))
+
+    agent = TaskCreatorAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(agent, root_callback)
+
+    assert result.reason == "callback_stop"
+    assert agent.calls == ["initial", ""]
+    assert all("MANDATORY ACTION" not in message for message in agent.calls)
+    assert root_callback.tool_counts == {}
+    assert role_callback.tool_counts == {"create_tasks": 2}
+    role_callback.process_metrics.assert_called()
+
+
+def test_run_agent_until_terminal_state_policy_stops_after_required_tool(monkeypatch):
+    root_callback = CliCallback()
+    root_callback.should_stop = Mock(return_value=False)
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class PolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            if len(self.calls) == 1:
+                role_callback.tool_counts["required_tool"] = 1
+            return SimpleNamespace(metrics=None)
+
+    agent = PolicyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        logger=logger,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"required_tool"},
+            terminal_after_required_tools=True,
+            terminal_reason="required_tool_done",
+            terminal_message="Required tool completed",
+        ),
+    )
+
+    assert result.reason == "required_tool_done"
+    assert result.message == "Required tool completed"
+    assert agent.calls == ["initial", ""]
+    assert root_callback.tool_counts == {}
+    assert role_callback.tool_counts == {"required_tool": 1}
+    assert all("MANDATORY ACTION" not in message for message in agent.calls)
+    assert not logger.warning.called
+
+
+def test_run_agent_until_terminal_state_policy_stops_at_max_tool_calls(monkeypatch):
+    root_callback = CliCallback()
+    root_callback.should_stop = Mock(return_value=False)
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class MaxToolAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            role_callback.tool_counts["shell"] = len(self.calls)
+            return SimpleNamespace(metrics=None)
+
+    agent = MaxToolAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        logger=logger,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            max_tool_calls=1,
+            terminal_reason="max_tools",
+            terminal_message="Stopped after max tools",
+        ),
+    )
+
+    assert result.reason == "max_tools"
+    assert result.message == "Stopped after max tools"
+    assert agent.calls == ["initial"]
+
+
+def test_run_agent_until_terminal_state_stops_repeated_tool_loop_without_error(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class RepeatedToolAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            callback.tool_counts["shell"] = 4
+            return SimpleNamespace(
+                metrics=None,
+                state={
+                    "repeated_tool_loop": {
+                        "repeat_count": 4,
+                        "tool_name": "shell",
+                    }
+                },
+            )
+
+    agent = RepeatedToolAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(agent, callback, logger=logger)
+
+    assert result.reason == "repeated_tool_loop"
+    assert "latest completed result was reused" in result.message
+    assert agent.calls == ["initial"]
+    assert logger.warning.called
+
+
+def test_run_agent_until_terminal_state_describes_multi_call_tool_cycle(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class RepeatedToolAgent:
+        def __init__(self):
+            self.messages = []
+            self._cyber_callback_handler = callback
+
+        def __call__(self, message):
+            del message
+            callback.tool_counts["shell"] = 7
+            return SimpleNamespace(
+                metrics=None,
+                state={
+                    "repeated_tool_loop": {
+                        "cycle_length": 2,
+                        "repeat_count": 3,
+                        "tool_name": "shell",
+                        "tool_names": ["shell", "shell"],
+                    }
+                },
+            )
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(RepeatedToolAgent(), callback, logger=logger)
+
+    assert result.reason == "repeated_tool_loop"
+    assert result.message == (
+        "Stopped agent after 3 repetitions of a 2-call tool cycle involving shell; "
+        "matching completed results were reused."
+    )
+
+
+def test_run_agent_policy_can_stop_immediately_after_required_tool(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+
+    class PolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            role_callback.tool_counts["create_tasks"] = 1
+            return SimpleNamespace(metrics=None)
+
+    agent = PolicyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"create_tasks"},
+            terminal_after_required_tools=True,
+            allow_text_final_after_tools=False,
+            terminal_reason="task_creator_done",
+        ),
+    )
+
+    assert result.reason == "task_creator_done"
+    assert agent.calls == ["initial"]
+
+
+def test_run_agent_policy_requires_success_marker_when_configured(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+
+    class PolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            role_callback.tool_counts["record_task_acceptance"] = len(self.calls)
+            state = {}
+            if len(self.calls) == 2:
+                state["terminal_tool_completed"] = {"tool_name": "record_task_acceptance"}
+            return SimpleNamespace(metrics=None, state=state)
+
+    agent = PolicyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            terminal_reason="task_executor_done",
+        ),
+    )
+
+    assert result.reason == "task_executor_done"
+    assert len(agent.calls) == 2
+
+
+def test_run_agent_policy_waits_for_all_successful_required_tool_outcomes(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    role_callback.tool_outcome_journal = ToolOutcomeJournal()
+
+    class PolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            tool_name = "record_task_acceptance" if len(self.calls) == 1 else "record_finding_validation"
+            role_callback.tool_counts[tool_name] = 1
+            role_callback.tool_outcome_journal.append(
+                tool_use_id=f"tool-{len(self.calls)}",
+                tool_name=tool_name,
+                success=True,
+                correctable=False,
+                tool_input={},
+                output="complete",
+            )
+            return SimpleNamespace(metrics=None, state={})
+
+    agent = PolicyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"record_task_acceptance", "record_finding_validation"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            terminal_reason="task_executor_done",
+        ),
+    )
+
+    assert result.reason == "task_executor_done"
+    assert len(agent.calls) == 2
+
+
+def test_run_agent_policy_requires_new_tool_calls_for_reused_agent_pass(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+    role_callback.tool_counts = {"shell": 1}
+
+    class ReusedAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            if len(self.calls) == 2:
+                role_callback.tool_counts["shell"] += 1
+            return SimpleNamespace(metrics=None)
+
+    agent = ReusedAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            min_tool_calls=1,
+            terminal_after_required_tools=True,
+        ),
+    )
+
+    assert result.reason == "agent_completed_required_tools"
+    assert len(agent.calls) == 3
+    assert role_callback.tool_counts == {"shell": 2}
+    assert "MANDATORY ACTION" in agent.calls[1]
+
+
+def test_run_agent_returns_rejected_required_tool_error(monkeypatch):
+    root_callback = CliCallback()
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(return_value=False)
+
+    class ExhaustedAgent:
+        def __init__(self):
+            self.messages = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, _message):
+            return SimpleNamespace(
+                metrics=None,
+                state={
+                    "terminal_tool_rejected": {
+                        "tool_name": "create_tasks",
+                        "error": "limits field required",
+                    }
+                },
+            )
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        ExhaustedAgent(),
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(required_tool_names={"create_tasks"}),
+    )
+
+    assert result.reason == "required_tool_rejected"
+    assert result.message == "limits field required"
+
+
+def test_agent_run_policy_rejects_unknown_actionless_mode():
+    with pytest.raises(ValueError, match="actionless_mode must be"):
+        cyberautoagent.AgentRunPolicy(actionless_mode="guess")
+
+
+def test_extract_last_assistant_text_skips_tool_use_messages():
+    messages = [
+        {"role": "assistant", "content": [{"text": "older"}]},
+        {"role": "assistant", "content": [{"toolUse": {"name": "shell"}}, {"text": "tool turn"}]},
+        {"role": "user", "content": [{"text": "tool result"}]},
+        {"role": "assistant", "content": [{"text": "final worker summary"}]},
+    ]
+
+    assert cyberautoagent.extract_last_assistant_text(messages) == "final worker summary"
+    assert cyberautoagent.extract_last_assistant_text([messages[1]]) == ""
+    assert cyberautoagent.extract_last_assistant_text(None) == ""
+
+
+def test_run_agent_until_terminal_state_policy_requires_all_tools(monkeypatch):
+    root_callback = CliCallback()
+    root_callback.should_stop = Mock(return_value=False)
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(side_effect=[False, False, True])
+
+    class PartialPolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            if len(self.calls) == 1:
+                role_callback.tool_counts["first_tool"] = 1
+            return SimpleNamespace(metrics=None)
+
+    agent = PartialPolicyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"first_tool", "second_tool"},
+            terminal_after_required_tools=True,
+        ),
+    )
+
+    assert result.reason == "callback_stop"
+    assert role_callback.tool_counts == {"first_tool": 1}
+    assert any("MANDATORY ACTION" in message for message in agent.calls)
+
+
+def test_run_agent_until_terminal_state_policy_ignores_configured_tools(monkeypatch):
+    root_callback = CliCallback()
+    root_callback.should_stop = Mock(return_value=False)
+    role_callback = CliCallback()
+    role_callback.should_stop = Mock(side_effect=[False, False, True])
+
+    class CaptureOnlyAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = []
+            self._cyber_callback_handler = role_callback
+
+        def __call__(self, message):
+            self.calls.append(message)
+            if len(self.calls) == 1:
+                role_callback.tool_counts["create_tasks"] = 1
+            return SimpleNamespace(metrics=None)
+
+    agent = CaptureOnlyAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(
+        agent,
+        root_callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            min_tool_calls=1,
+            terminal_after_required_tools=True,
+            ignored_terminal_tool_names={"create_tasks"},
+        ),
+    )
+
+    assert result.reason == "callback_stop"
+    assert role_callback.tool_counts == {"create_tasks": 1}
+    assert any("MANDATORY ACTION" in message for message in agent.calls)
+
+
+def test_run_agent_until_terminal_state_duration_budget(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    callback._emitted_any_reasoning = True
+    agent = CallableCliAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    with pytest.raises(cyberautoagent.BudgetLimitReached):
+        _run_agent_helper(agent, callback, operation_start=cyberautoagent.time.time() - 120, max_duration=1)
+
+
+def test_run_agent_until_terminal_state_recoverable_error_exhausted(monkeypatch):
+    callback = CliCallback()
+
+    class TimeoutAgent:
+        messages = []
+
+        def __call__(self, _message):
+            raise cyberautoagent.RequestsReadTimeout("read timed out")
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(TimeoutAgent(), callback, recoverable_retries=0)
+
+    assert result.reason == "network_timeout"
+    callback.emit_termination.assert_called_once()
+
+
+def test_run_agent_until_terminal_state_event_loop_stop_is_not_swallowed(monkeypatch):
+    callback = CliCallback()
+
+    class EventStopAgent:
+        messages = []
+
+        def __call__(self, _message):
+            raise RuntimeError("event loop cycle stop requested\nReason: done")
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    with pytest.raises(RuntimeError, match="event loop cycle stop requested"):
+        _run_agent_helper(EventStopAgent(), callback)
+
+
+def test_run_agent_until_terminal_state_propagates_max_tokens(monkeypatch):
+    callback = CliCallback()
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class TokenAgent:
+        messages = []
+
+        def __call__(self, _message):
+            raise MaxTokensReachedException("max_tokens")
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    with pytest.raises(MaxTokensReachedException):
+        cyberautoagent.run_agent_until_terminal_state(
+            agent=TokenAgent(),
+            callback_handler=callback,
+            current_message="initial",
+            initial_prompt="initial",
+            budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+            operation_start=cyberautoagent.time.time(),
+            max_duration=60,
+            logger=logger,
+        )
+
+
+def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
+    journal = ToolOutcomeJournal()
+    journal.append(
+        tool_use_id="tool-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        tool_input={"command": "curl target"},
+        output="200 OK",
+    )
+    callback = SimpleNamespace(tool_outcome_journal=journal)
+    agent = SimpleNamespace(
+        _cyber_agent_type="task_executor",
+        _cyber_callback_handler=callback,
+        model=SimpleNamespace(_output_tokens=6000),
+        messages=[{"role": "user", "content": [{"text": "assigned task"}]}],
+    )
+    calls = []
+    policies = []
+    repeated = "I should repeat this analysis rather than call the required tool.\n" * 60
+
+    def run_agent(**kwargs):
+        calls.append(kwargs["current_message"])
+        policies.append(kwargs["run_policy"])
+        if len(calls) == 1:
+            agent.messages.append({"role": "assistant", "content": [{"text": repeated}]})
+            raise MaxTokensReachedException("max_tokens")
+        return cyberautoagent.AgentRunResult("task_executor_done", "done")
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", run_agent)
+    logger = SimpleNamespace(warning=Mock())
+
+    result = cyberautoagent.run_workflow_agent_with_max_token_recovery(
+        agent=agent,
+        prompt="original task prompt",
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            recovery_objective="Map authentication behavior for the assigned /login route.",
+            recovery_next_action="Call record_task_acceptance with canonical durable evidence references.",
+        ),
+        callback_handler=callback,
+        initial_prompt="initial",
+        budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+        operation_start=cyberautoagent.time.time(),
+        max_duration=60,
+        logger=logger,
+    )
+
+    assert result.reason == "task_executor_done"
+    assert len(calls) == 2
+    assert "repetitive reasoning was detected" in calls[1]
+    assert "Task objective: Map authentication behavior for the assigned /login route." in calls[1]
+    assert "Latest tool outcome: shell: 200 OK" in calls[1]
+    assert "Next required action: Call record_task_acceptance" in calls[1]
+    assert repeated not in calls[1]
+    assert "Controller-observed successful outcomes" not in calls[1]
+    assert "Do not repeat any tool call already represented above" not in calls[1]
+    assert policies[1].max_agent_calls == 1
+    assert policies[1].max_model_turns == 1
+    assert policies[1].max_tool_calls == 1
+    assert agent.messages == []
+
+
+def test_workflow_task_executor_propagates_second_max_tokens(monkeypatch):
+    callback = SimpleNamespace(tool_outcome_journal=ToolOutcomeJournal())
+    agent = SimpleNamespace(
+        _cyber_agent_type="task_executor",
+        _cyber_callback_handler=callback,
+        model=SimpleNamespace(_output_tokens=6000),
+        messages=[],
+    )
+    calls = []
+    repeated = "The same reasoning loop continues without a tool call.\n" * 60
+
+    def run_agent(**kwargs):
+        calls.append(kwargs["current_message"])
+        agent.messages.append({"role": "assistant", "content": [{"text": repeated}]})
+        raise MaxTokensReachedException("max_tokens")
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", run_agent)
+
+    with pytest.raises(MaxTokensReachedException) as exc_info:
+        cyberautoagent.run_workflow_agent_with_max_token_recovery(
+            agent=agent,
+            prompt="original task prompt",
+            run_policy=cyberautoagent.AgentRunPolicy(required_tool_names={"record_task_acceptance"}),
+            callback_handler=callback,
+            initial_prompt="initial",
+            budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=60),
+            operation_start=cyberautoagent.time.time(),
+            max_duration=60,
+            logger=SimpleNamespace(warning=Mock()),
+        )
+
+    assert len(calls) == 2
+    assert exc_info.value.max_token_classification.kind == "reasoning_loop"
+    assert agent.messages == []
+
+
+def test_finalize_report_and_evaluation_runs_once(monkeypatch):
+    callback = CliCallback()
+    callback.termination_reason = "complete"
+    monkeypatch.setattr(
+        cyberautoagent,
+        "get_memory_client",
+        Mock(return_value=SimpleNamespace(get_active_plan=lambda: SimpleNamespace(assessment_complete=True))),
+    )
+    lifecycle = Mock()
+    callback.emit_model_usage_snapshot = lifecycle.emit_model_usage_snapshot
+    callback.ensure_report_generated = lifecycle.ensure_report_generated
+    callback.trigger_evaluation_on_completion = lifecycle.trigger_evaluation_on_completion
+    callback.emit_assessment_complete = lifecycle.emit_assessment_complete
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+    agent = SimpleNamespace(model=SimpleNamespace())
+    monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
+    monkeypatch.setattr(cyberautoagent, "get_model_timeout", Mock(return_value=450))
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=agent,
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    callback.ensure_report_generated.assert_called_once()
+    report_call = callback.ensure_report_generated.call_args
+    assert report_call.args == (agent, "example.com", "test", "web")
+    assert report_call.kwargs["completion_status"] == {
+        "assessment_complete": True,
+        "workflow_complete": True,
+        "termination_reason": "complete",
+        "termination_message": None,
+        "incomplete_reason": None,
+        "unresolved_task_count": None,
+        "incomplete_phase_ids": [],
+    }
+    callback.trigger_evaluation_on_completion.assert_called_once()
+    callback.emit_assessment_complete.assert_called_once()
+    assert [call[0] for call in lifecycle.method_calls] == [
+        "emit_model_usage_snapshot",
+        "ensure_report_generated",
+        "trigger_evaluation_on_completion",
+        "emit_assessment_complete",
+    ]
+
+
+def test_finalize_report_and_evaluation_allows_missing_agent_for_report_mode(monkeypatch):
+    callback = CliCallback()
+    callback.termination_reason = "complete"
+    monkeypatch.setattr(
+        cyberautoagent,
+        "get_memory_client",
+        Mock(return_value=SimpleNamespace(get_active_plan=lambda: SimpleNamespace(assessment_complete=True))),
+    )
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+    monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=None,
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    callback.ensure_report_generated.assert_called_once()
+    report_call = callback.ensure_report_generated.call_args
+    assert report_call.args == (None, "example.com", "test", "web")
+    assert report_call.kwargs["completion_status"]["assessment_complete"] is True
+    callback.emit_assessment_complete.assert_called_once()
+
+
+def test_finalize_report_and_evaluation_continues_when_model_usage_snapshot_fails(monkeypatch):
+    callback = CliCallback()
+    callback.termination_reason = "complete"
+    snapshot_error = RuntimeError("snapshot unavailable")
+    callback.emit_model_usage_snapshot.side_effect = snapshot_error
+    monkeypatch.setattr(
+        cyberautoagent,
+        "get_memory_client",
+        Mock(return_value=SimpleNamespace(get_active_plan=lambda: SimpleNamespace(assessment_complete=True))),
+    )
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=SimpleNamespace(model=SimpleNamespace()),
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    callback.ensure_report_generated.assert_called_once()
+    callback.trigger_evaluation_on_completion.assert_called_once()
+    logger.warning.assert_called_with(
+        "Unable to persist model usage before report generation: %s", snapshot_error
+    )
+
+
+def test_finalize_report_and_evaluation_completes_when_evaluation_is_disabled(monkeypatch):
+    callback = CliCallback()
+    callback.termination_reason = "complete"
+    monkeypatch.setattr(
+        cyberautoagent,
+        "get_memory_client",
+        Mock(return_value=SimpleNamespace(get_active_plan=lambda: SimpleNamespace(assessment_complete=True))),
+    )
+    monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "false")
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=SimpleNamespace(model=SimpleNamespace()),
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=SimpleNamespace(info=Mock(), warning=Mock()),
+    )
+
+    callback.trigger_evaluation_on_completion.assert_called_once()
+    callback.emit_assessment_complete.assert_called_once()
+
+
+def test_finalize_report_and_evaluation_handles_missing_handler_and_errors(monkeypatch):
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=SimpleNamespace(model=SimpleNamespace()),
+        callback_handler=None,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+    logger.warning.assert_called_with("No callback_handler available for evaluation trigger")
+
+    callback = CliCallback()
+    callback.ensure_report_generated.side_effect = RuntimeError("report failed")
+    callback.termination_reason = "error"
+    monkeypatch.setattr(
+        cyberautoagent,
+        "get_memory_client",
+        Mock(return_value=SimpleNamespace(get_active_plan=lambda: SimpleNamespace(assessment_complete=False))),
+    )
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=SimpleNamespace(model=SimpleNamespace()),
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    assert logger.warning.call_args.args[0] == "Error in final report/evaluation: %s"
+    report_call = callback.ensure_report_generated.call_args
+    assert report_call.kwargs["completion_status"]["assessment_complete"] is False
+    assert report_call.kwargs["completion_status"]["workflow_complete"] is False
+    assert report_call.kwargs["completion_status"]["termination_reason"] == "error"
+    callback.trigger_evaluation_on_completion.assert_not_called()
+    callback.emit_assessment_complete.assert_not_called()
+
+    callback = CliCallback()
+    callback.emit_assessment_complete.side_effect = RuntimeError("event failed")
+    callback.termination_reason = "complete"
+    monkeypatch.setattr(
+        cyberautoagent,
+        "get_memory_client",
+        Mock(return_value=SimpleNamespace(get_active_plan=lambda: SimpleNamespace(assessment_complete=True))),
+    )
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=SimpleNamespace(model=SimpleNamespace()),
+        callback_handler=callback,
+        target="example.com",
+        objective="test",
+        module="web",
+        logger=logger,
+    )
+
+    logger.warning.assert_called_with(
+        "Unable to determine or emit assessment completion: %s",
+        callback.emit_assessment_complete.side_effect,
+    )
 
 
 def test_cli_service_mode_idle_interrupt_returns(monkeypatch):
@@ -791,7 +2055,7 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
     fake_agent = SimpleNamespace(messages=[], model=SimpleNamespace(), cleanup=Mock())
     _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
     monkeypatch.setenv("CYBER_BUG_BOUNTY_HEADERS", '{"X-Env":"yes"}')
-    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "report", "--provider", "ollama", "--report", "--bug-bounty-header", "X-Test=1"])
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "report", "--max-duration", "60", "--provider", "ollama", "--report", "--bug-bounty-header", "X-Test=1"])
     monkeypatch.setattr(cyberautoagent, "get_default_base_dir", lambda: str(tmp_path))
 
     class DirEntry:
@@ -801,28 +2065,86 @@ def test_cli_main_report_mode_uses_latest_operation(monkeypatch, tmp_path):
         def is_dir(self):
             return True
 
-    monkeypatch.setattr(cyberautoagent.os, "scandir", lambda _path: [DirEntry("OP_20260101_000000"), DirEntry("OP_20260102_000000")])
+    from modules.tools.memory import create_application_store
+
+    store = create_application_store(
+        str(tmp_path / "cyber_autoagent.db"),
+        logical_target="example.com",
+    )
+    store.ensure_operation("OP_20260102_000000")
+    original_scandir = os.scandir
+    operation_dir = os.path.join(str(tmp_path), cyberautoagent.sanitize_target_name("example.com"))
+
+    def scandir(path):
+        if path == operation_dir:
+            return [DirEntry("OP_20260101_000000"), DirEntry("OP_20260102_000000")]
+        return original_scandir(path)
+
+    monkeypatch.setattr(
+        cyberautoagent.os,
+        "scandir",
+        scandir,
+    )
 
     cyberautoagent.main()
 
     assert os.environ["CYBER_OPERATION_ID"] == "OP_20260102_000000"
     assert json.loads(os.environ["CYBER_BUG_BOUNTY_HEADERS"]) == {"X-Test": "1"}
-    fake_agent.cleanup.assert_called_once()
+    callback.ensure_report_generated.assert_called_once()
+    report_call = callback.ensure_report_generated.call_args
+    assert report_call.args == (None, "example.com", "report", "web")
+    assert report_call.kwargs["completion_status"]["assessment_complete"] is False
+    fake_agent.cleanup.assert_not_called()
 
 
 def test_cli_main_service_mode_with_params_auto_runs(monkeypatch, tmp_path):
     callback = CliCallback()
-    fake_agent = SimpleNamespace(messages=[], model=SimpleNamespace(), cleanup=Mock())
-    _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
     monkeypatch.setattr(
         cyberautoagent.sys,
         "argv",
-        ["cyberautoagent", "--service-mode", "--target", "example.com", "--objective", "run", "--provider", "ollama"],
+        ["cyberautoagent", "--service-mode", "--target", "example.com", "--objective", "run", "--max-duration", "60", "--provider", "ollama"],
     )
 
     cyberautoagent.main()
 
-    fake_agent.cleanup.assert_called_once()
+    config_manager.workflow.run.assert_called_once()
+    fake_agent.cleanup.assert_not_called()
+
+
+def test_cli_main_passes_token_and_cost_budgets_to_agent_config(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "run",
+            "--max-duration",
+            "60",
+            "--max-tokens",
+            "250000",
+            "--max-cost",
+            "12.34",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    cyberautoagent.main()
+
+    config = cyberautoagent.create_agent_runtime_resources.call_args.kwargs["config"]
+    assert config.budget.max_duration_minutes == 60
+    assert config.budget.max_tokens == 250000
+    assert config.budget.max_cost == 12.34
+    config_manager.workflow.run.assert_called_once()
+    fake_agent.cleanup.assert_not_called()
 
 
 def test_cli_main_handles_max_tokens_exception(monkeypatch, tmp_path):
@@ -837,17 +2159,78 @@ def test_cli_main_handles_max_tokens_exception(monkeypatch, tmp_path):
             raise MaxTokensReachedException("max_tokens")
 
     agent = TokenAgent()
-    _patch_cli_common(monkeypatch, tmp_path, agent, callback)
-    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--iterations", "2", "--provider", "ollama"])
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, agent, callback)
+    config_manager.workflow.run.side_effect = MaxTokensReachedException("max_tokens")
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"])
 
     cyberautoagent.main()
 
     callback.emit_termination.assert_called_with("max_tokens", "Model token limit reached. Switching to final report.")
     callback.ensure_report_generated.assert_called()
-    agent.cleanup.assert_called_once()
+    agent.cleanup.assert_not_called()
 
 
-def test_cli_main_actionless_loop_redirects_and_stalls(monkeypatch, tmp_path):
+@pytest.mark.parametrize("has_callback", [True, False])
+def test_cli_main_emits_workflow_invariant_message_as_termination_reason(monkeypatch, tmp_path, has_callback):
+    callback = CliCallback() if has_callback else None
+    agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, agent, callback)
+    message = "Workflow iteration limit reached"
+    config_manager.workflow.run.side_effect = cyberautoagent.WorkflowInvariantError(message)
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cyberautoagent.main()
+
+    assert exc_info.value.code == 1
+    if callback:
+        callback.emit_termination.assert_called_once_with("error", message)
+
+
+def test_cli_main_preserves_generic_workflow_error_termination(monkeypatch, tmp_path):
+    callback = CliCallback()
+    agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, agent, callback)
+    message = "Unexpected workflow failure"
+    config_manager.workflow.run.side_effect = RuntimeError(message)
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cyberautoagent.main()
+
+    assert exc_info.value.code == 1
+    callback.emit_termination.assert_called_with("error", message)
+
+
+def test_cli_main_runs_workflow_controller(monkeypatch, tmp_path):
     callback = CliCallback()
     callback.should_stop = Mock(return_value=False)
     callback.has_reached_limit = Mock(return_value=False)
@@ -869,20 +2252,276 @@ def test_cli_main_actionless_loop_redirects_and_stalls(monkeypatch, tmp_path):
             return SimpleNamespace(metrics=SimpleNamespace(accumulated_usage={}))
 
     agent = QuietAgent()
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"])
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, agent, callback)
+    cyberautoagent.main()
+
+    config_manager.workflow.run.assert_called_once()
+    agent.cleanup.assert_not_called()
+    expected_cwd = tmp_path / "example.com" / os.environ["CYBER_OPERATION_ID"]
+    assert Path.cwd() == expected_cwd
+
+
+def test_cli_preflight_persists_without_initializing_qdrant(monkeypatch, tmp_path):
+    callback = CliCallback()
+    plan_store = Mock()
+    plan_store_cls = Mock(return_value=plan_store)
+    agent = CallableCliAgent()
     _patch_cli_common(monkeypatch, tmp_path, agent, callback)
-    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--iterations", "8", "--provider", "ollama"])
-    monkeypatch.setattr(cyberautoagent, "get_reflection_snapshot", Mock(return_value="reflect"))
-    monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock(return_value=SimpleNamespace(get_active_plan=Mock(return_value=None))))
-    monkeypatch.setattr(cyberautoagent, "get_active_task", Mock(return_value=""))
-    monkeypatch.setattr(cyberautoagent, "mem0_list", Mock(return_value=""))
-    monkeypatch.setattr(cyberautoagent, "rebuild_agent_conversation", Mock(return_value="rebuilt context"))
+    monkeypatch.setattr(cyberautoagent, "create_application_store", plan_store_cls)
+    monkeypatch.setattr(cyberautoagent, "get_application_database_path", Mock(return_value="/tmp/preflight.db"))
+    semantic_memory = Mock()
+    monkeypatch.setattr(cyberautoagent, "get_memory_client", semantic_memory)
+    plan_store.store_preflight_results.side_effect = lambda *_args: semantic_memory.assert_not_called()
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
 
     cyberautoagent.main()
 
-    assert len(agent.calls) >= 3
-    assert any("MANDATORY ACTION" in message for message in agent.calls)
-    callback.emit_termination.assert_called_with("stalled", "No actions taken after 3 attempts")
-    agent.cleanup.assert_called_once()
+    plan_store_cls.assert_called_once_with("/tmp/preflight.db", logical_target="example.com")
+    plan_store.store_preflight_results.assert_called_once()
+
+
+def test_cli_main_preflight_failure_stops_before_environment_or_workflow(monkeypatch, tmp_path):
+    callback = CliCallback()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, CallableCliAgent(), callback)
+    failure = cyberautoagent.TargetValidationResult(
+        "target-1",
+        "missing.test",
+        "network",
+        "fail",
+        ("resolve",),
+        "name not found",
+    )
+    monkeypatch.setattr(
+        cyberautoagent,
+        "run_target_preflight",
+        Mock(return_value=([cyberautoagent.OperationTarget("target-1", "missing.test", "network")], [failure])),
+    )
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "missing.test",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cyberautoagent.main()
+
+    assert exc_info.value.code == 2
+    cyberautoagent.auto_setup.assert_not_called()
+    config_manager.workflow.run.assert_not_called()
+
+
+def test_cli_main_workflow_runner_creates_role_agent(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    runner_result = cyberautoagent.AgentRunResult("callback_stop", "worker finished")
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(return_value=runner_result))
+    monkeypatch.setattr(cyberautoagent.sys, "argv", ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"])
+
+    def run_workflow():
+        work_runner = config_manager.workflow_controller.call_args.kwargs["work_runner"]
+        policy = cyberautoagent.AgentRunPolicy(required_tool_names={"shell"}, terminal_after_required_tools=True)
+        result = work_runner("task_executor", "do the task", ["shell"], "role system", policy)
+        assert result == "worker finished"
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
+
+    cyberautoagent.create_agent.assert_called_once()
+    agent_kwargs = cyberautoagent.create_agent.call_args.kwargs
+    assert agent_kwargs["runtime_resources"] is cyberautoagent.create_agent_runtime_resources.return_value
+    assert agent_kwargs["system_prompt"] == "role system"
+    assert agent_kwargs["tools"] == ["shell"]
+    assert re.match(r"Cyber-AutoAgent OP_\d{8}_\d{6} task_executor", agent_kwargs["name"])
+    assert agent_kwargs["agent_type"] == "task_executor"
+    assert agent_kwargs["include_tool_catalog"] is True
+    cyberautoagent.run_agent_until_terminal_state.assert_called_once()
+    run_kwargs = cyberautoagent.run_agent_until_terminal_state.call_args.kwargs
+    assert run_kwargs["agent"] is fake_agent
+    assert run_kwargs["callback_handler"] is callback
+    assert run_kwargs["current_message"] == "do the task"
+    assert run_kwargs["run_policy"].required_tool_names == frozenset({"shell"})
+    fake_agent.cleanup.assert_called_once()
+
+
+@pytest.mark.parametrize(("role", "include_tool_catalog"), [("task_executor", True), ("task_creator", False)])
+def test_cli_main_worker_session_reuses_and_cleans_role_agent(
+    monkeypatch,
+    tmp_path,
+    role,
+    include_tool_catalog,
+):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    runner_result = cyberautoagent.AgentRunResult("task_executor_done", "worker finished")
+    run_count = 0
+
+    def run_agent(**kwargs):
+        nonlocal run_count
+        run_count += 1
+        if run_count == 1:
+            fake_agent.messages.append({"role": "assistant", "content": [{"text": "first summary"}]})
+        return runner_result
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(side_effect=run_agent))
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"],
+    )
+
+    def run_workflow():
+        session_factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
+        policy = cyberautoagent.AgentRunPolicy(min_tool_calls=1, terminal_after_required_tools=True)
+        with session_factory(role, ["shell"], "role system") as run_executor:
+            first_result = run_executor("first pass", policy)
+            second_result = run_executor("critic guidance", policy)
+            assert first_result.text == "first summary"
+            assert first_result.outcomes == []
+            assert first_result.recovery_required is False
+            assert second_result.text == "worker finished"
+        fake_agent.cleanup.assert_called_once()
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
+
+    cyberautoagent.create_agent.assert_called_once()
+    create_kwargs = cyberautoagent.create_agent.call_args.kwargs
+    assert create_kwargs["agent_type"] == role
+    assert create_kwargs["include_tool_catalog"] is include_tool_catalog
+    assert cyberautoagent.run_agent_until_terminal_state.call_count == 2
+    assert [
+        call.kwargs["current_message"]
+        for call in cyberautoagent.run_agent_until_terminal_state.call_args_list
+    ] == ["first pass", "critic guidance"]
+    fake_agent.cleanup.assert_called_once()
+
+
+def test_cli_main_retained_executor_preserves_repeated_tool_loop_metadata(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    loop_details = {
+        "cycle_signature": "loop-signature",
+        "cycle_length": 1,
+        "repeat_count": 4,
+        "tool_name": "shell",
+        "tool_names": ["shell"],
+    }
+    runner_result = cyberautoagent.AgentRunResult(
+        "repeated_tool_loop",
+        "Stopped agent after repeated shell calls",
+        details=loop_details,
+    )
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(return_value=runner_result))
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"],
+    )
+
+    def run_workflow():
+        session_factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
+        with session_factory("task_executor", ["shell"], "role system") as run_executor:
+            result = run_executor("perform task", cyberautoagent.AgentRunPolicy())
+        assert result.text == runner_result.message
+        assert result.repeat_loop_detected is True
+        assert result.repeat_loop_signature == "loop-signature"
+        assert result.repeat_loop_reason == runner_result.message
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
+
+
+def test_cli_main_workflow_runner_prefers_agent_final_text_over_policy_message(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    fake_agent.messages = [{"role": "assistant", "content": [{"toolUse": {"name": "shell"}}]}]
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    policy = cyberautoagent.AgentRunPolicy(
+        required_tool_names={"shell"},
+        terminal_after_required_tools=True,
+        terminal_reason="task_executor_done",
+        terminal_message="Task executor completed after tool use",
+    )
+    runner_result = cyberautoagent.AgentRunResult(policy.terminal_reason, policy.terminal_message)
+    def run_agent(**kwargs):
+        fake_agent.messages.append({"role": "assistant", "content": [{"text": "real task summary"}]})
+        return runner_result
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(side_effect=run_agent))
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"],
+    )
+
+    def run_workflow():
+        work_runner = config_manager.workflow_controller.call_args.kwargs["work_runner"]
+        assert work_runner("task_executor", "do the task", ["shell"], "role system", policy) == "real task summary"
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
+    fake_agent.cleanup.assert_called_once()
+
+
+def test_cli_main_workflow_runner_omits_policy_message_when_no_agent_final_text(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    fake_agent.messages = [{"role": "assistant", "content": [{"toolUse": {"name": "shell"}}]}]
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    policy = cyberautoagent.AgentRunPolicy(
+        required_tool_names={"shell"},
+        terminal_after_required_tools=True,
+        terminal_reason="task_executor_done",
+        terminal_message="Task executor completed after tool use",
+    )
+    runner_result = cyberautoagent.AgentRunResult(policy.terminal_reason, policy.terminal_message)
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(return_value=runner_result))
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        ["cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60", "--provider", "ollama"],
+    )
+
+    def run_workflow():
+        work_runner = config_manager.workflow_controller.call_args.kwargs["work_runner"]
+        assert work_runner("task_executor", "do the task", ["shell"], "role system", policy) == ""
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
+    fake_agent.cleanup.assert_called_once()
 
 
 if __name__ == "__main__":

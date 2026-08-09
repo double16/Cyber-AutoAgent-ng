@@ -1,7 +1,7 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -55,18 +55,16 @@ const load = async () => {
     const [
         {render},
         {StatusIndicator},
-        {OperationStatusDisplay},
         {LogContainer, CompactLogDisplay},
         {InitializationWrapper},
     ] = await Promise.all([
         import('ink-testing-library'),
         import('../../../src/components/StatusIndicator.js'),
-        import('../../../src/components/OperationStatusDisplay.js'),
         import('../../../src/components/LogContainer.js'),
         import('../../../src/components/InitializationWrapper.js'),
     ]);
 
-    return {render, StatusIndicator, OperationStatusDisplay, LogContainer, CompactLogDisplay, InitializationWrapper};
+    return {render, StatusIndicator, LogContainer, CompactLogDisplay, InitializationWrapper};
 };
 
 const healthStatus = {
@@ -104,7 +102,7 @@ describe('status, log, operation, and wrapper components', () => {
 
     it('renders compact StatusIndicator updates and cleanup', async () => {
         const {StatusIndicator} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<StatusIndicator compact deploymentMode="full-stack"/>);
@@ -127,7 +125,7 @@ describe('status, log, operation, and wrapper components', () => {
     it('renders detailed StatusIndicator service rows and fallback modes', async () => {
         const {StatusIndicator} = await load();
 
-        let detailed!: TestRenderer.ReactTestRenderer;
+        let detailed!: ReactTestRenderer;
         await act(async () => {
             detailed = TestRenderer.create(<StatusIndicator/>);
         });
@@ -142,7 +140,7 @@ describe('status, log, operation, and wrapper components', () => {
         expect(frame).toContain('API');
         expect(frame).toContain('Database');
 
-        let cli!: TestRenderer.ReactTestRenderer;
+        let cli!: ReactTestRenderer;
         await act(async () => {
             cli = TestRenderer.create(<StatusIndicator compact deploymentMode="cli"/>);
         });
@@ -151,7 +149,7 @@ describe('status, log, operation, and wrapper components', () => {
         });
         expect(textFromTree(cli.toJSON())).toContain('Python');
 
-        let agent!: TestRenderer.ReactTestRenderer;
+        let agent!: ReactTestRenderer;
         await act(async () => {
             agent = TestRenderer.create(<StatusIndicator compact deploymentMode="agent"/>);
         });
@@ -159,55 +157,6 @@ describe('status, log, operation, and wrapper components', () => {
             healthSubscriber?.({...healthStatus, overall: 'unhealthy', dockerRunning: true});
         });
         expect(textFromTree(agent.toJSON())).toContain('Docker');
-    });
-
-    it('renders operation flow and operation status variants', async () => {
-        const {render, OperationStatusDisplay} = await load();
-        const startTime = new Date(Date.now() - 5000);
-
-        expect(render(
-            <OperationStatusDisplay flowState={{step: 'idle'}} showFlowProgress={false}/>
-        ).lastFrame()).toBe('');
-
-        const running = render(
-            <OperationStatusDisplay
-                terminalWidth={120}
-                flowState={{step: 'ready', module: 'web', target: 'example.com', objective: 'audit'}}
-                currentOperation={{
-                    id: 'OP_1',
-                    currentStep: 2,
-                    totalSteps: 5,
-                    description: 'Testing target',
-                    startTime,
-                    status: 'running',
-                    findings: 1,
-                }}
-            />
-        ).lastFrame();
-
-        expect(running).toContain('Setup');
-        expect(running).toContain('Module: web');
-        expect(running).toContain('Testing target');
-        expect(running).toContain('Step 2/5');
-        expect(running).toContain('Findings: 1');
-        expect(running).toContain('RUNNING');
-        expect(running).toContain('ETA');
-
-        for (const status of ['paused', 'completed', 'error', 'cancelled'] as const) {
-            expect(render(
-                <OperationStatusDisplay
-                    flowState={{step: 'target', module: 'web'}}
-                    currentOperation={{
-                        id: `OP_${status}`,
-                        currentStep: 0,
-                        totalSteps: 0,
-                        description: status,
-                        startTime,
-                        status,
-                    }}
-                />
-            ).lastFrame()).toContain(status.toUpperCase());
-        }
     });
 
     it('renders log containers with slicing, details, ansi stripping, and compact mode', async () => {
@@ -298,7 +247,7 @@ describe('status, log, operation, and wrapper components', () => {
 
         const onComplete = jest.fn();
         const onConfigOpen = jest.fn();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         act(() => {
             view = TestRenderer.create(

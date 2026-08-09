@@ -43,6 +43,7 @@ github.com/hahwul/dalfox/v2@latest \
 github.com/jpillora/chisel@latest \
 github.com/ropnop/kerbrute@latest \
 github.com/tomnomnom/qsreplace@latest \
+github.com/fullstorydev/grpcurl/cmd/grpcurl@latest \
 		; do
 		go install ${GOPKG}
 	done

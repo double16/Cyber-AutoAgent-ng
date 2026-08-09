@@ -4,11 +4,13 @@ import os
 from unittest.mock import patch, MagicMock
 
 from modules.config.models.capabilities import (
+    Capabilities,
     get_capabilities,
     get_model_input_limit,
     get_model_output_limit,
     get_model_pricing,
     ModelCapabilitiesResolver,
+    allows_reasoning_content_replay,
 )
 
 
@@ -55,6 +57,18 @@ class TestCapabilitiesPrecedence:
         del os.environ["CYBER_REASONING_DENY"]
         ModelCapabilitiesResolver.capabilities.cache_clear()
 
+    def test_litellm_reasoning_does_not_enable_chat_completion_replay(self):
+        caps = Capabilities(
+            supports_reasoning=True,
+            pass_reasoning_effort=True,
+            supports_tools=True,
+            supports_tool_choice=True,
+            supports_temperature=False,
+        )
+
+        assert allows_reasoning_content_replay("litellm", "openai/gpt-5", caps) is False
+        assert allows_reasoning_content_replay("bedrock", "claude-sonnet-4", caps) is True
+
 
 class TestTokenLimitPrecedence:
     """Validate models.dev used for token limits."""
@@ -68,7 +82,7 @@ class TestTokenLimitPrecedence:
     def test_azure_gpt5_context_limit(self):
         """Verify GPT-5 context limit from models.dev."""
         limit = get_model_input_limit("azure/gpt-5")
-        assert limit == 272000, "GPT-5 has 272K context window"
+        assert limit == 400000, "GPT-5 has a 400K context window in the bundled models.dev snapshot"
 
     def test_output_limit_from_models_dev(self):
         """Verify output limit retrieved from models.dev."""

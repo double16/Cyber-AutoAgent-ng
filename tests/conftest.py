@@ -25,6 +25,9 @@ os.environ["DEV_CLIENT_OFFLINE"] = "true"
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+os.environ["ENABLE_LANGFUSE_PROMPTS"] = "false"
+
+
 # Ensure provider override envs do not leak into tests expecting defaults
 for _var in (
     "CYBER_AGENT_PROVIDER",
@@ -49,8 +52,33 @@ for _var in (
     "MAX_COMPLETION_TOKENS",
     "MAX_TOKENS",
     "ENABLE_OBSERVABILITY",
+    "QDRANT_URL",
+    "QDRANT_API_KEY",
 ):
     os.environ.pop(_var, None)
+
+
+@pytest.fixture(autouse=True)
+def restore_provider_override_environment():
+    """Prevent in-process CLI tests from leaking provider overrides to later tests."""
+    keys = (
+        "CYBER_AGENT_PROVIDER",
+        "CYBER_AGENT_LLM_MODEL",
+        "CYBER_AGENT_EMBEDDING_MODEL",
+        "CYBER_AGENT_SWARM_MODEL",
+        "CYBER_AGENT_EVALUATION_MODEL",
+        "CYBER_MEMORY_MODE",
+        "QDRANT_URL",
+        "QDRANT_API_KEY",
+        "QDRANT_COLLECTION",
+    )
+    original = {key: os.environ.get(key) for key in keys}
+    yield
+    for key, value in original.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 @pytest.fixture
@@ -69,6 +97,34 @@ def outputs_dir():
         yield cwd / "outputs"
     else:
         yield Path.cwd() / ".." / "outputs"
+
+
+@pytest.fixture
+def ollama_taxonomy_client(request):
+    """Return an installed local Ollama model or skip without downloading one."""
+
+    import ollama
+
+    model = request.config.getoption("ollama_model")
+    client = ollama.Client(
+        host=request.config.getoption("ollama_host"),
+        timeout=request.config.getoption("ollama_timeout"),
+    )
+    try:
+        response = client.list()
+    except Exception as error:
+        pytest.skip(f"Ollama is unavailable: {error}")
+    models = getattr(response, "models", None)
+    if models is None and isinstance(response, dict):
+        models = response.get("models", [])
+    installed = set()
+    for item in models or []:
+        name = item.get("model", "") if isinstance(item, dict) else getattr(item, "model", "")
+        if name:
+            installed.add(str(name))
+    if model not in installed:
+        pytest.skip(f"Ollama model {model!r} is not installed")
+    return client, model
 
 
 @pytest.fixture
@@ -159,7 +215,7 @@ def mock_ollama_models_missing():
 def mock_memory_tools():
     """Mock memory tools module"""
     with patch("modules.agents.cyber_autoagent.memory_tools") as mock_tools:
-        mock_tools.mem0_instance = None
+        mock_tools.memory_instance = None
         mock_tools.operation_id = None
         yield mock_tools
 
@@ -170,7 +226,7 @@ def mock_strands_components():
     with (
         patch("modules.agents.cyber_autoagent.Agent") as mock_agent,
         patch("modules.agents.cyber_autoagent.BedrockModel") as mock_bedrock,
-        patch("modules.handlers.react.ReactBridgeHandler") as mock_handler,
+        patch("modules.handlers.react.agent_event_handler.AgentEventHandler") as mock_handler,
         patch("modules.agents.cyber_autoagent.Memory.from_config") as mock_memory,
         patch("modules.agents.cyber_autoagent.get_system_prompt") as mock_prompt,
     ):
@@ -197,7 +253,7 @@ def sample_agent_config():
     return {
         "target": "test.example.com",
         "objective": "Test security assessment",
-        "max_steps": 10,
+        "budget": {"max_duration_minutes": 60},
         "available_tools": ["nmap", "nikto"],
         "model_id": None,
         "region_name": "us-east-1",
@@ -233,6 +289,26 @@ def clear_lru_caches():
 
 
 def pytest_addoption(parser):
+    ollama_group = parser.getgroup("ollama")
+    ollama_group.addoption(
+        "--ollama-model",
+        action="store",
+        default="qwen3.6:27b-mlx",
+        help="Installed Ollama model for tests marked ollama.",
+    )
+    ollama_group.addoption(
+        "--ollama-host",
+        action="store",
+        default="http://localhost:11434",
+        help="Ollama host for tests marked ollama.",
+    )
+    ollama_group.addoption(
+        "--ollama-timeout",
+        action="store",
+        type=float,
+        default=120.0,
+        help="Per-request timeout in seconds for tests marked ollama.",
+    )
     parser.addoption(
         "--browser",
         action="store_true",
@@ -255,8 +331,7 @@ def pytest_runtest_setup(item):
         pytest.skip("Test requires --external option to run.")
 
     if "ollama" in item.keywords:
-        # pytest.skip(f"Skipping tests: Ollama", allow_module_level=True)
-        ollama_host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+        ollama_host = item.config.getoption("ollama_host")
         if "://" not in ollama_host:
             ollama_host = "http://" + ollama_host
         try:

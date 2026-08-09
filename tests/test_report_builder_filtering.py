@@ -6,7 +6,6 @@ Tests for report_builder operation_id filtering logic.
 - Memories with different operation_id are EXCLUDED
 - Memories WITHOUT operation_id (untagged) are included for backward compatibility
 """
-import json
 import os
 import re
 from unittest.mock import patch
@@ -14,16 +13,17 @@ from uuid import uuid4
 
 import pytest
 
-from modules.tools.memory import clear_memory_client
 from modules.handlers.report_generator import build_report_sections
-from modules.tools.memory import OperationPlan, PlanPhase, Task
+from modules.tools.memory import OperationPlan, PlanPhase, Task, clear_memory_client
+from tests.helpers.acceptance import make_acceptance
+
 
 @pytest.fixture(autouse=True)
 def memory_client_clear():
     clear_memory_client()
 
 
-@patch("modules.tools.memory.Mem0ServiceClient")
+@patch("modules.tools.memory.QdrantMemoryClient")
 def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
     op_id = "OP_ALLOFIT"
 
@@ -46,10 +46,10 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         )
 
         tasks = [
-            Task(task_uid=uuid4().hex, title="Task 1", phase=1, objective="Perform Task 1", status="done"),
-            Task(task_uid=uuid4().hex, title="Task 2", phase=2, objective="Perform Task 2", status="done"),
-            Task(task_uid=uuid4().hex, title="Task 3", phase=3, objective="Perform Task 3", status="done"),
-            Task(task_uid=uuid4().hex, title="Task 4", phase=4, objective="Perform Task 4", status="blocked"),
+            Task(task_uid=uuid4().hex, title="Task 1", phase=1, objective="Perform Task 1", acceptance=make_acceptance("t1"), status="done"),
+            Task(task_uid=uuid4().hex, title="Task 2", phase=2, objective="Perform Task 2", acceptance=make_acceptance("t2"), status="done"),
+            Task(task_uid=uuid4().hex, title="Task 3", phase=3, objective="Perform Task 3", acceptance=make_acceptance("t3"), status="done"),
+            Task(task_uid=uuid4().hex, title="Task 4", phase=4, objective="Perform Task 4", acceptance=make_acceptance("t4"), status="blocked"),
         ]
 
         # Mock list_memories to return both tagged and untagged
@@ -61,7 +61,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 "id": "100",
                 "memory": "[VULNERABILITY] A [WHERE] /a [IMPACT] /a/impact [EVIDENCE] /a/evidence [STEPS] /a/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "CRITICAL", "confidence": "90",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/a/control"]},
             },
             {
                 "id": "200",
@@ -73,19 +73,19 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 "id": "201",
                 "memory": "[VULNERABILITY] C [WHERE] /c [IMPACT] /c/impact [EVIDENCE] /c/evidence [STEPS] /c/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "HIGH", "confidence": "90",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/c/control"]},
             },
             {
                 "id": "300",
                 "memory": "[VULNERABILITY] D [WHERE] /d [IMPACT] /d/impact [EVIDENCE] /d/evidence [STEPS] /d/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "90",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/d/control"]},
             },
             {
                 "id": "301",
                 "memory": "[VULNERABILITY] E [WHERE] /e [IMPACT] /e/impact [EVIDENCE] /e/evidence [STEPS] /e/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "MEDIUM", "confidence": "80",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/e/control"]},
             },
             {
                 "id": "302",
@@ -97,13 +97,13 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 "id": "400",
                 "memory": "[VULNERABILITY] G [WHERE] /g [IMPACT] /g/impact [EVIDENCE] /g/evidence [STEPS] /g/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "90",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/g/control"]},
             },
             {
                 "id": "401",
                 "memory": "[VULNERABILITY] H [WHERE] /h [IMPACT] /h/impact [EVIDENCE] /h/evidence [STEPS] /h/steps",
                 "metadata": {"category": "finding", "operation_id": op_id, "severity": "LOW", "confidence": "70",
-                             "validation_status": "verified"},
+                             "validation_status": "verified", "negative_control_artifacts": ["/h/control"]},
             },
             {
                 "id": "402",
@@ -145,34 +145,53 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         ]
 
         with open(operation_dir / "cyber_operations.log", "w", encoding="utf-8") as f:
-            f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 209251, "inputTokens": 208136, "outputTokens": 1115, "totalTokens": 209251, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.75, "duration": "20m 0s", "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_171", "timestamp": "2026-01-26T21:29:49.060488"}}__CYBER_EVENT_END__\n')
-            f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 235860, "inputTokens": 234695, "outputTokens": 1165, "totalTokens": 235860, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 2.10, "duration": "21m 0s", "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_185", "timestamp": "2026-01-26T21:30:49.111082"}}__CYBER_EVENT_END__\n')
+            f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 209251, "inputTokens": 208136, "outputTokens": 1115, "totalTokens": 209251, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.75, "duration": "20m 0s", "budget": {{ "maxDurationMinutes": 60, "maxTokens": null, "maxCost": null }}, "progress": 0.1, "progressPercent": 10, "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_171", "timestamp": "2026-01-26T21:29:49.060488"}}__CYBER_EVENT_END__\n')
+            f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 235860, "inputTokens": 234695, "outputTokens": 1165, "totalTokens": 235860, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 2.10, "duration": "21m 0s", "budget": {{ "maxDurationMinutes": 60, "maxTokens": null, "maxCost": null }}, "progress": 0.15, "progressPercent": 15, "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_185", "timestamp": "2026-01-26T21:30:49.111082"}}__CYBER_EVENT_END__\n')
 
-        out = build_report_sections(
-            operation_id=op_id,
-            target="example.com",
-            objective="test",
-            module="web",
-            steps_executed=197,
-            tools_used=["shell", "shell", "python_repl", "shell", "python_repl", "stop"],
-        )
+        with patch("modules.handlers.report_generator.logger.info") as logger_info:
+            out = build_report_sections(
+                operation_id=op_id,
+                target="example.com",
+                objective="test",
+                module="web",
+                tools_used=["shell", "shell", "python_repl", "shell", "python_repl"],
+            )
 
         assert out.get("operation_id") == op_id
         assert out.get("target") == "example.com"
         assert out.get("objective") == "test"
         assert out.get("date")
-        assert out.get("steps_executed") == 197
-        assert out.get("severity_counts", {}) == {"critical": 1, "high": 2, "medium": 3, "low": 4, "info": 5}
+        assert "steps_executed" not in out
+        assert out.get("severity_counts", {}) == {"critical": 1, "high": 1, "medium": 2, "low": 2, "info": 0}
+        assert out["finding_count"] == 6
+        assert out["observation_count"] == 5
+        assert out["validation_failure_count"] == 4
+        logger_info.assert_any_call(
+            "Report sections built: %d findings, %d observations, %d validation failures "
+            "(%d evidence items total; %d critical, %d high)",
+            6,
+            5,
+            4,
+            15,
+            1,
+            1,
+        )
         assert out.get("critical_count") == 1
-        assert out.get("high_count") == 2
-        assert out.get("medium_count") == 3
-        assert out.get("low_count") == 4
-        assert out.get("info_count") == 5
+        assert out.get("high_count") == 1
+        assert out.get("medium_count") == 2
+        assert out.get("low_count") == 2
+        assert out.get("info_count") == 0
         assert "Comprehensive web application security assessment" in out.get("overview")
         assert out.get("operation_plan", "{}") == plan.to_dict()
 
-        assert out.get("operation_tasks", {}).get("columns") == Task.csv_format()
-        assert out.get("operation_tasks", {}).get("items", []) == [ task.to_toon(include_format=False) for task in tasks ]
+        operation_tasks = out.get("operation_tasks", {})
+        assert operation_tasks.get("columns") == (
+            "title,objective,acceptance_mode,phase,status,status_reason,kind,reference_id,"
+            "replacement_of,target_scope,target_values,acceptance"
+        )
+        assert len(operation_tasks.get("items", [])) == len(tasks)
+        assert all("manifest" not in item for item in operation_tasks["items"])
+        assert all("criterion" not in item.lower() for item in operation_tasks["items"])
 
         evidence_text = out.get("evidence_text")
         assert all([f" /{chr(c)}\n" in evidence_text for c in range(ord('a'), ord('p'))])
@@ -180,15 +199,15 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
 
         findings_table = out.get("findings_table")
         assert "CRITICAL | 1 |" in findings_table
-        assert "HIGH | 2 |" in findings_table
-        assert "MEDIUM | 3 |" in findings_table
-        assert "LOW | 4 |" in findings_table
+        assert "HIGH | 1 |" in findings_table
+        assert "MEDIUM | 2 |" in findings_table
+        assert "LOW | 2 |" in findings_table
         assert "INFO |" not in findings_table
 
         summary_table = out.get("summary_table")
-        assert summary_table.count("| MEDIUM |") == 3
-        assert summary_table.count("| LOW |") == 4
-        assert summary_table.count("| INFO |") == 5
+        assert summary_table.count("| MEDIUM |") == 2
+        assert summary_table.count("| LOW |") == 2
+        assert summary_table.count("| INFO |") == 0
         assert "|  |  |  |" not in summary_table
 
         assert "OWASP Top 10 vulnerabilities" in out.get("analysis")
@@ -201,16 +220,17 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
         assert all(["id" in e for e in raw_evidence])
         assert all(["severity" in e for e in raw_evidence])
         assert len(list(filter(lambda e: e["severity"] == "CRITICAL", raw_evidence))) == 1
-        assert len(list(filter(lambda e: e["severity"] == "HIGH", raw_evidence))) == 2
-        assert len(list(filter(lambda e: e["severity"] == "MEDIUM", raw_evidence))) == 3
-        assert len(list(filter(lambda e: e["severity"] == "LOW", raw_evidence))) == 4
-        assert len(list(filter(lambda e: e["severity"] == "INFO", raw_evidence))) == 5
+        verified = [item for item in raw_evidence if item["category"] == "finding"]
+        assert len(list(filter(lambda e: e["severity"] == "HIGH", verified))) == 1
+        assert len(list(filter(lambda e: e["severity"] == "MEDIUM", verified))) == 2
+        assert len(list(filter(lambda e: e["severity"] == "LOW", verified))) == 2
+        assert len(list(filter(lambda e: e["severity"] == "INFO", verified))) == 0
 
-        assert out.get("tools_summary") == "- shell: 3 uses\n- python_repl: 2 uses\n- stop: 1 use"
+        assert out.get("tools_summary") == "- shell\n- python_repl"
         assert "OWASP Top 10 2021" in out.get("analysis_framework")
         assert out.get("module") == "web"
         assert out.get("evidence_count") == 15
-        assert out.get("canonical_findings", {}).keys() == {'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'}
+        assert out.get("canonical_findings", {}).keys() == {'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'}
 
         assert re.search(r".+/.+", out.get("main_model"))
         assert out.get("input_tokens") == 234695
@@ -222,7 +242,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
     finally:
         os.environ.pop("CYBER_AGENT_OUTPUT_DIR")
 
-@patch("modules.tools.memory.Mem0ServiceClient")
+@patch("modules.tools.memory.QdrantMemoryClient")
 def test_report_builder_filters_by_operation_id(mock_client_cls):
     """Report builder should filter evidence by operation_id for per-operation reports."""
     op_id = "OP_123"
@@ -262,12 +282,13 @@ def test_report_builder_filters_by_operation_id(mock_client_cls):
         "/c" in e.get("content", "") for e in out.get("raw_evidence", []) or []
     ), "Should include untagged evidence for backward compatibility"
 
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 2, "low": 0, "info": 0}
+    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    assert out["validation_failure_count"] == 2
     assert out.get("module") == "custom_module"
 
 
-@patch("modules.tools.memory.Mem0ServiceClient")
-@patch.dict(os.environ, {"MEMORY_ISOLATION": "shared"})
+@patch("modules.tools.memory.QdrantMemoryClient")
+@patch.dict(os.environ, {"CYBER_MEMORY_MODE": "shared"})
 def test_report_builder_cross_operation(mock_client_cls):
     """Report builder should filter evidence by operation_id for per-operation reports."""
     op_id = "OP_123"
@@ -307,10 +328,11 @@ def test_report_builder_cross_operation(mock_client_cls):
         "/c" in e.get("content", "") for e in out.get("raw_evidence", []) or []
     ), "Should include untagged evidence for backward compatibility"
 
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 3, "low": 0, "info": 0}
+    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    assert out["validation_failure_count"] == 3
 
 
-@patch("modules.tools.memory.Mem0ServiceClient")
+@patch("modules.tools.memory.QdrantMemoryClient")
 def test_report_builder_includes_untagged_evidence(mock_client_cls):
     op_id = "OP_456"
     mock_client = mock_client_cls.return_value
@@ -331,10 +353,13 @@ def test_report_builder_includes_untagged_evidence(mock_client_cls):
         "/legacy" in e.get("content", "") for e in out.get("raw_evidence", []) or []
     ), "Should include untagged evidence"
 
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 1, "low": 0, "info": 0}
+    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    assert out["finding_count"] == 0
+    assert out["observation_count"] == 0
+    assert out["validation_failure_count"] == 1
 
 
-@patch("modules.tools.memory.Mem0ServiceClient")
+@patch("modules.tools.memory.QdrantMemoryClient")
 def test_report_builder_only_has_info_evidence(mock_client_cls):
     """Report builder should include info evidence."""
     op_id = "OP_789"
@@ -357,13 +382,27 @@ def test_report_builder_only_has_info_evidence(mock_client_cls):
         },
     ]
 
-    out = build_report_sections(
-        operation_id=op_id, target="example.com", objective="test"
-    )
+    with patch("modules.handlers.report_generator.logger.info") as logger_info:
+        out = build_report_sections(
+            operation_id=op_id, target="example.com", objective="test"
+        )
     assert len(out.get("raw_evidence")) == 3
     evidence_text = out.get("evidence_text", "")
     assert "/a" in evidence_text, "Expected matching observation from current operation"
     assert "/b" in evidence_text, "Expected matching discovery from current operation"
     assert "/c" in evidence_text, "Expected matching signal from current operation"
 
-    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 3}
+    assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    assert out["finding_count"] == 0
+    assert out["observation_count"] == 3
+    assert out["validation_failure_count"] == 0
+    logger_info.assert_any_call(
+        "Report sections built: %d findings, %d observations, %d validation failures "
+        "(%d evidence items total; %d critical, %d high)",
+        0,
+        3,
+        0,
+        3,
+        0,
+        0,
+    )

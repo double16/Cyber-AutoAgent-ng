@@ -6,13 +6,15 @@ This module contains all model instantiation logic for Bedrock, Ollama, and Lite
 Model creation is a configuration concern because it involves reading configuration,
 applying provider-specific settings, and managing credentials.
 """
+from __future__ import annotations
+
 import dataclasses
 import logging
 import os
 import sys
-from math import floor
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from math import floor
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import ollama
 from google.genai.types import HttpRetryOptions, HttpOptions
@@ -36,6 +38,13 @@ from modules.config.models.capabilities import (
 from modules.handlers.utils import print_status
 
 logger = get_logger("Config.ModelFactory")
+
+if TYPE_CHECKING:
+    from strands.models import BedrockModel
+    from strands.models.gemini import GeminiModel
+    from strands.models.litellm import LiteLLMModel
+
+    from modules.config.models.ollama import OllamaModel
 
 PROMPT_TOKEN_FALLBACK_LIMIT = 0
 try:
@@ -265,6 +274,38 @@ def _resolve_prompt_token_limit(
     return None
 
 
+def require_prompt_token_limit(provider: str, model_id: Optional[str]) -> int:
+    """Return the resolved context window or fail before constructing an unbounded agent."""
+
+    limit = _resolve_prompt_token_limit(provider, model_id)
+    if not isinstance(limit, int) or limit <= 0:
+        raise ValueError(
+            f"Unable to determine context window for provider={provider} model={model_id}. "
+            "Configure CYBER_CONTEXT_LIMIT or CYBER_PROMPT_LIMIT_FORCE."
+        )
+    return limit
+
+
+def apply_model_context_window(model: Model, provider: str, model_id: str) -> int:
+    """Apply the already resolved context window to the provider model and Strands."""
+
+    limit = require_prompt_token_limit(provider, model_id)
+    update: Dict[str, Any] = {"context_window_limit": limit}
+    if provider == "ollama":
+        config = model.get_config()
+        options = dict(config.get("options") or {}) if isinstance(config, dict) else {}
+        options["num_ctx"] = limit
+        update["options"] = options
+    model.update_config(**update)
+    logger.info(
+        "Applied resolved context window=%d to provider=%s model=%s",
+        limit,
+        provider,
+        model_id,
+    )
+    return limit
+
+
 def _parse_context_window_fallbacks() -> Optional[List[Dict[str, List[str]]]]:
     """Parse context window fallbacks from environment or configuration.
 
@@ -478,6 +519,7 @@ def create_bedrock_model(
         additional_fields["output_config"]["effort"] = effort
 
     capabilities = get_capabilities(provider, model_id)
+    sdk_config = config_manager.get_sdk_config(provider)
 
     # FIXME: for bedrock, "is_thinking" means something more (?)
     if role in ["primary", "swarm"] and config_manager.is_thinking_model(provider, model_id):
@@ -508,6 +550,7 @@ def create_bedrock_model(
             max_tokens=config["max_tokens"],
             additional_request_fields=additional_fields if additional_fields else None,
             boto_client_config=boto_config,
+            streaming=sdk_config.enable_streaming,
         )
         setattr(model, "_output_tokens", config["max_tokens"])
 
@@ -553,6 +596,7 @@ def create_bedrock_model(
         max_tokens=llm_max,
         additional_request_fields=additional_fields if additional_fields else None,
         boto_client_config=boto_config,
+        streaming=sdk_config.enable_streaming,
     )
     setattr(model, "_output_tokens", llm_max)
 
@@ -579,7 +623,7 @@ def create_ollama_model(
     """
     from modules.config.models import get_capabilities
     from modules.config.models.ollama import OllamaModel
-    from modules.agents.patches import patch_ollama_model_token_usage, patch_ollama_model_json_toolcalls
+    from modules.agents.patches import patch_ollama_model_json_toolcalls
     # patch_ollama_model_token_usage()
 
     # The AgentRepairHook will detect and patch. For models we know need the patch, do it before model use.
@@ -590,6 +634,7 @@ def create_ollama_model(
     config_manager = _get_config_manager()
     config = config_manager.get_local_model_config(model_id, provider)
     capabilities = get_capabilities(provider, model_id)
+    sdk_config = config_manager.get_sdk_config(provider)
 
     create_parameters = _get_parameters_by_role(provider, model_id, role, config)
     llm_temp = create_parameters.llm_temp
@@ -621,6 +666,7 @@ def create_ollama_model(
         keep_alive=config.get("keep_alive"),
         additional_args=additional_args,
         options=config.get("options", {}),
+        stream=sdk_config.enable_streaming,
     )
     setattr(model, "_output_tokens", llm_max)
     return model
@@ -651,6 +697,7 @@ def create_litellm_model(
     config_manager = _get_config_manager()
     config = config_manager.get_standard_model_config(model_id, region_name, provider)
     capabilities = get_capabilities(provider, model_id)
+    sdk_config = config_manager.get_sdk_config(provider)
 
     # Prepare client args based on model prefix
     client_args: Dict[str, Any] = {}
@@ -774,6 +821,7 @@ def create_litellm_model(
         client_args=client_args,
         model_id=config["model_id"],
         params=params,
+        stream=sdk_config.enable_streaming,
     )
     setattr(model, "_output_tokens", llm_max)
     return model
@@ -899,6 +947,7 @@ def create_strands_model(
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
+        apply_model_context_window(model, provider, model_id)
         return model
 
     except Exception as e:

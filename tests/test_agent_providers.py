@@ -37,7 +37,7 @@ def _minimal_server_config():
 @patch("modules.agents.cyber_autoagent.get_config_manager")
 @patch("modules.config.models.factory.create_litellm_model")
 @patch("modules.handlers.react.hooks.ReactHooks")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
 @patch("modules.agents.cyber_autoagent.get_memory_client", return_value=None)
 def test_agent_creation_litellm(
@@ -57,10 +57,8 @@ def test_agent_creation_litellm(
     mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
-    mock_cfg.get_mem0_service_config.return_value = {
-        "vector_store": {"provider": "faiss", "config": {"path": "test"}},
-        "embedder": {"provider": "aws_bedrock", "config": {"model": "test"}},
-        "llm": {"provider": "aws_bedrock", "config": {"model": "test"}},
+    mock_cfg.get_qdrant_memory_config.return_value = {
+        "embedding_provider": "bedrock", "embedding_model": "test", "embedding_dimensions": 1024,
     }
     mock_get_cfg.return_value = mock_cfg
 
@@ -71,17 +69,16 @@ def test_agent_creation_litellm(
     from modules.agents.cyber_autoagent import create_agent, AgentConfig
 
     config = AgentConfig(target="t", objective="o", provider="litellm", op_id="OP_TEST")
-    agent, handler = create_agent(target="t", objective="o", config=config)
+    agent = create_agent(target="t", objective="o", config=config)
 
     assert agent is not None
-    assert handler is not None
     mock_create_litellm.assert_called_once()
 
 
 @patch("modules.agents.cyber_autoagent.get_config_manager")
 @patch("modules.config.models.factory._handle_model_creation_error")
 @patch("modules.handlers.react.hooks.ReactHooks")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
 @patch("modules.agents.cyber_autoagent.get_memory_client", return_value=None)
 def test_agent_creation_unsupported_provider_raises(
@@ -98,10 +95,8 @@ def test_agent_creation_unsupported_provider_raises(
     mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
-    mock_cfg.get_mem0_service_config.return_value = {
-        "vector_store": {"provider": "faiss", "config": {"path": "test"}},
-        "embedder": {"provider": "aws_bedrock", "config": {"model": "test"}},
-        "llm": {"provider": "aws_bedrock", "config": {"model": "test"}},
+    mock_cfg.get_qdrant_memory_config.return_value = {
+        "embedding_provider": "bedrock", "embedding_model": "test", "embedding_dimensions": 1024,
     }
     mock_get_cfg.return_value = mock_cfg
     mock_hooks.side_effect = FakeReactHooks

@@ -34,6 +34,17 @@ interface ModalRegistryProps {
   setIsConfigurationModalOpen?: (value: boolean) => void;
 }
 
+const ModalWrapper: React.FC<{ children: React.ReactNode; terminalWidth: number }> = ({ children, terminalWidth }) => {
+  const fallbackWidth = (process as any)?.stdout?.columns ?? 100;
+  const width = Math.max(40, Math.floor(((terminalWidth || fallbackWidth) * 0.9)));
+
+  return (
+    <Box flexDirection="column" width={width}>
+      {children}
+    </Box>
+  );
+};
+
 export const ModalRegistry: React.FC<ModalRegistryProps> = ({
   activeModal,
   modalContext,
@@ -51,20 +62,10 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
     return null;
   }
   
-  // Common modal wrapper for consistent styling
-  const ModalWrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const w = Math.max(40, Math.floor(((terminalWidth || ((process as any)?.stdout?.columns ?? 100)) * 0.9)));
-    return (
-      <Box flexDirection="column" width={w}>
-        {children}
-      </Box>
-    );
-  };
-  
   switch (activeModal) {
     case ModalType.CONFIG:
       return (
-        <ModalWrapper>
+        <ModalWrapper terminalWidth={terminalWidth}>
           <ConfigEditorLazy 
             onClose={() => {
               onClose();
@@ -79,12 +80,12 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
       );
       
     case ModalType.MEMORY_SEARCH:
-      // Memory functionality removed - requires Python environment with Mem0
+      // Memory functionality is provided by the Python Qdrant integration.
       return null;
       
     case ModalType.MODULE_SELECTOR:
       return (
-        <ModalWrapper>
+        <ModalWrapper terminalWidth={terminalWidth}>
           <ModuleSelectorLazy 
             onClose={onClose}
             onSelect={(moduleName) => {
@@ -99,7 +100,7 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
       
     case ModalType.SAFETY_WARNING:
       return (
-        <ModalWrapper>
+        <ModalWrapper terminalWidth={terminalWidth}>
           {modalContext.pendingExecution && (
             <SafetyWarning 
               target={modalContext.pendingExecution.target}
@@ -116,7 +117,7 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
       
     case ModalType.INITIALIZATION:
       return (
-        <ModalWrapper>
+        <ModalWrapper terminalWidth={terminalWidth}>
           <InitializationFlow 
             onComplete={() => {
               onClose();
@@ -129,7 +130,7 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
       
     case ModalType.DOCUMENTATION:
       return (
-        <ModalWrapper>
+        <ModalWrapper terminalWidth={terminalWidth}>
           <DocumentationViewerLazy 
             onClose={onClose}
             selectedDoc={modalContext.documentIndex}

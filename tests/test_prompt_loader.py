@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from modules.prompts.factory import ModulePromptLoader
 
 
@@ -174,6 +176,20 @@ def test_module_prompt_loader_tools_allowlist_not_inherited(tmp_path, monkeypatc
     assert tools_remaining == ["missing_tool"]
 
 
+def test_module_prompt_loader_load_module_termination_policy(tmp_path, monkeypatch):
+    # Create a termination_policy.md for module
+    module_dir = tmp_path / "operation_plugins" / "web"
+    module_dir.mkdir(parents=True)
+    (module_dir / "module.yaml").write_text("name: web\n")
+    (module_dir / "termination_policy.md").write_text("Termination Policy\n")
+
+    loader = ModulePromptLoader()
+    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
+
+    content = loader.load_module_termination_policy("web")
+    assert "Termination Policy" in content
+
+
 def test_module_prompt_loader_load_module_report_prompt(tmp_path, monkeypatch):
     # Create a report_prompt.md for module
     module_dir = tmp_path / "operation_plugins" / "web"
@@ -328,17 +344,14 @@ def test_module_prompt_loader_report_prompt_inheritance_cycle_safe(tmp_path, mon
     assert content.strip() == "B REPORT"
 
 
-def test_module_prompt_loader_prioritizes_operation_optimized_prompt(
+def test_module_prompt_loader_ignores_operation_prompt_files(
     tmp_path, monkeypatch
 ):
-    """Test that operation-specific optimized prompt takes priority."""
-    # Create operation folder with optimized prompt
+    """Operation roots no longer override module execution prompts."""
     operation_root = tmp_path / "outputs" / "target" / "OP_TEST"
     operation_root.mkdir(parents=True)
-    optimized_path = operation_root / "execution_prompt_optimized.txt"
-    optimized_path.write_text("Optimized execution prompt for this operation")
+    (operation_root / "execution_prompt.md").write_text("Stale operation prompt")
 
-    # Create master prompt
     plugins_dir = tmp_path / "operation_plugins" / "web"
     plugins_dir.mkdir(parents=True)
     (plugins_dir / "module.yaml").write_text("name: web\n")
@@ -348,19 +361,17 @@ def test_module_prompt_loader_prioritizes_operation_optimized_prompt(
     loader = ModulePromptLoader()
     monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
 
-    # Load with operation_root - should get optimized version
     content = loader.load_module_execution_prompt(
         "web", operation_root=str(operation_root)
     )
-    assert content == "Optimized execution prompt for this operation"
-    assert loader.last_loaded_execution_prompt_source == f"optimized:{optimized_path}"
+    assert content == "Master execution prompt"
+    assert loader.last_loaded_execution_prompt_source == f"web:{master_path}"
 
 
-def test_module_prompt_loader_falls_back_to_master_when_no_optimized(
+def test_module_prompt_loader_uses_master_with_operation_root(
     tmp_path, monkeypatch
 ):
-    """Test fallback to master when optimized prompt doesn't exist."""
-    # Create operation folder WITHOUT optimized prompt
+    """Test fallback to master when an operation root is provided."""
     operation_root = tmp_path / "outputs" / "target" / "OP_TEST"
     operation_root.mkdir(parents=True)
 
@@ -402,32 +413,6 @@ def test_module_prompt_loader_handles_invalid_operation_root(tmp_path, monkeypat
     assert loader.last_loaded_execution_prompt_source == f"web:{master_path}"
 
 
-def test_module_prompt_loader_handles_empty_optimized_file(tmp_path, monkeypatch):
-    """Test handling of empty optimized prompt file."""
-    # Create operation folder with EMPTY optimized prompt
-    operation_root = tmp_path / "outputs" / "target" / "OP_TEST"
-    operation_root.mkdir(parents=True)
-    optimized_path = operation_root / "execution_prompt_optimized.txt"
-    optimized_path.write_text("")  # Empty file
-
-    # Create master prompt
-    plugins_dir = tmp_path / "operation_plugins" / "web"
-    plugins_dir.mkdir(parents=True)
-    (plugins_dir / "module.yaml").write_text("name: web\n")
-    master_path = plugins_dir / "execution_prompt.md"
-    master_path.write_text("Master execution prompt")
-
-    loader = ModulePromptLoader()
-    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
-
-    # Load with operation_root - should fall back to master since optimized is empty
-    content = loader.load_module_execution_prompt(
-        "web", operation_root=str(operation_root)
-    )
-    assert content == "Master execution prompt"
-    assert loader.last_loaded_execution_prompt_source == f"web:{master_path}"
-
-
 def test_module_prompt_loader_operation_root_none(tmp_path, monkeypatch):
     """Test that operation_root=None works correctly."""
     # Create master prompt
@@ -461,3 +446,79 @@ def test_module_prompt_loader_find_module_dir_deep_search(tmp_path, monkeypatch)
     
     found_dir = loader._find_module_dir("web")
     assert found_dir == module_dir
+
+
+def test_built_in_modules_define_advisory_phase_contracts():
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    modules = ("code_security", "context_navigator", "ctf", "threat_emulation", "web", "web_recon")
+
+    for module in modules:
+        policy = (root / module / "termination_policy.md").read_text()
+        assert "## Recommended Minimum Phase Contract" in policy
+        assert "advisory guidance, not a mandatory phase count" in policy
+        assert "Adjacent recommendations may be merged" in policy
+        assert "Omit a recommendation only when it is demonstrably" in policy
+
+
+def test_built_in_phase_contract_titles_have_one_primary_outcome():
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    modules = ("code_security", "context_navigator", "ctf", "threat_emulation", "web", "web_recon")
+
+    for module in modules:
+        policy = (root / module / "termination_policy.md").read_text()
+        phase_lines = [
+            line
+            for line in policy.splitlines()
+            if line.lstrip().split(" ", 1)[0].rstrip(".").isdigit()
+        ]
+        assert phase_lines
+        assert all("** &" not in line and "& **" not in line for line in phase_lines)
+
+
+def test_ctf_phase_contract_preserves_chain_evidence_and_flag_completion():
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    policy = (root / "ctf" / "termination_policy.md").read_text()
+
+    assert "Challenge Surface Mapping" in policy
+    assert "Generate Exploit Hypotheses from the Challenge Surface" in policy
+    assert "Exploit Chain Analysis" in policy
+    assert "Flag Retrieval and Confirmation" in policy
+    assert "Coverage Closure" not in policy
+    assert "each prerequisite, transition, required server-side acceptance" in policy
+    assert "failed links" in policy
+    assert "failed links and alternative branches" in policy
+    assert "prerequisite, action, observed transition, and artifact" in policy
+    assert "direct single-step flag path does not require artificial" in policy
+    assert "chain records" in policy
+
+
+def test_web_phase_contract_uses_distinct_industry_aligned_capabilities():
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    policy = (root / "web" / "termination_policy.md").read_text()
+
+    expected_phases = (
+        "Attack Surface Mapping",
+        "Generate Attack Hypotheses from the Mapped Attack Surface",
+        "Vulnerability Discovery and Exploitability Testing",
+        "Exploit Chain Analysis",
+        "Finding Validation",
+        "Impact Demonstration",
+    )
+    for phase in expected_phases:
+        assert phase in policy
+
+    assert "Impact Demonstration & Coverage Closure" not in policy
+    assert "Hypothesis Testing & Validation" not in policy
+    assert "not_applicable" in policy
+    assert "without destructive action" in policy
+
+
+@pytest.mark.parametrize("module", ["web", "ctf", "code_security"])
+def test_chain_phase_contracts_are_analytical_and_conditionally_applicable(module):
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    policy = (root / module / "termination_policy.md").read_text()
+
+    assert "not_applicable" in policy
+    assert "rather than repeating" in policy or "does not repeat" in policy
+    assert "concrete" in policy
+    assert "evidence" in policy

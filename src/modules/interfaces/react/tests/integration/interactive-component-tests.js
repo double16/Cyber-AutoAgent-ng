@@ -309,8 +309,8 @@ class ComponentTestRunner {
     term.onData(data => {
       output += data;
       // Track events
-      if (output.includes('[STEP')) {
-        events.push('step');
+      if (output.includes('[BUDGET')) {
+        events.push('budget');
       }
       if (output.includes('tool:')) {
         events.push('tool');
@@ -323,24 +323,24 @@ class ComponentTestRunner {
     await this.wait(3000);
     
     // Check event sequence
-    const hasStepHeaders = events.includes('step');
+    const hasBudgetUpdates = events.includes('budget');
     const hasToolEvents = events.includes('tool');
     const hasOutput = events.includes('output');
     
     // Check formatting
-    const properFormatting = output.includes('[STEP') &&
+    const properFormatting = output.includes('[BUDGET') &&
                             output.includes('tool:') &&
                             (output.includes('├─') || output.includes('└─'));
     
     term.kill();
     
-    const testPassed = hasStepHeaders && hasToolEvents && hasOutput && properFormatting;
+    const testPassed = hasBudgetUpdates && hasToolEvents && hasOutput && properFormatting;
     
     this.results.push({
       name: 'Stream Display',
       passed: testPassed,
       details: {
-        hasStepHeaders,
+        hasProgressUpdates,
         hasToolEvents,
         hasOutput,
         properFormatting,

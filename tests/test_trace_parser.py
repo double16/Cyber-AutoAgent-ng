@@ -18,7 +18,7 @@ def test_parsed_trace_properties_and_tool_outputs():
         messages=[ParsedMessage("user", "short"), ParsedMessage("assistant", "x" * 40)],
         tool_calls=[
             ParsedToolCall("shell", {"cmd": "id"}, output="uid=0"),
-            ParsedToolCall("mem0_store", {"content": "finding"}, output=None),
+            ParsedToolCall("store_finding", {"title": "finding"}, output=None),
         ],
     )
 
@@ -26,7 +26,7 @@ def test_parsed_trace_properties_and_tool_outputs():
     assert trace.has_tool_usage is True
     assert trace.get_tool_outputs() == [
         "Tool [shell]: uid=0",
-        "Tool [mem0_store] executed: {'content': 'finding'}",
+        "Tool [store_finding] executed: {'title': 'finding'}",
     ]
 
 
@@ -88,8 +88,8 @@ def test_parse_tool_observations_and_counts():
     observations = [
         {
             "type": "TOOL",
-            "name": "Tool: mem0_store",
-            "input": [{"content": '{"action":"store","content":"critical finding"}'}],
+            "name": "Tool: store_finding",
+            "input": [{"content": '{"claim":"critical finding","severity":"CRITICAL"}'}],
             "output": {"message": "stored"},
             "statusMessage": None,
         },
@@ -104,8 +104,8 @@ def test_parse_tool_observations_and_counts():
 
     tools = parser._extract_tool_calls(SimpleNamespace(), observations)
 
-    assert [tool.name for tool in tools] == ["mem0_store", "http_request"]
-    assert tools[0].input_data == {"action": "store", "content": "critical finding"}
+    assert [tool.name for tool in tools] == ["store_finding", "http_request"]
+    assert tools[0].input_data == {"claim": "critical finding", "severity": "CRITICAL"}
     assert tools[1].success is False
     assert parser.count_memory_operations(tools) == 1
     assert parser.count_evidence_findings(tools) == 1
@@ -122,13 +122,12 @@ def test_context_formatting_memory_findings_and_current_counts():
         tool_calls=[
             ParsedToolCall("shell", {}, output="whoami"),
             ParsedToolCall(
-                "mem0_store",
-                {"content": "SQL injection",
-                 "metadata": {"operation_id": "OP1", "severity": "high", "category": "sqli"}},
+                "store_finding",
+                {"claim": "SQL injection", "severity": "HIGH"},
                 output="stored",
             ),
             ParsedToolCall(
-                "mem0_store",
+                "store_knowledge",
                 {"content": "Other op", "metadata": {"operation_id": "OP2"}},
                 output="stored",
             ),
@@ -141,7 +140,7 @@ def test_context_formatting_memory_findings_and_current_counts():
     assert "[Shell Command Output] whoami" in contexts
     assert "[Memory Store] SQL injection" in contexts
     assert "[HTTP Response] HTTP 500" in contexts
-    assert "[Security Finding - high/sqli] SQL injection" in contexts
+    assert "[Security Finding - unknown/unknown] SQL injection" in contexts
     assert "[System] finding: exposed token" in contexts
     assert parser.count_current_evidence_findings(trace) == 1
 
@@ -205,3 +204,46 @@ async def test_sample_creation_and_topic_generation_fallbacks():
     multi = await parser._create_multi_turn_sample(multi_trace)
     assert multi.reference_topics == ["Assess auth"]
     assert len(multi.user_input) >= 3
+
+
+@pytest.mark.asyncio
+async def test_topic_generation_reports_progress_before_llm_call(monkeypatch):
+    calls = []
+
+    async def generate(_self, **_kwargs):
+        calls.append("generate")
+        return SimpleNamespace(topics=["authentication", "authorization"])
+
+    monkeypatch.setattr("ragas.prompt.PydanticPrompt.generate", generate)
+    parser = TraceParser(
+        llm=SimpleNamespace(generate=object()),
+        progress_callback=lambda kind, status="started": calls.append(f"{kind}:{status}"),
+    )
+
+    topics = await parser._generate_reference_topics_from_trace(
+        ParsedTrace("t", "Trace", "Assess auth", [], [])
+    )
+
+    assert topics == ["authentication", "authorization"]
+    assert calls == ["reference_topics:started", "generate", "reference_topics:completed"]
+
+
+@pytest.mark.asyncio
+async def test_topic_generation_ignores_progress_callback_failure(monkeypatch):
+    async def generate(_self, **_kwargs):
+        return SimpleNamespace(topics=["network security"])
+
+    def fail_progress(_kind):
+        raise RuntimeError("event stream disconnected")
+
+    monkeypatch.setattr("ragas.prompt.PydanticPrompt.generate", generate)
+    parser = TraceParser(
+        llm=SimpleNamespace(generate=object()),
+        progress_callback=fail_progress,
+    )
+
+    topics = await parser._generate_reference_topics_from_trace(
+        ParsedTrace("t", "Trace", "Assess network", [], [])
+    )
+
+    assert topics == ["network security"]

@@ -1,7 +1,7 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
-import {jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -90,7 +90,7 @@ describe('input and selection components', () => {
         const onConfirm = jest.fn();
         const onCancel = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <SafetyWarning target="example.com" module="web" onConfirm={onConfirm} onCancel={onCancel}/>
@@ -107,10 +107,21 @@ describe('input and selection components', () => {
         sendInput('y');
         expect(onConfirm).toHaveBeenCalledTimes(1);
 
-        act(() => view.update(<SafetyWarning target="example.org" module="recon" onConfirm={onConfirm}
-                                             onCancel={onCancel}/>));
+        act(() => {
+            view.unmount();
+            view = TestRenderer.create(
+                <SafetyWarning target="example.org" module="recon" onConfirm={onConfirm} onCancel={onCancel}/>
+            );
+        });
         sendInput('n');
         expect(onCancel).toHaveBeenCalledTimes(1);
+
+        act(() => {
+            view.unmount();
+            view = TestRenderer.create(
+                <SafetyWarning target="example.net" module="cloud" onConfirm={onConfirm} onCancel={onCancel}/>
+            );
+        });
         sendInput('', {escape: true});
         expect(onCancel).toHaveBeenCalledTimes(2);
     });
@@ -146,7 +157,7 @@ describe('input and selection components', () => {
             {label: 'Gamma', value: 'c', description: 'third', badge: 'ready'},
         ];
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <RadioSelect
@@ -191,7 +202,19 @@ describe('input and selection components', () => {
         expect(render(<ThinkingIndicator message="Custom message"/>).lastFrame())
             .toContain('Custom message');
 
-        let inline!: TestRenderer.ReactTestRenderer;
+        process.env.CYBER_RECORDING_MODE = 'true';
+        const recordingView = render(<ThinkingIndicator startTime={Date.now() - 5_000} message="Recording"/>);
+        const beforeTick = recordingView.lastFrame() || '';
+        expect(beforeTick).toContain('⌛');
+        expect(beforeTick).not.toContain('[0s]');
+        act(() => {
+            jest.advanceTimersByTime(3_000);
+        });
+        const afterTick = recordingView.lastFrame() || '';
+        expect(afterTick).not.toContain('s]');
+        delete process.env.CYBER_RECORDING_MODE;
+
+        let inline!: ReactTestRenderer;
         act(() => {
             inline = TestRenderer.create(<InlineThinking message="wait"/>);
         });
@@ -235,5 +258,49 @@ describe('input and selection components', () => {
         });
         sendInput('', {escape: true});
         expect(onClose).toHaveBeenCalledTimes(2);
+    });
+
+    it('selects the navigated module when navigation and Enter are batched', async () => {
+        const {ModuleSelector} = await load();
+        const onClose = jest.fn();
+        const onSelect = jest.fn();
+
+        act(() => {
+            TestRenderer.create(<ModuleSelector onClose={onClose} onSelect={onSelect}/>);
+        });
+
+        act(() => {
+            (global as any).__inkInputHandler?.('', {downArrow: true});
+            (global as any).__inkInputHandler?.('', {return: true});
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(switchModule).toHaveBeenCalledWith('cloud');
+        expect(onSelect).toHaveBeenCalledWith('cloud');
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('selects the previous module when upward navigation and Enter are batched', async () => {
+        const {ModuleSelector} = await load();
+        const onClose = jest.fn();
+        const onSelect = jest.fn();
+
+        act(() => {
+            TestRenderer.create(<ModuleSelector onClose={onClose} onSelect={onSelect}/>);
+        });
+
+        act(() => {
+            (global as any).__inkInputHandler?.('', {upArrow: true});
+            (global as any).__inkInputHandler?.('', {return: true});
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(switchModule).toHaveBeenCalledWith('recon');
+        expect(onSelect).toHaveBeenCalledWith('recon');
+        expect(onClose).toHaveBeenCalledTimes(1);
     });
 });

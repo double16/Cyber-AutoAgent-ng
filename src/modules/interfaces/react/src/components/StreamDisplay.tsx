@@ -4,12 +4,11 @@
  */
 
 import React from 'react';
-import { Box, Text } from 'ink';
-import { ThinkingIndicator } from './ThinkingIndicator.js';
+import { Box, Static, Text } from 'ink';
 import { StreamEvent } from '../types/events.js';
-import { SwarmDisplay, SwarmState, SwarmAgent } from './SwarmDisplay.js';
 import { formatToolInput } from '../utils/toolFormatters.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
+import { themeManager } from '../themes/theme-manager.js';
 // Removed toolCategories import - using clean tool display without emojis
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
@@ -17,12 +16,13 @@ import * as path from 'path';
 import stripAnsi from 'strip-ansi';
 import { useConfig } from '../contexts/ConfigContext.js';
 import type { Config } from '../contexts/ConfigContext.js';
+import { formatOperationHealth } from '../utils/operationHealthFormatting.js';
+import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
+import { formatWorkflowActivityEvent } from '../utils/workflowActivityFormatting.js';
+import { MarkdownRenderer } from '../utils/markdownRows.js';
 
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
 let cachedProjectRoot: string | null | undefined;
-
-// Tracks the most recently-started task title so it can be shown in the ThinkingIndicator.
-let activeTaskTitle: string | null = null;
 
 const resolveProjectRoot = (): string | null => {
   if (cachedProjectRoot !== undefined) {
@@ -54,7 +54,18 @@ const resolveProjectRoot = (): string | null => {
 // Extended event types for UI-specific events not covered by the core SDK events
 // These events are used for UI state management and display formatting
 export type AdditionalStreamEvent = 
-  | { type: 'step_header'; step: number | string; maxSteps?: number; totalTools?: number; operation?: string; duration?: string; [key: string]: any }
+  | {
+      type: 'progress_update';
+      step: number | string;
+      progressPercent?: number;
+      totalTools?: number;
+      operation?: string;
+      duration?: string;
+      health?: OperationHealthSnapshot;
+      [key: string]: any;
+    }
+  | { type: 'evaluation_step_complete'; status: 'completed' | 'skipped' | 'failed'; evaluation_step_kind: string; [key: string]: any }
+  | { type: 'evaluation_complete'; status?: 'completed' | 'no_results' | 'failed'; scores?: Record<string, number>; [key: string]: any }
   | { type: 'reasoning'; content: string; [key: string]: any }
   | { type: 'thinking'; context?: 'reasoning' | 'tool_preparation' | 'tool_execution' | 'waiting' | 'startup' | 'rate_limit'; startTime?: number; urgent?: boolean; [key: string]: any }
   | { type: 'thinking_end'; [key: string]: any }
@@ -64,6 +75,10 @@ export type AdditionalStreamEvent =
   | { type: 'tool_input_corrected'; tool_id: string; tool_input: any; [key: string]: any }
   | { type: 'command'; content: string; [key: string]: any }
   | { type: 'output'; content: string; exitCode?: number; duration?: number; [key: string]: any }
+  | { type: 'tool_discovery_start'; message?: string; [key: string]: any }
+  | { type: 'tool_available'; tool_name?: string; description?: string; [key: string]: any }
+  | { type: 'tool_unavailable'; tool_name?: string; description?: string; [key: string]: any }
+  | { type: 'environment_ready'; message?: string; tool_count?: number; [key: string]: any }
   | { type: 'error'; content: string; [key: string]: any }
   | { type: 'metadata'; content: Record<string, string>; [key: string]: any }
   | { type: 'divider'; [key: string]: any }
@@ -77,18 +92,18 @@ export type AdditionalStreamEvent =
   | { type: 'tool_invocation_end'; duration?: number; success?: boolean; [key: string]: any }
   | { type: 'event_loop_cycle_start'; cycleNumber?: number; [key: string]: any }
   | { type: 'content_block_delta'; delta?: string; isReasoning?: boolean; [key: string]: any }
-  | { type: 'swarm_start'; agent_names?: any[]; agent_details?: any[]; task?: string; [key: string]: any }
-  | { type: 'swarm_handoff'; from_agent?: string; to_agent?: string; message?: string; [key: string]: any }
-  | { type: 'swarm_complete'; final_agent?: string; execution_count?: number; [key: string]: any }
   | { type: 'specialist_start'; specialist?: string; task?: string; finding?: string; artifactPaths?: string[]; [key: string]: any }
   | { type: 'specialist_progress'; specialist?: string; gate?: number; totalGates?: number; tool?: string; status?: string; [key: string]: any }
   | { type: 'specialist_end'; specialist?: string; result?: any; [key: string]: any }
   | { type: 'batch'; id?: string; events: DisplayStreamEvent[]; [key: string]: any }
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
-  | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; memoryPath?: string; [key: string]: any }
-  | { type: 'task_started'; task_uid?: string; title?: string; status?: string; [key: string]: any }
-  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; [key: string]: any }
+  | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; artifactsPath?: string; [key: string]: any }
+  | { type: 'workflow_activity'; content?: string; activity?: string; action?: string; role?: string; status?: string; phase_id?: number; phase_title?: string; task_uid?: string; task_title?: string; attempt?: number; attempt_total?: number; cycle?: number; cycle_total?: number; iteration?: number; iteration_total?: number; [key: string]: any }
+  | { type: 'preflight_check'; operation_id?: string; target_id?: string; target?: string; target_type?: string; status: 'pass' | 'fail' | 'skip'; checks?: string[]; reason?: string; resolved_addresses?: string[]; [key: string]: any }
+  | { type: 'task_started'; task_uid?: string; title?: string; status?: string; task_kind?: string; reference_id?: string; [key: string]: any }
+  | { type: 'task_done'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; finding_resolution?: string; [key: string]: any }
+  | { type: 'task_deferred'; task_uid?: string; title?: string; status?: string; status_reason?: string; task_kind?: string; reference_id?: string; [key: string]: any }
   | { type: 'rate_limit'; sleep_time?: number; wait_total?: number; message?: string; [key: string]: any };
 
 // Combined event type supporting both SDK-aligned and additional events
@@ -96,6 +111,33 @@ export type DisplayStreamEvent = StreamEvent | AdditionalStreamEvent;
 
 // Re-export StreamEvent type for backward compatibility
 export type { StreamEvent };
+
+const formatTaskScope = (event: any): string => {
+  const scope = typeof event?.target_scope === 'string' ? event.target_scope.trim() : '';
+  const ids = Array.isArray(event?.target_ids) ? event.target_ids.filter(Boolean).join(',') : '';
+  if (!scope || scope === 'all') return '';
+  return ids ? ` [scope: ${ids}]` : ` [scope: ${scope}]`;
+};
+
+const flattenDisplayEvents = (events: DisplayStreamEvent[]): DisplayStreamEvent[] => events.flatMap(event =>
+  event.type === 'batch' && Array.isArray(event.events) ? flattenDisplayEvents(event.events) : [event]
+);
+
+type TerminationDetail = { reason?: string; message?: string };
+
+const latestTerminationDetail = (events: DisplayStreamEvent[]): TerminationDetail | null => {
+  const termination = [...flattenDisplayEvents(events)]
+    .reverse()
+    .find(event => event.type === 'termination_reason');
+  if (!termination) return null;
+  const reason = typeof (termination as any).reason === 'string'
+    ? (termination as any).reason.trim()
+    : '';
+  const message = typeof (termination as any).message === 'string'
+    ? (termination as any).message.trim()
+    : '';
+  return reason || message ? { reason: reason || undefined, message: message || undefined } : null;
+};
 
 interface StreamDisplayProps {
   events: DisplayStreamEvent[];
@@ -231,6 +273,49 @@ export const getReportPathCandidates = (
   return candidates;
 };
 
+const REPORT_FILE_PREVIEW_BYTES = Math.max(
+  16384,
+  DISPLAY_LIMITS.REPORT_CONTENT_MAX_TOTAL_CHARS || 30000
+);
+
+export const readReportPreviewFile = async (
+  filePath: string,
+  maxBytes = REPORT_FILE_PREVIEW_BYTES
+): Promise<string> => {
+  const byteBudget = Math.max(1024, Math.floor(maxBytes));
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const stats = await handle.stat();
+    const size = Number(stats.size) || 0;
+    if (size <= 0) {
+      return '';
+    }
+
+    if (size <= byteBudget) {
+      const buffer = Buffer.alloc(size);
+      const { bytesRead } = await handle.read(buffer, 0, size, 0);
+      return buffer.subarray(0, bytesRead).toString('utf-8');
+    }
+
+    const headBytes = Math.max(1, Math.floor(byteBudget * 0.7));
+    const tailBytes = Math.max(1, byteBudget - headBytes);
+    const head = Buffer.alloc(headBytes);
+    const tail = Buffer.alloc(tailBytes);
+    const { bytesRead: headRead } = await handle.read(head, 0, headBytes, 0);
+    const { bytesRead: tailRead } = await handle.read(tail, 0, tailBytes, Math.max(0, size - tailBytes));
+    const omitted = Math.max(0, size - headRead - tailRead);
+    return [
+      head.subarray(0, headRead).toString('utf-8'),
+      '',
+      `... (report file preview truncated; ${omitted} bytes omitted) ...`,
+      '',
+      tail.subarray(0, tailRead).toString('utf-8'),
+    ].join('\n');
+  } finally {
+    await handle.close();
+  }
+};
+
 // Inline viewer to load and render the generated markdown report from disk
 const InlineReportViewer: React.FC<{
   ctx: OperationContext;
@@ -266,15 +351,18 @@ const InlineReportViewer: React.FC<{
   );
 
   React.useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       try {
-        setError(null);
-        setResolvedPath(null);
+        if (!cancelled) {
+          setError(null);
+          setResolvedPath(null);
+        }
 
         const candidates = candidatePaths;
 
         if (candidates.length === 0) {
-          if (!fallbackContent) {
+          if (!cancelled && !fallbackContent) {
             setError('Report context unavailable');
           }
           return;
@@ -287,8 +375,7 @@ const InlineReportViewer: React.FC<{
             if (!fsSync.existsSync(candidate)) {
               continue;
             }
-            const data = await fs.readFile(candidate, 'utf-8');
-            loaded = data;
+            loaded = await readReportPreviewFile(candidate);
             usedPath = candidate;
             break;
           } catch {}
@@ -297,26 +384,32 @@ const InlineReportViewer: React.FC<{
         if (!loaded) {
           // We already populated content from fallbackContent above (if present).
           // If there is no fallbackContent, surface a clear error.
-          if (!fallbackContent) {
+          if (!cancelled && !fallbackContent) {
             setError('Report file not found');
           }
           // Prefer the first existing candidate for the "Report saved to" hint.
           try {
             const firstExisting = candidates.find(p => fsSync.existsSync(p));
+            if (cancelled) {
+              return;
+            }
             if (firstExisting) {
               setResolvedPath(firstExisting);
             } else if (reportPath && path.isAbsolute(reportPath)) {
               setResolvedPath(reportPath);
             }
           } catch {
-            if (reportPath && path.isAbsolute(reportPath)) {
+            if (!cancelled && reportPath && path.isAbsolute(reportPath)) {
               setResolvedPath(reportPath);
             }
           }
           return;
         }
 
-        // File read succeeded; prefer full file content over inline fallback.
+        // File read succeeded; prefer bounded file preview over inline fallback.
+        if (cancelled) {
+          return;
+        }
         setContent(loaded);
         if (usedPath) {
           setResolvedPath(usedPath);
@@ -326,24 +419,30 @@ const InlineReportViewer: React.FC<{
       } catch (e: any) {
         // On unexpected errors, keep any existing content (seeded above) and
         // only surface an error if we had nothing to show.
-        if (!fallbackContent) {
+        if (!cancelled && !fallbackContent) {
           setError('Failed to load report');
         }
         try {
           const firstExisting = candidatePaths.find(p => fsSync.existsSync(p));
+          if (cancelled) {
+            return;
+          }
           if (firstExisting) {
             setResolvedPath(firstExisting);
           } else if (reportPath && path.isAbsolute(reportPath)) {
             setResolvedPath(reportPath);
           }
         } catch {
-          if (reportPath && path.isAbsolute(reportPath)) {
+          if (!cancelled && reportPath && path.isAbsolute(reportPath)) {
             setResolvedPath(reportPath);
           }
         }
       }
     };
     load();
+    return () => {
+      cancelled = true;
+    };
   }, [candidatePaths, fallbackContent, reportPath]);
 
   if (error) {
@@ -433,9 +532,7 @@ const InlineReportViewer: React.FC<{
     <Box flexDirection="column" marginTop={1} marginBottom={1}>
       <Text color="cyan" bold>SECURITY ASSESSMENT REPORT</Text>
       <Box flexDirection="column" marginTop={1} paddingX={1}>
-        {previewLines.map((line, i) => (
-          <Text key={i}>{line}</Text>
-        ))}
+        <MarkdownRenderer content={previewLines.join('\n')} />
         {truncatedNotice && (
           <Box marginTop={1}>
             <Text dimColor>
@@ -470,6 +567,7 @@ interface EventLineProps {
   // rendered only in the dynamic StreamDisplay (which can react to late-arriving
   // report_content and assessment_complete events).
   enableInlineReportView?: boolean;
+  terminationDetail?: TerminationDetail | null;
 }
 
 export const EventLine: React.FC<EventLineProps> = React.memo(({
@@ -482,11 +580,69 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
   projectRoot,
   configOverride,
   enableInlineReportView = true,
+  terminationDetail,
 }) => {
   const { config } = useConfig();
   const effectiveConfig = configOverride ?? config;
 
   switch (event.type) {
+    case 'tool_discovery_start': {
+      const message = typeof event.message === 'string' && event.message.trim()
+        ? event.message.trim()
+        : 'Loading cybersecurity assessment tools';
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="cyan" bold>TOOL DISCOVERY</Text>
+          <Box marginLeft={2}>
+            <Text>🔎 {message}</Text>
+          </Box>
+        </Box>
+      );
+    }
+
+    case 'tool_available': {
+      const toolName = typeof event.tool_name === 'string' && event.tool_name.trim()
+        ? event.tool_name.trim()
+        : 'unnamed tool';
+      const description = typeof event.description === 'string' ? event.description.trim() : '';
+      return (
+        <Box marginLeft={2}>
+          <Text color="green">🔧 </Text>
+          <Text bold>{toolName}</Text>
+          {description ? <Text dimColor>{` — ${description}`}</Text> : null}
+        </Box>
+      );
+    }
+
+    case 'tool_unavailable': {
+      const toolName = typeof event.tool_name === 'string' && event.tool_name.trim()
+        ? event.tool_name.trim()
+        : 'unnamed tool';
+      const description = typeof event.description === 'string' ? event.description.trim() : '';
+      return (
+        <Box marginLeft={2}>
+          <Text color="yellow">⛔ </Text>
+          <Text color="yellow" bold>{toolName}</Text>
+          {description ? <Text dimColor>{` — ${description}`}</Text> : null}
+          <Text dimColor> (unavailable)</Text>
+        </Box>
+      );
+    }
+
+    case 'environment_ready': {
+      const toolCount = Number(event.tool_count);
+      const message = typeof event.message === 'string' && event.message.trim()
+        ? event.message.trim()
+        : Number.isFinite(toolCount)
+          ? `Environment ready - ${toolCount} cybersecurity tools loaded`
+          : 'Environment ready';
+      return (
+        <Box marginTop={1}>
+          <Text color="green" bold>🟢 {message}</Text>
+        </Box>
+      );
+    }
+
     // =======================================================================
     // SDK NATIVE EVENT HANDLERS - Integrated with SDK context
     // =======================================================================
@@ -550,41 +706,61 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       );
       
     // =======================================================================
-    // LEGACY EVENT HANDLERS - Backward compatibility
+    // EVENT BOUNDARY HANDLERS
     // =======================================================================
-    case 'step_header':
-      // Detect if this is a swarm step and format appropriately
+    case 'progress_update':
       let stepDisplay = '';
+      const healthVisual = formatOperationHealth((event as any).health);
+
+      const eventAgent = (event as any)['agent_name'];
+      const agentSubStep = (event as any)['agent_sub_step'];
+      const operationStage = (event as any)['operation_stage'];
       
-      // Access properties through bracket notation to bypass TypeScript checks
-      const swarmAgent = (event as any)['swarm_agent'];
-      const swarmSubStep = (event as any)['swarm_sub_step'];
-      const swarmTotalIterations = (event as any)['swarm_total_iterations'];
-      const swarmMaxIterations = (event as any)['swarm_max_iterations'];
-      const isSwarmOperation = (event as any)['is_swarm_operation'];
-      
-      if (event.step === "FINAL REPORT") {
+      if (operationStage === 'ragas_evaluation') {
+        const evaluationIndex = Number((event as any)['evaluation_step_index']);
+        const evaluationTotal = Number((event as any)['evaluation_step_total']);
+        const evaluationKind = String((event as any)['evaluation_step_kind'] || '');
+        const evaluationLabel = String((event as any)['evaluation_step_label'] || '').trim();
+        const progressLabel = Number.isFinite(evaluationIndex) && Number.isFinite(evaluationTotal)
+          ? `${evaluationIndex}/${evaluationTotal}`
+          : (evaluationKind === 'reference_topics' ? 'PREPARING' : 'METRIC');
+        stepDisplay = `[RAGAS EVALUATION ${progressLabel}]${evaluationLabel ? ` ${evaluationLabel}` : ''}`;
+      } else if (operationStage === 'final_report') {
+        const reportIndex = Number((event as any)['report_step_index']);
+        const reportTotal = Number((event as any)['report_step_total']);
+        const reportLabel = String((event as any)['report_step_label'] || '').trim();
+        const reportKind = String((event as any)['report_step_kind'] || '').trim();
+        const progressLabel = Number.isFinite(reportIndex) && Number.isFinite(reportTotal)
+          ? `${reportIndex}/${reportTotal}`
+          : 'REPORT';
+        const kindLabel = reportKind === 'validation_failure' ? ' [REQUIRES VALIDATION]' : '';
+        stepDisplay = `[FINAL REPORT ${progressLabel}]${kindLabel}${reportLabel ? ` ${reportLabel}` : ''}`;
+      } else if (event.step === "FINAL REPORT") {
         stepDisplay = "[FINAL REPORT]";
       } else if (typeof event.step === 'string' && String(event.step).toUpperCase() === 'TERMINATED') {
-        // Clean termination header without confusing step counters
-        stepDisplay = "[TERMINATED]";
-      } else if (swarmAgent && swarmSubStep) {
-        // For swarm operations, show agent name with their step count and swarm-wide progress
-        // Use replaceAll to handle multi-word agent names correctly
-        const agentName = String(swarmAgent).toUpperCase().replaceAll('_', ' ');
-        // Show agent's step count and swarm-wide iteration progress (no max cap shown)
-        const swarmTotal = (event as any)['swarm_total_iterations'] ?? swarmSubStep;
-        stepDisplay = `[SWARM: ${agentName} • STEP ${swarmSubStep} | SWARM TOTAL ${swarmTotal}]`;
-      } else if (isSwarmOperation) {
-        // Generic swarm operation without specific agent
-        stepDisplay = `[SWARM • STEP ${event.step}/${event.maxSteps}]`;
+        // Pair the progress header with the later termination payload so failures are visible
+        // even when the terminal detail is rendered separately in the event stream.
+        const reason = terminationDetail?.reason;
+        const message = terminationDetail?.message;
+        stepDisplay = `[TERMINATED${reason ? `: ${reason}` : ''}]${message ? ` ${message}` : ''}`;
+      } else if (eventAgent && agentSubStep) {
+        const agentName = String(eventAgent).toUpperCase().replaceAll('_', ' ');
+        const agentTotal = (event as any)['agent_total_actions'] ?? agentSubStep;
+        const eventProgress = (event as any).progressPercent;
+        const progress = typeof eventProgress === 'number' ? ` | BUDGET ${eventProgress}%` : '';
+        stepDisplay = `[AGENT: ${agentName} • ACTION ${agentSubStep} | TOTAL ${agentTotal}${progress}]`;
       } else {
-        // Regular step header with tool count for budget transparency
+        // Regular progress header with tool count for budget transparency
         const toolCount = (event as any)['totalTools'];
+        const eventProgress = (event as any).progressPercent;
+        const progress = typeof eventProgress === 'number' ? `${eventProgress}%` : String(event.step || '');
         if (toolCount && toolCount > 0) {
-          stepDisplay = `[STEP ${event.step}/${event.maxSteps} | ${toolCount} tools]`;
+          const label = typeof eventProgress === 'number' ? 'BUDGET' : 'PROGRESS';
+          stepDisplay = `[${label} ${progress} | ${toolCount} tools]`;
         } else {
-          stepDisplay = `[STEP ${event.step}/${event.maxSteps}]`;
+          stepDisplay = typeof eventProgress === 'number'
+            ? `[BUDGET ${progress}]`
+            : `[PROGRESS ${progress}]`;
         }
       }
       
@@ -594,6 +770,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
             <Text color="#89B4FA" bold>
               {stepDisplay}
             </Text>
+            {healthVisual && (
+              <Text color={healthVisual.color} bold>{` ${healthVisual.label}`}</Text>
+            )}
           </Box>
           <Text color="#45475A">{getDivider()}</Text>
           {/* If this is the FINAL REPORT and we have operation context, render the report inline.
@@ -619,28 +798,100 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       );
       
     case 'task_started': {
-      const title = event.title;
-      if (typeof title === 'string' && title.trim().length > 0) {
-        activeTaskTitle = title.trim();
+      if (String((event as any).task_kind || '') !== 'finding_validation') {
+        return null;
       }
-      return null;
+      const title = String((event as any).title || 'Finding').replace(/^Verify finding:\s*/i, '').trim();
+      return (
+        <Box>
+          <Text color="yellow">{`VERIFYING FINDING ${title}${formatTaskScope(event)}`}</Text>
+        </Box>
+      );
+    }
+
+    case 'preflight_check': {
+      const status = String((event as any).status || 'skip').toLowerCase();
+      const target = String((event as any).target || 'unknown target');
+      const targetType = String((event as any).target_type || 'unknown');
+      const checks = Array.isArray((event as any).checks) ? (event as any).checks.join(', ') : '';
+      const reason = String((event as any).reason || '').trim();
+      const icon = status === 'pass' ? '✓' : status === 'fail' ? '✗' : '■';
+      const color = status === 'pass' ? 'green' : status === 'fail' ? 'red' : 'yellow';
+      const checkSuffix = checks ? ` [${checks}]` : '';
+      const reasonSuffix = reason ? `: ${reason}` : '';
+      return (
+        <Box>
+          <Text color={color}>
+            {`${icon} 🎯 ${status.toUpperCase()} ${target} (${targetType})${checkSuffix}${reasonSuffix}`}
+          </Text>
+        </Box>
+      );
+    }
+
+    case 'workflow_activity': {
+      const status = String((event as any).status || 'started').toLowerCase();
+      const formattedActivity = formatWorkflowActivityEvent(event);
+      const color = ['completed', 'success', 'done'].includes(status)
+        ? 'green'
+        : ['failed', 'error', 'blocked', 'partial_failure', 'cancelled', 'canceled', 'skipped', 'terminated', 'not_applicable'].includes(status)
+          ? 'yellow'
+          : 'cyan';
+      return (
+        <Box>
+          <Text color={color}>
+            {formattedActivity || ''}
+          </Text>
+        </Box>
+      );
     }
 
     case 'task_done': {
-      activeTaskTitle = null;
-      return null;
+      const title = String((event as any).title || '').trim();
+      const status = String((event as any).status || 'done').trim().toLowerCase();
+      const statusReason = String((event as any).status_reason || '').trim();
+      const findingResolution = String((event as any).finding_resolution || '').trim();
+      if (findingResolution) {
+        const findingTitle = title.replace(/^Verify finding:\s*/i, '').trim();
+        const verified = findingResolution === 'verified';
+        const label = verified ? 'FINDING VERIFIED' : 'FINDING REQUIRES VALIDATION';
+        const detail = statusReason ? `: ${statusReason}` : '';
+        return (
+          <Box>
+            <Text color={verified ? 'green' : 'yellow'}>
+              {`${label}${findingTitle ? ` ${findingTitle}` : ''}${detail}`}
+            </Text>
+          </Box>
+        );
+      }
+      const label = status === 'partial_failure'
+        ? 'TASK PARTIAL FAILURE'
+        : status === 'blocked'
+          ? 'TASK BLOCKED'
+          : 'TASK DONE';
+      const suffix = title ? ` ${title}` : '';
+      const detail = statusReason ? `: ${statusReason}` : '';
+      const color = status === 'blocked' || status === 'partial_failure' ? 'yellow' : 'green';
+      return (
+        <Box>
+          <Text color={color}>{`${label}${suffix}${detail}`}</Text>
+        </Box>
+      );
+    }
+
+    case 'task_deferred': {
+      const title = String((event as any).title || '').trim();
+      const statusReason = String((event as any).status_reason || '').trim();
+      const suffix = title ? ` ${title}` : '';
+      const detail = statusReason ? `: ${statusReason}` : '';
+      return (
+        <Box>
+          <Text color="yellow">{`TASK DEFERRED${suffix}${detail}`}</Text>
+        </Box>
+      );
     }
 
     case 'thinking':
-      return (
-        <ThinkingIndicator
-          context={event.context}
-          startTime={event.startTime}
-          enabled={animationsEnabled}
-          message={event.message ?? null}
-          taskTitle={activeTaskTitle ?? null}
-        />
-      );
+      return null;
 
     case 'thinking_end':
       // Don't render anything - this just signals to stop showing thinking indicator
@@ -661,11 +912,11 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       // Display a simple termination notification (no emojis)
       let reasonLabel = 'TERMINATED';
       switch (reason) {
-        case 'stop_tool':
-          reasonLabel = 'STOP TOOL';
+        case 'complete':
+          reasonLabel = 'OPERATION COMPLETE';
           break;
-        case 'step_limit':
-          reasonLabel = 'STEP LIMIT';
+        case 'budget_limit':
+          reasonLabel = 'BUDGET LIMIT';
           break;
         case 'user_abort':
           reasonLabel = 'TERMINATED';
@@ -684,6 +935,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         case 'model_error':
           reasonLabel = 'MODEL ERROR';
           break;
+        case 'error':
+          reasonLabel = 'TERMINATION ERROR';
+          break;
         default:
           reasonLabel = 'TERMINATED';
       }
@@ -692,6 +946,24 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         typeof msg === 'string'
           ? (msg.replace(/\s*Switching to final report\.?/gi, '').trim() || 'Provider/network timeout detected.')
           : msg;
+      if (reason === 'complete') {
+        return (
+          <Box flexDirection="column" marginTop={1} marginBottom={1}>
+            <Box borderStyle="round" borderColor="green" paddingX={1}>
+              <Text color="green" bold>{reasonLabel}: {sanitizedMessage || 'Assessment workflow completed.'}</Text>
+            </Box>
+          </Box>
+        );
+      }
+      if (reason === 'error') {
+        return (
+          <Box flexDirection="column" marginTop={1} marginBottom={1}>
+            <Box borderStyle="round" borderColor="red" paddingX={1}>
+              <Text color="red" bold>{reasonLabel}: {sanitizedMessage || 'Operation terminated due to an error.'}</Text>
+            </Box>
+          </Box>
+        );
+      }
       const likelyNetworkIssue = ['network_timeout', 'network_error', 'timeout'].includes(normalizedReason);
       const providerLabel = (() => {
         const providerId = effectiveConfig?.modelProvider;
@@ -738,12 +1010,12 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
     case 'reasoning':
       // This case should not be reached anymore as reasoning is handled in StreamDisplay
       // But keep it as fallback
-      const swarmAgentLabel = ('swarm_agent' in event && event.swarm_agent)
-        ? ` (${event.swarm_agent})`
+      const agentLabel = ('agent_name' in event && (event as any).agent_name)
+          ? ` (${(event as any).agent_name})`
         : '';
       return (
         <Box flexDirection="column">
-          <Text color="cyan" bold>reasoning{swarmAgentLabel}</Text>
+          <Text color="cyan" bold>reasoning{agentLabel}</Text>
           <Box paddingLeft={0}>
             <Text color="cyan">{event.content}</Text>
           </Box>
@@ -792,6 +1064,9 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
       } else {
         latestInput = hasEventInput ? eventInput : (hasMapInput ? mapInput : {});
       }
+      const agentContext = ('agent_name' in event && (event as any).agent_name)
+        ? ` (${(event as any).agent_name})`
+        : '';
       
       // Always show a tool header even if args are not yet available.
       // Individual tool renderers will gracefully handle missing fields.
@@ -808,16 +1083,15 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
 
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="yellow" bold>tool: swarm</Text>
+              <Text color="yellow" bold>tool: swarm{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ deploying {agentCount} agents: {agentNames}</Text>
               </Box>
             </Box>
           );
-        case 'mem0_store':
-        case 'mem0_get':
-        case 'mem0_retrieve':
-        case 'mem0_list': {
+        case 'memory_get':
+        case 'memory_retrieve':
+        case 'memory_list': {
           const action = event.tool_name.substring(5);
           const rawContent = latestInput?.plan || latestInput?.content || latestInput?.query || '';
           // Ensure content is always a string (handle plan objects, etc.)
@@ -841,7 +1115,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
 
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: {event.tool_name}</Text>
+              <Text color="green" bold>tool: {event.tool_name}{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ action: {action === 'store' ? 'storing' : action === 'retrieve' ? 'retrieving' : action}</Text>
               </Box>
@@ -858,11 +1132,27 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
             </Box>
           );
         }
+
+        case 'store_observation':
+        case 'store_knowledge':
+        case 'store_finding':
+        case 'record_finding_validation': {
+          const preview = formatToolInput(event.tool_name, latestInput);
+          const color = event.tool_name === 'store_finding' || event.tool_name === 'record_finding_validation'
+            ? 'yellow'
+            : 'green';
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              <Text color={color} bold>tool: {event.tool_name}{agentContext}</Text>
+              <Box marginLeft={2}>
+                <Text dimColor>└─ {preview}</Text>
+              </Box>
+            </Box>
+          );
+        }
           
         case 'shell': {
           // Show tool header with command(s) if available
-          const agentContext = ('swarm_agent' in event && event.swarm_agent) 
-            ? ` (${event.swarm_agent})` : '';
 
           // Pull raw commands from the most permissive set of fields
           const rawInput: any = (latestInput as any) || {};
@@ -973,7 +1263,7 @@ const method = latestInput.method || 'GET';
           const urlDisplay = url && url.trim().length > 0 ? url : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: http_request</Text>
+              <Text color="green" bold>tool: http_request{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ method: {method}</Text>
               </Box>
@@ -989,7 +1279,7 @@ const method = latestInput.method || 'GET';
           const urlDisplay = url && url.trim().length > 0 ? url : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_goto_url</Text>
+              <Text color="green" bold>tool: browser_goto_url{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ url: {urlDisplay}</Text>
               </Box>
@@ -1002,7 +1292,7 @@ const method = latestInput.method || 'GET';
           const actionDisplay = action && action.trim().length > 0 ? action : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_perform_action</Text>
+              <Text color="green" bold>tool: browser_perform_action{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ action: {actionDisplay}</Text>
               </Box>
@@ -1015,7 +1305,7 @@ const method = latestInput.method || 'GET';
           const instructionDisplay = instruction && instruction.trim().length > 0 ? instruction : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_observe_page</Text>
+              <Text color="green" bold>tool: browser_observe_page{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ instruction: {instructionDisplay}</Text>
               </Box>
@@ -1028,7 +1318,7 @@ const method = latestInput.method || 'GET';
           const expressionDisplay = expression && expression.trim().length > 0 ? expression : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_evaluate_js</Text>
+              <Text color="green" bold>tool: browser_evaluate_js{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ instruction: {expressionDisplay}</Text>
               </Box>
@@ -1039,7 +1329,7 @@ const method = latestInput.method || 'GET';
         case 'browser_get_cookies': {
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_get_cookies</Text>
+              <Text color="green" bold>tool: browser_get_cookies{agentContext}</Text>
             </Box>
           );
         }
@@ -1049,7 +1339,7 @@ const method = latestInput.method || 'GET';
           // Still, show a short description so the user understands what is happening.
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_get_page_html</Text>
+              <Text color="green" bold>tool: browser_get_page_html{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>└─ capture HTML of the current page and save as an artifact</Text>
               </Box>
@@ -1062,7 +1352,7 @@ const method = latestInput.method || 'GET';
           const headersDisplay = Object.keys(headers).length > 0 ? JSON.stringify(headers) : '(awaiting args …)';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: browser_set_headers</Text>
+              <Text color="green" bold>tool: browser_set_headers{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ headers: {headersDisplay}</Text>
               </Box>
@@ -1075,7 +1365,7 @@ const method = latestInput.method || 'GET';
           const fileContent = latestInput.content || '';
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: file_write</Text>
+              <Text color="green" bold>tool: file_write{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ path: {filePath}</Text>
               </Box>
@@ -1098,7 +1388,7 @@ const method = latestInput.method || 'GET';
           const lineCount = contentStr ? (contentStr.split('\n').length) : 0;
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: editor</Text>
+              <Text color="green" bold>tool: editor{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ command: {editorCmd}</Text>
               </Box>
@@ -1121,7 +1411,7 @@ const method = latestInput.method || 'GET';
           
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: think</Text>
+              <Text color="green" bold>tool: think{agentContext}</Text>
               {thought && (
                 <Box marginLeft={2}>
                   <Text dimColor>└─ {thought.length > 100 ? thought.substring(0, 100) + '...' : thought}</Text>
@@ -1153,7 +1443,7 @@ const method = latestInput.method || 'GET';
           }
           return (
             <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: python_repl</Text>
+              <Text color="green" bold>tool: python_repl{agentContext}</Text>
               <Box marginLeft={2} flexDirection="column">
                 <Text dimColor>└─ code:</Text>
                 {codeDisplayLines.length === 0 ? (
@@ -1179,7 +1469,7 @@ const method = latestInput.method || 'GET';
           const reportType = latestInput.report_type || latestInput.type || 'general';
           return (
             <Box flexDirection="column">
-              <Text color="green" bold>tool: report_generator</Text>
+              <Text color="green" bold>tool: report_generator{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ target: {target}</Text>
               </Box>
@@ -1197,7 +1487,7 @@ const method = latestInput.method || 'GET';
           const msgPreview = handoffMsg.length > 80 ? handoffMsg.substring(0, 80) + '...' : handoffMsg;
           return (
             <Box flexDirection="column">
-              <Text color="green" bold>tool: handoff_to_agent</Text>
+              <Text color="green" bold>tool: handoff_to_agent{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>├─ handoff_to: {handoffTo}</Text>
               </Box>
@@ -1218,7 +1508,7 @@ const method = latestInput.method || 'GET';
           const hasDesc = !!toolDescription;
           return (
             <Box flexDirection="column">
-              <Text color="green" bold>tool: load_tool</Text>
+              <Text color="green" bold>tool: load_tool{agentContext}</Text>
               <Box marginLeft={2}>
                 <Text dimColor>{hasPath || hasDesc ? '├─' : '└─'} loading: {toolName}</Text>
               </Box>
@@ -1236,23 +1526,8 @@ const method = latestInput.method || 'GET';
           );
         }
           
-        case 'stop': {
-          // Show clean stop tool header with reason
-          const stopReason = (latestInput && (latestInput.reason || latestInput.message)) || 'Manual stop requested';
-          return (
-            <Box flexDirection="column" marginTop={1}>
-              <Text color="green" bold>tool: stop</Text>
-              <Box marginLeft={2}>
-                <Text dimColor>└─ reason: {stopReason}</Text>
-              </Box>
-            </Box>
-          );
-        }
-
         default: {
-          // Enhanced tool display with swarm agent context and structured parameters
-          const agentContext = ('swarm_agent' in event && event.swarm_agent) 
-            ? ` (${event.swarm_agent})` : '';
+          // Enhanced tool display with agent context and structured parameters
           
           // Check if tool_input is an object with multiple properties for structured display
           const toolInput = latestInput;
@@ -1349,113 +1624,26 @@ const method = latestInput.method || 'GET';
           );
 
     case 'report_content': {
-      // Render the final report content directly from the event
-      // This handles massive reports (1000+ lines) that can overwhelm terminal rendering
-      try {
-        const content = typeof (event as any).content === 'string' ? (event as any).content : JSON.stringify((event as any).content, null, 2);
-        const lines = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-
-        // Safety limits to prevent terminal overload
-        const maxHead = DISPLAY_LIMITS.REPORT_CONTENT_PREVIEW_LINES || 100;
-        const maxTail = DISPLAY_LIMITS.REPORT_CONTENT_TAIL_LINES || 30;
-        const maxLineLength = DISPLAY_LIMITS.REPORT_CONTENT_MAX_LINE_LENGTH || 320;
-        const maxTotalChars = DISPLAY_LIMITS.REPORT_CONTENT_MAX_TOTAL_CHARS || 30000;
-        const maxLines = DISPLAY_LIMITS.REPORT_CONTENT_MAX_LINES || 150;
-
-        // Calculate total character count for safety check
-        const totalChars = content.length;
-
-        // If content is extremely large, show minimal preview with clear message
-        if (totalChars > maxTotalChars || lines.length > maxLines) {
-          // Extract report path from content if backend prepended it
-          const pathMatch = content.match(/^\[REPORT_PATH: ([^\]]+)\]/);
-          const reportPathHint = pathMatch
-            ? pathMatch[1]
-            : operationContext?.reportPath || 'Check operation output directory for security_assessment_report.md';
-
-          // Remove path marker from display if present
-          const displayContent = pathMatch ? content.replace(/^\[REPORT_PATH: [^\]]+\]\n\n/, '') : content;
-          const displayLines = displayContent.split('\n');
-
-          return (
-            <Box flexDirection="column" marginTop={1} marginBottom={1}>
-              <Box borderStyle="double" borderColor="yellow" paddingX={1}>
-                <Text color="yellow" bold>SECURITY ASSESSMENT REPORT (Preview Truncated)</Text>
-              </Box>
-              <Box flexDirection="column" marginTop={1} paddingX={1}>
-                <Text color="yellow" bold>Report size: {lines.length.toLocaleString()} lines ({Math.round(totalChars / 1024)}KB)</Text>
-                <Text dimColor>Inline preview suppressed to prevent terminal overload.</Text>
-                <Text> </Text>
-                <Text color="cyan" bold>Full report saved to disk:</Text>
-                <Text color="cyan">{reportPathHint}</Text>
-                <Text> </Text>
-                <Text dimColor>First {Math.min(20, displayLines.length)} lines:</Text>
-                {displayLines.slice(0, Math.min(20, displayLines.length)).map((line, i) => {
-                  const truncated = line.length > maxLineLength
-                    ? line.slice(0, maxLineLength) + '…'
-                    : line;
-                  return <Text key={i} dimColor>{truncated}</Text>;
-                })}
-                <Text> </Text>
-                <Text dimColor>... ({displayLines.length - 20} more lines in saved file)</Text>
-              </Box>
-            </Box>
-          );
-        }
-
-        // For reasonable-sized reports, show truncated inline version
-        const displayLines = lines.length > (maxHead + maxTail)
-          ? [...lines.slice(0, maxHead), '', '... (content continues)', '', ...lines.slice(-maxTail)]
-          : lines;
-
-        // Truncate individual lines to prevent terminal width issues
-        const truncatedLines = displayLines.map(line =>
-          line.length > maxLineLength ? line.slice(0, maxLineLength) + '…' : line
-        );
-
-        return (
-          <Box flexDirection="column" marginTop={1} marginBottom={1}>
-            <Box borderStyle="double" borderColor="cyan" paddingX={1}>
-              <Text color="cyan" bold>SECURITY ASSESSMENT REPORT</Text>
-            </Box>
-            <Box flexDirection="column" marginTop={1} paddingX={1}>
-              {truncatedLines.map((line, i) => (
-                <Text key={i}>{line}</Text>
-              ))}
-              {lines.length > (maxHead + maxTail) && (
-                <Box marginTop={1}>
-                  <Text dimColor>Full report saved to disk - check operation output directory</Text>
-                </Box>
-              )}
-            </Box>
-          </Box>
-        );
-      } catch (error) {
-        // Fallback if rendering fails - at least show something to the user
-        return (
-          <Box flexDirection="column" marginTop={1} marginBottom={1}>
-            <Box borderStyle="double" borderColor="red" paddingX={1}>
-              <Text color="red" bold>REPORT GENERATION ERROR</Text>
-            </Box>
-            <Box flexDirection="column" marginTop={1} paddingX={1}>
-              <Text color="red">Failed to render report content</Text>
-              <Text dimColor>Report was generated but could not be displayed inline</Text>
-              <Text> </Text>
-              <Text color="cyan">Full report saved to:</Text>
-              <Text color="cyan">./outputs/[target]/[operation_id]/security_assessment_report.md</Text>
-            </Box>
-          </Box>
-        );
-      }
+      // Keep the event for the final report fallback viewer, but do not emit a
+      // second inline body snippet into the streaming TUI.
+      return null;
     }
 
     case 'report_paths': {
       const opId = (event as any).operation_id || '';
       const target = (event as any).target || '';
-      const outputDir = (event as any).outputDir || '';
-      const reportPath = (event as any).reportPath || '';
-      const logPath = (event as any).logPath || '';
-      const memoryPath = (event as any).memoryPath || '';
+      const outputBaseDir = (() => {
+        const configured = effectiveConfig.outputDir || './outputs';
+        return path.isAbsolute(configured)
+          ? configured
+          : path.resolve(projectRoot || process.cwd(), configured);
+      })();
+      const displayPath = (raw: string): string => mapContainerReportPath(raw, outputBaseDir);
+      const outputDir = displayPath((event as any).outputDir || '');
+      const reportPath = displayPath((event as any).reportPath || '');
+      const logPath = displayPath((event as any).logPath || '');
+      const artifactsPath = displayPath((event as any).artifactsPath || '');
+      const fields = [opId, target, outputDir, reportPath, logPath, artifactsPath];
       return (
         <Box flexDirection="column" marginTop={1} marginBottom={1}>
           <Box borderStyle="round" borderColor="green" paddingX={1}>
@@ -1467,7 +1655,8 @@ const method = latestInput.method || 'GET';
             {outputDir ? (<Text>Operation Path: {outputDir}</Text>) : null}
             {reportPath ? (<Text>Report: {reportPath}</Text>) : null}
             {logPath ? (<Text>Log: {logPath}</Text>) : null}
-            {memoryPath ? (<Text>Memory: {memoryPath}</Text>) : null}
+            {artifactsPath ? (<Text>Artifacts: {artifactsPath}</Text>) : null}
+            {fields.every(value => !value) ? (<Text dimColor>Paths unavailable</Text>) : null}
           </Box>
         </Box>
       );
@@ -1576,6 +1765,7 @@ const method = latestInput.method || 'GET';
       if (!fromToolBuffer && filtered && (
         filtered.startsWith('▶') ||
         filtered.startsWith('◆') ||
+        filtered.trim().startsWith('✓') ||
         filtered.trim().startsWith('✓') ||
         filtered.trim().startsWith('○') ||
         filtered.startsWith('[Observability]')
@@ -1788,16 +1978,29 @@ const method = latestInput.method || 'GET';
     
     case 'tool_output': {
       // Standardized tool output from backend protocol
-      if (!('tool' in event) || !('output' in event)) {
+      if (!('output' in event)) {
         return null;
       }
       
-      const toolName = event.tool as string;
+      const toolName = String((event as any).tool || (event as any).tool_name || (event as any).toolName || 'tool');
       const toolStatus = (event.status as string) || 'success';
       const output = event.output as any;
       
       // Extract text content
-      const outputText = output?.text || '';
+      const outputText = (() => {
+        if (typeof output === 'string') return output;
+        if (output == null) return '';
+        if (typeof output.text === 'string') return output.text;
+        const stdout = typeof output.stdout === 'string' ? output.stdout : '';
+        const stderr = typeof output.stderr === 'string' ? output.stderr : '';
+        if (stdout || stderr) return [stdout, stderr].filter(Boolean).join('\n');
+        if (Array.isArray(output)) return output.map(item => String(item)).join('\n');
+        try {
+          return JSON.stringify(output, null, 2);
+        } catch {
+          return String(output);
+        }
+      })();
       
       if (!outputText.trim()) {
         return null;
@@ -1842,12 +2045,12 @@ const method = latestInput.method || 'GET';
     }
       
     case 'metadata': {
-      // Render metadata events normally, with special-case compact display for stop_tool
+      // Render metadata events normally.
       if (!event.content || typeof event.content !== 'object') return null;
       const entries = Object.entries(event.content);
       if (entries.length === 0) return null;
 
-      // Suppress duplicate stop-notification metadata; stop reason is shown in the tool header
+      // Suppress duplicate completion-notification metadata; completion reason is shown separately.
       if (entries.length === 1 && entries[0][0] === 'stopping') {
         return null;
       }
@@ -1903,145 +2106,6 @@ const method = latestInput.method || 'GET';
         </>
       );
       
-    case 'swarm_start': {
-      // Create and display SwarmDisplay component immediately.
-      // We treat a swarm_start as the beginning of an active swarm run so that
-      // the UI shows agents as running rather than permanently "initializing".
-      const swarmEvent = event as any;
-      const agents: SwarmAgent[] = (swarmEvent.agent_details || swarmEvent.agents || []).map((agent: any, index: number) => ({
-        id: `agent_${agent.name}_${index}`, // Unique id for each agent
-        name: agent.name,
-        role: agent.role || (agent.system_prompt ? agent.system_prompt.split('.')[0].trim() : ''),
-        // Mark the first agent as active to reflect that it will receive the
-        // first swarm step; others remain pending.
-        status: index === 0 ? 'active' : 'pending',
-        tools: agent.tools || [],
-        model_id: agent.model_id,
-        model_provider: agent.model_provider,
-        temperature: agent.temperature,
-        recentToolCalls: []
-      }));
-
-      const swarmState: SwarmState = {
-        id: `swarm_${Date.now()}`,
-        task: swarmEvent.task || 'Multi-agent operation',
-        status: 'running',
-        agents,
-        startTime: Date.now(),
-        totalTokens: 0,
-        maxHandoffs: swarmEvent.max_handoffs,
-        maxIterations: swarmEvent.max_iterations,
-        nodeTimeout: swarmEvent.node_timeout,
-        executionTimeout: swarmEvent.execution_timeout
-      };
-
-      // Use the compact summary view; the detailed per-agent view can be very
-      // tall and is redundant with the swarm step headers that follow.
-      return (
-        <Box marginTop={1} marginBottom={1}>
-          <SwarmDisplay swarmState={swarmState} collapsed={true} />
-        </Box>
-      );
-    }
-      
-    case 'swarm_handoff':
-      // Enhanced agent handoff display
-      const fromAgent = 'from_agent' in event ? String(event.from_agent || 'unknown') : 'unknown';
-      const toAgent = 'to_agent' in event ? String(event.to_agent || 'unknown') : 'unknown';
-      const handoffMessage = 'message' in event ? String(event.message || '') : '';
-      const sharedContext = 'shared_context' in event ? event.shared_context : {};
-      
-      return (
-        <Box flexDirection="column" marginTop={1}>
-          <Box>
-            <Text color="magenta" bold>[HANDOFF] </Text>
-            <Text color="cyan">{fromAgent}</Text>
-            <Text color="gray"> → </Text>
-            <Text color="green">{toAgent}</Text>
-          </Box>
-          {handoffMessage && (
-            <Box marginLeft={2}>
-              <Text dimColor>└─ "{handoffMessage}"</Text>
-            </Box>
-          )}
-          {typeof sharedContext === 'object' && Object.keys(sharedContext).length > 0 && (
-            <Box marginLeft={2} flexDirection="column">
-              <Text dimColor>   Context transferred:</Text>
-              {Object.entries(sharedContext).slice(0, 3).map(([key, value]) => (
-                <Box key={key} marginLeft={4}>
-                  <Text dimColor>• {key}: {String(value).substring(0, 50)}{String(value).length > 50 ? '...' : ''}</Text>
-                </Box>
-              ))}
-            </Box>
-          )}
-        </Box>
-      );
-      
-    case 'swarm_complete': {
-      // Enhanced swarm completion display
-      const finalAgent = 'final_agent' in event ? String(event.final_agent || 'unknown') : 'unknown';
-      const executionCount = 'execution_count' in event ? Number(event.execution_count || 0) : 0;
-      const handoffCount = 'handoff_count' in event ? Number(event.handoff_count || 0) : executionCount - 1;
-      const totalSteps = 'total_steps' in event ? Number(event.total_steps || 0) : 0;
-      const totalIterations = 'total_iterations' in event ? Number(event.total_iterations || 0) : 0;
-      const duration = 'duration' in event ? String(event.duration || 'unknown') : 'unknown';
-      const totalTokens = 'total_tokens' in event ? Number(event.total_tokens || 0) : 0;
-      const agentMetrics = 'agent_metrics' in event ? (event.agent_metrics as any[] || []) : [];
-      const swarmStatus = 'status' in event ? String(event.status || 'completed') : 'completed';
-      const completedAgents = 'completed_agents' in event ? (event.completed_agents as string[] || []) : [];
-      const failedAgents = 'failed_agents' in event ? (event.failed_agents as string[] || []) : [];
-      
-      // Determine if this was a timeout/failure
-      const isTimeout = swarmStatus.toLowerCase().includes('failed') || swarmStatus.toLowerCase().includes('timeout');
-      const statusColor = isTimeout ? 'red' : 'green';
-      const statusText = isTimeout ? 'TIMEOUT' : 'COMPLETE';
-      
-      return (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color={statusColor} bold>[SWARM: {statusText}] {completedAgents.length || agentMetrics.length || 0} agents, {handoffCount} handoffs, {totalIterations > 0 ? totalIterations : totalSteps} iterations</Text>
-          {duration !== 'unknown' && (
-            <Box marginLeft={2}>
-              <Text dimColor>├─ duration: {duration}</Text>
-            </Box>
-          )}
-          {totalTokens > 0 && (
-            <Box marginLeft={2}>
-              <Text dimColor>├─ tokens: {totalTokens.toLocaleString()}</Text>
-            </Box>
-          )}
-          {isTimeout && (
-            <Box marginLeft={2}>
-              <Text color="yellow">├─ ⚠️ Swarm execution timed out - continuing with manual fallback</Text>
-            </Box>
-          )}
-          {completedAgents.length > 0 && (
-            <Box marginLeft={2}>
-              <Text color="green">├─ completed: {completedAgents.join(', ')}</Text>
-            </Box>
-          )}
-          {failedAgents.length > 0 && (
-            <Box marginLeft={2}>
-              <Text color="red">└─ failed: {failedAgents.join(', ')}</Text>
-            </Box>
-          )}
-          {agentMetrics.length > 0 && agentMetrics.map((metric, idx) => {
-            const isLast = idx === agentMetrics.length - 1 && completedAgents.length === 0 && failedAgents.length === 0;
-            const prefix = isLast ? '└─' : '├─';
-            return (
-              <Box key={idx} marginLeft={2}>
-                <Text dimColor>{prefix} {metric.name}: {metric.steps} steps, {metric.tools} tools, {metric.tokens} tokens</Text>
-              </Box>
-            );
-          })}
-          {agentMetrics.length === 0 && completedAgents.length === 0 && (
-            <Box marginLeft={2}>
-              <Text dimColor>└─ final_agent: {finalAgent}</Text>
-            </Box>
-          )}
-        </Box>
-      );
-    }
-      
     case 'batch':
       // Handle batched events from backend
       // Recursively render each event in the batch
@@ -2082,9 +2146,6 @@ const method = latestInput.method || 'GET';
           ) : null}
           {('objective' in event && event.objective) ? (
             <Text dimColor>  Objective: {event.objective}</Text>
-          ) : null}
-          {('max_steps' in event && event.max_steps) ? (
-            <Text dimColor>  Max Steps: {event.max_steps}</Text>
           ) : null}
           {('model_id' in event && event.model_id) ? (
             <Text dimColor>  Model: {event.model_id}</Text>
@@ -2128,6 +2189,59 @@ const method = latestInput.method || 'GET';
           ) : null}
         </Box>
       );
+
+    case 'evaluation_step_complete': {
+      const status = String((event as any).status || 'completed');
+      if (status === 'completed') return null;
+      const metric = String((event as any).evaluation_metric || '').replace(/_/g, ' ');
+      const kind = String((event as any).evaluation_step_kind || 'evaluation').replace(/_/g, ' ');
+      const scope = String((event as any).evaluation_scope || 'operation');
+      const label = metric ? `${scope}: ${metric}` : `${scope}: ${kind}`;
+      const message = String((event as any).message || 'Evaluation step did not complete');
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={status === 'failed' ? 'red' : 'yellow'} bold>
+            [RAGAS EVALUATION] {label} {status}
+          </Text>
+          <Box marginLeft={2}>
+            <Text dimColor>└─ {message}</Text>
+          </Box>
+        </Box>
+      );
+    }
+
+    case 'evaluation_complete': {
+      const status = String((event as any).status || ((event as any).success === false ? 'failed' : 'completed'));
+      const scores = ((event as any).scores && typeof (event as any).scores === 'object')
+        ? Object.entries((event as any).scores).filter(([, value]) => typeof value === 'number') as Array<[string, number]>
+        : [];
+      const average = typeof (event as any).average_score === 'number'
+        ? (event as any).average_score
+        : (scores.length > 0 ? scores.reduce((sum, [, value]) => sum + value, 0) / scores.length : null);
+      if (status !== 'completed') {
+        return (
+          <Box flexDirection="column" marginTop={1}>
+            <Text color={status === 'failed' ? 'red' : 'yellow'} bold>
+              EVALUATION {status === 'no_results' ? 'COMPLETED WITHOUT RESULTS' : 'FAILED'}
+            </Text>
+            {(event as any).message && <Text dimColor>  {(event as any).message}</Text>}
+          </Box>
+        );
+      }
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="green" bold>EVALUATION COMPLETE</Text>
+          <Text dimColor>
+            {'  '}Metrics: {scores.length}{average != null ? ` | Average: ${(average * 100).toFixed(1)}%` : ''}
+          </Text>
+          {scores.map(([name, value], index) => (
+            <Text key={name} dimColor>
+              {'  '}{index === scores.length - 1 ? '└─' : '├─'} {name.replace(/_/g, ' ')}: {(value * 100).toFixed(1)}%
+            </Text>
+          ))}
+        </Box>
+      );
+    }
 
     case 'specialist_start': {
       const specialist = event.specialist || 'validation';
@@ -2306,83 +2420,7 @@ export const computeDisplayGroups = (events: DisplayStreamEvent[]): DisplayGroup
 
 
 export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events, animationsEnabled = true }) => {
-  // Track active swarm operations
-  const [swarmStates, setSwarmStates] = React.useState<Map<string, SwarmState>>(new Map());
-  // Process swarm events to build state with a stable ID to avoid remount flicker
-  React.useEffect(() => {
-    // Derive a stable signature from the latest swarm_start event
-    let latestSignature: string | null = null;
-    let latestTask: string | null = null;
-    let latestAgents: SwarmAgent[] | null = null;
-
-    events.forEach(event => {
-      if (event.type === 'swarm_start') {
-        const names = 'agent_names' in event && Array.isArray(event.agent_names)
-          ? (event.agent_names as any[]).map(a => typeof a === 'string' ? a : (a && (a.name || a.role)) || '').join(',')
-          : '';
-        const task = event.task || 'Unknown task';
-        const signature = `${names}|${task}`;
-        latestSignature = signature;
-        latestTask = task;
-
-        const agentDetails = event.agent_details || [];
-        const agents: SwarmAgent[] = [];
-        if (Array.isArray(agentDetails)) {
-          agentDetails.forEach((detail: any, i: number) => {
-            const agentName = detail.name || `Agent ${i + 1}`;
-            const systemPrompt = detail.system_prompt || '';
-            const agentTools = detail.tools || [];
-            const role = systemPrompt.split('.')[0].trim() || 'Agent';
-            agents.push({
-              id: `agent_${i}`,
-              name: agentName,
-              role,
-              task: role,
-              status: 'pending',
-              tools: Array.isArray(agentTools) ? agentTools : []
-            });
-          });
-        }
-        latestAgents = agents;
-      }
-    });
-
-    // If we have no new swarm info, do nothing
-    if (!latestSignature || !latestTask) {
-      return;
-    }
-
-    // Update swarm state incrementally and only if something changed
-    setSwarmStates(prev => {
-      const next = new Map(prev);
-      const existing = next.get(latestSignature!);
-      const now = Date.now();
-      const updated: SwarmState = {
-        id: latestSignature!,
-        task: latestTask!,
-        status: existing?.status || 'initializing',
-        agents: latestAgents && latestAgents.length > 0 ? latestAgents : (existing?.agents || []),
-        startTime: existing?.startTime || now,
-        endTime: existing?.endTime,
-        totalTokens: existing?.totalTokens,
-        result: existing?.result
-      };
-
-      // Shallow compare to avoid unnecessary state updates
-      const hasChanged = !existing 
-        || existing.task !== updated.task
-        || existing.status !== updated.status
-        || existing.agents.length !== updated.agents.length;
-
-      if (hasChanged) {
-        next.set(latestSignature!, updated);
-        return next;
-      }
-      return prev; // no change
-    });
-  }, [events]);
-  
-  // Track tool inputs (for handling tool_input_update events from swarm agents)
+  // Track tool inputs (for handling streamed tool_input_update events)
   const [toolInputs, setToolInputs] = React.useState<Map<string, any>>(new Map());
   
   // Resolve output base directory from config so report resolution matches backend outputDir
@@ -2432,18 +2470,7 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   
   // Group consecutive reasoning events to prevent multiple labels
   const displayGroups = React.useMemo(() => computeDisplayGroups(events), [events]);
-  
-  // Memoize active swarm lookup - expensive operation
-  const activeSwarm = React.useMemo(() => {
-    return Array.from(swarmStates.values()).find(s => 
-      s.status === 'running' || s.status === 'initializing'
-    );
-  }, [swarmStates]);
-  
-  // Memoize swarm event check
-  const hasSwarmStartEvent = React.useMemo(() => {
-    return events.some(e => e.type === 'swarm_start');
-  }, [events]);
+  const terminationDetail = React.useMemo(() => latestTerminationDetail(events), [events]);
   
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
@@ -2509,7 +2536,7 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   let finalReportIndex = -1;
   for (let i = 0; i < totalGroups; i++) {
     const group = displayGroups[i];
-    if (group.events.some(e => e.type === 'step_header' && (e as any).step === 'FINAL REPORT')) {
+    if (group.events.some(e => e.type === 'progress_update' && (e as any).step === 'FINAL REPORT')) {
       finalReportIndex = i;
       break;
     }
@@ -2523,13 +2550,6 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
 
   return (
     <Box flexDirection="column">
-      {/* Only display swarm if we have actual swarm events in this session */}
-      {activeSwarm && hasSwarmStartEvent && (
-        <Box marginBottom={1}>
-          <SwarmDisplay swarmState={activeSwarm} collapsed={false} />
-        </Box>
-      )}
-
       {/* Omitted items banner to indicate truncated history in the viewport */}
       {omittedCount > 0 && (
         <Box marginBottom={1}>
@@ -2560,15 +2580,13 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
             }
             return acc;
           }, '');
-          
-          // Check if this is swarm agent reasoning
-          const swarmAgent = group.events[0] && 'swarm_agent' in group.events[0] 
-            ? group.events[0].swarm_agent 
+
+          const agentName = group.events[0] && 'agent_name' in group.events[0]
+              ? (group.events[0] as any).agent_name
             : null;
-          
-          // Create reasoning label with agent info if available
-          const reasoningLabel = swarmAgent 
-            ? `reasoning (${swarmAgent})`
+
+          const reasoningLabel = agentName
+              ? `reasoning (${agentName})`
             : 'reasoning';
           
           return (
@@ -2591,6 +2609,7 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
                 reportPath={reportDetails.path}
                 reportFallbackContent={reportDetails.content}
                 projectRoot={projectRoot}
+                terminationDetail={terminationDetail}
                 enableInlineReportView={true}
               />
           ));
@@ -2600,16 +2619,29 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   );
 });
 
-// Static variant to render an immutable, deduplicated history without re-renders.
-// Uses the same normalization/grouping to avoid duplicate headers/banners.
-import { Static } from 'ink';
-
 export const StaticStreamDisplay: React.FC<{
   events: DisplayStreamEvent[];
   terminalWidth?: number;
   availableHeight?: number;
 }> = React.memo(({ events, terminalWidth, availableHeight }) => {
+  const eventKeyMapRef = React.useRef<WeakMap<object, string>>(new WeakMap());
+  const eventSeqRef = React.useRef(0);
+  const stableEventKey = React.useCallback((event: DisplayStreamEvent): string => {
+    const any = event as any;
+    const explicit = any?.id ?? any?.toolId ?? any?.tool_id;
+    if (explicit) return `${String(any?.type ?? 'event')}-${String(explicit)}`;
+    if (any?.timestamp) return `${String(any?.type ?? 'event')}-${String(any.timestamp)}`;
+    if (event && typeof event === 'object') {
+      const existing = eventKeyMapRef.current.get(event as object);
+      if (existing) return existing;
+      const next = `${String(any?.type ?? 'event')}-seq-${eventSeqRef.current++}`;
+      eventKeyMapRef.current.set(event as object, next);
+      return next;
+    }
+    return `event-seq-${eventSeqRef.current++}`;
+  }, []);
   const groups = React.useMemo(() => computeDisplayGroups(events), [events]);
+  const terminationDetail = React.useMemo(() => latestTerminationDetail(events), [events]);
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
   // Resolve output base directory from config for consistent path mapping
@@ -2673,11 +2705,11 @@ export const StaticStreamDisplay: React.FC<{
     return { operationId: opId, target, reportPath: reportDetails.path };
   }, [events, reportDetails.path]);
 
-  // Flatten groups into discrete render items with stable keys
+  // Flatten groups into discrete render items with stable keys.
   type Item = { key: string; render: () => React.ReactNode };
   const items: Item[] = React.useMemo(() => {
     const out: Item[] = [];
-    groups.forEach((group, gIdx) => {
+    groups.forEach((group) => {
       if (group.type === 'reasoning_group') {
         // Use reduce for better performance with large arrays
         const combinedContent = group.events.reduce((acc, e) => {
@@ -2700,18 +2732,16 @@ export const StaticStreamDisplay: React.FC<{
           }
           return acc;
         }, '');
-        
-        // Check if this is swarm agent reasoning
-        const swarmAgent = group.events[0] && 'swarm_agent' in group.events[0] 
-          ? (group.events[0] as any).swarm_agent 
+
+        const agentName = group.events[0] && 'agent_name' in group.events[0]
+            ? (group.events[0] as any).agent_name
           : null;
-        
-        // Create reasoning label with agent info if available
-        const reasoningLabel = swarmAgent 
-          ? `reasoning (${swarmAgent})`
+
+        const reasoningLabel = agentName
+            ? `reasoning (${agentName})`
           : 'reasoning';
         
-        const key = `rg-${group.startIdx}`;
+        const key = `rg-${group.startIdx}-${stableEventKey(group.events[0])}`;
         out.push({
           key,
           render: () => (
@@ -2725,8 +2755,7 @@ export const StaticStreamDisplay: React.FC<{
         });
       } else {
         group.events.forEach((event, i) => {
-          const eid = (event as any)?.id ?? (event as any)?.timestamp ?? `${gIdx}-${i}`;
-          const key = `ev-${eid}`;
+          const key = `ev-${group.startIdx}-${i}-${stableEventKey(event)}`;
           out.push({
             key,
             render: () => (
@@ -2738,6 +2767,7 @@ export const StaticStreamDisplay: React.FC<{
                 reportPath={reportDetails.path}
                 reportFallbackContent={reportDetails.content}
                 projectRoot={projectRoot}
+                terminationDetail={terminationDetail}
                 // Disable InlineReportViewer here; the dynamic StreamDisplay path will
                 // render the inline preview once the report is fully available.
                 enableInlineReportView={false}
@@ -2748,10 +2778,18 @@ export const StaticStreamDisplay: React.FC<{
       }
     });
     return out;
-  }, [groups, operationContext, reportDetails.path, reportDetails.content, projectRoot]);
+  }, [
+    groups,
+    operationContext,
+    reportDetails.path,
+    reportDetails.content,
+    projectRoot,
+    stableEventKey,
+    terminationDetail,
+  ]);
 
   return (
-    <Static items={items}>
+    <Static key={items[0]?.key ?? 'empty'} items={items}>
       {(item: Item) => item.render()}
     </Static>
   );

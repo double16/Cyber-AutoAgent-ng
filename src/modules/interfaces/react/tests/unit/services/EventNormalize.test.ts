@@ -57,6 +57,21 @@ describe('normalizeEvent source coverage', () => {
         }));
     });
 
+    it('normalizes report paths from backend snake_case fields', () => {
+        expect(normalizeEvent({
+            type: 'report_paths',
+            output_dir: '/app/outputs/dvwa/OP_1',
+            report_path: '/app/outputs/dvwa/OP_1/security_assessment_report.md',
+            log_path: '/app/outputs/dvwa/OP_1/cyber_operations.log',
+            artifacts_path: '/app/outputs/dvwa/OP_1/artifacts',
+        })).toEqual(expect.objectContaining({
+            outputDir: '/app/outputs/dvwa/OP_1',
+            reportPath: '/app/outputs/dvwa/OP_1/security_assessment_report.md',
+            logPath: '/app/outputs/dvwa/OP_1/cyber_operations.log',
+            artifactsPath: '/app/outputs/dvwa/OP_1/artifacts',
+        }));
+    });
+
     it('normalizes shell tool starts and creates stable ids', () => {
         const event = normalizeEvent({
             type: 'tool_start',
@@ -175,65 +190,6 @@ describe('normalizeEvent source coverage', () => {
         expect(repl.tool_input.code_preview).toBeUndefined();
     });
 
-    it('summarizes prompt optimizer overlays', () => {
-        const event = normalizeEvent({
-            type: 'tool_start',
-            tool_name: 'prompt_optimizer',
-            tool_input: {
-                Action: 'refine',
-                note: long(450),
-                current_step: '3',
-                expires_after_steps: '6',
-                overlay: JSON.stringify({
-                    payload: {
-                        directives: ['a', 'b', 'c', 'd', 'e'],
-                        trajectory: {reason: long(32770)},
-                        metadata: {source: 'reviewer'},
-                    },
-                }),
-            },
-        });
-
-        expect(event.tool_input).toEqual(expect.objectContaining({
-            action: 'refine',
-            current_step: 3,
-            expires_after_steps: 6,
-            directives: 'a, b, c, d, ... (+1 more)',
-            metadata: {source: 'reviewer'},
-        }));
-        expect(event.tool_input.note).toContain('truncated 50 chars');
-        expect(event.tool_input.trajectory.reason).toContain('truncated');
-    });
-
-    it('handles prompt optimizer defaults and invalid overlays', () => {
-        expect(normalizeEvent({
-            type: 'tool_start',
-            tool_name: 'prompt_optimizer',
-            tool_input: {overlay: '{bad json'},
-        }).tool_input).toEqual({action: 'apply'});
-
-        expect(normalizeEvent({
-            type: 'tool_start',
-            tool_name: 'prompt_optimizer',
-            tool_input: {
-                trigger: 'drift',
-                reviewer: 'critic',
-                context: 'step context',
-                prompt: 'new prompt',
-                overlay: {
-                    directives: [' keep ', '', 'evidence first'],
-                },
-            },
-        }).tool_input).toEqual(expect.objectContaining({
-            action: 'apply',
-            trigger: 'drift',
-            reviewer: 'critic',
-            context: 'step context',
-            prompt: 'new prompt',
-            directives: 'keep, evidence first',
-        }));
-    });
-
     it('normalizes command, tool_output, and prompt_change events', () => {
         expect(normalizeEvent({
             type: 'command',
@@ -245,6 +201,14 @@ describe('normalizeEvent source coverage', () => {
             output: 'hello',
         })).toEqual(expect.objectContaining({
             output: {text: 'hello'},
+            status: 'success',
+        }));
+
+        expect(normalizeEvent({
+            type: 'tool_output',
+            output: {stdout: 'ok', stderr: 'warn'},
+        })).toEqual(expect.objectContaining({
+            output: expect.objectContaining({text: 'ok\nwarn'}),
             status: 'success',
         }));
 

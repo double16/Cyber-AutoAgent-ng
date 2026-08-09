@@ -1,160 +1,357 @@
 # Agent Architecture
 
-Cyber-AutoAgent implements a **Single Agent Meta-Everything Architecture** using the Strands framework for autonomous penetration testing.
+Cyber-AutoAgent implements a **Python-orchestrated multi-agent workflow** using the Strands framework for autonomous security assessment.
 
-## Design Philosophy: Single Agent Meta-Everything Architecture
+## Design Philosophy: Python-Owned Workflow, Focused Agents
 
-The core design philosophy centers on a **single agent** that dynamically extends its capabilities through meta-operations, rather than multiple specialized agents competing for control.
+The core design philosophy centers on deterministic Python ownership of workflow state with short-lived agents assigned to narrow, well-defined roles.
 
-### Why Single Agent?
+### Why Python-Owned Orchestration?
 
-Traditional multi-agent systems face coordination challenges, resource conflicts, and complexity in task handoffs. Our approach maintains the simplicity and coherence of a single decision-maker while overcoming cognitive limitations through meta-capabilities.
+Long-lived autonomous conversations tend to accumulate stale assumptions, lose context, and mutate plan/task state inconsistently. Cyber-AutoAgent keeps the durable operation loop in Python:
 
-### The Meta-Everything Approach
+- plans, phases, and task statuses are stored in SQLite
+- Python chooses the active phase and task
+- Python applies task and phase evaluator decisions
+- Python controls budget-aware phase progression
+- agents handle reasoning, prompt tailoring, task execution, task creation, and evaluation
 
-This architecture allows the system to transcend static tool limitations and evolve its capabilities during execution, all orchestrated by one primary agent:
+### Focused Agent Roles
 
-- **Meta-Agent**: The swarm capability deploys dynamic agents as tools, each tailored for specific subtasks with their own reasoning loops
-- **Meta-Tooling**: Through the editor and load_tool capabilities, the agent can create, modify, and deploy new tools at runtime to address novel challenges  
-- **Meta-Learning**: Continuous memory storage and retrieval enables cross-session learning, building expertise over time
-- **Meta-Cognition**: Self-reflection and confidence assessment drives strategic decisions about tool selection and approach
+The controller creates agents for specific jobs:
 
-This meta-architecture allows the system to transcend static tool limitations and evolve its capabilities during execution, all while being orchestrated by a single primary agent.
+- **plan_creator**: creates or revises an initial high-level plan and infers operation-wide constraints
+- **plan_critic**: reviews an initial plan and either approves it or returns actionable revision feedback
+- **task_creator**: creates concrete current-phase tasks with finite acceptance contracts from a deterministic
+  controller prompt
+- **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
+  memory, optional tools, and likely commands for one task
+- **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
+- **task_executor**: executes one active task objective and retains its conversation across critic-guided passes
+- **task_evaluator**: reviews semantically complete acceptance ledgers and returns `done`, `partial_failure`, or `blocked`
+- **phase_evaluator**: returns phase status: `continue`, `done`, `partial_failure`, or `blocked`
+
+Module execution guidance supplies operation intent, explicit access boundaries, domain behavior, and evidence rules to
+planning and execution roles. The module termination policy, including any advisory recommended minimum phase contract,
+is also supplied directly to plan creation, plan criticism,
+plan revision, and phase evaluation so required end states become measurable plan criteria. A controller-owned executor
+contract keeps individual workers scoped to one task regardless of module.
+
+Each task also has an immutable acceptance manifest. Procedure bases declare machine-readable limits and whether they
+produce a generic artifact or versioned inventory manifest; coverage bases freeze one inventory artifact and its hash.
+Executors submit an atomic evidence-backed result for every criterion and, for coverage work, one terminal disposition
+per manifest item. Python resolves typed artifact, memory, observation, and finding evidence before semantic
+evaluation. This preserves broad, cohesive work under one retained executor without allowing moving completion
+targets.
+
+### Replacement and Supersession
+
+When a task cannot complete and its remaining intent must be split or retried as new work, replacement tasks declare
+`replacement_of` with the parent task UID and identify the parent criteria they resolve in `supersedes_criteria`.
+Python reconciles this lineage before phase closure. The parent becomes `superseded` only after every parent criterion is
+covered and every linked replacement is `done` or `superseded`. The parent record, evidence, and failure reason remain
+available for audit. Unlinked failures remain blocking, and Python does not infer replacement relationships from
+similar wording.
+
+```mermaid
+flowchart LR
+    M[Missing or invalid snapshot] --> R[Reject coverage task batch]
+    R --> P[Create bounded prerequisite inventory task]
+    P --> V[Validate and hash version-1 manifest]
+    V --> C[Create coverage tasks against frozen snapshot]
+```
+
+The swarm tool remains available as an execution capability, but it is no longer the top-level orchestration model.
 
 ## Core Architecture
 
 ```mermaid
 graph TB
     A[User Input] --> B[Cyber-AutoAgent]
-    B --> C[Agent]
-    C --> D[Tool Registry]
-    C --> E[Memory System]
-    C --> F[AI Models]
+    B --> C[Python Workflow Controller]
+    C --> D[SQLite Plan/Task Store]
+    C --> E[Runtime Resources]
+    C --> F[Short-Lived Role Agents]
+    F --> G[Restricted Tool Registry]
+    F --> H[Memory System]
+    F --> I[AI Models]
     
-    D --> G[shell]
-    D --> Q[MCP]
-    D --> H[editor] 
-    D --> I[swarm]
-    D --> J[load_tool]
-    D --> K[http_request]
-    D --> L[mem0_store]
-    D --> M[stop]
+    G --> J[shell]
+    G --> K[Typed memory tools / memory_retrieve]
+    G --> L[create_tasks when allowed]
+    G --> M[Selected Module Tools]
+    G --> N[Selected MCP Tools]
+    G --> O[swarm when selected]
     
-    G --> N[Security Tools]
-    N --> O[nmap, sqlmap, etc.]
-    N --> P[self install package]
+    J --> P[Security Tools]
+    P --> Q[nmap, sqlmap, etc.]
+    P --> R[self install package]
  
     style B fill:#f3e5f5,stroke:#333,stroke-width:2px
     style C fill:#fff3e0,stroke:#333,stroke-width:2px
-    style D fill:#e8f5e8,stroke:#333,stroke-width:2px
+    style F fill:#e8f5e8,stroke:#333,stroke-width:2px
 ```
 
 ## Strands Tools
 
-The agent operates through these core tools:
+Agents operate through role-specific restricted tool lists.
 
 ### Primary Tools
 - **shell**: Execute system commands (nmap, sqlmap, custom scripts)
 - **editor**: Create/modify files and custom tools
 - **swarm**: Deploy parallel agents for complex tasks
 - **http_request**: Make HTTP requests for web testing
-- **mem0_...**: Store/retrieve findings and knowledge
+- **memory_list / memory_retrieve**: List or semantically retrieve findings and knowledge
 - **load_tool**: Dynamically load created tools
-- **stop**: Terminate execution
+- **create_tasks**: Create durable tasks when a role permits task creation
+
+Plan/task state transitions are owned by Python workflow code. Agents can only add follow-up work with `create_tasks` when their role permits it. Active task context is injected into the role prompt by the workflow; agents do not fetch it with a tool.
+
+There is no agent-callable stop tool. When Python workflow evaluation determines the assessment is complete, the controller emits a `termination_reason` event with reason `complete`.
+
+Generated plan constraints are durable workflow guardrails. Task creation and prompt-building roles must honor them,
+and task/phase evaluators prevent successful completion when evidence shows a constraint violation.
+
+Initial plan generation uses a bounded actor/critic cycle before persistence. Critic approval immediately accepts the
+current draft; rejection sends feedback to `plan_creator` for revision. The
+`CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS` environment variable limits reviews and defaults to three. A rejection on
+the final configured review fails the workflow so an unapproved plan is never persisted or executed.
+
+Task prompt generation uses the same bounded pattern. `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` defaults to
+two critic reviews and accepts `0` to disable critique. A final rejection or invalid structured response after JSON
+retries marks only the active task `partial_failure`, without invoking its executor or evaluator.
+
+Task execution then uses a second bounded actor/critic loop:
+
+```mermaid
+flowchart LR
+    E[Retained task-executor] --> V[Fresh task-evaluator]
+    V -->|done| D[Persist done]
+    V -->|partial_failure or blocked| F[Persist final verdict]
+    E -->|no valid complete ledger; pass remains| E
+    E -->|cycle limit reached| F
+```
+
+`CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits executor attempts to produce a valid atomic ledger, defaults to three,
+and has a minimum of one.
+while `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` independently limits rejected acceptance repairs to two after the initial
+submission. Repairs retain the executor conversation and stop early when an equivalent rejected payload is repeated.
+Once that ledger exists, the evaluator's semantic verdict is terminal because the ledger cannot
+be revised. Python persists `done`, `partial_failure`, or `blocked` without replaying completed acceptance.
+
+Task creators stop within the Strands event loop after the first successful `create_tasks` mutation. Task executors
+stop the same way after a complete `record_task_acceptance` result. Rejected calls do not set the success marker and
+remain correctable; role completion therefore depends on durable success rather than raw tool-call counts or a later
+text-only turn.
+
+Every role invocation also has deterministic safety bounds. Three consecutive responses without a new tool action stop
+a required-tool role as stalled, regardless of tool calls or reasoning emitted during an earlier actor cycle. An
+absolute controller-to-agent call ceiling bounds repeated invocations, while the Strands SDK `turns` limit bounds model
+calls and tool executions inside each invocation. Task-executor actor cycles allow 8 agent calls with 32 SDK turns per
+call, bounded tool-recovery runs allow 4 calls with 8 turns, and task creators allow 3 calls with 6 turns.
+No-action redirection prompts respect the role policy: roles that disallow text completion are instructed to call an
+outstanding required tool and are never offered a text-only final-answer path. Task executors instead receive a
+task-progress redirect because their required acceptance tool is a completion condition: they call the next tool needed
+for unmet criteria and durable evidence, then submit acceptance after its prerequisites are complete.
+
+Bounded procedure contracts declare whether their output is a generic artifact or a version-1 inventory manifest.
+Python rejects mismatched evidence requirements during task creation. Inventory executors receive the canonical JSON
+shape in both their task prompt and acceptance-tool description, and acceptance validation evaluates each referenced
+artifact independently so an unrelated supporting file cannot invalidate a separate valid inventory.
+
+Each retained task executor also keeps a bounded controller-owned tool-outcome journal. A locally correctable failure
+permits prerequisite inspection or creation, independent work, alternative methods, and two changed retries by
+default. Structured memory and acceptance validation errors enter the same correction path. Identical failed calls are
+blocked locally, and equivalent failures are counted across retained executor cycles so conversation boundaries cannot
+restart an unbounded loop. Recovery does not lock unrelated tools or durable evidence operations.
+Generic executable startup and dependency failures quarantine only that executable for the current operation; later
+task prompts omit it while capability-compatible commands remain available. An unresolved correction is
+deterministically `partial_failure`. Evaluators receive the authoritative outcome journal separately from the worker's
+final narrative and must prefer it when the two conflict. Failed diagnostic and preflight shell commands remain visible
+in the journal but do not start recovery.
+
+Shell-tool discovery first resolves each configured command on `PATH`. A tool may optionally declare a side-effect-free
+`canary` object with `args`, `timeout_seconds`, and `accepted_exit_codes`; successful canaries mark tools verified.
+Commands without a safe standalone canary remain available but unverified. The Docker tools-image verifier implements
+the same configuration contract independently and is not imported by application runtime code.
+
+Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
+controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (six by
+default). Each turn ends after its first tool result; the initial prompt contains stable phase context and corrections
+contain only the prior validation error. Generic reasoning-loop repair is disabled for this role. Agents submit a flat
+`TaskProposal` whose `limits` object is always required. Python discards it and `output_kind` for snapshot work,
+infers the basis, supplies procedure invariants, derives source references and target scope, and compiles the proposal
+before storage. Inventory-wide moving collections are rejected as procedures and must use frozen snapshot references.
+Exact frozen-contract duplicates are skipped deterministically within the active phase; completed coverage from one
+phase does not suppress work against the same snapshot in a later phase. Unfinished coverage retries remain eligible,
+and duplicate-only calls retain the creator tool for a bounded corrected submission.
+
+Successful task acceptance populates task evidence with the validated immutable ledger references. Phase
+evaluators receive that canonical per-criterion ledger and may read only its resolved artifact paths, preventing stale
+predicted filenames from overriding accepted evidence. Task creators use a closed flat schema with explicit limits,
+criterion descriptions, snapshot references, and target IDs. Python generates readable unique criterion IDs and
+evidence requirements and owns the remaining contract and lifecycle fields.
+
+Complete task acceptance also publishes one bounded operation observation containing the task objective, criterion
+statuses, concrete summaries, evidence references, and aggregate coverage counts. Publication is replay-safe and lets
+later task-prompt-builders select accepted information by memory ID. A memory-backend failure is reported in the tool
+result but does not invalidate the immutable acceptance ledger or add an undeclared evaluator requirement.
+
+There is also no prompt optimizer tool, prompt rebuild hook, or stalled-loop conversation rebuild fallback. Prompt
+adaptation is workflow-native: prompt-builder agents receive current plan state, active phase/task context, compact task
+history, memory summaries, and selected optional tool candidates. Python enforces proportional phase budget caps before
+task work and handles separate advisory checkpoints before pending task activation.
 
 ### Security Tool Access
 
-Security tools are accessed **via shell**, not as direct tools:
-
-```python
-# Agent uses shell tool to run security commands
-shell("nmap -sV 192.168.1.1")
-shell("sqlmap -u 'http://target.com?id=1' --batch")
-shell("nikto -h target.com")
-```
+Security utilities are normally reached through the restricted shell capability. The active role receives only the
+capabilities allowed for its task, and command output is captured as operation evidence.
 
 ### MCP Tool Access
 
-MCP tools are accessed as direct tools. The purpose of the MCP tool can be a tailored security tool, CTF managements, etc.
+MCP tools can be accessed as direct tools, but they are optional tools. They are selected per worker role and task objective, not included in every worker's core tool list.
 
 ## Execution Flow
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant Agent
-    participant Strands
+    participant Controller as Python Controller
+    participant State as SQLite Plan/Task Store
+    participant PlanActor as Plan Creator Agent
+    participant PlanCritic as Plan Critic Agent
+    participant TaskCreator as Task Creator Agent
+    participant PromptActor as Task Prompt Builder Agent
+    participant PromptCritic as Task Prompt Critic Agent
+    participant Worker as Task Executor Agent
+    participant Eval as Task Evaluator Agent
+    participant PhaseEval as Phase Evaluator Agent
+    participant ReportActor as Report Actor Agent
+    participant ReportCritic as Report Critic Agent
     participant Tools
-    participant Memory
-    
-    User->>Agent: Start Assessment
-    Agent->>Memory: Initialize (get_plan|store_plan)
-    Agent->>Strands: Begin Reasoning Loop
-    
-    loop Assessment Cycle
-        Strands->>Agent: Analyze Situation
-        Agent->>Tools: Execute Tool (shell/http_request/etc)
-        Tools-->>Agent: Results
-        Agent->>Memory: Store Findings
-        Agent->>Memory: Create Tasks (current + future phases)
+    participant Memory as Qdrant Semantic Memory
 
-        alt Critical Finding
-            Agent->>Memory: Store Evidence
-            Agent->>Memory: Create Exploitation Tasks
+    User->>Controller: Start Assessment
+
+    Controller->>State: Load existing plan
+    alt No plan exists
+        Controller->>PlanActor: Create structured plan
+        PlanActor-->>Controller: Draft phases and acceptance criteria
+        loop Bounded plan actor/critic refinement
+            Controller->>PlanCritic: Review plan for coverage and constraints
+            PlanCritic-->>Controller: Approve or provide feedback
+            alt Critic rejects and reviews remain
+                Controller->>PlanActor: Revise plan using feedback
+                PlanActor-->>Controller: Revised plan
+            else Critic approves
+                Controller->>State: Persist approved plan
+            end
         end
-        
-        alt Complex Task
-            Agent->>Tools: Deploy Swarm
-            Tools-->>Agent: Parallel Results
-        end
-        
-        Agent->>Agent: Check Objective Progress
     end
-    
-    Agent->>User: Final Report
+
+    loop Python-owned assessment cycle
+        Controller->>State: Select active phase and task
+        alt No actionable task exists
+            Controller->>TaskCreator: Propose missing or follow-up tasks
+            TaskCreator->>Tools: create_tasks when permitted
+            Tools-->>State: Validate and persist tasks
+            opt Task-creation correction required
+                Controller->>TaskCreator: Correct rejected task proposals
+            end
+        else Active task exists
+            Controller->>PromptActor: Build task-execution prompt
+            PromptActor-->>Controller: Draft prompt, memory, and tools
+            loop Bounded prompt actor/critic refinement
+                Controller->>PromptCritic: Review prompt scope and safety
+                PromptCritic-->>Controller: Approve or provide feedback
+                alt Critic rejects and reviews remain
+                    Controller->>PromptActor: Revise prompt using feedback
+                    PromptActor-->>Controller: Revised prompt
+                else Critic approves
+                    Controller->>Worker: Execute approved task prompt
+                end
+            end
+
+            loop Bounded task actor/evaluator cycle
+                Worker->>Tools: Use restricted shell, HTTP, MCP, or module tools
+                Worker->>Memory: Store observations, findings, and evidence
+                Controller->>Eval: Evaluate acceptance, evidence, and status
+                Eval-->>Controller: done, partial_failure, blocked, or correction
+                alt Evaluator requests correction
+                    Controller->>Worker: Continue with bounded evaluator guidance
+                else Evaluator returns terminal status
+                    Controller->>State: Persist task status and evidence
+                end
+            end
+        end
+
+        opt Phase checkpoint or soft budget reached
+            Controller->>PhaseEval: Evaluate phase evidence and remaining work
+            PhaseEval-->>Controller: Continue, close, or partial_failure
+            Controller->>State: Advance or close phase
+        end
+    end
+
+    Controller->>ReportActor: Generate report sections
+    ReportActor-->>Controller: Draft section
+    loop Bounded report actor/critic refinement per section
+        Controller->>ReportCritic: Review report accuracy and requirements
+        ReportCritic-->>Controller: Approve or provide feedback
+        alt Critic rejects and cycles remain
+            Controller->>ReportActor: Revise section using feedback
+            ReportActor-->>Controller: Revised section
+        else Critic approves or cycle limit is reached
+            Controller->>State: Persist final section and critique metadata
+        end
+    end
+    Controller->>User: completion termination_reason event + Final Report
 ```
 
-## Metacognitive Architecture
+The actor/critic loops are bounded by separate configuration values: plan refinement, task-prompt refinement, task
+execution cycles plus evaluator corrections, and report refinement cycles. The controller remains the source of truth for
+state transitions; agents propose plans, prompts, evidence, evaluations, or revisions but cannot directly activate or
+close phases and tasks.
 
-The single agent employs metacognitive assessment to determine the optimal approach for each situation:
+## Role-Agent Reasoning
+
+Focused agents still use the Cyber-AutoAgent methodology, module guidance, confidence updates, and evidence standards. The difference is that role prompts constrain the scope of each agent.
 
 ```mermaid
 flowchart TD
-    A[Single Agent: Analyze Current State] --> B{Confidence Assessment}
+    A[Controller: Active Phase + Task] --> B[Prompt Builder: Select Memory + Tools]
+    B --> C[Task Executor: Analyze Task State]
+    C --> D{Confidence Assessment}
     
-    B -->|High >80%| C[Direct Specialized Tools]
-    B -->|Medium 50-80%| D[Deploy Swarm Assistance] 
-    B -->|Low <50%| E[Gather More Intelligence]
+    D -->|High >80%| E[Direct Specialized Tools]
+    D -->|Medium 50-80%| F[Deploy Swarm or Module Tool]
+    D -->|Low <50%| G[Gather More Intelligence]
     
-    C --> F[shell: Execute nmap, sqlmap, etc.]
-    D --> G[swarm: Create Specialized Sub-Agents]
-    E --> H[http_request: Reconnaissance]
+    E --> H[Typed memory: Evidence]
+    F --> H
+    G --> H
     
-    F --> I[mem0_store: Centralized Knowledge]
-    G --> I
-    H --> I
-    
-    I --> J{Primary Agent: Objective Met?}
-    J -->|No| A
-    J -->|Yes| K[Single Agent: Final Report]
+    H --> I[Task Evaluator]
+    I --> J{Task Status}
+    J -->|done / partial_failure / blocked| K[Controller Applies State]
+    K -->|linked replacements resolve all criteria| X[Mark parent superseded]
     
     style A fill:#e3f2fd,stroke:#333,stroke-width:3px
-    style J fill:#e3f2fd,stroke:#333,stroke-width:3px
     style K fill:#e3f2fd,stroke:#333,stroke-width:3px
-    style F fill:#e8f5e8
-    style G fill:#f3e5f5
-    style H fill:#fff3e0
+    style E fill:#e8f5e8
+    style F fill:#f3e5f5
+    style G fill:#fff3e0
 ```
 
 **Key Principles:**
-- **Single Decision Maker**: One primary agent maintains strategic control
-- **Metacognitive Awareness**: Agent assesses its own confidence levels
-- **Dynamic Capability Expansion**: Creates tools and deploys swarms as needed
-- **Centralized Memory**: All discoveries flow back to the primary agent's knowledge base
+- **Python State Authority**: Controller owns phase/task transitions and plan completion
+- **Focused Reasoning**: Agents receive narrow role prompts and task-specific context
+- **Metacognitive Awareness**: Agents assess confidence within their assigned objective
+- **Dynamic Capability Expansion**: Workers can use shell, selected tools, and swarm when appropriate
+- **Centralized Memory**: Discoveries flow into Qdrant and reports query operation-scoped evidence
 
 ## Tool Hierarchy
 
-Based on confidence and task complexity:
+Based on confidence, task complexity, and role-specific tool selection:
 
 1. **Specialized Security Tools** (via shell)
    - When vulnerability type is known
@@ -209,22 +406,18 @@ MCP Tools pre-configured:
 ```mermaid
 graph TB
     A[Agent Actions] --> B[Finding Discovered]
-    B --> C[mem0_store]
-    C --> D[Backend Selection]
-
-    D --> E[Mem0 Platform<br/>MEM0_API_KEY]
-    D --> F[OpenSearch<br/>OPENSEARCH_HOST]
-    D --> G[FAISS<br/>Default]
-
-    E --> H[Categorized Storage]
-    F --> H
-    G --> H
+    B --> C[store_finding / store_observation / store_knowledge]
+    C --> D[Qdrant Semantic Memory]
+    D --> E[Target values always filtered]
+    E --> F{Memory mode}
+    F -->|operation| H[Target + operation]
+    F -->|shared| H[Target across operations]
 
     H --> I[category: finding]
     H --> J[category: plan]
     H --> K[category: reflection]
 
-    L[Future Decisions] --> M[mem0_retrieve]
+    L[Future Decisions] --> M[memory_retrieve]
     M --> N[Historical Context]
     N --> A
 
@@ -232,12 +425,11 @@ graph TB
     style D fill:#e3f2fd,stroke:#333,stroke-width:2px
 ```
 
-**Memory Backend Selection**:
-1. **Plans and Tasks**: Stored in a local SQLite database (`plan_store.db`).
-2. **Semantic Memories**:
-   - **Mem0 Platform** - If `MEM0_API_KEY` environment variable is set
-   - **OpenSearch** - If `OPENSEARCH_HOST` environment variable is set
-   - **FAISS** - Default local vector storage if neither is configured
+**Memory Storage**:
+1. **Plans, Tasks, and Model Metrics**: Stored in `outputs/cyber_autoagent.db`, scoped by exact logical target and
+   operation ID. Model metrics are append-only per provider/model capture and include their capture timestamps.
+2. **Semantic Memories**: Stored in one Qdrant collection under `outputs/qdrant`, or in the configured Qdrant service.
+3. **Scope**: Exact target values are always criteria; operation ID is additionally required in `operation` mode.
 
 **Evidence Storage Format**:
 ```
@@ -270,17 +462,16 @@ graph TB
 
 ## Event System and UI Integration
 
-**ReactBridgeHandler** extends the Strands SDK's callback system to emit structured events for the React terminal interface:
+**AgentEventHandler** extends the Strands SDK's callback system to emit structured events for UI consumers:
 
-```python
-# Event types emitted during operation
+### Event types emitted during operation
+
 - tool_start: Tool invocation with parameters
 - tool_end: Tool completion with results
 - reasoning: Agent decision-making context
-- step_header: Iteration tracking (step X/max_steps)
-- metrics_update: Token usage, cost, duration
+- metrics_update: Token usage, cost, duration, and budget progress
+- progress_update: progress updates
 - operation_init: Operation metadata and configuration
-```
 
 Events flow from the Python agent through stdout using the `__CYBER_EVENT__` protocol, enabling real-time monitoring without tight coupling between backend and frontend.
 
@@ -299,12 +490,12 @@ Evaluation triggers automatically after operation completion when `ENABLE_AUTO_E
 
 ## Key Design Principles
 
-1. **Single Agent Orchestration**: One primary agent maintains strategic control and decision-making authority
-2. **Meta-Everything**: Dynamic tool creation, sub-agent deployment, and continuous learning capabilities
-3. **Confidence-Driven**: Tool selection and strategy based on the agent's metacognitive self-assessment
-4. **Evidence-Focused**: Centralized knowledge management with automatic categorization and storage
-5. **Swarm Intelligence**: Deploy specialized sub-agents as tools while maintaining primary agent control
-6. **Tool Agnostic**: Access any system tool via shell interface, with runtime tool installation capabilities
-7. **Continuous Evaluation**: Automated performance metrics for operational improvement
+1. **Python-Owned Orchestration**: Durable workflow state is managed by code, not by prompt instructions.
+2. **Focused Role Agents**: Each agent receives a short, defined objective and restricted tools.
+3. **Soft Budget Distribution**: Phase progress is evaluated against proportional budget targets.
+4. **Evidence-Focused Memory**: Findings, observations, and proof references are stored in Qdrant for retrieval and reporting.
+5. **Swarm Intelligence as a Capability**: Workers may deploy specialized sub-agents when useful, without giving up controller state authority.
+6. **Tool Agnostic Execution**: Shell can access installed tools, while optional MCP/module tools are selected per task.
+7. **Continuous Evaluation**: Automated performance metrics support operational improvement.
 
-This **Single Agent Meta-Everything Architecture** enables autonomous operation while maintaining coherent strategic control and avoiding the coordination complexity of traditional multi-agent systems.
+This architecture enables autonomous operation while keeping workflow control deterministic, inspectable, and resilient to context loss.

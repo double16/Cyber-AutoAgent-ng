@@ -525,11 +525,18 @@ export class ContainerManager extends EventEmitter {
           }
         });
 
-        const timeout = new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('Docker command timeout after 10 minutes')), 600000)
-        );
+        let timeoutId: NodeJS.Timeout | null = null;
+        const timeout = new Promise<void>((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error('Docker command timeout after 10 minutes')), 600000);
+        });
 
-        return Promise.race([composePromise, timeout]);
+        try {
+          return await Promise.race([composePromise, timeout]);
+        } finally {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+        }
       };
 
       // For single-container mode we can skip dependencies in up, but we still pull if needed

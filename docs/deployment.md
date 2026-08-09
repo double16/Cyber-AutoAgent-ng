@@ -2,6 +2,51 @@
 
 This guide covers deployment options for Cyber-AutoAgent in various environments.
 
+## How each mode works
+
+The React terminal uses one of three execution profiles. The setup wizard uses friendly display names, while the
+configuration and `--deployment-mode` option use the canonical values shown below.
+
+```text
+React UI
+├── Python / Local CLI (local-cli)
+│   └── Local Python agent process
+├── Single Container (single-container)
+│   └── Docker agent container
+└── Full Stack (full-stack)
+    └── Docker Compose: agent + supporting services
+```
+
+### Python / Local CLI (`local-cli`)
+
+The React UI starts the Python agent directly on the host through the local Python execution service. The host Python
+environment supplies the agent runtime, installed dependencies, and host-local security tools. Provider credentials,
+model configuration, and output paths are passed to that process, and no Docker services are started.
+
+The Python process emits structured execution events that the React UI consumes for progress, tool activity, metrics,
+reports, and terminal completion. This mode has the smallest footprint and is suited to development or environments
+where the required Python tools are already installed locally.
+
+### Single Container (`single-container`)
+
+The React UI uses the Docker execution service to start one isolated agent container. The container supplies the Python
+runtime and bundled assessment tools, while the UI passes the selected configuration, provider credentials, target
+information, and output mounts into the container.
+
+The container runs the assessment and exits when the operation completes. This mode does not start the persistent
+observability and evaluation service stack from Docker Compose. If observability is configured for this mode, it must
+use an externally available service.
+
+### Full Stack (`full-stack`)
+
+The React UI starts the Docker Compose deployment and communicates with the agent service over the Compose network.
+Alongside the agent, the stack provides the supporting services required for the complete platform experience,
+including observability, evaluation, service networking, databases, caching, and object storage.
+
+The supporting services remain available across agent processes and provide the infrastructure used for Langfuse
+tracing, evaluation workflows, and persisted service data. This mode has the largest disk, memory, startup-time, and
+operational requirements, but is the recommended profile when the complete platform is needed.
+
 ## Invocation Methods
 
 Cyber-AutoAgent supports **4 invocation methods**, each with different use cases:
@@ -24,7 +69,7 @@ export KMP_DUPLICATE_LIB_OK="TRUE"
 uv run python src/cyberautoagent.py \
   --target "https://example.com" \
   --objective "Bug bounty assessment" \
-  --iterations 150 \
+  --max-duration 120 \
   --provider litellm
 ```
 
@@ -38,7 +83,7 @@ cd src/modules/interfaces/react
 npm start -- --auto-run \
   --target "https://example.com" \
   --objective "Security assessment" \
-  --iterations 50
+  --max-duration 60
 ```
 
 **Configure via** `~/.cyber-autoagent/config.json`:
@@ -82,7 +127,7 @@ docker run --rm --entrypoint python \
   src/cyberautoagent.py \
   --target https://example.com \
   --objective "Security assessment" \
-  --iterations 50 \
+  --max-duration 60 \
   --provider litellm
 ```
 
@@ -126,18 +171,12 @@ Cyber-AutoAgent supports **300+ LLM providers** via LiteLLM. Examples:
 **Moonshot AI:**
 ```bash
 -e MOONSHOT_API_KEY=your_key
--e OPENAI_API_KEY=your_key  # Required for Mem0 OpenAI-compatible providers
 -e CYBER_AGENT_LLM_MODEL=moonshot/kimi-k2-thinking
 -e CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
--e MEM0_LLM_MODEL=azure/gpt-4o  # Memory system LLM (use Azure/Anthropic/Bedrock for Mem0)
--e AZURE_API_KEY=azure_key  # Required for embeddings and Mem0
+-e AZURE_API_KEY=azure_key  # Required for Azure embeddings
 -e AZURE_API_BASE=https://your-endpoint.openai.azure.com/
 -e AZURE_API_VERSION=2024-12-01-preview
 ```
-
-**Note:** When using OpenAI-compatible providers (Moonshot, OpenRouter, etc.) with Mem0, you must:
-1. Set `OPENAI_API_KEY` to the provider's API key for Mem0 compatibility
-2. Use a supported Mem0 provider (Azure, OpenAI, Anthropic, Bedrock) for `MEM0_LLM_MODEL`
 
 **Mixed Providers:** You can combine any LLM with any embedding model!
 
@@ -152,7 +191,7 @@ cd cyber-autoagent
 
 # Build and run with Docker Compose (includes observability)
 cd docker
-docker-compose up -d
+docker compose -f docker-compose.yml up -d
 
 # Run a penetration test
 docker run --rm \
@@ -238,7 +277,7 @@ Settings are applied in this priority order:
 
 ```
 1. CLI/API Arguments (Highest)
-   └─ Flags: --provider, --model, --iterations
+   └─ Flags: --provider, --model, --max-duration, --max-tokens, --max-cost
    └─ Direct parameters to create_agent()
 
 2. Environment Variables (Override)
@@ -287,13 +326,18 @@ safe_max = model_output_limit * 0.5
 
 ### Token Limit Resolution
 
-Token limits use **five-tier precedence**:
+Context-window limits use the existing provider-aware precedence:
 
 1. **Explicit override** - `CYBER_PROMPT_LIMIT_FORCE` environment variable
-2. **Context window maximum** - `CYBER_CONTEXT_LIMIT`, if defined, limits the following
-3. **Models.dev API** - Authoritative registry (preferred)
-4. **Fallback mappings** - `CYBER_CONTEXT_WINDOW_FALLBACKS` (JSON)
-5. **Provider defaults** - Safe defaults per provider
+2. **Ollama configuration or runtime detection** - `OLLAMA_CONTEXT_LENGTH`, model metadata, or the loaded model
+3. **Models.dev/static model registry** - Authoritative known-model data
+4. **LiteLLM provider detection** - Remote-provider model metadata
+5. **Context window maximum** - `CYBER_CONTEXT_LIMIT`, used as a clamp or configured fallback
+6. **Provider defaults** - Conservative final resolution
+
+The resolved value is written to the Strands model's `context_window_limit` and reused for prompt budgeting and
+conversation compression. Ollama also receives the same value as `num_ctx`. Values such as 48,000 are configuration or
+detection results, not application defaults. Startup fails when no positive context window can be resolved.
 
 **Example fallback configuration:**
 ```bash
@@ -305,45 +349,62 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 
 ### Environment Variables
 
-| Variable                            | Description                                           | Required                      |
-|-------------------------------------|-------------------------------------------------------|-------------------------------|
-| `CYBER_AGENT_PROVIDER`              | Provider choice (bedrock/ollama/litellm)              | No (auto-detected)            |
-| `CYBER_AGENT_LLM_MODEL`             | Main LLM model ID                                     | Yes                           |
-| `CYBER_AGENT_EMBEDDING_MODEL`       | Embedding model ID                                    | No (provider default)         |
-| `REASONING_EFFORT`                  | Reasoning effort (low/medium/high)                    | No (default: medium)          |
-| `MAX_TOKENS`                        | Override LLM max (output) tokens                      | No (models.dev default)       |
-| `CYBER_AGENT_SWARM_MODEL`           | Swarm LLM model ID                                    | No                            |
-| `CYBER_AGENT_SWARM_MAX_TOKENS`      | Override specialist max tokens                        | No (models.dev default)       |
-| `MAX_TOKENS_LIMIT`                  | Override LLM output token upper bound                 | No (12,000 default)           |
-| `MAX_TOKENS_REASONING_LIMIT`        | Override LLM output token upper bound (reasoning)     | No (32,000 default)           |
-| `CYBER_CONTEXT_LIMIT`               | Limit detected prompt tokens                          | No (auto-detected)            |
-| `CYBER_PROMPT_LIMIT_FORCE`          | Force prompt token limit                              | No (auto-detected)            |
-| `CYBER_SDK_CONTEXT_MANAGER`         | Strands context facade (`auto`, `agentic`, `false`)   | No (default: `auto`)          |
-| `AWS_ACCESS_KEY_ID`                 | AWS credentials for Bedrock                           | For Bedrock provider          |
-| `AWS_SECRET_ACCESS_KEY`             | AWS credentials for Bedrock                           | For Bedrock provider          |
-| `AWS_REGION`                        | AWS region (default: us-east-1)                       | For Bedrock provider          |
-| `OLLAMA_HOST`                       | Ollama API endpoint                                   | For Ollama provider           |
-| `OLLAMA_CONTEXT_LENGTH`             | Ollama model context length                           | No, Ollama default            |
-| `OLLAMA_TIMEOUT`                    | Ollama API timeout in seconds                         | No (default: 120)             |
-| `OLLAMA_KEEP_ALIVE`                 | Ollama model keep alive                               | No (default: 30m)             |
-| `AZURE_API_KEY`                     | Azure OpenAI API key                                  | For Azure/LiteLLM             |
-| `AZURE_API_BASE`                    | Azure endpoint URL                                    | For Azure/LiteLLM             |
-| `AZURE_API_VERSION`                 | Azure API version                                     | For Azure/LiteLLM             |
-| `MEM0_API_KEY`                      | Mem0 Platform API key                                 | For cloud memory backend      |
-| `MEM0_LLM_MODEL`                    | Memory system LLM                                     | No (auto-aligned)             |
-| `OPENSEARCH_HOST`                   | OpenSearch endpoint                                   | For OpenSearch memory backend |
-| `LANGFUSE_HOST`                     | Langfuse observability endpoint                       | For observability             |
-| `LANGFUSE_PUBLIC_KEY`               | Langfuse API public key                               | For observability             |
-| `LANGFUSE_SECRET_KEY`               | Langfuse API secret key                               | For observability             |
-| `ENABLE_AUTO_EVALUATION`            | Enable automatic Ragas evaluation                     | For evaluation                |
-| `CYBER_RATE_LIMIT_REQ_PER_MIN`      | Limit model requests per minute                       | No (no limit)                 |
-| `CYBER_RATE_LIMIT_TOKENS_PER_MIN`   | Limit model tokens per minute                         | No (no limit)                 |
-| `CYBER_RATE_LIMIT_MAX_CONCURRENT`   | Limit model concurrent requests                       | No (Ollama defaults to 1)     |
-| `CYBER_HEAP_MONITOR_AUTOSTART`      | Auto-start heap monitor thread (`0` disables)         | No (default: 1)               |
-| `CYBER_AGENT_PRICING_INPUT`         | Model price per 1M input tokens                       | No (defaults to models.dev)   |
-| `CYBER_AGENT_PRICING_OUTPUT`        | Model price per 1M output tokens                      | No (defaults to models.dev)   |
-| `CYBER_AGENT_PRICING_CACHE_READ`    | Model price per 1M cache read tokens                  | No (defaults to models.dev)   |
-| `CYBER_AGENT_PRICING_CACHE_WRITE`   | Model price per 1M cache write tokens                 | No (defaults to models.dev)   |
+| Variable                                           | Description                                                | Required                                                        |
+|----------------------------------------------------|------------------------------------------------------------|-----------------------------------------------------------------|
+| `CYBER_AGENT_PROVIDER`                             | Provider choice (bedrock/ollama/litellm/gemini)             | No (default: bedrock)                                           |
+| `CYBER_AGENT_LLM_MODEL`                            | Main LLM model ID                                          | Yes                                                             |
+| `CYBER_AGENT_EMBEDDING_MODEL`                      | Embedding model ID                                         | No (provider default)                                           |
+| `REASONING_EFFORT`                                 | Reasoning effort (low/medium/high)                         | No (default: medium)                                            |
+| `MAX_TOKENS`                                       | Override LLM max (output) tokens                           | No (models.dev default)                                         |
+| `CYBER_AGENT_SWARM_MODEL`                          | Swarm tool LLM model ID                                    | No                                                              |
+| `CYBER_AGENT_SWARM_MAX_TOKENS`                     | Override specialist max tokens                             | No (models.dev default)                                         |
+| `MAX_TOKENS_LIMIT`                                 | Override LLM output token upper bound                      | No (12,000 default)                                             |
+| `MAX_TOKENS_REASONING_LIMIT`                       | Override LLM output token upper bound (reasoning)          | No (32,000 default)                                             |
+| `CYBER_CONTEXT_LIMIT`                              | Limit detected prompt tokens                               | No (auto-detected)                                              |
+| `CYBER_PROMPT_LIMIT_FORCE`                         | Force prompt token limit                                   | No (auto-detected)                                              |
+| `CYBER_SDK_CONTEXT_MANAGER`                        | Strands context facade (`auto`, `agentic`, `false`)        | No (default: `false`)                                           |
+| `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `3`)                                               |
+| `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `2`)                                               |
+| `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum normal executor passes per task                    | No (default: `3`, minimum `1`)                                  |
+| `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS`             | Extra executor passes for actionable evaluator feedback    | No (default: `1`, minimum `0`)                                  |
+| `CYBER_SECLISTS_DIR`                               | Absolute SecLists root for wordlist-consuming tools        | No (common locations; container default: `/usr/share/seclists`) |
+| `CYBER_REPORT_REFINEMENT_CYCLES`                   | Critic-guided revision cycles per generated report section | No (default: `2`; `0` disables)                                 |
+| `CYBER_TAXONOMY_CACHE_DIR`                         | Local cache directory for CWE and ATT&CK catalogs          | No (default: user cache directory)                              |
+| `CYBER_TAXONOMY_REFRESH_DAYS`                      | Days before cached taxonomy catalogs are refreshed         | No (default: `30`)                                              |
+| `CYBER_TAXONOMY_REFRESH`                           | Fetch current catalogs when the cache is stale             | No (default: `true`)                                            |
+| `CYBER_TAXONOMY_OFFLINE`                           | Disable taxonomy catalog network refreshes                 | No (default: `false`)                                           |
+| `CYBER_TAXONOMY_CATALOG_URL`                       | Optional normalized taxonomy catalog mirror                | No                                                              |
+| `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS`        | Repeated blocked recovery calls before stopping execution  | No (default: `2`, minimum `1`)                                  |
+| `CYBER_TOOL_RECOVERY_MAX_CORRECTIONS`              | Changed retries allowed for one failed task invocation     | No (default: `2`, minimum `1`)                                  |
+| `CYBER_TASK_CREATOR_MAX_CORRECTIONS`               | Retained correction turns after rejected task creation     | No (default: `6`, minimum `0`)                                  |
+| `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS`            | Retained correction turns after rejected task acceptance   | No (default: `2`, minimum `0`)                                  |
+| `AWS_ACCESS_KEY_ID`                                | AWS credentials for Bedrock                                | For Bedrock provider                                            |
+| `AWS_SECRET_ACCESS_KEY`                            | AWS credentials for Bedrock                                | For Bedrock provider                                            |
+| `AWS_REGION`                                       | AWS region (default: us-east-1)                            | For Bedrock provider                                            |
+| `OLLAMA_HOST`                                      | Ollama API endpoint                                        | For Ollama provider                                             |
+| `OLLAMA_CONTEXT_LENGTH`                            | Ollama model context length                                | No, Ollama default                                              |
+| `OLLAMA_TIMEOUT`                                   | Ollama API timeout in seconds                              | No (default: 120)                                               |
+| `OLLAMA_KEEP_ALIVE`                                | Ollama model keep alive                                    | No (default: 30m)                                               |
+| `AZURE_API_KEY`                                    | Azure OpenAI API key                                       | For Azure/LiteLLM                                               |
+| `AZURE_API_BASE`                                   | Azure endpoint URL                                         | For Azure/LiteLLM                                               |
+| `AZURE_API_VERSION`                                | Azure API version                                          | For Azure/LiteLLM                                               |
+| `CYBER_MEMORY_MODE`                                | Memory query scope: `operation` or `shared`                | No (default: `operation`)                                       |
+| `QDRANT_URL`                                       | Qdrant service endpoint; unset uses `outputs/qdrant`       | No                                                              |
+| `QDRANT_API_KEY`                                   | Optional Qdrant service API key                            | Only for authenticated services                                 |
+| `QDRANT_COLLECTION`                                | Qdrant semantic-memory collection                          | No (default: `cyber_autoagent_memories`)                        |
+| `LANGFUSE_HOST`                                    | Langfuse observability endpoint                            | For observability                                               |
+| `LANGFUSE_PUBLIC_KEY`                              | Langfuse API public key                                    | For observability                                               |
+| `LANGFUSE_SECRET_KEY`                              | Langfuse API secret key                                    | For observability                                               |
+| `ENABLE_AUTO_EVALUATION`                           | Enable automatic Ragas evaluation                          | For evaluation                                                  |
+| `CYBER_RATE_LIMIT_REQ_PER_MIN`                     | Limit model requests per minute                            | No (no limit)                                                   |
+| `CYBER_RATE_LIMIT_TOKENS_PER_MIN`                  | Limit model tokens per minute                              | No (no limit)                                                   |
+| `CYBER_RATE_LIMIT_MAX_CONCURRENT`                  | Limit model concurrent requests                            | No (Ollama defaults to 1)                                       |
+| `CYBER_HEAP_MONITOR_AUTOSTART`                     | Auto-start heap monitor thread (`0` disables)              | No (default: 1)                                                 |
+| `CYBER_AGENT_PRICING_INPUT`                        | Model price per 1M input tokens                            | No (defaults to models.dev)                                     |
+| `CYBER_AGENT_PRICING_OUTPUT`                       | Model price per 1M output tokens                           | No (defaults to models.dev)                                     |
+| `CYBER_AGENT_PRICING_CACHE_READ`                   | Model price per 1M cache read tokens                       | No (defaults to models.dev)                                     |
+| `CYBER_AGENT_PRICING_CACHE_WRITE`                  | Model price per 1M cache write tokens                      | No (defaults to models.dev)                                     |
+| `CYBER_SDK_ENABLE_STREAMING`                       | Enable/disable model streaming.                            | No (defaults to `false`)                                        |
 
 ### Kubernetes Deployment
 
@@ -410,7 +471,7 @@ npm start
 # The interface will guide you through:
 # 1. Docker environment setup
 # 2. Deployment mode selection (local-cli, single-container, full-stack)
-# 3. Model provider configuration (Bedrock, Ollama, LiteLLM)
+# 3. Model provider configuration (Bedrock, Ollama, LiteLLM, Gemini)
 # 4. First assessment execution
 ```
 
@@ -418,15 +479,10 @@ Access the interface at `http://localhost:3000` when using full-stack deployment
 
 ## Memory Backend Configuration
 
-Cyber-AutoAgent supports three memory backends with automatic selection:
-
-| Backend       | Priority  | Environment Variable | Use Case                             |
-|---------------|-----------|----------------------|--------------------------------------|
-| Mem0 Platform | 1         | `MEM0_API_KEY`       | Cloud-hosted, managed service        |
-| OpenSearch    | 2         | `OPENSEARCH_HOST`    | AWS managed search, production scale |
-| FAISS         | 3         | None (default)       | Local vector storage, development    |
-
-Memory persists in `outputs/<target>/memory/` for cross-operation learning.
+Qdrant is the semantic-memory backend. With no service variables it uses filesystem storage at `outputs/qdrant`.
+Set `QDRANT_URL` and, when required, `QDRANT_API_KEY` to connect to a service. Every point is tagged with exact target
+values and operation ID. `CYBER_MEMORY_MODE=operation` queries both fields; `shared` omits only the operation criterion.
+See the [memory guide](memory.md) for the complete model.
 
 ## Configuration Examples
 
@@ -446,7 +502,7 @@ export MAX_TOKENS=8000  # Optional: Override default
 export AWS_REGION=us-east-1
 export CYBER_AGENT_LLM_MODEL=us.anthropic.claude-sonnet-4-5-20250929-v1:0
 export CYBER_AGENT_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0
-export MEM0_API_KEY=your_mem0_key  # Cloud memory backend
+export QDRANT_URL=http://localhost:6333  # Optional; omit for filesystem storage
 export REASONING_EFFORT=medium
 ```
 
@@ -458,8 +514,7 @@ export CYBER_AGENT_EMBEDDING_MODEL=azure/text-embedding-3-large
 export AZURE_API_KEY=your_azure_key  # For embeddings
 export AZURE_API_BASE=https://your-endpoint.openai.azure.com/
 export AZURE_API_VERSION=2024-12-01-preview
-export MEM0_LLM_MODEL=azure/gpt-4o  # Memory system uses Azure
-export OPENAI_API_KEY=your_moonshot_key  # Mem0 compatibility
+export QDRANT_URL=http://localhost:6333  # Optional memory service
 ```
 
 ### Ollama with Context Window Fallbacks
@@ -480,7 +535,7 @@ Common deployment issues:
 1. **Container fails to start**: Check Docker logs with `docker logs cyber-autoagent`
 2. **AWS credentials error**: Ensure IAM role has Bedrock access and correct region
 3. **Ollama connection failed**: Verify Ollama is running and accessible at specified host
-4. **Out of memory**: Increase Docker memory limits or reduce `--iterations` parameter
+4. **Out of memory**: Increase Docker memory limits or reduce token-heavy workloads
 5. **React interface issues**: Run `npm run build` after any code changes
 6. **Memory backend errors**: Verify environment variables and network connectivity
 7. **Model not found**: Check model ID format (use `provider/model` for LiteLLM)

@@ -34,6 +34,7 @@ export class DockerExecutionServiceAdapter extends EventEmitter implements Execu
   private mode: ExecutionMode;
   private activeHandle?: ExecutionHandle;
   private containerProgressHandler: ((message: string) => void) | null = null;
+  private completed = false;
 
   constructor(mode: ExecutionMode) {
     super();
@@ -69,6 +70,14 @@ export class DockerExecutionServiceAdapter extends EventEmitter implements Execu
 
   getMode(): ExecutionMode {
     return this.mode;
+  }
+
+  drainBufferedStartupEvents(): any[] {
+    return this.dockerService.drainBufferedStartupEvents();
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.dockerService.markStartupEventConsumerAttached();
   }
 
   getCapabilities(): ExecutionCapabilities {
@@ -254,6 +263,7 @@ export class DockerExecutionServiceAdapter extends EventEmitter implements Execu
       throw new Error('Docker execution already active');
     }
 
+    this.completed = false;
     const startTime = Date.now();
     const handleId = `docker-${this.mode}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -346,9 +356,17 @@ export class DockerExecutionServiceAdapter extends EventEmitter implements Execu
     }
   }
 
+  async stop(): Promise<void> {
+    await this.dockerService.stop();
+  }
+
   cleanup(): void {
     if (this.dockerService) {
-      this.dockerService.cleanup();
+      if (this.completed) {
+        this.dockerService.removeAllListeners();
+      } else {
+        this.dockerService.cleanup();
+      }
     }
     // Note: ContainerManager is singleton, don't cleanup here
     if (this.containerProgressHandler) {
@@ -368,6 +386,7 @@ export class DockerExecutionServiceAdapter extends EventEmitter implements Execu
     if (this.activeHandle) {
       this.activeHandle = undefined;
     }
+    this.completed = true;
     this.emit('complete', {
       success: true,
       durationMs: 0 // Will be calculated by handle

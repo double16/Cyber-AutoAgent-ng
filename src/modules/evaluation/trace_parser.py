@@ -10,7 +10,7 @@ data quality for accurate metric computation.
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
 
@@ -123,33 +123,37 @@ class TraceParser:
     Handles multiple trace formats and ensures data quality for metrics.
     """
 
-    def __init__(self, llm=None, langfuse_client=None):
+    def __init__(
+        self,
+        llm=None,
+        langfuse_client=None,
+        progress_callback: Optional[Callable[..., None]] = None,
+    ):
         """Initialize the trace parser.
 
         Args:
             llm: Optional LLM instance for generating reference topics
             langfuse_client: Langfuse client for fetching observations
+            progress_callback: Optional best-effort evaluation progress callback
         """
         self.security_tools = {
             "shell",
             "http_request",
-            "mem0_store",
-            "mem0_get",
-            "mem0_retrieve",
-            "mem0_list",
-            "store_plan",
-            "get_plan",
+            "store_observation",
+            "store_knowledge",
+            "store_finding",
+            "record_finding_validation",
+            "memory_get",
+            "memory_retrieve",
+            "memory_list",
             "create_tasks",
-            "list_uncompleted_tasks",
-            "task_done",
-            "get_active_task",
             "editor",
             "load_tool",
             "swarm",
-            "stop",
         }
         self.llm = llm
         self.langfuse = langfuse_client
+        self.progress_callback = progress_callback
 
     def parse_trace(self, trace: Any) -> Optional[ParsedTrace]:
         """
@@ -511,7 +515,7 @@ class TraceParser:
                     if isinstance(obs, dict)
                     else getattr(obs, "name", "")
                 )
-                # Strands tool invocations have names like "Tool: mem0_store" or "execute_tool"
+                # Strands tool invocations have names like "Tool: store_finding" or "execute_tool"
                 if obs_name and (
                     "Tool:" in obs_name
                     or "execute_tool" in obs_name.lower()
@@ -627,6 +631,7 @@ class TraceParser:
         success = status_msg != "error" if status_msg else True
 
         # Check if this is a valid tool
+        # FIXME: The allowlist won't cover everything, need to improve this logic.
         if tool_name and (
             any(tool in tool_name for tool in self.security_tools)
             or "build_report" in tool_name
@@ -659,7 +664,15 @@ class TraceParser:
         Returns:
             Number of memory operations
         """
-        return sum(1 for tc in tool_calls if tc.name.startswith("mem0_"))
+        memory_tools = {
+            "store_observation",
+            "store_knowledge",
+            "store_finding",
+            "record_finding_validation",
+            "memory_retrieve",
+            "memory_list",
+        }
+        return sum(1 for tc in tool_calls if tc.name in memory_tools)
 
     def count_evidence_findings(self, tool_calls: List[ParsedToolCall]) -> int:
         """Count evidence findings stored in memory.
@@ -672,7 +685,7 @@ class TraceParser:
         """
         findings = 0
         for tc in tool_calls:
-            if tc.name == "mem0_store" and tc.input_data:
+            if tc.name == "store_finding" and tc.input_data:
                 input_str = str(tc.input_data).lower()
                 # Check for finding indicators in the memory store
                 if (
@@ -680,9 +693,7 @@ class TraceParser:
                     or "vulnerability" in input_str
                     or "critical" in input_str
                 ):
-                    # Validate it's actually a store operation with evidence
-                    if "action" in input_str and "store" in input_str:
-                        findings += 1
+                    findings += 1
         return findings
 
     def _extract_metadata(self, trace: Any) -> Dict[str, Any]:
@@ -780,10 +791,11 @@ class TraceParser:
         if tool.name == "shell":
             # Shell commands often have important output
             return f"[Shell Command Output] {output_str[:600]}"
-        elif tool.name == "mem0_store":
+        elif tool.name in {"store_observation", "store_knowledge", "store_finding"}:
             # Memory operations contain findings
-            return f"[Memory Store] {tool.input_data.get('content', '')[:400]}"
-        elif tool.name.startswith("mem0"):
+            content = tool.input_data.get("content") or tool.input_data.get("claim") or ""
+            return f"[Memory Store] {str(content)[:400]}"
+        elif tool.name.startswith("memory_"):
             # Memory operations contain findings
             return f"[Memory Operation] {output_str[:400]}"
         elif tool.name == "http_request":
@@ -818,8 +830,9 @@ class TraceParser:
             current_op_id = None
 
         for tool in parsed_trace.tool_calls:
-            if tool.name.startswith("mem0_") and isinstance(tool.input_data, dict):
-                content = tool.input_data.get("content", "")
+            memory_tools = {"store_observation", "store_knowledge", "store_finding", "memory_retrieve"}
+            if tool.name in memory_tools and isinstance(tool.input_data, dict):
+                content = tool.input_data.get("content") or tool.input_data.get("claim") or ""
                 meta = (
                     tool.input_data.get("metadata", {})
                     if isinstance(tool.input_data.get("metadata", {}), dict)
@@ -835,7 +848,7 @@ class TraceParser:
                 except Exception:
                     pass
 
-                if tool.name == "mem0_store" and content and same_operation:
+                if tool.name == "store_finding" and content and same_operation:
                     # Emit concise context for current-session findings only
                     sev = meta.get("severity", "unknown")
                     cat = meta.get("category", "unknown")
@@ -843,7 +856,7 @@ class TraceParser:
                         f"[Security Finding - {sev}/{cat}] {str(content)[:500]}"
                     )
 
-                elif tool.name == "mem0_retrieve" and tool.output and same_operation:
+                elif tool.name == "memory_retrieve" and tool.output and same_operation:
                     # Include retrieved findings from this operation only
                     output_str = str(tool.output)
                     if output_str:
@@ -866,16 +879,14 @@ class TraceParser:
                 return 0
             findings = 0
             for tool in parsed_trace.tool_calls:
-                if tool.name == "mem0_store" and isinstance(tool.input_data, dict):
+                if tool.name == "store_finding" and isinstance(tool.input_data, dict):
                     meta = (
                         tool.input_data.get("metadata", {})
                         if isinstance(tool.input_data.get("metadata", {}), dict)
                         else {}
                     )
-                    if (
-                        meta.get("operation_id") == current_op_id
-                        and tool.input_data.get("content")
-                    ):
+                    same_operation = not meta.get("operation_id") or meta.get("operation_id") == current_op_id
+                    if same_operation and (tool.input_data.get("claim") or tool.input_data.get("content")):
                         findings += 1
             return findings
         except Exception:
@@ -954,9 +965,9 @@ class TraceParser:
         # Include sample of findings if available
         findings_sample = []
         for tool in parsed_trace.tool_calls[:5]:
-            if tool.name == "mem0_store":
+            if tool.name == "store_finding":
                 if isinstance(tool.input_data, dict):
-                    content = tool.input_data.get("content", "")
+                    content = tool.input_data.get("claim") or tool.input_data.get("content", "")
                     if content:
                         findings_sample.append(content[:200])
 
@@ -1028,9 +1039,25 @@ Return a JSON list of topic strings that represent the key areas this assessment
 
                 # Generate topics
                 topic_prompt = TopicGenerationPrompt()
+                if self.progress_callback:
+                    try:
+                        self.progress_callback("reference_topics")
+                    except Exception as error:
+                        logger.debug(
+                            "Unable to report reference-topic generation progress: %s",
+                            error,
+                        )
                 response = await topic_prompt.generate(
                     data=input_data, llm=self.llm, callbacks=None
                 )
+                if self.progress_callback:
+                    try:
+                        self.progress_callback("reference_topics", "completed")
+                    except Exception as error:
+                        logger.debug(
+                            "Unable to report reference-topic completion: %s",
+                            error,
+                        )
 
                 if response and hasattr(response, "topics") and response.topics:
                     logger.debug(
@@ -1050,6 +1077,14 @@ Return a JSON list of topic strings that represent the key areas this assessment
 
         except Exception as e:
             logger.error(f"Failed to generate topics with LLM: {e}")
+            if self.progress_callback:
+                try:
+                    self.progress_callback("reference_topics", "failed")
+                except Exception as error:
+                    logger.debug(
+                        "Unable to report reference-topic failure: %s",
+                        error,
+                    )
             # Use objective as topic if LLM fails
             return (
                 [parsed_trace.objective]

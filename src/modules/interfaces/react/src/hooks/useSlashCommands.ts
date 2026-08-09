@@ -53,11 +53,11 @@ export const useSlashCommands = () => {
         args: ['document_number']
       },
       {
-        command: '/plugins',
+        command: '/modules',
         description: 'Select security assessment module interactively',
         action: async (args) => {
-          // Plugins command should be handled by useCommandHandler
-          throw new Error('Plugins command should be handled by useCommandHandler');
+          // Modules command should be handled by useCommandHandler
+          throw new Error('Modules command should be handled by useCommandHandler');
         },
         args: ['module_name']
       },

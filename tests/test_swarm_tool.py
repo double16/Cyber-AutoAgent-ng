@@ -253,4 +253,3 @@ def test_swarm_creates_custom_agents_and_error_paths(monkeypatch):
     result = swarm_mod.swarm(task="do it", agents=[{"name": "a"}])
     assert result["status"] == "error"
     assert "boom" in result["content"][0]["text"]
-

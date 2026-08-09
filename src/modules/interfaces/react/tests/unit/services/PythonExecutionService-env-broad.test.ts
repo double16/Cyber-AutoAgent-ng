@@ -1,7 +1,7 @@
 import {EventEmitter} from 'events';
-import {beforeEach, describe, expect, it, jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 
-const existsSync = jest.fn((file: string) => !String(file).includes('mem0.faiss'));
+const existsSync = jest.fn(() => true);
 const execFileSync = jest.fn(() => Buffer.from('Python 3.12.0'));
 const spawn = jest.fn((_cmd: string, _args: string[], opts: any) => {
     const proc: any = new EventEmitter();
@@ -55,7 +55,7 @@ describe('PythonExecutionService broad environment construction', () => {
             continueOperation: true,
             reportOnly: 'report-1',
         } as any, {
-            iterations: 3,
+            budgetMaxDuration: 60,
             modelProvider: 'litellm',
             modelId: 'gpt-test',
             awsRegion: 'us-west-1',

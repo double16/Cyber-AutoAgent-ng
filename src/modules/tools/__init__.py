@@ -1,19 +1,20 @@
 """Tools module for Cyber-AutoAgent."""
 
 from modules.tools.memory import (
-    Mem0ServiceClient,
+    QdrantMemoryClient,
     get_memory_client,
     initialize_memory_system,
-    mem0_store,
-    mem0_retrieve,
-    mem0_list,
-    store_plan,
-    get_plan,
+    store_observation,
+    store_knowledge,
+    store_finding,
+    record_finding_validation,
+    store_objective_candidate,
+    record_objective_validation,
+    memory_retrieve,
+    memory_list,
     create_tasks,
-    list_uncompleted_tasks,
-    task_done,
-    get_active_task,
 )
+from modules.tools.artifact import read_artifact
 from modules.tools.browser import (
     initialize_browser,
     browser_goto_url,
@@ -36,7 +37,6 @@ from modules.tools.channels import (
     channel_close,
     channel_close_all,
 )
-from modules.tools.prompt_optimizer import prompt_optimizer
 from modules.tools.oast import (
     oast_health,
     oast_endpoints,
@@ -45,22 +45,21 @@ from modules.tools.oast import (
     oast_clear_http_responses,
     close_oast_providers,
 )
-from modules.tools import stop
 
 __all__ = [
-    "stop",
-    "mem0_store",
-    "mem0_retrieve",
-    "mem0_list",
-    "store_plan",
-    "get_plan",
+    "store_observation",
+    "store_knowledge",
+    "store_finding",
+    "record_finding_validation",
+    "store_objective_candidate",
+    "record_objective_validation",
+    "read_artifact",
+    "memory_retrieve",
+    "memory_list",
     "create_tasks",
-    "list_uncompleted_tasks",
-    "task_done",
-    "get_active_task",
     "initialize_memory_system",
     "get_memory_client",
-    "Mem0ServiceClient",
+    "QdrantMemoryClient",
     "initialize_browser",
     "browser_set_headers",
     "browser_goto_url",
@@ -69,7 +68,6 @@ __all__ = [
     "browser_perform_action",
     "browser_get_cookies",
     "browser_evaluate_js",
-    "prompt_optimizer",
     "discover_mcp_tools",
     "channel_create_forward",
     "channel_create_reverse",

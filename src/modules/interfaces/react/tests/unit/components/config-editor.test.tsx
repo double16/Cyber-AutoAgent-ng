@@ -1,7 +1,7 @@
 import React from 'react';
 import {TextDecoder, TextEncoder} from 'util';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 if (typeof global.TextEncoder === 'undefined') {
     global.TextEncoder = TextEncoder;
@@ -104,7 +104,6 @@ describe('ConfigEditor', () => {
             deploymentMode: 'local-cli',
             modelProvider: 'bedrock',
             modelId: 'anthropic.claude-sonnet-4-5',
-            memoryBackend: 'FAISS',
             observability: true,
             autoEvaluation: true,
             langfuseHost: '',
@@ -137,7 +136,7 @@ describe('ConfigEditor', () => {
         const {ConfigEditor} = await load();
         const onClose = jest.fn();
 
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={onClose}/>);
             await Promise.resolve();
@@ -185,7 +184,7 @@ describe('ConfigEditor', () => {
         }));
         (globalThis as any).fetch = fetchMock;
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
@@ -238,23 +237,23 @@ describe('ConfigEditor', () => {
             deploymentMode: 'full-stack',
             modelProvider: 'litellm',
             modelId: 'gpt-5-reasoning',
-            memoryBackend: 'opensearch',
+            memoryMode: 'shared',
+            qdrantUrl: 'http://localhost:6333',
             observability: true,
             autoEvaluation: true,
             langfuseHost: 'http://localhost:3000',
             langfusePublicKey: 'pk',
             langfuseSecretKey: 'sk',
-            opensearchHost: 'http://localhost:9200',
+            qdrantApiKey: 'secret',
             currentModel: {
                 inputCostPer1k: 0.01,
                 outputCostPer1k: 0.02,
             },
             outputDir: './outputs',
-            unifiedOutput: true,
         };
         inputHandlers.length = 0;
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
@@ -272,7 +271,7 @@ describe('ConfigEditor', () => {
         sendInput('', {downArrow: true});
         sendInput('', {return: true});
         output = textFromTree(view.toJSON());
-        expect(output).toContain('OpenSearch Host');
+        expect(output).toContain('Qdrant Service URL');
 
         sendInput('', {escape: true});
         sendInput('', {downArrow: true});
@@ -294,12 +293,12 @@ describe('ConfigEditor', () => {
         sendInput('', {return: true});
         output = textFromTree(view.toJSON());
         expect(output).toContain('Output Directory');
-        expect(output).toContain('Unified Output Structure');
+        expect(output).not.toContain('Unified Output Structure');
     });
 
     it('renders configuration status and deployment description branches', async () => {
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         config = {
             ...config,
@@ -348,7 +347,6 @@ describe('ConfigEditor', () => {
             deploymentMode: 'full-stack',
             modelProvider: 'bedrock',
             modelId: 'claude',
-            memoryBackend: 'FAISS',
             observability: false,
             autoEvaluation: false,
         };
@@ -387,7 +385,7 @@ describe('ConfigEditor', () => {
             .mockResolvedValueOnce({status: 500, text: async () => 'server exploded'});
         (globalThis as any).fetch = fetchMock;
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
@@ -431,7 +429,7 @@ describe('ConfigEditor', () => {
             },
         };
         const {ConfigEditor} = await load();
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
 
         await act(async () => {
             view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);

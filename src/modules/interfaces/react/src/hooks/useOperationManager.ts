@@ -15,6 +15,7 @@ import { ApplicationState } from './useApplicationState.js';
 import { useDebouncedState } from './useDebouncedState.js';
 import { ExecutionServiceFactory, ExecutionServiceSelectionError, ServiceSelectionResult } from '../services/ExecutionServiceFactory.js';
 import { ExecutionService, DEFAULT_EXECUTION_CONFIG } from '../services/ExecutionService.js';
+import {stopExecution} from '../services/executionLifecycle.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 
 export interface OperationHistoryEntry {
@@ -77,6 +78,17 @@ export function useOperationManager({
   const metricsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const currentExecutionServiceRef = useRef<ExecutionService | null>(null);
   const lastMetricsUpdateRef = useRef<number>(0);
+  const maxHistoryEntries = React.useMemo(() => {
+    const configured = Number(process.env.CYBER_MAX_OPERATION_HISTORY_ENTRIES);
+    return Number.isFinite(configured) && configured > 20 ? Math.floor(configured) : 200;
+  }, []);
+  const maxHistoryContentChars = React.useMemo(() => {
+    const configured = Number(process.env.CYBER_MAX_OPERATION_HISTORY_CONTENT_CHARS);
+    return Number.isFinite(configured) && configured > 1000 ? Math.floor(configured) : 12000;
+  }, []);
+  const trimHistoryEntries = useCallback((entries: OperationHistoryEntry[]): OperationHistoryEntry[] => {
+    return entries.length > maxHistoryEntries ? entries.slice(-maxHistoryEntries) : entries;
+  }, [maxHistoryEntries]);
 
   // Throttled metrics updater to avoid excessive re-renders during streaming
   const updateMetricsThrottled = useCallback((metrics: {
@@ -85,6 +97,7 @@ export function useOperationManager({
     duration: string;
     memoryOps: number;
     evidence: number;
+    progressPercent: number;
   }) => {
     const now = Date.now();
     if (now - (lastMetricsUpdateRef.current || 0) < 300) {
@@ -143,10 +156,12 @@ export function useOperationManager({
       }
       // Detach and cleanup any lingering execution service
       if (currentExecutionServiceRef.current) {
-        try {
-          currentExecutionServiceRef.current.removeAllListeners();
-          currentExecutionServiceRef.current.cleanup();
-        } catch {}
+        void stopExecution({
+          executionService: currentExecutionServiceRef.current,
+          cleanup: true,
+          removeListeners: true,
+        }).catch(() => {
+        });
         currentExecutionServiceRef.current = null;
       }
     };
@@ -158,19 +173,23 @@ export function useOperationManager({
     content: string, 
     operation?: Operation
   ) => {
+    void operation;
+    const normalizedContent = String(content ?? '');
+    const trimmedContent = normalizedContent.length > maxHistoryContentChars
+      ? `${normalizedContent.slice(0, maxHistoryContentChars)}\n... (history entry truncated)`
+      : normalizedContent;
     const entry: OperationHistoryEntry = {
       id: `${Date.now()}-${Math.random()}`,
       timestamp: new Date(),
       type,
-      content,
-      operation
+      content: trimmedContent
     };
     
     // For critical messages (errors), update immediately
     if (type === 'error') {
       if (!isMountedRef.current) return; // don't set state after unmount
       setOperationHistoryEntries(prev => {
-        const newEntries = [...prev, entry];
+        const newEntries = trimHistoryEntries([...prev, entry]);
         if (isMountedRef.current) {
           setDebouncedHistoryEntries(newEntries); // Update debounced state immediately for errors
         }
@@ -182,7 +201,7 @@ export function useOperationManager({
     // For other messages, debounce the updates to prevent UI flicker
     if (!isMountedRef.current) return;
     setOperationHistoryEntries(prev => {
-      const newEntries = [...prev, entry];
+      const newEntries = trimHistoryEntries([...prev, entry]);
       
       // Clear any existing timeout
       if (historyUpdateTimeoutRef.current) {
@@ -199,16 +218,19 @@ export function useOperationManager({
       
       return newEntries;
     });
-  }, [setDebouncedHistoryEntries]);
+  }, [maxHistoryContentChars, setDebouncedHistoryEntries, trimHistoryEntries]);
 
   // Assessment pause handler (implements documented Ctrl+C and ESC behavior)
   const handleAssessmentPause = useCallback(async () => {
     if (appState.activeOperation) {
       try {
-        // First, stop the execution service to kill the running Python process
+        // First, stop the execution service to kill the running Python/container process
         if (appState.executionService) {
           addOperationHistoryEntry('info', 'Stopping operation...');
-          await (appState.executionService as any).stop();
+          await stopExecution({
+            executionHandle: (appState.activeOperation as any).executionHandle,
+            executionService: appState.executionService,
+          });
         }
         
         // Then update the operation manager state
@@ -227,57 +249,64 @@ export function useOperationManager({
 
   // Assessment cancel handler
   const handleAssessmentCancel = useCallback(async () => {
-    if (appState.activeOperation) {
-      try {
-        // First, stop the execution using the executionHandle stored on the operation
-        const executionHandle = (appState.activeOperation as any).executionHandle;
-        if (executionHandle && executionHandle.stop) {
-          await executionHandle.stop();
-        } else if (appState.executionService) {
-          // Fallback: emit stop event to the service
-          appState.executionService.emit('stop');
-        }
-
-        // Proactively detach listeners and cleanup the execution service to avoid leaks
-        try {
-          const svc: any = appState.executionService;
-          if (svc) {
-            svc.removeAllListeners?.();
-            svc.cleanup?.();
-          }
-        } catch {}
-        
-        // Then update the operation manager state
-        operationManager.pauseOperation(appState.activeOperation.id);
-        actions.setActiveOperation(null);
-        actions.setExecutionService(null); // Clear the execution service reference
-        actions.setUserHandoff(false);
-        actions.setHasCompletedOperation(true); // Mark as completed to show the message
-        
-        // Reset the assessment flow for next operation and preserve current module from UI
-        assessmentFlowManager.setDefaultModule(currentModule || 'web');
-        assessmentFlowManager.resetCompleteWorkflow();
-        // Ensure the flow module matches the UI prompt immediately to prevent mismatches
-        if (currentModule) {
-          assessmentFlowManager.setModule(currentModule);
-        }
-        
-        // Clear existing operation logs first
-        clearOperationHistory();
-        
-        // Add a small delay to ensure clear is processed
-        await new Promise(resolve => setTimeout(resolve, 50));
-        
-        addOperationHistoryEntry('error', 'ESC Kill Switch activated');
-        addOperationHistoryEntry('info', 'Operation terminated. Start a new assessment or review partial results.');
-        
-        // Ensure messages are visible immediately (bypass debounce)
-        try { (flushHistoryEntries as any)?.(); } catch {}
-      } catch (error) {
-        addOperationHistoryEntry('error', `Failed to cancel assessment: ${error.message}`);
-      }
+    const activeOperation = appState.activeOperation;
+    if (!activeOperation) {
+      return;
     }
-  }, [appState.activeOperation, appState.executionService, operationManager, actions, addOperationHistoryEntry]);
+
+    let stopError: unknown;
+    try {
+      await stopExecution({
+        executionHandle: (activeOperation as any).executionHandle,
+        executionService: appState.executionService,
+        cleanup: true,
+        removeListeners: true,
+      });
+    } catch (error) {
+      stopError = error;
+    }
+
+    // Detach frontend state even if backend termination timed out. This keeps exit and new commands responsive.
+    operationManager.pauseOperation(activeOperation.id);
+    actions.setActiveOperation(null);
+    actions.setExecutionService(null); // Clear the execution service reference
+    actions.setUserHandoff(false);
+    actions.setHasCompletedOperation(true); // Mark as completed to show the message
+
+    // Reset the assessment flow for next operation and preserve current module from UI
+    assessmentFlowManager.setDefaultModule(currentModule || 'web');
+    assessmentFlowManager.resetCompleteWorkflow();
+    // Ensure the flow module matches the UI prompt immediately to prevent mismatches
+    if (currentModule) {
+      assessmentFlowManager.setModule(currentModule);
+    }
+
+    // Clear existing operation logs first
+    clearOperationHistory();
+
+    // Add a small delay to ensure clear is processed
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    addOperationHistoryEntry('error', 'ESC Kill Switch activated');
+    if (stopError instanceof Error) {
+      addOperationHistoryEntry('error', `Operation stop cleanup warning: ${stopError.message}`);
+    } else if (stopError) {
+      addOperationHistoryEntry('error', `Operation stop cleanup warning: ${String(stopError)}`);
+    }
+    addOperationHistoryEntry('info', 'Operation terminated. Start a new assessment or review partial results.');
+
+    // Ensure messages are visible immediately (bypass debounce)
+    try { (flushHistoryEntries as any)?.(); } catch {}
+  }, [
+    appState.activeOperation,
+    appState.executionService,
+    operationManager,
+    actions,
+    assessmentFlowManager,
+    currentModule,
+    addOperationHistoryEntry,
+    flushHistoryEntries,
+  ]);
 
   // Clear operation history
   const clearOperationHistory = useCallback(() => {
@@ -324,7 +353,8 @@ export function useOperationManager({
         cost: appState.operationMetrics?.cost || 0,
         duration: '0s',
         memoryOps: appState.operationMetrics?.memoryOps || 0,
-        evidence: appState.operationMetrics?.evidence || 0
+        evidence: appState.operationMetrics?.evidence || 0,
+        progressPercent: appState.operationMetrics?.progressPercent || 0,
       });
       
       // Add to operation history with deployment mode
@@ -333,7 +363,15 @@ export function useOperationManager({
         config.deploymentMode === 'single-container' ? 'Single Container' :
         config.deploymentMode === 'full-stack' ? 'Full Stack' : 'Auto';
       
-      addOperationHistoryEntry('info', `Starting ${assessmentParams.module} assessment on ${assessmentParams.target}`);
+      const operationSuffix = (value: string | boolean | undefined) =>
+        typeof value === 'string' && value ? ` ${value}` : '';
+      const operationStartMessage = assessmentParams.reportOnly
+        ? `Regenerating report${operationSuffix(assessmentParams.reportOnly)} for ${assessmentParams.target}`
+        : assessmentParams.continueOperation
+          ? `Continuing operation${operationSuffix(assessmentParams.continueOperation)} for ${assessmentParams.target}`
+          : `Starting ${assessmentParams.module} assessment on ${assessmentParams.target}`;
+
+      addOperationHistoryEntry('info', operationStartMessage);
       // Defer showing Operation ID until backend provides authoritative ID via operation_init
       addOperationHistoryEntry('info', 'Initializing operation…');
       addOperationHistoryEntry('info', `Execution Mode: ${deploymentModeDisplay}`);
@@ -403,8 +441,8 @@ export function useOperationManager({
           if (process.env.CYBER_TEST_MODE === 'true') {
             const t = event?.type || 'unknown';
             // Include some details for key types
-            if (t === 'step_header') {
-              console.log(`[TEST_EVENT] step_header step=${event.step} max=${event.maxSteps || event.total_steps || ''}`);
+            if (t === 'progress_update') {
+              console.log(`[TEST_EVENT] progress_update progress=${event.progressPercent ?? event.step ?? ''}`);
             } else if (t === 'tool_start') {
               console.log(`[TEST_EVENT] tool_start tool=${event.toolName || event.tool_name || ''}`);
             } else if (t === 'metrics_update') {
@@ -432,11 +470,10 @@ export function useOperationManager({
           }
         }
 
-        // Handle progress updates
-        if (event.step && event.total_steps) {
+        // Handle progress updates. progressPercent is budget progress; step is sequencing metadata.
+        if (event.type === 'progress_update' && typeof event.progressPercent === 'number') {
           operationManager.updateOperation(operation.id, {
-            currentStep: event.step,
-            totalSteps: event.total_steps,
+            progressPercentage: event.progressPercent,
             description: event.content || operation.description
           });
         }
@@ -451,17 +488,25 @@ export function useOperationManager({
 
           if (inputTokens > 0 || outputTokens > 0) {
             operationManager.updateTokenUsage(operation.id, inputTokens, outputTokens, cost, cacheReadTokens, cacheWriteTokens);
-            
-            const currentOp = operationManager.getOperation(operation.id);
-            if (currentOp) {
-              updateMetricsThrottled({
-                tokens: currentOp.cost.tokensUsed,
-                cost: currentOp.cost.estimatedCost,
-                duration: event.metrics.duration || operationManager.getOperationDuration(operation.id),
-                memoryOps: event.metrics.memoryOps || currentOp.findings,
-                evidence: event.metrics.evidence || currentOp.findings
-              });
-            }
+          }
+
+          const currentOp = operationManager.getOperation(operation.id);
+          if (currentOp) {
+            const memoryOps = typeof event.metrics.memoryOps === 'number'
+              ? event.metrics.memoryOps
+              : currentOp.memoryOps;
+            const evidence = typeof event.metrics.evidence === 'number'
+              ? event.metrics.evidence
+              : currentOp.evidence;
+            operationManager.updateOperation(operation.id, { memoryOps, evidence });
+            updateMetricsThrottled({
+              tokens: currentOp.cost.tokensUsed,
+              cost: currentOp.cost.estimatedCost,
+              duration: event.metrics.duration || operationManager.getOperationDuration(operation.id),
+              memoryOps,
+              evidence,
+              progressPercent: event.metrics.progressPercent ?? currentOp.progressPercentage,
+            });
           }
         }
 
@@ -492,8 +537,8 @@ export function useOperationManager({
             tokens: currentOp.cost.tokensUsed,
             cost: currentOp.cost.estimatedCost,
             duration: operationManager.getOperationDuration(operation.id),
-            memoryOps: currentOp.findings,
-            evidence: currentOp.findings
+            memoryOps: currentOp.memoryOps,
+            evidence: currentOp.evidence
           });
         }
         
@@ -508,7 +553,7 @@ export function useOperationManager({
           actions.clearCompletedOperation();
         }, 2000);
         
-        cleanupExecution();
+        cleanupExecution({ stop: false });
       };
       
       const handleExecutionError = (error: any) => {
@@ -534,11 +579,14 @@ export function useOperationManager({
       };
       
       // Cleanup function for event listeners and intervals
-      const cleanupExecution = () => {
-        try {
-          executionService.removeAllListeners();
-          executionService.cleanup();
-        } catch {}
+      const cleanupExecution = ({ stop = true }: { stop?: boolean } = {}) => {
+        void stopExecution({
+          executionService,
+          skipStop: !stop,
+          cleanup: true,
+          removeListeners: true,
+        }).catch(() => {
+        });
         if (metricsIntervalRef.current) {
           clearInterval(metricsIntervalRef.current);
           metricsIntervalRef.current = null;
@@ -571,8 +619,8 @@ export function useOperationManager({
             tokens: currentOp.cost.tokensUsed,
             cost: currentOp.cost.estimatedCost,
             duration: operationManager.getOperationDuration(operation.id),
-            memoryOps: currentOp.findings,
-            evidence: currentOp.findings
+            memoryOps: currentOp.memoryOps,
+            evidence: currentOp.evidence
           });
         }
       }, 5000) as unknown as NodeJS.Timeout;

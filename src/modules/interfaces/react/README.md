@@ -32,7 +32,7 @@ The interface communicates with the Python agent through structured events emitt
 
 ```typescript
 interface CyberEvent {
-  type: 'tool_start' | 'tool_output' | 'reasoning' | 'step_header';
+  type: 'tool_start' | 'tool_output' | 'reasoning' | 'progress_update';
   timestamp: string;
   data: EventData;
 }
@@ -80,6 +80,17 @@ npm run build
 npm start
 ```
 
+## Interactive Commands
+
+```bash
+target https://testphp.vulnweb.com
+execute focus on OWASP Top 10
+continue OP_20260320_101501
+report OP_20260320_101501
+```
+
+`continue` and `report` can omit the operation ID to use the latest previous operation for the configured target.
+
 ## Configuration
 
 Configuration persists to `~/.cyber-autoagent/config.json`:
@@ -90,7 +101,7 @@ Configuration persists to `~/.cyber-autoagent/config.json`:
 - LiteLLM (universal gateway)
 
 **Runtime Parameters:**
-- Maximum iterations (default: 100)
+- Required maximum duration, with optional token and cost budgets
 - Model selection
 - Memory persistence mode
 - Observability endpoints
@@ -141,9 +152,15 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 Event types handled by interface:
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Tool execution results
+- `task_started` / `task_deferred` / `task_done`: Workflow lifecycle events; deferral keeps work pending for
+  continuation, while completion includes finding-validation resolution
 - `reasoning`: Agent decision-making context
-- `step_header`: Iteration counter and timing
-- `metrics_update`: Token usage and costs
+- `progress_update`: Progress boundary; `step` is internal sequence metadata, `progressPercent` is budget usage, and
+  optional `health` supplies a compact colored workflow-health score and band in the stream and persistent footer
+- `metrics_update`: Token usage, costs and budget usage
+
+Typed memory tools are rendered according to their purpose. `store_finding` is shown as a candidate awaiting
+verification, while a finding-validation `task_done` event reports either `verified` or `validation_failure`.
 
 ## Testing
 

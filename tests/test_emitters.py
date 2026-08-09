@@ -51,6 +51,25 @@ def test_emitter_deduplicates_non_tool_events():
     assert occurrences == 1, f"Expected 1 event, got {occurrences}"
 
 
+def test_emitter_keeps_actor_critic_cycles_distinct():
+    emitter = StdoutEventEmitter(operation_id="TEST_OP")
+    buf = io.StringIO()
+
+    with redirect_stdout(buf):
+        for cycle in (1, 2):
+            emitter.emit({
+                "type": "workflow_activity",
+                "role": "plan_creator",
+                "status": "started",
+                "attempt": 1,
+                "attempt_total": 1,
+                "cycle": cycle,
+                "cycle_total": 2,
+            })
+
+    assert buf.getvalue().count("__CYBER_EVENT__") == 2
+
+
 def test_emitter_always_json_format():
     """Test that all events always emit JSON format (no CLI mode)."""
     emitter = StdoutEventEmitter(operation_id="TEST_OP")
@@ -58,7 +77,16 @@ def test_emitter_always_json_format():
 
     events = [
         {"type": "operation_init", "operation_id": "test-123", "target": "example.com"},
-        {"type": "step_header", "step": 2, "maxSteps": 5},
+        {
+            "type": "preflight_check",
+            "operation_id": "test-123",
+            "target_id": "target-1",
+            "target": "example.com",
+            "target_type": "network",
+            "status": "pass",
+            "checks": ["resolve"],
+        },
+        {"type": "progress_update", "step": 1, "progressPercent": 40},
         {"type": "reasoning", "content": "Analyzing"},
         {"type": "tool_start", "tool_name": "nmap"},
         {"type": "output", "content": "Test output"},

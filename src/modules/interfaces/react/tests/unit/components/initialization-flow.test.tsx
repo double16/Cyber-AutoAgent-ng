@@ -1,7 +1,7 @@
 import React from 'react';
 import { EventEmitter } from 'events';
-import { jest } from '@jest/globals';
-import TestRenderer, { act } from 'react-test-renderer';
+import {beforeEach, describe, expect, it, jest} from '@jest/globals';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -18,7 +18,7 @@ jest.unstable_mockModule('../../../src/contexts/ConfigContext.js', () => ({
 }));
 
 const pythonService = {
-  checkPythonVersion: jest.fn(async () => ({ installed: true, version: '3.11.8' })),
+  checkPythonVersion: jest.fn(async () => ({ installed: true, version: '3.12.8' })),
   setupPythonEnvironment: jest.fn(async (onMessage?: (message: string) => void) => {
     onMessage?.('Creating virtual environment');
     onMessage?.('Installing dependencies');
@@ -109,7 +109,7 @@ describe('InitializationFlow', () => {
   it('renders welcome, navigates deployment choices, and exits with escape', async () => {
     const { InitializationFlow } = await load();
     const onComplete = jest.fn();
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
 
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
@@ -132,7 +132,7 @@ describe('InitializationFlow', () => {
   it('sets up local CLI mode and auto-completes after success', async () => {
     const { InitializationFlow } = await load();
     const onComplete = jest.fn();
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
 
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
@@ -147,7 +147,7 @@ describe('InitializationFlow', () => {
     await wait(120);
     expect(pythonService.checkPythonVersion).toHaveBeenCalled();
     expect(pythonService.setupPythonEnvironment).toHaveBeenCalled();
-    expect(textFromTree(view.toJSON())).toContain('Python 3.11.8 detected');
+    expect(textFromTree(view.toJSON())).toContain('Python 3.12.8 detected');
     expect(textFromTree(view.toJSON())).toContain('Installing dependencies');
 
     await wait(1600);
@@ -157,7 +157,7 @@ describe('InitializationFlow', () => {
   it('sets up container mode with progress logs and health refresh', async () => {
     const { InitializationFlow } = await load();
     const onComplete = jest.fn();
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
 
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
@@ -182,10 +182,10 @@ describe('InitializationFlow', () => {
     const onComplete = jest.fn();
     pythonService.checkPythonVersion.mockResolvedValueOnce({
       installed: false,
-      error: 'Python 3.11+ is required',
+      error: 'Python 3.12+ is required',
     } as never);
 
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
     });
@@ -195,20 +195,20 @@ describe('InitializationFlow', () => {
     await wait(120);
 
     expect(textFromTree(view.toJSON())).toContain('Setup Failed');
-    expect(textFromTree(view.toJSON())).toContain('Python 3.11 or higher is required');
+    expect(textFromTree(view.toJSON())).toContain('Python 3.12 or higher is required');
 
     sendInput('b');
     expect(textFromTree(view.toJSON())).toContain('Choose Your Deployment Mode');
 
     pythonService.checkPythonVersion.mockResolvedValueOnce({
       installed: false,
-      error: 'Python 3.11+ is required',
+      error: 'Python 3.12+ is required',
     } as never);
     sendInput('', { return: true });
     await wait(120);
     expect(textFromTree(view.toJSON())).toContain('Setup Failed');
 
-    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.11.8' } as never);
+    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.12.8' } as never);
     sendInput('r');
     await wait(120);
     expect(pythonService.checkPythonVersion).toHaveBeenCalledTimes(3);
@@ -221,7 +221,7 @@ describe('InitializationFlow', () => {
     const onComplete = jest.fn();
     containerManager.switchToMode.mockRejectedValueOnce(new Error('Cannot connect to the Docker daemon'));
 
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
     });
@@ -262,7 +262,7 @@ describe('InitializationFlow', () => {
     const onComplete = jest.fn();
     pythonService.checkPythonVersion.mockRejectedValueOnce(new Error('Python not found'));
 
-    let view!: TestRenderer.ReactTestRenderer;
+    let view!: ReactTestRenderer;
     act(() => {
       view = TestRenderer.create(<InitializationFlow onComplete={onComplete} />);
     });
@@ -271,9 +271,9 @@ describe('InitializationFlow', () => {
     sendInput('', { return: true });
     await wait(120);
 
-    expect(textFromTree(view.toJSON())).toContain('Python 3.11+ is not installed');
+    expect(textFromTree(view.toJSON())).toContain('Python 3.12+ is not installed');
 
-    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.11.8' } as never);
+    pythonService.checkPythonVersion.mockResolvedValueOnce({ installed: true, version: '3.12.8' } as never);
     pythonService.setupPythonEnvironment.mockRejectedValueOnce(new Error('No requirements.txt'));
     sendInput('r');
     await wait(120);

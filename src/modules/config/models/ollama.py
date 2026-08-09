@@ -6,9 +6,10 @@
 import json
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, List
 
 import ollama
+from ollama import ChatResponse
 from pydantic import BaseModel
 from typing_extensions import TypedDict, Unpack, override
 
@@ -45,9 +46,11 @@ class OllamaModel(Model):
             stop_sequences: List of sequences that will stop generation when encountered.
             temperature: Controls randomness in generation (higher = more random).
             top_p: Controls diversity via nucleus sampling (alternative to temperature).
+            stream: True for streaming responses.
         """
 
         additional_args: dict[str, Any] | None
+        context_window_limit: int | None
         keep_alive: str | None
         max_tokens: int | None
         model_id: str
@@ -55,6 +58,7 @@ class OllamaModel(Model):
         stop_sequences: list[str] | None
         temperature: float | None
         top_p: float | None
+        stream: bool | None
 
     def __init__(
             self,
@@ -207,7 +211,7 @@ class OllamaModel(Model):
                     if value is not None
                 },
             },
-            "stream": True,
+            "stream": self.config.get("stream", True),
             "tools": [
                 {
                     "type": "function",
@@ -245,7 +249,7 @@ class OllamaModel(Model):
                 return {"messageStart": {"role": "assistant"}}
 
             case "content_start":
-                if event["data_type"] == "text":
+                if event["data_type"] in ("text", "reasoning_text"):
                     return {"contentBlockStart": {"start": {}}}
 
                 tool_name = event["data"].function.name
@@ -332,7 +336,7 @@ class OllamaModel(Model):
         logger.debug("request=<%s>", request)
 
         logger.debug("invoking model")
-        tool_requested = False
+        tool_requested = [False]  # holder pattern
 
         client = ollama.AsyncClient(self.host, **self.client_args)
         response = await client.chat(**request)
@@ -341,27 +345,43 @@ class OllamaModel(Model):
         yield self.format_chunk({"chunk_type": "message_start"})
         yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
 
-        event = None
-        async for event in response:
-            for tool_call in event.message.tool_calls or []:
-                yield self.format_chunk({"chunk_type": "content_start", "data_type": "tool", "data": tool_call})
-                yield self.format_chunk({"chunk_type": "content_delta", "data_type": "tool", "data": tool_call})
-                yield self.format_chunk({"chunk_type": "content_stop", "data_type": "tool", "data": tool_call})
-                tool_requested = True
+        def produce_chunks(event: ChatResponse) -> List[StreamEvent]:
+            chunks = []
 
-            yield self.format_chunk(
-                {"chunk_type": "content_delta", "data_type": "text", "data": event.message.content})
+            for tool_call in event.message.tool_calls or []:
+                chunks.append(self.format_chunk({"chunk_type": "content_start", "data_type": "tool", "data": tool_call}))
+                chunks.append(self.format_chunk({"chunk_type": "content_delta", "data_type": "tool", "data": tool_call}))
+                chunks.append(self.format_chunk({"chunk_type": "content_stop", "data_type": "tool", "data": tool_call}))
+                tool_requested[0] = True
+
+            chunks.append(self.format_chunk(
+                {"chunk_type": "content_delta", "data_type": "text", "data": event.message.content}))
             if event.message.thinking:
-                yield self.format_chunk(
-                    {"chunk_type": "content_delta", "data_type": "reasoning_text", "data": event.message.thinking})
+                chunks.append(self.format_chunk(
+                    {"chunk_type": "content_delta", "data_type": "reasoning_text", "data": event.message.thinking}))
+
+            return chunks
+
+        last_event = None
+        if hasattr(response, "__aiter__"):
+            async for event in response:
+                last_event = event
+                for se in produce_chunks(event):
+                    yield se
+        elif isinstance(response, ChatResponse):
+            last_event = response
+            for se in produce_chunks(response):
+                yield se
+        else:
+            raise ValueError(f"Invalid response type: {type(response)}")
 
         yield self.format_chunk({"chunk_type": "content_stop", "data_type": "text"})
 
-        if event is not None:
+        if last_event is not None:
             yield self.format_chunk(
-                {"chunk_type": "message_stop", "data": "tool_use" if tool_requested else event.done_reason}
+                {"chunk_type": "message_stop", "data": "tool_use" if tool_requested[0] else last_event.done_reason}
             )
-            yield self.format_chunk({"chunk_type": "metadata", "data": event})
+            yield self.format_chunk({"chunk_type": "metadata", "data": last_event})
         else:
             yield self.format_chunk(
                 {"chunk_type": "message_stop", "data": "end_turn"}

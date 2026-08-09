@@ -53,11 +53,51 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 ```
 
 **Event Types:**
+
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Execution results
+- `tool_discovery_start` / `tool_available` / `tool_unavailable` / `environment_ready`: Structured tool-discovery
+  and environment status events, rendered directly by the terminal and auto-run console rather than as generic output
+- `task_started` / `task_deferred` / `task_done`: Workflow lifecycle events; deferred tasks return to the pending queue,
+  while completed finding-validation tasks include their candidate reference and final `verified` or
+  `validation_failure` resolution
+- `task_superseded`: A failed or blocked parent task was resolved by explicitly linked replacement work. The event
+  includes `task_uid`, `replacement_task_uid`, `phase`, and the deterministic `reason`; the parent remains visible in
+  history but is no longer unresolved.
+- `output`: User-visible text, including controller-owned plan creation and update snapshots
 - `reasoning`: Agent decision context
-- `step_header`: Iteration tracking
-- `metrics_update`: Token usage and costs
+- `metrics_update`: Operation-wide token, cost, duration, and budget progress, including reporting and evaluation usage
+- `progress_update`: Progress updates with optional operation-health score/band, including indexed final-report and
+  Ragas metric stages and unindexed Ragas preparation stages; the latest valid health remains visible in the footer
+- `evaluation_step_complete`: Semantic completion status for a Ragas metric or preparation stage
+- `evaluation_complete`: Finalized assessment evaluation status and numeric scores
+- `assessment_complete`: Terminal lifecycle event emitted after report generation and any evaluation attempt
+
+The terminal gives `store_observation`, `store_knowledge`, `store_finding`, and `record_finding_validation` distinct
+summaries. Finding submission is displayed as pending verification, never as a confirmed vulnerability. Final-report
+progress with `report_step_kind=validation_failure` is labeled as requiring validation in interactive and auto-run
+output.
+
+When automatic evaluation is enabled, terminal event ordering is report events, Ragas evaluation progress and step
+results, `evaluation_complete`, and finally `assessment_complete`. An attempted evaluation emits
+`evaluation_complete` with `status` set to `completed`, `no_results`, or `failed`; disabled evaluation emits no
+evaluation events. `assessment_complete` is always emitted after the evaluation decision so execution services can
+close without hanging. The periodic metrics thread remains active through final reporting and evaluation and stops when
+this terminal lifecycle event is emitted.
+The React terminal keeps report and evaluation events in one append-only completion stream and shows an
+`Evaluating assessment` spinner with the current preparation or metric label until evaluation finishes.
+
+Evaluation work is not represented as `tool_start` or `tool_end`: those event types are reserved for actual callable
+tools. Metric progress identifies the scope and metric, while preparation labels cover evaluation-data assembly,
+reference-topic generation, rubric judging, and policy calibration. Successful `evaluation_complete` events include
+`metrics_evaluated`, `average_score`, and the finalized `scores` mapping.
+
+Evaluation model calls contribute to the same cumulative `metrics_update` totals as assessment and reporting calls.
+Auto-run therefore keeps showing one cost value while evaluation progresses; there is no separate
+evaluation-cost event or subtotal. Token totals remain available in the structured event and interactive footer.
+Provider-reported evaluation cache reads and cache creation also contribute to the structured event's
+`cacheReadTokens`, `cacheWriteTokens`, and total cost. Evaluation uses the same `CYBER_AGENT_PRICING_*` environment
+overrides and models.dev fallback as assessment and reporting.
 
 ### Event Processing
 
@@ -90,7 +130,7 @@ Application state follows unidirectional data flow using centralized state store
 - Operation metadata (target, objective, operation ID)
 - Execution progress (current step, status)
 - Event history (tool executions, outputs)
-- Configuration (provider, model, iterations)
+- Configuration (provider, model, duration/token/cost budgets)
 
 **State Updates:**
 - Event-driven mutations from agent operations
@@ -123,7 +163,7 @@ Configuration persists to `~/.cyber-autoagent/config.json`:
 **Managed Settings:**
 - Model provider selection (Bedrock, Ollama, LiteLLM)
 - Model identifiers and parameters
-- Execution limits (iterations)
+- Execution limits (duration, tokens, cost)
 - Memory persistence mode
 - Observability endpoints
 
@@ -186,14 +226,24 @@ print(f"__CYBER_EVENT__{json.dumps(event)}__CYBER_EVENT_END__\n", end="", flush=
 
 ### Event Parsing
 
-Interface extracts events using pattern matching:
+The interface treats the stream as a chunked protocol. A structured frame may
+be split across multiple stdout chunks, so the parser retains incomplete frames
+until the closing marker arrives. If an incomplete frame exceeds the parser's
+buffer limit, it is discarded without attempting `JSON.parse` and the UI emits
+an `output truncated` notice before resynchronizing at the next frame.
+
+The local Python service parses structured events from stdout only. stderr is
+reserved for process diagnostics and is kept separate so diagnostic output
+cannot be interleaved into a JSON frame.
+
+For compatibility, the parser still uses the existing markers:
 ```typescript
-const eventPattern = /__CYBER_EVENT__(.*?)__CYBER_EVENT_END__/;
-const match = buffer.match(eventPattern);
-if (match) {
-  const event = JSON.parse(match[1]);
+const start = buffer.indexOf('__CYBER_EVENT__');
+const end = buffer.indexOf('__CYBER_EVENT_END__', start);
+if (start >= 0 && end >= 0) {
+  const event = JSON.parse(buffer.slice(start + '__CYBER_EVENT__'.length, end));
   processEvent(event);
-  buffer = buffer.slice(match.index + match[0].length);
+  buffer = buffer.slice(end + '__CYBER_EVENT_END__'.length);
 }
 ```
 

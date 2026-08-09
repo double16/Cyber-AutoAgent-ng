@@ -7,17 +7,17 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 ### Core Architecture
 
 **[architecture.md](architecture.md)**
-- Single agent meta-everything architecture
+- Python-owned multi-agent workflow architecture
 - Strands framework integration
-- Tool hierarchy and selection
-- Metacognitive decision-making patterns
+- Role-agent lifecycle and restricted tool selection
+- Metacognitive reasoning patterns
 - Memory integration
 
 ### System Components
 
 **[memory.md](memory.md)**
 - Memory system architecture
-- Backend configurations (FAISS, OpenSearch, Mem0 Platform)
+- Qdrant filesystem and service configuration
 - Evidence categorization and storage
 - Reflection and planning systems
 - Query optimization
@@ -28,19 +28,14 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 - Tool discovery mechanisms
 - Report generation integration
 
-**[prompt_optimizer.md](prompt_optimizer.md)**
-- Dynamic prompt optimization
-- Meta-prompting approach
-- Automatic optimization triggers
-- XML tag preservation
-- Performance improvements
-
 **[task_tracking.md](task_tracking.md)**
 - Tasks are captured from new evidence
-- Execution is single-active-task, phase-gated
-- Completion is explicit with status + reason
+- Python owns phase/task activation and completion
+- Role agents execute short, defined objectives
+- Completion is evaluator-driven with status + reason
 - Context pruning preserves the active task and the evidence needed to continue
 - Pending work can persist across runs to enable long-lived coverage goals
+- Prompt adaptation happens inside the Python-owned role-agent workflow
 
 ### Interface and User Experience
 
@@ -79,24 +74,23 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 | Understanding agent design    | [architecture.md](architecture.md)                         |
 | Running assessments           | [user-instructions.md](user-instructions.md)               |
 | Configuring memory            | [memory.md](memory.md)                                     |
-| Creating custom modules       | [prompt_management.md](prompt_management.md)               |
+| Creating custom modules       | [operation_plugins.md](operation_plugins.md)                |
 | Monitoring operations         | [observability-evaluation.md](observability-evaluation.md) |
 | Production deployment         | [deployment.md](deployment.md)                             |
 | Understanding UI architecture | [terminal-frontend.md](terminal-frontend.md)               |
-| Optimizing prompts            | [prompt_optimizer.md](prompt_optimizer.md)                 |
 
 ## Getting Started
 
 1. **New Users**: Start with [user-instructions.md](user-instructions.md) for operational guidance
 2. **Developers**: Review [architecture.md](architecture.md) for system design
 3. **Operations**: Consult [deployment.md](deployment.md) for production setup
-4. **Module Developers**: See [prompt_management.md](prompt_management.md) for custom modules
+4. **Module Developers**: See [operation_plugins.md](operation_plugins.md) for custom modules and custom tools
 
 ## Document Conventions
 
-**Code Examples**: All code examples use actual file paths and verified commands
+**Code Examples**: Examples are limited to supported commands, configuration, and module custom-tool implementations
 **Diagrams**: Mermaid diagrams illustrate architecture and flow patterns
-**Configuration**: Examples include realistic configuration values
+**Configuration**: Examples use supported configuration fields and realistic placeholder values
 **Cross-References**: Links connect related concepts across documents
 
 ## Additional Resources

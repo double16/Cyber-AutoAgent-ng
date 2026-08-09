@@ -21,12 +21,12 @@ from strands.agent.conversation_manager import (
 )
 from strands.types.content import Message
 from strands.types.exceptions import ContextWindowOverflowException
-from strands.hooks import BeforeModelCallEvent, AfterModelCallEvent, HookProvider  # type: ignore
+from strands.hooks import BeforeModelCallEvent, AfterModelCallEvent, HookProvider, HookRegistry  # type: ignore
 from strands.tools.registry import ToolRegistry
 
 from modules.config.models.dev_client import get_models_client
 from modules.config.models.factory import get_model_id_from_agent
-from modules.utils.text_reducer import reduce_lines_lossy, collapse_first_repeated_sequence
+from modules.handlers.max_token_recovery import classify_max_token_output
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ def _get_context_limit() -> int:
             return int(new_val)
         except ValueError:
             pass
-    return 100000  # Default
+    return 0
 
 CONTEXT_LIMIT = _get_context_limit()
 # Legacy alias for backward compatibility
@@ -202,6 +202,71 @@ MAX_THRESHOLD_RATIO = 0.98  # Maximum threshold ratio (never exceed 98% of limit
 SMALL_CONVERSATION_THRESHOLD = 3  # Skip pruning for conversations with fewer messages
 # With preserve_first=1 and preserve_last=5, overlap is 6 messages
 PRESERVATION_OVERLAP_THRESHOLD = 6  # Expected overlap for early operations (first+last)
+STALE_TOOL_RESULT_THRESHOLD = 2000
+
+
+def _reduction_signature(messages: Sequence[Message]) -> tuple[int, int, tuple[str, ...]]:
+    """Return a stable progress signature for one reduction stage."""
+
+    serialized_sizes = []
+    identifiers = []
+    for index, message in enumerate(messages):
+        rendered = _json_to_compact_str(message)
+        serialized_sizes.append(len(rendered))
+        identifiers.append(str(message.get("id") or message.get("messageId") or index))
+    return len(messages), sum(serialized_sizes), tuple(identifiers)
+
+
+def _compact_stale_tool_outputs(agent: Agent, preserve_recent: int) -> int:
+    """Compact old tool results while retaining durable references and workflow state."""
+
+    messages = getattr(agent, "messages", None)
+    if not isinstance(messages, list):
+        return 0
+    stale_limit = max(0, len(messages) - max(1, preserve_recent))
+    compacted = 0
+    reference_pattern = re.compile(r"\b(?:artifact|artifact_id|memory|finding):[^\s\],}\\\"]+")
+    state_pattern = re.compile(
+        r'"(?:task_uid|criterion_id|status|disposition|complete|replayed|memory_published)"\s*:\s*'
+        r'(?:"[^\"]*"|true|false|null|-?\d+(?:\.\d+)?)'
+    )
+    for message in messages[:stale_limit]:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or "toolResult" not in block:
+                continue
+            tool_result = block.get("toolResult")
+            if not isinstance(tool_result, dict):
+                continue
+            result_content = tool_result.get("content", [])
+            rendered = _json_to_compact_str(result_content)
+            if len(rendered) <= STALE_TOOL_RESULT_THRESHOLD:
+                continue
+            searchable_chunks = []
+            for item in result_content if isinstance(result_content, list) else [result_content]:
+                if isinstance(item, dict) and "text" in item:
+                    searchable_chunks.append(str(item["text"]))
+                elif isinstance(item, dict) and "json" in item:
+                    searchable_chunks.append(json.dumps(item["json"], sort_keys=True, separators=(",", ":")))
+                else:
+                    searchable_chunks.append(str(item))
+            searchable = "\n".join(searchable_chunks)
+            references = list(dict.fromkeys(reference_pattern.findall(searchable)))
+            state = list(dict.fromkeys(state_pattern.findall(searchable)))
+            summary = {
+                "compacted": True,
+                "original_chars": len(rendered),
+                "status": tool_result.get("status"),
+                "references": references,
+                "workflow_state": state,
+            }
+            tool_result["content"] = [{"json": summary}]
+            compacted += 1
+    if compacted:
+        logger.info("Compacted %d stale tool result(s) while preserving references and workflow state", compacted)
+    return compacted
 
 
 def _record_context_reduction_event(
@@ -615,7 +680,7 @@ class SlidingWindowConversationManagerWithPreservation(SlidingWindowConversation
         self.preserve_first_messages = preserve_first_messages
 
     def reduce_context(self, agent: "Agent", e: Exception | None = None, **kwargs: Any) -> None:
-        # Preserve the first message, any configured N messages AND the latest active_task marker + related evidence messages + latest plan
+        # Preserve the first message, any configured N messages, and the latest serialized plan snapshot.
         before_messages = list(agent.messages)
         before_reduce_count = len(before_messages)
 
@@ -727,7 +792,7 @@ class MappingConversationManager(SummarizingConversationManager):
             should_truncate_results=False,  # Use our layers instead of SDK truncation
             preserve_first_messages=preserve_first_messages,
         )
-        self.mapper = tool_result_mapper or LargeToolResultMapper()
+        self.mapper = tool_result_mapper
         self.preserve_first = max(0, preserve_first_messages)
         self.preserve_last = max(0, preserve_recent_messages)
         self.removed_message_count = 0
@@ -807,7 +872,7 @@ class MappingConversationManager(SummarizingConversationManager):
             return
 
         # Build set of indices to remove, ensuring we remove complete tool pairs
-        protected_indices = _protected_indices_for_active_state(messages)
+        protected_indices = _protected_indices_for_plan_state(messages)
         indices_to_remove: set[int] = set()
         removed_count = 0
 
@@ -957,29 +1022,26 @@ class MappingConversationManager(SummarizingConversationManager):
                         assistant_messages_tokens[-1],
                         avg_assistant_messages_tokens,
                     )
-                    truncated_message = "".join([block.get("text", "") for block in messages[-1].get("content", [])])
-                    reduced_text = reduce_lines_lossy(
-                        collapse_first_repeated_sequence(truncated_message),
-                        similarity_threshold=0.5
-                    ).to_text().strip()
-                    # Consider adding user instructions similar to the main agent loop to reduce the chance of another reasoning loop.
-                    reduced_message_content = [
-                        {
+                    incomplete_text = "".join(
+                        block.get("text", "")
+                        for block in messages[-1].get("content", [])
+                        if isinstance(block, dict)
+                    )
+                    classification = classify_max_token_output(incomplete_text)
+                    if classification.kind == "reasoning_loop":
+                        discarded_message_content = [{
                             "type": "text",
-                            "text": reduced_text
-                        }
-                    ]
-                    reduced_text_tokens = estimate_prompt_tokens(
-                        model_id,
-                        [{"role": "assistant", "content": reduced_message_content}],
-                        None, None, None)
-                    if reduced_text_tokens < avg_assistant_messages_tokens * 5:
+                            "text": (
+                                "[Controller note: An incomplete repetitive assistant response was discarded. "
+                                "No claims from it were retained.]"
+                            ),
+                        }]
                         logger.info(
-                            "Context reduced via reasoning loop compression, est tokens of last message %s->%s",
+                            "Context removed untrusted reasoning loop, est tokens=%s repetition_ratio=%.3f",
                             assistant_messages_tokens[-1],
-                            reduced_text_tokens,
+                            classification.repetition_ratio,
                         )
-                        messages[-1]["content"] = reduced_message_content
+                        messages[-1]["content"] = discarded_message_content
                         content_reduced = True
                         target_count = self.preserve_first + self.preserve_last
                         if len(messages) > target_count and len(messages) > self.preserve_first:
@@ -991,8 +1053,14 @@ class MappingConversationManager(SummarizingConversationManager):
         # Use estimation to measure reduction impact (not telemetry - see docstring)
         before_tokens = safe_estimate_tokens(agent)
         stage = "sliding"
+        exhausted = getattr(agent, "_context_reduction_exhausted", None)
+        if not isinstance(exhausted, set):
+            exhausted = set()
+        sliding_signature = _reduction_signature(agent.messages)
         sliding_overridden = "reduce_context" in vars(self._sliding)
-        if before_msgs > window_size + self.preserve_first or sliding_overridden:
+        if ("sliding", sliding_signature) in exhausted:
+            logger.debug("Skipping exhausted sliding reduction stage")
+        elif before_msgs > window_size + self.preserve_first or sliding_overridden:
             try:
                 self._sliding.reduce_context(agent, e, **kwargs)
             except ContextWindowOverflowException as overflow_exc:
@@ -1032,6 +1100,42 @@ class MappingConversationManager(SummarizingConversationManager):
             and after_tokens is not None
             and after_tokens < before_tokens
         )
+        if not changed:
+            exhausted.add((stage, sliding_signature))
+            setattr(agent, "_context_reduction_exhausted", exhausted)
+            compact_signature = _reduction_signature(agent.messages)
+            if ("tool_compaction", compact_signature) not in exhausted:
+                stage = "tool_compaction"
+                compacted_results = _compact_stale_tool_outputs(agent, self.preserve_last)
+                after_msgs = _count_agent_messages(agent)
+                after_tokens = safe_estimate_tokens(agent)
+                changed = compacted_results > 0
+                if not changed:
+                    exhausted.add((stage, compact_signature))
+            if not changed:
+                summarize_signature = _reduction_signature(agent.messages)
+                if ("summarizing", summarize_signature) not in exhausted:
+                    stage = "summarizing"
+                    try:
+                        super().reduce_context(agent, e, **kwargs)
+                    except ContextWindowOverflowException:
+                        logger.debug("Summarizing reduction stage exhausted")
+                    after_msgs = _count_agent_messages(agent)
+                    after_tokens = safe_estimate_tokens(agent)
+                    changed = after_msgs < before_msgs or (
+                        before_tokens is not None
+                        and after_tokens is not None
+                        and after_tokens < before_tokens
+                    )
+                    if not changed:
+                        exhausted.add((stage, summarize_signature))
+            if not changed and len(agent.messages) > self.preserve_first + self.preserve_last + 1:
+                stage = "forced_prune"
+                self._force_prune_oldest(agent, 1)
+                after_msgs = _count_agent_messages(agent)
+                after_tokens = safe_estimate_tokens(agent)
+                changed = after_msgs < before_msgs
+            setattr(agent, "_context_reduction_exhausted", exhausted)
         if changed:
             removed = max(0, before_msgs - after_msgs)
             logger.info(
@@ -1046,13 +1150,20 @@ class MappingConversationManager(SummarizingConversationManager):
         else:
             # SDK Contract: If reduction was not possible, raise exception
             # This allows caller to know context management is exhausted
-            logger.warning(
-                "Context reduction requested but no change detected for stage=%s "
-                "(before=%d, after=%d messages). Reduction may be exhausted.",
-                stage,
-                before_msgs,
-                after_msgs,
-            )
+            warning_key = _reduction_signature(agent.messages)
+            warned = getattr(agent, "_context_reduction_noop_warnings", set())
+            if not isinstance(warned, set):
+                warned = set()
+            if warning_key not in warned:
+                logger.warning(
+                    "Context reduction requested but no change detected for stage=%s "
+                    "(before=%d, after=%d messages). Reduction is exhausted.",
+                    stage,
+                    before_msgs,
+                    after_msgs,
+                )
+                warned.add(warning_key)
+                setattr(agent, "_context_reduction_noop_warnings", warned)
             # Check if we're truly exhausted (can't reduce further)
             total_preserved = self.preserve_first + self.preserve_last
             if after_msgs <= total_preserved + 1:
@@ -1231,6 +1342,11 @@ def _get_prompt_token_limit(agent: Agent) -> Optional[int]:
             return int(limit)
     except Exception:
         logger.debug("Invalid prompt token limit on agent", exc_info=True)
+    model_limit = getattr(getattr(agent, "model", None), "context_window_limit", None)
+    if isinstance(model_limit, (int, float)) and model_limit > 0:
+        resolved = int(model_limit)
+        setattr(agent, "_prompt_token_limit", resolved)
+        return resolved
     if PROMPT_TOKEN_FALLBACK_LIMIT > 0:
         setattr(agent, "_prompt_token_limit", PROMPT_TOKEN_FALLBACK_LIMIT)
         logger.warning(
@@ -1744,27 +1860,6 @@ def _strip_reasoning_content(agent: Agent, force: bool = False, preserve_recent_
         )
 
 
-def strip_reflection_snapshot_messages(agent: Agent) -> None:
-    # Remove messages that start with "<reflection_snapshot>"
-    def _predicate(message) -> bool:
-        if not isinstance(message.get("content"), list):
-            return True
-        content = message.get("content")
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if "<reflection_snapshot>" in block.get("text", ""):
-                return False
-        return True
-
-    messages = getattr(agent, "messages", [])
-    messages[:] = [
-        message
-        for message in messages
-        if _predicate(message)
-    ]
-
-
 def _iter_message_texts(message: Dict[str, Any], block_limit: Set[str] = None) -> List[str]:
     """Return all text fragments from a message (normal text + toolResult text)."""
     out: List[str] = []
@@ -1809,44 +1904,11 @@ def _iter_message_texts(message: Dict[str, Any], block_limit: Set[str] = None) -
     return out
 
 
-_RE_ACTIVE_TASK = re.compile(r"<active_task[^>]*>(.*?)</active_task>", flags=re.S)
-
-def _find_active_task_payload_in_text(text: str) -> Optional[Dict[str, Any]]:
-    """Extract JSON payload from the last <active_task...>...</active_task> block in text."""
-    try:
-        if not isinstance(text, str) or "<active_task" not in text:
-            return None
-        matches = _RE_ACTIVE_TASK.findall(text)
-        if not matches:
-            return None
-        payload_str = (matches[-1] or "").strip()
-        if not payload_str:
-            return None
-        return json.loads(payload_str)
-    except Exception:
-        return None
-
-
-def _get_latest_active_task(messages: List[Dict[str, Any]]) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
-    """Return (index, payload) for the most recent <active_task...> marker in messages."""
-    for i in range(len(messages) - 1, -1, -1):
-        texts = _iter_message_texts(messages[i])
-        if not texts:
-            continue
-        joined = "\n".join(texts)
-        payload = _find_active_task_payload_in_text(joined)
-        if isinstance(payload, dict):
-            return i, payload
-    return None, None
-
-
-_PLAN_TOOL_NAMES = {"get_plan", "store_plan"}
-
-
 def _is_plan_tool_result_message(message: Dict[str, Any]) -> bool:
-    """True if the message contains a toolResult for get_plan or store_plan.
+    """True if the message contains a toolResult with a serialized plan.
 
-    We match on toolResult.toolUseId (Strands) and also allow toolResult._toolUseId when present.
+    Python-owned workflow no longer exposes plan read/write tools to agents, so
+    preserved plan snapshots are identified by their serialized TOON marker.
     """
     content = message.get("content")
     if not isinstance(content, list):
@@ -1857,9 +1919,6 @@ def _is_plan_tool_result_message(message: Dict[str, Any]) -> bool:
         tr = block.get("toolResult")
         if not isinstance(tr, dict):
             continue
-        tool_name = tr.get("name") or tr.get("_toolUseId") or tr.get("toolUseId")
-        if isinstance(tool_name, str) and tool_name in _PLAN_TOOL_NAMES:
-            return True
         try:
             if "plan_overview[" in json.dumps(tr.get("content", "")):
                 return True
@@ -1877,47 +1936,6 @@ def _get_latest_plan_tool_result(messages: List[Dict[str, Any]]) -> Optional[int
     return None
 
 
-def _evidence_match_tokens(evidence: List[str]) -> List[str]:
-    """Derive match tokens (full path + basename) from evidence entries.
-
-    Supports suffixes like:
-      - :56
-      - :57-78
-      - :L10-L20
-      - #anchor
-    """
-    tokens: List[str] = []
-    for raw in (evidence or []):
-        s = raw.strip().strip("[]")
-        if not s:
-            continue
-
-        # Strip suffixes
-        s = re.sub(r":L\d+(?:-L\d+)?$", "", s)   # :L10-L20
-        s = re.sub(r":\d+(?:-\d+)?$", "", s)     # :56 or :57-78
-        s = re.sub(r"#.*$", "", s)               # #anchor
-        s = s.strip()
-        if not s:
-            continue
-
-        tokens.append(s)
-        base = os.path.basename(s)
-        if base and base != s:
-            tokens.append(base)
-
-    # De-dupe, avoid tiny tokens
-    seen: set[str] = set()
-    out: List[str] = []
-    for t in tokens:
-        if not t or len(t) < 4:
-            continue
-        if t in seen:
-            continue
-        seen.add(t)
-        out.append(t)
-    return out
-
-
 def _message_has_tool_use(message: Dict[str, Any]) -> bool:
     content = message.get("content")
     if not isinstance(content, list):
@@ -1932,37 +1950,14 @@ def _message_has_tool_result(message: Dict[str, Any]) -> bool:
     return any(isinstance(b, dict) and "toolResult" in b for b in content)
 
 
-def _protected_indices_for_active_state(messages: List[Dict[str, Any]]) -> set[int]:
-    """Indices to preserve: latest plan tool result message, latest active_task marker + evidence-referencing messages + tool pairs."""
+def _protected_indices_for_plan_state(messages: List[Dict[str, Any]]) -> set[int]:
+    """Indices to preserve: latest serialized plan tool result message and its adjacent tool pair."""
     protected: set[int] = set()
 
     # Preserve the most recent plan toolResult message
     plan_idx = _get_latest_plan_tool_result(messages)
     if plan_idx is not None:
         protected.add(plan_idx)
-
-    idx, payload = _get_latest_active_task(messages)
-    if idx is None or not isinstance(payload, dict):
-        return protected
-
-    protected.add(idx)
-
-    evidence_val: List[str] = []
-    if isinstance(payload.get("task"), dict):
-        evidence_val = payload["task"].get("evidence", [])
-
-    tokens = _evidence_match_tokens(evidence_val)
-    if tokens:
-        match_indices: List[int] = []
-        for i, msg in enumerate(messages):
-            joined = "\n".join(_iter_message_texts(msg))
-            if joined and any(tok in joined for tok in tokens):
-                match_indices.append(i)
-
-        # Cap to avoid preserving too much
-        if len(match_indices) > 25:
-            match_indices = match_indices[-25:]
-        protected.update(match_indices)
 
     # Preserve tool pairs adjacent to protected indices
     for i in list(protected):
@@ -2017,7 +2012,7 @@ def _restore_preserved_messages(
     """Restore preserved first messages and protected state messages after reduction.
 
     Always preserves the very first message in full, plus any additionally configured
-    leading messages and the latest protected active-task / plan related messages.
+    leading messages and the latest protected serialized plan snapshot.
     """
     if not isinstance(messages, list) or not isinstance(before_messages, list) or not before_messages:
         return 0
@@ -2025,7 +2020,7 @@ def _restore_preserved_messages(
     preserve_n = max(1, int(preserve_first_messages or 0))
     preserve = before_messages[:preserve_n]
 
-    protected_indices = _protected_indices_for_active_state(before_messages)
+    protected_indices = _protected_indices_for_plan_state(before_messages)
     protected_msgs = [
         before_messages[i]
         for i in sorted(protected_indices)
@@ -2067,28 +2062,16 @@ def _restore_preserved_messages(
 
 
 def _dedupe_state_markers(agent: Agent) -> None:
-    """Remove all <reflection_snapshot> messages and keep only the most recent <active_task ...> and plan tool result message."""
+    """Keep only the most recent serialized plan tool result."""
 
     messages = getattr(agent, "messages", [])
     if not isinstance(messages, list) or not messages:
         return
 
-    protected_indices = _protected_indices_for_active_state(messages)
+    protected_indices = _protected_indices_for_plan_state(messages)
     indices_to_remove: set[int] = set()
 
     def _dedupe_candidate(message: Dict[str, Any]) -> bool:
-        texts = _iter_message_texts(message)
-        joined = "\n".join(texts)
-
-        # Remove reflection_snapshot markers regardless of where they appear
-        if "<reflection_snapshot>" in joined:
-            return True
-
-        if "<active_task" in joined:
-            payload = _find_active_task_payload_in_text(joined)
-            if payload is not None:
-                return True
-
         if _is_plan_tool_result_message(message):
             return True
 
@@ -2534,6 +2517,5 @@ __all__ = [
     "_strip_reasoning_content",
     "clear_shared_conversation_manager",
     "get_shared_conversation_manager",
-    "strip_reflection_snapshot_messages",
     "_dedupe_state_markers",
 ]

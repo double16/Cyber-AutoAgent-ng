@@ -18,7 +18,7 @@ def test_http_request_emits_request_start_for_url():
     ]
 
 
-def test_swarm_operation_emits_rich_agent_details_and_defaults():
+def test_swarm_tool_does_not_emit_specialized_ui_events():
     events = []
     emitter = ToolEventEmitter(events.append)
 
@@ -40,24 +40,10 @@ def test_swarm_operation_emits_rich_agent_details_and_defaults():
         },
     )
 
-    [event] = events
-    assert event["type"] == "swarm_start"
-    assert event["task"] == "map auth"
-    assert event["agent_count"] == 3
-    assert event["agent_names"] == ["recon", "validator", "broken"]
-    assert event["agent_details"][0] == {
-        "name": "recon",
-        "system_prompt": "find endpoints",
-        "tools": ["http_request", "123"],
-        "model_provider": "bedrock",
-        "model_id": "claude",
-    }
-    assert event["agent_details"][1]["model_id"] == "default"
-    assert event["agent_details"][2]["tools"] == []
-    assert event["max_handoffs"] == 20
+    assert events == []
 
 
-def test_swarm_operation_skips_empty_payload():
+def test_empty_swarm_payload_is_ignored_like_other_unmapped_tools():
     events = []
     emitter = ToolEventEmitter(events.append)
 

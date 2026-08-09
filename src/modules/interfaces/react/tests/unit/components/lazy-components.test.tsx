@@ -1,11 +1,10 @@
 import React from 'react';
-import TestRenderer, {act} from 'react-test-renderer';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {describe, expect, it} from '@jest/globals';
 import {
     ConfigEditorLazy,
     DocumentationViewerLazy,
     ModuleSelectorLazy,
-    SwarmDisplayLazy,
     TerminalLazy,
 } from '../../../src/components/LazyComponents.js';
 
@@ -20,14 +19,13 @@ const textFromTree = (node: any): string => {
 
 describe('LazyComponents', () => {
     it('renders descriptive suspense fallbacks for lazy component wrappers', () => {
-        let view!: TestRenderer.ReactTestRenderer;
+        let view!: ReactTestRenderer;
         act(() => {
             view = TestRenderer.create(
                 <>
                     <ConfigEditorLazy/>
                     <DocumentationViewerLazy/>
                     <ModuleSelectorLazy/>
-                    <SwarmDisplayLazy/>
                     <TerminalLazy/>
                 </>
             );
@@ -37,7 +35,6 @@ describe('LazyComponents', () => {
         expect(text).toContain('Loading Configuration Editor...');
         expect(text).toContain('Loading Documentation...');
         expect(text).toContain('Loading Module Selector...');
-        expect(text).toContain('Loading Swarm Display...');
         expect(text).toContain('Loading Terminal...');
     });
 });
