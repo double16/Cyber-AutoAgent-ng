@@ -6,6 +6,7 @@ Tests for report_builder operation_id filtering logic.
 - Memories with different operation_id are EXCLUDED
 - Memories WITHOUT operation_id (untagged) are included for backward compatibility
 """
+import hashlib
 import os
 import re
 from unittest.mock import patch
@@ -24,7 +25,7 @@ def memory_client_clear():
 
 
 @patch("modules.tools.memory.QdrantMemoryClient")
-def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
+def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path, monkeypatch):
     op_id = "OP_ALLOFIT"
 
     output_dir = tmp_path / "outputs"
@@ -143,6 +144,29 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 "metadata": {"category": "observation"},
             },
         ]
+        for item in mock_client.list_memories.return_value:
+            metadata = item["metadata"]
+            if metadata.get("validation_status") != "verified":
+                continue
+            marker = f"positive-evidence-{item['id']}"
+            artifact = operation_dir / f"proof-{item['id']}.txt"
+            artifact.write_text(marker, encoding="utf-8")
+            reference = f"artifact:proof-{item['id']}.txt"
+            assertion = {"artifact": reference, "marker": marker}
+            metadata.update(
+                {
+                    "artifacts": [reference],
+                    "candidate_evidence_assertions": [assertion],
+                    "evidence_assertions": [assertion],
+                    "evidence_artifact_fingerprints": {
+                        reference: hashlib.sha256(artifact.read_bytes()).hexdigest()
+                    },
+                }
+            )
+        monkeypatch.setattr(
+            "modules.handlers.report_generator._artifact_path_from_ref",
+            lambda reference: str(operation_dir / str(reference).removeprefix("artifact:")),
+        )
 
         with open(operation_dir / "cyber_operations.log", "w", encoding="utf-8") as f:
             f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 209251, "inputTokens": 208136, "outputTokens": 1115, "totalTokens": 209251, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.75, "duration": "20m 0s", "budget": {{ "maxDurationMinutes": 60, "maxTokens": null, "maxCost": null }}, "progress": 0.1, "progressPercent": 10, "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_171", "timestamp": "2026-01-26T21:29:49.060488"}}__CYBER_EVENT_END__\n')

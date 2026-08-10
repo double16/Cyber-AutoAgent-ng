@@ -1574,6 +1574,21 @@ class MultiAgentWorkflowController:
             )
             prompt_spec = self._deterministic_task_prompt_spec(plan, phase, task, error)
 
+        scope_feedback = self._task_prompt_scope_feedback(plan, task, prompt_spec)
+        if scope_feedback:
+            self._emit_task_scope_validation(plan, task, str(prompt_spec.get("prompt") or ""), "pre_executor", "blocked")
+            reason = "Task prompt exceeded the assigned service boundary: " + "; ".join(scope_feedback)
+            updated_task = self.state.mark_task(task, "partial_failure", reason)
+            self._emit_task_done(updated_task)
+            return
+        self._emit_task_scope_validation(
+            plan,
+            task,
+            str(prompt_spec.get("prompt") or ""),
+            "pre_executor",
+            "allowed",
+        )
+
         selected_tools = prompt_spec.get("tools", [])
         selected_tools = list(selected_tools) if isinstance(selected_tools, list) else []
         tools = build_role_tools(
@@ -2806,6 +2821,19 @@ Return exactly one decision for each candidate.
         repair_context_feedback: List[str] = []
         active_role = "task_prompt_builder"
         try:
+            immutable_scope_feedback = task_service_scope_violations(
+                plan, task, self._immutable_task_scope_text(task)
+            )
+            if immutable_scope_feedback:
+                self._emit_task_scope_validation(
+                    plan, task, self._immutable_task_scope_text(task), "immutable_task", "blocked"
+                )
+                raise TaskPromptBuildError(
+                    "Task content exceeds the assigned service boundary: " + "; ".join(immutable_scope_feedback),
+                    repairable=False,
+                    feedback=immutable_scope_feedback,
+                    failure_source="task_scope_validation",
+                )
             prompt_spec = self._run_json_text_agent(
                 "task_prompt_builder",
                 self._task_prompt_builder_prompt(plan, phase, task),
@@ -2819,15 +2847,27 @@ Return exactly one decision for each candidate.
             repair_critique: Optional[Dict[str, Any]] = None
             for iteration in range(1, self.task_prompt_refinement_iterations + 1):
                 active_role = "task_prompt_critic"
-                critique = self._run_json_text_agent(
-                    "task_prompt_critic",
-                    self._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
-                    [],
-                    system_prompt,
-                    data_validator=self._validate_task_prompt_critique,
-                    cycle=iteration,
-                    cycle_total=cycle_total,
-                )
+                scope_feedback = self._task_prompt_scope_feedback(plan, task, prompt_spec)
+                deterministic_scope_violation = bool(scope_feedback)
+                if deterministic_scope_violation:
+                    self._emit_task_scope_validation(
+                        plan,
+                        task,
+                        str(prompt_spec.get("prompt") or ""),
+                        "prompt_draft",
+                        "revision_requested" if iteration < self.task_prompt_refinement_iterations else "repair_requested",
+                    )
+                    critique = {"approved": False, "feedback": scope_feedback}
+                else:
+                    critique = self._run_json_text_agent(
+                        "task_prompt_critic",
+                        self._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
+                        [],
+                        system_prompt,
+                        data_validator=self._validate_task_prompt_critique,
+                        cycle=iteration,
+                        cycle_total=cycle_total,
+                    )
                 if critique["approved"]:
                     self._log_workflow(
                         "task prompt critic approved task=%s iteration=%s",
@@ -2837,7 +2877,10 @@ Return exactly one decision for each candidate.
                     break
                 self._record_efficiency_correction("task_prompt_critic_cycle")
                 if iteration == self.task_prompt_refinement_iterations:
-                    initial_repairable = not self._task_prompt_critique_is_hard_scope_violation(critique)
+                    initial_repairable = (
+                        deterministic_scope_violation
+                        or not self._task_prompt_critique_is_hard_scope_violation(critique)
+                    )
                     if initial_repairable:
                         repair_feedback = critique["feedback"]
                         repair_context_feedback = list(repair_feedback)
@@ -2862,15 +2905,27 @@ Return exactly one decision for each candidate.
                             self._filter_repairable_shell_selections(prompt_spec), task
                         )
                         active_role = "task_prompt_critic"
-                        repair_critique = self._run_json_text_agent(
-                            "task_prompt_critic",
-                            self._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
-                            [],
-                            system_prompt,
-                            data_validator=self._validate_task_prompt_critique,
-                            cycle=iteration + 1,
-                            cycle_total=cycle_total + 1,
-                        )
+                        repair_scope_feedback = self._task_prompt_scope_feedback(plan, task, prompt_spec)
+                        repair_scope_violation = bool(repair_scope_feedback)
+                        if repair_scope_violation:
+                            self._emit_task_scope_validation(
+                                plan,
+                                task,
+                                str(prompt_spec.get("prompt") or ""),
+                                "bounded_repair",
+                                "fallback_requested",
+                            )
+                            repair_critique = {"approved": False, "feedback": repair_scope_feedback}
+                        else:
+                            repair_critique = self._run_json_text_agent(
+                                "task_prompt_critic",
+                                self._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
+                                [],
+                                system_prompt,
+                                data_validator=self._validate_task_prompt_critique,
+                                cycle=iteration + 1,
+                                cycle_total=cycle_total + 1,
+                            )
                         if repair_critique["approved"]:
                             self._log_workflow(
                                 "task prompt bounded repair approved task=%s iteration=%s",
@@ -2890,8 +2945,9 @@ Return exactly one decision for each candidate.
                     raise TaskPromptBuildError(
                         f"Task prompt critic rejected the prompt after {iteration} review(s): "
                         + "; ".join(repair_feedback or critique["feedback"]),
-                        repairable=not self._task_prompt_critique_is_hard_scope_violation(
-                            repair_critique or critique
+                        repairable=(
+                            bool(repair_critique and self._task_prompt_scope_feedback(plan, task, prompt_spec))
+                            or not self._task_prompt_critique_is_hard_scope_violation(repair_critique or critique)
                         ),
                         feedback=repair_feedback or critique["feedback"],
                         failure_source="task_prompt_critic",
@@ -2915,8 +2971,8 @@ Return exactly one decision for each candidate.
         except Exception as error:
             if (
                 isinstance(error, TaskPromptBuildError)
-                and error.failure_source == "task_prompt_critic"
                 and not error.repairable
+                and error.failure_source in {"task_prompt_critic", "task_scope_validation"}
             ):
                 raise
             raise TaskPromptBuildError(
@@ -2931,6 +2987,27 @@ Return exactly one decision for each candidate.
             ",".join(sorted(prompt_spec.keys())),
         )
         return prompt_spec
+
+    @staticmethod
+    def _immutable_task_scope_text(task: Task) -> str:
+        """Return task-owned text whose target boundary cannot be repaired by a prompt rewrite."""
+
+        return "\n".join(
+            [
+                task.title,
+                task.objective,
+                task.acceptance.basis.description,
+                *(criterion.description for criterion in task.acceptance.criteria),
+            ]
+        )
+
+    @staticmethod
+    def _task_prompt_scope_feedback(
+        plan: OperationPlan, task: Task, prompt_spec: Dict[str, Any]
+    ) -> List[str]:
+        """Return deterministic service-boundary feedback for an LLM-produced prompt draft."""
+
+        return task_service_scope_violations(plan, task, str(prompt_spec.get("prompt") or ""))
 
     @staticmethod
     def _task_prompt_critique_is_hard_scope_violation(critique: Dict[str, Any]) -> bool:
@@ -3115,7 +3192,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
                 "Execute only the assigned task using the controller-provided tools. Preserve plan constraints and "
                 "target scope. Create durable evidence before recording each acceptance result. Do not create new "
                 "tasks or change plan state.\n\n"
-                f"## Operation objective\n{plan.objective}\n\n"
+                f"## Assigned target scope\n{self._task_target_scope_text(plan, task)}\n\n"
                 f"## Active phase\n{json.dumps(phase.to_dict(), sort_keys=True)}\n\n"
                 f"## Assigned task\n{json.dumps(task.to_dict(), sort_keys=True)}\n\n"
                 f"## Prompt-build fallback reason\n{self._short(error, 500)}\n\n"

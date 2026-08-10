@@ -8,6 +8,7 @@ This is NOT a Strands tool - it's a handler utility function.
 """
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -103,6 +104,7 @@ _INFORMATIONAL_OBSERVATION_CATEGORIES = frozenset({"observation", "signal", "dis
 _WORKFLOW_BOOKKEEPING_SOURCES = frozenset({"plan", "task", "task_acceptance"})
 _NARRATIVE_FINDING_REFERENCE_STOPWORDS = frozenset({
     "discovery",
+    "hypotheses",
     "validation",
 })
 _EXCERPT_STOPWORDS = {
@@ -509,9 +511,46 @@ def _normalize_report_category(
     evidence_contract_met = durable_evidence and (
         evidence_strategy == "direct" or artifact_backed_control
     )
-    if validation_status == "verified" and evidence_contract_met:
+    if validation_status == "verified" and evidence_contract_met and _verified_finding_assertions_met(metadata):
         return "finding"
     return "validation_failure"
+
+
+def _verified_finding_assertions_met(metadata: Dict[str, Any]) -> bool:
+    """Recheck the generic positive-evidence assertions for a verified finding."""
+
+    candidate_assertions = metadata.get("candidate_evidence_assertions")
+    validation_assertions = metadata.get("evidence_assertions")
+    fingerprints = metadata.get("evidence_artifact_fingerprints")
+    artifacts = metadata.get("artifacts")
+    if not all(isinstance(value, list) for value in (candidate_assertions, validation_assertions, artifacts)):
+        return False
+    if not candidate_assertions or not isinstance(fingerprints, dict):
+        return False
+    candidate_markers = {
+        str(item.get("marker") or "") for item in candidate_assertions if isinstance(item, dict)
+    }
+    validation_markers = {
+        str(item.get("marker") or "") for item in validation_assertions if isinstance(item, dict)
+    }
+    if not candidate_markers or "" in candidate_markers or candidate_markers != validation_markers:
+        return False
+    for assertion in validation_assertions:
+        if not isinstance(assertion, dict):
+            return False
+        reference = str(assertion.get("artifact") or "")
+        marker = str(assertion.get("marker") or "")
+        if reference not in artifacts or not marker:
+            return False
+        try:
+            path = _artifact_path_from_ref(reference)
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            return False
+        if marker not in content or fingerprints.get(reference) != digest:
+            return False
+    return True
 
 
 def _reportable_finding_source_task_uids(
@@ -1389,7 +1428,7 @@ def _resolve_report_model_metrics(
             callback_usage = callback_handler.model_usage()
             if _has_meaningful_model_usage(callback_usage):
                 model_usage = callback_usage
-                total_operation_time = format_duration(callback_handler.total_operation_time_seconds())
+                # This handler is created for report generation, so its duration is not assessment time.
         except Exception:
             logger.debug("Unable to read live operation usage for operation metadata", exc_info=True)
     if not _has_meaningful_model_usage(model_usage):
@@ -1508,6 +1547,7 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
     """Extract report inputs from one operation-log session."""
     summary: Dict[str, Any] = {
         "session_started": None,
+        "session_ended": None,
         "operation_id": None,
         "operation_mode": None,
         "termination_reason": None,
@@ -1587,6 +1627,8 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
         elif event_type == "termination_reason":
             summary["termination_reason"] = payload.get("reason")
             summary["termination_message"] = payload.get("message")
+        elif event_type == "operation_terminated":
+            summary["session_ended"] = payload.get("timestamp")
         elif event_type in {"tool_start", "tool_input_corrected"}:
             tool_name = str(payload.get("tool_name") or payload.get("name") or "").strip()
             if tool_name:
@@ -1611,6 +1653,10 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
             budget_candidate = event_budget
 
     summary["configured_budget"] = _normalize_budget_config(budget_candidate)
+    started = _parse_operation_timestamp(summary["session_started"])
+    ended = _parse_operation_timestamp(summary["session_ended"])
+    if started and ended and ended >= started:
+        metrics["duration"] = format_duration((ended - started).total_seconds())
     summary["tools_used"] = tools_used
     for command_values in shell_commands_by_tool_id.values():
         shell_command_names.extend(command_values)
@@ -1624,8 +1670,25 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
     return summary
 
 
+def _parse_operation_timestamp(value: Any) -> Optional[datetime]:
+    """Parse operation lifecycle timestamps emitted by the log without raising."""
+
+    text = str(value or "").strip().replace("Z", "+00:00")
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
 def _normalize_shell_command_names(value: Any) -> List[str]:
-    """Extract unique executable names from shell tool input."""
+    """Extract safe executable basenames from shell tool input.
+
+    Shell commands are valuable methodology telemetry, but command text is not a
+    trusted schema.  Accept portable executable names only and silently drop
+    malformed tokens rather than leaking shell fragments into reports.
+    """
 
     if isinstance(value, (list, tuple)):
         commands: List[str] = []
@@ -1636,19 +1699,28 @@ def _normalize_shell_command_names(value: Any) -> List[str]:
     if not text:
         return []
     names: List[str] = []
+    executable_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+    assignments = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+    wrappers = {"sudo", "command", "builtin", "exec", "env", "timeout", "nice", "nohup"}
     for segment in re.split(r"&&|\|\||[;|]", text):
         try:
             tokens = shlex.split(segment)
         except ValueError:
-            tokens = segment.split()
-        while tokens and (tokens[0] in {"sudo", "command", "builtin", "exec", "timeout"}):
+            continue
+        while tokens and assignments.match(tokens[0]):
             tokens.pop(0)
-        if tokens and tokens[0] == "env":
-            tokens.pop(0)
-            while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
-                tokens.pop(0)
+        while tokens and tokens[0] in wrappers:
+            wrapper = tokens.pop(0)
+            if wrapper == "env":
+                while tokens and assignments.match(tokens[0]):
+                    tokens.pop(0)
+            elif wrapper == "timeout":
+                while tokens and (tokens[0].startswith("-") or re.fullmatch(r"\d+(?:\.\d+)?", tokens[0])):
+                    tokens.pop(0)
         if tokens:
-            names.append(tokens[0].rsplit("/", 1)[-1])
+            candidate = tokens[0].rsplit("/", 1)[-1]
+            if executable_pattern.fullmatch(candidate):
+                names.append(candidate)
     return list(dict.fromkeys(names))
 
 
@@ -4604,7 +4676,7 @@ def _format_summary_table(findings: List[Dict[str, Any]]) -> str:
         if "parsed" in finding and any(finding["parsed"].values()):
             parsed = finding["parsed"]
             title = parsed.get("vulnerability", "Finding")[:50]
-            location = parsed.get("where", "N/A")[:30]
+            location = parsed.get("where", "N/A")
         else:
             content = finding.get("content", "")[:50]
             title = content.split("[WHERE]")[0] if "[WHERE]" in content else content

@@ -185,7 +185,18 @@ def test_sqlite_finding_ledger_operations(tmp_path):
 
     record = store.get_finding_by_fingerprint("op", "fingerprint")
     assert record["finding_uid"] == "finding-1"
-    assert record["candidate_data"] == {"claim": "claim", "source_task_uids": ["source-task"]}
+    assert record["candidate_data"] == {
+        "claim": "claim",
+        "source_task_uids": ["source-task"],
+        "source_task_receipts": [
+            {
+                "task_uid": "source-task",
+                "finding_uid": "finding-1",
+                "status": "persisted",
+                "evidence_refs": ["finding:finding-1"],
+            }
+        ],
+    }
 
     store.store_finding_validation("op", "finding-1", {"outcome": "confirmed"})
     store.resolve_finding("op", "finding-1", "verified")
@@ -195,6 +206,22 @@ def test_sqlite_finding_ledger_operations(tmp_path):
     assert resolved["resolution"] == "verified"
     assert store.list_findings("op") == [resolved]
     assert store.list_findings("other-operation") == []
+
+
+def test_sqlite_finding_evidence_receipts_are_operation_and_task_scoped(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "receipt.db"), "target")
+    store.store_finding_evidence_receipt(
+        "op", "receipt-1", "task-1", "artifact:artifacts/result.txt", "decisive marker", "a" * 64
+    )
+
+    assert store.get_finding_evidence_receipts("op", ["receipt-1"]) == [{
+        "receipt_uid": "receipt-1",
+        "source_task_uid": "task-1",
+        "artifact_ref": "artifact:artifacts/result.txt",
+        "marker": "decisive marker",
+        "artifact_fingerprint": "a" * 64,
+    }]
+    assert store.get_finding_evidence_receipts("other-operation", ["receipt-1"]) == []
 
 
 def test_sqlite_objective_validation_ledger_operations(tmp_path):

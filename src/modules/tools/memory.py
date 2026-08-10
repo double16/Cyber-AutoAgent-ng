@@ -46,7 +46,10 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -1272,7 +1275,119 @@ class SQLiteApplicationStore:
             if not os.path.isfile(self.db_path):
                 raise FileNotFoundError(f"Application database does not exist: {self.db_path}")
         else:
+            self._initialize_writable_database()
+
+    @staticmethod
+    def _sqlite_integrity_check(db_path: str) -> str:
+        """Return SQLite's integrity result, raising when the database cannot be inspected."""
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+        return str(row[0] if row else "missing integrity result").strip()
+
+    @staticmethod
+    def _recovery_backup_path(db_path: str) -> Path:
+        source = Path(db_path)
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+        return source.with_name(f"{source.stem}.corrupt-{timestamp}{source.suffix}")
+
+    def _backup_database_for_recovery(self) -> Path:
+        """Preserve the database and sidecars before an automatic recovery attempt."""
+
+        source = Path(self.db_path)
+        backup = self._recovery_backup_path(self.db_path)
+        if source.exists():
+            shutil.copy2(source, backup)
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(f"{source}{suffix}")
+            if sidecar.exists():
+                shutil.copy2(sidecar, Path(f"{backup}{suffix}"))
+        return backup
+
+    def _recover_database(self) -> bool:
+        """Recover the current database through sqlite3 .recover and atomically validate the result."""
+
+        source = Path(self.db_path)
+        with tempfile.NamedTemporaryFile(
+            prefix=f"{source.stem}.recovered-", suffix=source.suffix, dir=source.parent, delete=False
+        ) as temporary:
+            recovered_path = Path(temporary.name)
+        try:
+            recovered_sql = subprocess.run(
+                ["sqlite3", str(source), ".recover"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if recovered_sql.returncode != 0 or not recovered_sql.stdout.strip():
+                return False
+            restored = subprocess.run(
+                ["sqlite3", str(recovered_path)],
+                input=recovered_sql.stdout,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if restored.returncode != 0:
+                return False
+            SQLiteMigrationRunner(str(recovered_path)).migrate()
+            with sqlite3.connect(recovered_path) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if self._sqlite_integrity_check(str(recovered_path)).lower() != "ok":
+                return False
+            for suffix in ("-wal", "-shm", "-journal"):
+                Path(f"{source}{suffix}").unlink(missing_ok=True)
+            os.replace(recovered_path, source)
+            return True
+        finally:
+            recovered_path.unlink(missing_ok=True)
+
+    def _replace_with_fresh_database(self) -> None:
+        """Create and atomically install a fresh migrated database after failed recovery."""
+
+        source = Path(self.db_path)
+        with tempfile.NamedTemporaryFile(
+            prefix=f"{source.stem}.fresh-", suffix=source.suffix, dir=source.parent, delete=False
+        ) as temporary:
+            fresh_path = Path(temporary.name)
+        try:
+            SQLiteMigrationRunner(str(fresh_path)).migrate()
+            with sqlite3.connect(fresh_path) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if self._sqlite_integrity_check(str(fresh_path)).lower() != "ok":
+                raise RuntimeError("fresh SQLite database failed integrity check")
+            for suffix in ("-wal", "-shm", "-journal"):
+                Path(f"{source}{suffix}").unlink(missing_ok=True)
+            os.replace(fresh_path, source)
+        finally:
+            fresh_path.unlink(missing_ok=True)
+
+    def _initialize_writable_database(self) -> None:
+        """Migrate, validate, and recover the writable store before an operation can use it."""
+
+        database_exists = Path(self.db_path).exists()
+        try:
             SQLiteMigrationRunner(self.db_path).migrate()
+            integrity = self._sqlite_integrity_check(self.db_path)
+            if integrity.lower() == "ok":
+                return
+            raise sqlite3.DatabaseError(f"integrity_check={integrity}")
+        except (OSError, sqlite3.DatabaseError) as error:
+            if not database_exists:
+                raise
+            backup = self._backup_database_for_recovery()
+            recovered = self._recover_database()
+            if not recovered:
+                self._replace_with_fresh_database()
+            logger.warning(
+                "SQLite initialization recovery database=%s backup=%s recovered=%s error=%s",
+                Path(self.db_path).name,
+                backup.name,
+                recovered,
+                type(error).__name__,
+            )
+            if self._sqlite_integrity_check(self.db_path).lower() != "ok":
+                raise RuntimeError("SQLite initialization recovery did not produce an integral database")
 
     def _connect(self) -> sqlite3.Connection:
         """Open the application database, enforcing configured access."""
@@ -2571,7 +2686,71 @@ def _active_finding_source_task_uid(store: Any, operation_id: str) -> str:
         for task in store.get_tasks(operation_id)
         if task.status == "active" and task.kind not in {"finding_validation", "objective_validation"}
     ]
-    return active[0].task_uid if len(active) == 1 else ""
+    return active[0] if len(active) == 1 else None
+
+
+def _explicit_service_targets_for_task(plan: OperationPlan, task: Optional[Task]) -> List[OperationTarget]:
+    """Return explicit URL service targets bound to the finding's source task."""
+
+    selected_ids = set(task.target_ids) if task is not None and task.target_scope == "subset" else set()
+    selected = [
+        target for target in plan.targets if not selected_ids or target.target_id in selected_ids
+    ]
+    services = []
+    for target in selected:
+        parsed = urlsplit(str(target.value or "").strip())
+        try:
+            has_explicit_service = bool(parsed.scheme and parsed.hostname and parsed.port is not None)
+        except ValueError:
+            has_explicit_service = False
+        if has_explicit_service:
+            services.append(target)
+    return services
+
+
+def _canonicalize_finding_target(
+    target_value: str,
+    plan: Optional[OperationPlan],
+    source_task: Optional[Task],
+) -> Tuple[str, List[str]]:
+    """Bind a finding URL to a uniquely selected explicit service while retaining its route and query."""
+
+    if not isinstance(plan, OperationPlan):
+        return target_value, []
+    services = _explicit_service_targets_for_task(plan, source_task)
+    if not services:
+        return target_value, []
+    submitted = urlsplit(target_value)
+    try:
+        submitted_is_url = bool(submitted.scheme and submitted.hostname and submitted.port is not None)
+    except ValueError:
+        submitted_is_url = False
+    allowed = ", ".join(f"{target.target_id}={target.value}" for target in services)
+    if not submitted_is_url:
+        raise ValueError(f"finding target must be an absolute URL for the assigned service: {allowed}")
+    if len(services) == 1:
+        service = services[0]
+        registered = urlsplit(service.value)
+        canonical = urlunsplit(
+            (registered.scheme.lower(), registered.netloc.lower(), submitted.path or "/", submitted.query, "")
+        )
+        return canonical, [service.target_id]
+    matches = []
+    for service in services:
+        registered = urlsplit(service.value)
+        if (
+            submitted.scheme.lower() == registered.scheme.lower()
+            and submitted.hostname.lower() == registered.hostname.lower()
+            and submitted.port == registered.port
+        ):
+            matches.append(service)
+    if len(matches) != 1:
+        raise ValueError(f"finding target must match exactly one assigned service: {allowed}")
+    registered = urlsplit(matches[0].value)
+    canonical = urlunsplit(
+        (registered.scheme.lower(), registered.netloc.lower(), submitted.path or "/", submitted.query, "")
+    )
+    return canonical, [matches[0].target_id]
 
 
 def _finding_tool_result(finding_uid: str, verification_task_uid: str, status: str) -> str:
@@ -3733,6 +3912,167 @@ def _validate_proposal_service_scope(proposal: TaskProposal, selected_targets: L
         )
 
 
+_EXPLICIT_SERVICE_URL_REFERENCE_PATTERN = re.compile(
+    r"(?<![\w+.-])[a-z][a-z0-9+.-]*://[^\s\"'<>`]+",
+    re.IGNORECASE,
+)
+
+
+_SCOPE_HOSTNAME_PATTERN = re.compile(
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?"
+)
+_SCOPE_TIMESTAMP_REFERENCE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$")
+_SCOPE_RUNTIME_TAG_PATTERN = re.compile(
+    r"(?:alpine|debian|golang|java|node|php|python|ruby):\d+(?:\.\d+){0,3}(?:[-._][A-Za-z0-9._-]+)?$",
+    re.IGNORECASE,
+)
+_FINDING_VALIDATION_GUARDS_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "system" / "finding_validation_guards.yaml"
+)
+
+
+def _is_valid_bare_scope_host_port(reference: str) -> bool:
+    """Return whether a scheme-less reference contains an intentional host:port literal."""
+
+    parsed = urlsplit(f"//{reference}")
+    host = (parsed.hostname or "").rstrip(".")
+    if not host:
+        return False
+    if reference.startswith("["):
+        try:
+            return isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+        except ValueError:
+            return False
+    return bool(_SCOPE_HOSTNAME_PATTERN.fullmatch(host))
+
+
+def _is_non_network_bare_scope_reference(reference: str) -> bool:
+    """Return whether a host:port-shaped token is clearly a timestamp or runtime image tag."""
+
+    return bool(
+        _SCOPE_TIMESTAMP_REFERENCE_PATTERN.fullmatch(reference)
+        or _SCOPE_RUNTIME_TAG_PATTERN.fullmatch(reference)
+    )
+
+
+def _selected_task_targets(plan: OperationPlan, task: Task) -> List[OperationTarget]:
+    """Return only the executable targets assigned to a task."""
+
+    if task.target_scope == "subset":
+        selected_ids = set(task.target_ids)
+        return [target for target in plan.targets if target.target_id in selected_ids]
+    return list(plan.targets)
+
+
+def _explicit_service_references(text: str) -> List[str]:
+    """Extract URL or host:port literals without interpreting artifact paths as targets."""
+
+    references = []
+    seen = set()
+    url_matches = list(_EXPLICIT_SERVICE_URL_REFERENCE_PATTERN.finditer(text or ""))
+    for match in url_matches:
+        reference = match.group(0).rstrip(".,;:)]}")
+        if reference and reference not in seen:
+            references.append(reference)
+            seen.add(reference)
+    for match in _RE_HOST_PORT_TARGET.finditer(text or ""):
+        if any(start <= match.start() and match.end() <= end for start, end in (item.span() for item in url_matches)):
+            continue
+        reference = match.group(0).rstrip(".,;:)]}")
+        if (
+            reference
+            and not _is_non_network_bare_scope_reference(reference)
+            and _is_valid_bare_scope_host_port(reference)
+            and reference not in seen
+        ):
+            references.append(reference)
+            seen.add(reference)
+    return references
+
+
+def task_service_scope_validation_details(plan: OperationPlan, task: Task, text: str) -> List[Dict[str, Any]]:
+    """Return structured service-boundary violations for task text.
+
+    A task assigned to an explicit service may mention a route or query, but every explicit URL or host:port
+    literal must retain an assigned host and port. URL literals must retain the registered scheme as well.
+    Bare host:port literals are accepted for an explicitly registered URL because they do not assert a different
+    scheme. Filesystem and artifact prose is deliberately ignored.
+    """
+
+    service_targets = []
+    for target in _selected_task_targets(plan, task):
+        host = _explicit_target_host(target)
+        port = _explicit_target_port(target)
+        if host and port is not None:
+            value = str(target.value).strip()
+            parsed = urlsplit(value if "://" in value else f"//{value}")
+            service_targets.append(
+                {
+                    "target_id": target.target_id,
+                    "value": str(target.value),
+                    "scheme": parsed.scheme.lower() or None,
+                    "host": host.lower().rstrip("."),
+                    "port": port,
+                }
+            )
+    if not service_targets:
+        return []
+
+    violations = []
+    for reference in _explicit_service_references(text):
+        parsed = urlsplit(reference if "://" in reference else f"//{reference}")
+        try:
+            port = parsed.port
+        except ValueError:
+            violations.append({
+                "literal": reference,
+                "scheme": parsed.scheme.lower() or None,
+                "host": (parsed.hostname or "").lower().rstrip("."),
+                "port": None,
+                "reason": "invalid_port",
+                "allowed_targets": service_targets,
+            })
+            continue
+        host = (parsed.hostname or "").lower().rstrip(".")
+        scheme = parsed.scheme.lower() or None
+        matches = [
+            target
+            for target in service_targets
+            if target["host"] == host
+            and target["port"] == port
+            and (scheme is None or target["scheme"] is None or target["scheme"] == scheme)
+        ]
+        if not matches:
+            violations.append({
+                "literal": reference,
+                "scheme": scheme,
+                "host": host,
+                "port": port,
+                "reason": "boundary_mismatch",
+                "allowed_targets": service_targets,
+            })
+    return violations
+
+
+def task_service_scope_violations(plan: OperationPlan, task: Task, text: str) -> List[str]:
+    """Return human-readable exact service-boundary violations for task text."""
+
+    messages = []
+    for violation in task_service_scope_validation_details(plan, task, text):
+        allowed = ", ".join(
+            f"{target['target_id']}={target['value']}" for target in violation["allowed_targets"]
+        )
+        if violation["reason"] == "invalid_port":
+            messages.append(f"invalid service reference `{violation['literal']}`; allowed targets: {allowed}")
+        else:
+            messages.append(
+                f"service reference `{violation['literal']}` differs from assigned scheme/host/port boundary; "
+                f"allowed targets: {allowed}"
+            )
+    return messages
+
+
 def resolve_bound_executable_target(requested_target: str) -> str:
     """Resolve a tool target from the active task's registered target boundary."""
 
@@ -4274,6 +4614,29 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
     for item, normalized_value in normalized_values:
         item["value"] = normalized_value
         normalized_inventory = True
+    endpoint_keys = set()
+    deduplicated_items = []
+    duplicate_endpoint_count = 0
+    for item in manifest["items"]:
+        if str(item.get("kind")) != "endpoint":
+            deduplicated_items.append(item)
+            continue
+        route = _normalized_route(str(item.get("value") or ""))
+        key = (str(item.get("target_id") or ""), route[0] if route else "")
+        if route and key in endpoint_keys:
+            duplicate_endpoint_count += 1
+            normalized_inventory = True
+            continue
+        if route:
+            endpoint_keys.add(key)
+        deduplicated_items.append(item)
+    if duplicate_endpoint_count:
+        manifest["items"] = deduplicated_items
+        logger.info(
+            "Removed duplicate inventory endpoints reference=%s duplicate_count=%d",
+            canonical_artifact_reference(reference),
+            duplicate_endpoint_count,
+        )
     if reconcile:
         manifest = _reconcile_inventory_manifest(path, manifest)
     elif normalized_inventory:
@@ -4297,7 +4660,10 @@ def _collapse_duplicate_vulnerability_path(path: str) -> str:
 def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> str:
     """Canonicalize one HTTP inventory route and enforce its registered service boundary."""
 
-    parsed = urlsplit(str(value or "").strip())
+    raw_value = str(value or "").strip().replace(r'\"', '"')
+    if raw_value.startswith('"') and raw_value.endswith('"') and len(raw_value) >= 2:
+        raw_value = raw_value[1:-1].strip()
+    parsed = urlsplit(raw_value)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"inventory endpoint must be an absolute HTTP(S) URL: {value}")
     if registered_target:
@@ -4307,7 +4673,18 @@ def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> st
                 raise ValueError(
                     "inventory endpoint does not preserve the registered target scheme/host/port boundary"
                 )
-    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    cleaned_segments = []
+    for segment in (parsed.path or "/").split("/"):
+        cleaned = segment.strip('"')
+        if not cleaned or cleaned == ".":
+            continue
+        cleaned_segments.append(cleaned)
+    path = "/" + "/".join(cleaned_segments)
+    if parsed.path.endswith("/") and path != "/":
+        path += "/"
+    if any(character in path or character in parsed.query for character in ('"', "\\")):
+        raise ValueError("inventory endpoint contains unsupported raw quote or backslash route syntax")
+    path = re.sub(r"/{2,}", "/", path)
     path = _collapse_duplicate_vulnerability_path(path)
     query = parsed.query.rstrip("&")
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, query, ""))

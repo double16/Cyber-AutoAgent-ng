@@ -1,3 +1,4 @@
+import hashlib
 import json
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ from modules.handlers.report_generator import (
     _format_execution_history,
     _format_executive_deterministic_sections,
     _format_finding_with_narrative,
+    _format_summary_table,
     _format_operation_plan,
     _format_operation_tasks,
     _format_observation,
@@ -263,6 +265,19 @@ def test_narrative_consistency_ignores_workflow_terms_after_finding_keywords():
         "Vulnerability Discovery was incomplete, followed by Finding Validation.",
         canonical,
     )
+
+    assert not any("unknown finding" in warning for warning in warnings)
+
+
+def test_narrative_consistency_ignores_finding_hypotheses_without_candidates():
+    canonical = {
+        "findings": [],
+        "artifact_references": [],
+        "phase_coverage": [],
+        "completion_status": {"assessment_complete": False},
+    }
+
+    warnings = _validate_narrative_consistency("Finding hypotheses remain unconfirmed.", canonical)
 
     assert not any("unknown finding" in warning for warning in warnings)
 
@@ -1085,6 +1100,54 @@ def test_operation_log_parser_filters_bookkeeping_and_extracts_shell_commands(tm
     assert parsed["reportable_tools_used"] == ["shell", "http_request", "curl", "nmap"]
 
 
+def test_operation_log_parser_silently_rejects_malformed_shell_executable_tokens(tmp_path):
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-02 11:00:00",
+                event(
+                    {
+                        "type": "tool_start",
+                        "tool_name": "shell",
+                        "tool_input": {
+                            "command": "FOO=1 timeout 30 sqlmap -u target; curl -s target; id\"; search?x=1"
+                        },
+                    }
+                ),
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["reportable_tools_used"] == ["shell", "sqlmap", "curl"]
+
+
+def test_operation_log_parser_uses_execution_termination_timestamp_for_duration(tmp_path):
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-02T11:00:00",
+                event({"type": "metrics_update", "metrics": {"duration": "9m"}}),
+                event({"type": "operation_terminated", "timestamp": "2026-01-02T11:30:00"}),
+                event({"type": "operation_finalized", "timestamp": "2026-01-02T11:45:30"}),
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["metrics"]["duration"] == "30m 0s"
+
+
 def test_latest_operation_log_parser_uses_assessment_model_usage_snapshot(tmp_path):
     usage = [
         {
@@ -1475,7 +1538,17 @@ def test_report_category_helpers_cover_structured_and_free_form_artifacts():
         {"validation_status": "verified", "artifacts": ["/tmp/proof.txt"]},
         "Negative control saved at /tmp/control.txt",
         {},
-    ) == "finding"
+    ) == "validation_failure"
+
+
+def test_summary_table_preserves_full_finding_location():
+    location = "http://host.docker.internal:4280/dvwa/vulnerabilities/xss_rce/?name=proof"
+
+    table = _format_summary_table(
+        [{"severity": "HIGH", "parsed": {"vulnerability": "Reflected XSS", "where": location}}]
+    )
+
+    assert "http://host.docker.internal:4280/dvwa/vulnerabilities/xss\\_rce/?name=proof" in table
     assert _normalize_report_category(
         "finding",
         {"status": "verified", "proof_pack": "legacy"},
@@ -1776,6 +1849,19 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     # Create the proof file
     (tmp_path / "proof.txt").write_text("proof")
     (tmp_path / "negative-control.txt").write_text("control")
+    proof_ref = str(tmp_path / "proof.txt")
+    proof_assertion = {"artifact": proof_ref, "marker": "proof"}
+    mock_client.list_memories.return_value[0]["metadata"].update(
+        {
+            "artifacts": [proof_ref],
+            "candidate_evidence_assertions": [proof_assertion],
+            "evidence_assertions": [proof_assertion],
+            "evidence_artifact_fingerprints": {
+                proof_ref: hashlib.sha256((tmp_path / "proof.txt").read_bytes()).hexdigest()
+            },
+        }
+    )
+    monkeypatch.setattr(report_generator_module, "_artifact_path_from_ref", lambda _reference: proof_ref)
 
     # Run build_report_sections
     sections = build_report_sections(op_id, "example.com", "Test Objective")

@@ -48,6 +48,91 @@ def test_shared_semantic_enum_normalization_keeps_unknown_values_invalid(adapter
         TypeAdapter(adapter_type).validate_python("invented-state")
 
 
+def test_task_service_scope_violations_enforces_assigned_scheme_host_and_port_only():
+    plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[
+            mod.OperationTarget(
+                target_id="target-1", type="network", value="custom-scheme://service.example:4280"
+            ),
+            mod.OperationTarget(target_id="target-2", type="network", value="other.example:8443"),
+        ],
+    )
+    task = mod.Task(
+        task_uid="task-1",
+        title="Assess service",
+        objective="Collect bounded evidence",
+        acceptance=make_acceptance("service-boundary"),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+
+    assert mod.task_service_scope_violations(
+        plan,
+        task,
+        "Request custom-scheme://service.example:4280/api?mode=read and retain artifact:/tmp/evidence.json.",
+    ) == []
+    assert mod.task_service_scope_violations(plan, task, "Check service.example:4280/status.") == []
+
+    violations = mod.task_service_scope_violations(
+        plan,
+        task,
+        "Do not use https://service.example:4280 or custom-scheme://service.example:4200.",
+    )
+
+    assert len(violations) == 2
+    assert "https://service.example:4280" in violations[0]
+    assert "custom-scheme://service.example:4200" in violations[1]
+    assert "target-1=custom-scheme://service.example:4280" in violations[0]
+
+    invalid_port = mod.task_service_scope_violations(plan, task, "Check service.example:99999.")
+
+    assert len(invalid_port) == 1
+    assert "invalid service reference" in invalid_port[0]
+
+    host_only_plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", type="network", value="service.example")],
+    )
+    assert mod.task_service_scope_violations(
+        host_only_plan, task, "Check https://unrelated.example:443."
+    ) == []
+
+
+def test_task_scope_ignores_non_network_tokens_but_detects_numeric_hostname_references():
+    plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", type="network", value="10.0.0.5:4280")],
+    )
+    task = mod.Task(
+        task_uid="task-1",
+        title="Assess service",
+        objective="Collect bounded evidence",
+        acceptance=make_acceptance("service-boundary"),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+
+    assert mod.task_service_scope_violations(plan, task, "Started at 2026-08-08T20:15.") == []
+    assert len(mod.task_service_scope_violations(plan, task, "Do not probe 12invalid.example:4280.")) == 1
+    assert mod.task_service_scope_violations(plan, task, "Use python:3.12 for the local helper.") == []
+    assert mod.task_service_scope_violations(plan, task, "Probe 10.0.0.5:4280.") == []
+    assert len(mod.task_service_scope_violations(plan, task, "Probe 10.0.0.6:4280.")) == 1
+
+
 class FakeApplicationStore:
     def __init__(self):
         self.plan = None
@@ -288,6 +373,36 @@ def test_database_store_is_shared_when_operation_context_changes(tmp_path, monke
 
     assert second is first
     assert second.db_path == str(tmp_path / "cyber_autoagent.db")
+
+
+def test_sqlite_store_initialization_recovers_corrupt_database_before_operation(tmp_path, monkeypatch):
+    database = tmp_path / "cyber_autoagent.db"
+    database.write_bytes(b"not a sqlite database")
+    recovered = []
+
+    def recover(store):
+        recovered.append(store.db_path)
+        store._replace_with_fresh_database()
+        return True
+
+    monkeypatch.setattr(mod.SQLiteApplicationStore, "_recover_database", recover)
+
+    store = mod.SQLiteApplicationStore(str(database), logical_target="target")
+
+    assert recovered == [str(database)]
+    assert store._sqlite_integrity_check(str(database)).lower() == "ok"
+    assert len(list(tmp_path.glob("cyber_autoagent.corrupt-*.db"))) == 1
+
+
+def test_sqlite_store_initialization_replaces_database_when_recovery_fails(tmp_path, monkeypatch):
+    database = tmp_path / "cyber_autoagent.db"
+    database.write_bytes(b"not a sqlite database")
+    monkeypatch.setattr(mod.SQLiteApplicationStore, "_recover_database", lambda _store: False)
+
+    store = mod.SQLiteApplicationStore(str(database), logical_target="target")
+
+    assert store._sqlite_integrity_check(str(database)).lower() == "ok"
+    assert len(list(tmp_path.glob("cyber_autoagent.corrupt-*.db"))) == 1
 
 
 def test_read_only_plan_store_does_not_create_missing_database(tmp_path, monkeypatch):
@@ -1999,6 +2114,44 @@ def test_inventory_url_normalization_preserves_boundary_and_repairs_common_route
     )
 
     assert value == "http://host.docker.internal:4280/vulnerabilities/sqli/?id=1"
+
+
+def test_inventory_url_normalization_removes_serialized_quote_artifacts():
+    assert mod._canonical_inventory_url(
+        r'\"http://host.docker.internal:4280/\"instructions.php\"\"',
+        "http://host.docker.internal:4280",
+    ) == "http://host.docker.internal:4280/instructions.php"
+    assert mod._canonical_inventory_url(
+        r'http://host.docker.internal:4280/\".\"',
+        "http://host.docker.internal:4280",
+    ) == "http://host.docker.internal:4280/"
+
+
+def test_inventory_manifest_deduplicates_normalized_endpoints(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    payload["items"].append({
+        "id": "endpoint-duplicate",
+        "target_id": "target-1",
+        "kind": "endpoint",
+        "value": r'http://target.test/\"login\"',
+        "attributes": {},
+    })
+    manifest.write_text(json.dumps(payload))
+
+    loaded, _digest = mod._load_inventory_manifest(f"artifact:{manifest}")
+
+    assert [item["id"] for item in loaded["items"] if item["kind"] == "endpoint"] == ["endpoint-1"]
+    persisted = json.loads(manifest.read_text())
+    assert len(persisted["items"]) == 1
 
 
 @pytest.mark.parametrize(

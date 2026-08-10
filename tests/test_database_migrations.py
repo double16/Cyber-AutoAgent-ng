@@ -26,8 +26,12 @@ def test_packaged_migrations_create_schema_once(tmp_path):
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-    assert applied == [(1, "0001_initial_schema.sql"), (2, "0002_operation_model_metrics.sql")]
-    assert {"operations", "plans", "tasks", "operation_model_metrics"}.issubset(tables)
+    assert applied == [
+        (1, "0001_initial_schema.sql"),
+        (2, "0002_operation_model_metrics.sql"),
+        (3, "0003_finding_evidence_receipts.sql"),
+    ]
+    assert {"operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts"}.issubset(tables)
 
 
 def test_concurrent_startup_applies_each_migration_once(tmp_path):
@@ -38,7 +42,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 3
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):

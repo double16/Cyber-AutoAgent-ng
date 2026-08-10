@@ -5945,6 +5945,319 @@ def test_task_target_scope_text_preserves_explicit_url_service_boundaries():
     assert "broad host or port enumeration violates scope" in scope_text
 
 
+def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():
+    plan = OperationPlan(
+        objective="assess custom-scheme://service.example:4280",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="custom-scheme://service.example:4280")],
+    )
+    task = Task(
+        task_uid="active",
+        title="Map service",
+        objective="Map the assigned service",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    responses = iter(
+        [
+            '{"prompt":"Probe custom-scheme://service.example:4200/health","memory_ids":[],"tools":[],"shell_commands":[]}',
+            '{"prompt":"Probe custom-scheme://service.example:4280/health","memory_ids":[],"tools":[],"shell_commands":[]}',
+            '{"approved":true,"feedback":[]}',
+        ]
+    )
+    calls = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        calls.append(role)
+        return next(responses)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+        text_runner=text_runner,
+    )
+
+    prompt_spec = controller._build_task_prompt(plan, plan.phases[0], task)
+
+    assert prompt_spec["prompt"] == "Probe custom-scheme://service.example:4280/health"
+    assert calls == ["task_prompt_builder", "task_prompt_builder", "task_prompt_critic"]
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "task_scope_validation")
+    assert event["stage"] == "prompt_draft"
+    assert event["decision"] == "revision_requested"
+
+
+def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
+    plan = OperationPlan(
+        objective="assess custom-scheme://service.example:4280",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="custom-scheme://service.example:4280")],
+    )
+    task = Task(
+        task_uid="active",
+        title="Map service",
+        objective="Probe custom-scheme://service.example:4200/health",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    calls = []
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+        text_runner=lambda *args: calls.append(args) or "{}",
+    )
+
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="Task content exceeds") as error:
+        controller._build_task_prompt(plan, plan.phases[0], task)
+
+    assert error.value.repairable is False
+    assert calls == []
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "task_scope_validation")
+    assert event["stage"] == "immutable_task"
+    assert event["decision"] == "blocked"
+
+
+def test_task_executor_blocks_an_out_of_scope_prompt_that_bypasses_prompt_building(monkeypatch):
+    plan = OperationPlan(
+        objective="assess custom-scheme://service.example:4280",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="custom-scheme://service.example:4280")],
+    )
+    task = Task(
+        task_uid="active",
+        title="Map service",
+        objective="Map the assigned service",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    state = FakeState(plan, tasks=[task])
+    worker_prompts = []
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: "{}",
+        work_runner=lambda *args: worker_prompts.append(args),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_build_task_prompt",
+        lambda *_args: {"prompt": "Probe custom-scheme://service.example:4200", "tools": []},
+    )
+
+    controller._run_task(plan, plan.phases[0], task)
+
+    assert worker_prompts == []
+    assert state.tasks[0].status == "partial_failure"
+    assert "exceeded the assigned service boundary" in state.tasks[0].status_reason
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "task_scope_validation")
+    assert event["stage"] == "pre_executor"
+    assert event["decision"] == "blocked"
+    assert event["violations"][0]["literal"] == "custom-scheme://service.example:4200"
+
+
+def test_task_scope_validation_adds_safe_event_to_active_task_trace(monkeypatch):
+    plan = OperationPlan(
+        objective="assess custom-scheme://service.example:4280",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="custom-scheme://service.example:4280")],
+    )
+    task = Task(
+        task_uid="active",
+        title="Map service",
+        objective="Map the assigned service",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    span = Mock()
+    tracer = Mock()
+
+    @contextmanager
+    def span_context(*_args, **_kwargs):
+        yield span
+
+    tracer.start_as_current_span.side_effect = span_context
+    monkeypatch.setattr(workflow_mod.otel_trace, "get_tracer", lambda _name: tracer)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+        text_runner=lambda *args: "{}",
+    )
+
+    controller._emit_task_scope_validation(
+        plan,
+        task,
+        "Probe custom-scheme://service.example:4200/health",
+        "prompt_draft",
+        "revision_requested",
+    )
+
+    tracer.start_as_current_span.assert_called_once()
+    name = tracer.start_as_current_span.call_args.args[0]
+    attributes = tracer.start_as_current_span.call_args.kwargs["attributes"]
+    assert name == "task_scope_validation"
+    assert attributes["workflow.scope_validation.stage"] == "prompt_draft"
+    assert attributes["workflow.scope_validation.result"] == "blocked"
+    assert attributes["workflow.scope_validation.violation_count"] == 1
+    assert "Probe custom" not in attributes["workflow.scope_validation.violations"]
+
+
+def test_missing_finding_acceptance_recovers_with_required_persistence_then_acceptance():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1, "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 1})
+    task = Task(task_uid="active", title="Reflected XSS", objective="Verify reflected XSS", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+    acceptance_payload = {
+        "status": "satisfied",
+        "disposition": "finding_candidate",
+        "summary": "The script payload was reflected without encoding.",
+        "evidence_refs": ["artifact:artifacts/xss.html"],
+    }
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"verify xss","tools":[]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"acceptance recorded"}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append((prompt, run_policy.required_tool_names))
+        if len(calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="candidate acceptance rejected",
+                outcomes=[ToolOutcome(
+                    sequence=1,
+                    tool_use_id="acceptance-rejected",
+                    tool_name="record_task_acceptance",
+                    success=False,
+                    correctable=False,
+                    input_summary=json.dumps(acceptance_payload),
+                    output_summary="Acceptance disposition finding_candidate requires a finding created by this task.",
+                )],
+            )
+        if len(calls) == 2:
+            assert run_policy.required_tool_names == {"prepare_finding_evidence", "store_finding"}
+            assert "Do not repeat discovery" in prompt
+            return workflow_mod.TaskExecutorCycleResult(
+                text="finding stored",
+                outcomes=[ToolOutcome(
+                    sequence=2,
+                    tool_use_id="finding-store",
+                    tool_name="store_finding",
+                    success=True,
+                    correctable=False,
+                    input_summary="artifact-backed finding",
+                    output_summary='{"finding_ref":"finding:finding-1"}',
+                )],
+            )
+        assert run_policy.required_tool_names == {"record_task_acceptance"}
+        assert "finding:finding-1" in prompt
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="finding_candidate",
+            summary=acceptance_payload["summary"],
+            evidence_refs=("finding:finding-1",),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(
+            text="acceptance stored",
+            outcomes=[ToolOutcome(
+                sequence=3,
+                tool_use_id="acceptance-stored",
+                tool_name="record_task_acceptance",
+                success=True,
+                correctable=False,
+                input_summary=json.dumps(acceptance_payload),
+                output_summary="acceptance stored",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert [required for _prompt, required in calls] == [
+        {"record_task_acceptance"},
+        {"prepare_finding_evidence", "store_finding"},
+        {"record_task_acceptance"},
+    ]
+    assert state.tasks[0].status == "done"
+
+
+def test_missing_finding_acceptance_ends_when_required_persistence_fails():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1, "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 1})
+    task = Task(task_uid="active", title="Reflected XSS", objective="Verify reflected XSS", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append(run_policy.required_tool_names)
+        if len(calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="candidate acceptance rejected",
+                outcomes=[ToolOutcome(
+                    sequence=1,
+                    tool_use_id="acceptance-rejected",
+                    tool_name="record_task_acceptance",
+                    success=False,
+                    correctable=False,
+                    input_summary=json.dumps({"disposition": "finding_candidate"}),
+                    output_summary="Acceptance disposition finding_candidate requires a finding created by this task.",
+                )],
+            )
+        return workflow_mod.TaskExecutorCycleResult(
+            text="finding rejected",
+            outcomes=[ToolOutcome(
+                sequence=2,
+                tool_use_id="finding-rejected",
+                tool_name="store_finding",
+                success=False,
+                correctable=False,
+                input_summary="invalid finding",
+                output_summary="At least one existing artifact is required",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, *_args: '{"prompt":"verify xss","tools":[]}' if role == "task_prompt_builder" else "{}",
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert calls == [{"record_task_acceptance"}, {"prepare_finding_evidence", "store_finding"}]
+    assert state.tasks[0].status == "partial_failure"
+    assert "store_finding prerequisite" in state.tasks[0].status_reason
+
+
 def test_task_prompts_reject_host_wide_scans_for_explicit_url_service_targets():
     plan = OperationPlan(
         objective="assess custom-scheme://service.example:4280",
