@@ -91,6 +91,16 @@ def _bounded_text(value: Any, limit: int = 500) -> str:
     return text[: limit - 3] + "..."
 
 
+def _value_fingerprint(value: Any) -> str:
+    """Return a stable hash without retaining the full value in the outcome journal."""
+
+    try:
+        canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        canonical = str(value)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _redacted_input(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -227,6 +237,8 @@ class ToolOutcome:
     input_summary: str
     output_summary: str
     recovery_role: str = "normal"
+    input_fingerprint: str = ""
+    output_fingerprint: str = ""
 
 
 class ToolOutcomeJournal:
@@ -252,7 +264,7 @@ class ToolOutcomeJournal:
     ) -> ToolOutcome:
         self._sequence += 1
         redacted_input = _redacted_input(tool_input)
-        if tool_name == "create_tasks":
+        if tool_name in {"create_tasks", "record_task_acceptance"}:
             try:
                 input_summary = json.dumps(redacted_input, ensure_ascii=False, sort_keys=True)
             except (TypeError, ValueError):
@@ -268,6 +280,8 @@ class ToolOutcomeJournal:
             input_summary=_bounded_text(input_summary, 6000 if tool_name == "create_tasks" else 500),
             output_summary=_bounded_text(output),
             recovery_role=recovery_role,
+            input_fingerprint=_value_fingerprint(redacted_input),
+            output_fingerprint=_value_fingerprint(output),
         )
         self._entries.append(outcome)
         return outcome
@@ -507,8 +521,9 @@ class TaskFailureRecoveryHook(HookProvider):
     def recovery_guidance(self, tool_catalog_context: str = "") -> str:
         if self.failure_category == "artifact_unavailable":
             guidance = (
-                "An artifact could not be read. Make at most one changed read_artifact call using a canonical "
-                "artifact: reference. If it still fails, do not read that artifact again; use an existing durable "
+                "An artifact could not be read. Make at most one changed read_artifact call using its canonical "
+                "artifact: reference or a relative path (artifacts/ is searched first, then the operation root). "
+                "If it still fails, do not read that artifact again; use an existing durable "
                 "reference or capture bounded alternate evidence before recording acceptance. "
                 f"Failed artifact read: {self.failed_output}"
             )

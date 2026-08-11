@@ -60,6 +60,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Protocol, Tupl
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import litellm
+import yaml
 from langchain_aws import BedrockEmbeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_ollama import OllamaEmbeddings
@@ -1257,6 +1258,20 @@ class ApplicationStore(Protocol):
 
     def list_operation_model_metrics(self, operation_id: str) -> List[Dict[str, Any]]: ...
 
+    def store_finding_evidence_receipt(
+        self,
+        operation_id: str,
+        receipt_uid: str,
+        source_task_uid: str,
+        artifact_ref: str,
+        marker: str,
+        artifact_fingerprint: str,
+    ) -> None: ...
+
+    def get_finding_evidence_receipts(
+        self, operation_id: str, receipt_uids: List[str]
+    ) -> List[Dict[str, str]]: ...
+
 
 class SQLiteApplicationStore:
     """SQLite persistence for application workflow state.
@@ -1903,6 +1918,64 @@ class SQLiteApplicationStore:
                     ),
                 )
 
+    def store_finding_evidence_receipt(
+        self,
+        operation_id: str,
+        receipt_uid: str,
+        source_task_uid: str,
+        artifact_ref: str,
+        marker: str,
+        artifact_fingerprint: str,
+    ) -> None:
+        """Persist one task-bound, artifact-backed finding-evidence receipt."""
+
+        with self._lock:
+            with self._connect() as conn:
+                self._register_operation(conn, operation_id)
+                conn.execute(
+                    "INSERT INTO finding_evidence_receipts "
+                    "(logical_target, operation_id, receipt_uid, source_task_uid, artifact_ref, marker, "
+                    "artifact_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self.logical_target,
+                        operation_id,
+                        receipt_uid,
+                        source_task_uid,
+                        artifact_ref,
+                        marker,
+                        artifact_fingerprint,
+                        datetime.now().isoformat(),
+                    ),
+                )
+
+    def get_finding_evidence_receipts(
+        self, operation_id: str, receipt_uids: List[str]
+    ) -> List[Dict[str, str]]:
+        """Load receipts scoped to this target and operation in caller-supplied order."""
+
+        if not receipt_uids:
+            return []
+        placeholders = ", ".join("?" for _ in receipt_uids)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT receipt_uid, source_task_uid, artifact_ref, marker, artifact_fingerprint "
+                    "FROM finding_evidence_receipts WHERE logical_target = ? AND operation_id = ? "
+                    f"AND receipt_uid IN ({placeholders})",
+                    (self.logical_target, operation_id, *receipt_uids),
+                ).fetchall()
+        by_uid = {
+            str(row[0]): {
+                "receipt_uid": str(row[0]),
+                "source_task_uid": str(row[1]),
+                "artifact_ref": str(row[2]),
+                "marker": str(row[3]),
+                "artifact_fingerprint": str(row[4]),
+            }
+            for row in rows
+        }
+        return [by_uid[receipt_uid] for receipt_uid in receipt_uids if receipt_uid in by_uid]
+
     def link_finding_source_task(self, operation_id: str, finding_uid: str, task_uid: str) -> None:
         """Durably associate an idempotent finding candidate with a source task."""
 
@@ -1920,6 +1993,26 @@ class SQLiteApplicationStore:
                 if task_uid not in source_task_uids:
                     source_task_uids.append(task_uid)
                     candidate_data["source_task_uids"] = source_task_uids
+                    receipts = candidate_data.setdefault("source_task_receipts", [])
+                    if not any(
+                        isinstance(receipt, dict) and receipt.get("task_uid") == task_uid
+                        for receipt in receipts
+                    ):
+                        receipts.append(
+                            {
+                                "task_uid": task_uid,
+                                "finding_uid": finding_uid,
+                                "status": "persisted",
+                                "evidence_refs": list(
+                                    dict.fromkeys(
+                                        [
+                                            *candidate_data.get("artifacts", []),
+                                            f"finding:{finding_uid}",
+                                        ]
+                                    )
+                                ),
+                            }
+                        )
                     conn.execute(
                         "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
                         "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
@@ -2635,6 +2728,83 @@ def _validated_artifact_paths(artifacts: Any, *, require_one: bool = False) -> L
     return validated
 
 
+def _artifact_fingerprints(references: List[str]) -> Dict[str, str]:
+    """Snapshot evidence identity without assuming an HTTP or tool output format."""
+
+    fingerprints: Dict[str, str] = {}
+    for reference in references:
+        path = Path(_artifact_path_from_ref(reference))
+        try:
+            fingerprints[reference] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise ValueError(f"Unable to fingerprint finding artifact: {reference}") from error
+    return fingerprints
+
+
+def _validated_evidence_assertions(
+    assertions: Any,
+    allowed_artifacts: List[str],
+    *,
+    require_one: bool = False,
+) -> List[Dict[str, str]]:
+    """Validate literal evidence markers against their explicitly cited artifacts."""
+
+    if assertions is None:
+        assertions = []
+    if not isinstance(assertions, list):
+        raise ValueError("evidence_assertions must be a list")
+    validated: List[Dict[str, str]] = []
+    for assertion in assertions:
+        if not isinstance(assertion, dict):
+            raise ValueError("each evidence assertion must be an object")
+        reference = _validated_artifact_paths([assertion.get("artifact")], require_one=True)[0]
+        if reference not in allowed_artifacts:
+            raise ValueError("evidence assertion artifact must be among the cited artifacts")
+        marker = _clean_memory_text(assertion.get("marker"), "evidence assertion marker")
+        if not marker:
+            raise ValueError("evidence assertion marker must not be empty")
+        try:
+            artifact_text = Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            raise ValueError(f"Unable to read evidence assertion artifact: {reference}") from error
+        if marker not in artifact_text:
+            raise ValueError(f"evidence assertion marker was not found in {reference}")
+        normalized = {"artifact": reference, "marker": marker}
+        if normalized not in validated:
+            validated.append(normalized)
+    if require_one and not validated:
+        raise ValueError("At least one evidence assertion is required")
+    return validated
+
+
+def _matching_evidence_assertions(
+    candidate_assertions: Any,
+    validation_assertions: Any,
+    validation_artifacts: List[str],
+    validation_fingerprints: Any,
+) -> bool:
+    """Return whether validation re-proved every candidate positive evidence marker."""
+
+    try:
+        candidate_markers = {
+            str(item["marker"])
+            for item in candidate_assertions
+            if isinstance(item, dict) and str(item.get("marker") or "")
+        }
+        validated = _validated_evidence_assertions(
+            validation_assertions, validation_artifacts, require_one=True
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not candidate_markers or candidate_markers != {item["marker"] for item in validated}:
+        return False
+    expected_fingerprints = validation_fingerprints if isinstance(validation_fingerprints, dict) else {}
+    try:
+        return expected_fingerprints == _artifact_fingerprints(validation_artifacts)
+    except ValueError:
+        return False
+
+
 @tool
 def store_observation(
     content: str,
@@ -2679,6 +2849,13 @@ def _finding_fingerprint(title: str, claim: str, target: str, technique: str) ->
 
 
 def _active_finding_source_task_uid(store: Any, operation_id: str) -> str:
+    """Return the sole active non-verification task when a workflow executor owns the call."""
+
+    task = _active_finding_source_task(store, operation_id)
+    return task.task_uid if task is not None else ""
+
+
+def _active_finding_source_task(store: Any, operation_id: str) -> Optional[Task]:
     """Return the sole active non-verification task when a workflow executor owns the call."""
 
     active = [
@@ -2766,7 +2943,65 @@ def _finding_tool_result(finding_uid: str, verification_task_uid: str, status: s
     )
 
 
-@tool
+def _record_source_task_finding_receipt(
+    source_task: Optional[Task],
+    candidate: Dict[str, Any],
+    finding_uid: str,
+) -> None:
+    """Record candidate persistence without treating it as task-acceptance evidence.
+
+    A persisted candidate is useful progress, but it is not proof that the source
+    task's frozen criterion has been satisfied.  Keep this receipt inside the
+    candidate record so a later validation failure can be reported without
+    rewriting an immutable acceptance ledger.
+    """
+
+    if source_task is None:
+        return
+    receipts = candidate.setdefault("source_task_receipts", [])
+    if not any(item.get("task_uid") == source_task.task_uid for item in receipts if isinstance(item, dict)):
+        receipts.append(
+            {
+                "task_uid": source_task.task_uid,
+                "finding_uid": finding_uid,
+                "status": "persisted",
+                "evidence_refs": list(dict.fromkeys([*candidate["artifacts"], f"finding:{finding_uid}"])),
+            }
+        )
+
+
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "claim": {"type": "string"},
+                "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]},
+                "target": {"type": "string"},
+                "technique": {"type": "string"},
+                "expected_result": {"type": "string"},
+                "observed_result": {"type": "string"},
+                "reproduction_steps": {"type": "array", "items": {"type": "string"}},
+                "artifacts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "evidence_assertions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {"artifact": {"type": "string"}, "marker": {"type": "string"}},
+                        "required": ["artifact", "marker"],
+                    },
+                    "description": "Literal positive markers observed in cited artifacts.",
+                },
+            },
+            "required": [
+                "title", "claim", "severity", "target", "technique", "expected_result", "observed_result",
+                "reproduction_steps", "artifacts", "evidence_assertions",
+            ],
+        }
+    }
+)
 def store_finding(
     title: str,
     claim: str,
@@ -2777,12 +3012,15 @@ def store_finding(
     observed_result: str,
     reproduction_steps: List[str],
     artifacts: NonEmptyArtifactRefs,
+    evidence_assertions: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Submit one finding candidate and create its dedicated verification task.
 
-    This tool never creates a verified finding directly. Every distinct candidate is verified by a separate,
-    same-phase task before it can affect confirmed risk totals. Taxonomy classification is performed by a separate,
-    read-only workflow agent after this candidate is persisted.
+    This tool never creates a verified finding directly. Each candidate must include literal positive-evidence markers
+    found in its cited artifacts; a separate same-phase task must independently reproduce every marker before the
+    finding can affect confirmed risk totals. Taxonomy classification is performed by a separate, read-only workflow
+    agent after this candidate is persisted. For a uniquely assigned explicit service, the candidate target's scheme,
+    host, and port are canonicalized to that service while its route and query are retained.
     """
 
     candidate = {
@@ -2815,13 +3053,37 @@ def store_finding(
     if any(term in observed_lower for term in weak_evidence_terms):
         raise ValueError("observed_result must describe concrete observed evidence, not assumptions")
     candidate["artifacts"] = _validated_artifact_paths(artifacts, require_one=True)
-
+    candidate["artifact_fingerprints"] = _artifact_fingerprints(candidate["artifacts"])
+    op_id = _operation_id()
+    store = _get_database_store()
+    source_task = _active_finding_source_task(store, op_id)
+    candidate["evidence_assertions"] = _validated_evidence_assertions(
+        evidence_assertions, candidate["artifacts"], require_one=True
+    )
+    source_task_uid = source_task.task_uid if source_task is not None else ""
+    candidate["evidence_receipts"] = []
+    if source_task is not None:
+        for assertion in candidate["evidence_assertions"]:
+            receipt_uid = str(uuid.uuid4())
+            store.store_finding_evidence_receipt(
+                op_id,
+                receipt_uid,
+                source_task.task_uid,
+                assertion["artifact"],
+                assertion["marker"],
+                candidate["artifact_fingerprints"][assertion["artifact"]],
+            )
+            candidate["evidence_receipts"].append(f"finding_evidence:{receipt_uid}")
+    try:
+        active_plan = _get_active_plan()
+    except ValueError:
+        active_plan = None
+    candidate["target"], bound_target_ids = _canonicalize_finding_target(
+        candidate["target"], active_plan, source_task
+    )
     fingerprint = _finding_fingerprint(
         candidate["title"], candidate["claim"], candidate["target"], candidate["technique"]
     )
-    op_id = _operation_id()
-    store = _get_database_store()
-    source_task_uid = _active_finding_source_task_uid(store, op_id)
     existing = store.get_finding_by_fingerprint(op_id, fingerprint)
     if existing:
         if source_task_uid:
@@ -2842,6 +3104,8 @@ def store_finding(
     candidate["finding_uid"] = finding_uid
     candidate["validation_status"] = "pending"
     candidate["source_task_uids"] = [source_task_uid] if source_task_uid else []
+    candidate["source_task_receipts"] = []
+    _record_source_task_finding_receipt(source_task, candidate, finding_uid)
     content = (
         f"[VULNERABILITY] {candidate['title']} [WHERE] {candidate['target']} "
         f"[IMPACT] {candidate['claim']} [EVIDENCE] {candidate['observed_result']} "
@@ -2850,14 +3114,38 @@ def store_finding(
     _store_memory_entry(content, "finding_candidate", candidate)
 
     current_phase = _get_plan_current_phase()
-    target_ids = _target_ids_for_literal(candidate["target"])
+    target_ids = bound_target_ids or _target_ids_for_literal(candidate["target"])
     target_scope: TargetScope = "subset" if target_ids else "all"
+    candidate["verification_packet"] = {
+        "version": 1,
+        "source_task": {
+            "task_uid": source_task_uid,
+            "title": source_task.title if source_task is not None else "",
+            "objective": source_task.objective if source_task is not None else "",
+        },
+        "target": candidate["target"],
+        "target_scope": target_scope,
+        "target_ids": target_ids,
+        "claim": candidate["claim"],
+        "technique": candidate["technique"],
+        "expected_result": candidate["expected_result"],
+        "observed_result": candidate["observed_result"],
+        "reproduction_steps": candidate["reproduction_steps"],
+        "evidence_assertions": candidate["evidence_assertions"],
+        "artifacts": candidate["artifacts"],
+        "artifact_fingerprints": candidate["artifact_fingerprints"],
+    }
     task = Task(
         task_uid=task_uid,
         title=f"Verify finding: {candidate['title']}",
         objective=(
             f"Independently verify finding candidate {finding_uid} against {candidate['target']}. "
-            "Reproduce the claimed behavior, capture direct or differential artifacts, call "
+            f"Expected result: {candidate['verification_packet']['expected_result']} Observed candidate result: "
+            f"{candidate['verification_packet']['observed_result']} Source evidence: "
+            f"{', '.join(candidate['verification_packet']['artifacts'])}. "
+            "Required positive evidence markers: "
+            f"{', '.join(assertion['marker'] for assertion in candidate['evidence_assertions'])}. "
+            "Reproduce every marker in fresh direct or differential artifacts, call "
             "record_finding_validation with the outcome, and stop."
         ),
         acceptance=AcceptanceContract(
@@ -2886,6 +3174,75 @@ def store_finding(
     store.store_finding_candidate(op_id, finding_uid, fingerprint, candidate, task_uid)
     _ensure_memory_client().store_task(task=task, user_id=_user_id())
     return _finding_tool_result(finding_uid, task_uid, "pending_validation")
+
+
+def _load_finding_validation_guards() -> List[Dict[str, Any]]:
+    """Load the small, declarative catalog of unambiguous validation contradictions."""
+
+    try:
+        payload = yaml.safe_load(_FINDING_VALIDATION_GUARDS_PATH.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError("finding validation guard catalog is unavailable or invalid") from error
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise ValueError("finding validation guard catalog must declare version 1")
+    rules = payload.get("rules")
+    if not isinstance(rules, list):
+        raise ValueError("finding validation guard catalog rules must be a list")
+    validated = []
+    for item in rules:
+        if not isinstance(item, dict):
+            raise ValueError("finding validation guard rules must be objects")
+        rule_id = str(item.get("id") or "").strip()
+        claim_terms = item.get("claim_terms")
+        all_of = item.get("contradiction_all_of")
+        any_of = item.get("contradiction_any_of")
+        if (
+            not rule_id
+            or not isinstance(claim_terms, list)
+            or not all(isinstance(term, str) and term.strip() for term in claim_terms)
+            or bool(all_of) == bool(any_of)
+        ):
+            raise ValueError(f"finding validation guard rule {rule_id or '<unknown>'} is invalid")
+        markers = all_of or any_of
+        if not isinstance(markers, list) or not all(isinstance(marker, str) and marker.strip() for marker in markers):
+            raise ValueError(f"finding validation guard rule {rule_id} has invalid contradiction markers")
+        validated.append({
+            "id": rule_id,
+            "claim_terms": [term.lower().strip() for term in claim_terms],
+            "contradiction_all_of": [marker.lower().strip() for marker in all_of or []],
+            "contradiction_any_of": [marker.lower().strip() for marker in any_of or []],
+        })
+    return validated
+
+
+def _finding_validation_contradictions(
+    candidate: Dict[str, Any], evidence_artifacts: List[str]
+) -> List[str]:
+    """Return catalog rule IDs contradicted by every cited confirmation artifact."""
+
+    claim_text = " ".join(
+        str(candidate.get(field) or "") for field in ("title", "claim", "technique")
+    ).lower()
+    artifact_texts = []
+    for reference in evidence_artifacts:
+        try:
+            artifact_texts.append(Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace").lower())
+        except OSError:
+            return []
+    contradictions = []
+    for rule in _load_finding_validation_guards():
+        if not any(term in claim_text for term in rule["claim_terms"]):
+            continue
+        markers_all = rule["contradiction_all_of"]
+        markers_any = rule["contradiction_any_of"]
+        if all(
+            all(marker in text for marker in markers_all)
+            if markers_all
+            else any(marker in text for marker in markers_any)
+            for text in artifact_texts
+        ):
+            contradictions.append(rule["id"])
+    return contradictions
 
 
 @tool(
@@ -2936,8 +3293,9 @@ def record_finding_validation(
     evidence_strategy: str = "direct",
     evidence_artifacts: Optional[List[str]] = None,
     control_artifacts: Optional[List[str]] = None,
+    evidence_assertions: Optional[List[Dict[str, str]]] = None,
 ) -> str:
-    """Record the result of the active, dedicated finding-verification task."""
+    """Record a validation outcome, deterministically re-proving candidate evidence for confirmations."""
 
     op_id = _operation_id()
     store = _get_database_store()
@@ -2960,6 +3318,38 @@ def record_finding_validation(
     controls = _validated_artifact_paths(control_artifacts)
     if normalized_outcome == "confirmed" and strategy == "differential" and not controls:
         raise ValueError("Differential confirmation requires at least one negative-control artifact")
+    if normalized_outcome == "confirmed":
+        candidate_assertions = (record.get("candidate_data") or {}).get("evidence_assertions")
+        assertions = []
+        for candidate_assertion in candidate_assertions or []:
+            marker = str(candidate_assertion.get("marker") or "") if isinstance(candidate_assertion, dict) else ""
+            if not marker:
+                raise ValueError("finding candidate has no valid positive evidence assertions")
+            matching_artifact = next(
+                (
+                    reference
+                    for reference in evidence
+                    if marker in Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace")
+                ),
+                None,
+            )
+            if matching_artifact is None:
+                raise ValueError(f"confirmed validation evidence did not reproduce candidate marker: {marker}")
+            assertions.append({"artifact": matching_artifact, "marker": marker})
+        if not _matching_evidence_assertions(
+            candidate_assertions,
+            assertions,
+            evidence,
+            _artifact_fingerprints(evidence),
+        ):
+            raise ValueError("confirmed validation assertions must re-prove every candidate evidence marker")
+        contradictions = _finding_validation_contradictions(record.get("candidate_data") or {}, evidence)
+        if contradictions:
+            raise ValueError(
+                "confirmed finding validation is contradicted by cited evidence: " + ", ".join(contradictions)
+            )
+    else:
+        assertions = []
 
     validation = {
         "finding_uid": finding_uid,
@@ -2969,6 +3359,8 @@ def record_finding_validation(
         "evidence_strategy": strategy,
         "evidence_artifacts": evidence,
         "control_artifacts": controls,
+        "evidence_assertions": assertions,
+        "evidence_artifact_fingerprints": _artifact_fingerprints(evidence),
         "validation_status": "submitted",
     }
     if not validation["reproduction_steps"]:
@@ -2997,6 +3389,56 @@ def record_finding_validation(
     )
 
 
+def build_record_finding_validation_tool(task: Task) -> Any:
+    """Bind finding validation to the candidate assigned to one verification task."""
+
+    if task.kind != "finding_validation" or not task.reference_id:
+        raise ValueError("record_finding_validation requires a bound finding-validation task")
+    finding_uid = task.reference_id
+
+    def record_bound_finding_validation(
+        outcome: str,
+        summary: str,
+        reproduction_steps: List[str],
+        evidence_strategy: str = "direct",
+        evidence_artifacts: Optional[List[str]] = None,
+        control_artifacts: Optional[List[str]] = None,
+    ) -> str:
+        return record_finding_validation(
+            finding_uid,
+            outcome,
+            summary,
+            reproduction_steps,
+            evidence_strategy,
+            evidence_artifacts,
+            control_artifacts,
+        )
+
+    record_bound_finding_validation.__name__ = "record_finding_validation"
+    record_bound_finding_validation.__doc__ = """Record the independent outcome for this assigned finding candidate.
+
+The controller binds this tool to the only finding assigned to the task. Supply fresh evidence artifacts and an
+outcome; Python re-proves the candidate's immutable markers and records the frozen task acceptance.
+"""
+    return tool(
+        record_bound_finding_validation,
+        inputSchema={
+            "json": {
+                "type": "object",
+                "properties": {
+                    "outcome": {"type": "string", "enum": ["confirmed", "not_confirmed"]},
+                    "summary": {"type": "string"},
+                    "reproduction_steps": {"type": "array", "items": {"type": "string"}},
+                    "evidence_strategy": {"type": "string", "enum": ["direct", "differential"]},
+                    "evidence_artifacts": {"type": "array", "items": {"type": "string"}},
+                    "control_artifacts": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["outcome", "summary", "reproduction_steps"],
+            }
+        },
+    )
+
+
 def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> Optional[str]:
     """Materialize the evaluator-approved resolution for a verification task."""
 
@@ -3010,7 +3452,17 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
 
     candidate = record["candidate_data"]
     validation = record.get("validation_data")
-    confirmed = evaluator_status == "done" and validation and validation.get("outcome") == "confirmed"
+    confirmed = (
+        evaluator_status == "done"
+        and validation
+        and validation.get("outcome") == "confirmed"
+        and _matching_evidence_assertions(
+            candidate.get("evidence_assertions"),
+            validation.get("evidence_assertions"),
+            validation.get("evidence_artifacts", []),
+            validation.get("evidence_artifact_fingerprints"),
+        )
+    )
     if confirmed:
         metadata = dict(candidate)
         metadata.update(validation)
@@ -3021,6 +3473,7 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
                 "validation_status": "verified",
                 "artifacts": validation["evidence_artifacts"],
                 "negative_control_artifacts": validation["control_artifacts"],
+                "candidate_evidence_assertions": candidate["evidence_assertions"],
             }
         )
         _store_memory_entry(candidate["claim"], "finding", metadata)

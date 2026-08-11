@@ -168,6 +168,7 @@ def specialized_recon_orchestrator(
         target: str,
         recon_type: str = "comprehensive",
         output_file: Optional[str] = None,
+        inventory_manifest: Optional[str] = None,
 ) -> str:
     """
     Orchestrates automated web recon for a target. It scans for subdomains, live hosts/tech stack, crawled endpoints, JS files, URL/form parameters, and hidden/high-value services.
@@ -175,9 +176,10 @@ def specialized_recon_orchestrator(
     Input:
     - Accepts URL or domain; normalizes to domain or IP address.
     - output_file: path to write results to disk.
+    - inventory_manifest: optional path for an additional validated inventory manifest.
 
     Reuse vs run:
-    - Reuse existing `recon_result_v1` for same target if sufficient.
+    - Reuse existing `recon_result_v1` for the same target if sufficient.
     - Otherwise run recon.
 
     Sufficiency (reuse) if ALL:
@@ -215,6 +217,7 @@ def specialized_recon_orchestrator(
     except ImportError:
         pass
 
+    manifest_target = target
     target = _normalize_target_endpoint(target)
     if not target:
         raise ValueError("target is required")
@@ -363,6 +366,61 @@ def specialized_recon_orchestrator(
             _err("recommendations", str(e))
     except Exception as e:
         _err("orchestration", str(e))
+
+    if inventory_manifest:
+        try:
+            from modules.tools.recon_inventory_manifest import (
+                records_to_inventory_manifest,
+                resolve_inventory_target,
+                write_inventory_manifest,
+            )
+
+            records = []
+            for endpoint in results.get("endpoints", []) or []:
+                if isinstance(endpoint, dict):
+                    records.append(
+                        {
+                            "url": endpoint.get("url") or endpoint.get("endpoint") or endpoint.get("path"),
+                            "method": endpoint.get("method", "GET"),
+                            "status": endpoint.get("status_code") or endpoint.get("status"),
+                        }
+                    )
+                else:
+                    records.append({"url": endpoint, "method": "GET"})
+            for javascript_file in results.get("js_files", []) or []:
+                records.append({"url": javascript_file, "method": "GET"})
+            for live_host in results.get("live_hosts", []) or []:
+                if isinstance(live_host, dict):
+                    records.append(
+                        {
+                            "url": live_host.get("url") or live_host.get("host") or live_host.get("input"),
+                            "status": live_host.get("status_code") or live_host.get("status"),
+                            "technologies": live_host.get("technologies") or live_host.get("tech") or [],
+                        }
+                    )
+                else:
+                    records.append({"url": live_host, "method": "GET"})
+            technologies = [
+                item.get("technology") or item.get("name") or item.get("tech")
+                if isinstance(item, dict)
+                else item
+                for item in results.get("technologies", []) or []
+            ]
+            resolved_manifest_target, manifest_target_id = resolve_inventory_target(manifest_target)
+            manifest = records_to_inventory_manifest(
+                records,
+                target_id=manifest_target_id,
+                target=resolved_manifest_target,
+                technologies=[item for item in technologies if item],
+                parameters=results.get("parameters", []) or [],
+            )
+            results["inventory_manifest"] = write_inventory_manifest(inventory_manifest, manifest)
+        except Exception as error:
+            results["inventory_manifest"] = {
+                "path": os.path.abspath(inventory_manifest),
+                "validation_status": "error",
+                "error": str(error),
+            }
 
     result_str = json.dumps(results, indent=2)
     if output_file:
@@ -1454,9 +1512,22 @@ def main() -> int:
         help="Type of recon to run (default: comprehensive)",
     )
     parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
+    parser.add_argument(
+        "--inventory-manifest",
+        "--inventory_manifest",
+        default=None,
+        help="Path to write an additional validated inventory manifest",
+    )
 
     args = parser.parse_args()
-    print(specialized_recon_orchestrator(args.target, recon_type=args.recon_type, output_file=args.output_file))
+    print(
+        specialized_recon_orchestrator(
+            args.target,
+            recon_type=args.recon_type,
+            output_file=args.output_file,
+            inventory_manifest=args.inventory_manifest,
+        )
+    )
     return 0
 
 

@@ -2,6 +2,10 @@
 
 ### Features
 
+- Make the deterministic recon-output-to-inventory-manifest converter a generally available core agent tool.
+- Add opt-in, validated inventory-manifest output to specialized reconnaissance and authentication analysis, plus a
+  deterministic agent tool for converting katana, feroxbuster, ffuf, gobuster, dirsearch, httpx, gospider, and plain
+  URL-list output with bounded auto-detection.
 - Add a Langfuse session exporter that produces a redacted, LLM-ready prompt and reasoning review packet in JSON or
   YAML.
 - Consolidate authoritative workflow state into `outputs/cyber_autoagent.db`.
@@ -51,6 +55,16 @@
 
 ### Fixes
 
+- Give evidence-backed tasks that omitted terminal acceptance one bounded completion-only recovery turn, without
+  changing rejected-acceptance correction behavior.
+- Retain task-created observation and knowledge references during acceptance recovery, show them for normal
+  corrections, and make one auditable final replacement of only operation-missing hallucinated memory references.
+- Preserve task, acceptance-ledger, tool-outcome, and rejected-submission evidence in bounded acceptance corrections
+  so the executor does not restart reconnaissance when durable evidence already exists.
+- Give rejected finding submissions one bounded, artifact-focused repair attempt for missing evidence assertions,
+  automatically validate candidate acceptance after successful persistence, and emit structured repair telemetry.
+- Validate finding evidence and persist audit receipts within candidate storage, bind verification calls to their
+  assigned candidate, and deterministically accept source tasks only when their frozen criterion is candidate storage.
 - Format inline React TUI report previews as terminal-friendly Markdown.
 - Emit explicit report, log, and artifacts paths so the React TUI populates the ARTIFACTS AND LOGS section reliably.
 - Keep the React footer spinner task title within the live terminal width so long task names do not wrap off screen.

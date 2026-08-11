@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
@@ -414,6 +416,27 @@ def test_outcome_journal_is_bounded_and_redacts_sensitive_input():
     assert "Bearer secret" not in entries[-1].input_summary
     assert "[REDACTED]" in entries[-1].input_summary
     assert len(entries[-1].output_summary) == 500
+
+
+def test_outcome_journal_retains_record_task_acceptance_input_as_json():
+    journal = ToolOutcomeJournal()
+    payload = {
+        "status": "satisfied",
+        "disposition": "finding_candidate",
+        "summary": "Payload reflected without encoding",
+        "evidence_refs": ["artifact:artifacts/xss.html"],
+    }
+
+    outcome = journal.append(
+        tool_use_id="acceptance",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=False,
+        tool_input=payload,
+        output="finding created by this task is required",
+    )
+
+    assert json.loads(outcome.input_summary) == payload
 
 
 def test_correctable_classifier_does_not_retry_ordinary_negative_result():

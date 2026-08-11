@@ -129,6 +129,12 @@ Agents use provider-neutral names:
 Workflow bookkeeping tools are intentionally separate from semantic retrieval. Qdrant does not replace SQLite as the
 authoritative source for task, phase, acceptance, or validation status.
 
+`store_finding` validates literal positive markers in durable artifacts, records internal candidate-persistence
+receipts, and fingerprints cited evidence. When a source task's frozen criterion is solely candidate persistence, the
+controller records that task acceptance from the returned finding reference; this does not verify the security claim.
+The separate verification task receives the candidate's structured reproduction packet and records the finding outcome
+from fresh evidence.
+
 Workflow prompts exclude automatically published task-acceptance memories and any semantic plan/task bookkeeping.
 Those records remain available for audit and reporting, while agents receive the controller-owned task history and
 acceptance ledger instead. Ordinary observations, findings, validation outcomes, and reusable knowledge remain eligible

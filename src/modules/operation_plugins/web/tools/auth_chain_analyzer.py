@@ -10,7 +10,7 @@ import tempfile
 import urllib3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -33,7 +33,8 @@ def _coerce_str(arg: bytes | str | None) -> str:
 def auth_chain_analyzer(
         target_url: str,
         auth_type: str = "auto",
-        output_file: Optional[str] = None
+        output_file: Optional[str] = None,
+        inventory_manifest: Optional[str] = None,
 ) -> str:
     """
     Map auth flows + identify/validate auth bypass surfaces for a target. Supported: JWT, OAuth, SAML, cookies, sessions.
@@ -54,6 +55,7 @@ def auth_chain_analyzer(
     - target_url: base URL/domain (scheme optional; https assumed)
     - auth_type: "jwt"|"oauth"|"saml"|"session"|"auto" (use specific type to reduce noise)
     - output_file: path to write results to disk
+    - inventory_manifest: optional path for an additional validated inventory manifest.
 
     RETURNS (JSON)
     - summary: mechanism/token types, confirmed_exploits count
@@ -164,8 +166,6 @@ def auth_chain_analyzer(
         # Preserve any previously discovered vulnerabilities; append bypass test results.
         results["vulnerabilities"].extend(bypass_results)
 
-        successful_bypasses = [b for b in bypass_results if isinstance(b, dict) and b.get("successful", False)]
-
         # Convert bypass results into structured findings for the agent.
         for b in bypass_results:
             if not isinstance(b, dict):
@@ -235,21 +235,77 @@ def auth_chain_analyzer(
             "next_phase": "bypass_testing" if best_surface in {"bypass_validation", "exploitation"} else "recon",
         }
 
+        if inventory_manifest:
+            try:
+                from modules.tools.recon_inventory_manifest import (
+                    records_to_inventory_manifest,
+                    resolve_inventory_target,
+                    write_inventory_manifest,
+                )
+
+                records = []
+                for endpoint in results.get("auth_endpoints", []) or []:
+                    if isinstance(endpoint, dict):
+                        records.append(
+                            {
+                                "url": endpoint.get("url")
+                                or endpoint.get("full_url")
+                                or urljoin(
+                                    target_url.rstrip("/") + "/",
+                                    str(endpoint.get("endpoint") or endpoint.get("path") or ""),
+                                ),
+                                "method": endpoint.get("method", "GET"),
+                                "status": endpoint.get("status_code") or endpoint.get("status"),
+                            }
+                        )
+                    else:
+                        records.append({"url": endpoint, "method": "GET"})
+                workflows = []
+                for step in (results.get("flow_analysis", {}) or {}).get("authentication_steps", []) or []:
+                    if isinstance(step, dict):
+                        value = step.get("description") or step.get("endpoint") or step.get("step") or step.get("name")
+                        workflows.append({"value": value, "attributes": {"auth_step": step}})
+                    else:
+                        workflows.append({"value": str(step), "attributes": {}})
+                technologies = [
+                    f"Authentication: {mechanism.get('type')}"
+                    for mechanism in results.get("auth_mechanisms", []) or []
+                    if isinstance(mechanism, dict) and mechanism.get("type")
+                ]
+                resolved_manifest_target, manifest_target_id = resolve_inventory_target(target_url)
+                manifest = records_to_inventory_manifest(
+                    records,
+                    target_id=manifest_target_id,
+                    target=resolved_manifest_target,
+                    workflows=workflows,
+                    technologies=technologies,
+                )
+                report["inventory_manifest"] = write_inventory_manifest(inventory_manifest, manifest)
+            except Exception as manifest_error:
+                report["inventory_manifest"] = {
+                    "path": os.path.abspath(inventory_manifest),
+                    "validation_status": "error",
+                    "error": str(manifest_error),
+                }
+
         # Output JSON only
         output = json.dumps(report, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        output = json.dumps(
-            {
-                "tool": "auth_chain_analyzer",
-                "target": target_url,
-                "auth_type": auth_type,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error": str(e),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        error_report = {
+            "tool": "auth_chain_analyzer",
+            "target": target_url,
+            "auth_type": auth_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": str(e),
+        }
+        if inventory_manifest:
+            error_report["inventory_manifest"] = {
+                "path": os.path.abspath(inventory_manifest),
+                "validation_status": "error",
+                "error": "Authentication analysis did not complete, so no inventory manifest was produced.",
+            }
+        output = json.dumps(error_report, ensure_ascii=False, indent=2)
 
     if output_file:
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -1830,9 +1886,22 @@ def main() -> int:
         help="Authentication type to focus on (default: auto)",
     )
     parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
+    parser.add_argument(
+        "--inventory-manifest",
+        "--inventory_manifest",
+        default=None,
+        help="Path to write an additional validated inventory manifest",
+    )
 
     args = parser.parse_args()
-    print(auth_chain_analyzer(args.target_url, auth_type=args.auth_type, output_file=args.output_file))
+    print(
+        auth_chain_analyzer(
+            args.target_url,
+            auth_type=args.auth_type,
+            output_file=args.output_file,
+            inventory_manifest=args.inventory_manifest,
+        )
+    )
     return 0
 
 

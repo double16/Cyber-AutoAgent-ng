@@ -286,6 +286,25 @@ class FakeState:
             for criterion in task.acceptance.criteria
         ]
 
+    def record_finding_candidate_acceptance(self, task, finding_ref):
+        self.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="finding_candidate",
+            summary=f"Artifact-backed finding candidate persisted for {task.title}.",
+            evidence_refs=(finding_ref,),
+        )]
+
+    def record_task_acceptance(self, task, payload):
+        self.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status=payload["status"],
+            disposition=payload["disposition"],
+            summary=payload["summary"],
+            evidence_refs=tuple(payload["evidence_refs"]),
+        )]
+        return "acceptance stored"
+
     def list_finding_records(self):
         return list(self.finding_records)
 
@@ -1373,6 +1392,8 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy(monkey
     assert "neither mandates use nor makes another selected method exclusive" in captured["prompt"]
     assert "module_probe" in captured["tools"]
     assert "create_tasks" not in captured["tools"]
+    assert "store_finding" in captured["tools"]
+    assert "record_finding_validation" not in captured["tools"]
     assert "record_task_acceptance" in captured["tools"]
     assert captured["system_prompt"] == "base prompt"
     assert captured["policy"].min_tool_calls == 1
@@ -1380,6 +1401,67 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy(monkey
     assert captured["policy"].allow_text_final_after_tools is False
     assert captured["policy"].ignored_terminal_tool_names == frozenset()
     assert captured["policy"].terminal_reason == "task_executor_done"
+
+
+def test_finding_candidate_storage_deterministically_records_matching_acceptance():
+    runtime = _runtime()
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding candidate", source_refs=["task:source-task"]),
+        criteria=[
+            AcceptanceCriterion(
+                id="finding-candidate",
+                description="Persist one finding candidate",
+                evidence_requirements=[EvidenceRequirement(kind="finding_candidate")],
+            )
+        ],
+    )
+    task = Task(
+        task_uid="source-task",
+        title="Assess reflected XSS",
+        objective="Assess reflected XSS",
+        acceptance=acceptance,
+        phase=1,
+        status="active",
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    captured = {}
+
+    def text_runner(role, *_args):
+        if role == "task_prompt_builder":
+            return '{"prompt":"store candidate","tools":[]}'
+        return '{"status":"done","reason":"candidate persisted"}'
+
+    def work_runner(_role, _prompt, tools, _system_prompt, policy):
+        captured["tools"] = {tool.__name__ for tool in tools}
+        captured["policy"] = policy
+        return workflow_mod.TaskExecutorCycleResult(
+            text="candidate stored",
+            outcomes=[ToolOutcome(
+                sequence=1,
+                tool_use_id="finding-store",
+                tool_name="store_finding",
+                success=True,
+                correctable=False,
+                input_summary="candidate",
+                output_summary='{"finding_ref":"finding:finding-1"}',
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert captured["policy"].required_tool_names == {"store_finding"}
+    assert "store_finding" in captured["tools"]
+    assert "record_task_acceptance" not in captured["tools"]
+    assert state.acceptance_results[task.task_uid][0].evidence_refs == ("finding:finding-1",)
+    assert state.tasks[0].status == "done", state.tasks[0].status_reason
 
 
 def test_task_executor_contract_disables_follow_up_task_creation():
@@ -1542,7 +1624,7 @@ def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation():
 
     assert len(actor_prompts) == 2
     assert "Missing criterion:" in actor_prompts[1]
-    assert "Latest artifact/evidence:" in actor_prompts[1]
+    assert "Durable evidence ledger:" in actor_prompts[1]
     assert "Required tool call: record_task_acceptance" in actor_prompts[1]
     assert evaluator_calls
     assert state.tasks[0].status == "done"
@@ -1788,6 +1870,7 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
     )
     state = FakeState(_plan(), tasks=[task])
     policies = []
+    tool_names = set()
     finalize = Mock(return_value="verified")
     monkeypatch.setattr(workflow_mod, "finalize_finding_validation", finalize)
     monkeypatch.setattr(workflow_mod, "finding_validation_submitted", Mock(return_value=True))
@@ -1801,6 +1884,8 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
 
     @contextmanager
     def executor_session(role, tools, system_prompt):
+        tool_names.update(tool.__name__ for tool in tools)
+
         def run(prompt, policy):
             policies.append(policy)
             return "validation submitted"
@@ -1818,6 +1903,9 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
     controller._run_task(_plan(), _plan().phases[0], task)
 
     assert policies[0].required_tool_names == {"record_finding_validation"}
+    assert "record_finding_validation" in tool_names
+    assert "store_finding" not in tool_names
+    assert "record_task_acceptance" not in tool_names
     finalize.assert_called_once_with(task, "done", "evidence approved")
     assert state.tasks[0].status == "done"
     assert state.tasks[0].status_reason == "evidence approved"
@@ -2379,7 +2467,7 @@ def test_task_acceptance_gate_skips_evaluator_and_lists_missing_criteria():
                 AcceptanceCriterion(
                     id="assess-the-assigned-endpoint",
                     description="Assess the assigned endpoint",
-                    evidence_requirements=[EvidenceRequirement(kind="memory")],
+                    evidence_requirements=[EvidenceRequirement(kind="artifact")],
                 )
             ],
         ),
@@ -2417,6 +2505,183 @@ def test_task_acceptance_gate_skips_evaluator_and_lists_missing_criteria():
     assert roles == ["task_prompt_builder"]
     assert state.tasks[0].status == "partial_failure"
     assert "assess-the-assigned-endpoint" in state.tasks[0].status_reason
+
+
+def test_missing_acceptance_gets_one_evidence_backed_terminal_recovery_turn(monkeypatch):
+    task = TaskModel(
+        task_uid="hypotheses",
+        title="Generate hypotheses",
+        objective="Assess the assigned endpoint",
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Hypothesis generation",
+                source_refs=["target:target-1"],
+                procedure={
+                    "methods": ["review"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[
+                AcceptanceCriterion(
+                    id="assess-the-assigned-endpoint",
+                    description="Document endpoint hypotheses",
+                    evidence_requirements=[EvidenceRequirement(kind="artifact")],
+                )
+            ],
+        ),
+        phase=1,
+        status="active",
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+
+    def text_runner(role, *_args):
+        if role == "task_prompt_builder":
+            return '{"prompt":"assess endpoint","tools":[]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"acceptance recorded"}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append((prompt, run_policy))
+        if len(calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="endpoint response recorded",
+                outcomes=[ToolOutcome(
+                    1,
+                    "request",
+                    "http_request",
+                    True,
+                    False,
+                    "GET /endpoint",
+                    "saved artifact:artifacts/endpoint.html",
+                )],
+            )
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="assess-the-assigned-endpoint",
+            status="satisfied",
+            disposition="observation",
+            summary="Testable endpoint hypotheses were recorded.",
+            evidence_refs=("memory:task-hypotheses",),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(
+            text="observation and acceptance recorded",
+            outcomes=[
+                ToolOutcome(
+                    2,
+                    "observation",
+                    "store_observation",
+                    True,
+                    False,
+                    "hypotheses",
+                    '{"memory_ref":"memory:task-hypotheses"}',
+                ),
+                ToolOutcome(
+                    3,
+                    "acceptance",
+                    "record_task_acceptance",
+                    True,
+                    False,
+                    "acceptance",
+                    "acceptance stored",
+                ),
+            ],
+        )
+
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1})
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(calls) == 2
+    assert calls[1][1].required_tool_names == {"record_task_acceptance"}
+    assert calls[1][1].max_tool_calls == 2
+    assert "Required Terminal Acceptance Recovery" in calls[1][0]
+    assert "Do not repeat discovery" in calls[1][0]
+    event = next(
+        event
+        for event in runtime.callback_handler.events
+        if event["type"] == "acceptance_recovery_context" and event["reason"] == "missing_acceptance"
+    )
+    assert event["mode"] == "missing_acceptance_evidence_read_then_accept"
+    assert state.tasks[0].status == "done"
+
+
+def test_missing_acceptance_without_durable_evidence_does_not_get_terminal_recovery():
+    task = Task(task_uid="no-evidence", title="No evidence", objective="Assess endpoint", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append((prompt, run_policy))
+        return workflow_mod.TaskExecutorCycleResult(text="no durable result", outcomes=[])
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, *_args: (
+            '{"prompt":"assess endpoint","tools":[]}'
+            if role == "task_prompt_builder"
+            else '{"status":"done","reason":"unexpected"}'
+        ),
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(calls) == 1
+    assert state.tasks[0].status == "partial_failure"
+
+
+def test_rejected_acceptance_does_not_use_missing_acceptance_recovery():
+    task = Task(task_uid="rejected", title="Rejected", objective="Assess endpoint", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append((prompt, run_policy))
+        return workflow_mod.TaskExecutorCycleResult(
+            text="rejected acceptance",
+            outcomes=[ToolOutcome(
+                1,
+                "acceptance",
+                "record_task_acceptance",
+                False,
+                False,
+                '{"status":"satisfied"}',
+                "Acceptance evidence reference is invalid",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(
+            env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1, "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 0}
+        ),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, *_args: '{"prompt":"assess endpoint","tools":[]}',
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(calls) == 1
+    assert not any(
+        event.get("reason") == "missing_acceptance" for event in controller.runtime.callback_handler.events
+    )
 
 
 def test_task_executor_appends_selected_memories_from_prompt_spec():
@@ -2982,7 +3247,7 @@ def test_task_executor_uses_fresh_sessions_for_compact_continuations():
     prompt = controller._task_executor_critic_guidance(
         task,
         ["criterion-1"],
-        ["artifact:artifacts/result.txt"],
+        [{"reference": "artifact:artifacts/result.txt", "source": "task_evidence"}],
         next_cycle=2,
     )
 
@@ -2995,6 +3260,226 @@ def test_task_executor_uses_fresh_sessions_for_compact_continuations():
     assert "Start a fresh actor cycle 2" in prompt
     assert "Assigned objective: Assess one behavior" in prompt
     assert "Frozen acceptance criteria: criterion-1:" in prompt
+    assert "artifact:artifacts/result.txt (source: task_evidence)" in prompt
+    assert "Do not perform network discovery" in prompt
+
+
+def test_acceptance_recovery_context_merges_task_ledger_outcomes_and_rejection(monkeypatch):
+    task = Task(
+        task_uid="task",
+        title="Task",
+        objective="Assess one behavior",
+        phase=1,
+        status="active",
+        evidence=["artifact:artifacts/task.txt", "not-a-reference"],
+    )
+    acceptance = AcceptanceResult(
+        criterion_id=task.acceptance.criteria[0].id,
+        status="satisfied",
+        disposition="observation",
+        summary="prior evidence",
+        evidence_refs=("memory:prior-observation",),
+    )
+    rejected = ToolOutcome(
+        1,
+        "rejected",
+        "record_task_acceptance",
+        False,
+        False,
+        json.dumps({"evidence_refs": ["artifact:artifacts/rejected.txt", "https://invalid.example"]}),
+        "invalid evidence",
+    )
+    outcome = ToolOutcome(
+        2,
+        "tool",
+        "http_request",
+        True,
+        False,
+        "request",
+        "saved artifact:artifacts/outcome.txt",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=lambda *_args: "{}",
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+
+    context = controller._acceptance_recovery_context(task, [acceptance], [outcome], rejected)
+
+    assert context == [
+        {"reference": "artifact:artifacts/task.txt", "source": "task_evidence"},
+        {"reference": "memory:prior-observation", "source": "prior_acceptance"},
+        {"reference": "artifact:artifacts/outcome.txt", "source": "tool_outcome"},
+        {"reference": "artifact:artifacts/rejected.txt", "source": "rejected_acceptance"},
+    ]
+
+
+def test_acceptance_recovery_context_includes_only_successful_task_created_memory_refs(monkeypatch):
+    task = Task(task_uid="task", title="Task", objective="Assess one behavior", phase=1, status="active")
+    outcomes = [
+        ToolOutcome(
+            1,
+            "stored-observation",
+            "store_observation",
+            True,
+            False,
+            "observation",
+            '{"memory_ref":"memory:task-observation"}',
+        ),
+        ToolOutcome(
+            2,
+            "failed-knowledge",
+            "store_knowledge",
+            False,
+            True,
+            "knowledge",
+            '{"memory_ref":"memory:failed"}',
+        ),
+        ToolOutcome(
+            3,
+            "retrieval",
+            "memory_retrieve",
+            True,
+            False,
+            "query",
+            '{"memory_ref":"memory:not-created-by-task"}',
+        ),
+    ]
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=lambda *_args: "{}",
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+
+    context = controller._acceptance_recovery_context(task, [], outcomes, None)
+
+    assert context == [{"reference": "memory:task-observation", "source": "task_memory:store_observation"}]
+
+
+def test_final_memory_acceptance_recovery_replaces_only_rejected_memory_refs():
+    payload = {
+        "status": "satisfied",
+        "disposition": "observation",
+        "summary": "Endpoint hypotheses were recorded.",
+        "evidence_refs": ["artifact:artifacts/endpoint.txt", "memory:hallucinated"],
+    }
+
+    corrected, replacements = MultiAgentWorkflowController._replace_invalid_memory_references(
+        payload,
+        ["memory:hallucinated"],
+        [
+            {"reference": "memory:task-observation", "source": "task_memory:store_observation"},
+            {"reference": "memory:task-knowledge", "source": "task_memory:store_knowledge"},
+        ],
+    )
+
+    assert corrected == {
+        **payload,
+        "evidence_refs": [
+            "artifact:artifacts/endpoint.txt",
+            "memory:task-observation",
+            "memory:task-knowledge",
+        ],
+    }
+    assert replacements == [
+        {"rejected": "memory:hallucinated", "replacement": "memory:task-observation"},
+        {"rejected": "memory:hallucinated", "replacement": "memory:task-knowledge"},
+    ]
+
+
+def test_final_memory_acceptance_recovery_requires_the_specific_missing_memory_error():
+    payload = {
+        "status": "satisfied",
+        "disposition": "observation",
+        "summary": "Endpoint hypotheses were recorded.",
+        "evidence_refs": ["memory:hallucinated"],
+    }
+
+    references = MultiAgentWorkflowController._invalid_memory_references(
+        "Acceptance evidence reference is invalid: memory:hallucinated",
+        payload,
+    )
+
+    assert references == []
+
+
+def test_task_executor_recovers_final_hallucinated_memory_reference_deterministically():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1, "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 1})
+    task = Task(task_uid="active", title="Generate hypotheses", objective="Assess one endpoint", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    attempted_payloads = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        attempted_payloads.append((prompt, run_policy.required_tool_names))
+        return workflow_mod.TaskExecutorCycleResult(
+            text="hypotheses persisted",
+            outcomes=[
+                ToolOutcome(
+                    len(attempted_payloads) * 2 - 1,
+                    f"observation-{len(attempted_payloads)}",
+                    "store_observation",
+                    True,
+                    False,
+                    "observation",
+                    '{"memory_ref":"memory:task-hypotheses"}',
+                )
+                if len(attempted_payloads) == 1
+                else ToolOutcome(
+                    3,
+                    "noop",
+                    "read_artifact",
+                    True,
+                    False,
+                    "artifact",
+                    "read",
+                ),
+                ToolOutcome(
+                    len(attempted_payloads) * 2,
+                    f"acceptance-{len(attempted_payloads)}",
+                    "record_task_acceptance",
+                    False,
+                    False,
+                    json.dumps(
+                        {
+                            "status": "satisfied",
+                            "disposition": "observation",
+                            "summary": "Endpoint hypotheses were recorded.",
+                            "evidence_refs": ["memory:hallucinated"],
+                        }
+                    ),
+                    "Acceptance evidence memory does not exist in this operation: memory:hallucinated",
+                ),
+            ],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, *_args: (
+            '{"prompt":"assess endpoint","tools":[]}'
+            if role == "task_prompt_builder"
+            else '{"status":"done","reason":"acceptance recorded"}'
+        ),
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(attempted_payloads) == 2
+    assert state.acceptance_results[task.task_uid][0].evidence_refs == ("memory:task-hypotheses",)
+    event = next(
+        event
+        for event in runtime.callback_handler.events
+        if event["type"] == "acceptance_memory_reference_recovery"
+    )
+    assert event["outcome"] == "accepted"
+    assert event["rejected_refs"] == ["memory:hallucinated"]
+    assert state.tasks[0].status == "done"
 
 
 def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval():
@@ -4786,6 +5271,48 @@ def test_task_cycle_progress_signature_changes_only_with_controller_observed_pro
     assert signature != MultiAgentWorkflowController._task_cycle_progress_signature([changed], [acceptance])
 
 
+def test_task_cycle_progress_actions_stop_only_for_identical_successful_action_and_result():
+    first = ToolOutcome(1, "tool-1", "read_artifact", True, False, "artifact:artifacts/page.html", "body-v1")
+    same = ToolOutcome(2, "tool-2", "read_artifact", True, False, "artifact:artifacts/page.html", "body-v1")
+    changed_content = ToolOutcome(
+        3, "tool-3", "read_artifact", True, False, "artifact:artifacts/page.html", "body-v2"
+    )
+    changed_action = ToolOutcome(4, "tool-4", "shell", True, False, "curl /next", "HTTP 200")
+
+    first_actions = MultiAgentWorkflowController._task_cycle_progress_actions([first])
+
+    assert MultiAgentWorkflowController._task_cycle_progress_actions([same]).issubset(first_actions)
+    assert not MultiAgentWorkflowController._task_cycle_progress_actions([changed_content]).issubset(first_actions)
+    assert not MultiAgentWorkflowController._task_cycle_progress_actions(
+        [same, changed_action]
+    ).issubset(first_actions)
+
+
+def test_task_cycle_progress_actions_detects_changed_large_artifact_content():
+    first = ToolOutcome(
+        1,
+        "tool-1",
+        "read_artifact",
+        True,
+        False,
+        "artifact:artifacts/page.html",
+        "x" * 600 + "first",
+    )
+    changed = ToolOutcome(
+        2,
+        "tool-2",
+        "read_artifact",
+        True,
+        False,
+        "artifact:artifacts/page.html",
+        "x" * 600 + "second",
+    )
+
+    first_actions = MultiAgentWorkflowController._task_cycle_progress_actions([first])
+
+    assert not MultiAgentWorkflowController._task_cycle_progress_actions([changed]).issubset(first_actions)
+
+
 def test_repeat_loop_recovery_is_bounded_and_requires_changed_action():
     cycle_result = workflow_mod.TaskExecutorCycleResult(
         text="Stopped after repeated browser_evaluate_js calls",
@@ -6155,7 +6682,7 @@ def test_missing_finding_acceptance_recovers_with_required_persistence_then_acce
                 )],
             )
         if len(calls) == 2:
-            assert run_policy.required_tool_names == {"prepare_finding_evidence", "store_finding"}
+            assert run_policy.required_tool_names == {"store_finding"}
             assert "Do not repeat discovery" in prompt
             return workflow_mod.TaskExecutorCycleResult(
                 text="finding stored",
@@ -6203,7 +6730,7 @@ def test_missing_finding_acceptance_recovers_with_required_persistence_then_acce
 
     assert [required for _prompt, required in calls] == [
         {"record_task_acceptance"},
-        {"prepare_finding_evidence", "store_finding"},
+        {"store_finding"},
         {"record_task_acceptance"},
     ]
     assert state.tasks[0].status == "done"
@@ -6247,15 +6774,124 @@ def test_missing_finding_acceptance_ends_when_required_persistence_fails():
         runtime=runtime,
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
-        text_runner=lambda role, *_args: '{"prompt":"verify xss","tools":[]}' if role == "task_prompt_builder" else "{}",
+        text_runner=lambda role, *_args: (
+            '{"prompt":"verify xss","tools":[]}'
+            if role == "task_prompt_builder"
+            else '{"status":"done","reason":"acceptance recorded"}'
+        ),
         work_runner=work_runner,
     )
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert calls == [{"record_task_acceptance"}, {"prepare_finding_evidence", "store_finding"}]
+    assert calls == [{"record_task_acceptance"}, {"store_finding"}]
     assert state.tasks[0].status == "partial_failure"
-    assert "store_finding prerequisite" in state.tasks[0].status_reason
+    assert "finding persistence" in state.tasks[0].status_reason
+
+
+def test_missing_finding_acceptance_repairs_missing_evidence_assertion_once():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1, "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 1})
+    task = Task(task_uid="active", title="Reflected XSS", objective="Verify reflected XSS", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append((prompt, run_policy.required_tool_names, run_policy.max_tool_calls))
+        if len(calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="candidate acceptance rejected",
+                outcomes=[ToolOutcome(
+                    sequence=1,
+                    tool_use_id="acceptance-rejected",
+                    tool_name="record_task_acceptance",
+                    success=False,
+                    correctable=False,
+                    input_summary=json.dumps({"disposition": "finding_candidate"}),
+                    output_summary="Acceptance disposition finding_candidate requires a finding created by this task.",
+                )],
+            )
+        if len(calls) == 2:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="finding rejected",
+                outcomes=[ToolOutcome(
+                    sequence=2,
+                    tool_use_id="finding-rejected",
+                    tool_name="store_finding",
+                    success=False,
+                    correctable=False,
+                    input_summary="missing assertions",
+                    output_summary="At least one evidence assertion is required",
+                )],
+            )
+        if len(calls) == 3:
+            assert run_policy.max_tool_calls == 2
+            assert "evidence_assertions" in prompt
+            assert "read_artifact for at most one" in prompt
+            return workflow_mod.TaskExecutorCycleResult(
+                text="finding stored after repair",
+                outcomes=[ToolOutcome(
+                    sequence=3,
+                    tool_use_id="finding-stored",
+                    tool_name="store_finding",
+                    success=True,
+                    correctable=False,
+                    input_summary="corrected assertions",
+                    output_summary='{"finding_ref":"finding:finding-1"}',
+                )],
+            )
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="finding_candidate",
+            summary="Finding persisted",
+            evidence_refs=("finding:finding-1",),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(
+            text="acceptance stored",
+            outcomes=[ToolOutcome(
+                sequence=4,
+                tool_use_id="acceptance-stored",
+                tool_name="record_task_acceptance",
+                success=True,
+                correctable=False,
+                input_summary="acceptance",
+                output_summary="acceptance stored",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, *_args: (
+            '{"prompt":"verify xss","tools":[]}'
+            if role == "task_prompt_builder"
+            else '{"status":"done","reason":"acceptance recorded"}'
+        ),
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert [required for _prompt, required, _limit in calls] == [
+        {"record_task_acceptance"},
+        {"store_finding"},
+        {"store_finding"},
+        {"record_task_acceptance"},
+    ]
+    assert state.tasks[0].status == "done", state.tasks[0].status_reason
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ("At least one evidence assertion is required", True),
+        ("evidence_assertions marker was not found", True),
+        ("Unknown severity", False),
+    ],
+)
+def test_finding_submission_repairability_is_narrow(error, expected):
+    assert MultiAgentWorkflowController._finding_submission_error_is_repairable(error) is expected
 
 
 def test_task_prompts_reject_host_wide_scans_for_explicit_url_service_targets():

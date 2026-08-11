@@ -195,6 +195,12 @@ Inventory item `kind` is one of `endpoint`, `parameter`, `workflow`, `service`, 
 such as discovered parameters, in `attributes`. The executor receives this exact contract whenever a criterion
 requires `inventory_manifest`; ordinary JSON outputs must use the generic `artifact` evidence kind.
 
+Web discovery tasks should prefer deterministic manifest production. Pass `--inventory-manifest` (or the additive
+`inventory_manifest` tool argument) to `specialized_recon_orchestrator` or `auth_chain_analyzer` while retaining their
+normal output. The generally available `recon_output_to_inventory_manifest` tool converts katana, feroxbuster, ffuf,
+gobuster, dirsearch, httpx, gospider, and plain URL-list artifacts; the source artifact remains unchanged. URL-list
+auto-detection samples at most the first five non-empty lines before the converter processes the complete artifact.
+
 Before an inventory is frozen, Python extracts same-scope navigation and form destinations from current-operation HTML
 artifacts and merges unambiguous missing routes. Fan-out then dispatches by kind: endpoints and their parameters share
 route tasks, workflows and services receive matching assessment tasks, and technologies receive component-validation

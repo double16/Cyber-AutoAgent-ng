@@ -75,6 +75,7 @@ from modules.tools.memory import (
     Task,
     build_create_tasks_tool,
     build_record_task_acceptance_tool,
+    build_record_finding_validation_tool,
     _artifact_path_from_ref,
     _coverage_route_groups,
     _load_inventory_manifest,
@@ -88,6 +89,9 @@ from modules.tools.memory import (
     objective_validation_outcome,
     objective_validation_submitted,
     resolve_operation_targets,
+    store_finding,
+    task_service_scope_validation_details,
+    task_service_scope_violations,
 )
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.config.taxonomy_catalog import get_taxonomy_catalog, validate_taxonomy_mappings
@@ -346,6 +350,26 @@ class WorkflowStateStore:
 
     def list_task_acceptance_results(self, task_uid: str) -> List[Any]:
         return self.client.list_task_acceptance_results(task_uid)
+
+    def record_finding_candidate_acceptance(self, task: Task, finding_ref: str) -> str:
+        """Record deterministic source-task acceptance after candidate persistence."""
+
+        return build_record_task_acceptance_tool(task.task_uid, task)(
+            status="satisfied",
+            disposition="finding_candidate",
+            summary=f"Artifact-backed finding candidate persisted for {task.title}.",
+            evidence_refs=[finding_ref],
+        )
+
+    def record_task_acceptance(self, task: Task, payload: Dict[str, Any]) -> str:
+        """Record one controller-owned acceptance payload through the task-bound validator."""
+
+        return build_record_task_acceptance_tool(task.task_uid, task)(
+            status=str(payload["status"]),
+            disposition=str(payload["disposition"]),
+            summary=str(payload["summary"]),
+            evidence_refs=list(payload["evidence_refs"]),
+        )
 
     def list_finding_records(self) -> List[Dict[str, Any]]:
         return self.client.list_finding_records()
@@ -1596,8 +1620,19 @@ class MultiAgentWorkflowController:
             selected_optional_tool_names=selected_tools,
             include_create_tasks=False,
         )
-        tools = [tool for tool in tools if get_tool_name(tool) != "record_task_acceptance"]
-        tools.append(build_record_task_acceptance_tool(task.task_uid, task))
+        finding_tool_names = {
+            "record_finding_validation",
+            "record_task_acceptance",
+            "store_finding",
+        }
+        tools = [tool for tool in tools if get_tool_name(tool) not in finding_tool_names]
+        candidate_acceptance_owned = self._finding_candidate_acceptance_is_deterministic(task)
+        if task.kind == "finding_validation":
+            tools.append(build_record_finding_validation_tool(task))
+        elif task.kind != "objective_validation":
+            tools.append(store_finding)
+            if not candidate_acceptance_owned:
+                tools.append(build_record_task_acceptance_tool(task.task_uid, task))
         execution_prompt = str(prompt_spec.get("prompt") or task.objective)
         execution_prompt = (
             execution_prompt.rstrip()
@@ -1640,7 +1675,13 @@ class MultiAgentWorkflowController:
             ",".join(spec["command"] for spec in selected_shell_commands),
         )
         validation_tool = self._validation_tool_name(task)
-        required_tools = {validation_tool} if validation_tool else {"record_task_acceptance"}
+        required_tools = (
+            {validation_tool}
+            if validation_tool
+            else {"store_finding"}
+            if candidate_acceptance_owned
+            else {"record_task_acceptance"}
+        )
         task_policy = AgentRunPolicy(
             min_tool_calls=1,
             required_tool_names=required_tools,
@@ -1657,6 +1698,8 @@ class MultiAgentWorkflowController:
             recovery_next_action=(
                 f"Call {validation_tool} with the independent validation outcome."
                 if validation_tool
+                else "Call store_finding with literal artifact evidence assertions."
+                if candidate_acceptance_owned
                 else "Call record_task_acceptance with canonical durable evidence references."
             ),
         )
@@ -1675,7 +1718,98 @@ class MultiAgentWorkflowController:
             recovery_next_action=(
                 f"Call {validation_tool} with the independent validation outcome."
                 if validation_tool
+                else "Call store_finding with literal artifact evidence assertions."
+                if candidate_acceptance_owned
                 else "Call record_task_acceptance with canonical durable evidence references."
+            ),
+        )
+        finding_store_policy = AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"store_finding"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            actionless_mode="required_tool",
+            max_actionless_calls=1,
+            max_agent_calls=2,
+            max_model_turns=4,
+            max_tool_calls=1,
+            terminal_reason="task_finding_prerequisite_done",
+            terminal_message="Task finding prerequisite persisted",
+            recovery_objective=task.objective,
+            recovery_next_action="Call store_finding with literal artifact evidence assertions.",
+        )
+        finding_store_repair_policy = AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"store_finding"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            actionless_mode="required_tool",
+            max_actionless_calls=2,
+            max_agent_calls=3,
+            max_model_turns=6,
+            max_tool_calls=2,
+            terminal_reason="task_finding_prerequisite_repair_done",
+            terminal_message="Task finding prerequisite repaired and persisted",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Read at most one supplied artifact if needed, then call store_finding with a literal "
+                "evidence_assertions artifact/marker pair."
+            ),
+        )
+        finding_acceptance_policy = AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            actionless_mode="required_tool",
+            max_actionless_calls=1,
+            max_agent_calls=2,
+            max_model_turns=4,
+            max_tool_calls=1,
+            terminal_reason="task_finding_acceptance_done",
+            terminal_message="Task finding acceptance recorded",
+            recovery_objective=task.objective,
+            recovery_next_action="Call record_task_acceptance with the persisted finding reference.",
+        )
+        acceptance_recovery_policy = AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            actionless_mode="required_tool",
+            max_actionless_calls=2,
+            max_agent_calls=3,
+            max_model_turns=6,
+            max_tool_calls=2,
+            terminal_reason="task_acceptance_recovery_done",
+            terminal_message="Task acceptance correction completed",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Use the controller-supplied durable evidence. Read at most one listed artifact if needed, then "
+                "call record_task_acceptance with a changed submission."
+            ),
+        )
+        missing_acceptance_recovery_policy = AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            actionless_mode="required_tool",
+            max_actionless_calls=2,
+            max_agent_calls=3,
+            max_model_turns=6,
+            max_tool_calls=2,
+            terminal_reason="task_missing_acceptance_recovery_done",
+            terminal_message="Task terminal acceptance recovery completed",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Use the supplied durable evidence. Store one required observation if needed, then call "
+                "record_task_acceptance exactly once."
             ),
         )
         self._log_workflow(
@@ -1695,7 +1829,17 @@ class MultiAgentWorkflowController:
         endpoint_evidence_recoveries = 0
         evaluator_corrections = 0
         finding_observation_repairs = 0
+        finding_observation_store_recovery = False
+        finding_acceptance_recovery = False
+        acceptance_recovery_active = False
+        missing_acceptance_recovery_active = False
+        missing_acceptance_recovery_used = False
+        memory_acceptance_recovery_used = False
+        finding_recovery_payload: Dict[str, Any] = {}
+        finding_recovery_ref = ""
+        acceptance_recovery_evidence: List[Dict[str, str]] = []
         previous_progress_signature: Optional[str] = None
+        seen_progress_actions: set[str] = set()
         repeat_loop_signatures: set[str] = set()
         repeat_loop_recovery_used = False
         acceptance_correction_limit = self._task_acceptance_correction_count()
@@ -1752,7 +1896,7 @@ class MultiAgentWorkflowController:
                 ) + min(
                     evaluator_corrections,
                     evaluator_correction_limit,
-                )
+                ) + int(missing_acceptance_recovery_used)
                 if cycle > allowed_actor_cycles:
                     break
                 self._log_workflow(
@@ -1761,7 +1905,18 @@ class MultiAgentWorkflowController:
                     cycle,
                     allowed_actor_cycles,
                 )
-                worker_result = run_executor(actor_prompt, task_policy)
+                worker_result = run_executor(
+                    actor_prompt,
+                    finding_store_policy
+                    if finding_observation_store_recovery
+                    else finding_acceptance_policy
+                    if finding_acceptance_recovery
+                    else acceptance_recovery_policy
+                    if acceptance_recovery_active
+                    else missing_acceptance_recovery_policy
+                    if missing_acceptance_recovery_active
+                    else task_policy,
+                )
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
                 repeated_loop = cycle_result.repeat_loop_detected
@@ -1796,6 +1951,69 @@ class MultiAgentWorkflowController:
                 failed_acceptance_calls, successful_acceptance_calls, repeated_acceptance = (
                     track_acceptance_outcomes(cycle_result.outcomes)
                 )
+                finding_ref = self._finding_reference_from_outcomes(
+                    [
+                        outcome
+                        for outcome in cycle_result.outcomes
+                        if outcome.tool_name == "store_finding" and outcome.success
+                    ]
+                )
+                finding_acceptance_required = candidate_acceptance_owned or any(
+                    self._acceptance_requires_current_task_finding(outcome.output_summary)
+                    for outcome in failed_acceptance_calls
+                )
+                if finding_ref and finding_acceptance_required:
+                    try:
+                        self.state.record_finding_candidate_acceptance(task, finding_ref)
+                        self._log_workflow(
+                            "task finding candidate acceptance recorded task=%s finding=%s",
+                            self._task_label(task),
+                            finding_ref,
+                        )
+                    except ValueError as error:
+                        self._log_workflow(
+                            "task finding candidate acceptance not deterministic task=%s finding=%s reason=%s",
+                            self._task_label(task),
+                            finding_ref,
+                            self._short(str(error)),
+                        )
+                if finding_acceptance_recovery:
+                    if not successful_acceptance_calls:
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                "The required record_task_acceptance call did not succeed after the finding "
+                                "prerequisite was persisted."
+                            ),
+                        )
+                        self._log_workflow(
+                            "task finding acceptance recovery failed task=%s cycle=%s",
+                            self._task_label(task),
+                            cycle,
+                        )
+                        break
+                    finding_acceptance_recovery = False
+                if acceptance_recovery_active and successful_acceptance_calls:
+                    acceptance_recovery_active = False
+                if finding_observation_store_recovery:
+                    if not any(
+                        outcome.tool_name == "store_finding" and outcome.success
+                        for outcome in cycle_result.outcomes
+                    ):
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                "The evaluator-required store_finding call did not persist an artifact-backed "
+                                "security finding."
+                            ),
+                        )
+                        self._log_workflow(
+                            "task evaluator finding recovery failed task=%s cycle=%s",
+                            self._task_label(task),
+                            cycle,
+                        )
+                        break
+                    finding_observation_store_recovery = False
                 if repeated_tool_failure is not None:
                     decision = WorkflowDecision(
                         status="partial_failure",
@@ -2022,6 +2240,7 @@ class MultiAgentWorkflowController:
                                         finding_observation_repairs += 1
                                         self._record_efficiency_correction("finding_observation_repair")
                                         acceptance_submitted = False
+                                        finding_observation_store_recovery = True
                                         continuation_criteria = [
                                             "store the artifact-backed security finding identified by the evaluator"
                                         ]
@@ -2061,6 +2280,178 @@ class MultiAgentWorkflowController:
                                         evaluator_correction_limit,
                                         self._short(decision.reason),
                                     )
+                    elif (
+                        failed_acceptance_calls
+                        and self._acceptance_requires_current_task_finding(
+                            failed_acceptance_calls[-1].output_summary
+                        )
+                    ):
+                        finding_recovery_payload = self._acceptance_payload_from_outcome(
+                            failed_acceptance_calls[-1]
+                        )
+                        store_prompt = self._finding_persistence_recovery_prompt(
+                            task,
+                            finding_recovery_payload,
+                            self._artifact_refs_from_tool_outcomes(tool_outcomes),
+                        )
+                        store_result = self._executor_cycle_result(
+                            run_executor(store_prompt, finding_store_policy)
+                        )
+                        tool_outcomes.extend(store_result.outcomes)
+                        successful_findings = [
+                            outcome
+                            for outcome in store_result.outcomes
+                            if outcome.tool_name == "store_finding" and outcome.success
+                        ]
+                        finding_recovery_ref = self._finding_reference_from_outcomes(successful_findings)
+                        failed_finding = next(
+                            (
+                                outcome
+                                for outcome in reversed(store_result.outcomes)
+                                if outcome.tool_name == "store_finding" and not outcome.success
+                            ),
+                            None,
+                        )
+                        terminal_finding_error = failed_finding
+                        if (
+                            not finding_recovery_ref
+                            and failed_finding is not None
+                            and self._finding_submission_error_is_repairable(failed_finding.output_summary)
+                        ):
+                            repair_prompt = self._finding_persistence_repair_prompt(
+                                task,
+                                finding_recovery_payload,
+                                self._artifact_refs_from_tool_outcomes(tool_outcomes),
+                                failed_finding.output_summary,
+                            )
+                            self._emit_finding_submission_repair(
+                                task,
+                                attempt=1,
+                                outcome="requested",
+                                error=failed_finding.output_summary,
+                                artifact_refs=self._artifact_refs_from_tool_outcomes(tool_outcomes),
+                            )
+                            repair_result = self._executor_cycle_result(
+                                run_executor(repair_prompt, finding_store_repair_policy)
+                            )
+                            tool_outcomes.extend(repair_result.outcomes)
+                            successful_findings = [
+                                outcome
+                                for outcome in repair_result.outcomes
+                                if outcome.tool_name == "store_finding" and outcome.success
+                            ]
+                            finding_recovery_ref = self._finding_reference_from_outcomes(successful_findings)
+                            repair_failure = next(
+                                (
+                                    outcome
+                                    for outcome in reversed(repair_result.outcomes)
+                                    if outcome.tool_name == "store_finding" and not outcome.success
+                                ),
+                                None,
+                            )
+                            terminal_finding_error = repair_failure or failed_finding
+                            self._emit_finding_submission_repair(
+                                task,
+                                attempt=2,
+                                outcome="persisted" if finding_recovery_ref else "failed",
+                                error=repair_failure.output_summary if repair_failure else "",
+                                artifact_refs=self._artifact_refs_from_tool_outcomes(tool_outcomes),
+                            )
+                        if not successful_findings or not finding_recovery_ref:
+                            acceptance_submitted = True
+                            decision = WorkflowDecision(
+                                status="partial_failure",
+                                reason=(
+                                    "record_task_acceptance required a current-task finding, but finding persistence "
+                                    "did not return a canonical finding reference"
+                                    + (
+                                        f": {terminal_finding_error.output_summary}"
+                                        if terminal_finding_error is not None
+                                        else "."
+                                    )
+                                ),
+                            )
+                            self._log_workflow(
+                                "task finding prerequisite recovery failed task=%s cycle=%s",
+                                self._task_label(task),
+                                cycle,
+                            )
+                        else:
+                            finding_acceptance_recovery = True
+                            actor_prompt = self._finding_acceptance_recovery_prompt(
+                                task,
+                                finding_recovery_payload,
+                                finding_recovery_ref,
+                            )
+                            decision = WorkflowDecision(
+                                status="partial_failure",
+                                reason=(
+                                    "Finding prerequisite persisted; a bounded acceptance submission is required."
+                                ),
+                            )
+                            self._log_workflow(
+                                "task finding prerequisite persisted task=%s cycle=%s finding=%s",
+                                self._task_label(task),
+                                cycle,
+                                finding_recovery_ref,
+                            )
+                    elif (
+                        not memory_acceptance_recovery_used
+                        and failed_acceptance_calls
+                        and acceptance_failures >= max_acceptance_attempts
+                    ):
+                        rejected_acceptance = failed_acceptance_calls[-1]
+                        recovery = self._recover_final_memory_acceptance(
+                            task,
+                            rejected_acceptance,
+                            tool_outcomes,
+                        )
+                        memory_acceptance_recovery_used = recovery["attempted"]
+                        if recovery["succeeded"]:
+                            acceptance_results = self.state.list_task_acceptance_results(task.task_uid)
+                            acceptance_submitted = True
+                            validation_outcome = self._validation_outcome(task)
+                            decision = (
+                                WorkflowDecision(
+                                    status="done",
+                                    reason=(
+                                        "Independent validation confirmed the candidate."
+                                        if validation_outcome == "confirmed"
+                                        else "Independent validation did not confirm the candidate."
+                                    ),
+                                )
+                                if validation_outcome in {"confirmed", "not_confirmed", "rejected", "inconclusive"}
+                                else self._evaluate_task(
+                                    plan,
+                                    phase,
+                                    task,
+                                    combined_worker_context,
+                                    tool_outcomes,
+                                    acceptance_results,
+                                    cycle=cycle,
+                                    cycle_total=maximum_actor_cycles,
+                                )
+                            )
+                            self._log_workflow(
+                                "task acceptance memory recovery succeeded task=%s cycle=%s replacements=%s",
+                                self._task_label(task),
+                                cycle,
+                                len(recovery["replacements"]),
+                            )
+                        else:
+                            decision = WorkflowDecision(
+                                status="partial_failure",
+                                reason=(
+                                    "record_task_acceptance exhausted its configured correction allowance "
+                                    f"after {acceptance_failures} rejected call(s)."
+                                ),
+                            )
+                            self._log_workflow(
+                                "task acceptance memory recovery failed task=%s failures=%s error=%s",
+                                self._task_label(task),
+                                acceptance_failures,
+                                self._short(recovery["error"]),
+                            )
                     elif repeated_acceptance:
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -2091,12 +2482,27 @@ class MultiAgentWorkflowController:
                             if failed_acceptance_calls
                             else "No acceptance result was recorded."
                         )
+                        acceptance_recovery_evidence = self._acceptance_recovery_context(
+                            task,
+                            self.state.list_task_acceptance_results(task.task_uid),
+                            tool_outcomes,
+                            failed_acceptance_calls[-1] if failed_acceptance_calls else None,
+                        )
+                        invalid_memory_refs = self._invalid_memory_references(
+                            acceptance_error,
+                            self._acceptance_payload_from_outcome(
+                                failed_acceptance_calls[-1] if failed_acceptance_calls else None
+                            ),
+                        )
+                        recovery_details = self._acceptance_recovery_details(acceptance_error)
+                        if invalid_memory_refs:
+                            recovery_details["invalid_memory_refs"] = invalid_memory_refs
                         correction = json.dumps(
                             {
                                 "tool": "record_task_acceptance",
                                 "error": acceptance_error,
-                                "recovery": self._acceptance_recovery_details(acceptance_error),
-                                "available_artifact_refs": self._artifact_refs_from_tool_outcomes(tool_outcomes),
+                                "recovery": recovery_details,
+                                "available_evidence": acceptance_recovery_evidence,
                                 "remaining_corrections": max(
                                     0,
                                     1 + self._task_acceptance_correction_count() - acceptance_failures,
@@ -2113,11 +2519,13 @@ class MultiAgentWorkflowController:
                                 f"Controller correction: {correction}"
                             ),
                         )
+                        acceptance_recovery_active = True
                         self._log_workflow(
-                            "task acceptance gate incomplete task=%s cycle=%s missing=%s",
+                            "task acceptance gate incomplete task=%s cycle=%s missing=%s recovery_evidence=%s",
                             self._task_label(task),
                             cycle,
                             missing_text,
+                            len(acceptance_recovery_evidence),
                         )
                 if decision.status == "done":
                     self._log_workflow(
@@ -2153,6 +2561,23 @@ class MultiAgentWorkflowController:
                     cycle_result.outcomes,
                     self.state.list_task_acceptance_results(task.task_uid),
                 )
+                progress_actions = self._task_cycle_progress_actions(cycle_result.outcomes)
+                if progress_actions and progress_actions.issubset(seen_progress_actions):
+                    decision = WorkflowDecision(
+                        status="partial_failure",
+                        reason=(
+                            "Task executor repeated evidence-producing actions with unchanged results after a "
+                            "bounded retry; no new durable evidence was produced."
+                        ),
+                    )
+                    self._log_workflow(
+                        "task evidence stagnation task=%s cycle=%s repeated_actions=%s",
+                        self._task_label(task),
+                        cycle,
+                        len(progress_actions),
+                    )
+                    break
+                seen_progress_actions.update(progress_actions)
                 if progress_signature == previous_progress_signature:
                     decision = WorkflowDecision(
                         status="partial_failure",
@@ -2176,8 +2601,24 @@ class MultiAgentWorkflowController:
                 ) + min(
                     evaluator_corrections,
                     evaluator_correction_limit,
-                )
-                if cycle < allowed_actor_cycles:
+                ) + int(missing_acceptance_recovery_used)
+                if cycle < allowed_actor_cycles and not finding_acceptance_recovery:
+                    recovery_context = acceptance_recovery_evidence or self._acceptance_recovery_context(
+                        task,
+                        self.state.list_task_acceptance_results(task.task_uid),
+                        tool_outcomes,
+                        None,
+                    )
+                    self._emit_acceptance_recovery_context(
+                        task,
+                        missing_criteria=continuation_criteria
+                        or self._missing_acceptance_criteria(
+                            task,
+                            self.state.list_task_acceptance_results(task.task_uid),
+                        ),
+                        evidence=recovery_context,
+                        required_tool=continuation_required_tool or "record_task_acceptance",
+                    )
                     actor_prompt = self._task_executor_critic_guidance(
                         task,
                         continuation_criteria
@@ -2185,7 +2626,7 @@ class MultiAgentWorkflowController:
                             task,
                             self.state.list_task_acceptance_results(task.task_uid),
                         ),
-                        self._artifact_refs_from_tool_outcomes(tool_outcomes),
+                        recovery_context,
                         next_cycle=cycle + 1,
                         required_tool=continuation_required_tool,
                         evaluator_instructions=evaluator_instructions,
@@ -2201,6 +2642,51 @@ class MultiAgentWorkflowController:
                         cycle,
                         decision.status,
                         self._short(decision.reason),
+                    )
+                elif (
+                    cycle == allowed_actor_cycles
+                    and not missing_acceptance_recovery_used
+                    and not validation_tool
+                    and not candidate_acceptance_owned
+                    and not any(outcome.tool_name == "record_task_acceptance" for outcome in tool_outcomes)
+                ):
+                    recovery_context = self._acceptance_recovery_context(
+                        task,
+                        self.state.list_task_acceptance_results(task.task_uid),
+                        tool_outcomes,
+                        None,
+                    )
+                    if recovery_context:
+                        missing_acceptance_recovery_used = True
+                        missing_acceptance_recovery_active = True
+                        missing_criteria = self._missing_acceptance_criteria(
+                            task,
+                            self.state.list_task_acceptance_results(task.task_uid),
+                        )
+                        self._emit_acceptance_recovery_context(
+                            task,
+                            missing_criteria=missing_criteria,
+                            evidence=recovery_context,
+                            required_tool="record_task_acceptance",
+                            recovery_reason="missing_acceptance",
+                        )
+                        actor_prompt = self._missing_acceptance_recovery_prompt(
+                            task,
+                            missing_criteria,
+                            recovery_context,
+                        )
+                        self._log_workflow(
+                            "task missing acceptance recovery requested task=%s cycle=%s evidence=%s",
+                            self._task_label(task),
+                            cycle,
+                            len(recovery_context),
+                        )
+                elif cycle < allowed_actor_cycles and finding_acceptance_recovery:
+                    self._log_workflow(
+                        "task finding acceptance recovery requested task=%s cycle=%s finding=%s",
+                        self._task_label(task),
+                        cycle,
+                        finding_recovery_ref,
                     )
         self._log_workflow(
             "task evaluated task=%s status=%s reason=%s",
@@ -2227,6 +2713,15 @@ class MultiAgentWorkflowController:
         if task.kind == "objective_validation":
             return "record_objective_validation"
         return ""
+
+    @staticmethod
+    def _finding_candidate_acceptance_is_deterministic(task: Task) -> bool:
+        """Return whether a persisted candidate alone satisfies this task's frozen acceptance contract."""
+
+        if task.kind in {"finding_validation", "objective_validation"} or len(task.acceptance.criteria) != 1:
+            return False
+        requirements = task.acceptance.criteria[0].evidence_requirements
+        return bool(requirements) and all(requirement.kind == "finding_candidate" for requirement in requirements)
 
     @staticmethod
     def _validation_submitted(task: Task) -> bool:
@@ -2324,7 +2819,7 @@ class MultiAgentWorkflowController:
         self,
         task: Task,
         missing_criteria: List[str],
-        artifact_refs: List[str],
+        recovery_evidence: List[Dict[str, str]],
         *,
         next_cycle: int,
         required_tool: str = "",
@@ -2333,15 +2828,27 @@ class MultiAgentWorkflowController:
     ) -> str:
         required_tool = required_tool or self._validation_tool_name(task) or "record_task_acceptance"
         criteria = ", ".join(missing_criteria) or "the assigned acceptance contract"
-        latest_artifact = artifact_refs[-1] if artifact_refs else "No new canonical artifact reference is available."
+        evidence_ledger = (
+            "\n".join(
+                f"- {item['reference']} (source: {item['source']})" for item in recovery_evidence
+            )
+            or "- None"
+        )
+        artifact_available = any(item["reference"].startswith(("artifact:", "artifact_id:")) for item in recovery_evidence)
         frozen_criteria = "; ".join(
             f"{criterion.id}: {criterion.description}" for criterion in task.acceptance.criteria
         )
         evaluator_section = ""
         required_tool_section = f"Required tool call: {required_tool}\n"
         completion_instruction = (
-            "Use the latest evidence, make only the smallest required correction, and call the required tool once "
-            "with the independent outcome. Do not broaden scope or add criteria."
+            "Use the durable evidence ledger. Do not perform network discovery, scanning, or new testing. "
+            + (
+                "If exact evidence must be inspected, call read_artifact for at most one listed artifact, then call "
+                "the required tool once with a changed submission."
+                if artifact_available
+                else "Call the required tool once with a changed submission using the listed durable evidence."
+            )
+            + " Do not broaden scope or add criteria."
         )
         if evaluator_instructions:
             evaluator_section = f"\nEvaluator corrective guidance:\n{evaluator_instructions}\n"
@@ -2359,11 +2866,38 @@ Assigned objective: {task.objective}
 Frozen acceptance criteria: {frozen_criteria}
 
 Missing criterion: {criteria}
-Latest artifact/evidence: {latest_artifact}
+Durable evidence ledger:
+{evidence_ledger}
 {required_tool_section}{evaluator_section}
 
 {completion_instruction}
 {loop_section}
+"""
+
+    @staticmethod
+    def _missing_acceptance_recovery_prompt(
+        task: Task,
+        missing_criteria: List[str],
+        recovery_evidence: List[Dict[str, str]],
+    ) -> str:
+        """Build the one final completion-only turn after normal work omitted acceptance."""
+
+        criteria = ", ".join(missing_criteria) or "the assigned acceptance contract"
+        evidence_ledger = "\n".join(
+            f"- {item['reference']} (source: {item['source']})" for item in recovery_evidence
+        )
+        return f"""## Required Terminal Acceptance Recovery
+The normal task cycles ended without a record_task_acceptance call. Do not repeat discovery, scanning, testing, or
+prior shell commands.
+
+Assigned objective: {task.objective}
+Missing criterion: {criteria}
+Durable evidence ledger:
+{evidence_ledger}
+
+Use only this evidence. If the frozen criterion requires an observation or memory reference, call the appropriate
+storage tool exactly once first. Then call record_task_acceptance exactly once using only canonical references returned
+by the storage tool or listed above. Do not add criteria or broaden scope.
 """
 
     @staticmethod
@@ -2398,8 +2932,8 @@ Latest artifact/evidence: {latest_artifact}
         normalized = str(error or "").lower()
         if "finding created by this task" in normalized:
             return (
-                "Complete the finding prerequisite first: call store_finding and retain its returned canonical "
-                "finding reference"
+                "Complete the finding prerequisite first: call store_finding with a literal marker tied to its source "
+                "artifact and retain the canonical finding reference"
             )
         if "ambiguous" in normalized and "finding" in normalized:
             return "Select exactly one canonical current-task finding reference returned by store_finding"
@@ -2425,11 +2959,226 @@ Latest artifact/evidence: {latest_artifact}
         if "evidence" in normalized or "memory:" in normalized or "artifact:" in normalized:
             return (
                 "Create the required durable evidence first with the appropriate registered storage tool and use "
-                "the canonical reference it returns"
+                "only a canonical reference returned by that tool; do not invent a memory identifier"
             )
         if "no acceptance result" in normalized:
             return "Complete the remaining assigned work and create its required durable evidence"
         return "Correct the rejected values using the registered schema and canonical enum values"
+
+    @staticmethod
+    def _acceptance_requires_current_task_finding(error: str) -> bool:
+        """Return whether a rejected candidate acceptance has one deterministic prerequisite."""
+
+        return "finding created by this task" in str(error or "").lower()
+
+    @staticmethod
+    def _acceptance_payload_from_outcome(outcome: Optional[ToolOutcome]) -> Dict[str, Any]:
+        """Return the safe, previously rejected acceptance payload when the tool journal retained JSON."""
+
+        if outcome is None:
+            return {}
+        try:
+            payload = json.loads(outcome.input_summary)
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        fields = ("status", "disposition", "summary", "evidence_refs")
+        return {field: payload[field] for field in fields if field in payload}
+
+    @staticmethod
+    def _task_memory_refs_from_tool_outcomes(tool_outcomes: List[ToolOutcome]) -> List[Dict[str, str]]:
+        """Return memory references created successfully by this task's storage calls only."""
+
+        references: List[Dict[str, str]] = []
+        seen = set()
+        for outcome in tool_outcomes:
+            if not outcome.success or outcome.tool_name not in {"store_observation", "store_knowledge"}:
+                continue
+            try:
+                result = json.loads(outcome.output_summary)
+            except (TypeError, ValueError):
+                continue
+            reference = str(result.get("memory_ref", "")).strip() if isinstance(result, dict) else ""
+            if not re.fullmatch(r"memory:[0-9A-Za-z-]+", reference) or reference in seen:
+                continue
+            references.append({"reference": reference, "source": f"task_memory:{outcome.tool_name}"})
+            seen.add(reference)
+            if len(references) == 8:
+                break
+        return references
+
+    @staticmethod
+    def _invalid_memory_references(error: str, payload: Dict[str, Any]) -> List[str]:
+        """Return submitted memory refs only for the operation-scoped missing-memory validator error."""
+
+        if "acceptance evidence memory does not exist in this operation" not in str(error or "").lower():
+            return []
+        evidence_refs = payload.get("evidence_refs", []) if isinstance(payload, dict) else []
+        if not isinstance(evidence_refs, list):
+            return []
+        reported = set(re.findall(r"\bmemory:[0-9A-Za-z-]+\b", str(error or "")))
+        return [
+            reference
+            for reference in evidence_refs
+            if isinstance(reference, str)
+            and reference.startswith("memory:")
+            and reference in reported
+        ]
+
+    @staticmethod
+    def _replace_invalid_memory_references(
+        payload: Dict[str, Any],
+        invalid_references: List[str],
+        task_memory_refs: List[Dict[str, str]],
+    ) -> tuple[Dict[str, Any], List[Dict[str, str]]]:
+        """Replace only rejected memory refs with task-created memory refs, preserving all other fields."""
+
+        required_fields = {"status", "disposition", "summary", "evidence_refs"}
+        if not required_fields.issubset(payload) or not invalid_references or not task_memory_refs:
+            return {}, []
+        evidence_refs = payload.get("evidence_refs")
+        if not isinstance(evidence_refs, list):
+            return {}, []
+        invalid = set(invalid_references)
+        replacements = [item["reference"] for item in task_memory_refs if item.get("reference")]
+        corrected_refs: List[str] = []
+        for reference in [*evidence_refs, *replacements]:
+            if reference in invalid or reference in corrected_refs:
+                continue
+            corrected_refs.append(reference)
+        if not corrected_refs:
+            return {}, []
+        corrected = dict(payload)
+        corrected["evidence_refs"] = corrected_refs
+        replacement_map = [
+            {"rejected": reference, "replacement": replacement}
+            for reference in invalid_references
+            for replacement in replacements
+        ]
+        return corrected, replacement_map
+
+    def _recover_final_memory_acceptance(
+        self,
+        task: Task,
+        rejected_acceptance: ToolOutcome,
+        tool_outcomes: List[ToolOutcome],
+    ) -> Dict[str, Any]:
+        """Attempt one auditable controller repair for hallucinated task-memory references."""
+
+        payload = self._acceptance_payload_from_outcome(rejected_acceptance)
+        invalid_refs = self._invalid_memory_references(rejected_acceptance.output_summary, payload)
+        task_memory_refs = self._task_memory_refs_from_tool_outcomes(tool_outcomes)
+        corrected_payload, replacements = self._replace_invalid_memory_references(
+            payload,
+            invalid_refs,
+            task_memory_refs,
+        )
+        if not corrected_payload:
+            return {"attempted": False, "succeeded": False, "replacements": [], "error": ""}
+        try:
+            self.state.record_task_acceptance(task, corrected_payload)
+        except (TypeError, ValueError) as error:
+            self._emit_memory_acceptance_recovery(task, invalid_refs, replacements, "rejected", str(error))
+            return {"attempted": True, "succeeded": False, "replacements": replacements, "error": str(error)}
+        self._emit_memory_acceptance_recovery(task, invalid_refs, replacements, "accepted", "")
+        return {"attempted": True, "succeeded": True, "replacements": replacements, "error": ""}
+
+    @staticmethod
+    def _finding_reference_from_outcomes(outcomes: List[ToolOutcome]) -> str:
+        """Extract the canonical finding reference returned by a successful finding persistence call."""
+
+        for outcome in reversed(outcomes):
+            match = re.search(r"\bfinding:[0-9A-Za-z-]+\b", str(outcome.output_summary or ""))
+            if match:
+                return match.group(0)
+        return ""
+
+    @staticmethod
+    def _finding_persistence_recovery_prompt(
+        task: Task,
+        acceptance_payload: Dict[str, Any],
+        artifact_refs: List[str],
+    ) -> str:
+        """Build the controller-owned persistence turn after a missing-finding acceptance rejection."""
+
+        evidence = artifact_refs or list(acceptance_payload.get("evidence_refs") or [])
+        return f"""## Required Finding Prerequisite
+The previous finding-candidate acceptance was rejected because this task has not persisted its finding.
+Do not repeat discovery, call record_task_acceptance, or run any unrelated tool.
+
+Assigned objective: {task.objective}
+Existing durable evidence: {json.dumps(evidence, sort_keys=True)}
+Rejected acceptance context: {json.dumps(acceptance_payload, sort_keys=True)}
+
+Call store_finding exactly once. Its payload must include `evidence_assertions` with one object shaped exactly as
+`{{"artifact":"artifact:artifacts/<existing-file>","marker":"<exact literal text present in that file>"}}`.
+Use a positive marker from the affected response, not a control request or a paraphrase. Retain the returned canonical
+finding_ref. Do not add taxonomy mappings.
+"""
+
+    @staticmethod
+    def _finding_submission_error_is_repairable(error: str) -> bool:
+        """Return whether one evidence-focused finding repair can correct the rejected payload."""
+
+        normalized = str(error or "").lower()
+        return any(
+            token in normalized
+            for token in (
+                "evidence assertion",
+                "evidence_assertions",
+                "marker",
+                "artifact reference",
+            )
+        )
+
+    @staticmethod
+    def _finding_persistence_repair_prompt(
+        task: Task,
+        acceptance_payload: Dict[str, Any],
+        artifact_refs: List[str],
+        error: str,
+    ) -> str:
+        """Build one bounded, evidence-only repair after a rejected finding submission."""
+
+        evidence = artifact_refs or list(acceptance_payload.get("evidence_refs") or [])
+        return f"""## Required Finding Submission Repair
+The prior store_finding submission was rejected. This is the one permitted repair; do not repeat discovery, testing,
+or record_task_acceptance.
+
+Assigned objective: {task.objective}
+Validation error: {error}
+Available durable artifacts: {json.dumps(evidence, sort_keys=True)}
+Prior acceptance context: {json.dumps(acceptance_payload, sort_keys=True)}
+
+If the exact positive response text is not already known, call read_artifact for at most one listed artifact. Then call
+store_finding once with a materially changed payload that includes:
+`evidence_assertions: [{{"artifact":"<one listed artifact ref>","marker":"<exact literal positive text from it>"}}]`.
+The marker must occur verbatim in the cited artifact and demonstrate the claimed behavior. Do not use a control-only
+marker, a URL, a request payload, or an inferred summary.
+"""
+
+    @staticmethod
+    def _finding_acceptance_recovery_prompt(
+        task: Task,
+        acceptance_payload: Dict[str, Any],
+        finding_ref: str,
+    ) -> str:
+        """Build the controller-owned acceptance turn after the finding prerequisite succeeds."""
+
+        payload = dict(acceptance_payload)
+        payload["status"] = payload.get("status", "satisfied")
+        payload["disposition"] = "finding_candidate"
+        payload["evidence_refs"] = [finding_ref]
+        return f"""## Required Finding Acceptance
+The finding prerequisite is complete for the assigned task. Do not read artifacts, repeat testing, or call store_finding.
+
+Assigned objective: {task.objective}
+Canonical current-task finding reference: {finding_ref}
+Acceptance payload to submit: {json.dumps(payload, sort_keys=True)}
+
+Call record_task_acceptance exactly once with this finding_candidate payload. Use the canonical finding reference above.
+"""
 
     @staticmethod
     def _acceptance_recovery_details(error: str) -> Dict[str, Any]:
@@ -2438,7 +3187,9 @@ Latest artifact/evidence: {latest_artifact}
         text = str(error or "")
         normalized = text.lower()
         code = "invalid_payload"
-        if "inventory manifest" in normalized:
+        if "acceptance evidence memory does not exist in this operation" in normalized:
+            code = "invalid_memory_reference"
+        elif "inventory manifest" in normalized:
             code = "invalid_inventory_manifest"
         elif "evidence reference" in normalized or "evidence_refs" in normalized:
             code = "invalid_evidence_reference"
@@ -2514,6 +3265,31 @@ Latest artifact/evidence: {latest_artifact}
             sort_keys=True,
             separators=(",", ":"),
         )
+
+    @staticmethod
+    def _task_cycle_progress_actions(outcomes: List[ToolOutcome]) -> set[str]:
+        """Return successful action/result identities used to detect bounded stagnation.
+
+        This deliberately requires both the normalized action input and its observed result to
+        match. A changed request, payload, method, artifact path, or artifact content therefore
+        remains valid exploration progress.
+        """
+
+        fingerprints = set()
+        for outcome in outcomes:
+            if not outcome.success or outcome.tool_name == "record_task_acceptance":
+                continue
+            payload = json.dumps(
+                {
+                    "tool": outcome.tool_name,
+                    "input": outcome.input_fingerprint or outcome.input_summary,
+                    "output": outcome.output_fingerprint or outcome.output_summary,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            fingerprints.add(hashlib.sha256(payload.encode("utf-8")).hexdigest())
+        return fingerprints
 
     @staticmethod
     def _missing_acceptance_criteria(task: Task, results: List[Any]) -> List[str]:
@@ -2756,6 +3532,180 @@ Return exactly one decision for each candidate.
             emit_ui_event(event)
         except Exception:
             logger.debug("Failed to emit workflow event: %s", event.get("type"), exc_info=True)
+
+    def _emit_task_scope_validation(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        text: str,
+        stage: str,
+        decision: str,
+    ) -> None:
+        """Emit structured scope-validation telemetry without exposing the full prompt."""
+
+        violations = task_service_scope_validation_details(plan, task, text)
+        trace_attributes = {
+            "workflow.event.name": "task_scope_validation",
+            "workflow.task.uid": str(task.task_uid),
+            "workflow.phase.id": int(task.phase),
+            "workflow.scope_validation.stage": stage,
+            "workflow.scope_validation.decision": decision,
+            "workflow.scope_validation.target_scope": str(task.target_scope),
+            "workflow.scope_validation.target_ids": list(task.target_ids),
+            "workflow.scope_validation.result": "blocked" if violations else "allowed",
+            "workflow.scope_validation.violation_count": len(violations),
+            "workflow.scope_validation.violations": json.dumps(
+                [
+                    {
+                        "literal": item.get("literal"),
+                        "reason": item.get("reason"),
+                        "scheme": item.get("scheme"),
+                        "host": item.get("host"),
+                        "port": item.get("port"),
+                    }
+                    for item in violations
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("task_scope_validation", attributes=trace_attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit task scope validation trace span", exc_info=True)
+        self._emit_workflow_event({
+            "type": "task_scope_validation",
+            "task_uid": str(task.task_uid),
+            "phase": int(task.phase),
+            "stage": stage,
+            "decision": decision,
+            "target_scope": task.target_scope,
+            "target_ids": list(task.target_ids),
+            "violations": violations,
+        })
+
+    def _emit_finding_submission_repair(
+        self,
+        task: Task,
+        *,
+        attempt: int,
+        outcome: str,
+        error: str,
+        artifact_refs: List[str],
+    ) -> None:
+        """Emit auditable telemetry for the one bounded finding-submission repair."""
+
+        trace_attributes = {
+            "workflow.event.name": "finding_submission_repair",
+            "workflow.task.uid": str(task.task_uid),
+            "workflow.phase.id": int(task.phase),
+            "workflow.finding_repair.attempt": int(attempt),
+            "workflow.finding_repair.outcome": outcome,
+            "workflow.finding_repair.error": self._short(str(error or ""), 500),
+            "workflow.finding_repair.artifact_refs": json.dumps(sorted(set(artifact_refs))),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("finding_submission_repair", attributes=trace_attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit finding submission repair trace span", exc_info=True)
+        self._emit_workflow_event(
+            {
+                "type": "finding_submission_repair",
+                "task_uid": str(task.task_uid),
+                "phase": int(task.phase),
+                "attempt": int(attempt),
+                "outcome": outcome,
+                "error": self._short(str(error or ""), 500),
+                "artifact_refs": sorted(set(artifact_refs)),
+            }
+        )
+
+    def _emit_acceptance_recovery_context(
+        self,
+        task: Task,
+        *,
+        missing_criteria: List[str],
+        evidence: List[Dict[str, str]],
+        required_tool: str,
+        recovery_reason: str = "acceptance_correction",
+    ) -> None:
+        """Emit the compact durable context used by one generic acceptance correction."""
+
+        source_counts = Counter(item["source"] for item in evidence)
+        has_artifact = any(item["reference"].startswith(("artifact:", "artifact_id:")) for item in evidence)
+        recovery_mode = "evidence_read_then_accept" if has_artifact else "accept_with_durable_evidence"
+        if recovery_reason == "missing_acceptance":
+            recovery_mode = f"missing_acceptance_{recovery_mode}"
+        attributes = {
+            "workflow.event.name": "acceptance_recovery_context",
+            "workflow.task.uid": str(task.task_uid),
+            "workflow.phase.id": int(task.phase),
+            "workflow.acceptance_recovery.criteria": json.dumps(sorted(missing_criteria)),
+            "workflow.acceptance_recovery.required_tool": required_tool,
+            "workflow.acceptance_recovery.mode": recovery_mode,
+            "workflow.acceptance_recovery.reason": recovery_reason,
+            "workflow.acceptance_recovery.evidence_count": len(evidence),
+            "workflow.acceptance_recovery.source_counts": json.dumps(dict(sorted(source_counts.items()))),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("acceptance_recovery_context", attributes=attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit acceptance recovery context trace span", exc_info=True)
+        self._emit_workflow_event(
+            {
+                "type": "acceptance_recovery_context",
+                "task_uid": str(task.task_uid),
+                "phase": int(task.phase),
+                "missing_criteria": sorted(missing_criteria),
+                "required_tool": required_tool,
+                "mode": recovery_mode,
+                "reason": recovery_reason,
+                "evidence": evidence,
+            }
+        )
+
+    def _emit_memory_acceptance_recovery(
+        self,
+        task: Task,
+        rejected_refs: List[str],
+        replacements: List[Dict[str, str]],
+        outcome: str,
+        error: str,
+    ) -> None:
+        """Emit the final controller-owned memory-reference acceptance repair without exposing content."""
+
+        attributes = {
+            "workflow.event.name": "acceptance_memory_reference_recovery",
+            "workflow.task.uid": str(task.task_uid),
+            "workflow.phase.id": int(task.phase),
+            "workflow.acceptance_memory_recovery.outcome": outcome,
+            "workflow.acceptance_memory_recovery.rejected_refs": json.dumps(sorted(set(rejected_refs))),
+            "workflow.acceptance_memory_recovery.replacements": json.dumps(replacements, sort_keys=True),
+            "workflow.acceptance_memory_recovery.error": self._short(error, 500),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("acceptance_memory_reference_recovery", attributes=attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit acceptance memory-reference recovery trace span", exc_info=True)
+        self._emit_workflow_event(
+            {
+                "type": "acceptance_memory_reference_recovery",
+                "task_uid": str(task.task_uid),
+                "phase": int(task.phase),
+                "outcome": outcome,
+                "rejected_refs": sorted(set(rejected_refs)),
+                "replacements": replacements,
+                "error": self._short(error, 500),
+            }
+        )
 
     def _emit_workflow_activity(
         self,
@@ -5839,7 +6789,9 @@ behavior. For a differential claim, require a meaningful application-content com
 status, size, WAF, CDN, redirect, or challenge differences alone are insufficient. For extraction claims, require the
 claimed data in the response artifact rather than only in a request or payload. For authorization-bypass claims, a
 401 or 403 is blocking evidence, not bypass evidence; require protected data or an equivalent authorization-sensitive
-success condition. Return partial_failure when these claim-specific requirements are not met.
+success condition. Python rejects a confirmed outcome when every cited artifact matches a configured, unambiguous
+contradiction rule. Treat that rejection as non-confirmation, not a reason to retry the same artifacts. Return
+partial_failure when these claim-specific requirements are not met.
 """
         return f"""Review existing evidence and classify the active task. The task below is your sole evaluation target.
 Do not execute or continue the task, perform phase work, pursue the operation objective, modify artifacts, or gather new
@@ -6030,6 +6982,11 @@ Do not return `continue` merely because work is incomplete when the task history
             return ""
         return (
             "\n\n## Inventory Manifest Evidence Contract (Controller-owned)\n"
+            "Prefer deterministic production: request `inventory_manifest` from specialized_recon_orchestrator or "
+            "auth_chain_analyzer when applicable, or convert an existing katana, feroxbuster, ffuf, gobuster, "
+            "dirsearch, httpx, gospider, or plain URL-list artifact with `recon_output_to_inventory_manifest`. "
+            "Preserve the original tool output; the manifest is an additional artifact. Hand-author JSON only when "
+            "no supported producer or converter applies.\n"
             + inventory_manifest_contract_text()
         )
 
@@ -6059,6 +7016,21 @@ Do not return `continue` merely because work is incomplete when the task history
             "- `observation`: use for informational, non-security-impacting results.\n"
             "Never use `finding_candidate` merely because this task confirmed a pre-existing finding."
         )
+        finding_submission_methodology = (
+            "\n\n## Finding Submission Sequence\n"
+            "For a new security claim, call `store_finding` before `record_task_acceptance`, with one exact positive "
+            "marker and its artifact. Python validates and records its internal evidence receipt, creates the follow-up "
+            "verification task, and attempts this task's finding-candidate acceptance from the frozen criterion. Do not "
+            "use controls or failed requests as positive markers."
+            if task is not None
+            and task.kind not in {"finding_validation", "objective_validation"}
+            and any(
+                requirement.kind == "finding_candidate"
+                for criterion in task.acceptance.criteria
+                for requirement in criterion.evidence_requirements
+            )
+            else ""
+        )
         finding_validation_methodology = (
             "\n\n## Finding Validation Methodology\n"
             "For a confirmed finding, independently reproduce the claimed behavior and preserve the response or "
@@ -6067,7 +7039,8 @@ Do not return `continue` merely because work is incomplete when the task history
             "difference alone is not proof of backend behavior. For data-extraction claims, the extracted data must "
             "appear in the response artifact, not only in the request or payload. For authorization-bypass claims, "
             "a 401 or 403 is evidence of blocking, not bypass; require protected data or an equivalent "
-            "authorization-sensitive success condition."
+            "authorization-sensitive success condition. Python rejects confirmed outcomes whose cited artifacts "
+            "match configured, unambiguous contradiction rules; record those outcomes as not_confirmed instead."
             if task is not None and task.kind == "finding_validation"
             else ""
         )
@@ -6098,7 +7071,7 @@ ledger does not replace storing substantive artifact evidence. Successful accept
 evidence references as one operation observation for later tasks. The controller binds the tool to the assigned task,
 criterion, and coverage IDs; never guess or submit those IDs. End with a concise summary of completed work,
 partial progress, or a concrete blocker. Python owns task, phase, and operation state transitions; never claim or
-perform them.{finding_validation_methodology}"""
+perform them.{finding_submission_methodology}{finding_validation_methodology}"""
 
     @staticmethod
     def _tool_selection_policy() -> str:
@@ -6348,6 +7321,55 @@ memory describes related evidence or prior work."""
             text = " ".join((str(outcome.input_summary or ""), str(outcome.output_summary or "")))
             references.update(re.findall(r"(?:artifact|artifact_id):[^\s\\\]\}\)\"']+", text))
         return sorted(references)
+
+    @staticmethod
+    def _canonical_recovery_reference(reference: Any) -> str:
+        """Normalize a durable recovery reference and reject raw text or paths."""
+
+        value = str(reference or "").strip()
+        if value.startswith(("artifact:", "artifact_id:")):
+            try:
+                return canonical_artifact_reference(value)
+            except (TypeError, ValueError):
+                return ""
+        if value.startswith(("memory:", "finding:")):
+            return value
+        return ""
+
+    def _acceptance_recovery_context(
+        self,
+        task: Task,
+        acceptance_results: List[Any],
+        tool_outcomes: List[ToolOutcome],
+        rejected_acceptance: Optional[ToolOutcome],
+    ) -> List[Dict[str, str]]:
+        """Return compact, task-owned durable evidence for an acceptance correction."""
+
+        candidates: List[tuple[str, Any]] = [("task_evidence", reference) for reference in task.evidence]
+        for result in acceptance_results:
+            candidates.extend(("prior_acceptance", reference) for reference in result.evidence_refs)
+        candidates.extend(
+            ("tool_outcome", reference) for reference in self._artifact_refs_from_tool_outcomes(tool_outcomes)
+        )
+        candidates.extend(
+            (item["source"], item["reference"])
+            for item in self._task_memory_refs_from_tool_outcomes(tool_outcomes)
+        )
+        if rejected_acceptance is not None:
+            candidates.extend(
+                ("rejected_acceptance", reference)
+                for reference in self._acceptance_payload_from_outcome(rejected_acceptance).get("evidence_refs", [])
+            )
+        evidence: List[Dict[str, str]] = []
+        seen = set()
+        for source, candidate in candidates:
+            reference = self._canonical_recovery_reference(candidate)
+            if reference and reference not in seen:
+                evidence.append({"reference": reference, "source": source})
+                seen.add(reference)
+            if len(evidence) == 8:
+                break
+        return evidence
 
     @staticmethod
     def _acceptance_result_section(results: List[Any]) -> str:

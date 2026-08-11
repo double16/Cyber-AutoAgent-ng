@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 import pytest
 
 import modules.operation_plugins.web.tools.specialized_recon_orchestrator as sro
+import modules.tools.recon_inventory_manifest as manifest_tool
 
 
 class _CP:
@@ -129,6 +130,7 @@ def test_orchestrator_uses_controller_bound_target_before_recon(monkeypatch):
         lambda errors=None: {"success": True, "tools": [], "failed": []},
     )
     monkeypatch.setattr(sro, "_advanced_subdomain_enum", lambda target, errors=None: [])
+    monkeypatch.setattr(sro, "_advanced_subdomain_enum", lambda target, errors=None: [])
     def analyze_live_hosts(hosts, errors=None):
         captured["hosts"] = hosts
         return {"hosts": [], "technologies": []}
@@ -147,6 +149,90 @@ def test_orchestrator_uses_controller_bound_target_before_recon(monkeypatch):
 
     assert output["target"] == "host.docker.internal:4280"
     assert captured["hosts"] == ["host.docker.internal:4280"]
+
+
+def test_orchestrator_inventory_manifest_is_additive(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sro,
+        "_setup_specialized_tools",
+        lambda errors=None: {"success": True, "tools": [], "failed": []},
+    )
+    monkeypatch.setattr(
+        sro,
+        "_analyze_live_hosts",
+        lambda hosts, errors=None: {
+            "hosts": [{"url": "https://target.test", "status_code": 200, "tech": ["nginx"]}],
+            "technologies": [{"technology": "nginx"}],
+        },
+    )
+    monkeypatch.setattr(
+        sro,
+        "_deep_web_intelligence",
+        lambda live_hosts, errors=None: {
+            "endpoints": [{"url": "https://target.test/search?q=one", "method": "GET"}],
+            "js_files": [],
+            "parameters": [{"name": "q"}],
+        },
+    )
+    monkeypatch.setattr(sro, "_analyze_attack_surface", lambda results: results.get("intelligence", {}))
+    monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
+    monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
+    monkeypatch.setattr(
+        manifest_tool,
+        "resolve_inventory_target",
+        lambda target, target_id="target-1": ("https://target.test", target_id),
+    )
+    captured = {}
+
+    def write_manifest(path, manifest):
+        captured.update({"path": path, "manifest": manifest})
+        return {"path": path, "validation_status": "valid", "item_count": len(manifest["items"])}
+
+    monkeypatch.setattr(manifest_tool, "write_inventory_manifest", write_manifest)
+
+    regular = _as_json(sro.specialized_recon_orchestrator("https://target.test", recon_type="comprehensive"))
+    additional = _as_json(
+        sro.specialized_recon_orchestrator(
+            "https://target.test",
+            recon_type="comprehensive",
+            inventory_manifest=str(tmp_path / "inventory.json"),
+        )
+    )
+
+    assert "inventory_manifest" not in regular
+    assert additional["inventory_manifest"]["validation_status"] == "valid"
+    assert captured["path"] == str(tmp_path / "inventory.json")
+    assert {item["kind"] for item in captured["manifest"]["items"]} >= {
+        "endpoint",
+        "parameter",
+        "service",
+        "technology",
+    }
+
+
+def test_orchestrator_reports_manifest_failure_without_replacing_results(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sro,
+        "_setup_specialized_tools",
+        lambda errors=None: {"success": True, "tools": [], "failed": []},
+    )
+    monkeypatch.setattr(sro, "_analyze_live_hosts", lambda hosts, errors=None: {"hosts": [], "technologies": []})
+    monkeypatch.setattr(sro, "_analyze_attack_surface", lambda results: results.get("intelligence", {}))
+    monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
+    monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
+    monkeypatch.setattr(manifest_tool, "write_inventory_manifest", lambda path, manifest: (_ for _ in ()).throw(ValueError("empty")))
+
+    result = _as_json(
+        sro.specialized_recon_orchestrator(
+            "https://target.test",
+            recon_type="fingerprint",
+            inventory_manifest=str(tmp_path / "inventory.json"),
+        )
+    )
+
+    assert result["target"] == "target.test"
+    assert result["inventory_manifest"]["validation_status"] == "error"
+    assert result["inventory_manifest"]["error"] == "empty"
 
 
 def test_public_hostname_detection_rejects_non_public_hosts():

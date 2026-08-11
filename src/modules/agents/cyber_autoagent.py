@@ -82,6 +82,7 @@ from modules.handlers.utils import (
     tool_rename,
 )
 from modules.tools.artifact import read_artifact
+from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.browser import (
     browser_evaluate_js,
     browser_get_cookies,
@@ -594,6 +595,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         memory_retrieve,
         memory_list,
         read_artifact,
+        recon_output_to_inventory_manifest,
         create_tasks,
         sleep,
         python_repl,

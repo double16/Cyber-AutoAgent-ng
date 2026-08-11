@@ -1,0 +1,24 @@
+# A rule rejects a confirmed validation only when the candidate matches claim_terms
+# and every cited evidence artifact matches its contradiction markers.
+version: 1
+rules:
+  - id: local_file_inclusion_open_failure
+    claim_terms:
+      - local file inclusion
+      - lfi
+      - file inclusion
+    contradiction_all_of:
+      - failed to open stream
+      - failed opening
+  - id: authorization_bypass_denied
+    claim_terms:
+      - authorization bypass
+      - authentication bypass
+      - access control bypass
+      - idor
+      - bola
+    contradiction_any_of:
+      - "http/1.1 401"
+      - "http/1.1 403"
+      - "http/2 401"
+      - "http/2 403"
