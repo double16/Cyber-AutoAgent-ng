@@ -22,3 +22,14 @@ rules:
       - "http/1.1 403"
       - "http/2 401"
       - "http/2 403"
+  - id: user_enumeration
+    claim_terms:
+      - user enumeration
+      - username enumeration
+    confirmation_requirement: response_comparison
+  - id: lack_of_rate_limiting
+    claim_terms:
+      - lack of rate limiting
+      - no rate limiting
+      - rate limiting
+    confirmation_requirement: rate_limit_probe

@@ -58,6 +58,41 @@ def test_store_observation_fixes_category_and_never_promotes(memory_client, oper
     assert metadata["severity"] == "HIGH"
 
 
+def test_new_memory_write_emits_durable_memory_event(memory_client, operation_ids):
+    events = []
+    mod.set_memory_event_emitter(events.append)
+
+    try:
+        store_observation("A newly stored observation")
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert events == [
+        {
+            "type": "memory_added",
+            "memory_id": "m-new",
+            "memory_ref": "memory:m-new",
+            "category": "observation",
+            "content_preview": "A newly stored observation",
+            "content_length": len("A newly stored observation"),
+        }
+    ]
+
+
+def test_memory_added_event_bounds_long_content_preview(memory_client, operation_ids):
+    events = []
+    content = "x" * 241
+    mod.set_memory_event_emitter(events.append)
+
+    try:
+        store_observation(content)
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert events[0]["content_preview"] == ("x" * 240) + "..."
+    assert events[0]["content_length"] == 241
+
+
 def test_store_knowledge_is_internal_category(memory_client, operation_ids):
     store_knowledge("Use a test/control pair", {"knowledge_type": "technique"})
 
@@ -79,6 +114,46 @@ def test_typed_memory_cleaning_and_duplicates(memory_client, operation_ids):
         "memory_ref": "memory:m-existing",
     }
     memory_client.store_memory.assert_not_called()
+
+
+def test_duplicate_memory_write_does_not_emit_memory_added_event(memory_client, operation_ids):
+    events = []
+    memory_client.search.return_value = [{"id": "m-existing", "memory": "Existing observation"}]
+    mod.set_memory_event_emitter(events.append)
+
+    try:
+        store_observation("Existing observation")
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert events == []
+
+
+def test_failed_memory_write_does_not_emit_memory_added_event(memory_client, operation_ids):
+    events = []
+    memory_client.store_memory.side_effect = RuntimeError("backend unavailable")
+    mod.set_memory_event_emitter(events.append)
+
+    try:
+        with pytest.raises(RuntimeError, match="backend unavailable"):
+            store_observation("Unavailable observation")
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert events == []
+
+
+def test_memory_event_callback_failure_does_not_interrupt_storage(memory_client, operation_ids):
+    def fail_event(_event):
+        raise RuntimeError("event transport unavailable")
+
+    mod.set_memory_event_emitter(fail_event)
+    try:
+        result = json.loads(store_observation("Stored despite event transport failure"))
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert result["memory_ref"] == "memory:m-new"
 
 
 def test_duplicate_without_id_creates_referenceable_memory(memory_client, operation_ids):
@@ -561,6 +636,106 @@ def test_differential_confirmation_requires_control(tmp_path: Path, operation_id
             )
 
 
+def test_confirmed_enumeration_and_rate_limit_require_resolved_manifest(tmp_path: Path, operation_ids, memory_client):
+    existing = tmp_path / "existing.txt"
+    nonexistent = tmp_path / "nonexistent.txt"
+    existing.write_text("HTTP/1.1 200 OK\n\npositive-marker existing user", encoding="utf-8")
+    nonexistent.write_text("HTTP/1.1 200 OK\n\npositive-marker unknown user", encoding="utf-8")
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps({
+        "version": 1,
+        "checks": {
+            "user_enumeration": {
+                "known_existing_artifact": str(existing),
+                "known_nonexistent_artifact": str(nonexistent),
+            },
+            "lack_of_rate_limiting": {
+                "attempts": [
+                    {"sequence": index, "response_artifact": str(existing)}
+                    for index in range(1, 11)
+                ]
+            },
+        },
+    }), encoding="utf-8")
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    task = Task("task-1", "Verify", "Verify", acceptance, 1, "active",
+                kind="finding_validation", reference_id="finding-1")
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "title": "User Enumeration and Lack of Rate Limiting",
+            "claim": "User enumeration and lack of rate limiting",
+            "technique": "Authentication testing",
+            "evidence_assertions": [{"artifact": "artifact:existing.txt", "marker": "positive-marker"}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    acceptance_results = []
+    plan_store.get_acceptance_results.side_effect = lambda *_args: list(acceptance_results)
+    plan_store.store_acceptance_results.side_effect = (
+        lambda _op_id, _task_uid, results: acceptance_results.extend(results)
+    )
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry"),
+    ):
+        payload = json.loads(record_finding_validation(
+            "finding-1", "confirmed", "Confirmed", ["Replay requests"], "direct", [str(existing)], None,
+            None, str(manifest),
+        ))
+
+    assert payload["outcome"] == "confirmed"
+    validation = plan_store.store_finding_validation.call_args.args[2]
+    assert validation["validation_manifest_attestation"]["derived"]["lack_of_rate_limiting"]["attempt_count"] == 10
+
+
+def test_confirmed_enumeration_rejects_identical_response_signatures(tmp_path: Path, operation_ids):
+    response = tmp_path / "response.txt"
+    response.write_text("HTTP/1.1 200 OK\n\npositive-marker identical", encoding="utf-8")
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps({
+        "version": 1,
+        "checks": {"user_enumeration": {
+            "known_existing_artifact": str(response),
+            "known_nonexistent_artifact": str(response),
+        }},
+    }), encoding="utf-8")
+    task = Task("task-1", "Verify", "Verify", make_acceptance().to_dict(), 1, "active",
+                kind="finding_validation", reference_id="finding-1")
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "title": "User Enumeration",
+            "claim": "User enumeration",
+            "technique": "Authentication testing",
+            "evidence_assertions": [{"artifact": "artifact:response.txt", "marker": "positive-marker"}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match="materially different"),
+    ):
+        record_finding_validation(
+            "finding-1", "confirmed", "Confirmed", ["Replay requests"], "direct", [str(response)], None,
+            None, str(manifest),
+        )
+
+    plan_store.store_finding_validation.assert_not_called()
+
+
 def test_confirmed_lfi_validation_rejects_cited_open_failure(tmp_path: Path, operation_ids):
     artifact = tmp_path / "lfi.txt"
     artifact.write_text(
@@ -686,6 +861,7 @@ def test_finding_validation_schema_advertises_only_canonical_enum_values():
 
     assert schema["properties"]["outcome"]["enum"] == ["confirmed", "not_confirmed"]
     assert schema["properties"]["evidence_strategy"]["enum"] == ["direct", "differential"]
+    assert schema["properties"]["validation_manifest"]["type"] == "string"
     assert "evidence_assertions" not in schema["properties"]
     assert "evidence_assertions" not in schema["required"]
 
@@ -705,6 +881,7 @@ def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identi
     schema = get_tool_spec(mod.build_record_finding_validation_tool(task))["inputSchema"]["json"]
 
     assert "finding_uid" not in schema["properties"]
+    assert schema["properties"]["validation_manifest"]["type"] == "string"
     assert schema["required"] == ["outcome", "summary", "reproduction_steps"]
 
 

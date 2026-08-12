@@ -28,6 +28,7 @@ from strands.hooks.events import AfterToolCallEvent
 from strands.hooks import HookProvider, HookRegistry
 
 from modules.config.system import get_logger
+from modules.utils.reasoning_sanitization import ReasoningSanitizationState, sanitize_reasoning_event
 from modules.utils.tool_call_normalization import normalize_tool_call_payload
 
 
@@ -360,6 +361,8 @@ def patch_model_class_tool_use_id(
     @functools.wraps(orig_stream)
     async def stream_patched(self: Any, *args: Any, **kwargs: Any) -> AsyncIterator[dict]:
         state = _ToolUseIdStreamState()
+        reasoning_sanitization = ReasoningSanitizationState()
+        sanitized_reasoning_marker_count = 0
 
         def _patch_tool_use_id(event: dict[str, Any], where: str) -> None:
             name = event.get("name")
@@ -409,6 +412,16 @@ def patch_model_class_tool_use_id(
             ctu = ev.get("current_tool_use")
             if isinstance(ctu, dict):
                 _patch_tool_use_id(ctu, "current_tool_use")
+
+            removed = sanitize_reasoning_event(ev, reasoning_sanitization)
+            if removed:
+                sanitized_reasoning_marker_count += removed
+                if sanitized_reasoning_marker_count == removed:
+                    logger.info(
+                        "reasoning_control_tokens_sanitized model_class=%s count=%d",
+                        model_cls.__name__,
+                        sanitized_reasoning_marker_count,
+                    )
 
             yield ev
 

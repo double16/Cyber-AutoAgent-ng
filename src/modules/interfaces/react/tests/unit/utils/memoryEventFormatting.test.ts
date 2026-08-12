@@ -2,12 +2,12 @@ import {describe, expect, it} from '@jest/globals';
 import {formatAutoRunMemoryEvent} from '../../../src/utils/memoryEventFormatting.js';
 
 describe('formatAutoRunMemoryEvent', () => {
-  it('formats typed memory tool actions', () => {
+  it('formats durable memory additions', () => {
     expect(formatAutoRunMemoryEvent({
-      type: 'tool_start',
-      tool_name: 'store_finding',
-      tool_input: {title: 'SQL injection', severity: 'HIGH', target: '/search'},
-    })).toContain('submitting finding for verification');
+      type: 'memory_added',
+      category: 'finding_candidate',
+      content_preview: 'SQL injection on /search',
+    })).toBe('🧠 Memory added (finding candidate): SQL injection on /search');
   });
 
   it('formats finding verification lifecycle events', () => {
@@ -32,6 +32,7 @@ describe('formatAutoRunMemoryEvent', () => {
 
   it('ignores unrelated events', () => {
     expect(formatAutoRunMemoryEvent({type: 'tool_start', tool_name: 'shell'})).toBeNull();
+    expect(formatAutoRunMemoryEvent({type: 'tool_start', tool_name: 'store_finding'})).toBeNull();
     expect(formatAutoRunMemoryEvent({type: 'task_done', title: 'Recon'})).toBeNull();
   });
 });

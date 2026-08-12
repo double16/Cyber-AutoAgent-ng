@@ -346,6 +346,18 @@ def test_reasoning_termination_metrics_and_basic_helpers():
     assert handler._collapse_repeated_sentences("A. A. B.") == "A. B."
 
 
+def test_reasoning_handler_drops_provider_control_markers_before_emitting():
+    handler = make_handler()
+
+    handler._handle_reasoning("<|channel>thought\nInspect the artifact.")
+    handler._emit_accumulated_reasoning(force=True)
+    handler._handle_reasoning("<|channel>|thought")
+    handler._emit_accumulated_reasoning(force=True)
+
+    reasoning_events = [event for event in handler._events if event["type"] == "reasoning"]
+    assert [event["content"] for event in reasoning_events] == ["Inspect the artifact."]
+
+
 def test_tool_announcement_streaming_update_and_message_processing():
     handler = make_handler()
 
@@ -420,8 +432,8 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert "error" in types
     assert "task_done" not in types
     assert "task_started" not in types
-    assert handler.memory_ops == 1
-    assert handler.evidence_count == 1
+    assert handler.memory_ops == 0
+    assert handler.evidence_count == 0
     assert handler.coordinator.report_findings == 0
 
 
@@ -500,17 +512,22 @@ def test_non_task_state_tool_result_does_not_emit_task_lifecycle_events():
     assert "task_started" not in event_types(handler)
 
 
-def test_store_observation_success_updates_report_estimate_without_memory_reads(monkeypatch):
-    handler = make_handler()
+def test_memory_added_updates_report_estimate_without_memory_reads(monkeypatch):
+    events = []
     monkeypatch.setattr(rb, "token_calc", lambda chars, model_id=None: int(chars))
+    monkeypatch.setattr(rb, "get_models_client", lambda: None)
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
+    emitter = SimpleNamespace(emit=events.append)
+    handler = AgentEventHandler(
+        operation_id="OP_MEMORY_EVENT",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        start_metrics_thread=False,
+    )
 
-    handler.tool_name_buffer["high_obs"] = "store_observation"
-    handler.tool_input_buffer["high_obs"] = {
-        "content": "x" * 37,
-        "metadata": {"category": "observation", "severity": "HIGH"},
-    }
-    handler._process_tool_result_from_message(
-        {"toolUseId": "high_obs", "status": "success", "content": [{"text": "stored"}]}
+    handler.emit_ui_event(
+        {"type": "memory_added", "category": "observation", "content_length": 37}
     )
 
     assert handler.memory_ops == 1
@@ -518,6 +535,29 @@ def test_store_observation_success_updates_report_estimate_without_memory_reads(
     assert handler.coordinator.report_findings == 0
     assert handler.coordinator.report_observations == 1
     assert handler.coordinator.report_observation_content_tokens == 37
+
+
+def test_non_evidence_memory_added_updates_only_memory_count(monkeypatch):
+    events = []
+    monkeypatch.setattr(rb, "get_models_client", lambda: None)
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
+    emitter = SimpleNamespace(emit=events.append)
+    handler = AgentEventHandler(
+        operation_id="OP_MEMORY_EVENT",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        start_metrics_thread=False,
+    )
+
+    handler.emit_ui_event(
+        {"type": "memory_added", "category": "knowledge", "content_length": 24}
+    )
+
+    assert handler.memory_ops == 1
+    assert handler.evidence_count == 0
+    assert handler.coordinator.memory_ops == 1
+    assert handler.coordinator.evidence_count == 0
 
 
 @pytest.mark.parametrize(
@@ -530,7 +570,7 @@ def test_store_observation_success_updates_report_estimate_without_memory_reads(
         ),
     ],
 )
-def test_non_evidence_memory_tools_increment_only_memory_operations(tool_name, tool_input):
+def test_memory_tool_completion_does_not_increment_memory_operations(tool_name, tool_input):
     handler = make_handler()
     handler.tool_name_buffer["memory"] = tool_name
     handler.tool_input_buffer["memory"] = tool_input
@@ -539,9 +579,9 @@ def test_non_evidence_memory_tools_increment_only_memory_operations(tool_name, t
         {"toolUseId": "memory", "status": "success", "content": [{"text": "stored"}]}
     )
 
-    assert handler.memory_ops == 1
+    assert handler.memory_ops == 0
     assert handler.evidence_count == 0
-    assert handler.coordinator.memory_ops == 1
+    assert handler.coordinator.memory_ops == 0
     assert handler.coordinator.evidence_count == 0
     assert handler.coordinator.report_findings == 0
     assert handler.coordinator.report_observations == 0

@@ -112,6 +112,7 @@ from modules.tools.memory import (
     memory_retrieve,
     record_finding_validation,
     record_objective_validation,
+    set_memory_event_emitter,
     store_finding,
     store_objective_candidate,
     store_knowledge,
@@ -800,6 +801,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
             "ui_mode": config_manager.getenv("CYBER_UI_MODE", "cli").lower(),
         },
     )
+    set_memory_event_emitter(callback_handler.emit_ui_event)
 
     sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "false") or "false").strip().lower()
     if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
@@ -899,8 +901,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     # Initialize concurrent tool executor for parallel execution
     tool_executor = ConcurrentToolExecutor()
 
-    trace_attributes_tool_names = [get_tool_name(tool) for tool in tools_list]
-
     # Register toolUseId hook for patching toolUseId, must be last
     tool_use_id_hook = ToolUseIdHook()
     hooks.append(tool_use_id_hook)
@@ -953,9 +953,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         if config.provider in ["bedrock", "litellm"]
         else "local",
         "gen_ai.request.model": config.model_id,
-        # Tool configuration
-        "tools.available": len(trace_attributes_tool_names),
-        "tools.names": trace_attributes_tool_names,
+        # Tool configuration. Strands emits the authoritative per-agent tool list
+        # as gen_ai.agent.tools; do not duplicate it with custom attributes.
         "tools.parallel_limit": 8,
         # Memory configuration
         "memory.enabled": True,

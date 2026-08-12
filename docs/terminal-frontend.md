@@ -56,6 +56,9 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 
 - `tool_start`: Tool invocation with parameters
 - `tool_output`: Execution results
+- `memory_added`: A newly created durable semantic-memory record, with its reference, category, and bounded preview.
+  Duplicate matches and failed writes do not emit this event; the auto-run terminal and memory metric use it as their
+  source of truth.
 - `tool_discovery_start` / `tool_available` / `tool_unavailable` / `environment_ready`: Structured tool-discovery
   and environment status events, rendered directly by the terminal and auto-run console rather than as generic output
 - `task_started` / `task_deferred` / `task_done`: Workflow lifecycle events; deferred tasks return to the pending queue,
@@ -74,7 +77,8 @@ __CYBER_EVENT__{"type":"tool_start","tool_name":"shell","tool_input":{...}}__CYB
 - `assessment_complete`: Terminal lifecycle event emitted after report generation and any evaluation attempt
 
 The terminal gives `store_observation`, `store_knowledge`, `store_finding`, and `record_finding_validation` distinct
-summaries. Finding submission is displayed as pending verification, never as a confirmed vulnerability. Final-report
+tool summaries, while durable write reporting uses `memory_added`. Finding submission is displayed as pending
+verification, never as a confirmed vulnerability. Final-report
 progress with `report_step_kind=validation_failure` is labeled as requiring validation in interactive and auto-run
 output.
 

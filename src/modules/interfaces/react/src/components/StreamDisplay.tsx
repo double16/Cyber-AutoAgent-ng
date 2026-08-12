@@ -73,6 +73,7 @@ export type AdditionalStreamEvent =
   | { type: 'tool_start'; tool_name: string; tool_input: any; [key: string]: any }
   | { type: 'tool_input_update'; tool_id: string; tool_input: any; [key: string]: any }
   | { type: 'tool_input_corrected'; tool_id: string; tool_input: any; [key: string]: any }
+  | { type: 'memory_added'; memory_id?: string; memory_ref?: string; category?: string; content_preview?: string; content_length?: number; [key: string]: any }
   | { type: 'command'; content: string; [key: string]: any }
   | { type: 'output'; content: string; exitCode?: number; duration?: number; [key: string]: any }
   | { type: 'tool_discovery_start'; message?: string; [key: string]: any }

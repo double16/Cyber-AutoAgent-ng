@@ -22,6 +22,8 @@ SUPPORTED_RECON_FORMATS = (
     "httpx",
     "gospider",
     "url_list",
+    "specialized_recon",
+    "auth_chain",
 )
 RECON_FORMAT_ALIASES = {
     "ferox": "feroxbuster",
@@ -30,6 +32,8 @@ RECON_FORMAT_ALIASES = {
     "gospider_text": "gospider",
     "httpx_jsonl": "httpx",
     "katana_jsonl": "katana",
+    "specialized_recon_orchestrator": "specialized_recon",
+    "auth_chain_analyzer": "auth_chain",
 }
 URL_PATTERN = re.compile(r"https?://[^\s\]\[<>{}\"']+")
 STATUS_PATTERN = re.compile(r"(?:status(?:_code)?[=: ]+|\bStatus:\s*)(\d{3})", re.IGNORECASE)
@@ -211,6 +215,41 @@ def _parse_url_list(text: str) -> List[Dict[str, Any]]:
     return [_record(line.strip()) for line in io.StringIO(text) if line.strip()]
 
 
+def _parse_specialized_recon(text: str) -> List[Dict[str, Any]]:
+    """Normalize specialized_recon_orchestrator's recon_result_v1 output."""
+
+    values = _json_values(text)
+    if len(values) != 1 or not isinstance(values[0], dict):
+        return []
+    payload = values[0]
+    metadata = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    if metadata.get("format") != "recon_result_v1":
+        return []
+    technologies = payload.get("technologies") if isinstance(payload.get("technologies"), list) else []
+    records = [_record(url, technologies=technologies) for url in payload.get("live_hosts", []) if isinstance(url, str)]
+    records.extend(_record(url, technologies=technologies) for url in payload.get("endpoints", []) if isinstance(url, str))
+    return records
+
+
+def _parse_auth_chain(text: str) -> List[Dict[str, Any]]:
+    """Normalize auth_chain_analyzer's structured JSON output."""
+
+    values = _json_values(text)
+    if len(values) != 1 or not isinstance(values[0], dict):
+        return []
+    payload = values[0]
+    if not isinstance(payload.get("auth_endpoints"), list) or "flow_analysis" not in payload:
+        return []
+    records = []
+    for endpoint in payload["auth_endpoints"]:
+        if not isinstance(endpoint, dict):
+            continue
+        url = endpoint.get("full_url") or endpoint.get("url")
+        if url:
+            records.append(_record(url, method=endpoint.get("method", "GET"), status=endpoint.get("status")))
+    return records
+
+
 def _is_complete_http_url(value: str) -> bool:
     """Return whether one stripped line contains only a parseable HTTP(S) URL."""
 
@@ -236,10 +275,16 @@ PARSERS = {
     "httpx": _parse_httpx,
     "gospider": _urls_from_text,
     "url_list": _parse_url_list,
+    "specialized_recon": _parse_specialized_recon,
+    "auth_chain": _parse_auth_chain,
 }
 
 
 def _infer_format(text: str) -> str:
+    if '"format": "recon_result_v1"' in text or '"format":"recon_result_v1"' in text:
+        return "specialized_recon"
+    if '"auth_endpoints"' in text and '"flow_analysis"' in text:
+        return "auth_chain"
     if '"request"' in text and '"endpoint"' in text:
         return "katana"
     if '"results"' in text and ('"FUZZ"' in text or '"ffufhash"' in text):
@@ -259,6 +304,29 @@ def _infer_format(text: str) -> str:
     if url_sample and all(_is_complete_http_url(candidate) for candidate in url_sample):
         return "url_list"
     raise ValueError(f"Unable to infer recon source format; choose one of: {', '.join(SUPPORTED_RECON_FORMATS)}")
+
+
+def _structured_inventory_fields(text: str, source_format: str) -> tuple[List[Dict[str, Any]], List[str], List[Any]]:
+    """Return workflow, technology, and parameter supplements for native structured outputs."""
+
+    values = _json_values(text)
+    payload = values[0] if len(values) == 1 and isinstance(values[0], dict) else {}
+    if source_format == "specialized_recon":
+        return (
+            [],
+            list(payload.get("technologies") or []) if isinstance(payload.get("technologies"), list) else [],
+            list(payload.get("parameters") or []) if isinstance(payload.get("parameters"), list) else [],
+        )
+    if source_format != "auth_chain":
+        return [], [], []
+    workflows = []
+    for mechanism in payload.get("auth_mechanisms", []) if isinstance(payload.get("auth_mechanisms"), list) else []:
+        if isinstance(mechanism, dict):
+            workflows.append({"description": mechanism.get("type") or mechanism.get("mechanism"), "attributes": mechanism})
+    flow = payload.get("flow_analysis") if isinstance(payload.get("flow_analysis"), dict) else {}
+    for step in flow.get("authentication_steps", []) if isinstance(flow.get("authentication_steps"), list) else []:
+        workflows.append({"description": str(step), "attributes": {"source": "authentication_steps"}})
+    return workflows, [], []
 
 
 def records_to_inventory_manifest(
@@ -485,7 +553,11 @@ def write_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, A
             "properties": {
                 "source_artifact": {
                     "type": "string",
-                    "description": "Current-operation artifact reference containing recon tool output.",
+                    "description": (
+                        "Canonical artifact reference, safe absolute path, or relative current-operation path "
+                        "containing recon output. Relative paths resolve from artifacts/ first, then from the "
+                        "operation output directory."
+                    ),
                 },
                 "output_file": {
                     "type": "string",
@@ -518,9 +590,10 @@ def recon_output_to_inventory_manifest(
 ) -> str:
     f"""Convert a supported recon artifact from {", ".join(SUPPORTED_RECON_FORMATS)} into a validated inventory manifest."""
 
-    from modules.tools.memory import _artifact_path_from_ref, canonical_artifact_reference
+    from modules.tools.artifact import resolve_operation_artifact_path
+    from modules.tools.memory import canonical_artifact_reference
 
-    source_path = _artifact_path_from_ref(source_artifact)
+    source_path = resolve_operation_artifact_path(source_artifact)
     source_ref = canonical_artifact_reference(source_path)
     with open(source_path, "r", encoding="utf-8", errors="replace") as source:
         text = source.read()
@@ -538,11 +611,15 @@ def recon_output_to_inventory_manifest(
         for record in records:
             if str(record.get("url") or "").startswith("/"):
                 record["url"] = urljoin(bound_target.rstrip("/") + "/", str(record["url"]).lstrip("/"))
+    workflows, technologies, parameters = _structured_inventory_fields(text, normalized_format)
     manifest = records_to_inventory_manifest(
         records,
         target_id=resolved_target_id,
         target=bound_target,
         source_ref=source_ref,
+        workflows=workflows,
+        technologies=technologies,
+        parameters=parameters,
     )
     if not manifest["items"]:
         raise ValueError("Recon output produced no in-scope inventory items")

@@ -21,7 +21,6 @@ from modules.config.models import (
 from modules.config.system import get_logger
 from modules.handlers.conversation_budget import get_shared_conversation_manager
 from modules.config.models.factory import _resolve_prompt_token_limit
-from modules.handlers.utils import get_tool_name
 
 logger = get_logger("Agents.CyberAutoAgent")
 
@@ -220,10 +219,6 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
         )
 
         if config.base_trace_attributes is not None:
-            trace_attributes_tool_names = []
-            for tool in kwargs.get("tools", []):
-                trace_attributes_tool_names.append(get_tool_name(tool))
-
             trace_attributes = config.base_trace_attributes | {
                 "langfuse.agent.type": agent_type,
                 "langfuse.capabilities.swarm": False,
@@ -234,9 +229,6 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 # Agent identification
                 "agent.name": f"Cyber-{name}",
                 "gen_ai.agent.name": f"Cyber-{name}",
-                # Tool configuration
-                "tools.available": len(trace_attributes_tool_names),
-                "tools.names": trace_attributes_tool_names,
             }
         else:
             trace_attributes = None

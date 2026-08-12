@@ -6,6 +6,7 @@ import pytest
 from modules.handlers.utils import get_tool_spec
 from modules.operation_plugins.web.tools import recon_inventory_manifest as manifest_tool
 from modules.prompts.factory import ModulePromptLoader
+from modules.tools import artifact
 from modules.tools import memory
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 
@@ -67,8 +68,55 @@ def test_format_inference_handles_structured_formats_and_url_lists():
     assert manifest_tool._infer_format('{"input":"target.test","status_code":200,"tech":[]}') == "httpx"
     assert manifest_tool._infer_format('{"type":"response","url":"https://target.test"}') == "feroxbuster"
     assert manifest_tool._infer_format("https://target.test/a\nhttps://target.test/b\n") == "url_list"
+    assert manifest_tool._infer_format(
+        '{"meta":{"format":"recon_result_v1"},"endpoints":["https://target.test/a"]}'
+    ) == "specialized_recon"
+    assert manifest_tool._infer_format(
+        '{"auth_endpoints":[{"full_url":"https://target.test/login"}],"flow_analysis":{}}'
+    ) == "auth_chain"
     with pytest.raises(ValueError, match="Unable to infer"):
         manifest_tool._infer_format("not recon output")
+
+
+@pytest.mark.parametrize(
+    ("source_format", "payload", "expected_kind"),
+    [
+        (
+            "specialized_recon",
+            {
+                "meta": {"format": "recon_result_v1"},
+                "live_hosts": ["https://target.test"],
+                "endpoints": ["https://target.test/app?q=1"],
+                "technologies": ["nginx"],
+                "parameters": ["csrf"],
+            },
+            "technology",
+        ),
+        (
+            "auth_chain",
+            {
+                "auth_endpoints": [{"full_url": "https://target.test/login", "status": 200}],
+                "auth_mechanisms": [{"type": "Session-based"}],
+                "flow_analysis": {"authentication_steps": ["Submit credentials"]},
+            },
+            "workflow",
+        ),
+    ],
+)
+def test_native_recon_formats_preserve_structured_inventory_context(source_format, payload, expected_kind):
+    records = manifest_tool.PARSERS[source_format](json.dumps(payload))
+    workflows, technologies, parameters = manifest_tool._structured_inventory_fields(json.dumps(payload), source_format)
+    manifest = manifest_tool.records_to_inventory_manifest(
+        records,
+        target_id="target-1",
+        target="https://target.test",
+        workflows=workflows,
+        technologies=technologies,
+        parameters=parameters,
+    )
+
+    assert any(item["kind"] == "endpoint" for item in manifest["items"])
+    assert any(item["kind"] == expected_kind for item in manifest["items"])
 
 
 @pytest.mark.parametrize(
@@ -167,6 +215,7 @@ def test_converter_reads_artifact_normalizes_alias_and_writes_valid_manifest(tmp
     )
     output = artifact_dir / "inventory.json"
     plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
 
@@ -197,6 +246,7 @@ def test_converter_supports_auto_explicit_and_hyphenated_url_list_formats(tmp_pa
     )
     output = artifact_dir / f"inventory-{source_format}.json"
     plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
     monkeypatch.setattr(
@@ -225,6 +275,7 @@ def test_converter_resolves_relative_gobuster_paths_against_registered_target(tm
     source.write_text("/admin (Status: 301) [Size: 0]", encoding="utf-8")
     output = artifact_dir / "inventory.json"
     plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
     monkeypatch.setattr(
@@ -261,6 +312,7 @@ def test_converter_rejects_unknown_format_empty_output_and_out_of_scope_records(
     artifact_dir.mkdir()
     source = artifact_dir / "recon.txt"
     source.write_text("nothing useful", encoding="utf-8")
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
 
     with pytest.raises(ValueError, match="source_format"):
@@ -298,3 +350,61 @@ def test_manifest_writer_rejects_missing_and_outside_output_paths(tmp_path, monk
         manifest_tool.write_inventory_manifest("", {"items": []})
     with pytest.raises(ValueError, match="inside the operation output root"):
         manifest_tool.write_inventory_manifest(str(tmp_path.parent / "outside.json"), {"items": []})
+
+
+def test_converter_source_artifact_resolves_relative_paths_and_prefers_artifacts(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    (artifact_dir / "urls.txt").write_text("https://target.test/artifact", encoding="utf-8")
+    (tmp_path / "urls.txt").write_text("https://target.test/root", encoding="utf-8")
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = json.loads(
+        manifest_tool.recon_output_to_inventory_manifest("urls.txt", "artifacts/inventory.json", source_format="url_list")
+    )
+
+    assert result["source_artifact"] == "artifact:artifacts/urls.txt"
+
+
+def test_converter_source_artifact_falls_back_to_operation_root_and_accepts_safe_absolute_path(tmp_path, monkeypatch):
+    source = tmp_path / "recon" / "urls.txt"
+    source.parent.mkdir()
+    source.write_text("https://target.test/root", encoding="utf-8")
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    relative = json.loads(
+        manifest_tool.recon_output_to_inventory_manifest("recon/urls.txt", "artifacts/relative.json", source_format="url_list")
+    )
+    absolute = json.loads(
+        manifest_tool.recon_output_to_inventory_manifest(
+            str(source), "artifacts/absolute.json", source_format="url_list"
+        )
+    )
+
+    assert relative["source_artifact"] == "artifact:recon/urls.txt"
+    assert absolute["source_artifact"] == "artifact:recon/urls.txt"
+
+
+def test_converter_source_artifact_rejects_operation_root_escapes(tmp_path, monkeypatch):
+    outside = tmp_path.parent / "outside-urls.txt"
+    outside.write_text("https://target.test/outside", encoding="utf-8")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "escaped-link.txt").symlink_to(outside)
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+
+    with pytest.raises(ValueError, match="outside"):
+        manifest_tool.recon_output_to_inventory_manifest(str(outside), "artifacts/inventory.json", source_format="url_list")
+    with pytest.raises(ValueError, match="outside"):
+        manifest_tool.recon_output_to_inventory_manifest("../outside-urls.txt", "artifacts/inventory.json", source_format="url_list")
+    with pytest.raises(ValueError, match="outside"):
+        manifest_tool.recon_output_to_inventory_manifest(
+            "artifact:artifacts/escaped-link.txt", "artifacts/inventory.json", source_format="url_list"
+        )

@@ -130,6 +130,69 @@ def test_default_text_runner_cleans_role_agent(monkeypatch):
     assert cleanup_calls == ["cleanup"]
 
 
+def test_acceptance_recovery_rejects_clear_http_error_artifacts(tmp_path):
+    artifact = tmp_path / "missing.html"
+    artifact.write_text("<title>404 Not Found</title><h1>Not Found</h1>", encoding="utf-8")
+
+    assert MultiAgentWorkflowController._artifact_recovery_quality(str(artifact)) == "non_viable"
+    assert MultiAgentWorkflowController._has_viable_acceptance_recovery_evidence(
+        [{"reference": "artifact:artifacts/missing.html", "usable": "false", "quality": "non_viable"}]
+    ) is False
+    assert MultiAgentWorkflowController._has_viable_acceptance_recovery_evidence(
+        [{"reference": "memory:observation-1"}]
+    ) is True
+
+
+def test_candidate_dependent_phase_closes_without_speculative_task_creation(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[
+            PlanPhase(
+                id=1,
+                title="Correlation",
+                status="active",
+                requires_finding_candidates=True,
+            ),
+        ],
+    )
+    state = FakeState(plan, finding_records=[])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        max_iterations=1,
+    )
+    transitions = []
+    def mark_phase(current_plan, phase_id, status):
+        transitions.append((phase_id, status))
+        updated = OperationPlan(
+            objective=current_plan.objective,
+            current_phase=phase_id,
+            total_phases=1,
+            phases=[PlanPhase(
+                id=1,
+                title="Correlation",
+                status=status,
+                requires_finding_candidates=True,
+            )],
+        )
+        state.plan = updated
+        return updated
+
+    monkeypatch.setattr(controller, "_mark_phase", mark_phase)
+    monkeypatch.setattr(controller, "_emit_workflow_completion", lambda _plan: None)
+
+    controller.run()
+
+    assert transitions == [(1, "not_applicable")]
+    assert any(
+        event["type"] == "phase_dependency_gate" and event["reason"] == "no_persisted_finding_candidates"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
 def test_default_text_runner_preserves_agent_error_when_cleanup_fails(monkeypatch):
     class Agent:
         def __call__(self, prompt):
@@ -2207,7 +2270,7 @@ def test_complete_acceptance_supersedes_repeated_rejection_after_recovery(replay
     assert state.tasks[0].status_reason == "durable acceptance approved"
 
 
-def test_evaluator_repairs_high_confidence_observation_by_creating_linked_finding():
+def test_evaluator_does_not_promote_high_confidence_observation_without_finding_receipt():
     runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1})
     task = Task(task_uid="active", title="Active", objective="test injection", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
@@ -2285,11 +2348,10 @@ def test_evaluator_repairs_high_confidence_observation_by_creating_linked_findin
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert len(actor_prompts) == 2
-    assert "Missing criterion: store the artifact-backed security finding" in actor_prompts[1]
-    assert "Required tool call: store_finding" in actor_prompts[1]
+    assert len(actor_prompts) == 1
     assert state.acceptance_results[task.task_uid][0].disposition == "observation"
-    assert state.tasks[0].status == "done"
+    assert state.tasks[0].status == "partial_failure"
+    assert "no artifact-validated store_finding receipt" in state.tasks[0].status_reason
 
 
 def test_evaluator_does_not_repair_low_confidence_observation_recommendation():
@@ -2548,7 +2610,7 @@ def test_missing_acceptance_gets_one_evidence_backed_terminal_recovery_turn(monk
         raise AssertionError(role)
 
     def work_runner(role, prompt, tools, system_prompt, run_policy):
-        calls.append((prompt, run_policy))
+        calls.append((prompt, run_policy, {workflow_mod.get_tool_name(tool) for tool in tools}))
         if len(calls) == 1:
             return workflow_mod.TaskExecutorCycleResult(
                 text="endpoint response recorded",
@@ -2608,6 +2670,8 @@ def test_missing_acceptance_gets_one_evidence_backed_terminal_recovery_turn(monk
     assert len(calls) == 2
     assert calls[1][1].required_tool_names == {"record_task_acceptance"}
     assert calls[1][1].max_tool_calls == 2
+    assert calls[1][2] <= {"read_artifact", "store_observation", "store_finding", "record_task_acceptance"}
+    assert "shell" not in calls[1][2]
     assert "Required Terminal Acceptance Recovery" in calls[1][0]
     assert "Do not repeat discovery" in calls[1][0]
     event = next(
@@ -3308,12 +3372,13 @@ def test_acceptance_recovery_context_merges_task_ledger_outcomes_and_rejection(m
 
     context = controller._acceptance_recovery_context(task, [acceptance], [outcome], rejected)
 
-    assert context == [
+    assert [{"reference": item["reference"], "source": item["source"]} for item in context] == [
         {"reference": "artifact:artifacts/task.txt", "source": "task_evidence"},
-        {"reference": "memory:prior-observation", "source": "prior_acceptance"},
         {"reference": "artifact:artifacts/outcome.txt", "source": "tool_outcome"},
         {"reference": "artifact:artifacts/rejected.txt", "source": "rejected_acceptance"},
+        {"reference": "memory:prior-observation", "source": "prior_acceptance"},
     ]
+    assert all(item["usable"] == "false" for item in context if item["reference"].startswith("artifact:"))
 
 
 def test_acceptance_recovery_context_includes_only_successful_task_created_memory_refs(monkeypatch):
@@ -5564,6 +5629,93 @@ def test_task_creation_batches_use_resolved_context_and_preserve_atomic_groups(m
     }
 
 
+def test_controller_inventory_filter_retains_unusual_in_scope_routes_and_removes_boundary_mismatch(
+    tmp_path,
+    monkeypatch,
+):
+    manifest_path = tmp_path / "inventory_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "items": [
+                    {
+                        "id": "in-scope",
+                        "target_id": "target-1",
+                        "kind": "endpoint",
+                        "value": "http://target.test:4280/etc/passwd",
+                    },
+                    {
+                        "id": "wrong-host",
+                        "target_id": "target-1",
+                        "kind": "endpoint",
+                        "value": "http://other.test:4280/admin",
+                    },
+                ],
+                "unassessed_gaps": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan = OperationPlan(
+        objective="assess http://target.test:4280",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="http://target.test:4280")],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=lambda *_args: "{}",
+    )
+    events = []
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(manifest_path))
+    monkeypatch.setattr(
+        workflow_mod,
+        "_load_inventory_manifest",
+        lambda _reference: (json.loads(manifest_path.read_text(encoding="utf-8")), "filtered-hash"),
+    )
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+
+    manifest, _snapshot_hash = controller._load_controller_inventory_manifest(
+        plan, "artifact:artifacts/inventory_manifest.json"
+    )
+
+    assert [item["id"] for item in manifest["items"]] == ["in-scope"]
+    assert "outside executable target boundaries" in manifest["unassessed_gaps"][-1]
+    assert events[-1]["type"] == "inventory_manifest_scope_filter"
+    assert events[-1]["rejection_reasons"] == {"host_mismatch": 1}
+
+
+def test_model_claim_conflict_emits_telemetry_without_changing_task_state(monkeypatch):
+    task = Task(task_uid="active", title="Active", objective="test", phase=1, status="active")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), [task]),
+        text_runner=lambda *_args: "{}",
+    )
+    events = []
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+
+    controller._emit_model_claim_conflicts(
+        task,
+        "The store_finding call was successful.",
+        [ToolOutcome(1, "store-1", "store_finding", False, True, "candidate", "rejected")],
+    )
+
+    assert events == [{
+        "type": "model_claim_conflicts_with_tool_outcome",
+        "task_uid": "active",
+        "phase": 1,
+        "claimed_action": "store_finding",
+        "actual_outcome": "failed_or_absent",
+        "tool_ids": ["store-1"],
+    }]
+
+
 def test_default_task_creation_batch_estimates_compact_fallback_prompt():
     plan = _plan()
     irrelevant = Task(
@@ -6806,11 +6958,25 @@ def test_missing_finding_acceptance_repairs_missing_evidence_assertion_once():
                     tool_name="record_task_acceptance",
                     success=False,
                     correctable=False,
-                    input_summary=json.dumps({"disposition": "finding_candidate"}),
-                    output_summary="Acceptance disposition finding_candidate requires a finding created by this task.",
+                    input_summary=json.dumps(
+                        {
+                            "disposition": "finding_candidate",
+                            "evidence_refs": ["artifact:artifacts/evidence.txt"],
+                        }
+                    ),
+                    output_summary=(
+                        "RECORD_TASK_ACCEPTANCE_REPAIR_FINDING_PREREQUISITE: The preceding finding submission "
+                        "did not persist. Do not retry acceptance. Repair store_finding first and use its returned "
+                        "finding:<id> reference only after it succeeds."
+                    ),
+                    raw_output_summary=(
+                        "Acceptance disposition finding_candidate requires a finding created by this task."
+                    ),
                 )],
             )
         if len(calls) == 2:
+            assert "## Required Finding Prerequisite" in prompt
+            assert "## Compact Task Continuation" not in prompt
             return workflow_mod.TaskExecutorCycleResult(
                 text="finding rejected",
                 outcomes=[ToolOutcome(
@@ -6879,6 +7045,13 @@ def test_missing_finding_acceptance_repairs_missing_evidence_assertion_once():
         {"store_finding"},
         {"record_task_acceptance"},
     ]
+    recovery_event = next(
+        event
+        for event in runtime.callback_handler.events
+        if event["type"] == "acceptance_recovery_context" and event["reason"] == "finding_prerequisite"
+    )
+    assert recovery_event["required_tool"] == "store_finding"
+    assert recovery_event["mode"] == "finding_prerequisite_store_with_durable_evidence"
     assert state.tasks[0].status == "done", state.tasks[0].status_reason
 
 
@@ -6892,6 +7065,27 @@ def test_missing_finding_acceptance_repairs_missing_evidence_assertion_once():
 )
 def test_finding_submission_repairability_is_narrow(error, expected):
     assert MultiAgentWorkflowController._finding_submission_error_is_repairable(error) is expected
+
+
+@pytest.mark.parametrize(
+    ("error", "raw_error", "expected"),
+    [
+        ("Acceptance disposition finding_candidate requires a finding created by this task.", "", True),
+        (
+            "RECORD_TASK_ACCEPTANCE_REPAIR_FINDING_PREREQUISITE: The preceding finding submission did not persist.",
+            "",
+            True,
+        ),
+        (
+            "RECORD_TASK_ACCEPTANCE_REPAIR_FINDING_PREREQUISITE: The preceding finding submission did not persist.",
+            "Acceptance disposition finding_candidate requires a finding created by this task.",
+            True,
+        ),
+        ("Acceptance evidence memory does not exist in this operation.", "", False),
+    ],
+)
+def test_acceptance_current_task_finding_classifier_uses_raw_and_normalized_errors(error, raw_error, expected):
+    assert MultiAgentWorkflowController._acceptance_requires_current_task_finding(error, raw_error) is expected
 
 
 def test_task_prompts_reject_host_wide_scans_for_explicit_url_service_targets():

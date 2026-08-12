@@ -176,7 +176,7 @@ def specialized_recon_orchestrator(
     Input:
     - Accepts URL or domain; normalizes to domain or IP address.
     - output_file: path to write results to disk.
-    - inventory_manifest: optional path for an additional validated inventory manifest.
+    - inventory_manifest: path for validated inventory manifest.
 
     Reuse vs run:
     - Reuse existing `recon_result_v1` for the same target if sufficient.

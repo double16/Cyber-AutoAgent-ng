@@ -179,6 +179,20 @@ def test_findings_summary_omits_confidence_when_missing():
     assert "Confidence" not in table
 
 
+def test_findings_summary_preserves_full_canonical_title():
+    title = "User Enumeration and Lack of Rate Limiting on /vulnerabilities/brute"
+    table = generate_findings_summary_table([
+        {
+            "category": "finding",
+            "severity": "MEDIUM",
+            "parsed": {"vulnerability": title, "where": "/vulnerabilities/brute"},
+            "validation_status": "verified",
+        }
+    ])
+
+    assert title in table
+
+
 def test_finding_report_prompt_and_evidence_omit_confidence():
     prompt = get_report_finding_system_prompt()
     evidence = format_evidence_for_report(

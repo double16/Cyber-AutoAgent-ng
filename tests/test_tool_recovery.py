@@ -12,6 +12,7 @@ from src.modules.handlers.tool_recovery import (
     _result_success,
     _result_text,
     _shell_executable,
+    format_tool_repair_error,
     is_correctable_tool_failure,
     outcomes_to_toon,
 )
@@ -94,6 +95,24 @@ def test_prerequisite_failure_allows_independent_work_until_successful_correctio
     assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "diagnostic", "correction"]
 
 
+def test_outcome_journal_retains_externalized_artifact_references():
+    journal = ToolOutcomeJournal()
+
+    outcome = journal.append(
+        tool_use_id="recon",
+        tool_name="specialized_recon_orchestrator",
+        success=True,
+        correctable=False,
+        tool_input={},
+        output=(
+            "[Tool output: 100 chars | Artifact ref: "
+            "artifact:artifacts/specialized_recon_orchestrator_result.log]"
+        ),
+    )
+
+    assert outcome.artifact_refs == ("artifact:artifacts/specialized_recon_orchestrator_result.log",)
+
+
 def test_failed_corrections_exhaust_configured_allowance_without_blocking_independent_work():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster --not-an-option http://target"}
@@ -157,7 +176,7 @@ def test_recovery_stops_at_configured_policy_violation_limit(limit):
     assert hook.exhausted is True
 
 
-def test_non_shell_correction_allows_independent_tools_and_requires_changed_input():
+def test_failed_store_finding_requires_changed_submission_before_other_mutations():
     journal = ToolOutcomeJournal()
     hook = TaskFailureRecoveryHook(journal, max_policy_violations=10)
     failed_input = {
@@ -176,7 +195,7 @@ def test_non_shell_correction_allows_independent_tools_and_requires_changed_inpu
 
     unrelated_write = _before("observation", "store_observation", {"content": "invented success"})
     hook._before_tool(unrelated_write)
-    assert unrelated_write.cancel_tool is False
+    assert "FINDING_REPAIR_REQUIRED" in unrelated_write.cancel_tool
 
     identical_retry = _before("identical", "store_finding", dict(failed_input))
     hook._before_tool(identical_retry)
@@ -297,6 +316,88 @@ def test_store_finding_missing_artifact_is_a_structured_correctable_failure():
     identical = _before("identical", "store_finding", failed_input)
     hook._before_tool(identical)
     assert "change its input or method" in identical.cancel_tool
+
+
+def test_failed_finding_submission_blocks_acceptance_until_changed_store_succeeds():
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal, max_policy_violations=10)
+    failed_input = {"title": "Candidate", "artifacts": ["artifacts/evidence.txt"]}
+    failed = _after(
+        "failed",
+        "store_finding",
+        failed_input,
+        status="error",
+        text="At least one evidence assertion is required",
+    )
+    hook._after_tool(failed)
+
+    assert hook.finding_submission_repair_active is True
+    assert "STORE_FINDING_REPAIR_MISSING_EVIDENCE_ASSERTIONS" in _result_text(failed.result)
+    assert journal.entries()[-1].raw_output_summary == "At least one evidence assertion is required"
+
+    acceptance = _before("acceptance", "record_task_acceptance", {"disposition": "finding_candidate"})
+    hook._before_tool(acceptance)
+    assert "FINDING_REPAIR_REQUIRED" in acceptance.cancel_tool
+
+    artifact_read = _before("read", "read_artifact", {"path": "artifacts/evidence.txt"})
+    hook._before_tool(artifact_read)
+    assert artifact_read.cancel_tool is False
+    hook._after_tool(_after("read", "read_artifact", artifact_read.tool_use["input"], status="success", text="proof"))
+
+    corrected = {
+        **failed_input,
+        "evidence_assertions": [{"artifact": "artifacts/evidence.txt", "marker": "proof"}],
+    }
+    retry = _before("retry", "store_finding", corrected)
+    hook._before_tool(retry)
+    assert retry.cancel_tool is False
+    hook._after_tool(_after("retry", "store_finding", corrected, status="success", text="finding:123"))
+    assert hook.finding_submission_repair_active is False
+
+
+def test_missing_marker_requires_artifact_read_before_changed_finding_retry():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
+    failed_input = {"title": "Candidate", "artifacts": ["artifacts/evidence.txt"], "evidence_assertions": []}
+    hook._after_tool(
+        _after(
+            "failed",
+            "store_finding",
+            failed_input,
+            status="error",
+            text="evidence assertion marker was not found in artifact:artifacts/evidence.txt",
+        )
+    )
+
+    retry = _before("retry", "store_finding", {**failed_input, "claim": "changed"})
+    hook._before_tool(retry)
+    assert "FINDING_REPAIR_READ_REQUIRED" in retry.cancel_tool
+
+
+def test_schema_error_is_replaced_with_compact_store_finding_repair_contract():
+    raw = "Validation failed for input parameters: 9 validation errors for Store_findingTool title Field required"
+    formatted = format_tool_repair_error("store_finding", raw)
+
+    assert formatted.startswith("STORE_FINDING_REPAIR_SCHEMA")
+    assert "content/metadata" in formatted
+    assert "9 validation errors" not in formatted
+
+
+def test_validation_error_status_is_not_treated_as_a_successful_tool_result():
+    assert _result_success({"status": "validation_error"}) is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "Acceptance disposition finding_candidate requires a finding created by this task",
+            "RECORD_TASK_ACCEPTANCE_REPAIR_FINDING_PREREQUISITE",
+        ),
+        ("acceptance result evidence_refs required", "RECORD_TASK_ACCEPTANCE_REPAIR_EVIDENCE_REFS"),
+    ],
+)
+def test_acceptance_errors_return_specific_repair_instructions(raw, expected):
+    assert expected in format_tool_repair_error("record_task_acceptance", raw)
 
 
 def test_non_shell_failed_correction_exhausts_recovery():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import shlex
 from collections import deque
@@ -11,6 +12,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 
 from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
+
+
+logger = logging.getLogger(__name__)
 
 
 _CORRECTABLE_ERROR_PATTERNS = tuple(
@@ -139,7 +143,24 @@ def _result_text(result: Any) -> str:
 def _result_success(result: Any, exception: Optional[Exception] = None) -> bool:
     if exception is not None or isinstance(result, Exception):
         return False
-    return not isinstance(result, dict) or result.get("status", "success") != "error"
+    if not isinstance(result, dict):
+        return True
+    return str(result.get("status", "success")).lower() in {"success", "ok"}
+
+
+def _artifact_references(*values: Any) -> tuple[str, ...]:
+    """Capture canonical-looking artifact references before result summaries are bounded."""
+
+    references = []
+    for value in values:
+        if isinstance(value, dict):
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        else:
+            text = str(value or "")
+        for reference in re.findall(r"(?:artifact|artifact_id):[^\s\\\]\}\)\"']+", text):
+            if reference not in references:
+                references.append(reference)
+    return tuple(references[:16])
 
 
 def _shell_executable(tool_input: Dict[str, Any]) -> str:
@@ -183,6 +204,60 @@ def is_correctable_tool_failure(tool_name: str, tool_input: Any, output: str) ->
     return tool_name in _STRUCTURED_CORRECTABLE_TOOLS and any(
         pattern.search(output) for pattern in _STRUCTURED_VALIDATION_PATTERNS
     )
+
+
+def format_tool_repair_error(tool_name: str, output: str) -> str:
+    """Return concise, actionable tool failures without exposing raw validator diagnostics to the agent."""
+
+    normalized = str(output or "").lower()
+    if tool_name == "store_finding":
+        if "evidence assertion" in normalized and "marker" not in normalized:
+            return (
+                "STORE_FINDING_REPAIR_MISSING_EVIDENCE_ASSERTIONS: Call read_artifact for one cited artifact, "
+                "then retry store_finding with evidence_assertions: "
+                "[{\"artifact\":\"artifact:artifacts/<file>\",\"marker\":\"<verbatim positive text>\"}]. "
+                "Do not call record_task_acceptance until store_finding succeeds and returns finding:<id>."
+            )
+        if "marker" in normalized and "not found" in normalized:
+            return (
+                "STORE_FINDING_REPAIR_MARKER_NOT_FOUND: The submitted marker is not evidence and must not be "
+                "reused. Call read_artifact for the cited artifact, then retry store_finding once with a changed "
+                "payload containing a verbatim positive marker. Do not call record_task_acceptance until it "
+                "returns finding:<id>."
+            )
+        if "validation failed for input parameters" in normalized or "field required" in normalized:
+            return (
+                "STORE_FINDING_REPAIR_SCHEMA: The legacy content/metadata payload is invalid. Retry store_finding "
+                "with title, claim, severity, target, technique, expected_result, observed_result, "
+                "reproduction_steps, artifacts, and evidence_assertions. Do not call record_task_acceptance until "
+                "store_finding returns finding:<id>."
+            )
+        if "artifact" in normalized:
+            return (
+                "STORE_FINDING_REPAIR_ARTIFACT: Use a canonical existing artifact reference that is also listed "
+                "in artifacts, read it if needed, and include a verbatim positive evidence_assertions marker. "
+                "Do not call record_task_acceptance until store_finding returns finding:<id>."
+            )
+    if tool_name == "record_task_acceptance":
+        if "requires a finding created by this task" in normalized:
+            return (
+                "RECORD_TASK_ACCEPTANCE_REPAIR_FINDING_PREREQUISITE: The preceding finding submission did not "
+                "persist. Do not retry acceptance. Repair store_finding first and use its returned finding:<id> "
+                "reference only after it succeeds."
+            )
+        if "evidence_refs required" in normalized:
+            eligible_match = re.search(r"eligible_evidence_refs=([^\n]+)", str(output or ""))
+            eligible_suffix = (
+                f" Eligible current-task references: {eligible_match.group(1).strip()}."
+                if eligible_match and eligible_match.group(1).strip() != "none"
+                else ""
+            )
+            return (
+                "RECORD_TASK_ACCEPTANCE_REPAIR_EVIDENCE_REFS: Retry record_task_acceptance with at least one "
+                "canonical durable evidence reference from this task, such as artifact:artifacts/<file>."
+                + eligible_suffix
+            )
+    return str(output or "")
 
 
 def _shell_command_text(tool_input: Any) -> str:
@@ -239,6 +314,8 @@ class ToolOutcome:
     recovery_role: str = "normal"
     input_fingerprint: str = ""
     output_fingerprint: str = ""
+    raw_output_summary: str = ""
+    artifact_refs: tuple[str, ...] = ()
 
 
 class ToolOutcomeJournal:
@@ -260,6 +337,7 @@ class ToolOutcomeJournal:
         correctable: bool,
         tool_input: Any,
         output: Any,
+        raw_output: Any = None,
         recovery_role: str = "normal",
     ) -> ToolOutcome:
         self._sequence += 1
@@ -271,6 +349,7 @@ class ToolOutcomeJournal:
                 input_summary = str(redacted_input)
         else:
             input_summary = str(redacted_input)
+        artifact_refs = _artifact_references(tool_input, output, raw_output)
         outcome = ToolOutcome(
             sequence=self._sequence,
             tool_use_id=_bounded_text(tool_use_id, 100),
@@ -282,6 +361,8 @@ class ToolOutcomeJournal:
             recovery_role=recovery_role,
             input_fingerprint=_value_fingerprint(redacted_input),
             output_fingerprint=_value_fingerprint(output),
+            raw_output_summary=_bounded_text(raw_output if raw_output is not None else output),
+            artifact_refs=artifact_refs,
         )
         self._entries.append(outcome)
         return outcome
@@ -326,6 +407,9 @@ class TaskFailureRecoveryHook(HookProvider):
         self._policy_violations = 0
         self._recovery_roles: Dict[str, str] = {}
         self._artifact_retry_used = False
+        self.finding_submission_repair_active = False
+        self._finding_repair_requires_artifact_read = False
+        self._finding_repair_artifact_read_complete = False
 
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(BeforeToolCallEvent, self._before_tool)
@@ -348,6 +432,35 @@ class TaskFailureRecoveryHook(HookProvider):
             return
         if not self.unresolved:
             return
+        if self.finding_submission_repair_active:
+            if tool_name == "record_task_acceptance":
+                self._block(
+                    event,
+                    tool_id,
+                    "FINDING_REPAIR_REQUIRED: store_finding previously failed. Do not call "
+                    "record_task_acceptance until a changed store_finding call succeeds and returns finding:<id>.",
+                )
+                return
+            if tool_name not in {"read_artifact", "store_finding"}:
+                self._block(
+                    event,
+                    tool_id,
+                    "FINDING_REPAIR_REQUIRED: only read_artifact and a changed store_finding call are allowed "
+                    "until finding persistence succeeds.",
+                )
+                return
+            if (
+                tool_name == "store_finding"
+                and self._finding_repair_requires_artifact_read
+                and not self._finding_repair_artifact_read_complete
+            ):
+                self._block(
+                    event,
+                    tool_id,
+                    "FINDING_REPAIR_READ_REQUIRED: the submitted evidence marker was not found. Read the cited "
+                    "artifact, then submit one changed store_finding payload using a verbatim positive marker.",
+                )
+                return
         if self.failure_category == "artifact_unavailable" and tool_name == "read_artifact":
             if self._artifact_retry_used:
                 self._block(
@@ -432,7 +545,8 @@ class TaskFailureRecoveryHook(HookProvider):
         tool_name = str(tool_use.get("name", "unknown"))
         tool_id = str(tool_use.get("toolUseId", tool_use.get("_toolUseId", "")))
         tool_input = tool_use.get("input", {})
-        output = _result_text(event.result)
+        raw_output = _result_text(event.result)
+        output = raw_output
         success = _result_success(event.result, event.exception)
         if not success and _is_interpretable_curl_http_result(tool_name, tool_input, output):
             success = True
@@ -444,9 +558,21 @@ class TaskFailureRecoveryHook(HookProvider):
             and tool_name == "shell"
             and any(pattern.search(output) for pattern in _STARTUP_FAILURE_PATTERNS)
         )
-        correctable = tool_name != "record_task_acceptance" and not success and (
-            startup_failure or is_correctable_tool_failure(tool_name, tool_input, output)
+        finding_submission_failure = tool_name == "store_finding" and any(
+            token in raw_output.lower() for token in ("evidence assertion", "marker", "validation failed", "field required")
         )
+        correctable = tool_name != "record_task_acceptance" and not success and (
+            startup_failure or finding_submission_failure or is_correctable_tool_failure(tool_name, tool_input, output)
+        )
+        if not success:
+            output = format_tool_repair_error(tool_name, raw_output)
+            if output != raw_output and isinstance(event.result, dict):
+                event.result["content"] = [{"text": output}]
+                logger.info(
+                    "Tool repair diagnostic retained outside agent context: tool=%s raw_error=%s",
+                    tool_name,
+                    _bounded_text(raw_output, 2000),
+                )
         self.journal.append(
             tool_use_id=tool_id,
             tool_name=tool_name,
@@ -454,6 +580,7 @@ class TaskFailureRecoveryHook(HookProvider):
             correctable=correctable,
             tool_input=tool_input,
             output=output,
+            raw_output=raw_output,
             recovery_role=role,
         )
 
@@ -471,12 +598,18 @@ class TaskFailureRecoveryHook(HookProvider):
                 self.unresolved = False
                 self.exhausted = False
                 self._policy_violations = 0
+                if tool_name == "store_finding":
+                    self.finding_submission_repair_active = False
+                    self._finding_repair_requires_artifact_read = False
+                    self._finding_repair_artifact_read_complete = False
             elif self.failure_category == "artifact_unavailable":
                 self._artifact_retry_used = True
             elif self._correction_attempts >= self.max_corrections:
                 self.exhausted = True
                 self._stop_event_loop(event, "correction_failed")
             return
+        if role in {"diagnostic", "read_only"} and success and tool_name == "read_artifact":
+            self._finding_repair_artifact_read_complete = True
         if role == "alternative" and success:
             self.unresolved = False
             self.exhausted = False
@@ -501,6 +634,10 @@ class TaskFailureRecoveryHook(HookProvider):
             self._correction_attempts = 0
             self._policy_violations = 0
             self._artifact_retry_used = False
+            if tool_name == "store_finding":
+                self.finding_submission_repair_active = True
+                self._finding_repair_requires_artifact_read = "marker" in raw_output.lower()
+                self._finding_repair_artifact_read_complete = False
 
     @staticmethod
     def _failure_category(tool_name: str, tool_input: Any, output: str) -> str:
@@ -519,7 +656,13 @@ class TaskFailureRecoveryHook(HookProvider):
         return "invalid_invocation"
 
     def recovery_guidance(self, tool_catalog_context: str = "") -> str:
-        if self.failure_category == "artifact_unavailable":
+        if self.finding_submission_repair_active:
+            guidance = (
+                "A finding submission failed. Do not call record_task_acceptance or unrelated tools. "
+                "Use only read_artifact and one changed store_finding call until it returns finding:<id>. "
+                f"Repair instruction: {self.failed_output}"
+            )
+        elif self.failure_category == "artifact_unavailable":
             guidance = (
                 "An artifact could not be read. Make at most one changed read_artifact call using its canonical "
                 "artifact: reference or a relative path (artifacts/ is searched first, then the operation root). "

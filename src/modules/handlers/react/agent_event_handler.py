@@ -33,6 +33,7 @@ from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
 from ...config.types import DEFAULT_MAX_DURATION
+from ...utils.reasoning_sanitization import sanitize_reasoning_control_text
 from ...utils.text_reducer import collapse_first_repeated_sequence
 from ..base import BudgetLimitReached
 from ..conversation_budget import token_calc
@@ -177,6 +178,7 @@ class OperationEventCoordinator:
         self._report_steps_started = 0
         self._report_refinement_cycles = get_report_refinement_cycles()
         self._operation_health_provider: Optional[Callable[[], Dict[str, Any]]] = None
+        self._operation_state_snapshot_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
     def next_agent_run_id(self, agent_name: str) -> str:
         with self._lock:
@@ -213,6 +215,27 @@ class OperationEventCoordinator:
             snapshot = provider()
         except Exception as error:
             logger.debug("Unable to compute operation health: %s", error, exc_info=True)
+            return None
+        return dict(snapshot) if isinstance(snapshot, dict) else None
+
+    def set_operation_state_snapshot_provider(
+        self,
+        provider: Optional[Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Set the best-effort state snapshot provider for failure fallback reporting."""
+
+        with self._lock:
+            self._operation_state_snapshot_provider = provider
+
+    def operation_state_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            provider = self._operation_state_snapshot_provider
+        if provider is None:
+            return None
+        try:
+            snapshot = provider()
+        except Exception as error:
+            logger.debug("Unable to collect operation state snapshot: %s", error, exc_info=True)
             return None
         return dict(snapshot) if isinstance(snapshot, dict) else None
 
@@ -814,6 +837,19 @@ class AgentEventHandler(PrintingCallbackHandler):
         """
         try:
             event = dict(event)
+            if event.get("type") == "memory_added":
+                category = str(event.get("category") or "")
+                content_length = int(event.get("content_length") or 0)
+                evidence = category in {"observation", "finding_candidate", "finding"}
+                self.memory_ops += 1
+                if evidence:
+                    self.evidence_count += 1
+                self.coordinator.record_memory(
+                    evidence=evidence,
+                    category=category,
+                    content_length=content_length,
+                    model_id=self.model_id,
+                )
             active_metadata = getattr(self, "_active_agent_metadata", None) or {}
             event.setdefault("operation_id", self.operation_id)
             event.setdefault("agent_run_id", active_metadata.get("agent_run_id") or self.agent_run_id)
@@ -842,6 +878,14 @@ class AgentEventHandler(PrintingCallbackHandler):
         """Return the shared point-in-time operation health snapshot."""
 
         return self.coordinator.operation_health_snapshot()
+
+    def set_operation_state_snapshot_provider(
+        self,
+        provider: Optional[Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Set the operation-wide state snapshot provider shared by every agent handler."""
+
+        self.coordinator.set_operation_state_snapshot_provider(provider)
 
     def operation_health_budget_diagnostics(self) -> Dict[str, Any]:
         """Return assessment progress and terminal-budget inputs for operation health."""
@@ -1557,6 +1601,7 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         We avoid emitting identical reasoning fragments repeatedly within a short window.
         """
+        text, _ = sanitize_reasoning_control_text(text)
         if not text:
             return
         try:
@@ -2086,46 +2131,6 @@ class AgentEventHandler(PrintingCallbackHandler):
             "outcome": outcome,
             "executed": executed,
         }
-
-        # Update live metrics for memory operations and evidence collection
-        try:
-            memory_tools = {
-                "store_observation",
-                "store_knowledge",
-                "store_finding",
-                "record_finding_validation",
-            }
-            if tool_name in memory_tools and success:
-                # Increment memory operation count on successful storage actions
-                if isinstance(tool_input, dict):
-                    self.memory_ops += 1
-                    # Only observations and finding candidates contribute evidence/report items.
-                    if tool_name in {"store_observation", "store_finding"}:
-                        category = "finding_candidate" if tool_name == "store_finding" else "observation"
-                        metadata = tool_input.get("metadata", {}) if isinstance(tool_input.get("metadata"), dict) else {}
-                        severity = str(metadata.get("severity", "") or tool_input.get("severity", ""))
-                        content = tool_input.get("content") or tool_input.get("claim") or ""
-                        self.evidence_count += 1
-                        if self.coordinator is not None:
-                            self.coordinator.record_memory(
-                                evidence=True,
-                                category=category,
-                                severity=severity,
-                                content_length=len(str(content)),
-                                model_id=self.model_id,
-                            )
-                    elif self.coordinator is not None:
-                        category = "knowledge" if tool_name == "store_knowledge" else "finding_validation"
-                        content = tool_input.get("content") or tool_input.get("summary") or ""
-                        self.coordinator.record_memory(
-                            evidence=False,
-                            category=category,
-                            content_length=len(str(content)),
-                            model_id=self.model_id,
-                        )
-        except Exception:
-            # Never allow metrics update errors to disrupt output
-            pass
 
         # Calculate duration if we have start time
         duration = None
@@ -2707,6 +2712,8 @@ class AgentEventHandler(PrintingCallbackHandler):
             return
 
         combined_reasoning = collapse_first_repeated_sequence("".join(self.reasoning_buffer)).strip()
+        combined_reasoning, _ = sanitize_reasoning_control_text(combined_reasoning)
+        combined_reasoning = combined_reasoning.strip()
         if not combined_reasoning:
             # Nothing meaningful; clear and return
             self.reasoning_buffer = []
@@ -3489,11 +3496,15 @@ class AgentEventHandler(PrintingCallbackHandler):
         """Generate fallback artifacts and publish their paths without rendering report content here."""
         from modules.handlers.report_generator import generate_deterministic_fallback_report
 
+        fallback_config = dict(config_params)
+        snapshot = self.coordinator.operation_state_snapshot()
+        if snapshot:
+            fallback_config["operation_state_snapshot"] = snapshot
         fallback = generate_deterministic_fallback_report(
             target=target,
             objective=objective,
             operation_id=self.operation_id,
-            config_params=config_params,
+            config_params=fallback_config,
             callback_handler=self,
             filename=report_path,
             error=error,

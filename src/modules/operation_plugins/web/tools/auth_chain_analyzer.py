@@ -55,7 +55,7 @@ def auth_chain_analyzer(
     - target_url: base URL/domain (scheme optional; https assumed)
     - auth_type: "jwt"|"oauth"|"saml"|"session"|"auto" (use specific type to reduce noise)
     - output_file: path to write results to disk
-    - inventory_manifest: optional path for an additional validated inventory manifest.
+    - inventory_manifest: path for validated inventory manifest.
 
     RETURNS (JSON)
     - summary: mechanism/token types, confirmed_exploits count

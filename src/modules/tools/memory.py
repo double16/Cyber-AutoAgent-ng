@@ -52,11 +52,12 @@ import subprocess
 import tempfile
 import threading
 import uuid
+from functools import wraps
 from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional, Protocol, Tuple
+from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Protocol, Tuple
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import litellm
@@ -93,6 +94,7 @@ logger = get_logger("Tools.Memory")
 _MEMORY_CONFIG: Optional[Dict[str, str]] = None
 _MEMORY_CLIENT: Optional["QdrantMemoryClient"] = None
 _DATABASE_STORE: Optional["ApplicationStore"] = None
+_MEMORY_EVENT_EMITTER: Optional[Callable[[Dict[str, Any]], None]] = None
 
 # Local Qdrant clients share one outputs-backed database within this process.
 _QDRANT_WRITE_LOCK = threading.Lock()
@@ -964,6 +966,7 @@ class PlanPhase:
     title: str
     status: PlanStatus
     criteria: str = ""
+    requires_finding_candidates: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, int) or self.id < 0:
@@ -980,6 +983,8 @@ class PlanPhase:
             object.__setattr__(self, "criteria", "")  # type: ignore[misc]
         if not isinstance(self.criteria, str):
             raise ValueError("phase.criteria must be a string")
+        if not isinstance(self.requires_finding_candidates, bool):
+            raise ValueError("phase.requires_finding_candidates must be a boolean")
 
     @staticmethod
     def from_obj(obj: Any) -> "PlanPhase":
@@ -990,6 +995,7 @@ class PlanPhase:
             title=str(obj.get("title", "")),
             status=str(obj.get("status", "pending")),  # validated in __post_init__
             criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
+            requires_finding_candidates=obj.get("requires_finding_candidates", False),
         )
 
     @staticmethod
@@ -998,7 +1004,7 @@ class PlanPhase:
 
     @staticmethod
     def csv_format() -> str:
-        return "id,title,status,criteria"
+        return "id,title,status,criteria,requires_finding_candidates"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -1007,7 +1013,7 @@ class PlanPhase:
         lines = []
         if include_format:
             lines.append(f"{self.toon_format()}:")
-        lines.append(f"  {self.id},{title},{status},{criteria}")
+        lines.append(f"  {self.id},{title},{status},{criteria},{str(self.requires_finding_candidates).lower()}")
         return "\n".join(lines).strip()
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1016,6 +1022,7 @@ class PlanPhase:
             "title": self.title,
             "status": self.status,
             "criteria": self.criteria,
+            "requires_finding_candidates": self.requires_finding_candidates,
         })
 
 
@@ -1281,16 +1288,104 @@ class SQLiteApplicationStore:
     targets and operations.
     """
 
+    _RUNTIME_RECOVERABLE_METHODS = frozenset({
+        "ensure_operation",
+        "has_operation",
+        "append_operation_model_metrics",
+        "list_operation_model_metrics",
+        "store_plan",
+        "get_plan",
+        "store_task",
+        "get_tasks",
+        "store_acceptance_results",
+        "get_acceptance_results",
+        "has_acceptance_memory_publication",
+        "mark_acceptance_memory_published",
+        "store_preflight_results",
+        "list_preflight_results",
+        "get_finding_by_fingerprint",
+        "get_finding",
+        "list_findings",
+        "store_finding_candidate",
+        "store_finding_evidence_receipt",
+        "get_finding_evidence_receipts",
+        "link_finding_source_task",
+        "store_finding_validation",
+        "update_finding_taxonomy_annotation",
+        "update_finding_attack_enrichment",
+        "resolve_finding",
+        "get_objective_candidate",
+        "get_objective_candidate_by_fingerprint",
+        "list_objective_candidates",
+        "store_objective_candidate",
+        "store_objective_validation",
+    })
+
+    def __getattribute__(self, name: str) -> Any:
+        """Wrap public persistence calls so a live database error gets one safe retry."""
+
+        value = object.__getattribute__(self, name)
+        recoverable = object.__getattribute__(self, "_RUNTIME_RECOVERABLE_METHODS")
+        if name not in recoverable or not callable(value):
+            return value
+
+        @wraps(value)
+        def recovered_call(*args: Any, **kwargs: Any) -> Any:
+            retry = object.__getattribute__(self, "_call_with_runtime_recovery")
+            return retry(lambda: value(*args, **kwargs))
+
+        return recovered_call
+
     def __init__(self, db_path: str, logical_target: str, read_only: bool = False):
         self.db_path = db_path
         self.logical_target = logical_target
         self.read_only = read_only
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._runtime_recovery_in_progress = False
         if self.read_only:
             if not os.path.isfile(self.db_path):
                 raise FileNotFoundError(f"Application database does not exist: {self.db_path}")
         else:
             self._initialize_writable_database()
+
+    def _recover_runtime_database(self, error: Exception) -> bool:
+        """Attempt one fail-closed repair after a live SQLite failure."""
+
+        if self.read_only or self._runtime_recovery_in_progress:
+            return False
+        self._runtime_recovery_in_progress = True
+        try:
+            backup = self._backup_database_for_recovery()
+            recovered = self._recover_database()
+            integral = recovered and self._sqlite_integrity_check(self.db_path).lower() == "ok"
+            logger.warning(
+                "SQLite runtime recovery database=%s backup=%s recovered=%s error=%s",
+                Path(self.db_path).name,
+                backup.name,
+                integral,
+                type(error).__name__,
+            )
+            return integral
+        except (OSError, sqlite3.DatabaseError) as recovery_error:
+            logger.error(
+                "SQLite runtime recovery failed database=%s original=%s recovery=%s",
+                Path(self.db_path).name,
+                type(error).__name__,
+                type(recovery_error).__name__,
+            )
+            return False
+        finally:
+            self._runtime_recovery_in_progress = False
+
+    def _call_with_runtime_recovery(self, operation: Callable[[], Any]) -> Any:
+        """Retry one store operation after a successful runtime recovery."""
+
+        try:
+            return operation()
+        except (sqlite3.DatabaseError, OSError) as error:
+            if not self._recover_runtime_database(error):
+                raise
+            return operation()
 
     @staticmethod
     def _sqlite_integrity_check(db_path: str) -> str:
@@ -2703,7 +2798,40 @@ def _store_memory_entry(
         memory_id = _memory_id_from_result(_exact_memory_match(recovered, cleaned_content))
     if not memory_id:
         raise RuntimeError("Memory was stored, but the backend did not return a durable ID")
+    _emit_memory_added(memory_id, category, cleaned_content)
     return _MemoryStoreResult(created=True, memory_id=memory_id)
+
+
+def set_memory_event_emitter(emitter: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Set the callback used to publish successful durable memory writes."""
+
+    global _MEMORY_EVENT_EMITTER
+    _MEMORY_EVENT_EMITTER = emitter
+
+
+def _emit_memory_added(memory_id: str, category: str, content: str) -> None:
+    """Publish one best-effort event after a new memory receives a durable ID."""
+
+    emitter = _MEMORY_EVENT_EMITTER
+    if not callable(emitter):
+        return
+    preview_limit = 240
+    preview = content[:preview_limit]
+    if len(content) > preview_limit:
+        preview += "..."
+    try:
+        emitter(
+            {
+                "type": "memory_added",
+                "memory_id": memory_id,
+                "memory_ref": f"memory:{memory_id}",
+                "category": category,
+                "content_preview": preview,
+                "content_length": len(content),
+            }
+        )
+    except Exception:
+        logger.debug("Unable to emit memory-added event", exc_info=True)
 
 
 def _operation_output_root() -> str:
@@ -3196,21 +3324,27 @@ def _load_finding_validation_guards() -> List[Dict[str, Any]]:
         claim_terms = item.get("claim_terms")
         all_of = item.get("contradiction_all_of")
         any_of = item.get("contradiction_any_of")
+        confirmation_requirement = str(item.get("confirmation_requirement") or "").strip()
         if (
             not rule_id
             or not isinstance(claim_terms, list)
             or not all(isinstance(term, str) and term.strip() for term in claim_terms)
-            or bool(all_of) == bool(any_of)
+            or (not confirmation_requirement and bool(all_of) == bool(any_of))
+            or (confirmation_requirement and confirmation_requirement not in {"response_comparison", "rate_limit_probe"})
         ):
             raise ValueError(f"finding validation guard rule {rule_id or '<unknown>'} is invalid")
         markers = all_of or any_of
-        if not isinstance(markers, list) or not all(isinstance(marker, str) and marker.strip() for marker in markers):
+        if markers and (
+            not isinstance(markers, list)
+            or not all(isinstance(marker, str) and marker.strip() for marker in markers)
+        ):
             raise ValueError(f"finding validation guard rule {rule_id} has invalid contradiction markers")
         validated.append({
             "id": rule_id,
             "claim_terms": [term.lower().strip() for term in claim_terms],
             "contradiction_all_of": [marker.lower().strip() for marker in all_of or []],
             "contradiction_any_of": [marker.lower().strip() for marker in any_of or []],
+            "confirmation_requirement": confirmation_requirement,
         })
     return validated
 
@@ -3235,6 +3369,8 @@ def _finding_validation_contradictions(
             continue
         markers_all = rule["contradiction_all_of"]
         markers_any = rule["contradiction_any_of"]
+        if not markers_all and not markers_any:
+            continue
         if all(
             all(marker in text for marker in markers_all)
             if markers_all
@@ -3243,6 +3379,96 @@ def _finding_validation_contradictions(
         ):
             contradictions.append(rule["id"])
     return contradictions
+
+
+def _finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return opt-in positive confirmation requirements matched by a finding claim."""
+
+    claim_text = " ".join(
+        str(candidate.get(field) or "") for field in ("title", "claim", "technique")
+    ).lower()
+    requirements = []
+    for rule in _load_finding_validation_guards():
+        requirement = rule.get("confirmation_requirement")
+        if requirement and any(term in claim_text for term in rule["claim_terms"]):
+            requirements.append({"id": rule["id"], "kind": str(requirement)})
+    return requirements
+
+
+def _read_json_artifact(reference: str) -> Tuple[str, Dict[str, Any]]:
+    canonical = _validated_artifact_paths([reference], require_one=True)[0]
+    try:
+        payload = json.loads(Path(_artifact_path_from_ref(canonical)).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("validation_manifest must be a readable JSON artifact") from error
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise ValueError("validation_manifest must declare version 1")
+    return canonical, payload
+
+
+def _response_signature(reference: str) -> Dict[str, str]:
+    """Derive a stable response signature from one resolved response artifact."""
+
+    canonical = _validated_artifact_paths([reference], require_one=True)[0]
+    try:
+        text = Path(_artifact_path_from_ref(canonical)).read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise ValueError(f"Unable to read validation response artifact: {canonical}") from error
+    status_match = re.search(r"\bHTTP(?:/\d(?:\.\d)?)?\s+(\d{3})\b|\bstatus(?:_code)?\s*[:=]\s*(\d{3})\b", text, re.I)
+    status = next((value for value in status_match.groups() if value), "") if status_match else ""
+    body = re.split(r"\r?\n\r?\n", text, maxsplit=1)[-1]
+    return {
+        "artifact": canonical,
+        "status": status,
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
+def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -> Dict[str, Any]:
+    """Validate narrow, artifact-derived positive predicates for matched claim families."""
+
+    manifest_ref, manifest = _read_json_artifact(reference)
+    requirements = _finding_confirmation_requirements(candidate)
+    checks = manifest.get("checks")
+    if not isinstance(checks, dict):
+        raise ValueError("validation_manifest must contain a checks object")
+    derived: Dict[str, Any] = {}
+    for requirement in requirements:
+        rule_id = requirement["id"]
+        check = checks.get(rule_id)
+        if not isinstance(check, dict):
+            raise ValueError(f"validation_manifest is missing required check: {rule_id}")
+        if requirement["kind"] == "response_comparison":
+            existing = _response_signature(check.get("known_existing_artifact", ""))
+            nonexistent = _response_signature(check.get("known_nonexistent_artifact", ""))
+            if (existing["status"], existing["body_sha256"]) == (
+                nonexistent["status"], nonexistent["body_sha256"],
+            ):
+                raise ValueError("user_enumeration confirmation requires materially different response signatures")
+            derived[rule_id] = {"known_existing": existing, "known_nonexistent": nonexistent}
+        elif requirement["kind"] == "rate_limit_probe":
+            attempts = check.get("attempts")
+            if not isinstance(attempts, list) or len(attempts) < 10:
+                raise ValueError("lack_of_rate_limiting confirmation requires at least 10 recorded attempts")
+            normalized_attempts = []
+            for expected_index, attempt in enumerate(attempts, 1):
+                if not isinstance(attempt, dict) or int(attempt.get("sequence", 0) or 0) != expected_index:
+                    raise ValueError("rate-limit attempts must be ordered sequentially from 1")
+                signature = _response_signature(attempt.get("response_artifact", ""))
+                artifact_text = Path(_artifact_path_from_ref(signature["artifact"])).read_text(
+                    encoding="utf-8", errors="replace"
+                ).lower()
+                if signature["status"] == "429" or any(
+                    marker in artifact_text for marker in ("too many requests", "rate limit", "account locked", "locked out")
+                ):
+                    raise ValueError("rate-limit probe contains throttling or lockout evidence")
+                normalized_attempts.append(signature)
+            derived[rule_id] = {"attempt_count": len(normalized_attempts), "attempts": normalized_attempts}
+    return {
+        "manifest": manifest_ref,
+        "requirements": requirements,
+        "derived": derived,
+    }
 
 
 @tool(
@@ -3280,6 +3506,10 @@ def _finding_validation_contradictions(
                     "default": None,
                     "description": "Negative-control artifacts for differential validation.",
                 },
+                "validation_manifest": {
+                    "type": "string",
+                    "description": "Versioned JSON artifact with claim-specific validation evidence when required.",
+                },
             },
             "required": ["finding_uid", "outcome", "summary", "reproduction_steps"],
         }
@@ -3294,6 +3524,7 @@ def record_finding_validation(
     evidence_artifacts: Optional[List[str]] = None,
     control_artifacts: Optional[List[str]] = None,
     evidence_assertions: Optional[List[Dict[str, str]]] = None,
+    validation_manifest: Optional[str] = None,
 ) -> str:
     """Record a validation outcome, deterministically re-proving candidate evidence for confirmations."""
 
@@ -3318,7 +3549,17 @@ def record_finding_validation(
     controls = _validated_artifact_paths(control_artifacts)
     if normalized_outcome == "confirmed" and strategy == "differential" and not controls:
         raise ValueError("Differential confirmation requires at least one negative-control artifact")
+    manifest_attestation: Dict[str, Any] = {}
     if normalized_outcome == "confirmed":
+        requirements = _finding_confirmation_requirements(record.get("candidate_data") or {})
+        if requirements:
+            if not validation_manifest:
+                required = ", ".join(item["id"] for item in requirements)
+                raise ValueError(f"confirmed validation requires validation_manifest for: {required}")
+            manifest_attestation = _validate_confirmation_manifest(
+                record.get("candidate_data") or {}, validation_manifest
+            )
+            evidence = list(dict.fromkeys([*evidence, manifest_attestation["manifest"]]))
         candidate_assertions = (record.get("candidate_data") or {}).get("evidence_assertions")
         assertions = []
         for candidate_assertion in candidate_assertions or []:
@@ -3361,6 +3602,7 @@ def record_finding_validation(
         "control_artifacts": controls,
         "evidence_assertions": assertions,
         "evidence_artifact_fingerprints": _artifact_fingerprints(evidence),
+        "validation_manifest_attestation": manifest_attestation,
         "validation_status": "submitted",
     }
     if not validation["reproduction_steps"]:
@@ -3403,6 +3645,7 @@ def build_record_finding_validation_tool(task: Task) -> Any:
         evidence_strategy: str = "direct",
         evidence_artifacts: Optional[List[str]] = None,
         control_artifacts: Optional[List[str]] = None,
+        validation_manifest: Optional[str] = None,
     ) -> str:
         return record_finding_validation(
             finding_uid,
@@ -3412,6 +3655,8 @@ def build_record_finding_validation_tool(task: Task) -> Any:
             evidence_strategy,
             evidence_artifacts,
             control_artifacts,
+            None,
+            validation_manifest,
         )
 
     record_bound_finding_validation.__name__ = "record_finding_validation"
@@ -3432,6 +3677,7 @@ outcome; Python re-proves the candidate's immutable markers and records the froz
                     "evidence_strategy": {"type": "string", "enum": ["direct", "differential"]},
                     "evidence_artifacts": {"type": "array", "items": {"type": "string"}},
                     "control_artifacts": {"type": "array", "items": {"type": "string"}},
+                    "validation_manifest": {"type": "string"},
                 },
                 "required": ["outcome", "summary", "reproduction_steps"],
             }
@@ -3461,6 +3707,10 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
             validation.get("evidence_assertions"),
             validation.get("evidence_artifacts", []),
             validation.get("evidence_artifact_fingerprints"),
+        )
+        and (
+            not _finding_confirmation_requirements(candidate)
+            or bool(validation.get("validation_manifest_attestation"))
         )
     )
     if confirmed:
@@ -6069,7 +6319,18 @@ def _validate_acceptance_result_evidence(
     references = list(dict.fromkeys(references))
     for reference in references:
         if reference.startswith("artifact:"):
-            _artifact_path_from_ref(reference)
+            try:
+                _artifact_path_from_ref(reference)
+            except ValueError as error:
+                requires_inventory = any(
+                    requirement.kind == "inventory_manifest" for requirement in criterion.evidence_requirements
+                )
+                if requires_inventory and "does not exist" in str(error).lower():
+                    raise ValueError(
+                        "The submitted manifest file does not exist. Do not retry acceptance. Create a validated "
+                        "inventory manifest first, then submit its returned artifact reference."
+                    ) from error
+                raise
         elif reference.startswith("memory:"):
             _evidence_reference_kind(reference, "memory")
         elif reference.startswith("finding:"):
@@ -6500,6 +6761,22 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
         )
         manifest, _snapshot_hash = _load_inventory_manifest(artifact_ref)
         coverage_item_ids = tuple(str(item["id"]) for item in manifest["items"])
+    eligible_evidence_refs = []
+    for reference in task.evidence:
+        try:
+            canonical = _canonical_evidence_reference(reference)
+        except ValueError:
+            continue
+        if canonical not in eligible_evidence_refs:
+            eligible_evidence_refs.append(canonical)
+    for reference in task.acceptance.basis.source_refs:
+        try:
+            canonical = _canonical_evidence_reference(reference)
+        except ValueError:
+            continue
+        if canonical not in eligible_evidence_refs:
+            eligible_evidence_refs.append(canonical)
+    eligible_evidence_refs = eligible_evidence_refs[:8]
 
     def record_task_acceptance(
         status: str,
@@ -6509,10 +6786,23 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     ) -> str:
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
-        evidence_refs = [
-            _canonical_evidence_reference(reference)
-            for reference in evidence_refs
-        ]
+        if not evidence_refs:
+            eligible = ", ".join(eligible_evidence_refs) or "none"
+            raise ValueError(
+                "acceptance result evidence_refs required; eligible_evidence_refs=" + eligible
+            )
+        try:
+            evidence_refs = [_canonical_evidence_reference(reference) for reference in evidence_refs]
+        except ValueError as error:
+            requires_inventory = any(
+                requirement.kind == "inventory_manifest" for requirement in criterion.evidence_requirements
+            )
+            if requires_inventory and "does not exist" in str(error).lower():
+                raise ValueError(
+                    "The submitted manifest file does not exist. Do not retry acceptance. Create a validated "
+                    "inventory manifest first, then submit its returned artifact reference."
+                ) from error
+            raise
         evidence_refs = _bind_acceptance_finding_reference(normalized_uid, disposition, evidence_refs)
         coverage = tuple(
             CoverageResult(item_id=item_id, status=status, evidence_refs=tuple(evidence_refs))
@@ -7517,7 +7807,8 @@ def get_memory_client(silent: bool = False) -> QdrantMemoryClient:
 
 
 def clear_memory_client() -> None:
-    global _MEMORY_CLIENT, _MEMORY_CONFIG, _DATABASE_STORE
+    global _MEMORY_CLIENT, _MEMORY_CONFIG, _DATABASE_STORE, _MEMORY_EVENT_EMITTER
     _MEMORY_CLIENT = None
     _MEMORY_CONFIG = None
     _DATABASE_STORE = None
+    _MEMORY_EVENT_EMITTER = None

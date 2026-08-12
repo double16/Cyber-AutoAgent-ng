@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
@@ -403,6 +404,47 @@ def test_sqlite_store_initialization_replaces_database_when_recovery_fails(tmp_p
 
     assert store._sqlite_integrity_check(str(database)).lower() == "ok"
     assert len(list(tmp_path.glob("cyber_autoagent.corrupt-*.db"))) == 1
+
+
+def test_sqlite_store_recovers_one_runtime_operation_and_retries(tmp_path, monkeypatch):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "runtime.db"), logical_target="target")
+    original_connect = store._connect
+    attempts = {"connect": 0, "recovery": 0}
+
+    def flaky_connect():
+        attempts["connect"] += 1
+        if attempts["connect"] == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return original_connect()
+
+    def recover(_error):
+        attempts["recovery"] += 1
+        return True
+
+    monkeypatch.setattr(store, "_connect", flaky_connect)
+    monkeypatch.setattr(store, "_recover_runtime_database", recover)
+
+    assert store.get_plan("operation") is None
+    assert attempts == {"connect": 2, "recovery": 1}
+
+
+def test_sqlite_store_fails_closed_when_runtime_recovery_fails(tmp_path, monkeypatch):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "runtime-fail.db"), logical_target="target")
+    attempts = {"recovery": 0}
+
+    def fail_connect():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def fail_recovery(_error):
+        attempts["recovery"] += 1
+        return False
+
+    monkeypatch.setattr(store, "_connect", fail_connect)
+    monkeypatch.setattr(store, "_recover_runtime_database", fail_recovery)
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        store.get_plan("operation")
+    assert attempts == {"recovery": 1}
 
 
 def test_read_only_plan_store_does_not_create_missing_database(tmp_path, monkeypatch):
@@ -4023,6 +4065,50 @@ def test_acceptance_disposition_requires_finding_for_confirmed_behavior(fake_mem
     )
     assert json.loads(result)["complete"] is True
     assert store.get_acceptance_results("op1", task.task_uid)[0].evidence_refs[-1] == "finding:candidate-1"
+
+
+def test_bound_acceptance_tool_lists_current_task_evidence_when_refs_are_missing(fake_memory_client):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    task = mod.Task(
+        task_uid="acceptance-evidence-context",
+        title="Evidence context",
+        objective="Record a negative result",
+        acceptance=make_acceptance("outcome"),
+        evidence=[f"artifact:{manifest}"],
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(ValueError, match=r"eligible_evidence_refs=.*artifact:inventory\.json"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="no_vulnerability",
+            summary="No vulnerability was demonstrated",
+            evidence_refs=[],
+        )
+
+
+def test_inventory_acceptance_missing_artifact_has_prerequisite_repair_error(fake_memory_client):
+    _client, store = fake_memory_client
+    task = mod.Task(
+        task_uid="missing-manifest",
+        title="Inventory",
+        objective="Create inventory",
+        acceptance=make_acceptance("outcome"),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(ValueError, match="submitted manifest file does not exist.*Do not retry acceptance"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Inventory produced",
+            evidence_refs=["artifact:artifacts/missing-inventory.json"],
+        )
 
 
 def test_acceptance_finding_auto_binding_rejects_missing_and_ambiguous_candidates(fake_memory_client):

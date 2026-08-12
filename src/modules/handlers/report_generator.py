@@ -2851,13 +2851,20 @@ def generate_deterministic_fallback_report(
     Path(output_path).mkdir(parents=True, exist_ok=True)
     report_filename = filename or os.path.join(output_path, "security_assessment_report.md")
     json_filename = os.path.join(output_path, "security_assessment_report.json")
-    sections = build_report_sections(
-        operation_id=operation_id,
-        target=target,
-        objective=objective,
-        module=config_params.get("module"),
-        tools_used=config_params.get("tools_used", []),
-    )
+    try:
+        sections = build_report_sections(
+            operation_id=operation_id,
+            target=target,
+            objective=objective,
+            module=config_params.get("module"),
+            tools_used=config_params.get("tools_used", []),
+        )
+    except Exception as section_error:
+        snapshot = config_params.get("operation_state_snapshot")
+        if not isinstance(snapshot, dict) or not snapshot:
+            raise
+        logger.warning("Using controller state snapshot for fallback report: %s", section_error)
+        sections = _fallback_sections_from_operation_snapshot(snapshot)
     sections["completion_status"] = completion_status
     completion_status.update(
         {
@@ -2987,6 +2994,32 @@ def generate_deterministic_fallback_report(
         "report_json_path": json_filename,
         "content": markdown,
         "status": "fallback",
+    }
+
+
+def _fallback_sections_from_operation_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Create minimal canonical report sections when the SQLite store is unavailable."""
+
+    tasks = [item for item in snapshot.get("tasks", []) if isinstance(item, dict)]
+    status_counts = Counter(str(task.get("status") or "unknown") for task in tasks)
+    plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
+    phase_rows = plan.get("phases") if isinstance(plan.get("phases"), list) else []
+    phase_coverage = "\n".join(
+        f"- Phase {item.get('id')}: {item.get('title')} — {item.get('status')}"
+        for item in phase_rows if isinstance(item, dict)
+    ) or "No phase coverage data was retained."
+    return {
+        "total_task_count": len(tasks),
+        "completed_task_count": sum(status_counts.get(status, 0) for status in ("done", "superseded")),
+        "task_status_counts": dict(status_counts),
+        "verified_findings_total": 0,
+        "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+        "summary_table": "No verified findings were retained in the controller snapshot.",
+        "raw_evidence": [],
+        "target_coverage": phase_coverage,
+        "execution_history": _format_execution_history(tasks, []),
+        "latest_run": {},
+        "reportable_tools_used": [],
     }
 
 
@@ -4675,10 +4708,10 @@ def _format_summary_table(findings: List[Dict[str, Any]]) -> str:
         # Extract title and location
         if "parsed" in finding and any(finding["parsed"].values()):
             parsed = finding["parsed"]
-            title = parsed.get("vulnerability", "Finding")[:50]
+            title = parsed.get("vulnerability", "Finding")
             location = parsed.get("where", "N/A")
         else:
-            content = finding.get("content", "")[:50]
+            content = finding.get("content", "")
             title = content.split("[WHERE]")[0] if "[WHERE]" in content else content
             location = "See appendix"
 

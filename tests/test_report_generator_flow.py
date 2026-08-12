@@ -1543,11 +1543,13 @@ def test_report_category_helpers_cover_structured_and_free_form_artifacts():
 
 def test_summary_table_preserves_full_finding_location():
     location = "http://host.docker.internal:4280/dvwa/vulnerabilities/xss_rce/?name=proof"
+    title = "User Enumeration and Lack of Rate Limiting on /vulnerabilities/brute"
 
     table = _format_summary_table(
-        [{"severity": "HIGH", "parsed": {"vulnerability": "Reflected XSS", "where": location}}]
+        [{"severity": "HIGH", "parsed": {"vulnerability": title, "where": location}}]
     )
 
+    assert title in table
     assert "http://host.docker.internal:4280/dvwa/vulnerabilities/xss\\_rce/?name=proof" in table
     assert _normalize_report_category(
         "finding",
@@ -2139,6 +2141,32 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     assert payload["report_status"] == "fallback"
     assert payload["narrative"] == {}
     assert payload["canonical"]["verified_findings_total"] == 1
+
+
+def test_fallback_report_uses_controller_snapshot_when_store_sections_fail(tmp_path, monkeypatch):
+    monkeypatch.setattr("modules.handlers.report_generator.get_output_path", lambda **_kwargs: str(tmp_path))
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.build_report_sections",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("disk I/O error")),
+    )
+
+    result = generate_deterministic_fallback_report(
+        target="https://example.test",
+        objective="Assess the target",
+        operation_id="OP_SNAPSHOT",
+        config_params={
+            "operation_state_snapshot": {
+                "plan": {"phases": [{"id": 1, "title": "Recon", "status": "done"}]},
+                "tasks": [{"phase": 1, "title": "Recon", "status": "done", "target_ids": ["target-1"]}],
+                "findings": [],
+            },
+            "completion_status": {"assessment_complete": False, "termination_reason": "error"},
+        },
+        error=OSError("disk I/O error"),
+    )
+
+    assert result["status"] == "fallback"
+    assert "| 1 | Recon | done |" in result["content"]
 
 
 def test_sanitize_mermaid_diagrams_quotes_supported_node_and_edge_labels():
