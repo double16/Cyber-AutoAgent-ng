@@ -496,6 +496,7 @@ def _model_metric_row(**overrides):
         "inference_time_ms": 456.0,
         "model_calls": 3,
         "correction_loops": 1,
+        "correction_categories": {"max_token_exhaustion": 1},
         "efficiency": 75.0,
     }
     return {**row, **overrides}
@@ -521,6 +522,7 @@ def test_sqlite_application_store_appends_timestamped_model_metric_captures(tmp_
         "2026-08-06T12:10:00.000001+00:00",
     ]
     assert [row["total_tokens"] for row in rows] == [150, 250]
+    assert rows[0]["correction_categories"] == {"max_token_exhaustion": 1}
 
 
 def test_sqlite_application_store_model_metrics_are_target_scoped_and_validated(tmp_path):
@@ -535,4 +537,10 @@ def test_sqlite_application_store_model_metrics_are_target_scoped_and_validated(
             "OP_1",
             "2026-08-06T12:00:00.000001+00:00",
             [_model_metric_row(total_tokens=1)],
+        )
+    with pytest.raises(ValueError, match="correction_categories"):
+        second.append_operation_model_metrics(
+            "OP_1",
+            "2026-08-06T12:00:00.000001+00:00",
+            [_model_metric_row(correction_categories={"max_token_exhaustion": 2})],
         )

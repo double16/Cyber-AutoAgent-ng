@@ -313,6 +313,7 @@ class FakeCallbackHandler:
         self.events = []
         self.timeline = []
         self.operation_health_provider = None
+        self.efficiency_events = []
 
     def has_reached_limit(self):
         return False
@@ -328,6 +329,12 @@ class FakeCallbackHandler:
     def emit_ui_event(self, event):
         self.events.append(event)
         self.timeline.append(("event", event))
+
+    def record_efficiency_event(self, category, agent=None):
+        self.efficiency_events.append((category, agent))
+
+    def record_max_token_exhaustion(self, *, role, classification, exhaustion_ordinal, agent=None):
+        self.efficiency_events.append(("max_token_exhaustion", role, classification, exhaustion_ordinal, agent))
 
     def set_operation_health_provider(self, provider):
         self.operation_health_provider = provider
@@ -854,6 +861,9 @@ def test_json_agent_retries_fresh_after_reasoning_loop():
     assert "previous response was discarded" in prompts[1]
     assert "Return only the required JSON object now" in prompts[1]
     assert prompts[1].endswith("original\n")
+    assert controller.runtime.callback_handler.efficiency_events == [
+        ("max_token_exhaustion", "task_evaluator", "reasoning_loop", 1, None)
+    ]
 
 
 def test_json_agent_emits_workflow_activity_lifecycle_events():
@@ -3662,6 +3672,7 @@ def test_task_executor_does_not_offer_another_turn_after_correction_was_exhauste
 
 
 def test_task_executor_max_token_recovery_exhaustion_is_partial_failure():
+    runtime = _runtime()
     state = FakeState(
         _plan(),
         tasks=[Task(task_uid="active", title="Active", objective="enumerate paths", phase=1, status="active")],
@@ -3683,7 +3694,7 @@ def test_task_executor_max_token_recovery_exhaustion_is_partial_failure():
         )
 
     controller = MultiAgentWorkflowController(
-        runtime=_runtime(),
+        runtime=runtime,
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
         text_runner=text_runner,
@@ -3695,6 +3706,10 @@ def test_task_executor_max_token_recovery_exhaustion_is_partial_failure():
     assert len(executor_calls) == 2
     assert state.tasks[0].status == "partial_failure"
     assert "reasoning loop" in state.tasks[0].status_reason
+    assert runtime.callback_handler.efficiency_events == [
+        ("max_token_exhaustion", "task_executor", "unknown", 1, None),
+        ("max_token_exhaustion", "task_executor", "unknown", 1, None),
+    ]
 
 
 def test_reasoning_loop_recovery_supersedes_original_and_queues_one_replacement():
@@ -6154,6 +6169,9 @@ def test_task_creator_uses_retained_correction_after_max_tokens():
     assert len(prompts) == 2
     assert "task creator reached its model token limit" in prompts[1]
     assert outcome.created_count == 1
+    assert controller.runtime.callback_handler.efficiency_events == [
+        ("max_token_exhaustion", "task_creator", "output_truncation", 1, None)
+    ]
 
 
 def test_task_creator_uses_configured_retained_correction_attempts():

@@ -1899,7 +1899,7 @@ def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
         tool_input={"command": "curl target"},
         output="200 OK",
     )
-    callback = SimpleNamespace(tool_outcome_journal=journal)
+    callback = SimpleNamespace(tool_outcome_journal=journal, record_max_token_exhaustion=Mock())
     agent = SimpleNamespace(
         _cyber_agent_type="task_executor",
         _cyber_callback_handler=callback,
@@ -1951,10 +1951,16 @@ def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
     assert policies[1].max_model_turns == 1
     assert policies[1].max_tool_calls == 1
     assert agent.messages == []
+    callback.record_max_token_exhaustion.assert_called_once_with(
+        role="task_executor",
+        classification="reasoning_loop",
+        exhaustion_ordinal=1,
+        agent=agent,
+    )
 
 
 def test_workflow_task_executor_propagates_second_max_tokens(monkeypatch):
-    callback = SimpleNamespace(tool_outcome_journal=ToolOutcomeJournal())
+    callback = SimpleNamespace(tool_outcome_journal=ToolOutcomeJournal(), record_max_token_exhaustion=Mock())
     agent = SimpleNamespace(
         _cyber_agent_type="task_executor",
         _cyber_callback_handler=callback,
@@ -1987,6 +1993,7 @@ def test_workflow_task_executor_propagates_second_max_tokens(monkeypatch):
     assert len(calls) == 2
     assert exc_info.value.max_token_classification.kind == "reasoning_loop"
     assert agent.messages == []
+    assert callback.record_max_token_exhaustion.call_count == 2
 
 
 def test_finalize_report_and_evaluation_runs_once(monkeypatch):

@@ -1362,8 +1362,8 @@ def _format_model_usage_table(
         ]
 
     lines = [
-        "| Capture Timestamp | Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time | Efficiency |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Capture Timestamp | Provider | Model | Context Window | Input Tokens | Output Tokens | Cache Read Tokens | Cache Write Tokens | Total Tokens | Cost (USD) | Inference Time | Efficiency | Corrections |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in sorted(
         normalized_rows,
@@ -1384,12 +1384,18 @@ def _format_model_usage_table(
         captured_at = str(row.get("captured_at") or row.get("capturedAt") or "N/A")
         efficiency = row.get("efficiency")
         efficiency_display = f"{float(efficiency):.1f}%" if isinstance(efficiency, (int, float)) else "N/A"
+        correction_categories = row.get("correction_categories", row.get("correctionCategories", {}))
+        correction_display = ", ".join(
+            f"{category}: {count}"
+            for category, count in sorted(correction_categories.items())
+            if isinstance(count, int) and count > 0
+        ) if isinstance(correction_categories, dict) else ""
         lines.append(
             f"| {captured_at} | {row.get('provider') or 'unknown'} | {row.get('model') or 'unknown'} | "
             f"{context_window_display} | {input_tokens:,} | {output_tokens:,} | {cache_read:,} | {cache_write:,} | "
             f"{total_tokens:,} | ${cost:.6f} | "
             f"{_format_inference_time(row.get('inference_time_ms', row.get('inferenceTimeMs')))} | "
-            f"{efficiency_display} |"
+            f"{efficiency_display} | {correction_display or '—'} |"
         )
     return "\n".join(lines)
 
@@ -1790,6 +1796,12 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "correction_loops",
             ):
                 combined[key] = combined.get(key, 0) + row.get(key, 0)
+            categories = row.get("correction_categories", {})
+            if isinstance(categories, dict):
+                combined_categories = combined.setdefault("correction_categories", {})
+                for category, count in categories.items():
+                    if isinstance(count, int):
+                        combined_categories[category] = combined_categories.get(category, 0) + count
 
     if duration_seconds:
         metrics["duration"] = format_duration(duration_seconds)
@@ -2582,7 +2594,7 @@ Narrative context:
             model_metrics["fallback_context_window"],
         )
         + "\n\n*Efficiency = 100 × model inferences ÷ (model inferences + correction loops). Correction loops include "
-        + "bounded reasoning, output-token, repair, tool-recovery, evaluator, and critic retries; higher values "
+        + "bounded reasoning, max-token exhaustion, repair, tool-recovery, evaluator, and critic retries; higher values "
         + "indicate greater efficiency.*\n"
         + "\n\n### Operation Plan\n\n"
         + _format_operation_plan(sections.get("operation_plan"))
@@ -2823,7 +2835,8 @@ def _format_deterministic_methodology(
             model_metrics["main_model"],
             model_metrics["fallback_context_window"],
         )
-        + "\n\n*Efficiency = 100 × model inferences ÷ (model inferences + correction loops).*\n"
+        + "\n\n*Efficiency = 100 × model inferences ÷ (model inferences + correction loops), including every "
+        + "max-token exhaustion.*\n"
     )
 
 

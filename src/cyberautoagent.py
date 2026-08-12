@@ -949,6 +949,21 @@ def run_workflow_agent_with_max_token_recovery(
                 repeated_pattern,
                 "retry" if can_retry else "propagate",
             )
+            agent_callback = getattr(agent, "_cyber_callback_handler", None) or callback_handler
+            if not getattr(error, "_max_token_efficiency_recorded", False):
+                record_max_token_exhaustion = getattr(agent_callback, "record_max_token_exhaustion", None)
+                if callable(record_max_token_exhaustion):
+                    record_max_token_exhaustion(
+                        role=role,
+                        classification=classification.kind,
+                        exhaustion_ordinal=max_token_recovery_attempts + 1,
+                        agent=agent,
+                    )
+                else:
+                    record_efficiency_event = getattr(agent_callback, "record_efficiency_event", None)
+                    if callable(record_efficiency_event):
+                        record_efficiency_event("max_token_exhaustion", agent=agent)
+                setattr(error, "_max_token_efficiency_recorded", True)
             if not can_retry:
                 raise
 
@@ -963,7 +978,6 @@ def run_workflow_agent_with_max_token_recovery(
                     actionless_mode="required_tool",
                 )
 
-            agent_callback = getattr(agent, "_cyber_callback_handler", None) or callback_handler
             journal = getattr(agent_callback, "tool_outcome_journal", None)
             journal_entries = journal.entries() if journal is not None else []
             completed_tools = [outcome.tool_name for outcome in journal_entries if outcome.success]
@@ -1954,6 +1968,9 @@ def main():
                                 outcomes=outcomes,
                                 max_tokens_exhausted=True,
                                 max_tokens_classification=kind,
+                                max_token_efficiency_accounted=bool(
+                                    getattr(error, "_max_token_efficiency_recorded", False)
+                                ),
                                 max_tokens_reason=(
                                     f"{role_label} repeated the same reasoning loop after its bounded recovery."
                                     if kind == "reasoning_loop"

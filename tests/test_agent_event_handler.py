@@ -804,6 +804,7 @@ def test_operation_coordinator_groups_usage_by_provider_model_and_latency():
             "efficiency": 100.0,
             "model_calls": 0,
             "correction_loops": 0,
+            "correction_categories": {},
         },
         {
             "provider": "ollama",
@@ -819,6 +820,7 @@ def test_operation_coordinator_groups_usage_by_provider_model_and_latency():
             "efficiency": 100.0,
             "model_calls": 0,
             "correction_loops": 0,
+            "correction_categories": {},
         },
     ]
 
@@ -1012,6 +1014,36 @@ def test_model_efficiency_is_higher_when_corrections_are_lower():
     assert rows["model-a"]["efficiency"] > rows["model-b"]["efficiency"]
     assert rows["model-a"]["efficiency"] == 100.0
     assert rows["model-b"]["efficiency"] == 50.0
+
+
+def test_model_efficiency_records_max_token_exhaustion_category():
+    coordinator = OperationEventCoordinator("OP_MAX_TOKENS", MagicMock())
+    coordinator.record_model_call("litellm", "model-a")
+    coordinator.record_efficiency_correction("litellm", "model-a", "max_token_exhaustion")
+
+    row = coordinator.model_usage()[0]
+
+    assert row["efficiency"] == 50.0
+    assert row["correction_categories"] == {"max_token_exhaustion": 1}
+
+
+def test_handler_emits_structured_max_token_exhaustion_event():
+    handler = make_handler()
+
+    handler.record_max_token_exhaustion(
+        role="task_executor",
+        classification="output_truncation",
+        exhaustion_ordinal=1,
+    )
+
+    assert handler._events == [{
+        "type": "model_max_token_exhaustion",
+        "operation_id": "OP_TEST",
+        "role": "task_executor",
+        "classification": "output_truncation",
+        "exhaustion_ordinal": 1,
+    }]
+    assert handler.model_usage()[0]["correction_categories"] == {"max_token_exhaustion": 1}
 
 
 def test_operation_coordinator_retains_effective_context_window_per_model():

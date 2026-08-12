@@ -1220,6 +1220,29 @@ def _normalize_model_metric_rows(rows: Any) -> List[Dict[str, Any]]:
         total_tokens = nonnegative_int("total_tokens")
         if total_tokens != input_tokens + output_tokens:
             raise ValueError("model metric total_tokens must equal input_tokens plus output_tokens")
+        raw_categories = raw_row.get("correction_categories", {})
+        if raw_categories is None:
+            raw_categories = {}
+        if not isinstance(raw_categories, dict):
+            raise ValueError("model metric correction_categories must be an object")
+        correction_categories = {}
+        for category, count in raw_categories.items():
+            normalized_category = str(category).strip()
+            if not normalized_category:
+                raise ValueError("model metric correction_categories keys must be non-empty strings")
+            if isinstance(count, bool):
+                raise ValueError("model metric correction_categories values must be non-negative integers")
+            try:
+                normalized_count = int(count)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "model metric correction_categories values must be non-negative integers"
+                ) from error
+            if normalized_count < 0:
+                raise ValueError("model metric correction_categories values must be non-negative integers")
+            correction_categories[normalized_category] = normalized_count
+        if sum(correction_categories.values()) > nonnegative_int("correction_loops"):
+            raise ValueError("model metric correction_categories cannot exceed correction_loops")
         normalized_rows.append(
             {
                 "provider": provider,
@@ -1234,6 +1257,7 @@ def _normalize_model_metric_rows(rows: Any) -> List[Dict[str, Any]]:
                 "inference_time_ms": nonnegative_float("inference_time_ms"),
                 "model_calls": nonnegative_int("model_calls"),
                 "correction_loops": nonnegative_int("correction_loops"),
+                "correction_categories": dict(sorted(correction_categories.items())),
                 "efficiency": nonnegative_float("efficiency"),
             }
         )
@@ -1555,8 +1579,8 @@ class SQLiteApplicationStore:
                     INSERT INTO operation_model_metrics (
                         logical_target, operation_id, captured_at, provider, model, context_window_tokens,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost,
-                        inference_time_ms, model_calls, correction_loops, efficiency
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        inference_time_ms, model_calls, correction_loops, correction_categories, efficiency
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -1575,6 +1599,7 @@ class SQLiteApplicationStore:
                             row["inference_time_ms"],
                             row["model_calls"],
                             row["correction_loops"],
+                            json.dumps(row["correction_categories"], sort_keys=True),
                             row["efficiency"],
                         )
                         for row in normalized_rows
@@ -1589,7 +1614,7 @@ class SQLiteApplicationStore:
                     """
                     SELECT captured_at, provider, model, context_window_tokens, input_tokens, output_tokens,
                            cache_read_tokens, cache_write_tokens, total_tokens, cost, inference_time_ms,
-                           model_calls, correction_loops, efficiency
+                           model_calls, correction_loops, correction_categories, efficiency
                     FROM operation_model_metrics
                     WHERE logical_target = ? AND operation_id = ?
                     ORDER BY captured_at, provider, model
@@ -1611,7 +1636,8 @@ class SQLiteApplicationStore:
                 "inference_time_ms": float(row[10]),
                 "model_calls": int(row[11]),
                 "correction_loops": int(row[12]),
-                "efficiency": float(row[13]),
+                "correction_categories": json.loads(row[13]) if row[13] else {},
+                "efficiency": float(row[14]),
             }
             for row in rows
         ]

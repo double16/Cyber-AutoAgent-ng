@@ -222,6 +222,7 @@ class TaskExecutorCycleResult:
     max_tokens_exhausted: bool = False
     max_tokens_reason: str = ""
     max_tokens_classification: str = ""
+    max_token_efficiency_accounted: bool = False
     repeat_loop_detected: bool = False
     repeat_loop_signature: str = ""
     repeat_loop_reason: str = ""
@@ -335,6 +336,21 @@ def default_text_runner(runtime: AgentRuntimeResources) -> AgentTextRunner:
             except MaxTokensReachedException as error:
                 classification, removed = classify_and_discard_max_token_output(agent)
                 setattr(error, "max_token_classification", classification)
+                callback_handler = getattr(runtime, "callback_handler", None)
+                if not getattr(error, "_max_token_efficiency_recorded", False):
+                    recorder = getattr(callback_handler, "record_max_token_exhaustion", None)
+                    if callable(recorder):
+                        recorder(
+                            role=role,
+                            classification=classification.kind,
+                            exhaustion_ordinal=1,
+                            agent=agent,
+                        )
+                    else:
+                        fallback_recorder = getattr(callback_handler, "record_efficiency_event", None)
+                        if callable(fallback_recorder):
+                            fallback_recorder("max_token_exhaustion", agent=agent)
+                    setattr(error, "_max_token_efficiency_recorded", True)
                 logger.warning(
                     "MAX_TOKEN_RECOVERY role=%s classification=%s repetition_ratio=%.3f "
                     "discarded_tokens=%s partial_removed=%s action=propagate",
@@ -1107,6 +1123,19 @@ class MultiAgentWorkflowController:
         recorder = getattr(self.runtime.callback_handler, "record_efficiency_event", None)
         if callable(recorder):
             recorder(category)
+
+    def _record_max_token_exhaustion(self, role: str, classification: str, exhaustion_ordinal: int) -> None:
+        """Record one max-token exhaustion not already observed by an agent callback."""
+
+        recorder = getattr(self.runtime.callback_handler, "record_max_token_exhaustion", None)
+        if callable(recorder):
+            recorder(
+                role=role,
+                classification=classification,
+                exhaustion_ordinal=exhaustion_ordinal,
+            )
+            return
+        self._record_efficiency_correction("max_token_exhaustion")
 
     def _short(self, value: Any, limit: int = 300) -> str:
         text = str(value or "").replace("\n", " ").strip()
@@ -2478,6 +2507,12 @@ class MultiAgentWorkflowController:
                     )
                     break
                 if cycle_result.max_tokens_exhausted:
+                    if not cycle_result.max_token_efficiency_accounted:
+                        self._record_max_token_exhaustion(
+                            "task_executor",
+                            cycle_result.max_tokens_classification or "unknown",
+                            1,
+                        )
                     self._validate_executor_follow_up_phases(
                         plan,
                         phase,
@@ -5415,11 +5450,13 @@ review existing memories. Return only the requested JSON decision."""
             batch_failure_reason = ""
             previous_creator_result = None
             batch_attempts = 0
+            previous_attempt_max_tokens = False
             with self._task_creator_session(tools, system_prompt) as run_creator:
                 for attempt in range(1, max_attempts + 1):
                     batch_attempts = attempt
                     if attempt > 1:
-                        self._record_efficiency_correction("task_creator_cycle")
+                        if not previous_attempt_max_tokens:
+                            self._record_efficiency_correction("task_creator_cycle")
                     creator_result = None
                     rejected_proposals = self._task_creator_rejected_proposals(previous_creator_result)
                     attempt_prompt = (
@@ -5442,6 +5479,7 @@ review existing memories. Return only the requested JSON decision."""
                     )
                     try:
                         creator_result = run_creator(attempt_prompt, run_policy)
+                        previous_attempt_max_tokens = False
                         self._emit_workflow_activity(
                             "task_creator",
                             "completed",
@@ -5451,6 +5489,17 @@ review existing memories. Return only the requested JSON decision."""
                         )
                         batch_failure_reason = self._task_creator_failure_reason(creator_result)
                     except MaxTokensReachedException as error:
+                        previous_attempt_max_tokens = True
+                        max_token_classification = str(
+                            getattr(getattr(error, "max_token_classification", None), "kind", "output_truncation")
+                        )
+                        if not getattr(error, "_max_token_efficiency_recorded", False):
+                            self._record_max_token_exhaustion(
+                                "task_creator",
+                                max_token_classification,
+                                attempt,
+                            )
+                            setattr(error, "_max_token_efficiency_recorded", True)
                         self._emit_workflow_activity(
                             "task_creator",
                             "failed",
@@ -6556,9 +6605,11 @@ Allowed evidence references:
                 classification = getattr(error, "max_token_classification", None)
                 kind = getattr(classification, "kind", "output_truncation")
                 ratio = float(getattr(classification, "repetition_ratio", 0.0) or 0.0)
+                if not getattr(error, "_max_token_efficiency_recorded", False):
+                    self._record_max_token_exhaustion(role, kind, attempt + 1)
+                    setattr(error, "_max_token_efficiency_recorded", True)
                 if attempt >= self.json_retries:
                     break
-                self._record_efficiency_correction("json_retry")
                 self._log_workflow(
                     "json agent role=%s max_tokens retrying classification=%s repetition_ratio=%.3f",
                     role,

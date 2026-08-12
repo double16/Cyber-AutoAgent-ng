@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -127,6 +127,7 @@ class _AgentUsageEntry:
 class _ModelEfficiencyEntry:
     model_calls: int = 0
     correction_loops: int = 0
+    correction_categories: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -279,11 +280,14 @@ class OperationEventCoordinator:
         category: str,
     ) -> None:
         """Record one bounded correction/recovery loop for a model."""
-        del category  # Categories remain available at call sites for auditability.
         key = (str(provider_id or "unknown"), str(model_id or "unknown"))
+        normalized_category = str(category or "unknown").strip() or "unknown"
         with self._lock:
             entry = self._model_efficiency.setdefault(key, _ModelEfficiencyEntry())
             entry.correction_loops += 1
+            entry.correction_categories[normalized_category] = (
+                entry.correction_categories.get(normalized_category, 0) + 1
+            )
 
     def model_usage(self) -> List[Dict[str, Any]]:
         """Return operation usage grouped by provider and model."""
@@ -325,6 +329,7 @@ class OperationEventCoordinator:
                         "efficiency": score,
                         "model_calls": efficiency.model_calls,
                         "correction_loops": efficiency.correction_loops,
+                        "correction_categories": dict(sorted(efficiency.correction_categories.items())),
                     }
                 )
             return rows
@@ -1063,7 +1068,16 @@ class AgentEventHandler(PrintingCallbackHandler):
             self._handle_completion()
 
         if kwargs.get("error") and "MaxTokensReached" in str(kwargs.get("error")):
-            self.record_efficiency_event("output_token_retry", agent=kwargs.get("agent"))
+            error = kwargs.get("error")
+            agent = kwargs.get("agent")
+            self.record_max_token_exhaustion(
+                role=str(getattr(agent, "_cyber_agent_type", "unknown")),
+                classification="unknown",
+                exhaustion_ordinal=1,
+                agent=agent,
+            )
+            if isinstance(error, BaseException):
+                setattr(error, "_max_token_efficiency_recorded", True)
             self.emit_ui_event(
                 {
                     "type": "error",
@@ -1210,6 +1224,27 @@ class AgentEventHandler(PrintingCallbackHandler):
             return
         provider_id, model_id = self._model_identity(agent or self._last_agent)
         coordinator.record_efficiency_correction(provider_id, model_id, category)
+
+    def record_max_token_exhaustion(
+        self,
+        *,
+        role: str,
+        classification: str,
+        exhaustion_ordinal: int,
+        agent: Any = None,
+    ) -> None:
+        """Account for and expose one observed max-token exhaustion."""
+
+        self.record_efficiency_event("max_token_exhaustion", agent=agent)
+        self.emit_ui_event(
+            {
+                "type": "model_max_token_exhaustion",
+                "operation_id": self.operation_id,
+                "role": str(role or "unknown"),
+                "classification": str(classification or "unknown"),
+                "exhaustion_ordinal": max(1, int(exhaustion_ordinal)),
+            }
+        )
 
     def _record_model_call_if_new(self, usage: Dict[str, Any], agent: Any = None) -> None:
         """Count one inference when cumulative usage advances for an agent."""

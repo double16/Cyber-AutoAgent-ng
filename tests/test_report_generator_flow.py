@@ -307,6 +307,7 @@ def test_format_model_usage_table_and_elapsed_time_fallbacks():
                 "cache_write_tokens": 5,
                 "cost": 0.1234567,
                 "inference_time_ms": 2500,
+                "correction_categories": {"max_token_exhaustion": 1},
             }
         ],
         "bedrock",
@@ -316,13 +317,13 @@ def test_format_model_usage_table_and_elapsed_time_fallbacks():
     assert "| Capture Timestamp | Provider | Model | Context Window | Input Tokens | Output Tokens |" in table
     assert (
         "| N/A | ollama | llama3 | 128,000 | 1,200 | 300 | 10 | 5 | 1,500 | $0.123457 | "
-        "0 hours 0 minutes | N/A |"
+        "0 hours 0 minutes | N/A | max_token_exhaustion: 1 |"
         in table
     )
     assert "| fallback-model |" not in table
 
     fallback = _format_model_usage_table([], "bedrock", "fallback-model", 200000)
-    assert "| N/A | bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in fallback
+    assert "| N/A | bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A | — |" in fallback
 
 
 def test_report_model_metrics_use_all_persisted_timestamped_rows(monkeypatch):
