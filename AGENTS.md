@@ -65,6 +65,11 @@
 
 ## Design Choices
 - Complexity leans towards deterministic code and away from the LLM where appropriate. Reasoning belongs in the LLM.
+- `src/modules/config/system/finding_validation_guards.yaml` is the declarative catalog for narrow, unambiguous
+  finding-validation rules. Update it when a finding class needs either a deterministic rejection based on
+  contradiction markers present in every cited artifact, or a required positive validation mode such as response
+  comparison or a rate-limit probe. Do not use it for heuristic or uncertain vulnerability inference; preserve its
+  small, evidence-backed scope and add tests for both a matching and a non-matching candidate/artifact case.
 - Fixed-enum tool schemas must advertise canonical values while pre-processing common semantic synonyms into those canonical values; unknown values remain invalid. Strands tool runtime validation strips `Annotated[BeforeValidator(...)]` metadata when it rebuilds a tool input model, so tool-facing aliased enum parameters must use string runtime annotations, provide an explicit canonical `inputSchema`, and normalize plus strictly validate inside the function. Add runtime-schema tests; Pydantic-only direct-call tests are insufficient.
 - Reporting/evaluation budget reserves may reserve tokens and cost only. Duration/time must not be reserved for reporting or evaluation.
 - Report `Total Operation Time` is assessment execution time only: it ends when execution terminates and excludes

@@ -143,6 +143,55 @@ def test_acceptance_recovery_rejects_clear_http_error_artifacts(tmp_path):
     ) is True
 
 
+def test_artifact_recovery_does_not_classify_arbitrary_non_http_text_as_contradictory(tmp_path):
+    artifact = tmp_path / "negative.txt"
+    artifact.write_text("request failed: no positive evidence was observed", encoding="utf-8")
+
+    assert MultiAgentWorkflowController._artifact_recovery_quality(str(artifact)) == "viable"
+
+
+def test_contradictory_finding_artifact_references_are_deterministic(tmp_path, monkeypatch):
+    artifact = tmp_path / "negative.txt"
+    artifact.write_text("HTTP/1.1 404 Not Found", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _ref: artifact)
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    outcome = ToolOutcome(
+        1,
+        "finding",
+        "store_finding",
+        False,
+        False,
+        json.dumps({"artifacts": ["artifact:artifacts/negative.txt"]}),
+        "evidence assertion marker was not found",
+    )
+
+    assert MultiAgentWorkflowController._has_contradictory_finding_artifact(outcome) is True
+    assert MultiAgentWorkflowController._contradictory_finding_artifact_refs(outcome) == [
+        "artifact:artifacts/negative.txt"
+    ]
+
+
+def test_acceptance_recovery_context_marks_unreadable_artifact_as_unknown(monkeypatch):
+    task = Task(task_uid="task", title="Task", objective="Assess behavior", phase=1, status="active")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _ref: "/missing/artifact.txt")
+
+    context = controller._acceptance_recovery_context(
+        task,
+        [],
+        [ToolOutcome(1, "tool", "shell", True, False, "", "artifact:artifacts/missing.txt")],
+        None,
+    )
+
+    assert context[0]["quality"] == "unknown"
+    assert context[0]["evidence_status"] == "unknown"
+
+
 def test_candidate_dependent_phase_closes_without_speculative_task_creation(monkeypatch):
     plan = OperationPlan(
         objective="assess",
@@ -3483,7 +3532,6 @@ def test_final_memory_acceptance_recovery_replaces_only_rejected_memory_refs():
         ["memory:hallucinated"],
         [
             {"reference": "memory:task-observation", "source": "task_memory:store_observation"},
-            {"reference": "memory:task-knowledge", "source": "task_memory:store_knowledge"},
         ],
     )
 
@@ -3492,9 +3540,31 @@ def test_final_memory_acceptance_recovery_replaces_only_rejected_memory_refs():
         "evidence_refs": [
             "artifact:artifacts/endpoint.txt",
             "memory:task-observation",
-            "memory:task-knowledge",
         ],
     }
+    assert replacements == [
+        {"rejected": "memory:hallucinated", "replacement": "memory:task-observation"},
+    ]
+
+
+def test_final_memory_acceptance_replaces_invalid_reference_with_all_task_local_references():
+    payload = {
+        "status": "satisfied",
+        "disposition": "observation",
+        "summary": "Endpoint hypotheses were recorded.",
+        "evidence_refs": ["memory:hallucinated"],
+    }
+
+    corrected, replacements = MultiAgentWorkflowController._replace_invalid_memory_references(
+        payload,
+        ["memory:hallucinated"],
+        [
+            {"reference": "memory:task-observation", "source": "task_memory:store_observation"},
+            {"reference": "memory:task-knowledge", "source": "task_memory:store_knowledge"},
+        ],
+    )
+
+    assert corrected["evidence_refs"] == ["memory:task-observation", "memory:task-knowledge"]
     assert replacements == [
         {"rejected": "memory:hallucinated", "replacement": "memory:task-observation"},
         {"rejected": "memory:hallucinated", "replacement": "memory:task-knowledge"},
@@ -3712,7 +3782,7 @@ def test_task_executor_max_token_recovery_exhaustion_is_partial_failure():
     ]
 
 
-def test_reasoning_loop_recovery_supersedes_original_and_queues_one_replacement():
+def test_reasoning_loop_recovery_keeps_original_incomplete_and_queues_one_replacement():
     task = Task(
         task_uid="active",
         title="Active",
@@ -3748,12 +3818,74 @@ def test_reasoning_loop_recovery_supersedes_original_and_queues_one_replacement(
 
     original = next(candidate for candidate in state.tasks if candidate.task_uid == "active")
     replacement = next(candidate for candidate in state.tasks if candidate.replacement_of == "active")
-    assert original.status == "superseded"
+    assert original.status == "partial_failure"
     assert replacement.status == "pending"
     assert replacement.phase == task.phase
-    assert replacement.acceptance == task.acceptance
+    assert replacement.acceptance.criteria == task.acceptance.criteria
     assert "criterion" in replacement.objective
     assert controller._assessment_is_complete(_plan()) is False
+
+
+def test_reasoning_loop_replacement_requires_exactly_one_unresolved_criterion():
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=_artifact_acceptance().basis,
+        criteria=(
+            AcceptanceCriterion(
+                id="criterion-1",
+                description="First bounded result",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            ),
+            AcceptanceCriterion(
+                id="criterion-2",
+                description="Second bounded result",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            ),
+        ),
+    )
+    task = Task(
+        task_uid="active",
+        title="Active",
+        objective="capture bounded evidence",
+        acceptance=acceptance,
+        phase=1,
+        status="active",
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    assert controller._create_reasoning_loop_replacement_task(task, []) is None
+
+
+def test_contradicted_finding_records_assessed_negative_when_contract_allows_it():
+    task = Task(
+        task_uid="active",
+        title="Check route",
+        objective="Test the route",
+        acceptance=_artifact_acceptance(),
+        phase=1,
+        status="active",
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    result = controller._record_contradicted_finding_as_negative(
+        task,
+        ["artifact:artifacts/route-404.txt"],
+    )
+
+    assert result["succeeded"] is True
+    acceptance = state.acceptance_results[task.task_uid][0]
+    assert acceptance.status == "assessed_negative"
+    assert acceptance.disposition == "no_vulnerability"
 
 
 def test_partial_failure_is_superseded_when_split_replacements_resolve_all_criteria():
@@ -3823,7 +3955,7 @@ def test_partial_failure_remains_blocking_until_all_replacements_succeed(replace
         replacement_of="parent",
         supersedes_criteria=["criterion-1"],
     )
-    state = FakeState(_plan(), tasks=[parent, replacement])
+    state = FakeState(_plan(), tasks=[parent, replacement], acceptance_complete=False)
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -3853,7 +3985,7 @@ def test_partial_failure_remains_blocking_when_replacement_omits_parent_criterio
         replacement_of="parent",
         supersedes_criteria=["other-criterion"],
     )
-    state = FakeState(_plan(), tasks=[parent, replacement])
+    state = FakeState(_plan(), tasks=[parent, replacement], acceptance_complete=False)
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -3894,6 +4026,145 @@ def test_non_loop_max_token_exhaustion_remains_partial_failure():
 
     assert state.tasks[0].status == "partial_failure"
     assert not any(candidate.replacement_of == "active" for candidate in state.tasks)
+
+
+def test_output_truncation_recovery_uses_one_compact_new_evidence_action():
+    state = FakeState(
+        _plan(),
+        tasks=[Task(task_uid="active", title="Active", objective="enumerate paths", phase=1, status="active")],
+    )
+    calls = []
+    prior_outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="first-observation",
+        tool_name="store_observation",
+        success=True,
+        correctable=False,
+        input_summary="observed route response",
+        output_summary='{"memory_ref":"memory:current-observation"}',
+    )
+    repeated_outcome = ToolOutcome(
+        sequence=2,
+        tool_use_id="second-observation",
+        tool_name="store_observation",
+        success=True,
+        correctable=False,
+        input_summary="observed route response",
+        output_summary='{"memory_ref":"memory:current-observation"}',
+    )
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"enumerate paths","tools":[]}'
+        pytest.fail(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append((prompt, [workflow_mod.get_tool_name(tool) for tool in tools], run_policy))
+        if len(calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="",
+                outcomes=[prior_outcome],
+                max_tokens_exhausted=True,
+                max_tokens_classification="output_truncation",
+            )
+        return workflow_mod.TaskExecutorCycleResult(text="", outcomes=[repeated_outcome])
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
+
+    assert len(calls) == 2
+    recovery_prompt, recovery_tools, recovery_policy = calls[1]
+    assert "## Compact Output-Truncation Recovery" in recovery_prompt
+    assert "memory:current-observation" in recovery_prompt
+    assert "observed route response" not in recovery_prompt
+    assert recovery_policy.max_tool_calls == 1
+    assert "record_task_acceptance" not in recovery_tools
+    assert state.tasks[0].status == "partial_failure"
+    recovery_event = next(
+        event
+        for event in controller.runtime.callback_handler.events
+        if event["type"] == "task_max_token_recovery"
+        and event["decision"] == "no_new_successful_tool_outcome"
+    )
+    assert recovery_event["retry_mode"] == "evidence"
+
+
+def test_output_truncation_recovery_prompt_limits_closure_to_required_tool():
+    task = Task(task_uid="active", title="Active", objective="close task", phase=1, status="active")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+
+    prompt = controller._output_truncation_recovery_prompt(
+        task,
+        [{"reference": "memory:observation_current", "source": "tool_outcome"}],
+        [],
+        "closure",
+        ["record_task_acceptance"],
+    )
+
+    assert "Allowed tools: record_task_acceptance" in prompt
+    assert "Call exactly one allowed closure tool" in prompt
+    assert "memory:observation_current" in prompt
+
+
+def test_output_truncation_recovery_uses_closure_only_after_acceptance_correction():
+    task = Task(task_uid="active", title="Active", objective="close task", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+    rejected_acceptance = ToolOutcome(
+        sequence=1,
+        tool_use_id="rejected-acceptance",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=True,
+        input_summary='{"status":"satisfied","disposition":"observation","evidence_refs":[]}',
+        output_summary="Acceptance evidence reference is invalid",
+    )
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"close task","tools":[]}'
+        pytest.fail(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append((prompt, [workflow_mod.get_tool_name(tool) for tool in tools], run_policy))
+        if len(calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(text="", outcomes=[rejected_acceptance])
+        return workflow_mod.TaskExecutorCycleResult(
+            text="",
+            outcomes=[],
+            max_tokens_exhausted=True,
+            max_tokens_classification="output_truncation",
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(
+            env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1, "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 1}
+        ),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(calls) == 3
+    recovery_prompt, recovery_tools, recovery_policy = calls[2]
+    assert "## Compact Output-Truncation Recovery" in recovery_prompt
+    assert recovery_tools == ["record_task_acceptance"]
+    assert recovery_policy.required_tool_names == {"record_task_acceptance"}
+    assert recovery_policy.max_tool_calls == 1
 
 
 def test_task_evaluator_prompt_omits_empty_worker_context_and_truncates_long_context():
