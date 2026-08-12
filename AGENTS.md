@@ -65,6 +65,31 @@
 
 ## Design Choices
 - Complexity leans towards deterministic code and away from the LLM where appropriate. Reasoning belongs in the LLM.
+- Generic controller, memory, and acceptance code must be protocol-, target-, tool-, and model-neutral. Put
+  module-specific behavior in typed adapters, operation plugins, or declarative catalogs.
+- Structured metadata is authoritative for workflow control. Do not infer phase dependencies, task kinds, evidence
+  kinds, or scope from titles, filenames, generated prose, or incidental tool-output wording.
+- Keep evidence availability separate from semantic conclusions. Readability, non-empty content, status codes, and
+  successful tool execution establish availability only; they do not independently prove support or contradiction.
+- Automatic semantic dispositions require a narrow declarative validation rule. A contradiction rule must match every
+  cited artifact before Python may record a negative disposition.
+- Canonicalization may normalize syntax or complete an unambiguous logical or relative reference. It must not silently
+  change an explicit service authority, network identity, or filesystem root for execution authorization. A
+  non-authorizing persisted record may correct one unique, conservatively matched target typo when the correction is
+  logged and canonicalized to an already assigned target.
+- Deterministic repair must be information-preserving and unambiguous. If multiple corrections remain possible, give
+  bounded recovery the valid choices instead of guessing or applying every candidate.
+- Recovery progress requires new durable state appropriate to the frozen acceptance contract. Reasoning cycles,
+  read-only calls, catalog inspection, and repeated artifact reads are not evidence progress.
+- State whether a bounded repair permits one model cycle or one tool invocation. Tool-constrained workflow recovery
+  means one tool invocation unless its contract explicitly says otherwise.
+- Repetition detection must use canonical inputs, outputs, references, and content fingerprints instead of hardcoded
+  producer names or filename prefixes.
+- Tool-schema changes should be additive where practical. Normalize supported legacy inputs at the boundary, use
+  canonical forms internally, and reject unknown values.
+- Generic workflow tests must cover representative HTTP, network, and source/filesystem cases. Incident fixtures may
+  reproduce a particular model, target, or tool failure, but assertions must test the general invariant rather than
+  making that model's wording, target's paths, or tool's artifact names universal behavior.
 - `src/modules/config/system/finding_validation_guards.yaml` is the declarative catalog for narrow, unambiguous
   finding-validation rules. Update it when a finding class needs either a deterministic rejection based on
   contradiction markers present in every cited artifact, or a required positive validation mode such as response

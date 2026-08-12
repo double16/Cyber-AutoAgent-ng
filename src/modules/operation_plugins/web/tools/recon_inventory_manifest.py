@@ -24,6 +24,7 @@ SUPPORTED_RECON_FORMATS = (
     "url_list",
     "specialized_recon",
     "auth_chain",
+    "inventory_manifest",
 )
 RECON_FORMAT_ALIASES = {
     "ferox": "feroxbuster",
@@ -34,6 +35,8 @@ RECON_FORMAT_ALIASES = {
     "katana_jsonl": "katana",
     "specialized_recon_orchestrator": "specialized_recon",
     "auth_chain_analyzer": "auth_chain",
+    "inventory": "inventory_manifest",
+    "manifest": "inventory_manifest",
 }
 URL_PATTERN = re.compile(r"https?://[^\s\]\[<>{}\"']+")
 STATUS_PATTERN = re.compile(r"(?:status(?:_code)?[=: ]+|\bStatus:\s*)(\d{3})", re.IGNORECASE)
@@ -281,6 +284,14 @@ PARSERS = {
 
 
 def _infer_format(text: str) -> str:
+    values = _json_values(text)
+    if (
+        len(values) == 1
+        and isinstance(values[0], dict)
+        and "items" in values[0]
+        and "unassessed_gaps" in values[0]
+    ):
+        return "inventory_manifest"
     if '"format": "recon_result_v1"' in text or '"format":"recon_result_v1"' in text:
         return "specialized_recon"
     if '"auth_endpoints"' in text and '"flow_analysis"' in text:
@@ -513,15 +524,9 @@ def records_to_inventory_manifest(
 def write_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
     """Atomically write and validate one inventory manifest."""
 
-    if not path:
-        raise ValueError("inventory manifest output path is required")
-    from modules.tools.memory import _load_inventory_manifest, _operation_output_root, canonical_artifact_reference
+    absolute_path = _inventory_manifest_output_path(path)
+    from modules.tools.memory import _load_inventory_manifest, canonical_artifact_reference
 
-    operation_root = os.path.realpath(_operation_output_root())
-    candidate_path = path if os.path.isabs(path) else os.path.join(operation_root, path)
-    absolute_path = os.path.realpath(candidate_path)
-    if os.path.commonpath((absolute_path, operation_root)) != operation_root:
-        raise ValueError(f"Inventory manifest output must remain inside the operation output root: {operation_root}")
     directory = os.path.dirname(absolute_path)
     os.makedirs(directory, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".inventory-manifest-", suffix=".json", dir=directory)
@@ -546,6 +551,21 @@ def write_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, A
     }
 
 
+def _inventory_manifest_output_path(path: str) -> str:
+    """Resolve one manifest output path inside the current operation root."""
+
+    if not path:
+        raise ValueError("inventory manifest output path is required")
+    from modules.tools.memory import _operation_output_root
+
+    operation_root = os.path.realpath(_operation_output_root())
+    candidate_path = path if os.path.isabs(path) else os.path.join(operation_root, path)
+    absolute_path = os.path.realpath(candidate_path)
+    if os.path.commonpath((absolute_path, operation_root)) != operation_root:
+        raise ValueError(f"Inventory manifest output must remain inside the operation output root: {operation_root}")
+    return absolute_path
+
+
 @tool(
     inputSchema={
         "json": {
@@ -555,8 +575,8 @@ def write_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, A
                     "type": "string",
                     "description": (
                         "Canonical artifact reference, safe absolute path, or relative current-operation path "
-                        "containing recon output. Relative paths resolve from artifacts/ first, then from the "
-                        "operation output directory."
+                        "containing supported recon output or an inventory manifest. Relative paths resolve from "
+                        "artifacts/ first, then from the operation output directory."
                     ),
                 },
                 "output_file": {
@@ -566,7 +586,7 @@ def write_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, A
                 "source_format": {
                     "type": "string",
                     "enum": ["auto", *SUPPORTED_RECON_FORMATS],
-                    "description": "Canonical recon output format. Defaults to auto detection.",
+                    "description": "Canonical recon or inventory-manifest format. Defaults to auto detection.",
                 },
                 "target_id": {
                     "type": "string",
@@ -588,7 +608,7 @@ def recon_output_to_inventory_manifest(
     target_id: str = "target-1",
     target: str = "",
 ) -> str:
-    f"""Convert a supported recon artifact from {", ".join(SUPPORTED_RECON_FORMATS)} into a validated inventory manifest."""
+    """Convert supported recon output or validate-copy an inventory manifest into a validated inventory manifest."""
 
     from modules.tools.artifact import resolve_operation_artifact_path
     from modules.tools.memory import canonical_artifact_reference
@@ -601,8 +621,21 @@ def recon_output_to_inventory_manifest(
     normalized_format = RECON_FORMAT_ALIASES.get(normalized_format, normalized_format)
     if normalized_format == "auto":
         normalized_format = _infer_format(text)
-    if normalized_format not in PARSERS:
+    if normalized_format not in {*PARSERS, "inventory_manifest"}:
         raise ValueError(f"source_format must be auto or one of: {', '.join(SUPPORTED_RECON_FORMATS)}")
+    if normalized_format == "inventory_manifest":
+        output_path = _inventory_manifest_output_path(output_file)
+        if output_path == os.path.realpath(source_path):
+            raise ValueError("inventory manifest output_file must differ from source_artifact")
+        try:
+            manifest = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError("inventory_manifest source must be a JSON object") from error
+        if not isinstance(manifest, dict):
+            raise ValueError("inventory_manifest source must be a JSON object")
+        result = write_inventory_manifest(output_file, manifest)
+        result.update({"source_artifact": source_ref, "source_format": normalized_format})
+        return json.dumps(result, sort_keys=True)
     bound_target, resolved_target_id = resolve_inventory_target(target or target_id, target_id)
     records = PARSERS[normalized_format](text)
     if not records:

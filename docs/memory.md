@@ -129,9 +129,12 @@ Agents use provider-neutral names:
 Workflow bookkeeping tools are intentionally separate from semantic retrieval. Qdrant does not replace SQLite as the
 authoritative source for task, phase, acceptance, or validation status.
 
-`store_finding` validates literal positive markers in durable artifacts, records internal candidate-persistence
-receipts, and fingerprints cited evidence. When a source task's frozen criterion is solely candidate persistence, the
-controller records that task acceptance from the returned finding reference; this does not verify the security claim.
+`store_finding` validates typed positive assertions in durable artifacts, records internal candidate-persistence
+receipts, and fingerprints cited evidence. Existing `marker` assertions remain valid and normalize to `literal_text`.
+New assertions may use exact text, an encoded byte sequence, or a JSON Pointer with a narrow data-only operator;
+arbitrary executable predicates are not accepted. When a source task's frozen criterion is solely candidate
+persistence, the controller records that task acceptance from the returned finding reference; this does not verify the
+security claim.
 The separate verification task receives the candidate's structured reproduction packet and records the finding outcome
 from fresh evidence.
 

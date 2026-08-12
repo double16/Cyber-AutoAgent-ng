@@ -130,14 +130,14 @@ def test_default_text_runner_cleans_role_agent(monkeypatch):
     assert cleanup_calls == ["cleanup"]
 
 
-def test_acceptance_recovery_rejects_clear_http_error_artifacts(tmp_path):
+def test_acceptance_recovery_treats_http_error_artifacts_as_available_unknown_evidence(tmp_path):
     artifact = tmp_path / "missing.html"
     artifact.write_text("<title>404 Not Found</title><h1>Not Found</h1>", encoding="utf-8")
 
-    assert MultiAgentWorkflowController._artifact_recovery_quality(str(artifact)) == "non_viable"
+    assert MultiAgentWorkflowController._artifact_recovery_quality(str(artifact)) == "available"
     assert MultiAgentWorkflowController._has_viable_acceptance_recovery_evidence(
-        [{"reference": "artifact:artifacts/missing.html", "usable": "false", "quality": "non_viable"}]
-    ) is False
+        [{"reference": "artifact:artifacts/missing.html", "usable": "true", "quality": "available"}]
+    ) is True
     assert MultiAgentWorkflowController._has_viable_acceptance_recovery_evidence(
         [{"reference": "memory:observation-1"}]
     ) is True
@@ -147,13 +147,14 @@ def test_artifact_recovery_does_not_classify_arbitrary_non_http_text_as_contradi
     artifact = tmp_path / "negative.txt"
     artifact.write_text("request failed: no positive evidence was observed", encoding="utf-8")
 
-    assert MultiAgentWorkflowController._artifact_recovery_quality(str(artifact)) == "viable"
+    assert MultiAgentWorkflowController._artifact_recovery_quality(str(artifact)) == "available"
 
 
 def test_contradictory_finding_artifact_references_are_deterministic(tmp_path, monkeypatch):
     artifact = tmp_path / "negative.txt"
-    artifact.write_text("HTTP/1.1 404 Not Found", encoding="utf-8")
+    artifact.write_text("Failed to open stream; failed opening /etc/passwd", encoding="utf-8")
     monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _ref: artifact)
+    monkeypatch.setattr("modules.tools.memory._artifact_path_from_ref", lambda _ref: artifact)
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
     outcome = ToolOutcome(
         1,
@@ -161,7 +162,12 @@ def test_contradictory_finding_artifact_references_are_deterministic(tmp_path, m
         "store_finding",
         False,
         False,
-        json.dumps({"artifacts": ["artifact:artifacts/negative.txt"]}),
+        json.dumps({
+            "title": "Local file inclusion",
+            "claim": "LFI reads local files",
+            "technique": "file inclusion",
+            "artifacts": ["artifact:artifacts/negative.txt"],
+        }),
         "evidence assertion marker was not found",
     )
 
@@ -188,7 +194,7 @@ def test_acceptance_recovery_context_marks_unreadable_artifact_as_unknown(monkey
         None,
     )
 
-    assert context[0]["quality"] == "unknown"
+    assert context[0]["quality"] == "unavailable"
     assert context[0]["evidence_status"] == "unknown"
 
 
@@ -242,39 +248,16 @@ def test_candidate_dependent_phase_closes_without_speculative_task_creation(monk
     )
 
 
-def test_semantic_impact_phase_closes_when_plan_metadata_omits_candidate_dependency(monkeypatch):
-    plan = OperationPlan(
-        objective="assess",
-        current_phase=1,
-        total_phases=1,
-        phases=[PlanPhase(id=1, title="Impact Demonstration", status="active", criteria="Demonstrate impact")],
+def test_phase_title_does_not_override_structured_candidate_dependency_metadata():
+    phase = PlanPhase(
+        id=1,
+        title="Impact Demonstration",
+        status="active",
+        criteria="Demonstrate impact",
+        requires_finding_candidates=False,
     )
-    state = FakeState(plan, finding_records=[])
-    controller = MultiAgentWorkflowController(
-        runtime=_runtime(),
-        budget=BudgetConfig(max_duration_minutes=60),
-        state_store=state,
-        max_iterations=1,
-    )
-    transitions = []
 
-    def mark_phase(current_plan, phase_id, status):
-        transitions.append((phase_id, status))
-        updated = OperationPlan(
-            objective=current_plan.objective,
-            current_phase=phase_id,
-            total_phases=1,
-            phases=[PlanPhase(id=1, title="Impact Demonstration", status=status, criteria="Demonstrate impact")],
-        )
-        state.plan = updated
-        return updated
-
-    monkeypatch.setattr(controller, "_mark_phase", mark_phase)
-    monkeypatch.setattr(controller, "_emit_workflow_completion", lambda _plan: None)
-
-    controller.run()
-
-    assert transitions == [(1, "not_applicable")]
+    assert workflow_mod._phase_semantically_requires_finding_candidates(phase) is False
 
 
 def test_default_text_runner_preserves_agent_error_when_cleanup_fails(monkeypatch):
@@ -1643,7 +1626,7 @@ def test_task_executor_contract_disables_follow_up_task_creation():
     assert "create_tasks" not in contract
 
 
-def test_endpoint_evidence_guard_rejects_inventory_manifest():
+def test_endpoint_evidence_guard_rejects_inventory_manifest(monkeypatch):
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -1656,7 +1639,12 @@ def test_endpoint_evidence_guard_rejects_inventory_manifest():
         objective="Assess login",
         acceptance=AcceptanceContract(
             mode="coverage",
-            basis=AcceptanceBasis(kind="snapshot", description="route", source_refs=["memory:inventory"], item_ids=["endpoint-1"]),
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="route",
+                source_refs=["artifact:artifacts/discovery.json"],
+                item_ids=["endpoint-1"],
+            ),
             criteria=[AcceptanceCriterion(
                 id="criterion",
                 description="Assess route",
@@ -1672,6 +1660,11 @@ def test_endpoint_evidence_guard_rejects_inventory_manifest():
         disposition="observation",
         summary="assessed",
         evidence_refs=("artifact:artifacts/inventory_manifest.json",),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "_load_inventory_manifest",
+        lambda _reference: ({"items": [{"id": "endpoint-1", "kind": "endpoint"}]}, "digest"),
     )
 
     reason = controller._endpoint_evidence_guard(task, [result], [])
@@ -1695,7 +1688,20 @@ def test_endpoint_evidence_inventory_rejection_is_recoverable():
             task_uid="endpoint",
             title="Assess endpoint http://target.test/login",
             objective="Assess",
-            acceptance=_artifact_acceptance(),
+            acceptance=AcceptanceContract(
+                mode="coverage",
+                basis=AcceptanceBasis(
+                    kind="snapshot",
+                    description="route",
+                    source_refs=["artifact:artifacts/discovery.json"],
+                    item_ids=["endpoint-1"],
+                ),
+                criteria=[AcceptanceCriterion(
+                    id="criterion",
+                    description="Assess route",
+                    evidence_requirements=[EvidenceRequirement(kind="artifact")],
+                )],
+            ),
             phase=1,
             status="active",
         ),
@@ -1706,10 +1712,10 @@ def test_endpoint_evidence_inventory_rejection_is_recoverable():
     )
     assert "do not repeat the rejected record_task_acceptance call" in instruction
     assert "artifact:artifacts/login_response.txt" in instruction
-    assert "http://target.test/login" in instruction
+    assert "endpoint-1" in instruction
 
 
-def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation():
+def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation(monkeypatch):
     runtime = _runtime(
         env_ints={
             "CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2,
@@ -1726,7 +1732,7 @@ def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation():
             basis=AcceptanceBasis(
                 kind="snapshot",
                 description="route",
-                source_refs=["memory:inventory"],
+                source_refs=["artifact:artifacts/discovery.json"],
                 item_ids=["endpoint-1"],
             ),
             criteria=[AcceptanceCriterion(
@@ -1746,6 +1752,15 @@ def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation():
         summary="assessed",
         evidence_refs=("artifact:artifacts/inventory_manifest.json",),
     )]
+    def load_manifest(reference):
+        if reference in {
+            "artifact:artifacts/discovery.json",
+            "artifact:artifacts/inventory_manifest.json",
+        }:
+            return {"items": [{"id": "endpoint-1", "kind": "endpoint"}]}, "digest"
+        raise ValueError("not an inventory manifest")
+
+    monkeypatch.setattr(workflow_mod, "_load_inventory_manifest", load_manifest)
     actor_prompts = []
     evaluator_calls = []
 
@@ -2663,7 +2678,9 @@ def test_task_acceptance_gate_skips_evaluator_and_lists_missing_criteria():
     assert "assess-the-assigned-endpoint" in state.tasks[0].status_reason
 
 
-def test_missing_acceptance_gets_one_evidence_backed_terminal_recovery_turn(monkeypatch):
+def test_missing_acceptance_gets_one_evidence_backed_terminal_recovery_turn(monkeypatch, tmp_path):
+    artifact = tmp_path / "endpoint.html"
+    artifact.write_text("endpoint response", encoding="utf-8")
     task = TaskModel(
         task_uid="hypotheses",
         title="Generate hypotheses",
@@ -2758,6 +2775,7 @@ def test_missing_acceptance_gets_one_evidence_backed_terminal_recovery_turn(monk
         work_runner=work_runner,
     )
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
@@ -3547,7 +3565,7 @@ def test_final_memory_acceptance_recovery_replaces_only_rejected_memory_refs():
     ]
 
 
-def test_final_memory_acceptance_replaces_invalid_reference_with_all_task_local_references():
+def test_final_memory_acceptance_does_not_guess_between_multiple_task_local_references():
     payload = {
         "status": "satisfied",
         "disposition": "observation",
@@ -3564,11 +3582,8 @@ def test_final_memory_acceptance_replaces_invalid_reference_with_all_task_local_
         ],
     )
 
-    assert corrected["evidence_refs"] == ["memory:task-observation", "memory:task-knowledge"]
-    assert replacements == [
-        {"rejected": "memory:hallucinated", "replacement": "memory:task-observation"},
-        {"rejected": "memory:hallucinated", "replacement": "memory:task-knowledge"},
-    ]
+    assert corrected == {}
+    assert replacements == []
 
 
 def test_final_memory_acceptance_recovery_requires_the_specific_missing_memory_error():
@@ -3589,7 +3604,27 @@ def test_final_memory_acceptance_recovery_requires_the_specific_missing_memory_e
 
 def test_task_executor_recovers_final_hallucinated_memory_reference_deterministically():
     runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1, "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 1})
-    task = Task(task_uid="active", title="Generate hypotheses", objective="Assess one endpoint", phase=1, status="active")
+    task = Task(
+        task_uid="active",
+        title="Generate hypotheses",
+        objective="Assess one endpoint",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Generate hypotheses",
+                source_refs=["memory:seed"],
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="hypotheses",
+                description="Store endpoint hypotheses",
+                evidence_requirements=[EvidenceRequirement(kind="observation")],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
     state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
     attempted_payloads = []
 
@@ -4028,7 +4063,7 @@ def test_non_loop_max_token_exhaustion_remains_partial_failure():
     assert not any(candidate.replacement_of == "active" for candidate in state.tasks)
 
 
-def test_output_truncation_recovery_uses_one_compact_new_evidence_action():
+def test_output_truncation_recovery_rejects_closure_without_required_terminal_state():
     state = FakeState(
         _plan(),
         tasks=[Task(task_uid="active", title="Active", objective="enumerate paths", phase=1, status="active")],
@@ -4091,7 +4126,7 @@ def test_output_truncation_recovery_uses_one_compact_new_evidence_action():
         event
         for event in controller.runtime.callback_handler.events
         if event["type"] == "task_max_token_recovery"
-        and event["decision"] == "no_new_successful_tool_outcome"
+        and event["decision"] == "no_new_durable_state"
     )
     assert recovery_event["retry_mode"] == "evidence"
 
@@ -4118,7 +4153,27 @@ def test_output_truncation_recovery_prompt_limits_closure_to_required_tool():
 
 
 def test_output_truncation_recovery_uses_closure_only_after_acceptance_correction():
-    task = Task(task_uid="active", title="Active", objective="close task", phase=1, status="active")
+    task = Task(
+        task_uid="active",
+        title="Active",
+        objective="close task",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Close task",
+                source_refs=["memory:seed"],
+                item_ids=["item-1"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="close",
+                description="Store closure observation",
+                evidence_requirements=[EvidenceRequirement(kind="observation")],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
     state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
     calls = []
     rejected_acceptance = ToolOutcome(
@@ -4127,7 +4182,10 @@ def test_output_truncation_recovery_uses_closure_only_after_acceptance_correctio
         tool_name="record_task_acceptance",
         success=False,
         correctable=True,
-        input_summary='{"status":"satisfied","disposition":"observation","evidence_refs":[]}',
+        input_summary=(
+            '{"status":"satisfied","disposition":"observation",'
+            '"evidence_refs":["memory:existing-observation"]}'
+        ),
         output_summary="Acceptance evidence reference is invalid",
     )
 
@@ -4139,7 +4197,18 @@ def test_output_truncation_recovery_uses_closure_only_after_acceptance_correctio
     def work_runner(role, prompt, tools, system_prompt, run_policy):
         calls.append((prompt, [workflow_mod.get_tool_name(tool) for tool in tools], run_policy))
         if len(calls) == 1:
-            return workflow_mod.TaskExecutorCycleResult(text="", outcomes=[rejected_acceptance])
+            return workflow_mod.TaskExecutorCycleResult(text="", outcomes=[
+                ToolOutcome(
+                    sequence=0,
+                    tool_use_id="stored-observation",
+                    tool_name="store_observation",
+                    success=True,
+                    correctable=False,
+                    input_summary="observation",
+                    output_summary='{"memory_ref":"memory:existing-observation"}',
+                ),
+                rejected_acceptance,
+            ])
         return workflow_mod.TaskExecutorCycleResult(
             text="",
             outcomes=[],

@@ -7,6 +7,7 @@ This module provides report generation functionality.
 This is NOT a Strands tool - it's a handler utility function.
 """
 
+import base64
 import json
 import hashlib
 import math
@@ -44,6 +45,8 @@ from modules.prompts.factory import (
 from modules.tools.memory import (
     OperationTarget,
     _artifact_path_from_ref,
+    _canonical_assertion_predicate,
+    _json_pointer_value,
     get_memory_client,
     list_persisted_operation_model_metrics,
     memory_is_cross_operation,
@@ -527,28 +530,47 @@ def _verified_finding_assertions_met(metadata: Dict[str, Any]) -> bool:
         return False
     if not candidate_assertions or not isinstance(fingerprints, dict):
         return False
-    candidate_markers = {
-        str(item.get("marker") or "") for item in candidate_assertions if isinstance(item, dict)
+    candidate_predicates = {
+        _canonical_assertion_predicate(item) for item in candidate_assertions if isinstance(item, dict)
     }
-    validation_markers = {
-        str(item.get("marker") or "") for item in validation_assertions if isinstance(item, dict)
+    validation_predicates = {
+        _canonical_assertion_predicate(item) for item in validation_assertions if isinstance(item, dict)
     }
-    if not candidate_markers or "" in candidate_markers or candidate_markers != validation_markers:
+    if not candidate_predicates or candidate_predicates != validation_predicates:
         return False
     for assertion in validation_assertions:
         if not isinstance(assertion, dict):
             return False
         reference = str(assertion.get("artifact") or "")
-        marker = str(assertion.get("marker") or "")
-        if reference not in artifacts or not marker:
+        if reference not in artifacts:
             return False
         try:
-            path = _artifact_path_from_ref(reference)
-            content = Path(path).read_text(encoding="utf-8", errors="replace")
-            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        except (OSError, ValueError):
+            path = Path(_artifact_path_from_ref(reference))
+            artifact_bytes = path.read_bytes()
+            digest = hashlib.sha256(artifact_bytes).hexdigest()
+            assertion_type = str(assertion.get("type") or ("literal_text" if "marker" in assertion else ""))
+            if assertion_type == "literal_text":
+                value = str(assertion.get("value", assertion.get("marker", "")))
+                matched = bool(value) and value in artifact_bytes.decode("utf-8", errors="replace")
+            elif assertion_type == "byte_sequence":
+                expected = (
+                    bytes.fromhex(str(assertion.get("value") or ""))
+                    if assertion.get("encoding") == "hex"
+                    else base64.b64decode(str(assertion.get("value") or ""), validate=True)
+                )
+                matched = bool(expected) and expected in artifact_bytes
+            elif assertion_type == "json_value":
+                actual = _json_pointer_value(json.loads(artifact_bytes), str(assertion.get("pointer") or ""))
+                operator = assertion.get("operator")
+                expected = assertion.get("expected")
+                matched = operator == "exists" or (
+                    actual == expected if operator == "equals" else expected in actual
+                )
+            else:
+                return False
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return False
-        if marker not in content or fingerprints.get(reference) != digest:
+        if not matched or fingerprints.get(reference) != digest:
             return False
     return True
 

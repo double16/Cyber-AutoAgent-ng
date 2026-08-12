@@ -202,6 +202,7 @@ def test_converter_tool_schema_advertises_canonical_formats():
     schema = get_tool_spec(manifest_tool.recon_output_to_inventory_manifest)["inputSchema"]["json"]
 
     assert schema["properties"]["source_format"]["enum"] == ["auto", *manifest_tool.SUPPORTED_RECON_FORMATS]
+    assert "inventory_manifest" in manifest_tool.SUPPORTED_RECON_FORMATS
     assert set(schema["required"]) == {"source_artifact", "output_file"}
 
 
@@ -233,6 +234,86 @@ def test_converter_reads_artifact_normalizes_alias_and_writes_valid_manifest(tmp
     assert result["artifact_ref"] == "artifact:artifacts/inventory.json"
     assert {item["kind"] for item in written["items"]} == {"service", "endpoint", "parameter"}
     assert memory._load_inventory_manifest(result["artifact_ref"])[0]["schema_version"] == 1
+
+
+@pytest.mark.parametrize("source_format", ["auto", "inventory_manifest", "inventory", "manifest"])
+def test_converter_validates_copies_inventory_manifest_without_mutating_source(tmp_path, monkeypatch, source_format):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    source = artifact_dir / "source-manifest.json"
+    source_manifest = {
+        "items": [{
+            "id": "endpoint-login",
+            "target_id": "target-1",
+            "kind": "endpoint",
+            "value": "https://target.test/login",
+            "attributes": {},
+        }],
+        "unassessed_gaps": [],
+    }
+    source.write_text(json.dumps(source_manifest, indent=2), encoding="utf-8")
+    source_bytes = source.read_bytes()
+    output = artifact_dir / f"validated-{source_format}.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = json.loads(
+        manifest_tool.recon_output_to_inventory_manifest(
+            "artifact:artifacts/source-manifest.json",
+            str(output),
+            source_format=source_format,
+        )
+    )
+
+    assert source.read_bytes() == source_bytes
+    assert result["source_artifact"] == "artifact:artifacts/source-manifest.json"
+    assert result["source_format"] == "inventory_manifest"
+    assert result["artifact_ref"] == f"artifact:artifacts/{output.name}"
+    assert memory._load_inventory_manifest(result["artifact_ref"])[0]["schema_version"] == 1
+
+
+def test_converter_rejects_invalid_or_overwriting_inventory_manifest_source(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    invalid = artifact_dir / "invalid-manifest.json"
+    invalid.write_text("[]", encoding="utf-8")
+    valid = artifact_dir / "valid-manifest.json"
+    valid.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "items": [{
+                "id": "endpoint-login",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "https://target.test/login",
+                "attributes": {},
+            }],
+            "unassessed_gaps": [],
+        }),
+        encoding="utf-8",
+    )
+    valid_bytes = valid.read_bytes()
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    with pytest.raises(ValueError, match="JSON object"):
+        manifest_tool.recon_output_to_inventory_manifest(
+            "artifact:artifacts/invalid-manifest.json",
+            "artifacts/validated.json",
+            source_format="inventory_manifest",
+        )
+    with pytest.raises(ValueError, match="must differ"):
+        manifest_tool.recon_output_to_inventory_manifest(
+            "artifact:artifacts/valid-manifest.json",
+            "artifacts/valid-manifest.json",
+            source_format="inventory_manifest",
+        )
+
+    assert valid.read_bytes() == valid_bytes
 
 
 @pytest.mark.parametrize("source_format", ["auto", "url_list", "url-list"])

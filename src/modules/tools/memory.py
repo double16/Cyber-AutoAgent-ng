@@ -41,6 +41,7 @@ Key Features:
    • Vector Store (Qdrant)
 """
 
+import base64
 import hashlib
 import ipaddress
 import json
@@ -2895,13 +2896,83 @@ def _artifact_fingerprints(references: List[str]) -> Dict[str, str]:
     return fingerprints
 
 
+def _json_pointer_value(payload: Any, pointer: str) -> Any:
+    """Resolve one RFC 6901 JSON Pointer without evaluating model-authored code."""
+
+    if pointer == "":
+        return payload
+    if not pointer.startswith("/"):
+        raise ValueError("json_value evidence assertion pointer must be empty or start with /")
+    current = payload
+    for raw_part in pointer[1:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (IndexError, TypeError, ValueError) as error:
+                raise ValueError(f"json_value evidence assertion pointer does not exist: {pointer}") from error
+        elif isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            raise ValueError(f"json_value evidence assertion pointer does not exist: {pointer}")
+    return current
+
+
+def _assertion_matches_artifact(assertion: Dict[str, Any], reference: str) -> bool:
+    """Evaluate one canonical, data-only assertion against an artifact."""
+
+    path = Path(_artifact_path_from_ref(reference))
+    assertion_type = str(assertion.get("type") or ("literal_text" if "marker" in assertion else ""))
+    try:
+        if assertion_type == "literal_text":
+            value = str(assertion.get("value", assertion.get("marker", "")))
+            return bool(value) and value in path.read_text(encoding="utf-8", errors="replace")
+        if assertion_type == "byte_sequence":
+            encoding = assertion["encoding"]
+            expected = (
+                bytes.fromhex(assertion["value"])
+                if encoding == "hex"
+                else base64.b64decode(assertion["value"], validate=True)
+            )
+            return bool(expected) and expected in path.read_bytes()
+        if assertion_type == "json_value":
+            actual = _json_pointer_value(json.loads(path.read_text(encoding="utf-8")), assertion["pointer"])
+            operator = assertion["operator"]
+            if operator == "exists":
+                return True
+            if operator == "equals":
+                return actual == assertion.get("expected")
+            expected = assertion.get("expected")
+            return (
+                expected in actual
+                if isinstance(actual, (str, list, dict))
+                else False
+            )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+        return False
+    return False
+
+
+def _canonical_assertion_predicate(assertion: Dict[str, Any]) -> str:
+    """Return an artifact-independent identity for a canonical evidence assertion."""
+
+    predicate = {key: value for key, value in assertion.items() if key not in {"artifact", "marker"}}
+    if not predicate.get("type") and assertion.get("marker"):
+        predicate = {"type": "literal_text", "value": str(assertion["marker"])}
+    return json.dumps(
+        predicate,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _validated_evidence_assertions(
     assertions: Any,
     allowed_artifacts: List[str],
     *,
     require_one: bool = False,
-) -> List[Dict[str, str]]:
-    """Validate literal evidence markers against their explicitly cited artifacts."""
+) -> List[Dict[str, Any]]:
+    """Normalize and validate typed evidence predicates against cited artifacts."""
 
     if assertions is None:
         assertions = []
@@ -2914,16 +2985,35 @@ def _validated_evidence_assertions(
         reference = _validated_artifact_paths([assertion.get("artifact")], require_one=True)[0]
         if reference not in allowed_artifacts:
             raise ValueError("evidence assertion artifact must be among the cited artifacts")
-        marker = _clean_memory_text(assertion.get("marker"), "evidence assertion marker")
-        if not marker:
-            raise ValueError("evidence assertion marker must not be empty")
-        try:
-            artifact_text = Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace")
-        except OSError as error:
-            raise ValueError(f"Unable to read evidence assertion artifact: {reference}") from error
-        if marker not in artifact_text:
-            raise ValueError(f"evidence assertion marker was not found in {reference}")
-        normalized = {"artifact": reference, "marker": marker}
+        assertion_type = str(assertion.get("type") or ("literal_text" if "marker" in assertion else "")).strip()
+        if assertion_type not in {"literal_text", "byte_sequence", "json_value"}:
+            raise ValueError("evidence assertion type must be literal_text, byte_sequence, or json_value")
+        normalized: Dict[str, Any] = {"artifact": reference, "type": assertion_type}
+        if assertion_type == "literal_text":
+            value = _clean_memory_text(assertion.get("value", assertion.get("marker")), "evidence assertion value")
+            if not value:
+                raise ValueError("literal_text evidence assertion value must not be empty")
+            normalized["value"] = value
+            # Retain the legacy field in persisted records and receipts during the additive transition.
+            normalized["marker"] = value
+        elif assertion_type == "byte_sequence":
+            encoding = str(assertion.get("encoding") or "").lower().strip()
+            value = str(assertion.get("value") or "").strip()
+            if encoding not in {"hex", "base64"} or not value:
+                raise ValueError("byte_sequence evidence assertion requires value and encoding hex or base64")
+            normalized.update({"encoding": encoding, "value": value})
+        else:
+            pointer = str(assertion.get("pointer") or "")
+            operator = str(assertion.get("operator") or "").lower().strip()
+            if operator not in {"exists", "equals", "contains"}:
+                raise ValueError("json_value evidence assertion operator must be exists, equals, or contains")
+            if operator != "exists" and "expected" not in assertion:
+                raise ValueError(f"json_value {operator} evidence assertion requires expected")
+            normalized.update({"pointer": pointer, "operator": operator})
+            if "expected" in assertion:
+                normalized["expected"] = assertion["expected"]
+        if not _assertion_matches_artifact(normalized, reference):
+            raise ValueError(f"evidence assertion was not satisfied by {reference}")
         if normalized not in validated:
             validated.append(normalized)
     if require_one and not validated:
@@ -2937,20 +3027,23 @@ def _matching_evidence_assertions(
     validation_artifacts: List[str],
     validation_fingerprints: Any,
 ) -> bool:
-    """Return whether validation re-proved every candidate positive evidence marker."""
+    """Return whether validation re-proved every candidate evidence predicate."""
 
     try:
-        candidate_markers = {
-            str(item["marker"])
-            for item in candidate_assertions
-            if isinstance(item, dict) and str(item.get("marker") or "")
+        candidate_predicates = {
+            _canonical_assertion_predicate(item)
+            for item in _validated_evidence_assertions(candidate_assertions, [
+                str(item.get("artifact")) for item in candidate_assertions if isinstance(item, dict)
+            ], require_one=True)
         }
         validated = _validated_evidence_assertions(
             validation_assertions, validation_artifacts, require_one=True
         )
-    except (KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, TypeError, ValueError):
         return False
-    if not candidate_markers or candidate_markers != {item["marker"] for item in validated}:
+    if not candidate_predicates or candidate_predicates != {
+        _canonical_assertion_predicate(item) for item in validated
+    }:
         return False
     expected_fingerprints = validation_fingerprints if isinstance(validation_fingerprints, dict) else {}
     try:
@@ -3057,23 +3150,97 @@ def _active_finding_source_task(store: Any, operation_id: str) -> Optional[Task]
     return active[0] if len(active) == 1 else None
 
 
-def _explicit_service_targets_for_task(plan: OperationPlan, task: Optional[Task]) -> List[OperationTarget]:
-    """Return explicit URL service targets bound to the finding's source task."""
+def _effective_url_port(parsed: Any) -> Optional[int]:
+    """Return an explicit or conventional URL port without assuming HTTP-only targets."""
+
+    try:
+        if parsed.port is not None:
+            return parsed.port
+    except ValueError:
+        return None
+    return {"http": 80, "https": 443}.get(str(parsed.scheme or "").lower())
+
+
+def _selected_finding_targets(plan: OperationPlan, task: Optional[Task]) -> List[OperationTarget]:
+    """Return operation targets assigned to a finding-producing task."""
 
     selected_ids = set(task.target_ids) if task is not None and task.target_scope == "subset" else set()
-    selected = [
-        target for target in plan.targets if not selected_ids or target.target_id in selected_ids
-    ]
-    services = []
-    for target in selected:
-        parsed = urlsplit(str(target.value or "").strip())
-        try:
-            has_explicit_service = bool(parsed.scheme and parsed.hostname and parsed.port is not None)
-        except ValueError:
-            has_explicit_service = False
-        if has_explicit_service:
-            services.append(target)
-    return services
+    return [target for target in plan.targets if not selected_ids or target.target_id in selected_ids]
+
+
+def _url_target_match(submitted: Any, target: OperationTarget) -> bool:
+    registered = urlsplit(str(target.value or "").strip())
+    try:
+        return bool(
+            submitted.scheme
+            and registered.scheme
+            and submitted.hostname
+            and registered.hostname
+            and submitted.scheme.lower() == registered.scheme.lower()
+            and submitted.hostname.lower().rstrip(".") == registered.hostname.lower().rstrip(".")
+            and _effective_url_port(submitted) == _effective_url_port(registered)
+        )
+    except ValueError:
+        return False
+
+
+def _single_edit_hostname_match(left: str, right: str) -> bool:
+    """Recognize one conservative hostname typo without granting execution authority."""
+
+    left = str(left or "").lower().rstrip(".")
+    right = str(right or "").lower().rstrip(".")
+    if not left or not right or min(len(left), len(right)) < 5 or abs(len(left) - len(right)) > 1:
+        return False
+    if left == right:
+        return True
+    if len(left) == len(right):
+        differences = [index for index, pair in enumerate(zip(left, right)) if pair[0] != pair[1]]
+        if len(differences) == 1:
+            return True
+        return (
+            len(differences) == 2
+            and differences[1] == differences[0] + 1
+            and left[differences[0]] == right[differences[1]]
+            and left[differences[1]] == right[differences[0]]
+        )
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    short_index = long_index = differences = 0
+    while short_index < len(shorter) and long_index < len(longer):
+        if shorter[short_index] == longer[long_index]:
+            short_index += 1
+        else:
+            differences += 1
+            if differences > 1:
+                return False
+        long_index += 1
+    return True
+
+
+def _url_target_typo_match(submitted: Any, target: OperationTarget) -> bool:
+    """Match one unique service hostname typo while preserving scheme and port."""
+
+    registered = urlsplit(str(target.value or "").strip())
+    try:
+        return bool(
+            submitted.scheme
+            and registered.scheme
+            and submitted.hostname
+            and registered.hostname
+            and submitted.scheme.lower() == registered.scheme.lower()
+            and _effective_url_port(submitted) == _effective_url_port(registered)
+            and _single_edit_hostname_match(submitted.hostname, registered.hostname)
+        )
+    except ValueError:
+        return False
+
+
+def _path_is_within(candidate: str, root: str) -> bool:
+    """Return whether a resolved filesystem location is equal to or below an assigned root."""
+
+    try:
+        return os.path.commonpath([candidate, root]) == root
+    except ValueError:
+        return False
 
 
 def _canonicalize_finding_target(
@@ -3081,44 +3248,103 @@ def _canonicalize_finding_target(
     plan: Optional[OperationPlan],
     source_task: Optional[Task],
 ) -> Tuple[str, List[str]]:
-    """Bind a finding URL to a uniquely selected explicit service while retaining its route and query."""
+    """Resolve a finding location without changing explicitly supplied target identity."""
 
     if not isinstance(plan, OperationPlan):
         return target_value, []
-    services = _explicit_service_targets_for_task(plan, source_task)
-    if not services:
-        return target_value, []
-    submitted = urlsplit(target_value)
-    try:
-        submitted_is_url = bool(submitted.scheme and submitted.hostname and submitted.port is not None)
-    except ValueError:
-        submitted_is_url = False
-    allowed = ", ".join(f"{target.target_id}={target.value}" for target in services)
-    if not submitted_is_url:
-        raise ValueError(f"finding target must be an absolute URL for the assigned service: {allowed}")
-    if len(services) == 1:
-        service = services[0]
-        registered = urlsplit(service.value)
+    value = str(target_value or "").strip()
+    selected = _selected_finding_targets(plan, source_task)
+    allowed = ", ".join(f"{target.target_id}={target.value}" for target in selected)
+    logical_matches = [target for target in selected if value == target.target_id]
+    if len(logical_matches) == 1:
+        return logical_matches[0].value, [logical_matches[0].target_id]
+
+    submitted = urlsplit(value)
+    if "://" in value and submitted.scheme:
+        matches = [target for target in selected if _url_target_match(submitted, target)]
+        for target in selected:
+            if target in matches or not submitted.hostname:
+                continue
+            if target.type == "network" and submitted.hostname.lower().rstrip(".") == target.value.lower().rstrip("."):
+                matches.append(target)
+            elif target.type == "network_range":
+                try:
+                    if ipaddress.ip_address(submitted.hostname) in ipaddress.ip_network(target.value, strict=False):
+                        matches.append(target)
+                except ValueError:
+                    continue
+        typo_corrected = False
+        if not matches:
+            typo_matches = [target for target in selected if _url_target_typo_match(submitted, target)]
+            if len(typo_matches) == 1:
+                matches = typo_matches
+                typo_corrected = True
+        if len(matches) != 1:
+            raise ValueError(
+                "finding target authority must match exactly one assigned target; "
+                f"submitted={value}; allowed targets: {allowed}"
+            )
+        registered = urlsplit(matches[0].value)
+        if typo_corrected:
+            logger.warning(
+                "Canonicalized unique finding hostname typo submitted=%s assigned=%s target_id=%s",
+                submitted.hostname,
+                registered.hostname,
+                matches[0].target_id,
+            )
+        if not registered.scheme:
+            return urlunsplit(
+                (submitted.scheme.lower(), submitted.netloc, submitted.path or "/", submitted.query, "")
+            ), [matches[0].target_id]
         canonical = urlunsplit(
-            (registered.scheme.lower(), registered.netloc.lower(), submitted.path or "/", submitted.query, "")
+            (registered.scheme.lower(), registered.netloc, submitted.path or "/", submitted.query, "")
         )
-        return canonical, [service.target_id]
-    matches = []
-    for service in services:
-        registered = urlsplit(service.value)
-        if (
-            submitted.scheme.lower() == registered.scheme.lower()
-            and submitted.hostname.lower() == registered.hostname.lower()
-            and submitted.port == registered.port
-        ):
-            matches.append(service)
-    if len(matches) != 1:
-        raise ValueError(f"finding target must match exactly one assigned service: {allowed}")
-    registered = urlsplit(matches[0].value)
-    canonical = urlunsplit(
-        (registered.scheme.lower(), registered.netloc.lower(), submitted.path or "/", submitted.query, "")
+        return canonical, [matches[0].target_id]
+
+    service_targets = [
+        target for target in selected
+        if "://" in str(target.value) and urlsplit(str(target.value)).scheme
+    ]
+    if value.startswith("/") and len(service_targets) == 1 and len(selected) == 1:
+        registered = str(service_targets[0].value).rstrip("/") + "/"
+        return urljoin(registered, value), [service_targets[0].target_id]
+
+    filesystem_matches = []
+    for target in selected:
+        if target.type != "filesystem":
+            continue
+        root = os.path.realpath(target.value)
+        candidate = os.path.realpath(value if os.path.isabs(value) else os.path.join(root, value))
+        if _path_is_within(candidate, root):
+            filesystem_matches.append((target, candidate))
+    if len(filesystem_matches) == 1:
+        return filesystem_matches[0][1], [filesystem_matches[0][0].target_id]
+    if len(service_targets) == 1 and len(selected) == 1 and not filesystem_matches:
+        registered = str(service_targets[0].value).rstrip("/") + "/"
+        return urljoin(registered, value), [service_targets[0].target_id]
+
+    try:
+        submitted_ip = ipaddress.ip_address(value.strip("[]"))
+    except ValueError:
+        submitted_ip = None
+    network_matches = []
+    for target in selected:
+        if target.type == "network_range" and submitted_ip is not None:
+            try:
+                if submitted_ip in ipaddress.ip_network(target.value, strict=False):
+                    network_matches.append(target)
+            except ValueError:
+                continue
+        elif target.type == "network" and value.rstrip("/") == target.value.rstrip("/"):
+            network_matches.append(target)
+    if len(network_matches) == 1:
+        return value, [network_matches[0].target_id]
+    if filesystem_matches or network_matches or value.startswith("/"):
+        raise ValueError(f"finding target is ambiguous within assigned targets: {allowed}")
+    raise ValueError(
+        "finding target must be an assigned logical target, an in-scope absolute location, or an unambiguous "
+        f"relative location; submitted={value}; allowed targets: {allowed}"
     )
-    return canonical, [matches[0].target_id]
 
 
 def _finding_tool_result(finding_uid: str, verification_task_uid: str, status: str) -> str:
@@ -3180,10 +3406,38 @@ def _record_source_task_finding_receipt(
                     "minItems": 1,
                     "items": {
                         "type": "object",
-                        "properties": {"artifact": {"type": "string"}, "marker": {"type": "string"}},
-                        "required": ["artifact", "marker"],
+                        "properties": {
+                            "artifact": {"type": "string"},
+                            "type": {
+                                "type": "string",
+                                "enum": ["literal_text", "byte_sequence", "json_value"],
+                            },
+                            "marker": {"type": "string"},
+                            "value": {},
+                            "encoding": {"type": "string", "enum": ["hex", "base64"]},
+                            "pointer": {"type": "string"},
+                            "operator": {"type": "string", "enum": ["exists", "equals", "contains"]},
+                            "expected": {},
+                        },
+                        "oneOf": [
+                            {"required": ["artifact", "marker"]},
+                            {
+                                "properties": {"type": {"const": "literal_text"}},
+                                "required": ["artifact", "type", "value"],
+                            },
+                            {
+                                "properties": {"type": {"const": "byte_sequence"}},
+                                "required": ["artifact", "type", "encoding", "value"],
+                            },
+                            {
+                                "properties": {"type": {"const": "json_value"}},
+                                "required": ["artifact", "type", "pointer", "operator"],
+                            },
+                        ],
                     },
-                    "description": "Literal positive markers observed in cited artifacts.",
+                    "description": (
+                        "Typed positive predicates observed in cited artifacts. Legacy marker is literal_text."
+                    ),
                 },
             },
             "required": [
@@ -3203,15 +3457,15 @@ def store_finding(
     observed_result: str,
     reproduction_steps: List[str],
     artifacts: NonEmptyArtifactRefs,
-    evidence_assertions: Optional[List[Dict[str, str]]] = None,
+    evidence_assertions: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Submit one finding candidate and create its dedicated verification task.
 
-    This tool never creates a verified finding directly. Each candidate must include literal positive-evidence markers
-    found in its cited artifacts; a separate same-phase task must independently reproduce every marker before the
+    This tool never creates a verified finding directly. Each candidate must include typed positive-evidence assertions
+    satisfied by its cited artifacts; a separate same-phase task must independently reproduce every assertion before the
     finding can affect confirmed risk totals. Taxonomy classification is performed by a separate, read-only workflow
-    agent after this candidate is persisted. For a uniquely assigned explicit service, the candidate target's scheme,
-    host, and port are canonicalized to that service while its route and query are retained.
+    agent after this candidate is persisted. The candidate location is bound to its assigned service, network, or
+    filesystem target before persistence.
     """
 
     candidate = {
@@ -3261,7 +3515,7 @@ def store_finding(
                 receipt_uid,
                 source_task.task_uid,
                 assertion["artifact"],
-                assertion["marker"],
+                str(assertion.get("marker") or _canonical_assertion_predicate(assertion)),
                 candidate["artifact_fingerprints"][assertion["artifact"]],
             )
             candidate["evidence_receipts"].append(f"finding_evidence:{receipt_uid}")
@@ -3416,6 +3670,9 @@ def _finding_validation_contradictions(
     candidate: Dict[str, Any], evidence_artifacts: List[str]
 ) -> List[str]:
     """Return catalog rule IDs contradicted by every cited confirmation artifact."""
+
+    if not evidence_artifacts:
+        return []
 
     claim_text = " ".join(
         str(candidate.get(field) or "") for field in ("title", "claim", "technique")
@@ -3626,27 +3883,31 @@ def record_finding_validation(
         candidate_assertions = (record.get("candidate_data") or {}).get("evidence_assertions")
         assertions = []
         for candidate_assertion in candidate_assertions or []:
-            marker = str(candidate_assertion.get("marker") or "") if isinstance(candidate_assertion, dict) else ""
-            if not marker:
+            if not isinstance(candidate_assertion, dict):
                 raise ValueError("finding candidate has no valid positive evidence assertions")
             matching_artifact = next(
                 (
                     reference
                     for reference in evidence
-                    if marker in Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace")
+                    if _assertion_matches_artifact(candidate_assertion, reference)
                 ),
                 None,
             )
             if matching_artifact is None:
-                raise ValueError(f"confirmed validation evidence did not reproduce candidate marker: {marker}")
-            assertions.append({"artifact": matching_artifact, "marker": marker})
+                raise ValueError(
+                    "confirmed validation evidence did not reproduce candidate assertion: "
+                    + _canonical_assertion_predicate(candidate_assertion)
+                )
+            reproduced = dict(candidate_assertion)
+            reproduced["artifact"] = matching_artifact
+            assertions.append(reproduced)
         if not _matching_evidence_assertions(
             candidate_assertions,
             assertions,
             evidence,
             _artifact_fingerprints(evidence),
         ):
-            raise ValueError("confirmed validation assertions must re-prove every candidate evidence marker")
+            raise ValueError("confirmed validation assertions must re-prove every candidate evidence assertion")
         contradictions = _finding_validation_contradictions(record.get("candidate_data") or {}, evidence)
         if contradictions:
             raise ValueError(
@@ -4693,11 +4954,6 @@ _SCOPE_HOSTNAME_PATTERN = re.compile(
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?"
 )
-_SCOPE_TIMESTAMP_REFERENCE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$")
-_SCOPE_RUNTIME_TAG_PATTERN = re.compile(
-    r"(?:alpine|debian|golang|java|node|php|python|ruby):\d+(?:\.\d+){0,3}(?:[-._][A-Za-z0-9._-]+)?$",
-    re.IGNORECASE,
-)
 _FINDING_VALIDATION_GUARDS_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "system" / "finding_validation_guards.yaml"
 )
@@ -4718,13 +4974,26 @@ def _is_valid_bare_scope_host_port(reference: str) -> bool:
     return bool(_SCOPE_HOSTNAME_PATTERN.fullmatch(host))
 
 
-def _is_non_network_bare_scope_reference(reference: str) -> bool:
-    """Return whether a host:port-shaped token is clearly a timestamp or runtime image tag."""
+def _bare_scope_host_is_assigned(reference: str, targets: List[OperationTarget]) -> bool:
+    """Return whether a bare host:port token names an assigned host or in-scope IP."""
 
-    return bool(
-        _SCOPE_TIMESTAMP_REFERENCE_PATTERN.fullmatch(reference)
-        or _SCOPE_RUNTIME_TAG_PATTERN.fullmatch(reference)
-    )
+    parsed = urlsplit(f"//{reference}")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host or not _is_valid_bare_scope_host_port(reference):
+        return False
+    for target in targets:
+        assigned_host = (_explicit_target_host(target) or "").lower().rstrip(".")
+        if assigned_host and host == assigned_host:
+            return True
+        if target.type == "network" and host == str(target.value).lower().rstrip("."):
+            return True
+        if target.type == "network_range":
+            try:
+                if ipaddress.ip_address(host) in ipaddress.ip_network(target.value, strict=False):
+                    return True
+            except ValueError:
+                continue
+    return False
 
 
 def _selected_task_targets(plan: OperationPlan, task: Task) -> List[OperationTarget]:
@@ -4736,7 +5005,12 @@ def _selected_task_targets(plan: OperationPlan, task: Task) -> List[OperationTar
     return list(plan.targets)
 
 
-def _explicit_service_references(text: str, *, include_bare_host_ports: bool = True) -> List[str]:
+def _explicit_service_references(
+    text: str,
+    *,
+    include_bare_host_ports: bool = True,
+    assigned_targets: Optional[List[OperationTarget]] = None,
+) -> List[str]:
     """Extract URL or host:port literals without interpreting artifact paths as targets."""
 
     references = []
@@ -4755,8 +5029,7 @@ def _explicit_service_references(text: str, *, include_bare_host_ports: bool = T
         reference = match.group(0).rstrip(".,;:)]}")
         if (
             reference
-            and not _is_non_network_bare_scope_reference(reference)
-            and _is_valid_bare_scope_host_port(reference)
+            and _bare_scope_host_is_assigned(reference, assigned_targets or [])
             and reference not in seen
         ):
             references.append(reference)
@@ -4773,8 +5046,9 @@ def task_service_scope_validation_details(plan: OperationPlan, task: Task, text:
     scheme. Filesystem and artifact prose is deliberately ignored.
     """
 
+    selected_targets = _selected_task_targets(plan, task)
     service_targets = []
-    for target in _selected_task_targets(plan, task):
+    for target in selected_targets:
         host = _explicit_target_host(target)
         port = _explicit_target_port(target)
         if host and port is not None:
@@ -4796,7 +5070,11 @@ def task_service_scope_validation_details(plan: OperationPlan, task: Task, text:
         criterion.id == "validate-the-assigned-technology" for criterion in task.acceptance.criteria
     )
     violations = []
-    for reference in _explicit_service_references(text, include_bare_host_ports=not technology_only):
+    for reference in _explicit_service_references(
+        text,
+        include_bare_host_ports=not technology_only,
+        assigned_targets=selected_targets,
+    ):
         parsed = urlsplit(reference if "://" in reference else f"//{reference}")
         try:
             port = parsed.port
@@ -5421,18 +5699,6 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
     return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _collapse_duplicate_vulnerability_path(path: str) -> str:
-    segments = [segment for segment in path.split("/") if segment]
-    if segments.count("vulnerabilities") < 2:
-        return path
-    for width in range(1, len(segments) // 2 + 1):
-        for start in range(0, len(segments) - (2 * width) + 1):
-            if segments[start:start + width] == segments[start + width:start + (2 * width)]:
-                collapsed = segments[:start + width] + segments[start + (2 * width):]
-                return "/" + "/".join(collapsed) + ("/" if path.endswith("/") else "")
-    return path
-
-
 def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> str:
     """Canonicalize one HTTP inventory route and enforce its registered service boundary."""
 
@@ -5461,7 +5727,6 @@ def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> st
     if any(character in path or character in parsed.query for character in ('"', "\\")):
         raise ValueError("inventory endpoint contains unsupported raw quote or backslash route syntax")
     path = re.sub(r"/{2,}", "/", path)
-    path = _collapse_duplicate_vulnerability_path(path)
     query = parsed.query.rstrip("&")
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, query, ""))
 

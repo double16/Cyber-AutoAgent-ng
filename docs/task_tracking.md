@@ -200,6 +200,8 @@ Web discovery tasks should prefer deterministic manifest production. Pass `--inv
 normal output. The generally available `recon_output_to_inventory_manifest` tool converts katana, feroxbuster, ffuf,
 gobuster, dirsearch, httpx, gospider, and plain URL-list artifacts; the source artifact remains unchanged. URL-list
 auto-detection samples at most the first five non-empty lines before the converter processes the complete artifact.
+It also accepts an existing inventory manifest as `source_artifact` and writes a distinct, validated manifest copy;
+manifest input bypasses recon parsing and preserves its target IDs and inventory structure for controller validation.
 
 Before an inventory is frozen, Python extracts same-scope navigation and form destinations from current-operation HTML
 artifacts and merges unambiguous missing routes. Fan-out then dispatches by kind: endpoints and their parameters share
@@ -284,6 +286,17 @@ executables and durable operations remain available, but failed output cannot be
 Recovery does not consume an actor/critic pass;
 if it remains unresolved, Python marks the task `partial_failure` without asking the evaluator to approve it. Evaluators
 receive controller-observed tool outcomes and treat them as authoritative over contradictory worker narration.
+
+Output-token truncation uses one controller-selected recovery invocation. If existing canonical references already
+satisfy the frozen evidence requirements, only the terminal closure tool is available. Otherwise, exactly one
+evidence-producing tool invocation is allowed, and it progresses only when it creates a new artifact, memory, or
+finding reference. Successful reads, catalog lookups, and reasoning without new durable state do not count.
+
+Target binding is type-aware. Explicit service authorities must match assigned scheme, host, and effective port;
+network hosts may bind through CIDR membership; filesystem locations must remain below their resolved assigned root;
+and logical IDs or unambiguous relative locations resolve to their assigned target. Finding persistence may correct a
+unique one-edit hostname typo to the registered authority for record consistency, but task execution scope remains an
+exact boundary and never receives fuzzy authorization.
 
 Every `store_finding` call requires at least one durable artifact reference and returns canonical `finding_ref` and
 `verification_task_ref` values. Python links the finding to the currently active source task and creates one narrow,

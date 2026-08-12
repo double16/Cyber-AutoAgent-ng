@@ -45,6 +45,7 @@ from collections import Counter
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -82,6 +83,7 @@ from modules.tools.memory import (
     build_record_finding_validation_tool,
     _artifact_path_from_ref,
     _coverage_route_groups,
+    _finding_validation_contradictions,
     _load_inventory_manifest,
     _write_inventory_manifest_atomically,
     canonical_artifact_reference,
@@ -230,31 +232,23 @@ class TaskExecutorCycleResult:
 
 
 FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
-_FINDING_DEPENDENT_PHASE_PATTERN = re.compile(
-    r"\b(?:finding(?:[- ]derived)?|candidate|exploit[ -]?(?:chain|path)|impact(?:\s+demonstration|\s+assessment)?)\b",
-    re.IGNORECASE,
-)
-_VOLATILE_ARTIFACT_REFERENCE_PATTERN = re.compile(
-    r"(?:artifact_id:)?(?:read_artifact_|shell_|http_fallback_)[0-9a-f_]{6,}(?:\.[A-Za-z0-9._-]+)?",
-    re.IGNORECASE,
-)
 _VOLATILE_OPERATION_ARTIFACT_PATH_PATTERN = re.compile(
     r"(?:/app/)?outputs/[^\s'\"]+/[^\s'\"]+/artifacts/[^\s'\"]+",
     re.IGNORECASE,
 )
+_CANONICAL_ARTIFACT_REFERENCE_PATTERN = re.compile(
+    r"\bartifact(?:_id)?:[^\s,;'\"\]\[(){}]+",
+    re.IGNORECASE,
+)
+_NON_EVIDENCE_RECOVERY_TOOLS = frozenset(
+    {"read_artifact", "memory_retrieve", "record_task_acceptance", "tool_catalog", "get_tool_help"}
+)
 
 
 def _phase_semantically_requires_finding_candidates(phase: PlanPhase) -> bool:
-    """Return whether phase semantics consume persisted finding candidates.
+    """Return the explicit structured dependency recorded on the plan phase."""
 
-    Plan metadata is useful to the model, but cannot be the sole authority for a
-    controller gate. This narrow classifier protects later finding-derived work
-    when a plan response omits or contradicts that metadata.
-    """
-
-    if phase.requires_finding_candidates:
-        return True
-    return bool(_FINDING_DEPENDENT_PHASE_PATTERN.search(f"{phase.title}\n{phase.criteria}"))
+    return bool(phase.requires_finding_candidates)
 
 
 @dataclass(frozen=True)
@@ -2057,7 +2051,7 @@ class MultiAgentWorkflowController:
             recovery_next_action=(
                 f"Call {validation_tool} with the independent validation outcome."
                 if validation_tool
-                else "Call store_finding with literal artifact evidence assertions."
+                else "Call store_finding with typed artifact evidence assertions."
                 if candidate_acceptance_owned
                 else "Call record_task_acceptance with canonical durable evidence references."
             ),
@@ -2077,7 +2071,7 @@ class MultiAgentWorkflowController:
             recovery_next_action=(
                 f"Call {validation_tool} with the independent validation outcome."
                 if validation_tool
-                else "Call store_finding with literal artifact evidence assertions."
+                else "Call store_finding with typed artifact evidence assertions."
                 if candidate_acceptance_owned
                 else "Call record_task_acceptance with canonical durable evidence references."
             ),
@@ -2127,7 +2121,7 @@ class MultiAgentWorkflowController:
             terminal_reason="task_finding_prerequisite_done",
             terminal_message="Task finding prerequisite persisted",
             recovery_objective=task.objective,
-            recovery_next_action="Call store_finding with literal artifact evidence assertions.",
+            recovery_next_action="Call store_finding with typed artifact evidence assertions.",
             recovery_allowed_tool_names={"store_finding"},
         )
         finding_store_repair_policy = AgentRunPolicy(
@@ -2145,8 +2139,8 @@ class MultiAgentWorkflowController:
             terminal_message="Task finding prerequisite repaired and persisted",
             recovery_objective=task.objective,
             recovery_next_action=(
-                "Read at most one supplied artifact if needed, then call store_finding with a literal "
-                "evidence_assertions artifact/marker pair."
+                "Read at most one supplied artifact if needed, then call store_finding with a typed "
+                "evidence_assertions predicate."
             ),
             recovery_allowed_tool_names={"read_artifact", "store_finding"},
         )
@@ -2386,7 +2380,10 @@ class MultiAgentWorkflowController:
                             if get_tool_name(tool) in output_truncation_closure_policy.required_tool_names
                         ]
                         if output_truncation_recovery_mode == "closure"
-                        else [tool for tool in tools if get_tool_name(tool) != "record_task_acceptance"]
+                        else [
+                            tool for tool in tools
+                            if get_tool_name(tool) not in _NON_EVIDENCE_RECOVERY_TOOLS
+                        ]
                     )
                 if manifest_prerequisite_recovery_active or evidence_prerequisite_recovery_active:
                     closure_tools = [tool for tool in tools if get_tool_name(tool) != "record_task_acceptance"]
@@ -2395,6 +2392,7 @@ class MultiAgentWorkflowController:
                     for outcome in tool_outcomes
                     if outcome.success
                 }
+                durable_references_before_cycle = self._durable_references_from_outcomes(tool_outcomes)
                 worker_result = run_executor(actor_prompt, current_policy, closure_tools)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
@@ -2407,11 +2405,22 @@ class MultiAgentWorkflowController:
                         for outcome in successful_outcomes
                         if (outcome.tool_name, outcome.input_summary) in prior_tool_inputs
                     ]
-                    if not successful_outcomes or repeated_outcomes:
+                    durable_references_after_cycle = self._durable_references_from_outcomes(tool_outcomes)
+                    new_durable_references = durable_references_after_cycle - durable_references_before_cycle
+                    closure_completed = any(
+                        outcome.success and outcome.tool_name in required_tools
+                        for outcome in cycle_result.outcomes
+                    )
+                    recovery_progressed = (
+                        closure_completed
+                        if output_truncation_recovery_mode == "closure"
+                        else bool(new_durable_references)
+                    )
+                    if not recovery_progressed or repeated_outcomes:
                         decision = WorkflowDecision(
                             status="partial_failure",
                             reason=(
-                                "Output-truncation recovery did not produce one new successful tool outcome."
+                                "Output-truncation recovery did not produce the required new durable state."
                             ),
                         )
                         self._emit_workflow_event({
@@ -2425,7 +2434,7 @@ class MultiAgentWorkflowController:
                             "allowed_tool_names": sorted(
                                 get_tool_name(tool) for tool in (closure_tools or [])
                             ),
-                            "decision": "no_new_successful_tool_outcome",
+                            "decision": "no_new_durable_state",
                         })
                         self._log_workflow(
                             "task output-truncation recovery failed task=%s cycle=%s mode=%s",
@@ -2443,7 +2452,7 @@ class MultiAgentWorkflowController:
                         "retry_mode": output_truncation_recovery_mode,
                         "durable_evidence_count": len(self._artifact_refs_from_tool_outcomes(tool_outcomes)),
                         "allowed_tool_names": sorted(get_tool_name(tool) for tool in (closure_tools or [])),
-                        "decision": "completed_one_bounded_action",
+                        "decision": "completed_closure" if closure_completed else "created_durable_evidence",
                     })
                 if manifest_prerequisite_recovery_active:
                     manifest_refs = self._valid_inventory_artifact_refs(tool_outcomes)
@@ -2645,20 +2654,20 @@ class MultiAgentWorkflowController:
                     if not max_token_recovery_used:
                         max_token_recovery_used = True
                         evidence_count = len(self._artifact_refs_from_tool_outcomes(cycle_result.outcomes))
-                        output_truncation_recovery_mode = (
-                            "closure"
-                            if cycle_result.max_tokens_classification == "output_truncation"
-                            and (acceptance_recovery_active or finding_acceptance_recovery)
-                            else "evidence"
-                        )
-                        output_truncation_recovery_active = (
-                            cycle_result.max_tokens_classification == "output_truncation"
-                        )
                         recovery_evidence = self._acceptance_recovery_context(
                             task,
                             self.state.list_task_acceptance_results(task.task_uid),
                             tool_outcomes,
                             None,
+                        )
+                        output_truncation_recovery_mode = (
+                            "closure"
+                            if cycle_result.max_tokens_classification == "output_truncation"
+                            and self._recovery_evidence_satisfies_acceptance(task, recovery_evidence)
+                            else "evidence"
+                        )
+                        output_truncation_recovery_active = (
+                            cycle_result.max_tokens_classification == "output_truncation"
                         )
                         allowed_recovery_tools = (
                             sorted(required_tools)
@@ -2666,7 +2675,7 @@ class MultiAgentWorkflowController:
                             else sorted(
                                 get_tool_name(tool)
                                 for tool in tools
-                                if get_tool_name(tool) != "record_task_acceptance"
+                                if get_tool_name(tool) not in _NON_EVIDENCE_RECOVERY_TOOLS
                             )
                         )
                         self._emit_workflow_event({
@@ -3879,8 +3888,9 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
         payload: Dict[str, Any],
         invalid_references: List[str],
         task_memory_refs: List[Dict[str, str]],
+        task: Optional[Task] = None,
     ) -> tuple[Dict[str, Any], List[Dict[str, str]]]:
-        """Replace only rejected memory refs with task-created memory refs, preserving all other fields."""
+        """Repair one invalid memory ref only when one compatible replacement exists."""
 
         required_fields = {"status", "disposition", "summary", "evidence_refs"}
         if not required_fields.issubset(payload) or not invalid_references or not task_memory_refs:
@@ -3889,7 +3899,24 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
         if not isinstance(evidence_refs, list):
             return {}, []
         invalid = set(invalid_references)
-        replacements = [item["reference"] for item in task_memory_refs if item.get("reference")]
+        allowed_sources = {"task_memory:store_observation", "task_memory:store_knowledge"}
+        if task is not None:
+            required_kinds = {
+                requirement.kind
+                for criterion in task.acceptance.criteria
+                for requirement in criterion.evidence_requirements
+            }
+            if required_kinds and required_kinds <= {"observation"}:
+                allowed_sources = {"task_memory:store_observation"}
+            elif not required_kinds & {"memory", "durable_evidence", "observation"}:
+                return {}, []
+        replacements = list(dict.fromkeys(
+            item["reference"]
+            for item in task_memory_refs
+            if item.get("reference") and item.get("source") in allowed_sources
+        ))
+        if len(invalid_references) != 1 or len(replacements) != 1:
+            return {}, []
         corrected_refs: List[str] = []
         for reference in [*evidence_refs, *replacements]:
             if reference in invalid or reference in corrected_refs:
@@ -3921,6 +3948,7 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
             payload,
             invalid_refs,
             task_memory_refs,
+            task,
         )
         if not corrected_payload:
             valid_refs = ", ".join(item["reference"] for item in task_memory_refs) or "none"
@@ -3959,10 +3987,9 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
             "status": "assessed_negative",
             "disposition": "no_vulnerability",
             "summary": (
-                "The cited response artifact contains an unambiguous HTTP error result and does not support "
-                "the proposed security finding."
+                "Every cited artifact satisfies a narrow declarative contradiction rule for the proposed finding."
             ),
-            "evidence_refs": [artifact_refs[0]],
+            "evidence_refs": artifact_refs,
         }
         try:
             self.state.record_task_acceptance(task, payload)
@@ -4018,8 +4045,8 @@ Assigned objective: {task.objective}
 Existing durable evidence: {json.dumps(evidence, sort_keys=True)}
 Rejected acceptance context: {json.dumps(acceptance_payload, sort_keys=True)}
 
-Call store_finding exactly once. Its payload must include `evidence_assertions` with one object shaped exactly as
-`{{"artifact":"artifact:artifacts/<existing-file>","marker":"<exact literal text present in that file>"}}`.
+Call store_finding exactly once. Its payload must include `evidence_assertions`. For text evidence, use one object shaped
+as `{{"artifact":"artifact:artifacts/<existing-file>","type":"literal_text","value":"<exact text>"}}`.
 Use a positive marker from the affected response, not a control request or a paraphrase. Retain the returned canonical
 finding_ref. Do not add taxonomy mappings.
 """
@@ -4059,12 +4086,12 @@ Available durable artifacts: {json.dumps(evidence, sort_keys=True)}
 Prior acceptance context: {json.dumps(acceptance_payload, sort_keys=True)}
 
 If the exact positive response text is not already known, call read_artifact for at most one listed artifact. Then call
-store_finding once with a materially changed payload that includes:
-`evidence_assertions: [{{"artifact":"<one listed artifact ref>","marker":"<exact literal positive text from it>"}}]`.
-The marker must occur verbatim in the cited artifact and demonstrate the claimed behavior. Do not use a control-only
-marker, a URL, a request payload, a target ID, a task summary, or an inferred hypothesis. If the artifact does not
-contain literal positive evidence for the claim, do not call store_finding or record_task_acceptance; end with the
-unsupported result.
+store_finding once with a materially changed payload. For text, use:
+`evidence_assertions: [{{"artifact":"<one listed ref>","type":"literal_text","value":"<exact text>"}}]`.
+Binary evidence may use `byte_sequence` with hex or base64; JSON may use `json_value` with a JSON Pointer and a narrow
+operator. The predicate must be satisfied by the cited artifact and demonstrate the claimed behavior. Do not use a
+control-only value, URL, request payload, target ID, task summary, or inferred hypothesis. If no positive predicate can
+be grounded in the artifact, do not call store_finding or record_task_acceptance; end with the unsupported result.
 """
 
     @staticmethod
@@ -4160,6 +4187,57 @@ Allowed tools: {allowed_tools_text}
 
 {action}
 """
+
+    @staticmethod
+    def _durable_references_from_outcomes(outcomes: List[ToolOutcome]) -> set[str]:
+        """Return canonical durable state created by successful tool outcomes."""
+
+        references = set(MultiAgentWorkflowController._artifact_refs_from_tool_outcomes(outcomes))
+        references.update(
+            item["reference"]
+            for item in MultiAgentWorkflowController._task_memory_refs_from_tool_outcomes(outcomes)
+        )
+        for outcome in outcomes:
+            if not outcome.success:
+                continue
+            references.update(re.findall(r"\bfinding:[0-9A-Za-z-]+\b", str(outcome.output_summary or "")))
+        return references
+
+    @staticmethod
+    def _recovery_evidence_satisfies_acceptance(task: Task, evidence: List[Dict[str, str]]) -> bool:
+        """Return whether existing references structurally satisfy the frozen contract."""
+
+        references = [item.get("reference", "") for item in evidence if item.get("reference")]
+        if not references:
+            return False
+        for criterion in task.acceptance.criteria:
+            for requirement in criterion.evidence_requirements:
+                if requirement.kind == "artifact":
+                    count = sum(reference.startswith(("artifact:", "artifact_id:")) for reference in references)
+                elif requirement.kind == "inventory_manifest":
+                    count = 0
+                    for reference in references:
+                        try:
+                            _load_inventory_manifest(reference)
+                        except ValueError:
+                            continue
+                        count += 1
+                elif requirement.kind == "memory":
+                    count = sum(reference.startswith("memory:") for reference in references)
+                elif requirement.kind == "observation":
+                    count = sum(
+                        item.get("source") == "task_memory:store_observation"
+                        for item in evidence
+                    )
+                elif requirement.kind == "finding_candidate":
+                    count = sum(reference.startswith("finding:") for reference in references)
+                elif requirement.kind == "verified_finding":
+                    count = 0
+                else:
+                    count = len(references)
+                if count < requirement.min_count:
+                    return False
+        return True
 
     @staticmethod
     def _acceptance_recovery_details(error: str) -> Dict[str, Any]:
@@ -4276,10 +4354,29 @@ Allowed tools: {allowed_tools_text}
 
     @staticmethod
     def _stagnation_normalized_text(value: str) -> str:
-        """Remove generated artifact identifiers from controller-side evidence comparisons."""
+        """Normalize artifact identities by content rather than producer naming conventions."""
 
-        normalized = _VOLATILE_OPERATION_ARTIFACT_PATH_PATTERN.sub("<operation-artifact>", str(value or ""))
-        return _VOLATILE_ARTIFACT_REFERENCE_PATTERN.sub("<generated-artifact>", normalized)
+        def content_identity(raw_reference: str) -> str:
+            reference = raw_reference.rstrip(".,;:)]}")
+            try:
+                path = (
+                    _artifact_path_from_ref(reference)
+                    if reference.startswith(("artifact:", "artifact_id:"))
+                    else reference
+                )
+                digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                return f"<artifact-sha256:{digest}>"
+            except (OSError, TypeError, ValueError):
+                return "<artifact-unavailable>"
+
+        normalized = _VOLATILE_OPERATION_ARTIFACT_PATH_PATTERN.sub(
+            lambda match: content_identity(match.group(0)),
+            str(value or ""),
+        )
+        return _CANONICAL_ARTIFACT_REFERENCE_PATTERN.sub(
+            lambda match: content_identity(match.group(0)),
+            normalized,
+        )
 
     @classmethod
     def _task_cycle_stagnation_actions(cls, outcomes: List[ToolOutcome]) -> set[str]:
@@ -5404,19 +5501,34 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
 
         if task.kind in VALIDATION_TASK_KINDS or task.acceptance.mode != "coverage":
             return ""
-        title = str(task.title or "")
-        if not title.lower().startswith("assess endpoint "):
+        basis = task.acceptance.basis
+        if basis.kind != "snapshot" or not basis.item_ids:
+            return ""
+        endpoint_item_ids = set()
+        for source_ref in basis.source_refs:
+            try:
+                manifest, _digest = _load_inventory_manifest(source_ref)
+            except ValueError:
+                continue
+            endpoint_item_ids.update(
+                str(item.get("id"))
+                for item in manifest.get("items", [])
+                if isinstance(item, dict) and item.get("kind") == "endpoint"
+            )
+        if not endpoint_item_ids.intersection(basis.item_ids):
             return ""
         evidence_refs = [
             reference
             for result in acceptance_results
             for reference in result.evidence_refs
         ]
-        inventory_refs = [
-            reference for reference in evidence_refs
-            if "inventory" in str(reference).rsplit("/", 1)[-1].lower()
-            or "manifest" in str(reference).rsplit("/", 1)[-1].lower()
-        ]
+        inventory_refs = []
+        for reference in evidence_refs:
+            try:
+                _load_inventory_manifest(reference)
+            except ValueError:
+                continue
+            inventory_refs.append(reference)
         if inventory_refs:
             return (
                 "Endpoint task used inventory/manifest evidence instead of route-specific evidence: "
@@ -5439,8 +5551,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         attempt: int,
         maximum: int,
     ) -> str:
-        title = str(task.title or "")
-        endpoint = title[len("Assess endpoint "):].strip() if title.lower().startswith("assess endpoint ") else title
+        endpoint = ", ".join(task.acceptance.basis.item_ids) or task.objective
         refs = ", ".join(artifact_refs) if artifact_refs else "none"
         return (
             "Endpoint evidence recovery is required before acceptance can be evaluated. "
@@ -8576,8 +8687,8 @@ memory describes related evidence or prior work."""
                 size_bytes = 0
                 readable = False
                 artifact_path = ""
-            quality = self._artifact_recovery_quality(artifact_path) if readable else "unknown"
-            viable = readable and size_bytes > 0 and quality != "non_viable"
+            quality = self._artifact_recovery_quality(artifact_path) if readable else "unavailable"
+            viable = readable and size_bytes > 0
             artifact_candidates.append(
                 {
                     "reference": reference,
@@ -8585,13 +8696,7 @@ memory describes related evidence or prior work."""
                     "size_bytes": str(size_bytes),
                     "usable": str(bool(viable)).lower(),
                     "quality": quality,
-                    "evidence_status": (
-                        "contradicts"
-                        if quality == "non_viable"
-                        else "supports"
-                        if quality == "viable"
-                        else "unknown"
-                    ),
+                    "evidence_status": "unknown",
                     "rank": str((100 if viable else 0) + source_rank.get(source, 0)),
                     "order": str(index),
                 }
@@ -8612,20 +8717,14 @@ memory describes related evidence or prior work."""
 
     @staticmethod
     def _artifact_recovery_quality(path: str) -> str:
-        """Classify obvious negative artifacts without imposing HTTP rules on other evidence."""
+        """Classify artifact availability without making a semantic claim."""
 
         if not path:
-            return "unknown"
+            return "unavailable"
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as artifact_file:
-                excerpt = artifact_file.read(8_192).lower()
+            return "available" if os.path.getsize(path) > 0 else "empty"
         except OSError:
-            return "unknown"
-        if re.search(r"\bhttp/\d(?:\.\d)?\s+[45]\d\d\b", excerpt) or re.search(
-            r"<(?:title|h1)>\s*(?:[45]\d\d|not found|forbidden|internal server error)", excerpt
-        ):
-            return "non_viable"
-        return "viable"
+            return "unavailable"
 
     @staticmethod
     def _finding_artifact_refs_from_outcome(outcome: Optional[ToolOutcome]) -> List[str]:
@@ -8656,17 +8755,22 @@ memory describes related evidence or prior work."""
 
     @classmethod
     def _contradictory_finding_artifact_refs(cls, outcome: Optional[ToolOutcome]) -> List[str]:
-        """Return cited finding artifacts with an unambiguous HTTP error response."""
+        """Return all cited artifacts only when a declarative contradiction rule matches all."""
 
-        contradictory: List[str] = []
-        for reference in cls._finding_artifact_refs_from_outcome(outcome):
-            try:
-                path = _artifact_path_from_ref(reference)
-            except (OSError, ValueError):
-                continue
-            if cls._artifact_recovery_quality(path) == "non_viable":
-                contradictory.append(reference)
-        return contradictory
+        if outcome is None:
+            return []
+        try:
+            payload = json.loads(outcome.input_summary)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(payload, dict):
+            return []
+        references = cls._finding_artifact_refs_from_outcome(outcome)
+        try:
+            contradictions = _finding_validation_contradictions(payload, references)
+        except ValueError:
+            return []
+        return references if contradictions else []
 
     @classmethod
     def _has_contradictory_finding_artifact(cls, outcome: Optional[ToolOutcome]) -> bool:
@@ -8676,11 +8780,11 @@ memory describes related evidence or prior work."""
 
     @staticmethod
     def _has_viable_acceptance_recovery_evidence(evidence: List[Dict[str, str]]) -> bool:
-        """Return whether acceptance-only recovery has evidence beyond known negative artifacts."""
+        """Return whether acceptance recovery has a durable reference available."""
 
         return any(
             not item["reference"].startswith("artifact:")
-            or item.get("quality") != "non_viable"
+            or item.get("quality") == "available"
             for item in evidence
         )
 

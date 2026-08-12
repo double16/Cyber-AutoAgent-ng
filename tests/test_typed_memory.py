@@ -288,7 +288,12 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
         "expected_result": "Unauthenticated request is denied",
         "observed_result": "Admin data was returned",
         "reproduction_steps": ["Send an unauthenticated request", "Compare the response"],
-        "evidence_assertions": [{"artifact": "artifact:admin-response.txt", "marker": "admin data"}],
+        "evidence_assertions": [{
+            "artifact": "artifact:admin-response.txt",
+            "type": "literal_text",
+            "value": "admin data",
+            "marker": "admin data",
+        }],
         "artifacts": ["artifact:admin-response.txt"],
         "artifact_fingerprints": candidate["artifact_fingerprints"],
     }
@@ -321,10 +326,68 @@ def test_store_finding_persists_internal_task_bound_evidence_receipts(memory_cli
         )
 
     candidate = plan_store.store_finding_candidate.call_args.args[3]
-    assert candidate["evidence_assertions"] == [{"artifact": "artifact:response.txt", "marker": "admin data"}]
+    assert candidate["evidence_assertions"] == [{
+        "artifact": "artifact:response.txt",
+        "type": "literal_text",
+        "value": "admin data",
+        "marker": "admin data",
+    }]
     assert candidate["evidence_receipts"][0].startswith("finding_evidence:")
     stored = plan_store.store_finding_evidence_receipt.call_args.args
     assert stored[2:5] == (task.task_uid, "artifact:response.txt", "admin data")
+
+
+def test_typed_evidence_assertions_validate_binary_and_json_artifacts(tmp_path: Path):
+    binary = tmp_path / "capture.bin"
+    binary.write_bytes(b"prefix\x00\xffproofsuffix")
+    structured = tmp_path / "result.json"
+    structured.write_text('{"result":{"roles":["user","admin"]}}', encoding="utf-8")
+
+    with patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)):
+        references = mod._validated_artifact_paths([str(binary), str(structured)])
+        assertions = mod._validated_evidence_assertions(
+            [
+                {
+                    "artifact": str(binary),
+                    "type": "byte_sequence",
+                    "encoding": "hex",
+                    "value": "00ff70726f6f66",
+                },
+                {
+                    "artifact": str(structured),
+                    "type": "json_value",
+                    "pointer": "/result/roles",
+                    "operator": "contains",
+                    "expected": "admin",
+                },
+            ],
+            references,
+            require_one=True,
+        )
+
+    assert [assertion["type"] for assertion in assertions] == ["byte_sequence", "json_value"]
+
+
+def test_typed_evidence_assertion_rejects_unsatisfied_predicate(tmp_path: Path):
+    artifact = tmp_path / "result.json"
+    artifact.write_text('{"result":"denied"}', encoding="utf-8")
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match="was not satisfied"),
+    ):
+        references = mod._validated_artifact_paths([str(artifact)])
+        mod._validated_evidence_assertions(
+            [{
+                "artifact": str(artifact),
+                "type": "json_value",
+                "pointer": "/result",
+                "operator": "equals",
+                "expected": "allowed",
+            }],
+            references,
+            require_one=True,
+        )
 
 
 def test_store_finding_canonicalizes_service_boundary_and_retains_route_query(
@@ -416,7 +479,7 @@ def test_store_finding_rejects_ambiguous_multi_service_target(memory_client, ope
         patch("src.modules.tools.memory._get_active_plan", return_value=plan),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
-        pytest.raises(ValueError, match="exactly one assigned service"),
+        pytest.raises(ValueError, match="exactly one assigned target"),
     ):
         store_finding(
             "Reflected XSS",
@@ -434,6 +497,72 @@ def test_store_finding_rejects_ambiguous_multi_service_target(memory_client, ope
     store_entry.assert_not_called()
     plan_store.store_finding_candidate.assert_not_called()
     memory_client.store_task.assert_not_called()
+
+
+def test_finding_target_resolver_handles_network_range_and_filesystem_locations(tmp_path: Path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_file = source_root / "app.py"
+    source_file.write_text("print('safe')", encoding="utf-8")
+    plan = mod.OperationPlan(
+        objective="Assess assigned targets",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[
+            mod.OperationTarget(target_id="network-1", type="network_range", value="10.20.0.0/24"),
+            mod.OperationTarget(target_id="service-1", type="network", value="10.30.0.4:22"),
+            mod.OperationTarget(target_id="source-1", type="filesystem", value=str(source_root)),
+        ],
+    )
+
+    network_task = Task(
+        task_uid="network-task",
+        title="Assess host",
+        objective="Assess host",
+        acceptance=make_acceptance("network").to_dict(),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["network-1"],
+    )
+    source_task = Task(
+        task_uid="source-task",
+        title="Assess source",
+        objective="Assess source",
+        acceptance=make_acceptance("source").to_dict(),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["source-1"],
+    )
+    service_task = Task(
+        task_uid="service-task",
+        title="Assess service",
+        objective="Assess service",
+        acceptance=make_acceptance("service").to_dict(),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["service-1"],
+    )
+
+    assert mod._canonicalize_finding_target("10.20.0.7", plan, network_task) == (
+        "10.20.0.7",
+        ["network-1"],
+    )
+    assert mod._canonicalize_finding_target("app.py", plan, source_task) == (
+        str(source_file.resolve()),
+        ["source-1"],
+    )
+    assert mod._canonicalize_finding_target("10.30.0.4:22", plan, service_task) == (
+        "10.30.0.4:22",
+        ["service-1"],
+    )
+    with pytest.raises(ValueError, match="allowed targets"):
+        mod._canonicalize_finding_target("10.21.0.7", plan, network_task)
+    with pytest.raises(ValueError, match="ambiguous|allowed targets"):
+        mod._canonicalize_finding_target("../outside.py", plan, source_task)
 
 
 def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Path):
@@ -515,6 +644,14 @@ def test_store_finding_schema_requires_artifacts():
     schema = get_tool_spec(store_finding)["inputSchema"]["json"]
 
     assert "artifacts" in schema["required"]
+    assertion_schema = schema["properties"]["evidence_assertions"]["items"]
+    assert assertion_schema["properties"]["type"]["enum"] == [
+        "literal_text",
+        "byte_sequence",
+        "json_value",
+    ]
+    assert assertion_schema["properties"]["encoding"]["enum"] == ["hex", "base64"]
+    assert assertion_schema["properties"]["operator"]["enum"] == ["exists", "equals", "contains"]
     assert "cwe_mappings" not in schema["properties"]
     assert "mitre_attack_mappings" not in schema["properties"]
 
@@ -799,7 +936,7 @@ def test_confirmed_validation_rejects_missing_positive_evidence_marker(tmp_path:
     with (
         patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
-        pytest.raises(ValueError, match="did not reproduce candidate marker"),
+        pytest.raises(ValueError, match="did not reproduce candidate assertion"),
     ):
         record_finding_validation(
             "finding-1",

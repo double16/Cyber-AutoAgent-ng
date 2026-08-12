@@ -128,10 +128,11 @@ def test_task_scope_ignores_non_network_tokens_but_detects_numeric_hostname_refe
     )
 
     assert mod.task_service_scope_violations(plan, task, "Started at 2026-08-08T20:15.") == []
-    assert len(mod.task_service_scope_violations(plan, task, "Do not probe 12invalid.example:4280.")) == 1
+    assert mod.task_service_scope_violations(plan, task, "Use image 12invalid.example:4280 locally.") == []
     assert mod.task_service_scope_violations(plan, task, "Use python:3.12 for the local helper.") == []
     assert mod.task_service_scope_violations(plan, task, "Probe 10.0.0.5:4280.") == []
-    assert len(mod.task_service_scope_violations(plan, task, "Probe 10.0.0.6:4280.")) == 1
+    assert mod.task_service_scope_violations(plan, task, "Mention 10.0.0.6:4280 as data.") == []
+    assert len(mod.task_service_scope_violations(plan, task, "Probe http://10.0.0.6:4280/")) == 1
 
 
 def test_technology_task_scope_does_not_treat_version_as_host_port():
@@ -2174,13 +2175,15 @@ def test_acceptance_evidence_error_advertises_canonical_reference_syntax():
     assert "Raw URLs" in message
 
 
-def test_inventory_url_normalization_preserves_boundary_and_repairs_common_route_errors():
+def test_inventory_url_normalization_preserves_boundary_and_repeated_route_segments():
     value = mod._canonical_inventory_url(
         "http://host.docker.internal:4280/vulnerabilities/sqli/vulnerabilities/sqli/?id=1&&",
         "http://host.docker.internal:4280",
     )
 
-    assert value == "http://host.docker.internal:4280/vulnerabilities/sqli/?id=1"
+    assert value == (
+        "http://host.docker.internal:4280/vulnerabilities/sqli/vulnerabilities/sqli/?id=1"
+    )
 
 
 def test_inventory_url_normalization_removes_serialized_quote_artifacts():
