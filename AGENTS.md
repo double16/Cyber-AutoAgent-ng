@@ -47,9 +47,9 @@
 
   ```bash
   UV_CACHE_DIR="$PWD/.uv-cache" uv run python3 --version
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest tests/test_multi_agent_workflow.py -q --tb=short
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
   UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest tests/test_multi_agent_workflow.py -q
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest -q
   UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
   ```
 

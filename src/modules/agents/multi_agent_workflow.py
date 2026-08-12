@@ -228,6 +228,31 @@ class TaskExecutorCycleResult:
 
 
 FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
+_FINDING_DEPENDENT_PHASE_PATTERN = re.compile(
+    r"\b(?:finding(?:[- ]derived)?|candidate|exploit[ -]?(?:chain|path)|impact(?:\s+demonstration|\s+assessment)?)\b",
+    re.IGNORECASE,
+)
+_VOLATILE_ARTIFACT_REFERENCE_PATTERN = re.compile(
+    r"(?:artifact_id:)?(?:read_artifact_|shell_|http_fallback_)[0-9a-f_]{6,}(?:\.[A-Za-z0-9._-]+)?",
+    re.IGNORECASE,
+)
+_VOLATILE_OPERATION_ARTIFACT_PATH_PATTERN = re.compile(
+    r"(?:/app/)?outputs/[^\s'\"]+/[^\s'\"]+/artifacts/[^\s'\"]+",
+    re.IGNORECASE,
+)
+
+
+def _phase_semantically_requires_finding_candidates(phase: PlanPhase) -> bool:
+    """Return whether phase semantics consume persisted finding candidates.
+
+    Plan metadata is useful to the model, but cannot be the sole authority for a
+    controller gate. This narrow classifier protects later finding-derived work
+    when a plan response omits or contradicts that metadata.
+    """
+
+    if phase.requires_finding_candidates:
+        return True
+    return bool(_FINDING_DEPENDENT_PHASE_PATTERN.search(f"{phase.title}\n{phase.criteria}"))
 
 
 @dataclass(frozen=True)
@@ -510,7 +535,12 @@ class WorkflowStateStore:
             explicit_empty_candidate_phase = (
                 status == "not_applicable" and phase.requires_finding_candidates and not phase_has_work
             )
-            if (
+            if explicit_empty_candidate_phase:
+                # This phase had no semantically applicable work. Earlier failures
+                # still make the operation incomplete, but do not change this
+                # phase's own applicability result.
+                pass
+            elif (
                 blocking_tasks
                 or failed_tasks
                 or (
@@ -665,6 +695,16 @@ class WorkflowStateStore:
 
     def create_plan_from_dict(self, plan_data: Dict[str, Any]) -> OperationPlan:
         phases = [PlanPhase.from_obj(phase) for phase in plan_data.get("phases", [])]
+        phases = [
+            PlanPhase(
+                id=phase.id,
+                title=phase.title,
+                status=phase.status,
+                criteria=phase.criteria,
+                requires_finding_candidates=_phase_semantically_requires_finding_candidates(phase),
+            )
+            for phase in phases
+        ]
         if not phases:
             raise WorkflowInvariantError("plan creator returned no phases")
         if not any(phase.status == "active" for phase in phases):
@@ -1424,7 +1464,7 @@ class MultiAgentWorkflowController:
                     continue
                 phase_continue_decision = decision
 
-            if phase.requires_finding_candidates and before_count == 0:
+            if _phase_semantically_requires_finding_candidates(phase) and before_count == 0:
                 candidate_records = self.state.list_finding_records()
                 eligible_candidates = [
                     record for record in candidate_records if not str(record.get("resolution") or "").strip()
@@ -1442,6 +1482,7 @@ class MultiAgentWorkflowController:
                         "phase": phase.id,
                         "decision": "not_applicable",
                         "reason": "no_persisted_finding_candidates",
+                        "semantic_dependency": True,
                     })
                     if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
                         self._emit_workflow_completion(updated_plan)
@@ -2117,6 +2158,23 @@ class MultiAgentWorkflowController:
             recovery_objective=task.objective,
             recovery_next_action="Create or convert a validated inventory manifest; do not call record_task_acceptance.",
         )
+        evidence_prerequisite_policy = AgentRunPolicy(
+            min_tool_calls=1,
+            terminal_after_required_tools=False,
+            allow_text_final_after_tools=False,
+            actionless_mode="task_progress",
+            max_actionless_calls=2,
+            max_agent_calls=4,
+            max_model_turns=8,
+            max_tool_calls=5,
+            terminal_reason="task_evidence_prerequisite_recovery_done",
+            terminal_message="Evidence prerequisite recovery completed",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Create or convert valid durable evidence for the missing reference; do not call "
+                "record_task_acceptance until the evidence exists."
+            ),
+        )
         self._log_workflow(
             "task executor policy task=%s min_tool_calls=%s ignored_tools=%s",
             self._task_label(task),
@@ -2140,6 +2198,8 @@ class MultiAgentWorkflowController:
         missing_acceptance_recovery_active = False
         manifest_prerequisite_recovery_active = False
         manifest_prerequisite_recovery_used = False
+        evidence_prerequisite_recovery_active = False
+        evidence_prerequisite_recovery_used = False
         missing_acceptance_recovery_used = False
         memory_acceptance_recovery_used = False
         finding_recovery_payload: Dict[str, Any] = {}
@@ -2147,8 +2207,10 @@ class MultiAgentWorkflowController:
         acceptance_recovery_evidence: List[Dict[str, str]] = []
         previous_progress_signature: Optional[str] = None
         seen_progress_actions: set[str] = set()
+        seen_stagnation_actions: set[str] = set()
         repeat_loop_signatures: set[str] = set()
         repeat_loop_recovery_used = False
+        max_token_recovery_used = False
         acceptance_correction_limit = self._task_acceptance_correction_count()
         endpoint_evidence_correction_limit = self._task_endpoint_evidence_correction_count()
         evaluator_correction_limit = self._task_evaluator_correction_count()
@@ -2205,6 +2267,8 @@ class MultiAgentWorkflowController:
                     evaluator_correction_limit,
                 ) + int(missing_acceptance_recovery_used)
                 allowed_actor_cycles += int(manifest_prerequisite_recovery_used)
+                allowed_actor_cycles += int(evidence_prerequisite_recovery_used)
+                allowed_actor_cycles += int(max_token_recovery_used)
                 if cycle > allowed_actor_cycles:
                     break
                 self._log_workflow(
@@ -2216,6 +2280,8 @@ class MultiAgentWorkflowController:
                 current_policy = (
                     manifest_prerequisite_policy
                     if manifest_prerequisite_recovery_active
+                    else evidence_prerequisite_policy
+                    if evidence_prerequisite_recovery_active
                     else
                     finding_store_policy
                     if finding_observation_store_recovery
@@ -2233,10 +2299,14 @@ class MultiAgentWorkflowController:
                         for tool in tools
                         if get_tool_name(tool) in current_policy.recovery_allowed_tool_names
                     ]
-                    if missing_acceptance_recovery_active or finding_observation_store_recovery
+                    if (
+                        missing_acceptance_recovery_active
+                        or finding_observation_store_recovery
+                        or evidence_prerequisite_recovery_active
+                    )
                     else None
                 )
-                if manifest_prerequisite_recovery_active:
+                if manifest_prerequisite_recovery_active or evidence_prerequisite_recovery_active:
                     closure_tools = [tool for tool in tools if get_tool_name(tool) != "record_task_acceptance"]
                 worker_result = run_executor(actor_prompt, current_policy, closure_tools)
                 cycle_result = self._executor_cycle_result(worker_result)
@@ -2266,6 +2336,32 @@ class MultiAgentWorkflowController:
                     decision = WorkflowDecision(
                         status="partial_failure",
                         reason="Inventory manifest prerequisite recovery did not produce a valid manifest artifact.",
+                    )
+                    break
+                if evidence_prerequisite_recovery_active:
+                    evidence_refs = self._artifact_refs_from_tool_outcomes(cycle_result.outcomes)
+                    if evidence_refs:
+                        evidence_prerequisite_recovery_active = False
+                        acceptance_recovery_active = True
+                        acceptance_recovery_evidence = self._acceptance_recovery_context(
+                            task,
+                            self.state.list_task_acceptance_results(task.task_uid),
+                            tool_outcomes,
+                            None,
+                        )
+                        actor_prompt = self._task_executor_critic_guidance(
+                            task,
+                            self._missing_acceptance_criteria(
+                                task, self.state.list_task_acceptance_results(task.task_uid)
+                            ),
+                            acceptance_recovery_evidence,
+                            next_cycle=cycle + 1,
+                            required_tool="record_task_acceptance",
+                        )
+                        continue
+                    decision = WorkflowDecision(
+                        status="partial_failure",
+                        reason="Evidence prerequisite recovery did not produce a valid durable artifact.",
                     )
                     break
                 repeated_loop = cycle_result.repeat_loop_detected
@@ -2404,12 +2500,41 @@ class MultiAgentWorkflowController:
                                 cycle,
                             )
                             return
+                    if not max_token_recovery_used:
+                        max_token_recovery_used = True
+                        evidence_count = len(self._artifact_refs_from_tool_outcomes(cycle_result.outcomes))
+                        self._emit_workflow_event({
+                            "type": "task_max_token_recovery",
+                            "task_uid": task.task_uid,
+                            "phase": task.phase,
+                            "cycle": cycle,
+                            "classification": cycle_result.max_tokens_classification or "unknown",
+                            "durable_evidence_count": evidence_count,
+                            "decision": "bounded_changed_action_retry",
+                        })
+                        actor_prompt = self._max_token_recovery_prompt(task, cycle_result, evidence_count)
+                        self._log_workflow(
+                            "task max-token bounded recovery task=%s cycle=%s evidence=%s",
+                            self._task_label(task),
+                            cycle,
+                            evidence_count,
+                        )
+                        continue
                     decision = WorkflowDecision(
                         status="partial_failure",
                         reason=cycle_result.max_tokens_reason or (
                             "Task executor exhausted its bounded output-token recovery."
                         ),
                     )
+                    self._emit_workflow_event({
+                        "type": "task_max_token_recovery",
+                        "task_uid": task.task_uid,
+                        "phase": task.phase,
+                        "cycle": cycle,
+                        "classification": cycle_result.max_tokens_classification or "unknown",
+                        "durable_evidence_count": len(self._artifact_refs_from_tool_outcomes(cycle_result.outcomes)),
+                        "decision": "exhausted",
+                    })
                     self._log_workflow(
                         "task executor max-token recovery exhausted task=%s cycle=%s reason=%s",
                         self._task_label(task),
@@ -2705,6 +2830,7 @@ class MultiAgentWorkflowController:
                             None,
                         )
                         terminal_finding_error = failed_finding
+                        repair_read_completed = False
                         if (
                             not finding_recovery_ref
                             and failed_finding is not None
@@ -2752,19 +2878,37 @@ class MultiAgentWorkflowController:
                                 None,
                             )
                             terminal_finding_error = repair_failure or failed_finding
+                            repair_read_completed = any(
+                                outcome.tool_name == "read_artifact" and outcome.success
+                                for outcome in repair_result.outcomes
+                            )
                             self._emit_finding_submission_repair(
                                 task,
                                 attempt=2,
-                                outcome="persisted" if finding_recovery_ref else "failed",
+                                outcome=(
+                                    "persisted"
+                                    if finding_recovery_ref
+                                    else "unsupported_claim"
+                                    if repair_read_completed
+                                    else "failed"
+                                ),
                                 error=repair_failure.output_summary if repair_failure else "",
                                 raw_error=repair_failure.raw_output_summary if repair_failure else "",
                                 artifact_refs=self._artifact_refs_from_tool_outcomes(tool_outcomes),
                             )
                         if not successful_findings or not finding_recovery_ref:
                             acceptance_submitted = True
+                            unsupported_claim = (
+                                failed_finding is not None
+                                and repair_read_completed
+                            )
                             decision = WorkflowDecision(
                                 status="partial_failure",
                                 reason=(
+                                    "Available artifact evidence did not support the proposed finding claim; "
+                                    "acceptance was not submitted."
+                                    if unsupported_claim
+                                    else
                                     "record_task_acceptance required a current-task finding, but finding persistence "
                                     "did not return a canonical finding reference"
                                     + (
@@ -2914,6 +3058,7 @@ class MultiAgentWorkflowController:
                             sort_keys=True,
                         )
                         missing_manifest = "submitted manifest file does not exist" in acceptance_error.lower()
+                        missing_artifact = recovery_details["code"] == "missing_artifact_prerequisite"
                         repair_instruction = self._task_acceptance_repair_instruction(acceptance_error)
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -2923,6 +3068,8 @@ class MultiAgentWorkflowController:
                                 + (
                                     "Create or convert the required manifest in the bounded prerequisite recovery turn."
                                     if missing_manifest
+                                    else "Create or convert valid durable evidence in the bounded prerequisite recovery turn. "
+                                    if missing_artifact
                                     else "Then make one changed record_task_acceptance submission. "
                                 )
                                 + f" Controller correction: {correction}"
@@ -2930,7 +3077,11 @@ class MultiAgentWorkflowController:
                         )
                         manifest_prerequisite_recovery_active = missing_manifest
                         manifest_prerequisite_recovery_used = manifest_prerequisite_recovery_used or missing_manifest
-                        acceptance_recovery_active = not missing_manifest
+                        evidence_prerequisite_recovery_active = missing_artifact and not missing_manifest
+                        evidence_prerequisite_recovery_used = (
+                            evidence_prerequisite_recovery_used or evidence_prerequisite_recovery_active
+                        )
+                        acceptance_recovery_active = not missing_manifest and not missing_artifact
                         self._log_workflow(
                             "task acceptance gate incomplete task=%s cycle=%s missing=%s recovery_evidence=%s",
                             self._task_label(task),
@@ -2973,7 +3124,8 @@ class MultiAgentWorkflowController:
                     self.state.list_task_acceptance_results(task.task_uid),
                 )
                 progress_actions = self._task_cycle_progress_actions(cycle_result.outcomes)
-                if progress_actions and progress_actions.issubset(seen_progress_actions):
+                stagnation_actions = self._task_cycle_stagnation_actions(cycle_result.outcomes)
+                if stagnation_actions and stagnation_actions.issubset(seen_stagnation_actions):
                     decision = WorkflowDecision(
                         status="partial_failure",
                         reason=(
@@ -2985,10 +3137,19 @@ class MultiAgentWorkflowController:
                         "task evidence stagnation task=%s cycle=%s repeated_actions=%s",
                         self._task_label(task),
                         cycle,
-                        len(progress_actions),
+                        len(stagnation_actions),
                     )
+                    self._emit_workflow_event({
+                        "type": "task_evidence_stagnation",
+                        "task_uid": task.task_uid,
+                        "phase": task.phase,
+                        "cycle": cycle,
+                        "action_count": len(stagnation_actions),
+                        "reason": "no_new_evidence_after_bounded_retry",
+                    })
                     break
                 seen_progress_actions.update(progress_actions)
+                seen_stagnation_actions.update(stagnation_actions)
                 if progress_signature == previous_progress_signature:
                     decision = WorkflowDecision(
                         status="partial_failure",
@@ -3584,7 +3745,9 @@ If the exact positive response text is not already known, call read_artifact for
 store_finding once with a materially changed payload that includes:
 `evidence_assertions: [{{"artifact":"<one listed artifact ref>","marker":"<exact literal positive text from it>"}}]`.
 The marker must occur verbatim in the cited artifact and demonstrate the claimed behavior. Do not use a control-only
-marker, a URL, a request payload, or an inferred summary.
+marker, a URL, a request payload, a target ID, a task summary, or an inferred hypothesis. If the artifact does not
+contain literal positive evidence for the claim, do not call store_finding or record_task_acceptance; end with the
+unsupported result.
 """
 
     @staticmethod
@@ -3609,6 +3772,26 @@ Acceptance payload to submit: {json.dumps(payload, sort_keys=True)}
 Call record_task_acceptance exactly once with this finding_candidate payload. Use the canonical finding reference above.
 """
 
+    def _max_token_recovery_prompt(
+        self,
+        task: Task,
+        cycle_result: TaskExecutorCycleResult,
+        evidence_count: int,
+    ) -> str:
+        """Build the sole controller-owned retry after an exhausted executor response."""
+
+        return f"""## Bounded Max-Token Recovery
+The preceding executor cycle exhausted its output budget before reaching task closure.
+This is the only retry for that condition. Do not repeat the same reasoning or tool call.
+
+Assigned objective: {task.objective}
+Previous classification: {cycle_result.max_tokens_classification or "unknown"}
+Durable artifacts produced in the interrupted cycle: {evidence_count}
+
+Take one materially different, evidence-producing action. If the task can now be closed, use the required
+record_task_acceptance call with valid current-task evidence. Otherwise record the constraint truthfully and stop.
+"""
+
     @staticmethod
     def _acceptance_recovery_details(error: str) -> Dict[str, Any]:
         """Classify a rejected acceptance call into bounded, machine-readable recovery details."""
@@ -3622,6 +3805,8 @@ Call record_task_acceptance exactly once with this finding_candidate payload. Us
             code = "invalid_inventory_manifest"
         elif "evidence reference" in normalized or "evidence_refs" in normalized:
             code = "invalid_evidence_reference"
+        elif "artifact does not exist" in normalized or "artifact file does not exist" in normalized:
+            code = "missing_artifact_prerequisite"
         elif "finding" in normalized:
             code = "finding_reference_required"
         elif "no acceptance result" in normalized:
@@ -3713,6 +3898,39 @@ Call record_task_acceptance exactly once with this finding_candidate payload. Us
                     "tool": outcome.tool_name,
                     "input": outcome.input_fingerprint or outcome.input_summary,
                     "output": outcome.output_fingerprint or outcome.output_summary,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            fingerprints.add(hashlib.sha256(payload.encode("utf-8")).hexdigest())
+        return fingerprints
+
+    @staticmethod
+    def _stagnation_normalized_text(value: str) -> str:
+        """Remove generated artifact identifiers from controller-side evidence comparisons."""
+
+        normalized = _VOLATILE_OPERATION_ARTIFACT_PATH_PATTERN.sub("<operation-artifact>", str(value or ""))
+        return _VOLATILE_ARTIFACT_REFERENCE_PATTERN.sub("<generated-artifact>", normalized)
+
+    @classmethod
+    def _task_cycle_stagnation_actions(cls, outcomes: List[ToolOutcome]) -> set[str]:
+        """Return stable action/evidence identities across fresh executor contexts.
+
+        Unlike normal progress accounting, this intentionally ignores generated
+        artifact names. A new filename alone is not new evidence, while changed
+        response content or a genuinely different normalized action remains
+        valid exploration progress.
+        """
+
+        fingerprints = set()
+        for outcome in outcomes:
+            if not outcome.success or outcome.tool_name == "record_task_acceptance":
+                continue
+            payload = json.dumps(
+                {
+                    "tool": outcome.tool_name,
+                    "input": cls._stagnation_normalized_text(outcome.input_summary),
+                    "output": cls._stagnation_normalized_text(outcome.output_summary),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -5020,8 +5238,15 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         ]
         phase_tasks = self.state.list_tasks(phase=phase.id)
         phase_has_work = bool(phase_tasks)
-        if not actionable and not phase_failures and not (
-            decision.status == "not_applicable" and (phase_has_work or prior_incomplete_phases)
+        explicit_empty_candidate_phase = (
+            decision.status == "not_applicable"
+            and _phase_semantically_requires_finding_candidates(phase)
+            and not phase_has_work
+        )
+        if explicit_empty_candidate_phase or (
+            not actionable and not phase_failures and not (
+                decision.status == "not_applicable" and phase_has_work
+            )
         ):
             return decision
         status_counts = Counter(task.status for task in actionable)
@@ -5067,6 +5292,11 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         """Stop phase work at its budget boundary, classify it, and advance."""
 
         active_tasks = self.state.list_tasks(phase=phase.id, status=["active"])
+        unresolved_candidate_count = len([
+            record
+            for record in self.state.list_finding_records()
+            if not str(record.get("resolution") or "").strip()
+        ])
         for active_task in active_tasks:
             reason = (
                 f"Phase budget hard cap reached at {progress:.2f}% (cap {phase_cap:.2f}%); "
@@ -5080,6 +5310,15 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             )
             deferred_task = self.state.defer_task(active_task, reason)
             self._emit_task_deferred(deferred_task)
+
+        self._emit_workflow_event({
+            "type": "phase_hard_cap",
+            "phase": phase.id,
+            "progress": progress,
+            "cap": phase_cap,
+            "deferred_task_count": len(active_tasks),
+            "unresolved_candidate_count": unresolved_candidate_count,
+        })
 
         try:
             decision = self._evaluate_phase_with_policy(plan, phase, hard_cap=phase_cap)
@@ -5433,6 +5672,26 @@ review existing memories. Return only the requested JSON decision."""
             f"- {target.target_id} [{target.type}]: {target.value}"
             for target in plan.targets
         ) or "- No executable targets resolved; omit target_ids."
+        candidate_refs = [
+            str(
+                record.get("finding_ref")
+                or (f"finding:{record['finding_uid']}" if record.get("finding_uid") else "")
+                or record.get("reference")
+                or record.get("id")
+                or ""
+            ).strip()
+            for record in self.state.list_finding_records()
+            if not str(record.get("resolution") or "").strip()
+        ]
+        candidate_context = ""
+        if _phase_semantically_requires_finding_candidates(phase):
+            candidate_context = (
+                "\nFinding-dependent phase rule:\n"
+                "- This phase consumes persisted findings. Create work only from the canonical finding references "
+                f"already stored by the controller: {json.dumps([ref for ref in candidate_refs if ref])}. "
+                "Supply one or more of those values in every proposal's finding_refs array. Hypotheses, target IDs, "
+                "task summaries, and inferred vulnerability names are not substitutes.\n"
+            )
         procedure_rules = f"""- For bounded procedure work, supply non-empty `methods`, `snapshot_refs: []`, and one or more positive integer
   `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
   stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
@@ -5473,7 +5732,8 @@ Make exactly one successful `create_tasks` call. A rejected validation attempt d
 Python continues this conversation after a rejection, up to {max_corrections} correction(s). Preserve prior fixes and
 stop after this call.
 
-Every proposal MUST contain non-empty `title`, `objective`, explicit `methods` and `snapshot_refs` arrays, a `limits`
+Every proposal MUST contain non-empty `title`, `objective`, explicit `methods`, `snapshot_refs`, and `finding_refs`
+arrays, a `limits`
 object, and exactly one `criteria` value. The
 criterion contains only a non-empty `description`. `basis_description` is optional and defaults to the objective.
 Python assigns active phase {phase.id} and pending status, infers target scope from `target_ids`, and compiles the full
@@ -5504,6 +5764,7 @@ Target scoping:
 - `target_ids` MUST be exact IDs from the executable target registry below. Never invent placeholder IDs.
 - When a registry value is an explicit `scheme://host:port` URL or `host:port` netloc, create tasks for that exact service boundary. Do not
   turn it into host-wide or all-port work unless a separate executable host or network target authorizes that scope.
+{candidate_context}
 
 Executable target registry:
 {target_lines}
@@ -5715,12 +5976,20 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
     ) -> List[Any]:
         if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
             raise WorkflowInvariantError("create_tasks tool is required for task_creator")
+        required_finding_refs = None
+        if phase is not None and _phase_semantically_requires_finding_candidates(phase):
+            required_finding_refs = {
+                f"finding:{record['finding_uid']}"
+                for record in self.state.list_finding_records()
+                if record.get("finding_uid") and not str(record.get("resolution") or "").strip()
+            }
         return [build_create_tasks_tool(
             prompt_token_limit=getattr(self.runtime, "prompt_token_limit", 48_000),
             coverage_item_ids=batch.item_ids if batch and batch.snapshot_ref else None,
             expected_snapshot_ref=batch.snapshot_ref if batch else None,
             phase_title=phase.title if phase else "",
             phase_objective=phase.criteria if phase else "",
+            required_finding_refs=required_finding_refs,
         )]
 
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
@@ -6685,7 +6954,7 @@ uses a frozen snapshot of that inventory; later discoveries become follow-up wor
 
 {termination_policy_section}
 
-Return JSON exactly: {{\"objective\": string, \"constraints\": [string], \"current_phase\": 1, \"phases\": [{{\"id\": int, \"title\": string, \"status\": \"pending\", \"criteria\": string}}]}}.
+Return JSON exactly: {{\"objective\": string, \"constraints\": [string], \"current_phase\": 1, \"phases\": [{{\"id\": int, \"title\": string, \"status\": \"pending\", \"criteria\": string, \"requires_finding_candidates\": boolean}}]}}.
 
 Now, create the plan and output only the plan:
 """

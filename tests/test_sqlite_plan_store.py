@@ -3,7 +3,15 @@ import sqlite3
 
 import pytest
 
-from modules.tools.memory import AcceptanceResult, CoverageResult, OperationPlan, PlanPhase, SQLiteApplicationStore, Task
+from modules.tools.memory import (
+    AcceptanceResult,
+    CoverageResult,
+    OperationPlan,
+    OperationTarget,
+    PlanPhase,
+    SQLiteApplicationStore,
+    Task,
+)
 from tests.helpers.acceptance import make_acceptance
 
 
@@ -144,6 +152,23 @@ def test_sqlite_plan_store_plan_operations(tmp_path):
     assert retrieved_updated.assessment_complete is True
     assert retrieved_updated.created_at == retrieved_plan.created_at
     assert retrieved_updated.updated_at > retrieved_plan.updated_at
+
+
+def test_sqlite_plan_store_round_trips_operation_targets(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "targets.db"), "target")
+    plan = OperationPlan(
+        objective="Assess the service",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active", criteria="Map the service")],
+        targets=[OperationTarget("target-1", "https://service.example:8443", "network")],
+    )
+
+    store.store_plan("op-1", plan)
+    restored = store.get_plan("op-1")
+
+    assert restored is not None
+    assert restored.targets == plan.targets
 
 
 def test_sqlite_plan_store_task_operations(tmp_path):

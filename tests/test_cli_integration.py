@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import cyberautoagent
 from modules.handlers.tool_recovery import ToolOutcomeJournal
 
+ORIGINAL_RUN_TARGET_PREFLIGHT = cyberautoagent.run_target_preflight
+
 
 @pytest.fixture(autouse=True)
 def restore_working_directory_after_test():
@@ -57,6 +59,110 @@ def bypass_live_memory_client(monkeypatch):
     """Keep CLI workflow tests independent of local Qdrant/Ollama availability."""
 
     monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock())
+
+
+def test_restore_continuation_state_uses_persisted_objective_and_targets(tmp_path):
+    from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, SQLiteApplicationStore
+
+    operation_id = "OP_20260812_120000"
+    store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical")
+    targets = [OperationTarget("target-1", "https://service.example:8443", "network")]
+    store.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Assess the authenticated service",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(1, "Recon", "active", "Map the service")],
+            targets=targets,
+        ),
+    )
+
+    objective, restored = cyberautoagent.restore_continuation_state(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id=operation_id,
+        incoming_objective="Perform web assessment",
+        module="web",
+        continuation_requested=True,
+        logger=Mock(),
+    )
+
+    assert objective == "Assess the authenticated service"
+    assert restored == targets
+
+
+def test_via_environment_resolves_before_placeholder_classification(monkeypatch):
+    monkeypatch.setenv("CYBER_OBJECTIVE", "Perform web assessment")
+
+    objective = cyberautoagent.resolve_objective_from_environment("via environment")
+
+    assert objective == "Perform web assessment"
+    assert cyberautoagent._is_continuation_objective_placeholder(objective, "web") is True
+
+
+def test_via_environment_requires_a_non_empty_objective(monkeypatch):
+    monkeypatch.delenv("CYBER_OBJECTIVE", raising=False)
+
+    with pytest.raises(ValueError, match="CYBER_OBJECTIVE"):
+        cyberautoagent.resolve_objective_from_environment("via environment")
+
+
+def test_restore_continuation_state_preserves_explicit_objective(tmp_path):
+    from modules.tools.memory import OperationPlan, PlanPhase, SQLiteApplicationStore
+
+    operation_id = "OP_20260812_120001"
+    store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical")
+    store.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Persisted objective",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(1, "Recon", "active", "Map the service")],
+        ),
+    )
+
+    objective, restored = cyberautoagent.restore_continuation_state(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id=operation_id,
+        incoming_objective="Continue only the authentication checks",
+        module="web",
+        continuation_requested=True,
+        logger=Mock(),
+    )
+
+    assert objective == "Continue only the authentication checks"
+    assert restored is None
+
+
+def test_run_target_preflight_validates_supplied_targets_without_resolving(monkeypatch):
+    from modules.tools.memory import OperationTarget
+
+    targets = [OperationTarget("target-1", "service.example", "network")]
+    monkeypatch.setattr(
+        cyberautoagent,
+        "resolve_operation_targets",
+        Mock(side_effect=AssertionError("continuation targets must not be re-resolved")),
+    )
+    expected = cyberautoagent.TargetValidationResult(
+        "target-1", "service.example", "network", "pass", ("test",)
+    )
+    monkeypatch.setattr(cyberautoagent, "validate_operation_targets", Mock(return_value=[expected]))
+    logger = Mock()
+
+    resolved, results = ORIGINAL_RUN_TARGET_PREFLIGHT(
+        logical_target="logical",
+        objective="unused",
+        operation_id="OP_test",
+        logger=logger,
+        emitter=Mock(),
+        targets=targets,
+    )
+
+    assert resolved == targets
+    assert len(results) == 1
 
 
 class TestCLIArguments:

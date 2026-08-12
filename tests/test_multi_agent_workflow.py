@@ -193,6 +193,41 @@ def test_candidate_dependent_phase_closes_without_speculative_task_creation(monk
     )
 
 
+def test_semantic_impact_phase_closes_when_plan_metadata_omits_candidate_dependency(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Impact Demonstration", status="active", criteria="Demonstrate impact")],
+    )
+    state = FakeState(plan, finding_records=[])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        max_iterations=1,
+    )
+    transitions = []
+
+    def mark_phase(current_plan, phase_id, status):
+        transitions.append((phase_id, status))
+        updated = OperationPlan(
+            objective=current_plan.objective,
+            current_phase=phase_id,
+            total_phases=1,
+            phases=[PlanPhase(id=1, title="Impact Demonstration", status=status, criteria="Demonstrate impact")],
+        )
+        state.plan = updated
+        return updated
+
+    monkeypatch.setattr(controller, "_mark_phase", mark_phase)
+    monkeypatch.setattr(controller, "_emit_workflow_completion", lambda _plan: None)
+
+    controller.run()
+
+    assert transitions == [(1, "not_applicable")]
+
+
 def test_default_text_runner_preserves_agent_error_when_cleanup_fails(monkeypatch):
     class Agent:
         def __call__(self, prompt):
@@ -3657,7 +3692,7 @@ def test_task_executor_max_token_recovery_exhaustion_is_partial_failure():
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert len(executor_calls) == 1
+    assert len(executor_calls) == 2
     assert state.tasks[0].status == "partial_failure"
     assert "reasoning loop" in state.tasks[0].status_reason
 
@@ -4236,6 +4271,14 @@ def test_acceptance_recovery_details_default_to_schema_correction():
     assert details["code"] == "invalid_payload"
     assert details["required_evidence"] == []
     assert details["artifact_sha256"] is None
+
+
+def test_acceptance_recovery_details_classifies_missing_artifact_as_prerequisite():
+    details = MultiAgentWorkflowController._acceptance_recovery_details(
+        "Artifact does not exist: artifact:artifacts/validation.txt"
+    )
+
+    assert details["code"] == "missing_artifact_prerequisite"
 
 
 def test_advisory_checkpoint_can_continue_below_phase_hard_cap():
@@ -5319,6 +5362,33 @@ def test_phase_terminal_guard_converts_not_applicable_to_done_when_phase_has_com
     assert decision.status == "done"
 
 
+def test_phase_terminal_guard_preserves_empty_finding_dependent_phase_status():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Hypotheses", status="partial_failure"),
+            PlanPhase(id=2, title="Finding Validation", status="active", requires_finding_candidates=True),
+        ],
+    )
+    pending = Task(task_uid="pending", title="Pending", objective="assess route", phase=1, status="pending")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[pending]),
+        text_runner=lambda *_args: "{}",
+    )
+
+    decision = controller._guard_phase_terminal_decision(
+        plan.phases[1],
+        workflow_mod.WorkflowDecision(status="not_applicable", reason="no candidates"),
+        context="phase evaluation",
+    )
+
+    assert decision.status == "not_applicable"
+
+
 def test_task_cycle_progress_signature_changes_only_with_controller_observed_progress():
     acceptance = AcceptanceResult(
         criterion_id="criterion",
@@ -5376,6 +5446,56 @@ def test_task_cycle_progress_actions_detects_changed_large_artifact_content():
     first_actions = MultiAgentWorkflowController._task_cycle_progress_actions([first])
 
     assert not MultiAgentWorkflowController._task_cycle_progress_actions([changed]).issubset(first_actions)
+
+
+def test_stagnation_actions_ignore_generated_artifact_names_but_preserve_new_evidence():
+    first = ToolOutcome(
+        1,
+        "tool-1",
+        "shell",
+        True,
+        False,
+        "cat /app/outputs/dvwa/OP_1/artifacts/shell_20260811_214240_675d95.artifact.log | tail -n 50",
+        "artifact_id:shell_20260811_214240_675d95.artifact.log\nno positive evidence",
+    )
+    same = ToolOutcome(
+        2,
+        "tool-2",
+        "shell",
+        True,
+        False,
+        "cat /app/outputs/dvwa/OP_1/artifacts/shell_20260811_214250_dea05a.artifact.log | tail -n 50",
+        "artifact_id:shell_20260811_214250_dea05a.artifact.log\nno positive evidence",
+    )
+    changed = ToolOutcome(
+        3,
+        "tool-3",
+        "shell",
+        True,
+        False,
+        "cat /app/outputs/dvwa/OP_1/artifacts/shell_20260811_214302_53720c.artifact.log | tail -n 50",
+        "artifact_id:shell_20260811_214302_53720c.artifact.log\nverbatim positive proof",
+    )
+
+    first_actions = MultiAgentWorkflowController._task_cycle_stagnation_actions([first])
+
+    assert MultiAgentWorkflowController._task_cycle_stagnation_actions([same]).issubset(first_actions)
+    assert not MultiAgentWorkflowController._task_cycle_stagnation_actions([changed]).issubset(first_actions)
+
+
+def test_finding_repair_prompt_excludes_logical_target_ids_as_evidence():
+    task = Task(task_uid="active", title="Candidate", objective="Verify the assigned finding", phase=1, status="active")
+
+    prompt = MultiAgentWorkflowController._finding_persistence_repair_prompt(
+        task,
+        {},
+        ["artifact:artifacts/evidence.txt"],
+        "evidence assertion marker was not found",
+    )
+
+    assert "target ID" in prompt
+    assert "unsupported result" in prompt
+    assert "record_task_acceptance" in prompt
 
 
 def test_repeat_loop_recovery_is_bounded_and_requires_changed_action():

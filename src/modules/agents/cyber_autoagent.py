@@ -953,9 +953,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         if config.provider in ["bedrock", "litellm"]
         else "local",
         "gen_ai.request.model": config.model_id,
-        # Tool configuration. Strands emits the authoritative per-agent tool list
-        # as gen_ai.agent.tools; do not duplicate it with custom attributes.
-        "tools.parallel_limit": 8,
         # Memory configuration
         "memory.enabled": True,
         "memory.path": config_manager.getenv("QDRANT_URL") or os.path.join(server_config.output.base_dir, "qdrant"),

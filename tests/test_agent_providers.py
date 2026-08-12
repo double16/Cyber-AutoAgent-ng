@@ -49,7 +49,7 @@ def test_agent_creation_litellm(
     mock_get_cfg,
 ):
     # Stub out the UI handler to have an emitter attribute
-    mock_rbh.return_value = SimpleNamespace(emitter=None)
+    mock_rbh.return_value = SimpleNamespace(emitter=None, emit_ui_event=lambda _event: None)
 
     # Mock config manager
     mock_cfg = Mock()
@@ -89,7 +89,7 @@ def test_agent_creation_unsupported_provider_raises(
     mock_handle_error,
     mock_get_cfg,
 ):
-    mock_rbh.return_value = SimpleNamespace(emitter=None)
+    mock_rbh.return_value = SimpleNamespace(emitter=None, emit_ui_event=lambda _event: None)
     mock_cfg = Mock()
     mock_cfg.validate_requirements.return_value = None
     mock_cfg.getenv.side_effect = _default_getenv

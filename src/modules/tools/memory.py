@@ -2946,6 +2946,36 @@ def store_observation(
     """
 
     merged = _clean_metadata(metadata)
+    source_task = _active_finding_source_task(_get_database_store(), _operation_id())
+    try:
+        plan = _get_active_plan()
+    except (RuntimeError, ValueError):
+        plan = None
+    if source_task is not None and plan is not None:
+        selected_targets = _selected_task_targets(plan, source_task)
+        if len(selected_targets) == 1:
+            target = selected_targets[0]
+            supplied_location = str(merged.get("target") or merged.get("location") or "").strip()
+            if supplied_location and "://" in supplied_location and target.type == "network":
+                submitted = urlsplit(supplied_location)
+                registered = urlsplit(target.value)
+                try:
+                    matches = (
+                        submitted.scheme.lower() == registered.scheme.lower()
+                        and submitted.hostname is not None
+                        and registered.hostname is not None
+                        and submitted.hostname.lower().rstrip(".") == registered.hostname.lower().rstrip(".")
+                        and submitted.port == registered.port
+                    )
+                except ValueError:
+                    matches = False
+                if not matches:
+                    raise ValueError(
+                        "observation target/location must match the active task's assigned target boundary"
+                    )
+            merged["target_id"] = target.target_id
+            merged["target"] = target.value
+            merged.pop("location", None)
     if artifacts:
         merged["artifacts"] = _validated_artifact_paths(artifacts)
     result = _store_memory_entry(content, "observation", merged)
@@ -2963,10 +2993,17 @@ def store_knowledge(content: str, metadata: Optional[Dict[str, Any]] = None) -> 
     """Store one reusable technique, lesson, or durable internal note.
 
     Knowledge remains retrievable but is excluded from security assessment reports.
+    The returned memory_ref may be supplied as durable evidence for record_task_acceptance.
     """
 
-    _store_memory_entry(content, "knowledge", metadata)
-    return "Knowledge stored."
+    result = _store_memory_entry(content, "knowledge", metadata)
+    return json.dumps(
+        {
+            "stored": True,
+            "created": result.created,
+            "memory_ref": f"memory:{result.memory_id}",
+        }
+    )
 
 
 def _finding_fingerprint(title: str, claim: str, target: str, technique: str) -> str:
@@ -4174,6 +4211,10 @@ class TaskProposal(_StrictTaskWireModel):
         default_factory=list,
         description="Existing task, memory, artifact, or finding references; use [] for procedure proposals",
     )
+    finding_refs: List[str] = Field(
+        default_factory=list,
+        description="Canonical persisted finding references required by finding-dependent work",
+    )
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
     criteria: List[TaskProposalCriterion] = Field(min_length=1, max_length=1)
     target_ids: List[str] = Field(default_factory=list)
@@ -4402,6 +4443,7 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                         },
                     },
                     "snapshot_refs": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "finding_refs": {"type": "array", "items": {"type": "string"}, "default": []},
                     "output_kind": {"type": "string", "enum": ["artifact", "inventory_manifest"]},
                     "criteria": {
                         "type": "array",
@@ -4668,7 +4710,7 @@ def _selected_task_targets(plan: OperationPlan, task: Task) -> List[OperationTar
     return list(plan.targets)
 
 
-def _explicit_service_references(text: str) -> List[str]:
+def _explicit_service_references(text: str, *, include_bare_host_ports: bool = True) -> List[str]:
     """Extract URL or host:port literals without interpreting artifact paths as targets."""
 
     references = []
@@ -4679,6 +4721,8 @@ def _explicit_service_references(text: str) -> List[str]:
         if reference and reference not in seen:
             references.append(reference)
             seen.add(reference)
+    if not include_bare_host_ports:
+        return references
     for match in _RE_HOST_PORT_TARGET.finditer(text or ""):
         if any(start <= match.start() and match.end() <= end for start, end in (item.span() for item in url_matches)):
             continue
@@ -4722,8 +4766,11 @@ def task_service_scope_validation_details(plan: OperationPlan, task: Task, text:
     if not service_targets:
         return []
 
+    technology_only = all(
+        criterion.id == "validate-the-assigned-technology" for criterion in task.acceptance.criteria
+    )
     violations = []
-    for reference in _explicit_service_references(text):
+    for reference in _explicit_service_references(text, include_bare_host_ports=not technology_only):
         parsed = urlsplit(reference if "://" in reference else f"//{reference}")
         try:
             port = parsed.port
@@ -5898,6 +5945,7 @@ def _create_tasks_from_proposals(
     expected_snapshot_ref: Optional[str] = None,
     phase_title: str = "",
     phase_objective: str = "",
+    required_finding_refs: Optional[set[str]] = None,
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
@@ -5941,6 +5989,18 @@ def _create_tasks_from_proposals(
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
         title = proposal.title.strip()
         objective = proposal.objective.strip()
+        finding_refs = list(dict.fromkeys(
+            str(reference).strip() for reference in proposal.finding_refs if str(reference).strip()
+        ))
+        if required_finding_refs is not None:
+            if not finding_refs:
+                raise ValueError("finding-dependent task proposal requires at least one canonical finding_refs entry")
+            invalid_finding_refs = sorted(set(finding_refs) - required_finding_refs)
+            if invalid_finding_refs:
+                raise ValueError(
+                    "finding-dependent task proposal includes unavailable finding_refs: "
+                    + ", ".join(invalid_finding_refs)
+                )
         replacement_of = str(proposal.replacement_of or "").strip() or None
         supersedes_criteria = list(dict.fromkeys(
             str(criterion_id).strip() for criterion_id in proposal.supersedes_criteria if str(criterion_id).strip()
@@ -6180,7 +6240,7 @@ def _create_tasks_from_proposals(
                 title=group_title,
                 objective=group_objective,
                 acceptance=group_acceptance,
-                evidence=[],
+                evidence=finding_refs,
                 phase=current_phase,
                 status="pending",
                 target_scope=group_target_scope,
@@ -6246,6 +6306,7 @@ def build_create_tasks_tool(
     expected_snapshot_ref: Optional[str] = None,
     phase_title: str = "",
     phase_objective: str = "",
+    required_finding_refs: Optional[set[str]] = None,
 ) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
 
@@ -6265,6 +6326,7 @@ def build_create_tasks_tool(
             expected_snapshot_ref=expected_snapshot_ref,
             phase_title=phase_title,
             phase_objective=phase_objective,
+            required_finding_refs=required_finding_refs,
         )
         if int(json.loads(result).get("created_count", 0)) > 0:
             completed = True

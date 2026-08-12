@@ -134,6 +134,30 @@ def test_task_scope_ignores_non_network_tokens_but_detects_numeric_hostname_refe
     assert len(mod.task_service_scope_violations(plan, task, "Probe 10.0.0.6:4280.")) == 1
 
 
+def test_technology_task_scope_does_not_treat_version_as_host_port():
+    plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Hypotheses", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", type="network", value="http://service.example:4280")],
+    )
+    acceptance = make_acceptance("validate-the-assigned-technology")
+    task = mod.Task(
+        task_uid="technology",
+        title="Validate technology apache http server:2.4.68",
+        objective="Validate technology apache http server:2.4.68",
+        acceptance=acceptance,
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+
+    assert mod.task_service_scope_violations(plan, task, task.title) == []
+    assert len(mod.task_service_scope_violations(plan, task, "Use http://other.example:4280.")) == 1
+
+
 class FakeApplicationStore:
     def __init__(self):
         self.plan = None
@@ -1298,6 +1322,7 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
         "methods",
         "limits",
         "snapshot_refs",
+        "finding_refs",
         "output_kind",
         "criteria",
         "target_ids",
@@ -2852,12 +2877,37 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
         "methods",
         "limits",
         "snapshot_refs",
+        "finding_refs",
         "output_kind",
         "criteria",
         "target_ids",
         "replacement_of",
         "supersedes_criteria",
     }
+
+
+def test_bound_create_tasks_tool_requires_and_persists_candidate_source_refs(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Impact Demonstration", status="active")],
+    )
+    proposal = task_proposal("Demonstrate impact", "Demonstrate the assigned finding", "impact")
+
+    with pytest.raises(ValueError, match="requires at least one canonical finding_refs"):
+        mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+
+    proposal["finding_refs"] = ["finding:unknown"]
+    with pytest.raises(ValueError, match="includes unavailable finding_refs"):
+        mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+
+    proposal["finding_refs"] = ["finding:candidate-1"]
+    result = mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+
+    assert json.loads(result)["created_count"] == 1
+    assert store.tasks[-1].evidence == ["finding:candidate-1"]
 
 
 def test_task_proposal_limits_remove_nullable_unused_values():
@@ -3133,6 +3183,80 @@ def test_store_observation_reference_satisfies_bound_acceptance(fake_memory_clie
 
     assert observation["memory_ref"] == "memory:m1"
     assert result["complete"] is True
+
+
+def test_store_knowledge_returns_memory_reference_for_acceptance(fake_memory_client):
+    _client, store = fake_memory_client
+    task = mod.Task(
+        task_uid="knowledge-round-trip",
+        title="Generate hypotheses",
+        objective="Record hypotheses",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="Stored hypothesis knowledge",
+                source_refs=("memory:m1",),
+            ),
+            criteria=[
+                mod.AcceptanceCriterion(
+                    id="hypotheses",
+                    description="Record hypotheses",
+                    evidence_requirements=[mod.EvidenceRequirement(kind="durable_evidence")],
+                )
+            ],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    knowledge = json.loads(mod.store_knowledge("Hypotheses recorded"))
+    accepted = json.loads(
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Hypotheses recorded",
+            evidence_refs=[knowledge["memory_ref"]],
+        )
+    )
+
+    assert knowledge["stored"] is True
+    assert knowledge["created"] is True
+    assert knowledge["memory_ref"] == "memory:m1"
+    assert accepted["complete"] is True
+
+
+def test_store_observation_uses_active_task_target_and_rejects_conflicting_location(
+    fake_memory_client, monkeypatch
+):
+    client, store = fake_memory_client
+    plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", type="network", value="http://target.test:4280")],
+    )
+    task = mod.Task(
+        task_uid="active-observation",
+        title="Observe target",
+        objective="Observe target",
+        acceptance=make_acceptance("observation"),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    store.store_task("op1", task)
+    monkeypatch.setattr(mod, "_get_active_plan", lambda: plan)
+
+    mod.store_observation("Observed response", metadata={"location": "http://target.test:4280/path"})
+
+    assert client._fake_backend.add_calls[-1]["metadata"]["target_id"] == "target-1"
+    assert client._fake_backend.add_calls[-1]["metadata"]["target"] == "http://target.test:4280"
+    with pytest.raises(ValueError, match="assigned target boundary"):
+        mod.store_observation("Wrong target", metadata={"target": "http://other.test:4280"})
 
 
 def test_evidence_reference_kind_validates_memory_findings_and_prefixes(fake_memory_client):
