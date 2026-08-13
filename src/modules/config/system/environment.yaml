@@ -344,6 +344,14 @@ cyber_tools:
     description: "ROP gadget finder and binary information"
     caps: [reverse_engineering, exploitation_framework]
     canary: {args: ["-h"]}
+  webcrack:
+    description: "JavaScript deobfuscation, unminification, and bundle unpacking"
+    caps: [reverse_engineering]
+    canary: {args: ["--help"]}
+  shuji:
+    description: "Recover original JavaScript and CSS sources from sourcemaps"
+    caps: [reverse_engineering]
+    canary: {args: ["--help"]}
 
   # Steganography & Forensics
   steghide:

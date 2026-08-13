@@ -2,6 +2,7 @@
 
 ### Features
 
+- Add webcrack and shuji JavaScript reverse-engineering tools.
 - Make the deterministic recon-output-to-inventory-manifest converter a generally available core agent tool.
 - Add opt-in, validated inventory-manifest output to specialized reconnaissance and authentication analysis, plus a
   deterministic agent tool for converting katana, feroxbuster, ffuf, gobuster, dirsearch, httpx, gospider, and plain

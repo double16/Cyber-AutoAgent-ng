@@ -35,7 +35,7 @@ FROM kalilinux/kali-rolling
 
 LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng Tools"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"
-LABEL org.opencontainers.image.version="0.9.1"
+LABEL org.opencontainers.image.version="0.10.0"
 LABEL org.opencontainers.image.source="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.url="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.licenses="MIT"
@@ -333,7 +333,7 @@ RUN ARCH=$(uname -m) && \
     curl --silent --fail -L "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" -o /usr/local/bin/opengrep && \
     chmod +x /usr/local/bin/opengrep
 
-RUN npm install --global @graphql-inspector/cli
+RUN npm install --global @graphql-inspector/cli webcrack shuji
 
 # Install TruffleHog (Secret Scanning)
 RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh latest | sh -s -- -b /usr/local/bin
