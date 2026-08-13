@@ -64,6 +64,7 @@
 - Use template literals for string concatenation
 
 ## Design Choices
+- If a design decision is given by the user that generally applies, add it to AGENTS.md.
 - Complexity leans towards deterministic code and away from the LLM where appropriate. Reasoning belongs in the LLM.
 - Generic controller, memory, and acceptance code must be protocol-, target-, tool-, and model-neutral. Put
   module-specific behavior in typed adapters, operation plugins, or declarative catalogs.

@@ -43,7 +43,7 @@ import sys
 import uuid
 from collections import Counter
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
@@ -240,6 +240,8 @@ _CANONICAL_ARTIFACT_REFERENCE_PATTERN = re.compile(
     r"\bartifact(?:_id)?:[^\s,;'\"\]\[(){}]+",
     re.IGNORECASE,
 )
+_UNSAFE_INVENTORY_URL_SYNTAX = re.compile(r"[\x00-\x20\"'\\`{}]")
+_INVALID_INVENTORY_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _NON_EVIDENCE_RECOVERY_TOOLS = frozenset(
     {"read_artifact", "memory_retrieve", "record_task_acceptance", "tool_catalog", "get_tool_help"}
 )
@@ -637,6 +639,7 @@ class WorkflowStateStore:
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
             supersedes_criteria=task.supersedes_criteria,
+            recovery_context=task.recovery_context,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -658,6 +661,7 @@ class WorkflowStateStore:
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
             supersedes_criteria=task.supersedes_criteria,
+            recovery_context=task.recovery_context,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -679,6 +683,7 @@ class WorkflowStateStore:
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
             supersedes_criteria=task.supersedes_criteria,
+            recovery_context=task.recovery_context,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -700,6 +705,7 @@ class WorkflowStateStore:
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
             supersedes_criteria=task.supersedes_criteria,
+            recovery_context=task.recovery_context,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ))
@@ -934,7 +940,10 @@ class MultiAgentWorkflowController:
         retained = []
         rejected: List[Dict[str, str]] = []
         for item in manifest["items"]:
-            reason = self._inventory_item_target_rejection_reason(item, targets)
+            reason = (
+                self._inventory_item_semantic_rejection_reason(item)
+                or self._inventory_item_target_rejection_reason(item, targets)
+            )
             if reason:
                 rejected.append({"id": str(item.get("id") or ""), "reason": reason})
             else:
@@ -968,6 +977,24 @@ class MultiAgentWorkflowController:
         return _load_inventory_manifest(reference)
 
     @staticmethod
+    def _inventory_item_semantic_rejection_reason(item: Any) -> str:
+        """Reject malformed endpoint text while preserving syntactically valid unusual routes."""
+
+        if not isinstance(item, dict) or str(item.get("kind") or "").strip() != "endpoint":
+            return ""
+        value = str(item.get("value") or "").strip()
+        if _UNSAFE_INVENTORY_URL_SYNTAX.search(value) or _INVALID_INVENTORY_PERCENT_ESCAPE.search(value):
+            return "invalid_endpoint_syntax"
+        parsed = urlparse(value)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return "invalid_network_endpoint"
+        try:
+            parsed.port
+        except ValueError:
+            return "invalid_network_endpoint"
+        return ""
+
+    @staticmethod
     def _inventory_item_target_rejection_reason(
         item: Any,
         targets: Dict[str, OperationTarget],
@@ -977,7 +1004,7 @@ class MultiAgentWorkflowController:
         target = targets.get(str(item.get("target_id") or "").strip())
         if target is None:
             return "unknown_target_id"
-        if str(item.get("kind") or "").strip() not in {"endpoint", "parameter"}:
+        if str(item.get("kind") or "").strip() != "endpoint":
             return ""
         value = str(item.get("value") or "").strip()
         parsed = urlparse(value)
@@ -2008,6 +2035,19 @@ class MultiAgentWorkflowController:
             + "\n\n## Frozen Task Acceptance Contract (Controller-owned)\n"
             + json.dumps(task.acceptance.to_dict(), indent=2, sort_keys=True)
         )
+        if task.recovery_context:
+            recovery_context = task.recovery_context
+            execution_prompt += (
+                "\n\n## Recovery Contract (Controller-owned)\n"
+                f"Original objective: {recovery_context.get('original_objective', task.objective)}\n"
+                f"Recovery trigger: {recovery_context.get('trigger', 'bounded recovery')}\n"
+                "Unresolved acceptance work: "
+                + ", ".join(recovery_context.get("unresolved_criteria", []))
+                + "\nRequired procedure methods: "
+                + ", ".join(recovery_context.get("procedure_methods", []))
+                + "\nContinue the original phase-specific objective. Do not substitute generic mapping, "
+                "artifact reading, or unrelated exploration for the unresolved acceptance work.\n"
+            )
         evidence_refs = list(task.evidence)
         for result in self.state.list_task_acceptance_results(task.task_uid):
             evidence_refs.extend(result.evidence_refs)
@@ -2247,9 +2287,10 @@ class MultiAgentWorkflowController:
             terminal_message="Evidence prerequisite recovery completed",
             recovery_objective=task.objective,
             recovery_next_action=(
-                "Create or convert valid durable evidence for the missing reference; do not call "
-                "record_task_acceptance until the evidence exists."
+                "Read current-operation evidence if needed, then store one task-local observation or knowledge "
+                "record. Do not call record_task_acceptance until the returned reference exists."
             ),
+            recovery_allowed_tool_names={"read_artifact", "store_observation", "store_knowledge"},
         )
         self._log_workflow(
             "task executor policy task=%s min_tool_calls=%s ignored_tools=%s",
@@ -2402,7 +2443,11 @@ class MultiAgentWorkflowController:
                         ]
                     )
                 if manifest_prerequisite_recovery_active or evidence_prerequisite_recovery_active:
-                    closure_tools = [tool for tool in tools if get_tool_name(tool) != "record_task_acceptance"]
+                    closure_tools = [
+                        tool
+                        for tool in tools
+                        if get_tool_name(tool) in current_policy.recovery_allowed_tool_names
+                    ]
                 prior_tool_inputs = {
                     (outcome.tool_name, outcome.input_summary)
                     for outcome in tool_outcomes
@@ -2412,6 +2457,7 @@ class MultiAgentWorkflowController:
                 worker_result = run_executor(actor_prompt, current_policy, closure_tools)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
+                task = self._retain_task_artifact_evidence(task, tool_outcomes)
                 self._emit_model_claim_conflicts(task, cycle_result.text, cycle_result.outcomes)
                 if output_truncation_recovery_active and not cycle_result.max_tokens_exhausted:
                     output_truncation_recovery_active = False
@@ -2497,16 +2543,16 @@ class MultiAgentWorkflowController:
                     )
                     break
                 if evidence_prerequisite_recovery_active:
-                    evidence_refs = self._artifact_refs_from_tool_outcomes(cycle_result.outcomes)
-                    if evidence_refs:
+                    recovery_evidence = self._acceptance_recovery_context(
+                        task,
+                        self.state.list_task_acceptance_results(task.task_uid),
+                        tool_outcomes,
+                        None,
+                    )
+                    if self._recovery_evidence_satisfies_acceptance(task, recovery_evidence):
                         evidence_prerequisite_recovery_active = False
                         acceptance_recovery_active = True
-                        acceptance_recovery_evidence = self._acceptance_recovery_context(
-                            task,
-                            self.state.list_task_acceptance_results(task.task_uid),
-                            tool_outcomes,
-                            None,
-                        )
+                        acceptance_recovery_evidence = recovery_evidence
                         actor_prompt = self._task_executor_critic_guidance(
                             task,
                             self._missing_acceptance_criteria(
@@ -3309,6 +3355,9 @@ class MultiAgentWorkflowController:
                                 failed_acceptance_calls[-1] if failed_acceptance_calls else None
                             ),
                         )
+                        missing_memory_prerequisite = bool(invalid_memory_refs) and not self._task_memory_refs_from_tool_outcomes(
+                            tool_outcomes
+                        )
                         recovery_details = self._acceptance_recovery_details(acceptance_error)
                         if invalid_memory_refs:
                             recovery_details["invalid_memory_refs"] = invalid_memory_refs
@@ -3327,6 +3376,10 @@ class MultiAgentWorkflowController:
                         )
                         missing_manifest = "submitted manifest file does not exist" in acceptance_error.lower()
                         missing_artifact = recovery_details["code"] == "missing_artifact_prerequisite"
+                        no_eligible_evidence = (
+                            "evidence_refs required" in acceptance_error.lower()
+                            and not self._has_viable_acceptance_recovery_evidence(acceptance_recovery_evidence)
+                        )
                         repair_instruction = self._task_acceptance_repair_instruction(acceptance_error)
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -3337,7 +3390,7 @@ class MultiAgentWorkflowController:
                                     "Create or convert the required manifest in the bounded prerequisite recovery turn."
                                     if missing_manifest
                                     else "Create or convert valid durable evidence in the bounded prerequisite recovery turn. "
-                                    if missing_artifact
+                                    if missing_artifact or no_eligible_evidence or missing_memory_prerequisite
                                     else "Then make one changed record_task_acceptance submission. "
                                 )
                                 + f" Controller correction: {correction}"
@@ -3345,11 +3398,17 @@ class MultiAgentWorkflowController:
                         )
                         manifest_prerequisite_recovery_active = missing_manifest
                         manifest_prerequisite_recovery_used = manifest_prerequisite_recovery_used or missing_manifest
-                        evidence_prerequisite_recovery_active = missing_artifact and not missing_manifest
+                        evidence_prerequisite_recovery_active = (
+                            (missing_artifact or no_eligible_evidence or missing_memory_prerequisite)
+                            and not missing_manifest
+                        )
                         evidence_prerequisite_recovery_used = (
                             evidence_prerequisite_recovery_used or evidence_prerequisite_recovery_active
                         )
-                        acceptance_recovery_active = not missing_manifest and not missing_artifact
+                        acceptance_recovery_active = (
+                            not missing_manifest and not missing_artifact and not no_eligible_evidence
+                            and not missing_memory_prerequisite
+                        )
                         self._log_workflow(
                             "task acceptance gate incomplete task=%s cycle=%s missing=%s recovery_evidence=%s",
                             self._task_label(task),
@@ -3646,14 +3705,25 @@ class MultiAgentWorkflowController:
             frozen_at=task.acceptance.frozen_at,
         )
         artifact_refs = self._artifact_refs_from_tool_outcomes(tool_outcomes)
-        latest_artifact = artifact_refs[-1] if artifact_refs else "no prior durable artifact"
+        durable_evidence = list(dict.fromkeys([*task.evidence, *artifact_refs]))
         required_tool = self._validation_tool_name(task) or "record_task_acceptance"
+        procedure = task.acceptance.basis.procedure
+        procedure_methods = list(procedure.methods) if procedure is not None else []
+        recovery_context = {
+            "parent_task_uid": task.task_uid,
+            "trigger": "bounded_reasoning_loop",
+            "original_objective": task.objective,
+            "unresolved_criteria": [f"{criterion.id}: {criterion.description}"],
+            "procedure_methods": procedure_methods,
+            "durable_evidence_refs": durable_evidence,
+        }
         replacement = Task(
             task_uid=str(uuid.uuid4()),
             title=f"{task.title} (reasoning-loop recovery)",
             objective=(
-                f"Satisfy acceptance criterion {criterion.id}: {criterion.description} "
-                f"Use {latest_artifact} as the latest durable evidence context, then call {required_tool}."
+                f"Continue the original objective: {task.objective.rstrip('.')}. "
+                f"Resolve only acceptance criterion {criterion.id}: {criterion.description}. "
+                f"Use the retained durable evidence and then call {required_tool}."
             ),
             acceptance=replacement_acceptance,
             phase=task.phase,
@@ -3662,11 +3732,12 @@ class MultiAgentWorkflowController:
                 f"Replacement for {task.task_uid} after bounded reasoning-loop recovery. "
                 f"Complete criterion {criterion.id} with one focused evidence action and {required_tool}."
             ),
-            evidence=list(task.evidence),
+            evidence=durable_evidence,
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.task_uid,
             supersedes_criteria=[criterion.id],
+            recovery_context=recovery_context,
             target_scope=task.target_scope,
             target_ids=list(task.target_ids),
         )
@@ -8655,19 +8726,38 @@ memory describes related evidence or prior work."""
         """Return durable artifact references exposed by successful tool outcomes."""
 
         references = set()
+        consumer_tools = {"memory_list", "memory_retrieve", "read_artifact", "retrieve_offloaded_content"}
         for outcome in tool_outcomes:
-            if not outcome.success:
+            if not outcome.success or outcome.tool_name in consumer_tools:
                 continue
             references.update(getattr(outcome, "artifact_refs", ()) or ())
-            text = " ".join(
-                (
-                    str(outcome.input_summary or ""),
-                    str(outcome.output_summary or ""),
-                    str(outcome.raw_output_summary or ""),
-                )
-            )
+            text = " ".join((str(outcome.output_summary or ""), str(outcome.raw_output_summary or "")))
             references.update(re.findall(r"(?:artifact|artifact_id):[^\s\\\]\}\)\"']+", text))
         return sorted(references)
+
+    def _retain_task_artifact_evidence(self, task: Task, outcomes: List[ToolOutcome]) -> Task:
+        """Persist successful task-owned artifacts before a fresh executor context can lose them."""
+
+        known = list(task.evidence)
+        known_set = set(known)
+        additions = []
+        for reference in self._artifact_refs_from_tool_outcomes(outcomes):
+            canonical = self._canonical_recovery_reference(reference)
+            if canonical.startswith("artifact:") and canonical not in known_set:
+                known_set.add(canonical)
+                additions.append(canonical)
+        if not additions:
+            return task
+        updated = replace(task, evidence=[*known, *additions])
+        persisted = self.state.store_task(updated)
+        self._emit_workflow_event({
+            "type": "task_durable_evidence_retained",
+            "task_uid": task.task_uid,
+            "phase": task.phase,
+            "artifact_refs": additions,
+            "source": "successful_tool_outcomes",
+        })
+        return persisted
 
     @staticmethod
     def _valid_inventory_artifact_refs(tool_outcomes: List[ToolOutcome]) -> List[str]:

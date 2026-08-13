@@ -31,6 +31,7 @@ from modules.handlers.report_generator import (
     _ground_report_item,
     _has_artifact_reference,
     _artifact_references,
+    _omit_cross_operation_artifact_references,
     _normalize_report_category,
     _normalize_budget_config,
     _normalize_artifact_reference,
@@ -610,6 +611,21 @@ def test_artifact_reference_parser_accepts_canonical_and_bare_paths_without_fals
     }
     assert _has_artifact_reference(text)
     assert _normalize_artifact_reference("`outputs/proof.log`,") == "artifact:outputs/proof.log"
+
+
+def test_shared_memory_artifact_references_are_omitted_without_losing_narrative():
+    value = {
+        "content": "Prior result used artifact:artifacts/prior/proof.txt and remains relevant.",
+        "metadata": {"evidence_refs": ["outputs/prior/request.log"], "category": "observation"},
+    }
+
+    sanitized, omitted = _omit_cross_operation_artifact_references(value)
+
+    assert omitted == 2
+    assert "remains relevant" in sanitized["content"]
+    assert "artifact:artifacts/prior/proof.txt" not in sanitized["content"]
+    assert sanitized["metadata"]["evidence_refs"] == ["[prior-operation artifact omitted]"]
+    assert _artifact_references(sanitized) == set()
 
 
 def test_grounding_normalizes_bare_reference_and_preserves_markdown_syntax():
@@ -1721,6 +1737,35 @@ def test_report_consistency_accepts_matching_canonical_state():
 
     assert _validate_report_consistency(sections, completion) == []
     assert _format_report_consistency_warnings([]) == ""
+
+
+def test_report_consistency_reports_omitted_shared_memory_artifacts_as_one_warning():
+    sections = {
+        "raw_evidence": [],
+        "verified_findings_total": 0,
+        "finding_count": 0,
+        "validation_failure_count": 0,
+        "finding_validation_failure_count": 0,
+        "task_status_counts": {},
+        "total_task_count": 0,
+        "completed_task_count": 0,
+        "phase_coverage": [],
+        "evidence_integrity_errors": [
+            {
+                "kind": "cross_operation_artifact_refs_omitted",
+                "count": 2,
+                "source_operations": ["OP_20260813_161308"],
+            }
+        ],
+    }
+    completion = {"assessment_complete": True, "workflow_complete": True}
+
+    errors = _validate_report_consistency(sections, completion)
+
+    assert errors == [
+        "Excluded 2 artifact reference(s) from shared-memory evidence originating in prior operation(s): "
+        "OP_20260813_161308."
+    ]
 
 
 def test_report_consistency_counts_superseded_tasks_as_recovered_completion():

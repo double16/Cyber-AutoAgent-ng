@@ -199,6 +199,30 @@ def test_acceptance_recovery_context_marks_unreadable_artifact_as_unknown(monkey
     assert context[0]["evidence_status"] == "unknown"
 
 
+def test_successful_artifact_outcomes_are_retained_as_task_evidence(monkeypatch):
+    task = Task(task_uid="task", title="Task", objective="Assess behavior", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    outcome = ToolOutcome(
+        1,
+        "tool",
+        "browser_goto_url",
+        True,
+        False,
+        "",
+        "artifact:artifacts/browser-result.log",
+    )
+
+    updated = controller._retain_task_artifact_evidence(task, [outcome])
+
+    assert updated.evidence == ["artifact:artifacts/browser-result.log"]
+    assert state.tasks[0].evidence == updated.evidence
+    assert any(event["type"] == "task_durable_evidence_retained" for event in controller.runtime.callback_handler.events)
+
+
 def test_candidate_dependent_phase_closes_without_speculative_task_creation(monkeypatch):
     plan = OperationPlan(
         objective="assess",
@@ -3542,6 +3566,7 @@ def test_acceptance_recovery_context_merges_task_ledger_outcomes_and_rejection(m
         False,
         "request",
         "saved artifact:artifacts/outcome.txt",
+        artifact_refs=("artifact:artifacts/outcome.txt",),
     )
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -3560,6 +3585,45 @@ def test_acceptance_recovery_context_merges_task_ledger_outcomes_and_rejection(m
         {"reference": "memory:prior-observation", "source": "prior_acceptance"},
     ]
     assert all(item["usable"] == "false" for item in context if item["reference"].startswith("artifact:"))
+
+
+def test_durable_artifact_references_exclude_consumer_tool_mentions():
+    outcomes = [
+        ToolOutcome(
+            1,
+            "recon",
+            "specialized_recon_orchestrator",
+            True,
+            False,
+            "target",
+            "created inventory",
+            artifact_refs=("artifact:artifacts/inventory_manifest.json",),
+        ),
+        ToolOutcome(
+            2,
+            "memory-list",
+            "memory_list",
+            True,
+            False,
+            "",
+            "old evidence artifact:artifacts/previous_operation.txt",
+            artifact_refs=("artifact:artifacts/previous_operation.txt",),
+        ),
+        ToolOutcome(
+            3,
+            "read",
+            "read_artifact",
+            True,
+            False,
+            "artifact:artifacts/inventory_manifest.json",
+            "content",
+            artifact_refs=("artifact:artifacts/inventory_manifest.json",),
+        ),
+    ]
+
+    assert MultiAgentWorkflowController._artifact_refs_from_tool_outcomes(outcomes) == [
+        "artifact:artifacts/inventory_manifest.json"
+    ]
 
 
 def test_acceptance_recovery_context_includes_only_successful_task_created_memory_refs(monkeypatch):
@@ -3766,6 +3830,124 @@ def test_task_executor_recovers_final_hallucinated_memory_reference_deterministi
     assert state.tasks[0].status == "done"
 
 
+def test_invalid_memory_acceptance_reference_requires_storage_before_closure():
+    runtime = _runtime(
+        env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1, "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": 1}
+    )
+    task = Task(
+        task_uid="active",
+        title="Generate hypotheses",
+        objective="Assess one endpoint",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Generate hypotheses",
+                source_refs=["memory:seed"],
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[
+                AcceptanceCriterion(
+                    id="hypotheses",
+                    description="Store endpoint hypotheses",
+                    evidence_requirements=[EvidenceRequirement(kind="observation")],
+                )
+            ],
+        ),
+        phase=1,
+        status="active",
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+    rejected_payload = {
+        "status": "satisfied",
+        "disposition": "observation",
+        "summary": "Endpoint hypotheses were recorded.",
+        "evidence_refs": ["memory:hallucinated"],
+    }
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        tool_names = {workflow_mod.get_tool_name(tool) for tool in tools}
+        calls.append((run_policy.required_tool_names, tool_names, prompt))
+        if len(calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="acceptance rejected",
+                outcomes=[
+                    ToolOutcome(
+                        1,
+                        "acceptance-rejected",
+                        "record_task_acceptance",
+                        False,
+                        False,
+                        json.dumps(rejected_payload),
+                        "Acceptance evidence memory does not exist in this operation: memory:hallucinated",
+                    )
+                ],
+            )
+        if len(calls) == 2:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="observation stored",
+                outcomes=[
+                    ToolOutcome(
+                        2,
+                        "observation-stored",
+                        "store_observation",
+                        True,
+                        False,
+                        "Endpoint behavior was assessed.",
+                        '{"memory_ref":"memory:task-hypotheses"}',
+                    )
+                ],
+            )
+
+        state.acceptance_results[task.task_uid] = [
+            AcceptanceResult(
+                criterion_id="hypotheses",
+                status="satisfied",
+                disposition="observation",
+                summary="Endpoint hypotheses were recorded.",
+                evidence_refs=("memory:task-hypotheses",),
+            )
+        ]
+        return workflow_mod.TaskExecutorCycleResult(
+            text="acceptance stored",
+            outcomes=[
+                ToolOutcome(
+                    3,
+                    "acceptance-stored",
+                    "record_task_acceptance",
+                    True,
+                    False,
+                    json.dumps({**rejected_payload, "evidence_refs": ["memory:task-hypotheses"]}),
+                    "acceptance stored",
+                )
+            ],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, *_args: (
+            '{"prompt":"assess endpoint","tools":[]}'
+            if role == "task_prompt_builder"
+            else '{"status":"done","reason":"acceptance recorded"}'
+        ),
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert [required for required, _tools, _prompt in calls] == [
+        {"record_task_acceptance"},
+        set(),
+        {"record_task_acceptance"},
+    ]
+    assert calls[1][1] <= {"read_artifact", "store_observation", "store_knowledge"}
+    assert "record_task_acceptance" not in calls[1][1]
+    assert state.tasks[0].status == "done"
+
+
 def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval():
     runtime = _runtime()
     state = FakeState(
@@ -3927,6 +4109,9 @@ def test_reasoning_loop_recovery_keeps_original_incomplete_and_queues_one_replac
     assert replacement.phase == task.phase
     assert replacement.acceptance.criteria == task.acceptance.criteria
     assert "criterion" in replacement.objective
+    assert replacement.recovery_context["parent_task_uid"] == "active"
+    assert replacement.recovery_context["original_objective"] == task.objective
+    assert replacement.recovery_context["unresolved_criteria"]
     assert controller._assessment_is_complete(_plan()) is False
 
 
@@ -6363,6 +6548,30 @@ def test_controller_inventory_filter_retains_unusual_in_scope_routes_and_removes
     assert "outside executable target boundaries" in manifest["unassessed_gaps"][-1]
     assert events[-1]["type"] == "inventory_manifest_scope_filter"
     assert events[-1]["rejection_reasons"] == {"host_mismatch": 1}
+
+
+def test_controller_inventory_filter_retains_parameter_for_its_in_scope_target():
+    target = OperationTarget(target_id="target-1", type="network", value="http://target.test:4280")
+
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {
+            "id": "parameter-1",
+            "target_id": "target-1",
+            "kind": "parameter",
+            "value": "redirect",
+            "endpoint_id": "endpoint-1",
+        },
+        {target.target_id: target},
+    ) == ""
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {
+            "id": "endpoint-1",
+            "target_id": "target-1",
+            "kind": "endpoint",
+            "value": "https://other.test:4280/",
+        },
+        {target.target_id: target},
+    ) == "scheme_mismatch"
 
 
 def test_model_claim_conflict_emits_telemetry_without_changing_task_state(monkeypatch):

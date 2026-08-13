@@ -40,6 +40,8 @@ RECON_FORMAT_ALIASES = {
 }
 URL_PATTERN = re.compile(r"https?://[^\s\]\[<>{}\"']+")
 STATUS_PATTERN = re.compile(r"(?:status(?:_code)?[=: ]+|\bStatus:\s*)(\d{3})", re.IGNORECASE)
+_UNSAFE_URL_SYNTAX = re.compile(r"[\x00-\x20\"'\\`{}]")
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
 def resolve_inventory_target(target: str, target_id: str = "target-1") -> tuple[str, str]:
@@ -59,7 +61,10 @@ def resolve_inventory_target(target: str, target_id: str = "target-1") -> tuple[
 
 
 def _canonical_url(value: str) -> str:
-    parsed = urlparse(str(value or "").strip().rstrip(".,;"))
+    raw_value = str(value or "").strip().rstrip(".,;")
+    if not raw_value or _UNSAFE_URL_SYNTAX.search(raw_value) or _INVALID_PERCENT_ESCAPE.search(raw_value):
+        return ""
+    parsed = urlparse(raw_value)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return ""
     host = parsed.hostname.lower().rstrip(".")

@@ -33,6 +33,7 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (3, "0003_finding_evidence_receipts.sql"),
         (4, "0004_model_metric_correction_categories.sql"),
         (5, "0005_task_replacement_lineage.sql"),
+        (6, "0006_task_recovery_context.sql"),
     ]
     assert {"operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts"}.issubset(tables)
     assert "correction_categories" in metric_columns
@@ -50,7 +51,7 @@ def test_task_replacement_lineage_migrates_existing_database(tmp_path, monkeypat
 
     with sqlite3.connect(db_path) as conn:
         task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
-    assert {"replacement_of", "supersedes_criteria"}.issubset(task_columns)
+    assert {"replacement_of", "supersedes_criteria", "recovery_context"}.issubset(task_columns)
 
 
 def test_concurrent_startup_applies_each_migration_once(tmp_path):
@@ -61,7 +62,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 5
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 6
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):

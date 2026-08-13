@@ -267,6 +267,39 @@ def _artifact_references(value: Any) -> set[str]:
     return references
 
 
+def _omit_cross_operation_artifact_references(value: Any) -> tuple[Any, int]:
+    """Remove artifact references from shared-memory evidence from another operation.
+
+    Shared memory may provide useful narrative context, but an artifact path is only
+    valid within the operation that produced it.  Retaining such a reference in a
+    new report would incorrectly present stale evidence as locally available.
+    """
+
+    if isinstance(value, str):
+        omitted = len(_ARTIFACT_REFERENCE.findall(value))
+        if not omitted:
+            return value, 0
+        return _ARTIFACT_REFERENCE.sub("[prior-operation artifact omitted]", value), omitted
+    if isinstance(value, dict):
+        sanitized: dict[Any, Any] = {}
+        omitted = 0
+        for key, item in value.items():
+            sanitized_item, item_omitted = _omit_cross_operation_artifact_references(item)
+            sanitized[key] = sanitized_item
+            omitted += item_omitted
+        return sanitized, omitted
+    if isinstance(value, list):
+        sanitized_items = [_omit_cross_operation_artifact_references(item) for item in value]
+        return [item for item, _count in sanitized_items], sum(count for _item, count in sanitized_items)
+    if isinstance(value, tuple):
+        sanitized_items = [_omit_cross_operation_artifact_references(item) for item in value]
+        return tuple(item for item, _count in sanitized_items), sum(count for _item, count in sanitized_items)
+    if isinstance(value, set):
+        sanitized_items = [_omit_cross_operation_artifact_references(item) for item in value]
+        return {item for item, _count in sanitized_items}, sum(count for _item, count in sanitized_items)
+    return value, 0
+
+
 def _normalize_artifact_reference(reference: str) -> str:
     """Normalize canonical and supported bare artifact paths for comparison and resolution."""
     normalized = str(reference).strip().strip("`.,;:)]}")
@@ -797,9 +830,18 @@ def _validate_report_consistency(
 
     for integrity_error in sections.get("evidence_integrity_errors", []) or []:
         if isinstance(integrity_error, dict):
-            errors.append(
-                f"Evidence artifact reference could not be resolved: {integrity_error.get('reference', 'unknown')}."
-            )
+            if integrity_error.get("kind") == "cross_operation_artifact_refs_omitted":
+                count = int(integrity_error.get("count", 0) or 0)
+                source_operations = ", ".join(integrity_error.get("source_operations", []) or [])
+                errors.append(
+                    "Excluded "
+                    f"{count} artifact reference(s) from shared-memory evidence originating in prior operation(s)"
+                    f"{f': {source_operations}' if source_operations else ''}."
+                )
+            else:
+                errors.append(
+                    f"Evidence artifact reference could not be resolved: {integrity_error.get('reference', 'unknown')}."
+                )
     return errors
 
 
@@ -4159,6 +4201,8 @@ def build_report_sections(
         # Process evidence entries - FILTER BY OPERATION_ID
         evidence_skipped = 0
         evidence_included = 0
+        cross_operation_artifact_refs_omitted = 0
+        cross_operation_artifact_source_operations: set[str] = set()
 
         logger.info(f"Processing {len(raw_memories)} memories for evidence")
 
@@ -4210,6 +4254,18 @@ def build_report_sections(
                         f"Skipping evidence from different operation: {item_op_id} (current: {operation_id})")
                     evidence_skipped += 1
                     continue
+
+            item_operation_id = str(metadata.get("operation_id") or memory_item.get("operation_id") or "")
+            if cross_operation and item_operation_id != str(operation_id):
+                memory_content, content_omitted = _omit_cross_operation_artifact_references(memory_content)
+                metadata, metadata_omitted = _omit_cross_operation_artifact_references(metadata)
+                omitted = content_omitted + metadata_omitted
+                if omitted:
+                    cross_operation_artifact_refs_omitted += omitted
+                    source_operation_id = item_operation_id or "unknown prior operation"
+                    cross_operation_artifact_source_operations.add(source_operation_id)
+                    metadata["source_operation_id"] = source_operation_id
+                    metadata["cross_operation_artifact_refs_omitted"] = omitted
 
             task_uid = str(metadata.get("task_uid") or "").strip()
             if (
@@ -4454,6 +4510,14 @@ def build_report_sections(
         # Build complete sections dictionary
         target_coverage = _format_target_coverage(operation_plan, task_records, evidence, target_values)
         evidence_integrity_errors = []
+        if cross_operation_artifact_refs_omitted:
+            evidence_integrity_errors.append(
+                {
+                    "kind": "cross_operation_artifact_refs_omitted",
+                    "count": cross_operation_artifact_refs_omitted,
+                    "source_operations": sorted(cross_operation_artifact_source_operations),
+                }
+            )
         for item in evidence:
             for reference in sorted(_artifact_references(item)):
                 if not reference.startswith("artifact:"):

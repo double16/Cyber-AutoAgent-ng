@@ -198,6 +198,32 @@ def test_manifest_builder_deduplicates_and_records_parameters_scope_and_gaps():
     ]
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://target.test/assets/vendor/venobox/'+name+'",
+        "https://target.test/path with spaces",
+        "https://target.test/invalid%zz",
+    ],
+)
+def test_manifest_builder_rejects_non_url_text_fragments(value):
+    manifest = manifest_tool.records_to_inventory_manifest(
+        [{"url": value, "method": "GET"}], target_id="target-1", target="https://target.test"
+    )
+
+    assert manifest["items"] == []
+    assert manifest["unassessed_gaps"] == [{"reason": "unparseable_url", "value": value}]
+
+
+def test_manifest_builder_preserves_valid_unusual_path():
+    value = "https://target.test/usr/src/app/dist/app.controller.js"
+    manifest = manifest_tool.records_to_inventory_manifest(
+        [{"url": value, "method": "GET"}], target_id="target-1", target="https://target.test"
+    )
+
+    assert any(item["kind"] == "endpoint" and item["value"] == value for item in manifest["items"])
+
+
 def test_converter_tool_schema_advertises_canonical_formats():
     schema = get_tool_spec(manifest_tool.recon_output_to_inventory_manifest)["inputSchema"]["json"]
 

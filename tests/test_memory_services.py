@@ -4,6 +4,7 @@ import os
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from jsonschema import Draft202012Validator
@@ -2298,6 +2299,49 @@ def test_coverage_route_grouping_does_not_expand_with_context_window():
     assert len(at_48k) == 20
 
 
+def test_coverage_route_grouping_keeps_orphan_parameters_as_inventory_only():
+    manifest = {
+        "items": [
+            {
+                "id": "endpoint-1",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "https://target.test/search",
+            },
+            {
+                "id": "parameter-1",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "query",
+                "attributes": {"endpoint_id": "endpoint-1"},
+            },
+            {
+                "id": "parameter-2",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "orphaned_parameter",
+            },
+            {
+                "id": "parameter-3",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "https://target.test/looks-like-a-route",
+            },
+        ]
+    }
+
+    groups = mod._coverage_route_groups(manifest, prompt_token_limit=48_000)
+
+    assert groups == [
+        (
+            "target-1",
+            "endpoint",
+            "https://target.test/search",
+            ["endpoint-1", "parameter-1"],
+        )
+    ]
+
+
 def test_create_tasks_binds_canonical_manifest_per_route_independent_of_context(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
@@ -3838,7 +3882,8 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
 
 def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_path):
     client, store = fake_memory_client
-    proof = tmp_path / "proof.txt"
+    proof = Path(mod._operation_output_root()) / "proof.txt"
+    proof.parent.mkdir(parents=True, exist_ok=True)
     proof.write_text("proof")
 
     assert mod._normalize_evidence({"a": 1}) == ['{"a": 1}']
@@ -4331,6 +4376,62 @@ def test_qdrant_memory_client_scope_and_workflow_methods(fake_memory_client, mon
     assert overview["has_memories"] is True
 
 
+def test_qdrant_shared_retrieval_filters_results_to_overlapping_target_values():
+    class FakeQdrant:
+        def __init__(self):
+            self.last_scroll_filter = None
+            self.last_query_filter = None
+            self.points = [
+                SimpleNamespace(
+                    id="same-target",
+                    payload={
+                        "memory": "prior operation target context",
+                        "target_values": ["https://target.test"],
+                        "operation_id": "OP-prior",
+                        "active": True,
+                    },
+                ),
+                SimpleNamespace(
+                    id="other-target",
+                    payload={
+                        "memory": "unrelated target context",
+                        "target_values": ["https://other.test"],
+                        "operation_id": "OP-prior",
+                        "active": True,
+                    },
+                ),
+            ]
+
+        def scroll(self, **kwargs):
+            self.last_scroll_filter = kwargs["scroll_filter"]
+            return self.points, None
+
+        def query_points(self, **kwargs):
+            self.last_query_filter = kwargs["query_filter"]
+            return SimpleNamespace(points=self.points)
+
+        def retrieve(self, **_kwargs):
+            return [self.points[1]]
+
+    client = mod.QdrantMemoryClient.__new__(mod.QdrantMemoryClient)
+    client.target_values = ["https://target.test"]
+    client.memory_mode = "shared"
+    client.operation_id = "OP-current"
+    client.collection_name = "test_memories"
+    client.qdrant = FakeQdrant()
+    client.embeddings = SimpleNamespace(embed_query=lambda _query: [0.1])
+
+    listed = mod.QdrantMemoryClient.list_memories(client)
+    searched = mod.QdrantMemoryClient.search(client, "prior context")
+
+    assert [memory["id"] for memory in listed] == ["same-target"]
+    assert [memory["id"] for memory in searched] == ["same-target"]
+    assert mod.QdrantMemoryClient.get_memory_by_id(client, "other-target") is None
+    assert client.qdrant.last_scroll_filter.must[0].key == "target_values"
+    assert len(client.qdrant.last_scroll_filter.must) == 1
+    assert client.qdrant.last_query_filter.must[0].match.any == ["https://target.test"]
+
+
 def test_qdrant_memory_rejects_invalid_mode_and_missing_target():
     assert mod.QdrantMemoryClient._memory_mode("shared") == "shared"
     assert mod.QdrantMemoryClient._memory_mode("operation") == "operation"
@@ -4338,3 +4439,10 @@ def test_qdrant_memory_rejects_invalid_mode_and_missing_target():
         mod.QdrantMemoryClient._memory_mode("fresh")
     with pytest.raises(ValueError, match="OperationTarget"):
         mod.QdrantMemoryClient._target_values({})
+
+    client = mod.QdrantMemoryClient.__new__(mod.QdrantMemoryClient)
+    client.target_values = []
+    client.memory_mode = "shared"
+    client.operation_id = "OP-current"
+    with pytest.raises(ValueError, match="canonical OperationTarget"):
+        mod.QdrantMemoryClient._scope_filter(client)

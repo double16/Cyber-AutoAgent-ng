@@ -846,6 +846,7 @@ class Task:
     target_ids: List[str] = field(default_factory=list)
     replacement_of: Optional[str] = None
     supersedes_criteria: List[str] = field(default_factory=list)
+    recovery_context: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -859,6 +860,9 @@ class Task:
             raise ValueError("task status is invalid")
         object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
+        if not isinstance(self.recovery_context, dict):
+            raise ValueError("recovery_context must be an object")
+        object.__setattr__(self, "recovery_context", dict(self.recovery_context))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
         if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded"):
@@ -895,6 +899,7 @@ class Task:
             reference_id=obj.get("reference_id"),
             replacement_of=obj.get("replacement_of"),
             supersedes_criteria=_normalize_target_ids(obj.get("supersedes_criteria", [])),
+            recovery_context=dict(obj.get("recovery_context") or {}),
             target_scope=str(obj.get("target_scope", "all") or "all"),
             target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
@@ -915,6 +920,7 @@ class Task:
             "reference_id": self.reference_id,
             "replacement_of": self.replacement_of,
             "supersedes_criteria": self.supersedes_criteria,
+            "recovery_context": self.recovery_context,
             "target_scope": self.target_scope,
             "target_ids": self.target_ids,
         })
@@ -1716,10 +1722,10 @@ class SQLiteApplicationStore:
                     INSERT INTO tasks (
                         logical_target, task_uid, operation_id, title, objective, acceptance_contract, phase,
                         status, status_reason, evidence,
-                        created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria,
+                        created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context,
                         target_scope, target_ids
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(logical_target, operation_id, task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
@@ -1732,6 +1738,7 @@ class SQLiteApplicationStore:
                         reference_id=excluded.reference_id,
                         replacement_of=excluded.replacement_of,
                         supersedes_criteria=excluded.supersedes_criteria,
+                        recovery_context=excluded.recovery_context,
                         target_scope=excluded.target_scope,
                         target_ids=excluded.target_ids,
                         updated_at=excluded.updated_at
@@ -1752,6 +1759,7 @@ class SQLiteApplicationStore:
                     task.reference_id,
                     task.replacement_of,
                     json.dumps(task.supersedes_criteria),
+                    json.dumps(task.recovery_context, sort_keys=True),
                     task.target_scope,
                     json.dumps(task.target_ids),
                 ))
@@ -1763,7 +1771,7 @@ class SQLiteApplicationStore:
             with self._connect() as conn:
                 cursor = conn.execute(
                     "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
-                    "created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, "
+                    "created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
                     "target_scope, target_ids "
                     "FROM tasks WHERE logical_target = ? AND operation_id = ?",
                     (self.logical_target, operation_id),
@@ -1785,8 +1793,9 @@ class SQLiteApplicationStore:
                             reference_id=row[11],
                             replacement_of=row[12],
                             supersedes_criteria=json.loads(row[13] or "[]"),
-                            target_scope=row[14] or "all",
-                            target_ids=json.loads(row[15] or "[]"),
+                            recovery_context=json.loads(row[14] or "{}"),
+                            target_scope=row[15] or "all",
+                            target_ids=json.loads(row[16] or "[]"),
                         )
                     )
         return tasks
@@ -2690,16 +2699,36 @@ def normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
 
 _RE_PROOF_PACK_FILE_PATTERN = re.compile(r"artifact(?:\s+paths?)?:\s*(\S+)", re.IGNORECASE)
 
+
+def _proof_pack_path_from_value(value: Any) -> str:
+    """Resolve one proof-pack file only when it belongs to this operation's root."""
+
+    reference = str(value or "").strip()
+    if not reference:
+        raise ValueError("proof-pack path is required")
+    if reference.startswith(("artifact:", "artifact_id:")):
+        return _artifact_path_from_ref(reference)
+
+    root = os.path.realpath(_operation_output_root())
+    candidate = reference if os.path.isabs(reference) else os.path.join(root, reference)
+    resolved = os.path.realpath(candidate)
+    if os.path.commonpath([root, resolved]) != root:
+        raise ValueError(f"Proof-pack path is outside the current operation output: {reference}")
+    if not os.path.isfile(resolved):
+        raise ValueError(f"Proof-pack file does not exist: {reference}")
+    return resolved
+
+
 def _has_valid_proof_pack(finding: Any) -> bool:
     """Validate proof_pack structure and artifact existence (fail-closed).
 
     Expectations:
     - proof_pack is a dict with key 'artifacts': List[str] of file paths (absolute or relative)
     - Optional 'rationale': short string tying artifacts to impact
-    - Every listed artifact path MUST exist at validation time
+    - Every usable proof path MUST resolve inside the current operation output and exist at validation time
 
     Notes:
-    - No content parsing or domain heuristics are used here; presence of files only
+    - No content parsing or domain heuristics are used here; operation-local file presence only
     - Any exception or malformed input results in False (fail-closed)
     """
     try:
@@ -2712,19 +2741,20 @@ def _has_valid_proof_pack(finding: Any) -> bool:
                 stack.extend(e.values())
             else:
                 e_str = str(e)
-                if e_str.startswith(("artifact:", "artifact_id:")):
-                    try:
-                        _artifact_path_from_ref(e_str)
-                    except ValueError:
-                        pass
-                    else:
-                        return True
-                if os.path.exists(e_str):
+                try:
+                    _proof_pack_path_from_value(e_str)
+                except ValueError:
+                    pass
+                else:
                     return True
                 matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
                 file_paths = [path.strip() for paths in matches for path in paths.split(",")]
                 for path in file_paths:
-                    if os.path.exists(path):
+                    try:
+                        _proof_pack_path_from_value(path)
+                    except ValueError:
+                        continue
+                    else:
                         return True
     except Exception:
         return False
@@ -6136,14 +6166,30 @@ def _coverage_route_groups(
         for item in manifest["items"]
         if item["kind"] == "endpoint"
     }
+    endpoint_route_keys = {
+        (str(item["target_id"]), route[0])
+        for item in endpoints_by_id.values()
+        if (route := _normalized_route(str(item["value"]))) is not None
+    }
     for item in manifest["items"]:
         item_id = str(item["id"])
         kind = str(item["kind"])
-        route = _normalized_route(str(item["value"])) if kind in {"endpoint", "parameter"} else None
-        if kind == "parameter" and route is None:
+        if kind == "parameter":
             endpoint_id = str(item.get("attributes", {}).get("endpoint_id", ""))
             endpoint = endpoints_by_id.get(endpoint_id)
             route = _normalized_route(str(endpoint["value"])) if endpoint else None
+            if route is None:
+                parameter_route = _normalized_route(str(item["value"]))
+                if parameter_route and (str(item["target_id"]), parameter_route[0]) in endpoint_route_keys:
+                    # Older recon manifests may encode a parameter as a URL with
+                    # a query string instead of recording endpoint_id.
+                    route = parameter_route
+            if route is None:
+                # A parameter without an owning endpoint is useful inventory metadata,
+                # but cannot be assessed safely as an independent network target.
+                continue
+        else:
+            route = _normalized_route(str(item["value"])) if kind == "endpoint" else None
         if route is not None:
             route_key, label = route
             group_key = (str(item["target_id"]), f"route:{route_key}")
@@ -7524,10 +7570,13 @@ class QdrantMemoryClient:
         metadata: Optional[Dict[str, Any]] = None,
         operation_id: Optional[str] = None,
     ) -> qdrant_models.Filter:
+        target_values = [str(value).strip() for value in self.target_values if str(value).strip()]
+        if not target_values:
+            raise ValueError("Qdrant memory retrieval requires at least one canonical OperationTarget value")
         must: List[Any] = [
             qdrant_models.FieldCondition(
                 key="target_values",
-                match=qdrant_models.MatchAny(any=self.target_values),
+                match=qdrant_models.MatchAny(any=target_values),
             )
         ]
         effective_operation = None
@@ -7562,6 +7611,15 @@ class QdrantMemoryClient:
             "target_values": list(payload.get("target_values") or []),
             "score": getattr(point, "score", None),
         }
+
+    def _memory_matches_target_values(self, memory: Dict[str, Any]) -> bool:
+        """Return whether a retrieved memory shares at least one current target value."""
+
+        stored_values = memory.get("target_values") if isinstance(memory, dict) else None
+        if not isinstance(stored_values, list):
+            return False
+        current_values = {str(value).strip() for value in self.target_values if str(value).strip()}
+        return bool(current_values.intersection(str(value).strip() for value in stored_values if str(value).strip()))
 
     def store_memory(
         self,
@@ -7620,10 +7678,11 @@ class QdrantMemoryClient:
         )
         start = (effective_page - 1) * effective_limit
         page_points = points[start:start + effective_limit]
+        memories = [self._point_to_memory(point) for point in page_points]
         return [
-            self._point_to_memory(point)
-            for point in page_points
-            if bool((point.payload or {}).get("active", True))
+            memory
+            for point, memory in zip(page_points, memories)
+            if bool((point.payload or {}).get("active", True)) and self._memory_matches_target_values(memory)
         ]
 
     def get_memory_by_id(
@@ -7642,7 +7701,7 @@ class QdrantMemoryClient:
         if not points:
             return None
         memory = self._point_to_memory(points[0])
-        allowed = memory["target_values"] and bool(set(memory["target_values"]) & set(self.target_values))
+        allowed = self._memory_matches_target_values(memory)
         if self.memory_mode == "operation":
             allowed = allowed and memory["operation_id"] == self.operation_id
         return memory if allowed else None
@@ -7676,7 +7735,13 @@ class QdrantMemoryClient:
             with_payload=True,
             with_vectors=False,
         )
-        return [self._point_to_memory(point) for point in result.points if bool((point.payload or {}).get("active", True))]
+        return [
+            memory
+            for point in result.points
+            if bool((point.payload or {}).get("active", True))
+            for memory in [self._point_to_memory(point)]
+            if self._memory_matches_target_values(memory)
+        ]
 
     def store_plan(
         self,
@@ -7826,6 +7891,7 @@ class QdrantMemoryClient:
                             reference_id=t.reference_id,
                             replacement_of=t.replacement_of,
                             supersedes_criteria=t.supersedes_criteria,
+                            recovery_context=t.recovery_context,
                             target_scope=t.target_scope,
                             target_ids=t.target_ids,
                         )
@@ -7879,6 +7945,7 @@ class QdrantMemoryClient:
                 reference_id=target.reference_id,
                 replacement_of=target.replacement_of,
                 supersedes_criteria=target.supersedes_criteria,
+                recovery_context=target.recovery_context,
                 target_scope=target.target_scope,
                 target_ids=target.target_ids,
             )
@@ -7909,6 +7976,7 @@ class QdrantMemoryClient:
                         reference_id=p.reference_id,
                         replacement_of=p.replacement_of,
                         supersedes_criteria=p.supersedes_criteria,
+                        recovery_context=p.recovery_context,
                         target_scope=p.target_scope,
                         target_ids=p.target_ids,
                     )

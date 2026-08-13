@@ -241,6 +241,10 @@ def test_sqlite_plan_store_round_trips_task_replacement_lineage(tmp_path):
         status="done",
         replacement_of="parent",
         supersedes_criteria=["criterion-1"],
+        recovery_context={
+            "parent_task_uid": "parent",
+            "original_objective": "Complete the assigned security check",
+        },
     )
 
     store.store_task(operation_id, parent)
@@ -249,6 +253,7 @@ def test_sqlite_plan_store_round_trips_task_replacement_lineage(tmp_path):
     reloaded = {task.task_uid: task for task in SQLiteApplicationStore(db_path, "target").get_tasks(operation_id)}
     assert reloaded["replacement"].replacement_of == "parent"
     assert reloaded["replacement"].supersedes_criteria == ["criterion-1"]
+    assert reloaded["replacement"].recovery_context == replacement.recovery_context
 
 
 def test_sqlite_finding_ledger_operations(tmp_path):
