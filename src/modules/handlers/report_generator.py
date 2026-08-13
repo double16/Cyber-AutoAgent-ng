@@ -46,6 +46,7 @@ from modules.tools.memory import (
     OperationTarget,
     _artifact_path_from_ref,
     _canonical_assertion_predicate,
+    _finding_validation_contradictions,
     _json_pointer_value,
     get_memory_client,
     list_persisted_operation_model_metrics,
@@ -490,8 +491,11 @@ def _normalize_report_category(
         metadata.get("validation_status") or metadata.get("status") or ""
     ).strip().lower()
     proof_pack = metadata.get("proof_pack") or {}
+    artifacts = metadata.get("artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = []
     durable_evidence = (
-        _has_artifact_reference(metadata.get("artifacts"))
+        _has_artifact_reference(artifacts)
         or _has_artifact_reference(proof_pack.get("artifacts") if isinstance(proof_pack, dict) else None)
         or _has_artifact_reference(parsed.get("evidence", ""))
     )
@@ -514,7 +518,15 @@ def _normalize_report_category(
     evidence_contract_met = durable_evidence and (
         evidence_strategy == "direct" or artifact_backed_control
     )
-    if validation_status == "verified" and evidence_contract_met and _verified_finding_assertions_met(metadata):
+    evidence_artifacts = metadata.get("evidence_artifacts")
+    cited_artifacts = evidence_artifacts if isinstance(evidence_artifacts, list) else artifacts
+    contradictory_evidence = _finding_validation_contradictions(metadata, cited_artifacts)
+    if (
+        validation_status == "verified"
+        and evidence_contract_met
+        and not contradictory_evidence
+        and _verified_finding_assertions_met(metadata)
+    ):
         return "finding"
     return "validation_failure"
 
@@ -744,10 +756,11 @@ def _validate_report_consistency(
     if total_tasks != int(sections.get("total_task_count", 0) or 0):
         errors.append("Task status totals did not match the reported total task count.")
         sections["total_task_count"] = total_tasks
-    completed_tasks = normalized_counts.get("done", 0)
+    completed_tasks = normalized_counts.get("done", 0) + normalized_counts.get("superseded", 0)
     if completed_tasks != int(sections.get("completed_task_count", 0) or 0):
-        errors.append("Completed task count did not match done task statuses.")
+        errors.append("Completed task count did not match successful terminal task statuses.")
         sections["completed_task_count"] = completed_tasks
+    sections["superseded_task_count"] = normalized_counts.get("superseded", 0)
     sections["task_status_counts"] = dict(sorted(normalized_counts.items()))
 
     phase_rows = sections.get("phase_coverage", [])
@@ -860,6 +873,7 @@ def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
         "task_status_counts": dict(sections.get("task_status_counts") or {}),
         "total_task_count": int(sections.get("total_task_count", 0) or 0),
         "completed_task_count": int(sections.get("completed_task_count", 0) or 0),
+        "superseded_task_count": int(sections.get("superseded_task_count", 0) or 0),
         "phase_coverage": sections.get("phase_coverage") or [],
         "target_coverage": sections.get("target_coverage") or "",
         "completion_status": sections.get("completion_status") or {},
@@ -3046,6 +3060,7 @@ def _fallback_sections_from_operation_snapshot(snapshot: Dict[str, Any]) -> Dict
     return {
         "total_task_count": len(tasks),
         "completed_task_count": sum(status_counts.get(status, 0) for status in ("done", "superseded")),
+        "superseded_task_count": status_counts.get("superseded", 0),
         "task_status_counts": dict(status_counts),
         "verified_findings_total": 0,
         "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
@@ -4138,7 +4153,8 @@ def build_report_sections(
             phase_coverage.append(phase_row)
 
         total_task_count = len(task_records)
-        completed_task_count = task_status_counts.get("done", 0)
+        completed_task_count = task_status_counts.get("done", 0) + task_status_counts.get("superseded", 0)
+        superseded_task_count = task_status_counts.get("superseded", 0)
 
         # Process evidence entries - FILTER BY OPERATION_ID
         evidence_skipped = 0
@@ -4502,6 +4518,7 @@ def build_report_sections(
             "task_status_counts": dict(sorted(task_status_counts.items())),
             "total_task_count": total_task_count,
             "completed_task_count": completed_task_count,
+            "superseded_task_count": superseded_task_count,
             "evidence_text": evidence_text,
             "findings_table": findings_table,
             "summary_table": summary_table,

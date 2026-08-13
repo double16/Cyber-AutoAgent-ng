@@ -32,9 +32,25 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (2, "0002_operation_model_metrics.sql"),
         (3, "0003_finding_evidence_receipts.sql"),
         (4, "0004_model_metric_correction_categories.sql"),
+        (5, "0005_task_replacement_lineage.sql"),
     ]
     assert {"operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts"}.issubset(tables)
     assert "correction_categories" in metric_columns
+
+
+def test_task_replacement_lineage_migrates_existing_database(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "legacy.db")
+    packaged_migrations = SQLiteMigrationRunner._load_migrations()
+    legacy_migrations = [migration for migration in packaged_migrations if migration[0] < 5]
+    monkeypatch.setattr(SQLiteMigrationRunner, "_load_migrations", staticmethod(lambda: legacy_migrations))
+    SQLiteMigrationRunner(db_path).migrate()
+
+    monkeypatch.setattr(SQLiteMigrationRunner, "_load_migrations", staticmethod(lambda: packaged_migrations))
+    SQLiteMigrationRunner(db_path).migrate()
+
+    with sqlite3.connect(db_path) as conn:
+        task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+    assert {"replacement_of", "supersedes_criteria"}.issubset(task_columns)
 
 
 def test_concurrent_startup_applies_each_migration_once(tmp_path):
@@ -45,7 +61,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 4
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 5
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):

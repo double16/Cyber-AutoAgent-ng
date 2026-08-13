@@ -1560,6 +1560,36 @@ def test_summary_table_preserves_full_finding_location():
     ) == "validation_failure"
 
 
+@pytest.mark.parametrize(
+    ("artifact_content", "expected_category"),
+    [
+        ('{"user":"Leaf"}', "validation_failure"),
+        ('{"user":{"id":1,"details":{"role":"admin"}}}', "finding"),
+    ],
+)
+def test_report_rechecks_nested_json_claim_shape(tmp_path, monkeypatch, artifact_content, expected_category):
+    artifact = tmp_path / "response.json"
+    artifact.write_text(artifact_content, encoding="utf-8")
+    reference = "artifact:artifacts/response.json"
+    assertion = {"artifact": reference, "type": "literal_text", "value": '"user"'}
+    metadata = {
+        "validation_status": "verified",
+        "evidence_strategy": "direct",
+        "artifacts": [reference],
+        "evidence_artifacts": [reference],
+        "candidate_evidence_assertions": [assertion],
+        "evidence_assertions": [assertion],
+        "evidence_artifact_fingerprints": {reference: hashlib.sha256(artifact.read_bytes()).hexdigest()},
+        "title": "Endpoint returns nested JSON structure",
+        "claim": "The endpoint returns a nested JSON object containing user details.",
+        "technique": "Information Disclosure",
+    }
+    monkeypatch.setattr(report_generator_module, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    monkeypatch.setattr("modules.tools.memory._artifact_path_from_ref", lambda _reference: str(artifact))
+
+    assert _normalize_report_category("finding", metadata, "", {}) == expected_category
+
+
 def test_format_target_coverage_counts_scoped_tasks_and_report_items():
     plan = OperationPlan(
         objective="Assess targets",
@@ -1691,6 +1721,35 @@ def test_report_consistency_accepts_matching_canonical_state():
 
     assert _validate_report_consistency(sections, completion) == []
     assert _format_report_consistency_warnings([]) == ""
+
+
+def test_report_consistency_counts_superseded_tasks_as_recovered_completion():
+    sections = {
+        "raw_evidence": [],
+        "verified_findings_total": 0,
+        "finding_count": 0,
+        "validation_failure_count": 0,
+        "finding_validation_failure_count": 0,
+        "task_status_counts": {"done": 1, "superseded": 1},
+        "total_task_count": 2,
+        "completed_task_count": 1,
+        "phase_coverage": [{
+            "phase_id": 1,
+            "status": "done",
+            "task_status_counts": {"done": 1, "superseded": 1},
+        }],
+        "evidence_integrity_errors": [],
+    }
+    completion = {"assessment_complete": True, "workflow_complete": True}
+
+    errors = _validate_report_consistency(sections, completion)
+    canonical = _canonical_report_data(sections)
+
+    assert errors == ["Completed task count did not match successful terminal task statuses."]
+    assert sections["completed_task_count"] == 2
+    assert sections["superseded_task_count"] == 1
+    assert canonical["completed_task_count"] == 2
+    assert canonical["superseded_task_count"] == 1
 
 
 @pytest.fixture(autouse=True)

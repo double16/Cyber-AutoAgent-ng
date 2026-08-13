@@ -1716,9 +1716,10 @@ class SQLiteApplicationStore:
                     INSERT INTO tasks (
                         logical_target, task_uid, operation_id, title, objective, acceptance_contract, phase,
                         status, status_reason, evidence,
-                        created_at, updated_at, kind, reference_id, target_scope, target_ids
+                        created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria,
+                        target_scope, target_ids
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(logical_target, operation_id, task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
@@ -1729,6 +1730,8 @@ class SQLiteApplicationStore:
                         evidence=excluded.evidence,
                         kind=excluded.kind,
                         reference_id=excluded.reference_id,
+                        replacement_of=excluded.replacement_of,
+                        supersedes_criteria=excluded.supersedes_criteria,
                         target_scope=excluded.target_scope,
                         target_ids=excluded.target_ids,
                         updated_at=excluded.updated_at
@@ -1747,6 +1750,8 @@ class SQLiteApplicationStore:
                     task_dict["updated_at"],
                     task.kind,
                     task.reference_id,
+                    task.replacement_of,
+                    json.dumps(task.supersedes_criteria),
                     task.target_scope,
                     json.dumps(task.target_ids),
                 ))
@@ -1758,7 +1763,8 @@ class SQLiteApplicationStore:
             with self._connect() as conn:
                 cursor = conn.execute(
                     "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
-                    "created_at, updated_at, kind, reference_id, target_scope, target_ids "
+                    "created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, "
+                    "target_scope, target_ids "
                     "FROM tasks WHERE logical_target = ? AND operation_id = ?",
                     (self.logical_target, operation_id),
                 )
@@ -1777,8 +1783,10 @@ class SQLiteApplicationStore:
                             updated_at=row[9],
                             kind=row[10] or "standard",
                             reference_id=row[11],
-                            target_scope=row[12] or "all",
-                            target_ids=json.loads(row[13] or "[]"),
+                            replacement_of=row[12],
+                            supersedes_criteria=json.loads(row[13] or "[]"),
+                            target_scope=row[14] or "all",
+                            target_ids=json.loads(row[15] or "[]"),
                         )
                     )
         return tasks
@@ -3641,13 +3649,15 @@ def _load_finding_validation_guards() -> List[Dict[str, Any]]:
         claim_terms = item.get("claim_terms")
         all_of = item.get("contradiction_all_of")
         any_of = item.get("contradiction_any_of")
+        json_shape = str(item.get("contradiction_json_shape") or "").strip()
         confirmation_requirement = str(item.get("confirmation_requirement") or "").strip()
         if (
             not rule_id
             or not isinstance(claim_terms, list)
             or not all(isinstance(term, str) and term.strip() for term in claim_terms)
-            or (not confirmation_requirement and bool(all_of) == bool(any_of))
+            or (not confirmation_requirement and sum(bool(value) for value in (all_of, any_of, json_shape)) != 1)
             or (confirmation_requirement and confirmation_requirement not in {"response_comparison", "rate_limit_probe"})
+            or (json_shape and json_shape not in {"flat_json_object"})
         ):
             raise ValueError(f"finding validation guard rule {rule_id or '<unknown>'} is invalid")
         markers = all_of or any_of
@@ -3661,6 +3671,7 @@ def _load_finding_validation_guards() -> List[Dict[str, Any]]:
             "claim_terms": [term.lower().strip() for term in claim_terms],
             "contradiction_all_of": [marker.lower().strip() for marker in all_of or []],
             "contradiction_any_of": [marker.lower().strip() for marker in any_of or []],
+            "contradiction_json_shape": json_shape,
             "confirmation_requirement": confirmation_requirement,
         })
     return validated
@@ -3681,7 +3692,7 @@ def _finding_validation_contradictions(
     for reference in evidence_artifacts:
         try:
             artifact_texts.append(Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace").lower())
-        except OSError:
+        except (OSError, ValueError):
             return []
     contradictions = []
     for rule in _load_finding_validation_guards():
@@ -3689,16 +3700,33 @@ def _finding_validation_contradictions(
             continue
         markers_all = rule["contradiction_all_of"]
         markers_any = rule["contradiction_any_of"]
-        if not markers_all and not markers_any:
+        json_shape = rule["contradiction_json_shape"]
+        if not markers_all and not markers_any and not json_shape:
             continue
-        if all(
-            all(marker in text for marker in markers_all)
-            if markers_all
-            else any(marker in text for marker in markers_any)
-            for text in artifact_texts
-        ):
+        if json_shape == "flat_json_object":
+            matches = all(_is_flat_json_object(text) for text in artifact_texts)
+        else:
+            matches = all(
+                all(marker in text for marker in markers_all)
+                if markers_all
+                else any(marker in text for marker in markers_any)
+                for text in artifact_texts
+            )
+        if matches:
             contradictions.append(rule["id"])
     return contradictions
+
+
+def _is_flat_json_object(text: str) -> bool:
+    """Return whether text is a JSON object whose values contain no nested objects or arrays."""
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and bool(payload) and all(
+        not isinstance(value, (dict, list)) for value in payload.values()
+    )
 
 
 def _finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:

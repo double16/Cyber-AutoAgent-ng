@@ -1748,15 +1748,22 @@ class MultiAgentWorkflowController:
         """Reconcile resolved replacement tasks before applying phase completion rules."""
 
         reconciled = self._reconcile_superseded_tasks(phase_id)
-        if status == "partial_failure" and reconciled:
+        if status in {"partial_failure", "blocked"}:
+            phase_tasks = self.state.list_tasks(phase=phase_id)
             remaining_failures = self.state.list_tasks(
                 phase=phase_id,
                 status=["active", "pending", "partial_failure", "blocked"],
             )
-            if not remaining_failures:
+            if (
+                phase_tasks
+                and not remaining_failures
+                and any(task.status == "superseded" for task in phase_tasks)
+                and all(task.status in {"done", "superseded"} for task in phase_tasks)
+            ):
                 self._log_workflow(
-                    "promoting phase after replacement reconciliation phase=%s status=done",
+                    "promoting phase with only successful terminal tasks phase=%s status=done reconciled=%s",
                     phase_id,
+                    len(reconciled),
                 )
                 status = "done"
         return self.state.mark_phase(plan, phase_id, status)
@@ -1790,16 +1797,25 @@ class MultiAgentWorkflowController:
                 continue
             if any(replacement.status not in {"done", "superseded"} for replacement in replacements):
                 continue
+            original_status = parent.status
+            original_reason = str(parent.status_reason or "").strip()
             reason = (
                 f"Original task intent resolved by successful replacement tasks: "
                 f"{', '.join(replacement.task_uid for replacement in replacements)}. "
-                f"Superseded from {parent.status}."
+                f"Superseded from {original_status}."
             )
+            if original_reason:
+                reason = f"{reason} Original reason: {original_reason}"
             updated = self.state.mark_task(parent, "superseded", reason)
             reconciled.append(updated)
             self._emit_task_done(updated)
-            for replacement in replacements:
-                self._emit_task_superseded(updated, replacement)
+            self._emit_task_superseded(
+                updated,
+                replacements,
+                original_status=original_status,
+                original_reason=original_reason,
+                covered_criteria=sorted(covered_criteria),
+            )
             self._log_workflow(
                 "task superseded after replacement reconciliation original=%s replacements=%s",
                 self._task_label(parent),
@@ -3538,6 +3554,8 @@ class MultiAgentWorkflowController:
             )
         updated_task = self.state.mark_task(task, decision.status, decision.reason)
         self._emit_task_done(updated_task, finding_resolution=resolution)
+        if updated_task.replacement_of and updated_task.status in {"done", "superseded"}:
+            self._reconcile_superseded_tasks(updated_task.phase)
 
     @staticmethod
     def _validation_tool_name(task: Task) -> str:
@@ -4606,15 +4624,26 @@ Return exactly one decision for each candidate.
             "fallback": "deterministic_controller_template",
         })
 
-    def _emit_task_superseded(self, task: Task, replacement: Task) -> None:
-        """Emit durable lineage when a replacement assumes a looped task's coverage."""
+    def _emit_task_superseded(
+        self,
+        task: Task,
+        replacements: List[Task],
+        *,
+        original_status: str,
+        original_reason: str,
+        covered_criteria: List[str],
+    ) -> None:
+        """Emit one durable lineage event after replacement coverage is confirmed."""
 
         self._emit_workflow_event({
             "type": "task_superseded",
             "task_uid": str(task.task_uid),
-            "replacement_task_uid": str(replacement.task_uid),
+            "replacement_task_uids": [str(replacement.task_uid) for replacement in replacements],
             "phase": int(task.phase),
             "reason": str(task.status_reason or ""),
+            "original_status": original_status,
+            "original_status_reason": original_reason,
+            "covered_criteria": covered_criteria,
         })
 
     def _queue_replacement_task(self, task: Task, replacement: Task, trigger: str) -> None:
@@ -5379,7 +5408,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             ),
             self._evaluator_tools(),
             self._task_evaluator_system_prompt(),
-            data_validator=lambda payload: self._validate_evaluator_decision_payload(
+            data_validator=lambda payload: self._validate_task_evaluator_decision_payload(
                 payload, allowed=("done", "partial_failure", "blocked")
             ),
             cycle=cycle,
@@ -5428,6 +5457,8 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             return None
         if not isinstance(recommendation, dict):
             raise WorkflowInvariantError("task evaluator finding_recommendation must be an object")
+        if not recommendation:
+            return None
         required = recommendation.get("required")
         confidence = recommendation.get("confidence")
         reason = recommendation.get("reason", "")
@@ -5621,6 +5652,10 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         *,
         hard_cap: Optional[float] = None,
     ) -> WorkflowDecision:
+        # Reconcile persisted replacement chains before asking the evaluator. This lets a
+        # resumed operation close a phase whose previously failed task has already been
+        # resolved by a successful replacement.
+        self._reconcile_superseded_tasks(phase.id)
         try:
             data = self._run_json_text_agent(
                 "phase_evaluator",
@@ -5644,6 +5679,9 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             decision = self._decision_from_data(data, allowed=allowed)
         except WorkflowInvariantError as error:
             return self._phase_evaluator_fallback(phase, error, hard_cap=hard_cap)
+        # The evaluator does not mutate tasks, but run this again immediately before
+        # terminal guarding so every decision observes the same effective task state.
+        self._reconcile_superseded_tasks(phase.id)
         decision = self._guard_phase_terminal_decision(
             phase,
             decision,
@@ -7041,9 +7079,13 @@ Allowed evidence references:
         last_failure_was_parse = False
         last_failure_was_schema = False
         last_response_keys: List[str] = []
-        for attempt in range(self.json_retries + 1):
+        parse_retries = 0
+        schema_retries = 0
+        schema_retry_limit = 1 if role == "task_evaluator" else self.json_retries
+        maximum_attempts = 1 + max(self.json_retries, schema_retry_limit)
+        for attempt in range(maximum_attempts):
             activity_attempt = attempt + 1
-            activity_total = self.json_retries + 1
+            activity_total = maximum_attempts
             self._emit_workflow_activity(
                 role,
                 "started",
@@ -7107,8 +7149,9 @@ Allowed evidence references:
                 last_error = error
                 last_failure_was_parse = True
                 last_failure_was_schema = False
-                if attempt >= self.json_retries:
+                if parse_retries >= self.json_retries:
                     break
+                parse_retries += 1
                 self._record_efficiency_correction("json_retry")
                 self._log_workflow(
                     "json agent role=%s invalid_json retrying error=%s response_excerpt=%s",
@@ -7138,11 +7181,13 @@ Allowed evidence references:
                 last_error = error
                 last_failure_was_parse = False
                 last_failure_was_schema = True
-                if attempt >= self.json_retries:
+                if schema_retries >= schema_retry_limit:
                     break
-                self._record_efficiency_correction("json_retry")
+                schema_retries += 1
+                correction_category = "evaluator_correction" if role == "task_evaluator" else "json_retry"
+                self._record_efficiency_correction(correction_category)
                 self._log_workflow(
-                    "json agent role=%s invalid_json retrying error=%s response_excerpt=%s",
+                    "json agent role=%s invalid_schema retrying error=%s response_excerpt=%s",
                     role,
                     self._short(error),
                     self._short(response),
@@ -7151,7 +7196,7 @@ Allowed evidence references:
                     prompt,
                     error,
                     response,
-                    include_previous_response=role in {"taxonomy_annotator", "attack_enricher"},
+                    include_previous_response=role in {"task_evaluator", "taxonomy_annotator", "attack_enricher"},
                 )
                 continue
             self._emit_workflow_activity(
@@ -7205,16 +7250,16 @@ Allowed evidence references:
         self._log_workflow(
             "json agent role=%s failed attempts=%s error=%s response_excerpt=%s",
             role,
-            self.json_retries + 1,
+            attempt + 1,
             self._short(last_error),
             self._short(excerpt),
         )
         if isinstance(last_error, MaxTokensReachedException):
             raise WorkflowInvariantError(
-                f"{role} reached its max_tokens limit after {self.json_retries + 1} attempt(s): {last_error}"
+                f"{role} reached its max_tokens limit after {attempt + 1} attempt(s): {last_error}"
             )
         raise WorkflowInvariantError(
-            f"{role} returned invalid JSON after {self.json_retries + 1} attempt(s): {last_error}. "
+            f"{role} returned invalid JSON after {attempt + 1} attempt(s): {last_error}. "
             f"Response excerpt: {excerpt}"
         )
 
@@ -7299,6 +7344,21 @@ Allowed evidence references:
                 f"workflow evaluator status {raw_status!r} normalized to {status!r}; "
                 f"expected one of {', '.join(allowed)}"
             )
+
+    @classmethod
+    def _validate_task_evaluator_decision_payload(
+        cls,
+        data: Dict[str, Any],
+        *,
+        allowed: tuple[str, ...],
+    ) -> None:
+        """Validate task-evaluator metadata inside the bounded JSON schema repair path."""
+
+        cls._validate_evaluator_decision_payload(data, allowed=allowed)
+        try:
+            cls._finding_recommendation_from_evaluator(data)
+        except WorkflowInvariantError as error:
+            raise ValueError(str(error)) from error
 
     @staticmethod
     def _json_max_token_retry_prompt(original_prompt: str, classification: str) -> str:

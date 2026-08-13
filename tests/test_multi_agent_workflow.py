@@ -30,6 +30,7 @@ from modules.tools.memory import (
     OperationPlan,
     OperationTarget,
     PlanPhase,
+    SQLiteApplicationStore,
     Task as TaskModel,
 )
 
@@ -2507,6 +2508,74 @@ def test_task_evaluator_rejects_malformed_finding_recommendations(recommendation
         })
 
 
+def test_task_evaluator_treats_empty_finding_recommendation_as_omitted():
+    assert MultiAgentWorkflowController._finding_recommendation_from_evaluator({
+        "finding_recommendation": {},
+    }) is None
+
+
+def test_task_evaluator_repairs_invalid_optional_recommendation_once():
+    task = Task(task_uid="active", title="Active", objective="Assess behavior", phase=1, status="active")
+    responses = iter((
+        json.dumps({
+            "status": "done",
+            "reason": "Artifact-backed negative result is sufficient.",
+            "finding_recommendation": {"required": "no"},
+        }),
+        json.dumps({
+            "status": "done",
+            "reason": "Artifact-backed negative result is sufficient.",
+        }),
+    ))
+    prompts = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        assert role == "task_evaluator"
+        prompts.append(prompt)
+        return next(responses)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=text_runner,
+    )
+
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task)
+
+    assert decision.status == "done"
+    assert len(prompts) == 2
+    assert "finding_recommendation.required must be a boolean" in prompts[1]
+    assert "Previous response to correct:" in prompts[1]
+
+
+def test_task_evaluator_contains_repeated_invalid_optional_recommendation():
+    task = Task(task_uid="active", title="Active", objective="Assess behavior", phase=1, status="active")
+    responses = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        assert role == "task_evaluator"
+        responses.append(prompt)
+        return json.dumps({
+            "status": "done",
+            "reason": "Artifact-backed negative result is sufficient.",
+            "finding_recommendation": {"required": "no"},
+        })
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=text_runner,
+    )
+
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task)
+
+    assert decision.status == "partial_failure"
+    assert "failed the required decision schema after bounded retries" in decision.reason
+    assert len(responses) == 2
+
+
 def test_repeated_acceptance_rejection_remains_terminal_while_ledger_is_incomplete():
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
@@ -3930,6 +3999,7 @@ def test_partial_failure_is_superseded_when_split_replacements_resolve_all_crite
         objective="Test the security cookie and user token",
         phase=1,
         status="partial_failure",
+        status_reason="Initial combined task exhausted its bounded recovery.",
         acceptance=_acceptance("criterion-1"),
     )
     replacements = [
@@ -3965,7 +4035,138 @@ def test_partial_failure_is_superseded_when_split_replacements_resolve_all_crite
     assert updated_parent.status == "superseded"
     assert "cookie-replacement" in updated_parent.status_reason
     assert "token-replacement" in updated_parent.status_reason
+    assert "Original reason: Initial combined task exhausted its bounded recovery." in updated_parent.status_reason
     assert updated_plan.phases[0].status == "done"
+
+    supersession_events = [
+        event for event in controller.runtime.callback_handler.events if event["type"] == "task_superseded"
+    ]
+    assert supersession_events == [{
+        "type": "task_superseded",
+        "task_uid": "parent",
+        "replacement_task_uids": ["cookie-replacement", "token-replacement"],
+        "phase": 1,
+        "reason": updated_parent.status_reason,
+        "original_status": "partial_failure",
+        "original_status_reason": "Initial combined task exhausted its bounded recovery.",
+        "covered_criteria": ["criterion-1"],
+    }]
+
+
+def test_phase_marking_promotes_recovered_task_even_if_evaluator_is_stale():
+    plan = _plan()
+    parent = Task(
+        task_uid="parent",
+        title="Combined test",
+        objective="Resolve both assigned checks",
+        phase=1,
+        status="partial_failure",
+        status_reason="The combined task failed before completing its contract.",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Replacement test",
+        objective="Resolve the remaining assigned check",
+        phase=1,
+        status="done",
+        replacement_of="parent",
+        supersedes_criteria=["criterion-1"],
+    )
+    state = FakeState(plan, tasks=[parent, replacement])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: '{"status":"partial_failure","reason":"Stale evaluator decision."}',
+    )
+
+    decision = controller._evaluate_phase_with_policy(plan, plan.phases[0])
+    updated_plan = controller._mark_phase(plan, 1, decision.status)
+
+    assert decision.status == "partial_failure"
+    assert next(task for task in state.tasks if task.task_uid == "parent").status == "superseded"
+    assert updated_plan.phases[0].status == "done"
+
+
+def test_successful_replacement_reconciles_parent_before_phase_evaluation():
+    parent = Task(
+        task_uid="parent",
+        title="Original task",
+        objective="Complete the assigned check",
+        phase=1,
+        status="partial_failure",
+        status_reason="The original task timed out.",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Replacement task",
+        objective="Complete the assigned check with a focused method",
+        phase=1,
+        status="active",
+        replacement_of="parent",
+        supersedes_criteria=["criterion-1"],
+    )
+    state = FakeState(_plan(), tasks=[parent, replacement])
+
+    def text_runner(role, *_args):
+        if role == "task_prompt_builder":
+            return '{"prompt":"complete the focused check","tools":[]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"Focused replacement completed its criterion."}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda *_args: "replacement evidence",
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], replacement)
+
+    assert next(task for task in state.tasks if task.task_uid == "replacement").status == "done"
+    assert next(task for task in state.tasks if task.task_uid == "parent").status == "superseded"
+    assert any(event["type"] == "task_superseded" for event in controller.runtime.callback_handler.events)
+
+
+def test_persisted_replacement_lineage_reconciles_after_sqlite_reload(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "workflow.db"), "target")
+    parent = Task(
+        task_uid="parent",
+        title="Original task",
+        objective="Complete the assigned check",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-1"),
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Replacement task",
+        objective="Complete the unresolved check",
+        phase=1,
+        status="done",
+        acceptance=_acceptance("criterion-1"),
+        replacement_of="parent",
+        supersedes_criteria=["criterion-1"],
+    )
+    store.store_task("operation", parent)
+    store.store_task("operation", replacement)
+
+    reloaded_tasks = SQLiteApplicationStore(str(tmp_path / "workflow.db"), "target").get_tasks("operation")
+    state = FakeState(_plan(), tasks=reloaded_tasks)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    controller._reconcile_superseded_tasks(1)
+
+    assert next(task for task in state.tasks if task.task_uid == "parent").status == "superseded"
+    assert any(event["type"] == "task_superseded" for event in controller.runtime.callback_handler.events)
 
 
 @pytest.mark.parametrize(

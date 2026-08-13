@@ -220,6 +220,37 @@ def test_sqlite_plan_store_task_operations(tmp_path):
     assert updated_tasks[0].updated_at > tasks[0].updated_at
 
 
+def test_sqlite_plan_store_round_trips_task_replacement_lineage(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    operation_id = "test-op"
+    store = SQLiteApplicationStore(db_path, "target")
+    parent = Task(
+        task_uid="parent",
+        title="Original task",
+        objective="Complete the assigned security check",
+        acceptance=make_acceptance("criterion-1"),
+        phase=1,
+        status="partial_failure",
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Replacement task",
+        objective="Complete the unresolved security check",
+        acceptance=make_acceptance("criterion-1"),
+        phase=1,
+        status="done",
+        replacement_of="parent",
+        supersedes_criteria=["criterion-1"],
+    )
+
+    store.store_task(operation_id, parent)
+    store.store_task(operation_id, replacement)
+
+    reloaded = {task.task_uid: task for task in SQLiteApplicationStore(db_path, "target").get_tasks(operation_id)}
+    assert reloaded["replacement"].replacement_of == "parent"
+    assert reloaded["replacement"].supersedes_criteria == ["criterion-1"]
+
+
 def test_sqlite_finding_ledger_operations(tmp_path):
     store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
     store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")

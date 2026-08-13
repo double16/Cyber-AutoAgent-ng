@@ -586,6 +586,7 @@ def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Pat
     with (
         patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._ensure_memory_client", return_value=MagicMock()),
     ):
         result = json.loads(
             store_finding(
@@ -915,6 +916,71 @@ def test_confirmed_lfi_validation_rejects_cited_open_failure(tmp_path: Path, ope
             )
 
     plan_store.store_finding_validation.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("artifact_content", "should_reject"),
+    [
+        ('{"user":"Leaf"}', True),
+        ('{"user":{"id":1,"details":{"role":"admin"}}}', False),
+    ],
+)
+def test_confirmed_nested_json_validation_requires_nested_response(
+    tmp_path: Path,
+    operation_ids,
+    artifact_content: str,
+    should_reject: bool,
+):
+    artifact = tmp_path / "response.json"
+    artifact.write_text(artifact_content, encoding="utf-8")
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    task = Task(
+        "task-1", "Verify", "Verify claim", acceptance, 1, "active",
+        kind="finding_validation", reference_id="finding-1",
+    )
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "title": "Endpoint returns nested JSON structure",
+            "claim": "The endpoint returns a nested JSON object containing user details.",
+            "technique": "Information Disclosure",
+            "evidence_assertions": [{"artifact": "artifact:response.json", "marker": '"user"'}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    memory_client = MagicMock()
+    memory_client.store_memory.return_value = {"results": [{"id": "memory-validation"}]}
+    def invocation():
+        return record_finding_validation(
+            "finding-1", "confirmed", "Claim reproduced", ["Replay request"], "direct", [str(artifact)], None,
+            [{"artifact": str(artifact), "marker": '"user"'}],
+        )
+
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._ensure_memory_client", return_value=memory_client),
+        patch("src.modules.tools.memory._record_task_acceptance", return_value='{"complete": true}'),
+    ):
+        if should_reject:
+            with pytest.raises(ValueError, match="nested_json_claim_flat_response"):
+                invocation()
+        else:
+            invocation()
+
+    if should_reject:
+        plan_store.store_finding_validation.assert_not_called()
+    else:
+        plan_store.store_finding_validation.assert_called_once()
 
 
 def test_confirmed_validation_rejects_missing_positive_evidence_marker(tmp_path: Path, operation_ids):

@@ -79,6 +79,11 @@
   logged and canonicalized to an already assigned target.
 - Deterministic repair must be information-preserving and unambiguous. If multiple corrections remain possible, give
   bounded recovery the valid choices instead of guessing or applying every candidate.
+- A failed task becomes `superseded` only after linked replacement tasks conclusively cover its frozen acceptance
+  criteria. Count superseded work as recovered terminal history, not as a phase or operation failure, while preserving
+  the original status reason and replacement lineage for audit.
+- Optional LLM metadata must not terminate an operation. Validate it inside a bounded semantic repair path; after one
+  failed semantic repair, preserve evidence, emit structured failure telemetry, and contain the failure to that task.
 - Recovery progress requires new durable state appropriate to the frozen acceptance contract. Reasoning cycles,
   read-only calls, catalog inspection, and repeated artifact reads are not evidence progress.
 - State whether a bounded repair permits one model cycle or one tool invocation. Tool-constrained workflow recovery

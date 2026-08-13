@@ -55,6 +55,8 @@
 
 ### Fixes
 
+- Persist replacement-task lineage in SQLite so successful replacements can supersede their failed parents after
+  controller restarts or task reloads.
 - Give evidence-backed tasks that omitted terminal acceptance one bounded completion-only recovery turn, without
   changing rejected-acceptance correction behavior.
 - Retain task-created observation and knowledge references during acceptance recovery, show them for normal

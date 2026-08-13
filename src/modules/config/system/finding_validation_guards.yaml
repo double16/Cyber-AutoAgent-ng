@@ -22,6 +22,12 @@ rules:
       - "http/1.1 403"
       - "http/2 401"
       - "http/2 403"
+  - id: nested_json_claim_flat_response
+    claim_terms:
+      - nested json
+      - nested json structure
+      - nested json object
+    contradiction_json_shape: flat_json_object
   - id: user_enumeration
     claim_terms:
       - user enumeration
