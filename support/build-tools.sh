@@ -4,7 +4,7 @@
 # Builds and publishes the tools docker image. This image is large and doesn't
 # change much, it makes sense to use a published version.
 #
-# If you'd rather publish to your own REGISTRY:
+# If you'd rather publish to your own registry:
 #   1. Change the `REGISTRY` and `IMAGE_NAME` variables.
 #   2. Set the `APT_PROXY` variable if you have an HTTP proxy for Debian packages.
 #   3. If using AWS ECR, set AWS credentials before running. Otherwise, comment out the `aws ecr-public` line.
