@@ -454,7 +454,7 @@ graph TB
 - **Benefits**: Latest models, managed infrastructure, reliable performance
 
 ### Ollama Provider (Local)
-- **Primary**: qwen3-coder:30b-a3b-q4_K_M (default)
+- **Primary**: qwen3.6:27b (default)
 - **Embeddings**: mxbai-embed-large:latest
 - **Benefits**: Privacy, offline, no API costs, local control
 

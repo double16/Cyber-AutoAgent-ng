@@ -300,6 +300,29 @@ def _omit_cross_operation_artifact_references(value: Any) -> tuple[Any, int]:
     return value, 0
 
 
+def _current_operation_report_memories(
+    memories: List[Dict[str, Any]],
+    operation_id: str,
+) -> tuple[List[Dict[str, Any]], int, set[str]]:
+    """Keep prior-operation shared memories advisory by excluding them from report evidence."""
+
+    current = []
+    source_operations: set[str] = set()
+    excluded = 0
+    for memory_item in memories:
+        metadata = memory_item.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        item_operation_id = str(
+            metadata.get("operation_id") or memory_item.get("operation_id") or ""
+        ).strip()
+        if item_operation_id == str(operation_id):
+            current.append(memory_item)
+            continue
+        excluded += 1
+        source_operations.add(item_operation_id or "unknown prior operation")
+    return current, excluded, source_operations
+
+
 def _normalize_artifact_reference(reference: str) -> str:
     """Normalize canonical and supported bare artifact paths for comparison and resolution."""
     normalized = str(reference).strip().strip("`.,;:)]}")
@@ -836,6 +859,14 @@ def _validate_report_consistency(
                 errors.append(
                     "Excluded "
                     f"{count} artifact reference(s) from shared-memory evidence originating in prior operation(s)"
+                    f"{f': {source_operations}' if source_operations else ''}."
+                )
+            elif integrity_error.get("kind") == "cross_operation_advisory_memories_excluded":
+                count = int(integrity_error.get("count", 0) or 0)
+                source_operations = ", ".join(integrity_error.get("source_operations", []) or [])
+                errors.append(
+                    "Excluded "
+                    f"{count} advisory shared-memory record(s) from current-operation report evidence"
                     f"{f': {source_operations}' if source_operations else ''}."
                 )
             else:
@@ -4023,6 +4054,12 @@ def build_report_sections(
             run_id=operation_id if not cross_operation else None,
             limit=MAX_REPORT_FINDINGS * 10,
         )
+        advisory_memory_source_operations: set[str] = set()
+        advisory_memory_count = 0
+        if cross_operation:
+            raw_memories, advisory_memory_count, advisory_memory_source_operations = (
+                _current_operation_report_memories(raw_memories, operation_id)
+            )
         list_finding_records = getattr(memory_client, "list_finding_records", None)
         finding_records = (
             list_finding_records(operation_id=operation_id)
@@ -4510,6 +4547,14 @@ def build_report_sections(
         # Build complete sections dictionary
         target_coverage = _format_target_coverage(operation_plan, task_records, evidence, target_values)
         evidence_integrity_errors = []
+        if advisory_memory_count:
+            evidence_integrity_errors.append(
+                {
+                    "kind": "cross_operation_advisory_memories_excluded",
+                    "count": advisory_memory_count,
+                    "source_operations": sorted(advisory_memory_source_operations),
+                }
+            )
         if cross_operation_artifact_refs_omitted:
             evidence_integrity_errors.append(
                 {

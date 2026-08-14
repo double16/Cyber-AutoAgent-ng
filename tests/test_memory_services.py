@@ -932,6 +932,94 @@ def test_task_proposal_defaults_basis_description_to_objective():
     assert proposal.effective_basis_description == "Check target"
 
 
+def test_create_tasks_rejects_accidental_multi_route_http_proposal_atomically(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    proposal = task_proposal(
+        "NoSQL injection assessment",
+        "Test POST /api/auth/login and GET /api/products/:id for NoSQL injection.",
+        "Record NoSQL injection results for both routes.",
+        target_ids=["target-1"],
+    )
+
+    with pytest.raises(ValueError, match="multiple distinct endpoint routes: /api/auth/login, /api/products/:id"):
+        mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert store.tasks == []
+
+
+def test_create_tasks_accepts_single_http_route_method_and_query_variants(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    proposal = task_proposal(
+        "Login injection assessment",
+        "Test POST /api/auth/login?mode=baseline and GET http://target.test/api/auth/login/.",
+        "Record evidence for the login endpoint.",
+        target_ids=["target-1"],
+    )
+
+    result = mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert json.loads(result)["created_count"] == 1
+    assert len(store.tasks) == 1
+
+
+def test_create_tasks_accepts_declared_multi_route_workflow(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    proposal = task_proposal(
+        "Authenticated purchase workflow assessment",
+        "Test POST /api/auth/login followed by POST /api/orders as one authenticated workflow.",
+        "Record the ordered workflow outcome.",
+        target_ids=["target-1"],
+    )
+
+    result = mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert json.loads(result)["created_count"] == 1
+    assert len(store.tasks) == 1
+
+
+def test_create_tasks_does_not_apply_http_route_atomicity_to_filesystem_targets(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess source",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="/repo", type="filesystem")],
+    )
+    proposal = task_proposal(
+        "Source analysis",
+        "Inspect /repo/app.py and /repo/config.py for unsafe input handling.",
+        "Store source-analysis evidence.",
+        target_ids=["target-1"],
+    )
+
+    result = mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert json.loads(result)["created_count"] == 1
+    assert len(store.tasks) == 1
+
+
 @pytest.mark.parametrize("reference", ["shell:curl https://target.test", "tooluse_123", "https://target.test"])
 def test_canonical_evidence_reference_rejects_non_durable_references(reference):
     with pytest.raises(ValueError, match="Acceptance evidence references must use"):

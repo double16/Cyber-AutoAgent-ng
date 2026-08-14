@@ -128,7 +128,7 @@ export AWS_REGION=us-east-1
 
 # Ollama
 ollama serve
-ollama pull qwen3-coder:30b-a3b-q4_K_M
+ollama pull qwen3.6:27b
 
 # LiteLLM-compatible providers
 export OPENAI_API_KEY=your_key

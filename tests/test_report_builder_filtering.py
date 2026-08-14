@@ -314,7 +314,7 @@ def test_report_builder_filters_by_operation_id(mock_client_cls):
 @patch("modules.tools.memory.QdrantMemoryClient")
 @patch.dict(os.environ, {"CYBER_MEMORY_MODE": "shared"})
 def test_report_builder_cross_operation(mock_client_cls):
-    """Report builder should filter evidence by operation_id for per-operation reports."""
+    """Shared-mode reports should keep prior and unattributed memories advisory."""
     op_id = "OP_123"
     # Mock list_memories to return both tagged and untagged
     mock_client = mock_client_cls.return_value
@@ -343,17 +343,22 @@ def test_report_builder_cross_operation(mock_client_cls):
     assert any(
         "/a" in e.get("content", "") for e in out.get("raw_evidence", []) or []
     ), "Expected matching evidence from current operation"
-    # Evidence from OTHER operations should be EXCLUDED (filtered out)
-    assert any(
+    # Evidence from OTHER operations remains retrieval context but is not report evidence.
+    assert not any(
         "/b" in e.get("content", "") for e in out.get("raw_evidence", []) or []
-    ), "Should INCLUDE evidence from other operations"
-    # Untagged evidence (no operation_id) should be included for backward compatibility
-    assert any(
+    ), "Should exclude advisory evidence from other operations"
+    # Untagged evidence cannot be attributed to this operation and is also advisory.
+    assert not any(
         "/c" in e.get("content", "") for e in out.get("raw_evidence", []) or []
-    ), "Should include untagged evidence for backward compatibility"
+    ), "Should exclude unattributed advisory evidence"
 
     assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    assert out["validation_failure_count"] == 3
+    assert out["validation_failure_count"] == 1
+    assert out["evidence_integrity_errors"] == [{
+        "kind": "cross_operation_advisory_memories_excluded",
+        "count": 2,
+        "source_operations": ["OP_OTHER", "unknown prior operation"],
+    }]
 
 
 @patch("modules.tools.memory.QdrantMemoryClient")

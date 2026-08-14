@@ -108,6 +108,12 @@
 - Budget of any kind may be exceeded while required reporting completes.
 - Planning and task fan-out are independent of operation budget constraints. Budgets govern execution, evaluation, and termination, not the number of planned task records; there should be no budget-aware scheduling.
 - The workflow should prefer new task creation to reduce complexity in the LLM as long as losing the LLM context does not reduce precision. Producing artifacts from one task to feed another task is encouraged.
+- In shared memory mode, prior-operation memories are advisory investigation context only. Render their origin and do
+  not allow them to satisfy current-operation acceptance, findings, proof, completion, or report evidence without
+  current-operation revalidation.
+- Evaluator-requested repairs must distinguish acceptance closure from missing execution evidence.
+- Phase dependency policy must use structured plan fields such as `requires_finding_candidates`; never infer phase
+  dependencies or budget behavior from generated phase numbers or titles.
 
 ## Application Best Practices
 - Budget is reporting only after reporting or evaluation stages are reached.

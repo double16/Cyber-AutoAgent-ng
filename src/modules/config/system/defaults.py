@@ -51,7 +51,7 @@ def build_ollama_defaults() -> Dict[str, Any]:
     return {
         "llm": LLMConfig(
             provider=ModelProvider.OLLAMA,
-            model_id="qwen3-coder:30b-a3b-q4_K_M",
+            model_id="qwen3.6:27b",
             temperature=DEFAULT_TEMPERATURE_EXECUTION,
             max_tokens=6144,
         ),
@@ -75,7 +75,7 @@ def build_ollama_defaults() -> Dict[str, Any]:
         ),
         "swarm_llm": LLMConfig(
             provider=ModelProvider.OLLAMA,
-            model_id="qwen3-coder:30b-a3b-q4_K_M",
+            model_id="qwen3.6:27b",
             temperature=DEFAULT_TEMPERATURE_SWARM,
             max_tokens=6144,
         ),

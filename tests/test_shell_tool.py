@@ -26,6 +26,7 @@ CommandExecutor = shell_module.CommandExecutor
 execute_commands = shell_module.execute_commands
 execute_single_command = shell_module.execute_single_command
 shell = shell_module.shell
+scoped_shell_command_validator = shell_module.scoped_shell_command_validator
 validate_command = shell_module.validate_command
 
 
@@ -143,6 +144,16 @@ def test_shell_formats_error_response():
     assert result["status"] == "error"
     assert "Failed: 1" in result["content"][0]["text"]
     assert "Exit Code: 7" in result["content"][1]["text"]
+
+
+def test_shell_scope_validator_rejects_before_command_execution():
+    with scoped_shell_command_validator(lambda commands: "Use http://192.0.2.10:3001 instead."):
+        with patch.object(shell_module, "execute_commands") as run:
+            result = shell("curl -sS https://target-1/api/spawn")
+
+    run.assert_not_called()
+    assert result["status"] == "error"
+    assert result["content"] == [{"text": "Use http://192.0.2.10:3001 instead."}]
 
 
 def test_shell_timeout_normalization_and_clamping():

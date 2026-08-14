@@ -6152,6 +6152,78 @@ def _normalized_route(value: str) -> Optional[Tuple[str, str]]:
     return route_url, route_url
 
 
+_PROPOSAL_RELATIVE_ENDPOINT_PATTERN = re.compile(
+    r"(?:\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+|"
+    r"\b(?:endpoint|route|path)\s*(?:is|at|:)?\s*)"
+    r"(?P<path>/[^\s\"'<>`]+)",
+    re.IGNORECASE,
+)
+_PROPOSAL_WORKFLOW_WORDING_PATTERN = re.compile(r"\b(?:workflow|flow)\b", re.IGNORECASE)
+
+
+def _normalized_http_route_path(value: str) -> Optional[str]:
+    """Return a normalized HTTP route path without scheme, authority, or query."""
+
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    return path.rstrip("/") or "/"
+
+
+def _procedure_proposal_endpoint_routes(
+    proposal: TaskProposal,
+    selected_targets: List[OperationTarget],
+) -> List[str]:
+    """Return distinct HTTP endpoint routes explicitly named by a procedure proposal."""
+
+    http_targets = [
+        target
+        for target in selected_targets
+        if (parsed := urlsplit(str(target.value).strip())).scheme.lower() in {"http", "https"}
+        and parsed.netloc
+    ]
+    if not http_targets:
+        return []
+
+    text = _proposal_scope_text(proposal)
+    routes = set()
+    for reference in _explicit_service_references(
+        text,
+        include_bare_host_ports=False,
+        assigned_targets=http_targets,
+    ):
+        normalized = _normalized_http_route_path(reference)
+        if normalized is not None:
+            routes.add(normalized)
+    for match in _PROPOSAL_RELATIVE_ENDPOINT_PATTERN.finditer(text):
+        raw_path = match.group("path").rstrip(".,;)]}")
+        if not raw_path:
+            continue
+        normalized = re.sub(r"/{2,}", "/", urlsplit(raw_path).path or "/")
+        routes.add(normalized.rstrip("/") or "/")
+    return sorted(routes)
+
+
+def _validate_procedure_proposal_route_atomicity(
+    proposal: TaskProposal,
+    selected_targets: List[OperationTarget],
+) -> None:
+    """Reject accidental multi-route HTTP work while allowing declared workflows."""
+
+    if proposal.inferred_basis_kind != "procedure":
+        return
+    routes = _procedure_proposal_endpoint_routes(proposal, selected_targets)
+    if len(routes) <= 1 or _PROPOSAL_WORKFLOW_WORDING_PATTERN.search(_proposal_scope_text(proposal)):
+        return
+    raise ValueError(
+        "procedure proposal contains multiple distinct endpoint routes: "
+        + ", ".join(routes)
+        + ". Resubmit separate route-scoped proposals. Use workflow or flow wording only for a genuine ordered "
+        "multi-step workflow."
+    )
+
+
 def _coverage_route_groups(
     manifest: Dict[str, Any],
     *,
@@ -6394,6 +6466,10 @@ def _create_tasks_from_proposals(
             plan=plan,
             proposal=proposal,
         )
+        selected_targets = [
+            target for target in plan.targets if not target_ids or target.target_id in set(target_ids)
+        ]
+        _validate_procedure_proposal_route_atomicity(proposal, selected_targets)
         acceptance = _freeze_and_validate_acceptance(
             _proposal_acceptance_contract(proposal, plan),
             [*existing_tasks, *staged_tasks],

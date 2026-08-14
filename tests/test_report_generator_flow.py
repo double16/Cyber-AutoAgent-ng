@@ -54,6 +54,7 @@ from modules.handlers.report_generator import (
     _format_verified_findings_summary,
     _compact_finding_context,
     _compact_next_steps_source,
+    _current_operation_report_memories,
     _validate_narrative_consistency,
     _format_report_consistency_warnings,
     build_report_sections,
@@ -626,6 +627,21 @@ def test_shared_memory_artifact_references_are_omitted_without_losing_narrative(
     assert "artifact:artifacts/prior/proof.txt" not in sanitized["content"]
     assert sanitized["metadata"]["evidence_refs"] == ["[prior-operation artifact omitted]"]
     assert _artifact_references(sanitized) == set()
+
+
+def test_shared_report_memories_exclude_prior_operation_claims_entirely():
+    current, excluded, source_operations = _current_operation_report_memories(
+        [
+            {"id": "current", "memory": "current evidence", "metadata": {"operation_id": "OP_CURRENT"}},
+            {"id": "prior", "memory": "stale version claim", "metadata": {"operation_id": "OP_PRIOR"}},
+            {"id": "unknown", "memory": "unattributed claim", "metadata": {}},
+        ],
+        "OP_CURRENT",
+    )
+
+    assert [item["id"] for item in current] == ["current"]
+    assert excluded == 2
+    assert source_operations == {"OP_PRIOR", "unknown prior operation"}
 
 
 def test_grounding_normalizes_bare_reference_and_preserves_markdown_syntax():
@@ -1765,6 +1781,34 @@ def test_report_consistency_reports_omitted_shared_memory_artifacts_as_one_warni
     assert errors == [
         "Excluded 2 artifact reference(s) from shared-memory evidence originating in prior operation(s): "
         "OP_20260813_161308."
+    ]
+
+
+def test_report_consistency_reports_excluded_advisory_memories():
+    sections = {
+        "raw_evidence": [],
+        "verified_findings_total": 0,
+        "finding_count": 0,
+        "validation_failure_count": 0,
+        "finding_validation_failure_count": 0,
+        "task_status_counts": {},
+        "total_task_count": 0,
+        "completed_task_count": 0,
+        "phase_coverage": [],
+        "evidence_integrity_errors": [{
+            "kind": "cross_operation_advisory_memories_excluded",
+            "count": 3,
+            "source_operations": ["OP_PRIOR"],
+        }],
+    }
+
+    errors = _validate_report_consistency(
+        sections,
+        {"assessment_complete": True, "workflow_complete": True},
+    )
+
+    assert errors == [
+        "Excluded 3 advisory shared-memory record(s) from current-operation report evidence: OP_PRIOR."
     ]
 
 

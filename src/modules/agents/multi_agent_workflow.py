@@ -101,6 +101,7 @@ from modules.tools.memory import (
     task_service_scope_violations,
 )
 from modules.tools.semantic_enum import normalize_semantic_enum
+from modules.tools.shell import scoped_shell_command_validator
 from modules.config.taxonomy_catalog import get_taxonomy_catalog, validate_taxonomy_mappings
 from modules.tools.tool_catalog import get_shell_command_help_context, get_shell_command_specs
 from modules.utils.json_repair import parse_json_response, parse_json_response_with_metadata
@@ -211,6 +212,8 @@ class WorkflowDecision:
     instructions: str = ""
     finding_recommendation_required: bool = False
     finding_recommendation_reason: str = ""
+    repair_kind: str = "none"
+    unresolved_evidence_gaps: tuple[str, ...] = ()
 
 
 @dataclass
@@ -939,11 +942,22 @@ class MultiAgentWorkflowController:
         targets = {target.target_id: target for target in plan.targets}
         retained = []
         rejected: List[Dict[str, str]] = []
+        out_of_scope_endpoint_ids = {
+            str(item.get("id") or "").strip()
+            for item in manifest["items"]
+            if isinstance(item, dict)
+            and str(item.get("kind") or "").strip() == "endpoint"
+            and self._inventory_item_target_rejection_reason(item, targets)
+            and str(item.get("id") or "").strip()
+        }
         for item in manifest["items"]:
             reason = (
                 self._inventory_item_semantic_rejection_reason(item)
                 or self._inventory_item_target_rejection_reason(item, targets)
             )
+            source_endpoint_id = self._inventory_source_endpoint_id(item)
+            if not reason and source_endpoint_id in out_of_scope_endpoint_ids:
+                reason = "source_endpoint_outside_target"
             if reason:
                 rejected.append({"id": str(item.get("id") or ""), "reason": reason})
             else:
@@ -954,7 +968,7 @@ class MultiAgentWorkflowController:
             if not isinstance(gaps, list):
                 gaps = []
             warning = (
-                f"Controller filtered {len(rejected)} inventory item(s) outside executable target boundaries; "
+                f"Controller filtered {len(rejected)} invalid or out-of-scope inventory item(s); "
                 "manifest remains usable with retained items."
             )
             if warning not in gaps:
@@ -975,6 +989,16 @@ class MultiAgentWorkflowController:
             canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
             return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return _load_inventory_manifest(reference)
+
+    @staticmethod
+    def _inventory_source_endpoint_id(item: Any) -> str:
+        """Return the endpoint provenance link used by dependent inventory items."""
+
+        if not isinstance(item, dict) or str(item.get("kind") or "").strip() == "endpoint":
+            return ""
+        attributes = item.get("attributes")
+        attributes = attributes if isinstance(attributes, dict) else {}
+        return str(item.get("endpoint_id") or attributes.get("endpoint_id") or "").strip()
 
     @staticmethod
     def _inventory_item_semantic_rejection_reason(item: Any) -> str:
@@ -1438,11 +1462,14 @@ class MultiAgentWorkflowController:
 
             phase_cap = self._phase_budget_cap(plan, phase)
             if progress >= phase_cap:
+                cap_context = self._phase_budget_cap_context(plan, phase)
                 self._log_workflow(
-                    "phase hard cap reached phase=%s progress=%.2f cap=%.2f",
+                    "phase hard cap reached phase=%s progress=%.2f cap=%.2f base_cap=%.2f dependent_phase=%s",
                     self._phase_label(phase),
                     progress,
                     phase_cap,
+                    cap_context["base_cap"],
+                    cap_context["dependent_phase_id"],
                 )
                 updated_plan = self._close_phase_at_hard_cap(plan, phase, progress, phase_cap)
                 if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
@@ -2333,6 +2360,8 @@ class MultiAgentWorkflowController:
         acceptance_correction_limit = self._task_acceptance_correction_count()
         endpoint_evidence_correction_limit = self._task_endpoint_evidence_correction_count()
         evaluator_correction_limit = self._task_evaluator_correction_count()
+        evaluator_execution_repair_used = False
+        evaluator_execution_repair_gaps: tuple[str, ...] = ()
         decision = WorkflowDecision(status="partial_failure", reason="Task executor did not run")
 
         def repeated_correctable_failure(outcomes: List[ToolOutcome]) -> Optional[ToolOutcome]:
@@ -2365,7 +2394,19 @@ class MultiAgentWorkflowController:
                 self._record_efficiency_correction("acceptance_correction")
             return failed_calls, successful_calls, repeated
 
-        with self._task_executor_session("task_executor", tools, system_prompt) as run_executor:
+        with self._task_executor_session("task_executor", tools, system_prompt) as executor:
+            def run_executor(
+                prompt: str,
+                policy: Optional[AgentRunPolicy],
+                tool_override: Optional[List[Any]] = None,
+            ) -> Any:
+                with scoped_shell_command_validator(
+                    lambda commands: self._validate_task_shell_commands(plan, task, commands)
+                ):
+                    if tool_override is None:
+                        return executor(prompt, policy)
+                    return executor(prompt, policy, tool_override)
+
             actor_prompt = execution_prompt
             maximum_actor_cycles = (
                 self.task_execution_cycles
@@ -2388,6 +2429,7 @@ class MultiAgentWorkflowController:
                 allowed_actor_cycles += int(manifest_prerequisite_recovery_used)
                 allowed_actor_cycles += int(evidence_prerequisite_recovery_used)
                 allowed_actor_cycles += int(max_token_recovery_used)
+                allowed_actor_cycles += int(evaluator_execution_repair_used)
                 if cycle > allowed_actor_cycles:
                     break
                 self._log_workflow(
@@ -2528,6 +2570,7 @@ class MultiAgentWorkflowController:
                             None,
                         )
                         actor_prompt = self._task_executor_critic_guidance(
+                            plan,
                             task,
                             self._missing_acceptance_criteria(
                                 task, self.state.list_task_acceptance_results(task.task_uid)
@@ -2554,6 +2597,7 @@ class MultiAgentWorkflowController:
                         acceptance_recovery_active = True
                         acceptance_recovery_evidence = recovery_evidence
                         actor_prompt = self._task_executor_critic_guidance(
+                            plan,
                             task,
                             self._missing_acceptance_criteria(
                                 task, self.state.list_task_acceptance_results(task.task_uid)
@@ -2757,6 +2801,7 @@ class MultiAgentWorkflowController:
                         })
                         actor_prompt = (
                             self._output_truncation_recovery_prompt(
+                                plan,
                                 task,
                                 recovery_evidence,
                                 tool_outcomes,
@@ -2764,7 +2809,7 @@ class MultiAgentWorkflowController:
                                 allowed_recovery_tools,
                             )
                             if output_truncation_recovery_active
-                            else self._max_token_recovery_prompt(task, cycle_result, evidence_count)
+                            else self._max_token_recovery_prompt(plan, task, cycle_result, evidence_count)
                         )
                         self._log_workflow(
                             "task max-token bounded recovery task=%s cycle=%s evidence=%s",
@@ -2807,7 +2852,10 @@ class MultiAgentWorkflowController:
                         cycle,
                     )
                     recovery_result = self._executor_cycle_result(
-                        run_executor(cycle_result.recovery_guidance, recovery_policy)
+                        run_executor(
+                            self._with_executable_target_scope(plan, task, cycle_result.recovery_guidance),
+                            recovery_policy,
+                        )
                     )
                     tool_outcomes.extend(recovery_result.outcomes)
                     self._emit_model_claim_conflicts(task, recovery_result.text, recovery_result.outcomes)
@@ -2966,6 +3014,13 @@ class MultiAgentWorkflowController:
                                     cycle=cycle,
                                     cycle_total=maximum_actor_cycles,
                                 )
+                                if evaluator_execution_repair_used and decision.repair_kind != "execution":
+                                    self._emit_evaluator_execution_repair(
+                                        task,
+                                        evaluator_execution_repair_gaps,
+                                        attempt=1,
+                                        outcome="completed",
+                                    )
                                 if decision.finding_recommendation_required:
                                     persisted_candidate = any(
                                         outcome.tool_name == "store_finding" and outcome.success
@@ -3002,6 +3057,44 @@ class MultiAgentWorkflowController:
                                                 "Evaluator still requires an artifact-backed finding after the "
                                                 "bounded store_finding repair."
                                             ),
+                                        )
+                                elif decision.repair_kind == "execution":
+                                    if evaluator_execution_repair_used:
+                                        decision = WorkflowDecision(
+                                            status="partial_failure",
+                                            reason=(
+                                                "Evaluator-identified execution gaps remained after the single "
+                                                "bounded evidence-producing repair: "
+                                                + "; ".join(decision.unresolved_evidence_gaps)
+                                            ),
+                                        )
+                                        self._emit_evaluator_execution_repair(
+                                            task,
+                                            decision.unresolved_evidence_gaps,
+                                            attempt=1,
+                                            outcome="exhausted",
+                                        )
+                                    else:
+                                        evaluator_execution_repair_used = True
+                                        evaluator_execution_repair_gaps = decision.unresolved_evidence_gaps
+                                        self._record_efficiency_correction("evaluator_execution_repair")
+                                        acceptance_submitted = False
+                                        evaluator_instructions = decision.instructions.strip() or (
+                                            "Produce current-operation durable evidence for each listed gap."
+                                        )
+                                        continuation_criteria = list(decision.unresolved_evidence_gaps)
+                                        self._emit_evaluator_execution_repair(
+                                            task,
+                                            decision.unresolved_evidence_gaps,
+                                            attempt=1,
+                                            outcome="scheduled",
+                                        )
+                                        self._log_workflow(
+                                            "task evaluator requested evidence-producing repair task=%s cycle=%s "
+                                            "gaps=%s",
+                                            self._task_label(task),
+                                            cycle,
+                                            len(decision.unresolved_evidence_gaps),
                                         )
                                 elif (
                                     decision.status == "partial_failure"
@@ -3509,7 +3602,7 @@ class MultiAgentWorkflowController:
                 ) + min(
                     evaluator_corrections,
                     evaluator_correction_limit,
-                ) + int(missing_acceptance_recovery_used)
+                ) + int(missing_acceptance_recovery_used) + int(evaluator_execution_repair_used)
                 if cycle < allowed_actor_cycles and not finding_acceptance_recovery:
                     recovery_context = acceptance_recovery_evidence or self._acceptance_recovery_context(
                         task,
@@ -3517,17 +3610,19 @@ class MultiAgentWorkflowController:
                         tool_outcomes,
                         None,
                     )
-                    self._emit_acceptance_recovery_context(
-                        task,
-                        missing_criteria=continuation_criteria
-                        or self._missing_acceptance_criteria(
+                    if not (evaluator_execution_repair_used and evaluator_instructions):
+                        self._emit_acceptance_recovery_context(
                             task,
-                            self.state.list_task_acceptance_results(task.task_uid),
-                        ),
-                        evidence=recovery_context,
-                        required_tool=continuation_required_tool or "record_task_acceptance",
-                    )
+                            missing_criteria=continuation_criteria
+                            or self._missing_acceptance_criteria(
+                                task,
+                                self.state.list_task_acceptance_results(task.task_uid),
+                            ),
+                            evidence=recovery_context,
+                            required_tool=continuation_required_tool or "record_task_acceptance",
+                        )
                     actor_prompt = self._task_executor_critic_guidance(
+                        plan,
                         task,
                         continuation_criteria
                         or self._missing_acceptance_criteria(
@@ -3579,6 +3674,7 @@ class MultiAgentWorkflowController:
                             recovery_reason="missing_acceptance",
                         )
                         actor_prompt = self._missing_acceptance_recovery_prompt(
+                            plan,
                             task,
                             missing_criteria,
                             recovery_context,
@@ -3745,6 +3841,7 @@ class MultiAgentWorkflowController:
 
     def _task_executor_critic_guidance(
         self,
+        plan: OperationPlan,
         task: Task,
         missing_criteria: List[str],
         recovery_evidence: List[Dict[str, str]],
@@ -3791,6 +3888,7 @@ Start a fresh actor cycle {next_cycle} for the existing task. Do not replay prio
 completed commands. The controller intentionally did not retain earlier conversation messages.
 
 Assigned objective: {task.objective}
+{self._executable_target_scope_text(plan, task)}
 Frozen acceptance criteria: {frozen_criteria}
 
 Missing criterion: {criteria}
@@ -3802,8 +3900,9 @@ Durable evidence ledger:
 {loop_section}
 """
 
-    @staticmethod
     def _missing_acceptance_recovery_prompt(
+        self,
+        plan: OperationPlan,
         task: Task,
         missing_criteria: List[str],
         recovery_evidence: List[Dict[str, str]],
@@ -3828,6 +3927,7 @@ The normal task cycles ended without a record_task_acceptance call. Do not repea
 prior shell commands.
 
 Assigned objective: {task.objective}
+{self._executable_target_scope_text(plan, task)}
 Missing criterion: {criteria}
 Durable evidence ledger:
 {evidence_ledger}
@@ -4207,6 +4307,7 @@ Call record_task_acceptance exactly once with this finding_candidate payload. Us
 
     def _max_token_recovery_prompt(
         self,
+        plan: OperationPlan,
         task: Task,
         cycle_result: TaskExecutorCycleResult,
         evidence_count: int,
@@ -4218,6 +4319,7 @@ The preceding executor cycle exhausted its output budget before reaching task cl
 This is the only retry for that condition. Do not repeat the same reasoning or tool call.
 
 Assigned objective: {task.objective}
+{self._executable_target_scope_text(plan, task)}
 Previous classification: {cycle_result.max_tokens_classification or "unknown"}
 Durable artifacts produced in the interrupted cycle: {evidence_count}
 
@@ -4227,6 +4329,7 @@ record_task_acceptance call with valid current-task evidence. Otherwise record t
 
     def _output_truncation_recovery_prompt(
         self,
+        plan: OperationPlan,
         task: Task,
         recovery_evidence: List[Dict[str, str]],
         tool_outcomes: List[ToolOutcome],
@@ -4266,6 +4369,7 @@ Start fresh with only the controller-owned state below. Do not reconstruct prior
 previous tool call.
 
 Assigned objective: {task.objective}
+{self._executable_target_scope_text(plan, task)}
 Unresolved frozen acceptance criteria: {criteria_text}
 Durable evidence ledger:
 {evidence_text}
@@ -4819,6 +4923,84 @@ Return exactly one decision for each candidate.
             "violations": violations,
         })
 
+    def _validate_task_shell_commands(self, plan: OperationPlan, task: Task, commands: List[Any]) -> Optional[str]:
+        """Reject shell service literals that escape the active task's executable boundary."""
+
+        command_text = "\n".join(
+            str(command.get("command", "")) if isinstance(command, dict) else str(command)
+            for command in commands
+        )
+        violations = task_service_scope_validation_details(plan, task, command_text)
+        decision = "blocked" if violations else "allowed"
+        self._emit_task_command_scope_validation(plan, task, violations, decision)
+        if not violations:
+            return None
+        allowed_targets = self._task_executable_target_values(plan, task)
+        allowed_text = ", ".join(allowed_targets) or "none"
+        literal = str(violations[0].get("literal") or "service reference")
+        return (
+            "The shell command was not executed because its service target is outside the assigned task boundary: "
+            f"`{literal}`. Use only this exact assigned endpoint or its in-scope route: {allowed_text}. "
+            "Logical target IDs are controller identifiers, not hostnames. Submit one materially changed command."
+        )
+
+    def _emit_task_command_scope_validation(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        violations: List[Dict[str, Any]],
+        decision: str,
+    ) -> None:
+        """Emit auditable shell-command scope decisions without retaining command text."""
+
+        trace_attributes = {
+            "workflow.event.name": "task_command_scope_validation",
+            "workflow.task.uid": str(task.task_uid),
+            "workflow.phase.id": int(task.phase),
+            "workflow.scope_validation.stage": "shell_command",
+            "workflow.scope_validation.decision": decision,
+            "workflow.scope_validation.target_scope": str(task.target_scope),
+            "workflow.scope_validation.target_ids": list(task.target_ids),
+            "workflow.scope_validation.allowed_targets": self._task_executable_target_values(plan, task),
+            "workflow.scope_validation.violation_count": len(violations),
+            "workflow.scope_validation.violations": json.dumps(
+                [
+                    {
+                        "literal": item.get("literal"),
+                        "reason": item.get("reason"),
+                        "scheme": item.get("scheme"),
+                        "host": item.get("host"),
+                        "port": item.get("port"),
+                    }
+                    for item in violations
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("task_command_scope_validation", attributes=trace_attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit task command scope validation trace span", exc_info=True)
+        self._log_workflow(
+            "task command scope validation task=%s decision=%s violations=%s",
+            self._task_label(task),
+            decision,
+            json.dumps(trace_attributes["workflow.scope_validation.violations"], sort_keys=True),
+        )
+        self._emit_workflow_event({
+            "type": "task_command_scope_validation",
+            "task_uid": str(task.task_uid),
+            "phase": int(task.phase),
+            "decision": decision,
+            "target_scope": task.target_scope,
+            "target_ids": list(task.target_ids),
+            "allowed_targets": self._task_executable_target_values(plan, task),
+            "violations": violations,
+        })
+
     def _emit_finding_submission_repair(
         self,
         task: Task,
@@ -4909,6 +5091,44 @@ Return exactly one decision for each candidate.
                 "mode": recovery_mode,
                 "reason": recovery_reason,
                 "evidence": evidence,
+            }
+        )
+
+    def _emit_evaluator_execution_repair(
+        self,
+        task: Task,
+        evidence_gaps: tuple[str, ...],
+        *,
+        attempt: int,
+        outcome: str,
+    ) -> None:
+        """Emit one structured evaluator-directed evidence repair transition."""
+
+        attributes = {
+            "workflow.event.name": "evaluator_execution_repair",
+            "workflow.task.uid": str(task.task_uid),
+            "workflow.phase.id": int(task.phase),
+            "workflow.evaluator_repair.kind": "execution",
+            "workflow.evaluator_repair.gap_count": len(evidence_gaps),
+            "workflow.evaluator_repair.gaps": json.dumps(list(evidence_gaps)),
+            "workflow.evaluator_repair.attempt": attempt,
+            "workflow.evaluator_repair.outcome": outcome,
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("evaluator_execution_repair", attributes=attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit evaluator execution repair trace span", exc_info=True)
+        self._emit_workflow_event(
+            {
+                "type": "evaluator_execution_repair",
+                "task_uid": str(task.task_uid),
+                "phase": int(task.phase),
+                "repair_kind": "execution",
+                "evidence_gaps": list(evidence_gaps),
+                "attempt": attempt,
+                "outcome": outcome,
             }
         )
 
@@ -5490,6 +5710,9 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             },
         )
         decision = self._decision_from_data(data, allowed=("done", "partial_failure", "blocked"))
+        repair = self._evaluator_repair_from_data(data)
+        decision.repair_kind = repair["kind"]
+        decision.unresolved_evidence_gaps = tuple(repair["evidence_gaps"])
         recommendation = self._finding_recommendation_from_evaluator(data)
         if (
             recommendation is not None
@@ -5885,11 +6108,63 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         )
         return WorkflowDecision(status=effective_status, reason=reason)
 
-    @staticmethod
-    def _phase_budget_cap(plan: OperationPlan, phase: PlanPhase) -> float:
-        """Return the mandatory budget boundary for a plan phase."""
+    def _phase_budget_cap(self, plan: OperationPlan, phase: PlanPhase) -> float:
+        """Return the dependency-aware mandatory budget boundary for a plan phase."""
 
-        return max(1, phase.id) / max(1, plan.total_phases) * 100
+        return float(self._phase_budget_cap_context(plan, phase)["effective_cap"])
+
+    def _phase_budget_cap_context(self, plan: OperationPlan, phase: PlanPhase) -> Dict[str, Any]:
+        """Extend an immediate producer through its candidate-dependent consumer's normal boundary."""
+
+        denominator = max(1, plan.total_phases)
+        base_cap = max(1, phase.id) / denominator * 100
+        ordered = sorted(plan.phases, key=lambda item: item.id)
+        phase_index = next((index for index, item in enumerate(ordered) if item.id == phase.id), -1)
+        next_phase = ordered[phase_index + 1] if 0 <= phase_index < len(ordered) - 1 else None
+        unresolved_candidates = [
+            record
+            for record in self.state.list_finding_records()
+            if not str(record.get("resolution") or "").strip()
+        ]
+        extended = bool(
+            next_phase
+            and next_phase.status == "pending"
+            and _phase_semantically_requires_finding_candidates(next_phase)
+            and not _phase_semantically_requires_finding_candidates(phase)
+            and not unresolved_candidates
+        )
+        effective_cap = (
+            max(base_cap, max(1, next_phase.id) / denominator * 100)
+            if extended and next_phase is not None
+            else base_cap
+        )
+        return {
+            "base_cap": base_cap,
+            "effective_cap": effective_cap,
+            "extended": extended,
+            "dependent_phase_id": next_phase.id if extended and next_phase is not None else None,
+            "extension_reason": "future_phase_requires_finding_candidates" if extended else "",
+        }
+
+    @staticmethod
+    def _evaluator_repair_from_data(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the evaluator's protocol-neutral, controller-routable repair request."""
+
+        repair = data.get("repair")
+        if repair is None:
+            return {"kind": "none", "evidence_gaps": []}
+        if not isinstance(repair, dict):
+            raise WorkflowInvariantError("task evaluator repair must be an object")
+        kind = str(repair.get("kind") or "").strip().lower()
+        if kind not in {"none", "acceptance", "execution"}:
+            raise WorkflowInvariantError("task evaluator repair.kind must be none, acceptance, or execution")
+        gaps = repair.get("evidence_gaps", [])
+        if not isinstance(gaps, list) or any(not isinstance(gap, str) or not gap.strip() for gap in gaps):
+            raise WorkflowInvariantError("task evaluator repair.evidence_gaps must contain non-empty strings")
+        normalized_gaps = list(dict.fromkeys(gap.strip() for gap in gaps))
+        if kind == "execution" and not normalized_gaps:
+            raise WorkflowInvariantError("task evaluator execution repair requires evidence_gaps")
+        return {"kind": kind, "evidence_gaps": normalized_gaps}
 
     def _close_phase_at_hard_cap(
         self,
@@ -5901,6 +6176,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         """Stop phase work at its budget boundary, classify it, and advance."""
 
         active_tasks = self.state.list_tasks(phase=phase.id, status=["active"])
+        cap_context = self._phase_budget_cap_context(plan, phase)
         unresolved_candidate_count = len([
             record
             for record in self.state.list_finding_records()
@@ -5925,9 +6201,30 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             "phase": phase.id,
             "progress": progress,
             "cap": phase_cap,
+            "base_cap": cap_context["base_cap"],
+            "effective_cap": cap_context["effective_cap"],
+            "cap_extended": cap_context["extended"],
+            "dependent_phase_id": cap_context["dependent_phase_id"],
+            "extension_reason": cap_context["extension_reason"],
             "deferred_task_count": len(active_tasks),
             "unresolved_candidate_count": unresolved_candidate_count,
         })
+        cap_attributes = {
+            "workflow.event.name": "phase_hard_cap",
+            "workflow.phase.id": int(phase.id),
+            "workflow.phase_cap.progress": float(progress),
+            "workflow.phase_cap.base": float(cap_context["base_cap"]),
+            "workflow.phase_cap.effective": float(cap_context["effective_cap"]),
+            "workflow.phase_cap.extended": bool(cap_context["extended"]),
+            "workflow.phase_cap.dependent_phase_id": int(cap_context["dependent_phase_id"] or 0),
+            "workflow.phase_cap.extension_reason": str(cap_context["extension_reason"]),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("phase_hard_cap", attributes=cap_attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit phase hard cap trace span", exc_info=True)
 
         try:
             decision = self._evaluate_phase_with_policy(plan, phase, hard_cap=phase_cap)
@@ -6365,6 +6662,11 @@ immutable acceptance contract. Never emit `acceptance`, `phase`, `status`, `targ
 
 Acceptance basis rules:
 {procedure_rules if not snapshot_only else snapshot_rules}
+Route atomicity:
+- An ordinary HTTP procedure proposal must name exactly one endpoint route. Submit separate proposals for distinct
+  routes, even when they test the same vulnerability class. A multi-route proposal is allowed only for a genuine,
+  ordered multi-step workflow and must explicitly use `workflow` or `flow` wording in its title, objective, or
+  criterion; describe the sequence and workflow-level outcome.
 - If the required snapshot does not exist, create a bounded procedure-based prerequisite inventory task in this
   active phase instead of creating dependent assessment tasks.
 - Replacement lineage is allowed only for a `partial_failure` or `blocked` parent listed in
@@ -6375,6 +6677,8 @@ Acceptance basis rules:
 Correction rules:
 - Preserve every valid proposal intent from a rejected submission; one invalid proposal must not erase the others.
 - Split mixed procedure and snapshot proposals into separate valid objects in the corrected call.
+- Split an ordinary multi-route HTTP procedure into one route-scoped proposal per endpoint. Retain multiple routes in
+  one proposal only when it is a genuinely ordered workflow explicitly described with `workflow` or `flow` wording.
 - If a dependent snapshot producer is unavailable, create its bounded prerequisite and retain the dependent intent for
   the next creation pass instead of silently dropping it.
 
@@ -7428,8 +7732,11 @@ Allowed evidence references:
         cls._validate_evaluator_decision_payload(data, allowed=allowed)
         try:
             cls._finding_recommendation_from_evaluator(data)
+            repair = cls._evaluator_repair_from_data(data)
         except WorkflowInvariantError as error:
             raise ValueError(str(error)) from error
+        if repair["kind"] == "execution" and str(data.get("status") or "").strip() != "partial_failure":
+            raise ValueError("task evaluator execution repair requires partial_failure status")
 
     @staticmethod
     def _json_max_token_retry_prompt(original_prompt: str, classification: str) -> str:
@@ -8211,7 +8518,12 @@ result, but it cannot be represented as successful execution. Claims derived fro
 successful corrected invocation. Bare `curl -s` output with no captured response status is not proof of absence.
 
 Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"instructions": string,
+"repair": {{"kind":"none|acceptance|execution","evidence_gaps":[string]}},
 "finding_recommendation": {{"required": bool, "confidence": number, "reason": string}}}}.
+- Omit repair or use kind=none when no correction is appropriate. Use acceptance only for a closure/schema defect that
+  does not require new evidence. Use execution only when a material objective component lacks valid execution evidence,
+  such as malformed tool input, wrong operation or method, or an explicitly untested required component. For execution,
+  list each concrete unresolved evidence gap without prescribing a module-specific tool.
 - Omit finding_recommendation unless an artifact-backed acceptance recorded as observation likely represents a missing
   security finding. Set required=true only for direct, reproducible security-impacting behavior; hypotheses,
   informational facts, expected behavior, and assessed-negative results are not findings. Confidence must be 0.0-1.0.
@@ -8524,6 +8836,37 @@ unless a separate executable host or network target authorizes that scope."""
         return "\n".join(lines)
 
     @staticmethod
+    def _task_executable_target_values(plan: OperationPlan, task: Task) -> List[str]:
+        """Return concrete values allowed for execution, excluding logical target IDs."""
+
+        selected = (
+            [target for target in plan.targets if target.target_id in set(task.target_ids)]
+            if task.target_scope == "subset"
+            else list(plan.targets)
+        )
+        return [str(target.value).strip() for target in selected if str(target.value).strip()]
+
+    def _executable_target_scope_text(self, plan: OperationPlan, task: Task) -> str:
+        """Render concrete target values for fresh-context executor recovery prompts."""
+
+        targets = self._task_executable_target_values(plan, task)
+        if not targets:
+            return "## Executable Target Boundary\nNo executable target is assigned; do not infer or invent one."
+        return (
+            "## Executable Target Boundary (Controller-owned)\n"
+            "Use only these concrete target values and preserve an explicit URL target's scheme, host, and port:\n"
+            + "\n".join(f"- {target}" for target in targets)
+            + "\nLogical target IDs are controller identifiers only; never use them as hostnames, URLs, or shell targets."
+        )
+
+    def _with_executable_target_scope(self, plan: OperationPlan, task: Task, prompt: str) -> str:
+        """Attach resolved target context to a controller-generated recovery instruction."""
+
+        if not self._task_executable_target_values(plan, task):
+            return str(prompt)
+        return f"{str(prompt).rstrip()}\n\n{self._executable_target_scope_text(plan, task)}"
+
+    @staticmethod
     def _url_service_scope_line(target: OperationTarget) -> str:
         parsed = urlparse(target.value)
         if not parsed.scheme or not parsed.hostname or parsed.port is None:
@@ -8595,9 +8938,11 @@ unless a separate executable host or network target authorizes that scope."""
 
     @staticmethod
     def _memory_prompt_guidance() -> str:
-        return """Semantic memories are supporting evidence only. Controller-owned task history, acceptance ledgers,
-phase status, and completion state are authoritative. Do not infer that the active task is complete merely because a
-memory describes related evidence or prior work."""
+        return """Semantic memories are supporting context only. Controller-owned task history, acceptance ledgers,
+phase status, and completion state are authoritative. Memories marked prior_operation_advisory describe a prior run:
+use them only to choose what to investigate. They cannot satisfy current-task acceptance, prove a finding, establish
+task completion, or override current-operation evidence. Re-establish any useful prior claim with current-operation
+tools and durable evidence before relying on it."""
 
     def _memory_selection_summary(self) -> str:
         memories = self._prompt_memory_records()
@@ -8667,7 +9012,7 @@ memory describes related evidence or prior work."""
         return selected
 
     def _render_memories(self, memories: List[Dict[str, Any]]) -> str:
-        toon = f"memories[{len(memories)}]{{id,category,source,memory}}:\n"
+        toon = f"memories[{len(memories)}]{{id,category,source,origin_operation,evidence_status,memory}}:\n"
         if not memories:
             return toon.rstrip("\n")
         for memory in memories:
@@ -8675,6 +9020,14 @@ memory describes related evidence or prior work."""
             metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
             category = str(metadata.get("category") or "general")
             source = str(metadata.get("source") or "")
+            origin_operation = str(
+                metadata.get("operation_id") or memory.get("operation_id") or "unknown"
+            ).strip()
+            evidence_status = (
+                "current_operation_evidence"
+                if origin_operation == str(self.runtime.operation_id)
+                else "prior_operation_advisory"
+            )
             memory_text = self._memory_text(memory)[:1000]
             toon += (
                 "  "
@@ -8683,6 +9036,10 @@ memory describes related evidence or prior work."""
                 + sanitize_toon_value(category)
                 + ","
                 + sanitize_toon_value(source)
+                + ","
+                + sanitize_toon_value(origin_operation)
+                + ","
+                + sanitize_toon_value(evidence_status)
                 + ","
                 + sanitize_toon_value(memory_text)
                 + "\n"

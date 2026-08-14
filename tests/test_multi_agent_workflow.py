@@ -2991,9 +2991,9 @@ def test_task_executor_appends_selected_memories_from_prompt_spec():
     assert requested_memory_ids == ["m2", "m1"]
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
     assert "## Selected Memory Context\n" in captured["prompt"]
-    assert "memories[2]{id,category,source,memory}:" in captured["prompt"]
-    assert "m2,general,,memory for m2" in captured["prompt"]
-    assert "m1,general,,memory for m1" in captured["prompt"]
+    assert "memories[2]{id,category,source,origin_operation,evidence_status,memory}:" in captured["prompt"]
+    assert "m2,general,,unknown,prior_operation_advisory,memory for m2" in captured["prompt"]
+    assert "m1,general,,unknown,prior_operation_advisory,memory for m1" in captured["prompt"]
 
 
 def test_task_executor_continues_when_selected_memory_lookup_fails():
@@ -3409,7 +3409,7 @@ def test_task_evaluator_does_not_invent_memory_requirement_for_gathered_informat
         worker_context="Found /login 200 and /admin 403 but did not store observations.",
     )
 
-    assert "memories[0]{id,category,source,memory}:" in prompt
+    assert "memories[0]{id,category,source,origin_operation,evidence_status,memory}:" in prompt
     assert "did not store it in memories" not in prompt
     assert "Automatically published acceptance memory supports later tasks" in prompt
 
@@ -3514,6 +3514,7 @@ def test_task_executor_uses_fresh_sessions_for_compact_continuations():
         acceptance=_acceptance("criterion-1"),
     )
     prompt = controller._task_executor_critic_guidance(
+        _plan(),
         task,
         ["criterion-1"],
         [{"reference": "artifact:artifacts/result.txt", "source": "task_evidence"}],
@@ -4526,6 +4527,7 @@ def test_output_truncation_recovery_prompt_limits_closure_to_required_tool():
     )
 
     prompt = controller._output_truncation_recovery_prompt(
+        _plan(),
         task,
         [{"reference": "memory:observation_current", "source": "tool_outcome"}],
         [],
@@ -6512,6 +6514,19 @@ def test_controller_inventory_filter_retains_unusual_in_scope_routes_and_removes
                         "kind": "endpoint",
                         "value": "http://other.test:4280/admin",
                     },
+                    {
+                        "id": "wrong-host-parameter",
+                        "target_id": "target-1",
+                        "kind": "parameter",
+                        "value": "redirect",
+                        "attributes": {"endpoint_id": "wrong-host"},
+                    },
+                    {
+                        "id": "unlinked-parameter",
+                        "target_id": "target-1",
+                        "kind": "parameter",
+                        "value": "unusual_path",
+                    },
                 ],
                 "unassessed_gaps": [],
             }
@@ -6544,10 +6559,13 @@ def test_controller_inventory_filter_retains_unusual_in_scope_routes_and_removes
         plan, "artifact:artifacts/inventory_manifest.json"
     )
 
-    assert [item["id"] for item in manifest["items"]] == ["in-scope"]
-    assert "outside executable target boundaries" in manifest["unassessed_gaps"][-1]
+    assert [item["id"] for item in manifest["items"]] == ["in-scope", "unlinked-parameter"]
+    assert "invalid or out-of-scope" in manifest["unassessed_gaps"][-1]
     assert events[-1]["type"] == "inventory_manifest_scope_filter"
-    assert events[-1]["rejection_reasons"] == {"host_mismatch": 1}
+    assert events[-1]["rejection_reasons"] == {
+        "host_mismatch": 1,
+        "source_endpoint_outside_target": 1,
+    }
 
 
 def test_controller_inventory_filter_retains_parameter_for_its_in_scope_target():
@@ -7085,6 +7103,9 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
     assert "without violating any plan constraint" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
     assert "Stay within the authorized target scope" in prompt
+    assert "ordinary HTTP procedure proposal must name exactly one endpoint route" in prompt
+    assert "ordered multi-step workflow" in prompt
+    assert "Split an ordinary multi-route HTTP procedure into one route-scoped proposal" in prompt
 
 
 def test_task_creator_prompt_exposes_replacement_parent_criteria():
@@ -7510,6 +7531,92 @@ def test_task_target_scope_text_preserves_explicit_url_service_boundaries():
     assert "port=4280" in scope_text
     assert "Do not convert it into a host-only target" in scope_text
     assert "broad host or port enumeration violates scope" in scope_text
+
+
+def test_task_shell_scope_guard_rejects_logical_target_id_and_exposes_concrete_endpoint():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="http://192.0.2.10:3001")],
+    )
+    task = Task(
+        task_uid="active",
+        title="Assess service",
+        objective="Test the assigned service",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+
+    error = controller._validate_task_shell_commands(plan, task, ["curl -sS -i https://target-1/api/spawn"])
+
+    assert error is not None
+    assert "not executed" in error
+    assert "http://192.0.2.10:3001" in error
+    assert "Logical target IDs" in error
+    event = next(
+        event for event in controller.runtime.callback_handler.events if event["type"] == "task_command_scope_validation"
+    )
+    assert event["decision"] == "blocked"
+    assert event["violations"][0]["literal"] == "https://target-1/api/spawn"
+
+
+def test_task_shell_scope_guard_allows_assigned_endpoint_and_recovery_prompts_keep_it():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="http://192.0.2.10:3001")],
+    )
+    task = Task(
+        task_uid="active",
+        title="Assess service",
+        objective="Test the assigned service",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+
+    assert controller._validate_task_shell_commands(
+        plan,
+        task,
+        ["curl -sS -i http://192.0.2.10:3001/api/spawn"],
+    ) is None
+    prompts = [
+        controller._output_truncation_recovery_prompt(plan, task, [], [], "evidence", ["shell"]),
+        controller._max_token_recovery_prompt(
+            plan,
+            task,
+            workflow_mod.TaskExecutorCycleResult(
+                text="",
+                outcomes=[],
+                max_tokens_classification="exploration",
+            ),
+            0,
+        ),
+        controller._task_executor_critic_guidance(plan, task, ["criterion-1"], [], next_cycle=2),
+        controller._with_executable_target_scope(plan, task, "Correct the failed command."),
+    ]
+
+    for prompt in prompts:
+        assert "http://192.0.2.10:3001" in prompt
+        assert "never use them as hostnames" in prompt
+        assert "target-1 [network]" not in prompt
 
 
 def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():
@@ -9223,17 +9330,19 @@ def test_memory_summary_returns_compact_memories_and_handles_errors():
     )
 
     memories = controller._memory_summary()
-    assert memories.startswith("memories[2]{id,category,source,memory}:\n")
+    assert memories.startswith("memories[2]{id,category,source,origin_operation,evidence_status,memory}:\n")
     assert "  m1,finding,," in memories
-    assert "\n  m2,general,,short\n" in memories
+    assert "\n  m2,general,,unknown,prior_operation_advisory,short\n" in memories
 
     first_line = memories.splitlines()[1]
-    first_parts = first_line.strip().split(",", maxsplit=3)
+    first_parts = first_line.strip().split(",", maxsplit=5)
     assert first_parts[0] == "m1"
-    assert len(first_parts[3]) == 1000
+    assert len(first_parts[5]) == 1000
 
     state.client = SimpleNamespace(list_memories=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("fail")))
-    assert controller._memory_summary() == "memories[0]{id,category,source,memory}:"
+    assert controller._memory_summary() == (
+        "memories[0]{id,category,source,origin_operation,evidence_status,memory}:"
+    )
 
 
 def test_prompt_memory_filter_excludes_bookkeeping_and_retains_evidence():
@@ -9391,3 +9500,195 @@ def test_operation_health_provider_freezes_last_assessment_health_during_reporti
     assert assessment_health["coverage_feasibility"]["penalty_applied"] is True
     assert reporting_health == assessment_health
     assert controller._last_assessment_health == assessment_health
+
+
+def test_shared_prompt_memory_marks_prior_operation_as_advisory():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+
+    rendered = controller._render_memories([
+        {
+            "id": "current",
+            "memory": "current proof",
+            "operation_id": "OP_TEST",
+            "metadata": {"category": "observation", "operation_id": "OP_TEST"},
+        },
+        {
+            "id": "prior",
+            "memory": "prior claim",
+            "operation_id": "OP_PRIOR",
+            "metadata": {"category": "observation", "operation_id": "OP_PRIOR"},
+        },
+    ])
+
+    assert "origin_operation,evidence_status" in rendered
+    assert "OP_TEST,current_operation_evidence" in rendered
+    assert "OP_PRIOR,prior_operation_advisory" in rendered
+    assert "cannot satisfy current-task acceptance" in controller._memory_prompt_guidance()
+
+
+@pytest.mark.parametrize(
+    ("repair", "error"),
+    [
+        ({"kind": "execution", "evidence_gaps": []}, "requires evidence_gaps"),
+        ({"kind": "invented", "evidence_gaps": ["gap"]}, "none, acceptance, or execution"),
+        ({"kind": "execution", "evidence_gaps": [""]}, "non-empty strings"),
+    ],
+)
+def test_task_evaluator_rejects_invalid_repair_contract(repair, error):
+    with pytest.raises(workflow_mod.WorkflowInvariantError, match=error):
+        MultiAgentWorkflowController._evaluator_repair_from_data({"repair": repair})
+
+
+@pytest.mark.parametrize(
+    ("repair_resolves", "expected_status", "expected_outcomes"),
+    [
+        (True, "done", ["scheduled", "completed"]),
+        (False, "partial_failure", ["scheduled", "exhausted"]),
+    ],
+)
+def test_evaluator_execution_defect_gets_one_evidence_producing_actor_cycle(
+    repair_resolves,
+    expected_status,
+    expected_outcomes,
+):
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1})
+    task = Task(task_uid="active", title="Protocol test", objective="Test all required operations", phase=1,
+                status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id=task.acceptance.criteria[0].id,
+        status="satisfied",
+        disposition="assessed_negative",
+        summary="One operation tested",
+        evidence_refs=("artifact:artifacts/first-operation.txt",),
+    )]
+    actor_prompts = []
+    evaluator_calls = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        nonlocal evaluator_calls
+        if role == "task_prompt_builder":
+            return '{"prompt":"run protocol test","tools":[]}'
+        if role == "task_evaluator":
+            evaluator_calls += 1
+            if evaluator_calls == 1:
+                return json.dumps({
+                    "status": "partial_failure",
+                    "reason": "A required operation was not executed.",
+                    "instructions": "Execute the missing operation and capture durable evidence.",
+                    "repair": {"kind": "execution", "evidence_gaps": ["required operation B"]},
+                })
+            if repair_resolves:
+                return json.dumps({"status": "done", "reason": "Both operations now have durable evidence."})
+            return json.dumps({
+                "status": "partial_failure",
+                "reason": "Operation B evidence is still invalid.",
+                "instructions": "Capture a valid operation B result.",
+                "repair": {"kind": "execution", "evidence_gaps": ["required operation B"]},
+            })
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_prompts.append(prompt)
+        if len(actor_prompts) == 1:
+            return workflow_mod.TaskExecutorCycleResult(text="first operation already accepted", outcomes=[])
+        return workflow_mod.TaskExecutorCycleResult(
+            text="captured operation B",
+            outcomes=[ToolOutcome(
+                sequence=1,
+                tool_use_id="operation-b",
+                tool_name="shell",
+                success=True,
+                correctable=False,
+                input_summary="run operation B",
+                output_summary="artifact:artifacts/operation-b.txt",
+                artifact_refs=("artifact:artifacts/operation-b.txt",),
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(actor_prompts) == 2
+    assert "required operation B" in actor_prompts[1]
+    assert "Required tool call: record_task_acceptance" not in actor_prompts[1]
+    repair_events = [event for event in runtime.callback_handler.events
+                     if event["type"] == "evaluator_execution_repair"]
+    assert [event["outcome"] for event in repair_events] == expected_outcomes
+    assert state.tasks[0].status == expected_status
+
+
+def test_phase_cap_extends_immediate_producer_for_candidate_dependent_phase():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=4,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Discovery", status="active"),
+            PlanPhase(id=3, title="Validation", status="pending", requires_finding_candidates=True),
+            PlanPhase(id=4, title="Report", status="pending"),
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+    )
+
+    context = controller._phase_budget_cap_context(plan, plan.phases[1])
+
+    assert context == {
+        "base_cap": 50.0,
+        "effective_cap": 75.0,
+        "extended": True,
+        "dependent_phase_id": 3,
+        "extension_reason": "future_phase_requires_finding_candidates",
+    }
+
+
+def test_phase_cap_does_not_extend_when_candidate_already_exists():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Discovery", status="active"),
+            PlanPhase(id=2, title="Validation", status="pending", requires_finding_candidates=True),
+        ],
+    )
+    state = FakeState(plan)
+    state.finding_records.append({"finding_uid": "finding-1", "resolution": None})
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    assert controller._phase_budget_cap(plan, plan.phases[0]) == 50.0
+
+
+def test_controller_inventory_filter_rejects_dependents_of_out_of_scope_endpoint():
+    endpoint = {"id": "outside", "target_id": "target-1", "kind": "endpoint",
+                "value": "https://outside.test/path"}
+    top_level = {"id": "parameter-1", "target_id": "target-1", "kind": "parameter",
+                 "value": "q", "endpoint_id": "outside"}
+    nested = {"id": "parameter-2", "target_id": "target-1", "kind": "parameter",
+              "value": "page", "attributes": {"endpoint_id": "outside"}}
+    unlinked = {"id": "parameter-3", "target_id": "target-1", "kind": "parameter", "value": "safe"}
+    rejected_endpoint_ids = {endpoint["id"]}
+
+    assert MultiAgentWorkflowController._inventory_source_endpoint_id(top_level) in rejected_endpoint_ids
+    assert MultiAgentWorkflowController._inventory_source_endpoint_id(nested) in rejected_endpoint_ids
+    assert MultiAgentWorkflowController._inventory_source_endpoint_id(unlinked) == ""
