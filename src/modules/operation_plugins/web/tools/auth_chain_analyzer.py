@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import urllib3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -29,12 +29,13 @@ def _coerce_str(arg: bytes | str | None) -> str:
     return str(arg)
 
 
-@tool
-def auth_chain_analyzer(
+def _auth_chain_analyzer_impl(
         target_url: str,
         auth_type: str = "auto",
-        output_file: Optional[str] = None,
-        inventory_manifest: Optional[str] = None,
+        *,
+        output_file: str,
+        inventory_manifest: str,
+        validate_output_paths: bool,
 ) -> str:
     """
     Map auth flows + identify/validate auth bypass surfaces for a target. Supported: JWT, OAuth, SAML, cookies, sessions.
@@ -280,7 +281,11 @@ def auth_chain_analyzer(
                     workflows=workflows,
                     technologies=technologies,
                 )
-                report["inventory_manifest"] = write_inventory_manifest(inventory_manifest, manifest)
+                report["inventory_manifest"] = write_inventory_manifest(
+                    inventory_manifest,
+                    manifest,
+                    validate_path=validate_output_paths,
+                )
             except Exception as manifest_error:
                 report["inventory_manifest"] = {
                     "path": os.path.abspath(inventory_manifest),
@@ -312,6 +317,24 @@ def auth_chain_analyzer(
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(output)
     return output
+
+
+@tool
+def auth_chain_analyzer(
+        target_url: str,
+        auth_type: str = "auto",
+        *,
+        output_file: str,
+        inventory_manifest: str,
+) -> str:
+    """Analyze authentication flows and write its result and inventory manifest."""
+    return _auth_chain_analyzer_impl(
+        target_url,
+        auth_type=auth_type,
+        output_file=output_file,
+        inventory_manifest=inventory_manifest,
+        validate_output_paths=True,
+    )
 
 
 def _append_unique(list: List, item: Any):
@@ -1885,21 +1908,22 @@ def main() -> int:
         choices=["jwt", "oauth", "saml", "session", "auto"],
         help="Authentication type to focus on (default: auto)",
     )
-    parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
+    parser.add_argument("--output-file", "-o", default="/dev/null", help="Path to write results to disk")
     parser.add_argument(
         "--inventory-manifest",
         "--inventory_manifest",
-        default=None,
+        default="/dev/null",
         help="Path to write an additional validated inventory manifest",
     )
 
     args = parser.parse_args()
     print(
-        auth_chain_analyzer(
+        _auth_chain_analyzer_impl(
             args.target_url,
             auth_type=args.auth_type,
             output_file=args.output_file,
             inventory_manifest=args.inventory_manifest,
+            validate_output_paths=False,
         )
     )
     return 0

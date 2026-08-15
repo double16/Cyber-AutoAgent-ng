@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+from modules.handlers.utils import get_tool_spec
 import modules.operation_plugins.web.tools.specialized_recon_orchestrator as sro
 import modules.tools.recon_inventory_manifest as manifest_tool
 
@@ -34,6 +35,40 @@ class _Resp:
 def _as_json(result_str: str) -> Dict[str, Any]:
     assert isinstance(result_str, str)
     return json.loads(result_str)
+
+
+def _run(*args, **kwargs):
+    kwargs.setdefault("output_file", "/dev/null")
+    kwargs.setdefault("inventory_manifest", "/dev/null")
+    return sro.specialized_recon_orchestrator(*args, **kwargs)
+
+
+def test_orchestrator_tool_schema_requires_output_paths():
+    schema = get_tool_spec(sro.specialized_recon_orchestrator)["inputSchema"]["json"]
+
+    assert {"output_file", "inventory_manifest"} <= set(schema["required"])
+
+
+def test_orchestrator_requires_output_paths():
+    with pytest.raises(TypeError):
+        sro.specialized_recon_orchestrator("example.com", recon_type="fingerprint")
+
+
+def test_orchestrator_cli_defaults_to_unvalidated_dev_null_paths(monkeypatch, capsys):
+    captured = {}
+
+    def fake_impl(*args, **kwargs):
+        captured.update(kwargs)
+        return "{}"
+
+    monkeypatch.setattr(sro, "_specialized_recon_orchestrator_impl", fake_impl)
+    monkeypatch.setattr("sys.argv", ["specialized_recon_orchestrator", "example.com"])
+
+    assert sro.main() == 0
+    assert captured["output_file"] == "/dev/null"
+    assert captured["inventory_manifest"] == "/dev/null"
+    assert captured["validate_output_paths"] is False
+    assert capsys.readouterr().out == "{}\n"
 
 
 @pytest.fixture
@@ -102,16 +137,16 @@ def test_target_normalization_domain_and_url_inputs(fake_subprocess, fake_reques
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    out1 = _as_json(sro.specialized_recon_orchestrator("Example.com", recon_type="fingerprint"))
+    out1 = _as_json(_run("Example.com", recon_type="fingerprint"))
     assert out1["target"] == "example.com"
 
-    out2 = _as_json(sro.specialized_recon_orchestrator("https://Example.com/some/path", recon_type="fingerprint"))
+    out2 = _as_json(_run("https://Example.com/some/path", recon_type="fingerprint"))
     assert out2["target"] == "example.com"
 
-    out3 = _as_json(sro.specialized_recon_orchestrator("Example.com/another/path", recon_type="fingerprint"))
+    out3 = _as_json(_run("Example.com/another/path", recon_type="fingerprint"))
     assert out3["target"] == "example.com"
 
-    out4 = _as_json(sro.specialized_recon_orchestrator("https://Example.com:8443/some/path", recon_type="fingerprint"))
+    out4 = _as_json(_run("https://Example.com:8443/some/path", recon_type="fingerprint"))
     assert out4["target"] == "example.com:8443"
 
 
@@ -145,7 +180,7 @@ def test_orchestrator_uses_controller_bound_target_before_recon(monkeypatch):
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    output = _as_json(sro.specialized_recon_orchestrator("http://host.docker.internal:4220", "fingerprint"))
+    output = _as_json(_run("http://host.docker.internal:4220", "fingerprint"))
 
     assert output["target"] == "host.docker.internal:4280"
     assert captured["hosts"] == ["host.docker.internal:4280"]
@@ -184,22 +219,28 @@ def test_orchestrator_inventory_manifest_is_additive(monkeypatch, tmp_path):
     )
     captured = {}
 
-    def write_manifest(path, manifest):
+    def write_manifest(path, manifest, **kwargs):
         captured.update({"path": path, "manifest": manifest})
         return {"path": path, "validation_status": "valid", "item_count": len(manifest["items"])}
 
     monkeypatch.setattr(manifest_tool, "write_inventory_manifest", write_manifest)
 
-    regular = _as_json(sro.specialized_recon_orchestrator("https://target.test", recon_type="comprehensive"))
+    regular = _as_json(
+        _run(
+            "https://target.test",
+            recon_type="comprehensive",
+            inventory_manifest=str(tmp_path / "regular-inventory.json"),
+        )
+    )
     additional = _as_json(
-        sro.specialized_recon_orchestrator(
+        _run(
             "https://target.test",
             recon_type="comprehensive",
             inventory_manifest=str(tmp_path / "inventory.json"),
         )
     )
 
-    assert "inventory_manifest" not in regular
+    assert regular["inventory_manifest"]["validation_status"] == "valid"
     assert additional["inventory_manifest"]["validation_status"] == "valid"
     assert captured["path"] == str(tmp_path / "inventory.json")
     assert {item["kind"] for item in captured["manifest"]["items"]} >= {
@@ -220,10 +261,14 @@ def test_orchestrator_reports_manifest_failure_without_replacing_results(monkeyp
     monkeypatch.setattr(sro, "_analyze_attack_surface", lambda results: results.get("intelligence", {}))
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
-    monkeypatch.setattr(manifest_tool, "write_inventory_manifest", lambda path, manifest: (_ for _ in ()).throw(ValueError("empty")))
+    monkeypatch.setattr(
+        manifest_tool,
+        "write_inventory_manifest",
+        lambda path, manifest, **kwargs: (_ for _ in ()).throw(ValueError("empty")),
+    )
 
     result = _as_json(
-        sro.specialized_recon_orchestrator(
+        _run(
             "https://target.test",
             recon_type="fingerprint",
             inventory_manifest=str(tmp_path / "inventory.json"),
@@ -287,7 +332,7 @@ def test_orchestrator_skips_public_osint_for_non_public_hostname(monkeypatch):
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    out = _as_json(sro.specialized_recon_orchestrator("https://portal.internal:8443/login", "comprehensive"))
+    out = _as_json(_run("https://portal.internal:8443/login", "comprehensive"))
 
     assert out["target"] == "portal.internal:8443"
     assert captured_hosts["hosts"] == ["portal.internal:8443"]
@@ -323,7 +368,7 @@ def test_orchestrator_preserves_port_for_connection_tools_after_subdomain_enum(m
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    out = _as_json(sro.specialized_recon_orchestrator("https://Example.com:8443/some/path", "comprehensive"))
+    out = _as_json(_run("https://Example.com:8443/some/path", "comprehensive"))
 
     assert out["target"] == "example.com:8443"
     assert captured["subdomain_target"] == "example.com:8443"
@@ -533,7 +578,7 @@ def test_orchestrator_end_to_end_happy_path_with_mocked_tools(fake_subprocess, f
     # crt.sh request (called even if tools succeed)
     fake_requests["get_handler"] = lambda url, kwargs: _Resp(ok=True, text="[]", json_obj=[])
 
-    out = _as_json(sro.specialized_recon_orchestrator("example.com", recon_type="comprehensive"))
+    out = _as_json(_run("example.com", recon_type="comprehensive"))
 
     assert out["target"] == "example.com"
     assert out["recon_type"] == "comprehensive"
@@ -933,7 +978,7 @@ def test_orchestrator_records_phase_errors_and_continues(monkeypatch):
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    out = _as_json(sro.specialized_recon_orchestrator("example.com", recon_type="comprehensive"))
+    out = _as_json(_run("example.com", recon_type="comprehensive"))
     phases = {e.get("phase") for e in out.get("errors", [])}
     assert "subdomain_enum" in phases
     assert "live_hosts" in phases
@@ -950,7 +995,7 @@ def test_meta_coverage_updates_for_web_recon(monkeypatch):
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    out = _as_json(sro.specialized_recon_orchestrator("example.com", recon_type="fingerprint"))
+    out = _as_json(_run("example.com", recon_type="fingerprint"))
     cov = out["meta"]["coverage"]
     assert cov["live_hosts_discovered"] == 1
     assert cov["subdomains_discovered"] == 0
@@ -970,7 +1015,7 @@ def test_meta_coverage_updates_for_comprehensive(monkeypatch):
     monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
     monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
 
-    out = _as_json(sro.specialized_recon_orchestrator("example.com", recon_type="comprehensive"))
+    out = _as_json(_run("example.com", recon_type="comprehensive"))
     cov = out["meta"]["coverage"]
     assert cov["subdomains_discovered"] == 2
     assert cov["live_hosts_discovered"] == 1
