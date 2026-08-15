@@ -2298,6 +2298,30 @@ class MultiAgentWorkflowController:
             recovery_next_action="Submit the required closure using current-task durable evidence.",
             recovery_allowed_tool_names=required_tools,
         )
+        max_token_synthesis_policy = AgentRunPolicy(
+            min_tool_calls=1 if required_tools else 0,
+            required_tool_names=required_tools,
+            terminal_after_required_tools=bool(required_tools),
+            require_successful_required_tools=bool(required_tools),
+            allow_text_final_after_tools=not bool(required_tools),
+            actionless_mode="required_tool" if required_tools else "task_progress",
+            max_actionless_calls=1,
+            max_agent_calls=2,
+            max_model_turns=4,
+            max_tool_calls=2,
+            terminal_reason="task_max_token_synthesis_done",
+            terminal_message="Task max-token synthesis recovery completed",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Complete the required terminal action using retained current-task evidence."
+            ),
+            recovery_allowed_tool_names={
+                *required_tools,
+                "read_artifact",
+                "store_observation",
+                "store_knowledge",
+            },
+        )
         finding_store_policy = AgentRunPolicy(
             min_tool_calls=1,
             required_tool_names={"store_finding"},
@@ -2369,6 +2393,30 @@ class MultiAgentWorkflowController:
                 "Use the controller-supplied durable evidence. Read at most one listed artifact if needed, then "
                 "call record_task_acceptance with a changed submission."
             ),
+        )
+        evaluator_synthesis_recovery_policy = AgentRunPolicy(
+            min_tool_calls=0,
+            terminal_after_required_tools=False,
+            allow_text_final_after_tools=True,
+            actionless_mode="task_progress",
+            max_actionless_calls=1,
+            max_agent_calls=2,
+            max_model_turns=4,
+            max_tool_calls=2,
+            terminal_reason="task_evaluator_synthesis_repair_done",
+            terminal_message="Evaluator-requested terminal synthesis repair completed",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Use retained evidence to produce the missing task-specific terminal content. Store an "
+                "observation or knowledge record only if required, then optionally retry acceptance. "
+                "Do not perform new discovery or testing."
+            ),
+            recovery_allowed_tool_names={
+                "read_artifact",
+                "store_observation",
+                "store_knowledge",
+                "record_task_acceptance",
+            },
         )
         missing_acceptance_recovery_policy = AgentRunPolicy(
             min_tool_calls=1,
@@ -2503,11 +2551,14 @@ class MultiAgentWorkflowController:
         max_token_recovery_used = False
         output_truncation_recovery_active = False
         output_truncation_recovery_mode = ""
+        max_token_synthesis_recovery_active = False
         acceptance_correction_limit = self._task_acceptance_correction_count()
         endpoint_evidence_correction_limit = self._task_endpoint_evidence_correction_count()
         evaluator_correction_limit = self._task_evaluator_correction_count()
         evaluator_execution_repair_used = False
         evaluator_execution_repair_gaps: tuple[str, ...] = ()
+        evaluator_synthesis_repair_active = False
+        evaluator_synthesis_repair_used = False
         decision = WorkflowDecision(status="partial_failure", reason="Task executor did not run")
 
         def repeated_correctable_failure(outcomes: List[ToolOutcome]) -> Optional[ToolOutcome]:
@@ -2584,6 +2635,7 @@ class MultiAgentWorkflowController:
                 allowed_actor_cycles += int(output_prerequisite_recovery_used)
                 allowed_actor_cycles += int(max_token_recovery_used)
                 allowed_actor_cycles += int(evaluator_execution_repair_used)
+                allowed_actor_cycles += int(evaluator_synthesis_repair_used)
                 if cycle > allowed_actor_cycles:
                     break
                 self._log_workflow(
@@ -2597,6 +2649,8 @@ class MultiAgentWorkflowController:
                     if output_truncation_recovery_active and output_truncation_recovery_mode == "closure"
                     else output_truncation_evidence_policy
                     if output_truncation_recovery_active
+                    else max_token_synthesis_policy
+                    if max_token_synthesis_recovery_active
                     else manifest_prerequisite_policy
                     if manifest_prerequisite_recovery_active
                     else evidence_prerequisite_policy
@@ -2605,6 +2659,8 @@ class MultiAgentWorkflowController:
                     if execution_prerequisite_recovery_active
                     else output_prerequisite_policy
                     if output_prerequisite_recovery_active
+                    else evaluator_synthesis_recovery_policy
+                    if evaluator_synthesis_repair_active
                     else finding_store_policy
                     if finding_observation_store_recovery
                     else finding_acceptance_policy
@@ -2654,15 +2710,36 @@ class MultiAgentWorkflowController:
                         if get_tool_name(tool) != "record_task_acceptance"
                         and get_tool_name(tool) not in _NON_EVIDENCE_RECOVERY_TOOLS
                     ]
+                if max_token_synthesis_recovery_active:
+                    closure_tools = [
+                        tool
+                        for tool in tools
+                        if get_tool_name(tool) in max_token_synthesis_policy.recovery_allowed_tool_names
+                    ]
+                if evaluator_synthesis_repair_active:
+                    closure_tools = [
+                        tool
+                        for tool in tools
+                        if get_tool_name(tool)
+                        in evaluator_synthesis_recovery_policy.recovery_allowed_tool_names
+                    ]
                 prior_tool_inputs = {
                     (outcome.tool_name, outcome.input_summary)
                     for outcome in tool_outcomes
                     if outcome.success
                 }
                 durable_references_before_cycle = self._durable_references_from_outcomes(tool_outcomes)
+                synthesis_repair_cycle = (
+                    evaluator_synthesis_repair_active or max_token_synthesis_recovery_active
+                )
+                max_token_synthesis_cycle = max_token_synthesis_recovery_active
                 worker_result = run_executor(actor_prompt, current_policy, closure_tools)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
+                if synthesis_repair_cycle:
+                    evaluator_synthesis_repair_active = False
+                if max_token_synthesis_cycle:
+                    max_token_synthesis_recovery_active = False
                 task = self._retain_task_artifact_evidence(task, tool_outcomes)
                 self._emit_model_claim_conflicts(task, cycle_result.text, cycle_result.outcomes)
                 deferred_acceptance_failure_ids: set[str] = set()
@@ -2791,6 +2868,22 @@ class MultiAgentWorkflowController:
                         "durable_evidence_count": len(self._artifact_refs_from_tool_outcomes(tool_outcomes)),
                         "allowed_tool_names": sorted(get_tool_name(tool) for tool in (closure_tools or [])),
                         "decision": "completed_closure" if closure_completed else "created_durable_evidence",
+                    })
+                if max_token_synthesis_cycle and not cycle_result.max_tokens_exhausted:
+                    self._emit_workflow_event({
+                        "type": "task_max_token_recovery",
+                        "task_uid": task.task_uid,
+                        "phase": task.phase,
+                        "cycle": cycle,
+                        "classification": "output_truncation",
+                        "retry_mode": "synthesis",
+                        "durable_evidence_count": len(
+                            self._artifact_refs_from_tool_outcomes(tool_outcomes)
+                        ),
+                        "allowed_tool_names": sorted(
+                            get_tool_name(tool) for tool in (closure_tools or [])
+                        ),
+                        "decision": "completed_synthesis_turn",
                     })
                 if manifest_prerequisite_recovery_active:
                     manifest_refs = self._valid_inventory_artifact_refs(plan, tool_outcomes)
@@ -3000,18 +3093,21 @@ class MultiAgentWorkflowController:
                             tool_outcomes,
                             None,
                         )
-                        output_truncation_recovery_mode = (
-                            "closure"
-                            if cycle_result.max_tokens_classification == "output_truncation"
+                        evidence_ready_for_terminal_synthesis = (
+                            cycle_result.max_tokens_classification == "output_truncation"
                             and self._recovery_evidence_satisfies_acceptance(task, recovery_evidence)
-                            else "evidence"
+                        )
+                        output_truncation_recovery_mode = (
+                            "synthesis" if evidence_ready_for_terminal_synthesis else "evidence"
                         )
                         output_truncation_recovery_active = (
                             cycle_result.max_tokens_classification == "output_truncation"
+                            and not evidence_ready_for_terminal_synthesis
                         )
+                        max_token_synthesis_recovery_active = evidence_ready_for_terminal_synthesis
                         allowed_recovery_tools = (
-                            sorted(required_tools)
-                            if output_truncation_recovery_mode == "closure"
+                            sorted(max_token_synthesis_policy.recovery_allowed_tool_names)
+                            if output_truncation_recovery_mode == "synthesis"
                             else sorted(
                                 get_tool_name(tool)
                                 for tool in tools
@@ -3025,16 +3121,27 @@ class MultiAgentWorkflowController:
                             "cycle": cycle,
                             "classification": cycle_result.max_tokens_classification or "unknown",
                             "durable_evidence_count": evidence_count,
+                            "evidence_ready_for_terminal_synthesis": evidence_ready_for_terminal_synthesis,
                             "retry_mode": output_truncation_recovery_mode,
                             "allowed_tool_names": allowed_recovery_tools,
                             "decision": (
-                                "bounded_compact_retry"
-                                if output_truncation_recovery_active
+                                "bounded_synthesis_retry"
+                                if output_truncation_recovery_mode == "synthesis"
                                 else "bounded_changed_action_retry"
                             ),
                         })
                         actor_prompt = (
-                            self._output_truncation_recovery_prompt(
+                            self._evaluator_synthesis_recovery_prompt(
+                                plan,
+                                task,
+                                recovery_evidence,
+                                "Complete the missing terminal summary or disposition from the retained evidence.",
+                                next_cycle=cycle + 1,
+                                source="max_token",
+                                required_tools=required_tools,
+                            )
+                            if output_truncation_recovery_mode == "synthesis"
+                            else self._output_truncation_recovery_prompt(
                                 plan,
                                 task,
                                 recovery_evidence,
@@ -3329,6 +3436,53 @@ class MultiAgentWorkflowController:
                                             self._task_label(task),
                                             cycle,
                                             len(decision.unresolved_evidence_gaps),
+                                        )
+                                elif decision.repair_kind == "acceptance":
+                                    if evaluator_synthesis_repair_used:
+                                        decision = WorkflowDecision(
+                                            status="partial_failure",
+                                            reason=(
+                                                "Evaluator-requested terminal synthesis remained incomplete after "
+                                                "the single bounded synthesis repair."
+                                            ),
+                                        )
+                                        self._emit_evaluator_synthesis_repair(
+                                            task,
+                                            decision.instructions or decision.reason,
+                                            attempt=1,
+                                            outcome="exhausted",
+                                        )
+                                    else:
+                                        evaluator_synthesis_repair_used = True
+                                        evaluator_synthesis_repair_active = True
+                                        synthesis_instructions = (
+                                            decision.instructions.strip() or decision.reason.strip()
+                                        )
+                                        self._record_efficiency_correction("evaluator_synthesis_repair")
+                                        acceptance_submitted = False
+                                        self._emit_evaluator_synthesis_repair(
+                                            task,
+                                            synthesis_instructions,
+                                            attempt=1,
+                                            outcome="scheduled",
+                                        )
+                                        actor_prompt = self._evaluator_synthesis_recovery_prompt(
+                                            plan,
+                                            task,
+                                            acceptance_recovery_evidence
+                                            or self._acceptance_recovery_context(
+                                                task,
+                                                acceptance_results,
+                                                tool_outcomes,
+                                                None,
+                                            ),
+                                            synthesis_instructions,
+                                            next_cycle=cycle + 1,
+                                        )
+                                        self._log_workflow(
+                                            "task evaluator requested terminal synthesis repair task=%s cycle=%s",
+                                            self._task_label(task),
+                                            cycle,
                                         )
                                 elif (
                                     decision.status == "partial_failure"
@@ -3831,7 +3985,11 @@ class MultiAgentWorkflowController:
                 )
                 progress_actions = self._task_cycle_progress_actions(cycle_result.outcomes)
                 stagnation_actions = self._task_cycle_stagnation_actions(cycle_result.outcomes)
-                if stagnation_actions and stagnation_actions.issubset(seen_stagnation_actions):
+                if (
+                    not synthesis_repair_cycle
+                    and stagnation_actions
+                    and stagnation_actions.issubset(seen_stagnation_actions)
+                ):
                     replacement = self._create_reasoning_loop_replacement_task(task, tool_outcomes)
                     if replacement is not None:
                         self._queue_replacement_task(task, replacement, "evidence_stagnation")
@@ -3865,7 +4023,7 @@ class MultiAgentWorkflowController:
                     break
                 seen_progress_actions.update(progress_actions)
                 seen_stagnation_actions.update(stagnation_actions)
-                if progress_signature == previous_progress_signature:
+                if not synthesis_repair_cycle and progress_signature == previous_progress_signature:
                     decision = WorkflowDecision(
                         status="partial_failure",
                         reason=(
@@ -3889,6 +4047,7 @@ class MultiAgentWorkflowController:
                     evaluator_corrections,
                     evaluator_correction_limit,
                 ) + int(missing_acceptance_recovery_used) + int(evaluator_execution_repair_used)
+                allowed_actor_cycles += int(evaluator_synthesis_repair_used)
                 allowed_actor_cycles += int(manifest_prerequisite_recovery_used)
                 allowed_actor_cycles += int(evidence_prerequisite_recovery_used)
                 allowed_actor_cycles += int(execution_prerequisite_recovery_used)
@@ -3899,6 +4058,7 @@ class MultiAgentWorkflowController:
                     and not finding_acceptance_recovery
                     and not execution_prerequisite_recovery_active
                     and not output_prerequisite_recovery_active
+                    and not evaluator_synthesis_repair_active
                 ):
                     recovery_context = acceptance_recovery_evidence or self._acceptance_recovery_context(
                         task,
@@ -4200,6 +4360,62 @@ Durable evidence ledger:
 
 {completion_instruction}
 {loop_section}
+"""
+
+    def _evaluator_synthesis_recovery_prompt(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        recovery_evidence: List[Dict[str, str]],
+        evaluator_instructions: str,
+        *,
+        next_cycle: int,
+        source: str = "evaluator",
+        required_tools: Optional[set[str]] = None,
+    ) -> str:
+        """Build one closure-only repair turn for missing task-specific terminal content."""
+
+        evidence_ledger = (
+            "\n".join(
+                f"- {item['reference']} (source: {item['source']})" for item in recovery_evidence
+            )
+            or "- None"
+        )
+        criteria = "; ".join(
+            f"{criterion.id}: {criterion.description}" for criterion in task.acceptance.criteria
+        )
+        terminal_tools = ", ".join(sorted(required_tools or set())) or "none"
+        heading = (
+            "Max-Token Terminal Synthesis Recovery"
+            if source == "max_token"
+            else "Evaluator Terminal Synthesis Repair"
+        )
+        source_context = (
+            "The preceding executor response was truncated. Its unfinished reasoning and tool calls are unavailable."
+            if source == "max_token"
+            else "An evaluator identified missing terminal content while retained evidence was available."
+        )
+        return f"""## {heading}
+Start fresh actor cycle {next_cycle} for the existing task. This is a closure repair, not a new investigation.
+Do not perform discovery, scanning, new testing, or repeat evidence-producing commands.
+{source_context}
+
+Assigned objective: {task.objective}
+{self._executable_target_scope_text(plan, task)}
+Frozen acceptance criteria: {criteria}
+Durable evidence ledger:
+{evidence_ledger}
+
+Evaluator corrective guidance:
+{evaluator_instructions}
+Required terminal tool(s): {terminal_tools}
+
+Use the retained evidence to produce the missing task-specific terminal content. State the supported result for
+the frozen task, including any required hypotheses, observation, negative result, or disposition. Store an
+observation or knowledge record only when the acceptance contract requires one, using the returned canonical
+reference. Call each required terminal tool once when listed above. You may retry the existing acceptance once if
+the stored content changes its required references.
+Do not add criteria, broaden scope, or pursue unrelated discoveries.
 """
 
     def _output_prerequisite_recovery_prompt(
@@ -5550,6 +5766,46 @@ Return exactly one decision for each candidate.
             }
         )
 
+    def _emit_evaluator_synthesis_repair(
+        self,
+        task: Task,
+        instructions: str,
+        *,
+        attempt: int,
+        outcome: str,
+    ) -> None:
+        """Emit one bounded evaluator-directed terminal synthesis transition."""
+
+        repair_id = f"{task.task_uid}:synthesis:{attempt}"
+        attributes = {
+            "workflow.event.name": "evaluator_synthesis_repair",
+            "workflow.task.uid": str(task.task_uid),
+            "workflow.phase.id": int(task.phase),
+            "workflow.evaluator_repair.kind": "acceptance",
+            "workflow.evaluator_repair.attempt": int(attempt),
+            "workflow.evaluator_repair.outcome": outcome,
+            "workflow.evaluator_repair.instructions": self._short(str(instructions or ""), 1000),
+            "workflow.evaluator_repair.id": repair_id,
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("evaluator_synthesis_repair", attributes=attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit evaluator synthesis repair trace span", exc_info=True)
+        self._emit_workflow_event(
+            {
+                "type": "evaluator_synthesis_repair",
+                "task_uid": str(task.task_uid),
+                "phase": int(task.phase),
+                "repair_kind": "acceptance",
+                "attempt": int(attempt),
+                "outcome": outcome,
+                "instructions": self._short(str(instructions or ""), 1000),
+                "repair_id": repair_id,
+            }
+        )
+
     def _emit_memory_acceptance_recovery(
         self,
         task: Task,
@@ -6145,6 +6401,15 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         repair = self._evaluator_repair_from_data(data)
         decision.repair_kind = repair["kind"]
         decision.unresolved_evidence_gaps = tuple(repair["evidence_gaps"])
+        if self._evaluator_reopens_resolved_execution_gate(task, acceptance_results or [], decision):
+            self._emit_evaluator_execution_gate_reconciliation(task, decision)
+            decision = WorkflowDecision(
+                status="done",
+                reason=(
+                    "Controller acceptance is authoritative: every frozen execution requirement has a "
+                    "current-task receipt and every frozen criterion has a recorded terminal result."
+                ),
+            )
         recommendation = self._finding_recommendation_from_evaluator(data)
         if (
             recommendation is not None
@@ -6173,6 +6438,72 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             self._short(decision.reason),
         )
         return decision
+
+    def _controller_execution_gate_status(
+        self,
+        task: Task,
+        acceptance_results: List[Any],
+    ) -> tuple[bool, List[str]]:
+        """Return whether persisted controller receipts resolve every frozen execution requirement."""
+
+        required_ids = [
+            requirement.id
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        ]
+        if not required_ids or self._missing_acceptance_criteria(task, acceptance_results):
+            return False, required_ids
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        receipts = dict(current_task.recovery_context.get("execution_evidence_receipts") or {})
+        return set(required_ids).issubset(receipts), required_ids
+
+    def _evaluator_reopens_resolved_execution_gate(
+        self,
+        task: Task,
+        acceptance_results: List[Any],
+        decision: WorkflowDecision,
+    ) -> bool:
+        """Reject a stale evaluator execution repair after controller acceptance replay."""
+
+        gate_satisfied, _required_ids = self._controller_execution_gate_status(task, acceptance_results)
+        return (
+            gate_satisfied
+            and decision.status == "partial_failure"
+            and decision.repair_kind == "execution"
+        )
+
+    def _emit_evaluator_execution_gate_reconciliation(
+        self,
+        task: Task,
+        decision: WorkflowDecision,
+    ) -> None:
+        """Record when authoritative receipts supersede stale evaluator execution feedback."""
+
+        event = {
+            "type": "evaluator_execution_gate_reconciled",
+            "task_uid": task.task_uid,
+            "phase": task.phase,
+            "outcome": "suppressed_stale_execution_feedback",
+            "evaluator_status": decision.status,
+            "evaluator_reason": self._short(decision.reason, 500),
+        }
+        attributes = {
+            "workflow.event.name": "evaluator_execution_gate_reconciled",
+            "workflow.task.uid": task.task_uid,
+            "workflow.phase.id": task.phase,
+            "workflow.execution_gate.outcome": event["outcome"],
+            "workflow.evaluator.status": decision.status,
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("evaluator_execution_gate_reconciled", attributes=attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit evaluator execution-gate reconciliation span", exc_info=True)
+        self._emit_workflow_event(event)
 
     @staticmethod
     def _finding_recommendation_from_evaluator(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -9234,6 +9565,7 @@ generic replacement for an existing verification task.
         worker_context_section = self._worker_context_section(worker_context)
         tool_outcome_section = self._tool_outcome_section(tool_outcomes or [])
         acceptance_result_section = self._acceptance_result_section(acceptance_results or [])
+        execution_gate_section = self._controller_execution_gate_section(task, acceptance_results or [])
         current_task_findings = self._task_finding_summary(task.task_uid)
         endpoint_binding = ""
         if task.acceptance.mode == "coverage" and str(task.title).lower().startswith("assess endpoint "):
@@ -9284,6 +9616,9 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 - Python has already confirmed that every frozen acceptance criterion has a recorded terminal result. Review the
   semantic quality of those results and their evidence; do not add criteria or infer broader scope from phase context,
   examples, or new discoveries outside the frozen manifest.
+- The controller execution-gate section below is authoritative. When it reports that all frozen execution
+  requirements are satisfied, a historical failed acceptance attempt is not an unresolved execution gap. Do not return
+  an execution repair for that historical failure; evaluate only independent semantic-quality concerns.
 - A recorded status is not self-proving. Use partial_failure when its summary or evidence references do not support the
   corresponding frozen criterion and status.
 - Use partial_failure when useful progress was made but any material part remains unsupported.
@@ -9308,6 +9643,9 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 
 ## Frozen acceptance results
 {acceptance_result_section}
+
+## Controller execution-gate status
+{execution_gate_section}
 
 ## Current-task findings
 {current_task_findings}
@@ -9935,6 +10273,62 @@ tools and durable evidence before relying on it."""
         )
 
     @staticmethod
+    def _canonical_url_subject(value: str) -> Optional[tuple[str, str, Optional[int], str]]:
+        """Return a comparison form for a URL execution subject.
+
+        The empty URL path and ``/`` identify the same root resource. Other path
+        variations intentionally remain distinct so execution receipts cannot
+        broaden a task's frozen route scope.
+        """
+
+        parsed = urlparse(str(value or "").strip())
+        if not parsed.scheme or not parsed.hostname:
+            return None
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        scheme = parsed.scheme.lower()
+        effective_port = port if port is not None else {"http": 80, "https": 443}.get(scheme)
+        return scheme, parsed.hostname.lower(), effective_port, parsed.path or "/"
+
+    @classmethod
+    def _url_subjects_in_text(cls, text: str) -> List[tuple[str, str, Optional[int], str]]:
+        """Extract normalized URL subjects from a tool invocation or result."""
+
+        subjects = []
+        for candidate in _SHELL_URL_LITERAL_PATTERN.findall(str(text or "")):
+            normalized = cls._canonical_url_subject(candidate.rstrip(".,;:!?)]}"))
+            if normalized is not None and normalized not in subjects:
+                subjects.append(normalized)
+        return subjects
+
+    @classmethod
+    def _assigned_url_subjects(
+        cls,
+        plan: OperationPlan,
+        task: Task,
+    ) -> List[tuple[str, str, Optional[int], str]]:
+        """Return URL targets that are within the task's assigned logical scope."""
+
+        subjects = []
+        for target in plan.targets:
+            if task.target_ids and target.target_id not in task.target_ids:
+                continue
+            normalized = cls._canonical_url_subject(target.value)
+            if normalized is not None and normalized not in subjects:
+                subjects.append(normalized)
+        return subjects
+
+    @staticmethod
+    def _route_subject_pattern(subject: str) -> re.Pattern[str]:
+        """Build the frozen route matcher while preserving named route parameters."""
+
+        route_pattern = re.escape(subject)
+        route_pattern = re.sub(r":[A-Za-z_][A-Za-z0-9_]*", r"[^/?#\\s]+", route_pattern)
+        return re.compile(f"^{route_pattern}$")
+
+    @staticmethod
     def _outcome_matches_execution_subject(
         plan: OperationPlan,
         task: Task,
@@ -9957,11 +10351,24 @@ tools and durable evidence before relying on it."""
                 str(target.value or "").strip().rstrip("/").lower()
                 for target in assigned_targets
             }
-            return any(value and value in haystack.lower() for value in assigned_values)
+            if any(value and value in haystack.lower() for value in assigned_values):
+                return True
+            assigned_urls = {
+                normalized
+                for target in assigned_targets
+                if (normalized := MultiAgentWorkflowController._canonical_url_subject(target.value)) is not None
+            }
+            return any(candidate in assigned_urls for candidate in MultiAgentWorkflowController._url_subjects_in_text(haystack))
         if subject.startswith("/"):
-            route_pattern = re.escape(subject)
-            route_pattern = re.sub(r":[A-Za-z_][A-Za-z0-9_]*", r"[^/?#\\s]+", route_pattern)
-            return bool(re.search(route_pattern, haystack))
+            assigned_urls = MultiAgentWorkflowController._assigned_url_subjects(plan, task)
+            route_pattern = MultiAgentWorkflowController._route_subject_pattern(subject)
+            if assigned_urls:
+                assigned_authorities = {(scheme, host, port) for scheme, host, port, _path in assigned_urls}
+                return any(
+                    (scheme, host, port) in assigned_authorities and bool(route_pattern.fullmatch(path))
+                    for scheme, host, port, path in MultiAgentWorkflowController._url_subjects_in_text(haystack)
+                )
+            return bool(route_pattern.search(haystack))
         normalized_subject = subject.rstrip("/").lower()
         if normalized_subject and normalized_subject in haystack.lower():
             return True
@@ -10013,6 +10420,11 @@ tools and durable evidence before relying on it."""
             references = self._valid_required_output_artifact_refs(
                 plan, task, tool_outcomes, requirement
             )
+            if procedure is not None and procedure.output_kind == "inventory_manifest" and matched:
+                references = list(dict.fromkeys([
+                    *references,
+                    *self._valid_inventory_output_refs_linked_to_execution(plan, tool_outcomes, matched),
+                ]))
             if not references:
                 continue
             if (
@@ -10052,6 +10464,45 @@ tools and durable evidence before relying on it."""
             self.state.store_task(replace(current_task, recovery_context=context))
         self._emit_controller_execution_evidence(task, criterion, resolved, expected_capabilities)
         return resolved
+
+    def _valid_inventory_output_refs_linked_to_execution(
+        self,
+        plan: OperationPlan,
+        tool_outcomes: List[ToolOutcome],
+        matched_outcomes: List[tuple[ToolOutcome, frozenset[str]]],
+    ) -> List[str]:
+        """Return inventory outputs produced from the subject-bound execution evidence.
+
+        Recon producers commonly write a raw result and a separate converter writes
+        the inventory manifest. The converter is a valid task-local continuation
+        only when it references an artifact exposed by the matching execution.
+        """
+
+        execution_refs = {
+            reference
+            for outcome, _capabilities in matched_outcomes
+            for reference in self._artifact_refs_from_tool_outcomes([outcome])
+            if self._execution_artifact_is_current_operation(reference)
+        }
+        if not execution_refs:
+            return []
+        valid = []
+        for outcome in tool_outcomes:
+            if not outcome.success or outcome.tool_name in _NON_EXECUTION_RECEIPT_TOOLS:
+                continue
+            outcome_refs = self._artifact_refs_from_tool_outcomes([outcome])
+            if not execution_refs.intersection(outcome_refs):
+                continue
+            for reference in outcome_refs:
+                if not self._execution_artifact_is_current_operation(reference):
+                    continue
+                try:
+                    self._load_controller_inventory_manifest(plan, reference)
+                except ValueError:
+                    continue
+                if reference not in valid:
+                    valid.append(reference)
+        return valid
 
     def _valid_required_output_artifact_refs(
         self,
@@ -10519,6 +10970,27 @@ tools and durable evidence before relying on it."""
     def _acceptance_result_section(results: List[Any]) -> str:
         return json.dumps(
             [result.to_dict() if hasattr(result, "to_dict") else result for result in results],
+            indent=2,
+            sort_keys=True,
+        )
+
+    def _controller_execution_gate_section(self, task: Task, acceptance_results: List[Any]) -> str:
+        """Render persisted execution-receipt state for evaluator reconciliation."""
+
+        satisfied, required_ids = self._controller_execution_gate_status(task, acceptance_results)
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        receipts = dict(current_task.recovery_context.get("execution_evidence_receipts") or {})
+        return json.dumps(
+            {
+                "authoritative": True,
+                "status": "satisfied" if satisfied else "incomplete",
+                "required_requirement_ids": required_ids,
+                "resolved_requirement_ids": sorted(set(required_ids).intersection(receipts)),
+                "historical_rejections_do_not_override_current_status": satisfied,
+            },
             indent=2,
             sort_keys=True,
         )
