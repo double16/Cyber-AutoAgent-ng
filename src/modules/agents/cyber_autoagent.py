@@ -25,7 +25,7 @@ from strands_tools import (
 )
 
 # These tools have the @tool decorator, the function is to be imported
-from strands_tools.editor import editor
+from strands_tools.editor import editor as strands_editor
 from strands_tools.load_tool import load_tool
 from strands_tools.sleep import sleep
 from strands_tools.tavily import tavily_search
@@ -82,6 +82,7 @@ from modules.handlers.utils import (
     tool_rename,
 )
 from modules.tools.artifact import read_artifact
+from modules.tools.editor import create_absolute_path_editor
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.browser import (
     browser_evaluate_js,
@@ -582,6 +583,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     # Core tools are available to workflow workers unless a role narrows them further.
     # Plan/task mutation remains owned by Python workflow code; create_tasks is included only for roles that need it.
+    editor = create_absolute_path_editor(strands_editor)
     core_tools_list = [
         swarm,
         shell,

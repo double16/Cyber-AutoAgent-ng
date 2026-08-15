@@ -38,6 +38,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import sqlite3
 import sys
 import uuid
@@ -72,6 +73,8 @@ from modules.handlers.tool_recovery import ToolOutcome, outcomes_to_toon
 from modules.tools.artifact import create_bounded_artifact_reader
 from modules.tools.memory import (
     AcceptanceContract,
+    AcceptanceCriterion,
+    ExecutionRequirement,
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
     OperationPlan,
@@ -82,9 +85,11 @@ from modules.tools.memory import (
     build_record_task_acceptance_tool,
     build_record_finding_validation_tool,
     _artifact_path_from_ref,
+    _operation_output_root,
     _coverage_route_groups,
     _finding_validation_contradictions,
     _load_inventory_manifest,
+    _route_scoped_phase_objective,
     _write_inventory_manifest_atomically,
     canonical_artifact_reference,
     finalize_finding_validation,
@@ -234,6 +239,17 @@ class TaskExecutorCycleResult:
     repeat_loop_reason: str = ""
 
 
+@dataclass
+class TaskCreatorToolInvocationLedger:
+    """Retain task-creator tool calls so text fallback never duplicates a real call."""
+
+    invocation_count: int = 0
+
+    def observe(self, tool_input: Dict[str, Any], result: Any, error: Optional[Exception]) -> None:
+        del tool_input, result, error
+        self.invocation_count += 1
+
+
 FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
 _VOLATILE_OPERATION_ARTIFACT_PATH_PATTERN = re.compile(
     r"(?:/app/)?outputs/[^\s'\"]+/[^\s'\"]+/artifacts/[^\s'\"]+",
@@ -248,6 +264,84 @@ _INVALID_INVENTORY_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _NON_EVIDENCE_RECOVERY_TOOLS = frozenset(
     {"read_artifact", "memory_retrieve", "record_task_acceptance", "tool_catalog", "get_tool_help"}
 )
+_SHELL_URL_LITERAL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+")
+_ABSOLUTE_ARTIFACT_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_.\-/])(/[^\s'\"`<>()\[\]{}\\]+)")
+_EXECUTION_METHOD_ALIASES = {
+    "analysis": "analyze",
+    "analyze": "analyze",
+    "audit": "analyze",
+    "inspect": "analyze",
+    "review": "analyze",
+    "source_analysis": "analyze",
+    "crawl": "crawl",
+    "spider": "crawl",
+    "spidering": "crawl",
+    "web_spider": "crawl",
+    "web_spidering": "crawl",
+    "discover": "crawl",
+    "discovery": "crawl",
+    "enumerate": "enumerate",
+    "enumeration": "enumerate",
+    "scan": "enumerate",
+    "http_request": "request",
+    "probe": "request",
+    "request": "request",
+    "compare": "compare",
+    "comparison": "compare",
+    "execute": "execute",
+    "exploit": "execute",
+    "test": "execute",
+    "validate": "execute",
+}
+_TOOL_EXECUTION_CAPABILITIES = {
+    "auth_chain_analyzer": frozenset({"analyze", "request"}),
+    "browser_goto_url": frozenset({"request"}),
+    "browser_observe_page": frozenset({"analyze"}),
+    "editor": frozenset({"analyze"}),
+    "http_request": frozenset({"request"}),
+    "idor_specialist": frozenset({"analyze", "request", "execute"}),
+    "python_repl": frozenset({"analyze", "execute"}),
+    "recon_output_to_inventory_manifest": frozenset({"analyze"}),
+    "specialized_recon_orchestrator": frozenset({"crawl", "request"}),
+}
+_NON_EXECUTION_RECEIPT_TOOLS = frozenset(
+    {
+        "create_tasks",
+        "editor",
+        "get_tool_help",
+        "memory_list",
+        "memory_retrieve",
+        "read_artifact",
+        "record_finding_validation",
+        "record_task_acceptance",
+        "retrieve_offloaded_content",
+        "store_finding",
+        "store_knowledge",
+        "store_observation",
+        "tool_catalog",
+    }
+)
+_SHELL_EXECUTION_CAPABILITIES = {
+    "bandit": frozenset({"analyze"}),
+    "cat": frozenset({"analyze"}),
+    "curl": frozenset({"request"}),
+    "feroxbuster": frozenset({"crawl"}),
+    "ffuf": frozenset({"crawl"}),
+    "gitleaks": frozenset({"analyze"}),
+    "grep": frozenset({"analyze"}),
+    "httpx": frozenset({"request"}),
+    "katana": frozenset({"crawl"}),
+    "masscan": frozenset({"enumerate"}),
+    "naabu": frozenset({"enumerate"}),
+    "nikto": frozenset({"request", "execute"}),
+    "nmap": frozenset({"enumerate"}),
+    "nuclei": frozenset({"request", "execute"}),
+    "rg": frozenset({"analyze"}),
+    "semgrep": frozenset({"analyze"}),
+    "sqlmap": frozenset({"request", "execute"}),
+    "testssl": frozenset({"request", "execute"}),
+    "wget": frozenset({"request"}),
+}
 
 
 def _phase_semantically_requires_finding_candidates(phase: PlanPhase) -> bool:
@@ -2036,6 +2130,7 @@ class MultiAgentWorkflowController:
             "allowed",
         )
 
+        tool_outcomes: List[ToolOutcome] = []
         selected_tools = prompt_spec.get("tools", [])
         selected_tools = list(selected_tools) if isinstance(selected_tools, list) else []
         tools = build_role_tools(
@@ -2050,12 +2145,25 @@ class MultiAgentWorkflowController:
         }
         tools = [tool for tool in tools if get_tool_name(tool) not in finding_tool_names]
         candidate_acceptance_owned = self._finding_candidate_acceptance_is_deterministic(task)
+        acceptance_tool = None
         if task.kind == "finding_validation":
             tools.append(build_record_finding_validation_tool(task))
         elif task.kind != "objective_validation":
             tools.append(store_finding)
             if not candidate_acceptance_owned:
-                tools.append(build_record_task_acceptance_tool(task.task_uid, task))
+                acceptance_tool = build_record_task_acceptance_tool(
+                    task.task_uid,
+                    task,
+                    execution_evidence_resolver=lambda current_task, criterion: (
+                        self._resolve_controller_execution_evidence(
+                            plan,
+                            current_task,
+                            criterion,
+                            tool_outcomes,
+                        )
+                    ),
+                )
+                tools.append(acceptance_tool)
         execution_prompt = str(prompt_spec.get("prompt") or task.objective)
         execution_prompt = (
             execution_prompt.rstrip()
@@ -2319,6 +2427,40 @@ class MultiAgentWorkflowController:
             ),
             recovery_allowed_tool_names={"read_artifact", "store_observation", "store_knowledge"},
         )
+        execution_prerequisite_policy = AgentRunPolicy(
+            min_tool_calls=1,
+            terminal_after_required_tools=False,
+            allow_text_final_after_tools=False,
+            actionless_mode="task_progress",
+            max_actionless_calls=2,
+            max_agent_calls=4,
+            max_model_turns=8,
+            max_tool_calls=5,
+            terminal_reason="task_execution_prerequisite_recovery_done",
+            terminal_message="Execution prerequisite recovery completed",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Execute the exact frozen method against the exact frozen subject and retain its artifact. "
+                "Do not call record_task_acceptance; the controller retained the valid submission."
+            ),
+        )
+        output_prerequisite_policy = AgentRunPolicy(
+            min_tool_calls=1,
+            terminal_after_required_tools=False,
+            allow_text_final_after_tools=False,
+            actionless_mode="task_progress",
+            max_actionless_calls=2,
+            max_agent_calls=4,
+            max_model_turns=8,
+            max_tool_calls=5,
+            terminal_reason="task_output_prerequisite_recovery_done",
+            terminal_message="Required task output prerequisite recovery completed",
+            recovery_objective=task.objective,
+            recovery_next_action=(
+                "Produce the frozen required output artifact and retain its reference. Do not call "
+                "record_task_acceptance; the controller retained the valid submission."
+            ),
+        )
         self._log_workflow(
             "task executor policy task=%s min_tool_calls=%s ignored_tools=%s",
             self._task_label(task),
@@ -2328,7 +2470,6 @@ class MultiAgentWorkflowController:
         existing_task_uids = {existing.task_uid for existing in self.state.list_tasks()}
         system_prompt = self.runtime.system_prompt
         worker_contexts = []
-        tool_outcomes: List[ToolOutcome] = []
         acceptance_failures = 0
         acceptance_failure_signatures: set[str] = set()
         failed_tool_inputs: Counter[tuple[str, str]] = Counter()
@@ -2344,6 +2485,11 @@ class MultiAgentWorkflowController:
         manifest_prerequisite_recovery_used = False
         evidence_prerequisite_recovery_active = False
         evidence_prerequisite_recovery_used = False
+        execution_prerequisite_recovery_active = False
+        execution_prerequisite_recovery_used = False
+        output_prerequisite_recovery_active = False
+        output_prerequisite_recovery_used = False
+        pending_acceptance_payload: Dict[str, Any] = {}
         missing_acceptance_recovery_used = False
         memory_acceptance_recovery_used = False
         finding_recovery_payload: Dict[str, Any] = {}
@@ -2377,14 +2523,20 @@ class MultiAgentWorkflowController:
 
         def track_acceptance_outcomes(
             outcomes: List[ToolOutcome],
+            ignored_failure_tool_use_ids: Optional[set[str]] = None,
         ) -> tuple[List[ToolOutcome], List[ToolOutcome], bool]:
             """Track rejected acceptance state while allowing changed artifact corrections."""
 
             nonlocal acceptance_failures
+            ignored_failure_tool_use_ids = ignored_failure_tool_use_ids or set()
             acceptance_outcomes = [
                 outcome for outcome in outcomes if outcome.tool_name == "record_task_acceptance"
             ]
-            failed_calls = [outcome for outcome in acceptance_outcomes if not outcome.success]
+            failed_calls = [
+                outcome
+                for outcome in acceptance_outcomes
+                if not outcome.success and outcome.tool_use_id not in ignored_failure_tool_use_ids
+            ]
             successful_calls = [outcome for outcome in acceptance_outcomes if outcome.success]
             signatures = [self._acceptance_failure_signature(outcome) for outcome in failed_calls]
             repeated = any(signature in acceptance_failure_signatures for signature in signatures)
@@ -2428,6 +2580,8 @@ class MultiAgentWorkflowController:
                 ) + int(missing_acceptance_recovery_used)
                 allowed_actor_cycles += int(manifest_prerequisite_recovery_used)
                 allowed_actor_cycles += int(evidence_prerequisite_recovery_used)
+                allowed_actor_cycles += int(execution_prerequisite_recovery_used)
+                allowed_actor_cycles += int(output_prerequisite_recovery_used)
                 allowed_actor_cycles += int(max_token_recovery_used)
                 allowed_actor_cycles += int(evaluator_execution_repair_used)
                 if cycle > allowed_actor_cycles:
@@ -2447,8 +2601,11 @@ class MultiAgentWorkflowController:
                     if manifest_prerequisite_recovery_active
                     else evidence_prerequisite_policy
                     if evidence_prerequisite_recovery_active
-                    else
-                    finding_store_policy
+                    else execution_prerequisite_policy
+                    if execution_prerequisite_recovery_active
+                    else output_prerequisite_policy
+                    if output_prerequisite_recovery_active
+                    else finding_store_policy
                     if finding_observation_store_recovery
                     else finding_acceptance_policy
                     if finding_acceptance_recovery
@@ -2490,6 +2647,13 @@ class MultiAgentWorkflowController:
                         for tool in tools
                         if get_tool_name(tool) in current_policy.recovery_allowed_tool_names
                     ]
+                if execution_prerequisite_recovery_active or output_prerequisite_recovery_active:
+                    closure_tools = [
+                        tool
+                        for tool in tools
+                        if get_tool_name(tool) != "record_task_acceptance"
+                        and get_tool_name(tool) not in _NON_EVIDENCE_RECOVERY_TOOLS
+                    ]
                 prior_tool_inputs = {
                     (outcome.tool_name, outcome.input_summary)
                     for outcome in tool_outcomes
@@ -2501,6 +2665,76 @@ class MultiAgentWorkflowController:
                 tool_outcomes.extend(cycle_result.outcomes)
                 task = self._retain_task_artifact_evidence(task, tool_outcomes)
                 self._emit_model_claim_conflicts(task, cycle_result.text, cycle_result.outcomes)
+                deferred_acceptance_failure_ids: set[str] = set()
+                if execution_prerequisite_recovery_active or output_prerequisite_recovery_active:
+                    for criterion in task.acceptance.criteria:
+                        self._resolve_controller_execution_evidence(plan, task, criterion, tool_outcomes)
+                    if output_prerequisite_recovery_active:
+                        self._emit_output_prerequisite_recovery(
+                            task,
+                            outcome=(
+                                "validated"
+                                if self._has_valid_required_output(plan, task, tool_outcomes)
+                                else "missing_or_invalid"
+                            ),
+                            allowed_tool_names=[
+                                get_tool_name(tool)
+                                for tool in (closure_tools or [])
+                            ],
+                        )
+                    refreshed_task = next(
+                        (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+                        task,
+                    )
+                    receipts = dict(refreshed_task.recovery_context.get("execution_evidence_receipts") or {})
+                    required_ids = {
+                        requirement.id
+                        for criterion in task.acceptance.criteria
+                        for requirement in criterion.execution_requirements
+                    }
+                    if required_ids.issubset(receipts) and acceptance_tool is not None and pending_acceptance_payload:
+                        replay_failure = self._replay_controller_acceptance(
+                            task,
+                            acceptance_tool,
+                            pending_acceptance_payload,
+                        )
+                        if replay_failure is not None:
+                            decision = replay_failure
+                            break
+                        execution_prerequisite_recovery_active = False
+                        output_prerequisite_recovery_active = False
+                    else:
+                        missing_ids = sorted(required_ids - set(receipts))
+                        self._emit_controller_acceptance_replay(
+                            task,
+                            "unresolved",
+                            "Missing execution requirements: " + ", ".join(missing_ids),
+                        )
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                (
+                                    "Output prerequisite recovery did not produce the required task-local output for: "
+                                    if output_prerequisite_recovery_active
+                                    else "Execution prerequisite recovery did not produce task-local proof for: "
+                                )
+                                + ", ".join(missing_ids)
+                            ),
+                        )
+                        break
+                if not execution_prerequisite_recovery_active and not output_prerequisite_recovery_active:
+                    replay_failure, deferred_acceptance_failure_ids = (
+                        self._reconcile_pending_controller_acceptance(
+                            plan,
+                            task,
+                            acceptance_tool,
+                            tool_outcomes,
+                            cycle_result.outcomes,
+                        )
+                    )
+                    if replay_failure is not None:
+                        decision = replay_failure
+                        break
                 if output_truncation_recovery_active and not cycle_result.max_tokens_exhausted:
                     output_truncation_recovery_active = False
                     successful_outcomes = [outcome for outcome in cycle_result.outcomes if outcome.success]
@@ -2559,7 +2793,7 @@ class MultiAgentWorkflowController:
                         "decision": "completed_closure" if closure_completed else "created_durable_evidence",
                     })
                 if manifest_prerequisite_recovery_active:
-                    manifest_refs = self._valid_inventory_artifact_refs(tool_outcomes)
+                    manifest_refs = self._valid_inventory_artifact_refs(plan, tool_outcomes)
                     if manifest_refs:
                         manifest_prerequisite_recovery_active = False
                         acceptance_recovery_active = True
@@ -2651,7 +2885,7 @@ class MultiAgentWorkflowController:
                     )
                 repeated_tool_failure = repeated_correctable_failure(cycle_result.outcomes)
                 failed_acceptance_calls, successful_acceptance_calls, repeated_acceptance = (
-                    track_acceptance_outcomes(cycle_result.outcomes)
+                    track_acceptance_outcomes(cycle_result.outcomes, deferred_acceptance_failure_ids)
                 )
                 finding_ref = self._finding_reference_from_outcomes(
                     [
@@ -3070,7 +3304,7 @@ class MultiAgentWorkflowController:
                                         )
                                         self._emit_evaluator_execution_repair(
                                             task,
-                                            decision.unresolved_evidence_gaps,
+                                            evaluator_execution_repair_gaps,
                                             attempt=1,
                                             outcome="exhausted",
                                         )
@@ -3352,6 +3586,10 @@ class MultiAgentWorkflowController:
                         not memory_acceptance_recovery_used
                         and failed_acceptance_calls
                         and acceptance_failures >= max_acceptance_attempts
+                        and self._acceptance_recovery_details(
+                            failed_acceptance_calls[-1].raw_output_summary
+                            or failed_acceptance_calls[-1].output_summary
+                        )["code"] == "invalid_memory_reference"
                     ):
                         rejected_acceptance = failed_acceptance_calls[-1]
                         recovery = self._recover_final_memory_acceptance(
@@ -3432,7 +3670,10 @@ class MultiAgentWorkflowController:
                     else:
                         missing_text = ", ".join(missing_criteria)
                         acceptance_error = (
-                            failed_acceptance_calls[-1].output_summary
+                            (
+                                failed_acceptance_calls[-1].raw_output_summary
+                                or failed_acceptance_calls[-1].output_summary
+                            )
                             if failed_acceptance_calls
                             else "No acceptance result was recorded."
                         )
@@ -3469,6 +3710,10 @@ class MultiAgentWorkflowController:
                         )
                         missing_manifest = "submitted manifest file does not exist" in acceptance_error.lower()
                         missing_artifact = recovery_details["code"] == "missing_artifact_prerequisite"
+                        missing_execution = recovery_details["code"] == "missing_execution_prerequisite"
+                        missing_output = missing_execution and not self._has_valid_required_output(
+                            plan, task, tool_outcomes
+                        )
                         no_eligible_evidence = (
                             "evidence_refs required" in acceptance_error.lower()
                             and not self._has_viable_acceptance_recovery_evidence(acceptance_recovery_evidence)
@@ -3482,6 +3727,10 @@ class MultiAgentWorkflowController:
                                 + (
                                     "Create or convert the required manifest in the bounded prerequisite recovery turn."
                                     if missing_manifest
+                                    else "Produce the frozen required output artifact in the bounded prerequisite recovery turn. "
+                                    if missing_output
+                                    else "Execute the exact frozen method and retain its task-local artifact. "
+                                    if missing_execution
                                     else "Create or convert valid durable evidence in the bounded prerequisite recovery turn. "
                                     if missing_artifact or no_eligible_evidence or missing_memory_prerequisite
                                     else "Then make one changed record_task_acceptance submission. "
@@ -3493,15 +3742,52 @@ class MultiAgentWorkflowController:
                         manifest_prerequisite_recovery_used = manifest_prerequisite_recovery_used or missing_manifest
                         evidence_prerequisite_recovery_active = (
                             (missing_artifact or no_eligible_evidence or missing_memory_prerequisite)
-                            and not missing_manifest
+                            and not missing_manifest and not missing_execution
                         )
                         evidence_prerequisite_recovery_used = (
                             evidence_prerequisite_recovery_used or evidence_prerequisite_recovery_active
                         )
                         acceptance_recovery_active = (
                             not missing_manifest and not missing_artifact and not no_eligible_evidence
-                            and not missing_memory_prerequisite
+                            and not missing_memory_prerequisite and not missing_execution
                         )
+                        if missing_output and not output_prerequisite_recovery_used:
+                            output_prerequisite_recovery_active = True
+                            output_prerequisite_recovery_used = True
+                            pending_acceptance_payload = self._acceptance_payload_from_outcome(
+                                failed_acceptance_calls[-1]
+                            )
+                            recovery_tools = [
+                                get_tool_name(tool)
+                                for tool in tools
+                                if get_tool_name(tool) != "record_task_acceptance"
+                                and get_tool_name(tool) not in _NON_EVIDENCE_RECOVERY_TOOLS
+                            ]
+                            self._emit_output_prerequisite_recovery(
+                                task,
+                                outcome="scheduled",
+                                allowed_tool_names=recovery_tools,
+                            )
+                            actor_prompt = self._output_prerequisite_recovery_prompt(
+                                plan,
+                                task,
+                                acceptance_recovery_evidence,
+                                next_cycle=cycle + 1,
+                            )
+                            self._record_efficiency_correction("output_prerequisite_repair")
+                        elif missing_execution and not execution_prerequisite_recovery_used:
+                            execution_prerequisite_recovery_active = True
+                            execution_prerequisite_recovery_used = True
+                            pending_acceptance_payload = self._acceptance_payload_from_outcome(
+                                failed_acceptance_calls[-1]
+                            )
+                            actor_prompt = self._execution_prerequisite_recovery_prompt(
+                                plan,
+                                task,
+                                acceptance_recovery_evidence,
+                                next_cycle=cycle + 1,
+                            )
+                            self._record_efficiency_correction("execution_prerequisite_repair")
                         self._log_workflow(
                             "task acceptance gate incomplete task=%s cycle=%s missing=%s recovery_evidence=%s",
                             self._task_label(task),
@@ -3603,7 +3889,17 @@ class MultiAgentWorkflowController:
                     evaluator_corrections,
                     evaluator_correction_limit,
                 ) + int(missing_acceptance_recovery_used) + int(evaluator_execution_repair_used)
-                if cycle < allowed_actor_cycles and not finding_acceptance_recovery:
+                allowed_actor_cycles += int(manifest_prerequisite_recovery_used)
+                allowed_actor_cycles += int(evidence_prerequisite_recovery_used)
+                allowed_actor_cycles += int(execution_prerequisite_recovery_used)
+                allowed_actor_cycles += int(output_prerequisite_recovery_used)
+                allowed_actor_cycles += int(max_token_recovery_used)
+                if (
+                    cycle < allowed_actor_cycles
+                    and not finding_acceptance_recovery
+                    and not execution_prerequisite_recovery_active
+                    and not output_prerequisite_recovery_active
+                ):
                     recovery_context = acceptance_recovery_evidence or self._acceptance_recovery_context(
                         task,
                         self.state.list_task_acceptance_results(task.task_uid),
@@ -3863,6 +4159,11 @@ class MultiAgentWorkflowController:
         frozen_criteria = "; ".join(
             f"{criterion.id}: {criterion.description}" for criterion in task.acceptance.criteria
         )
+        execution_requirements = "; ".join(
+            f"{requirement.id}: {requirement.description} [{requirement.subject_ref}]"
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        ) or "none"
         evaluator_section = ""
         required_tool_section = f"Required tool call: {required_tool}\n"
         completion_instruction = (
@@ -3890,6 +4191,7 @@ completed commands. The controller intentionally did not retain earlier conversa
 Assigned objective: {task.objective}
 {self._executable_target_scope_text(plan, task)}
 Frozen acceptance criteria: {frozen_criteria}
+Frozen execution bindings: {execution_requirements}
 
 Missing criterion: {criteria}
 Durable evidence ledger:
@@ -3898,6 +4200,82 @@ Durable evidence ledger:
 
 {completion_instruction}
 {loop_section}
+"""
+
+    def _output_prerequisite_recovery_prompt(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        recovery_evidence: List[Dict[str, str]],
+        *,
+        next_cycle: int,
+    ) -> str:
+        """Build one output-only repair turn without exposing the controller-owned terminal action."""
+
+        procedure = task.acceptance.basis.procedure
+        output_kind = procedure.output_kind if procedure is not None else "artifact"
+        evidence_ledger = (
+            "\n".join(
+                f"- {item['reference']} (source: {item['source']})" for item in recovery_evidence
+            )
+            or "- None"
+        )
+        requirements = "; ".join(
+            f"{requirement.id}: {requirement.description} [{requirement.subject_ref}]"
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        ) or "none"
+        return f"""## Required Output Recovery
+Start fresh actor cycle {next_cycle} for the existing task. Do not replay prior reasoning or broaden scope.
+
+Assigned objective: {task.objective}
+{self._executable_target_scope_text(plan, task)}
+Frozen execution bindings: {requirements}
+Required output kind: {output_kind}
+Retained task-local evidence:
+{evidence_ledger}
+
+Produce one valid current-operation artifact of the required output kind for the frozen task. Use any applicable
+available evidence-producing tool. The controller retained the prior acceptance submission and will validate the
+output and replay it itself after this turn. Do not call or attempt to describe record_task_acceptance.
+"""
+
+    def _execution_prerequisite_recovery_prompt(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        recovery_evidence: List[Dict[str, str]],
+        *,
+        next_cycle: int,
+    ) -> str:
+        """Build one provenance-only repair turn without exposing controller-owned acceptance replay."""
+
+        procedure = task.acceptance.basis.procedure
+        methods = ", ".join(procedure.methods) if procedure is not None else "the frozen method"
+        evidence_ledger = (
+            "\n".join(
+                f"- {item['reference']} (source: {item['source']})" for item in recovery_evidence
+            )
+            or "- None"
+        )
+        requirements = "; ".join(
+            f"{requirement.id}: {requirement.description} [{requirement.subject_ref}]"
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        ) or "none"
+        return f"""## Execution Evidence Recovery
+Start fresh actor cycle {next_cycle} for the existing task. Do not replay prior reasoning or broaden scope.
+
+Assigned objective: {task.objective}
+{self._executable_target_scope_text(plan, task)}
+Frozen execution methods: {methods}
+Frozen execution bindings: {requirements}
+Retained task-local evidence:
+{evidence_ledger}
+
+Produce current-operation artifact-backed evidence for the exact frozen method and subject. The controller retained
+the prior acceptance submission and will validate and replay it itself after this turn. Do not call or attempt to
+describe record_task_acceptance.
 """
 
     def _missing_acceptance_recovery_prompt(
@@ -4023,10 +4401,12 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
 
         if outcome is None:
             return {}
-        try:
-            payload = json.loads(outcome.input_summary)
-        except (TypeError, ValueError):
-            return {}
+        payload = outcome.structured_input
+        if payload is None:
+            try:
+                payload = json.loads(outcome.input_summary)
+            except (TypeError, ValueError):
+                return {}
         if not isinstance(payload, dict):
             return {}
         fields = ("status", "disposition", "summary", "evidence_refs")
@@ -4439,7 +4819,9 @@ Allowed tools: {allowed_tools_text}
         text = str(error or "")
         normalized = text.lower()
         code = "invalid_payload"
-        if "acceptance evidence memory does not exist in this operation" in normalized:
+        if "execution evidence is required before acceptance" in normalized:
+            code = "missing_execution_prerequisite"
+        elif "acceptance evidence memory does not exist in this operation" in normalized:
             code = "invalid_memory_reference"
         elif "inventory manifest" in normalized:
             code = "invalid_inventory_manifest"
@@ -4924,25 +5306,58 @@ Return exactly one decision for each candidate.
         })
 
     def _validate_task_shell_commands(self, plan: OperationPlan, task: Task, commands: List[Any]) -> Optional[str]:
-        """Reject shell service literals that escape the active task's executable boundary."""
+        """Reject URLs that misuse logical target IDs as shell hostnames."""
 
         command_text = "\n".join(
             str(command.get("command", "")) if isinstance(command, dict) else str(command)
             for command in commands
         )
-        violations = task_service_scope_validation_details(plan, task, command_text)
+        violations = self._shell_logical_target_id_violations(plan, command_text)
         decision = "blocked" if violations else "allowed"
         self._emit_task_command_scope_validation(plan, task, violations, decision)
         if not violations:
             return None
         allowed_targets = self._task_executable_target_values(plan, task)
         allowed_text = ", ".join(allowed_targets) or "none"
-        literal = str(violations[0].get("literal") or "service reference")
+        literal = str(violations[0].get("literal") or "logical target ID")
         return (
-            "The shell command was not executed because its service target is outside the assigned task boundary: "
-            f"`{literal}`. Use only this exact assigned endpoint or its in-scope route: {allowed_text}. "
-            "Logical target IDs are controller identifiers, not hostnames. Submit one materially changed command."
+            "The shell command was not executed because it uses a logical target ID as a hostname: "
+            f"`{literal}`. Use a concrete hostname or IP address, not a logical target ID. "
+            f"Concrete assigned targets: {allowed_text}. Submit one materially changed command."
         )
+
+    @staticmethod
+    def _shell_logical_target_id_violations(plan: OperationPlan, command_text: str) -> List[Dict[str, Any]]:
+        """Return URL literals that use a controller logical target ID as their hostname."""
+
+        target_ids = {
+            str(target.target_id).strip().lower()
+            for target in plan.targets
+            if str(target.target_id).strip()
+        }
+        violations = []
+        for match in _SHELL_URL_LITERAL_PATTERN.finditer(command_text):
+            literal = match.group(0).rstrip(".,;:)]}")
+            try:
+                parsed = urlparse(literal)
+                host = (parsed.hostname or "").lower().rstrip(".")
+            except ValueError:
+                continue
+            if host not in target_ids:
+                continue
+            try:
+                port = parsed.port
+            except ValueError:
+                port = None
+            violations.append({
+                "literal": literal,
+                "scheme": parsed.scheme.lower() or None,
+                "host": host,
+                "port": port,
+                "reason": "logical_target_id_as_host",
+                "allowed_targets": [],
+            })
+        return violations
 
     def _emit_task_command_scope_validation(
         self,
@@ -5104,6 +5519,7 @@ Return exactly one decision for each candidate.
     ) -> None:
         """Emit one structured evaluator-directed evidence repair transition."""
 
+        repair_id = f"{task.task_uid}:execution:{attempt}"
         attributes = {
             "workflow.event.name": "evaluator_execution_repair",
             "workflow.task.uid": str(task.task_uid),
@@ -5113,6 +5529,7 @@ Return exactly one decision for each candidate.
             "workflow.evaluator_repair.gaps": json.dumps(list(evidence_gaps)),
             "workflow.evaluator_repair.attempt": attempt,
             "workflow.evaluator_repair.outcome": outcome,
+            "workflow.evaluator_repair.id": repair_id,
         }
         try:
             tracer = otel_trace.get_tracer(__name__)
@@ -5129,6 +5546,7 @@ Return exactly one decision for each candidate.
                 "evidence_gaps": list(evidence_gaps),
                 "attempt": attempt,
                 "outcome": outcome,
+                "repair_id": repair_id,
             }
         )
 
@@ -5590,27 +6008,23 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             invalid_memory_ids = [
                 memory_id for memory_id in legacy_memory_ids if memory_id not in canonical_memory_ids
             ]
-            if invalid_memory_ids:
-                raise TaskPromptBuildError(
-                    "task prompt memory_ids contains unknown selection(s): " + ", ".join(invalid_memory_ids),
-                    repairable=True,
-                )
-            if invalid_memory_indices:
-                raise TaskPromptBuildError(
-                    "task prompt memory_indices contains out-of-range selection(s): "
-                    + ", ".join(str(index) for index in invalid_memory_indices),
-                    repairable=True,
-                )
+            valid_legacy_memory_ids = [
+                memory_id for memory_id in legacy_memory_ids if memory_id in canonical_memory_ids
+            ]
             canonical_selected_ids = list(dict.fromkeys(selected_memory_ids))
-            if legacy_memory_ids and memory_indices and set(legacy_memory_ids) != set(canonical_selected_ids):
-                raise TaskPromptBuildError(
-                    "task prompt memory_ids and memory_indices must select the same canonical memories",
-                    repairable=True,
-                )
-            if legacy_memory_ids and not memory_indices:
-                memory_indices = [canonical_memory_ids.index(memory_id) for memory_id in legacy_memory_ids]
-                canonical_selected_ids = list(legacy_memory_ids)
+            if valid_legacy_memory_ids and not memory_indices:
+                memory_indices = [canonical_memory_ids.index(memory_id) for memory_id in valid_legacy_memory_ids]
+                canonical_selected_ids = list(valid_legacy_memory_ids)
             selected_memory_ids = canonical_selected_ids
+            if invalid_memory_ids or invalid_memory_indices or (
+                valid_legacy_memory_ids and requested_memory_indices
+                and set(valid_legacy_memory_ids) != set(canonical_selected_ids)
+            ):
+                self._emit_task_memory_selection_filter(
+                    invalid_memory_ids,
+                    invalid_memory_indices,
+                    bool(valid_legacy_memory_ids and requested_memory_indices),
+                )
         else:
             selected_memory_ids = legacy_memory_ids
         return {
@@ -5620,6 +6034,24 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             "tools": tools,
             "shell_commands": shell_commands,
         }
+
+    def _emit_task_memory_selection_filter(
+        self,
+        dropped_ids: List[str],
+        dropped_indices: List[int],
+        index_precedence: bool,
+    ) -> None:
+        """Audit stale prompt-memory selectors without discarding a usable prompt."""
+
+        payload = {
+            "type": "task_prompt_memory_selection_filter",
+            "dropped_memory_id_count": len(dropped_ids),
+            "dropped_memory_indices": list(dropped_indices),
+            "memory_indices_preferred": index_precedence,
+        }
+        if dropped_ids:
+            payload["dropped_memory_ids"] = list(dropped_ids)
+        self._emit_workflow_event(payload)
 
     def _deterministic_task_prompt_spec(
         self,
@@ -6301,7 +6733,8 @@ review existing memories. Return only the requested JSON decision."""
         failed_batch_count = 0
         max_attempts = 1 + self._task_creator_correction_count()
         for batch in batches:
-            tools = self._task_creator_tools(phase, batch)
+            task_creator_ledger = TaskCreatorToolInvocationLedger()
+            tools = self._task_creator_tools(phase, batch, invocation_observer=task_creator_ledger.observe)
             prompt = self._task_creator_prompt(plan, phase, batch)
             before_batch_uids = {task.task_uid for task in self.state.list_tasks()}
             before_batch_actionable = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
@@ -6349,6 +6782,7 @@ review existing memories. Return only the requested JSON decision."""
                         context=activity_context,
                     )
                     try:
+                        invocation_count_before_run = task_creator_ledger.invocation_count
                         creator_result = run_creator(attempt_prompt, run_policy)
                         previous_attempt_max_tokens = False
                         self._emit_workflow_activity(
@@ -6358,7 +6792,16 @@ review existing memories. Return only the requested JSON decision."""
                             attempt_total=max_attempts,
                             context=activity_context,
                         )
-                        batch_failure_reason = self._task_creator_failure_reason(creator_result)
+                        replay_failure_reason = ""
+                        if task_creator_ledger.invocation_count == invocation_count_before_run:
+                            creator_result, replay_failure_reason = self._replay_task_creator_json_submission(
+                                creator_result,
+                                tools,
+                                phase=phase,
+                                batch=batch,
+                                attempt=attempt,
+                            )
+                        batch_failure_reason = replay_failure_reason or self._task_creator_failure_reason(creator_result)
                     except MaxTokensReachedException as error:
                         previous_attempt_max_tokens = True
                         max_token_classification = str(
@@ -6467,6 +6910,9 @@ review existing memories. Return only the requested JSON decision."""
         if not snapshot_refs:
             return [self._default_task_creation_batch(plan, phase, system_prompt)]
 
+        if len(snapshot_refs) > 1:
+            snapshot_refs = [self._merge_phase_inventory_manifests(plan, source_phase, snapshot_refs)]
+
         prompt_token_limit = int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)
         prompt_char_limit = max(1_000, int(prompt_token_limit * 4 * 0.60))
         raw_batches: List[Tuple[str, Tuple[Tuple[str, str, str, Tuple[str, ...]], ...], int]] = []
@@ -6514,6 +6960,180 @@ review existing memories. Return only the requested JSON decision."""
             TaskCreationBatch(index, total, snapshot_ref, groups, estimated)
             for index, (snapshot_ref, groups, estimated) in enumerate(raw_batches, start=1)
         ]
+
+    def _merge_phase_inventory_manifests(
+        self,
+        plan: OperationPlan,
+        source_phase: int,
+        references: List[str],
+    ) -> str:
+        """Create one provenance-preserving snapshot for downstream inventory fan-out."""
+
+        item_by_identity: Dict[str, Dict[str, Any]] = {}
+        source_id_maps: Dict[str, Dict[str, str]] = {}
+        loaded: List[Tuple[str, Dict[str, Any]]] = []
+        gaps: List[str] = []
+        for reference in sorted(set(references)):
+            manifest, _snapshot_hash = self._load_controller_inventory_manifest(plan, reference)
+            loaded.append((reference, manifest))
+            for gap in manifest.get("unassessed_gaps", []):
+                if isinstance(gap, str) and gap not in gaps:
+                    gaps.append(gap)
+            for raw_item in manifest.get("items", []):
+                if not isinstance(raw_item, dict):
+                    continue
+                identity = self._inventory_item_identity(raw_item)
+                stable_id = f"{str(raw_item.get('kind') or 'item')}-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
+                source_id_maps.setdefault(reference, {})[str(raw_item.get("id") or "")] = stable_id
+        for reference, manifest in loaded:
+            source_id_map = source_id_maps.get(reference, {})
+            for raw_item in manifest.get("items", []):
+                if not isinstance(raw_item, dict):
+                    continue
+                identity = self._inventory_item_identity(raw_item)
+                item = self._rewrite_inventory_item_refs(json.loads(json.dumps(raw_item)), source_id_map)
+                item["id"] = source_id_map.get(str(raw_item.get("id") or ""), item.get("id"))
+                attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+                item["attributes"] = attributes
+                attributes["source_manifest_refs"] = [reference]
+                if identity not in item_by_identity:
+                    item_by_identity[identity] = item
+                    continue
+                item_by_identity[identity] = self._merge_inventory_item(
+                    item_by_identity[identity],
+                    item,
+                    reference,
+                )
+        merged_items = [item_by_identity[identity] for identity in sorted(item_by_identity)]
+        if not merged_items:
+            raise ValueError("Cannot merge inventory manifests without validated inventory items")
+        manifest = {
+            "schema_version": 1,
+            "items": merged_items,
+            "unassessed_gaps": gaps,
+            "extraction": {
+                "source_artifact_count": len(references),
+                "candidate_count": sum(1 for _item in merged_items),
+                "added_count": len(merged_items),
+            },
+        }
+        canonical_payload = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:16]
+        path = (
+            Path(_operation_output_root())
+            / "artifacts"
+            / f"phase-{source_phase}-inventory-merged-{digest}.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_inventory_manifest_atomically(str(path), manifest)
+        merged_reference = canonical_artifact_reference(str(path))
+        _load_inventory_manifest(merged_reference)
+        self._emit_workflow_event({
+            "type": "inventory_manifest_merge",
+            "source_phase": source_phase,
+            "input_reference_count": len(references),
+            "output_reference": merged_reference,
+            "output_item_count": len(merged_items),
+        })
+        return merged_reference
+
+    @staticmethod
+    def _inventory_item_identity(item: Dict[str, Any]) -> str:
+        """Return the protocol-neutral semantic identity of one inventory item."""
+
+        return json.dumps(
+            {
+                "target_id": item.get("target_id"),
+                "kind": item.get("kind"),
+                "value": item.get("value"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def _merge_inventory_item(
+        cls,
+        existing: Dict[str, Any],
+        incoming: Dict[str, Any],
+        source_reference: str,
+    ) -> Dict[str, Any]:
+        """Merge complementary metadata without discarding source-attributed conflicts."""
+
+        merged = json.loads(json.dumps(existing))
+        conflicts: Dict[str, List[Any]] = {}
+        merged["attributes"] = cls._merge_inventory_value(
+            merged.get("attributes", {}),
+            incoming.get("attributes", {}),
+            "attributes",
+            conflicts,
+        )
+        provenance = merged["attributes"].setdefault("source_manifest_refs", [])
+        if source_reference not in provenance:
+            provenance.append(source_reference)
+        if conflicts:
+            conflict_store = merged["attributes"].setdefault("merge_conflicts", {})
+            for path, values in conflicts.items():
+                conflict_store[path] = values
+        return merged
+
+    @classmethod
+    def _merge_inventory_value(
+        cls,
+        existing: Any,
+        incoming: Any,
+        path: str,
+        conflicts: Dict[str, List[Any]],
+    ) -> Any:
+        if existing == incoming:
+            return existing
+        if isinstance(existing, dict) and isinstance(incoming, dict):
+            merged = json.loads(json.dumps(existing))
+            for key, value in incoming.items():
+                child_path = f"{path}.{key}"
+                if key not in merged:
+                    merged[key] = json.loads(json.dumps(value))
+                else:
+                    merged[key] = cls._merge_inventory_value(merged[key], value, child_path, conflicts)
+            return merged
+        if isinstance(existing, list) and isinstance(incoming, list):
+            merged = json.loads(json.dumps(existing))
+            keyed_positions = {
+                str(value.get("id") or value.get("name")): index
+                for index, value in enumerate(merged)
+                if isinstance(value, dict) and (value.get("id") or value.get("name"))
+            }
+            for value in incoming:
+                key = str(value.get("id") or value.get("name")) if isinstance(value, dict) else ""
+                if key and key in keyed_positions:
+                    index = keyed_positions[key]
+                    merged[index] = cls._merge_inventory_value(
+                        merged[index], value, f"{path}[{key}]", conflicts
+                    )
+                elif value not in merged:
+                    merged.append(json.loads(json.dumps(value)))
+            return merged
+        conflicts[path] = list(dict.fromkeys([
+            json.dumps(existing, sort_keys=True, default=str),
+            json.dumps(incoming, sort_keys=True, default=str),
+        ]))
+        return existing
+
+    @classmethod
+    def _rewrite_inventory_item_refs(cls, value: Any, source_id_map: Dict[str, str]) -> Any:
+        """Rewrite source-local item references after stable merged IDs are assigned."""
+
+        if isinstance(value, dict):
+            rewritten = {}
+            for key, item in value.items():
+                if key in {"endpoint_id", "item_id", "parent_id", "service_id", "workflow_id"}:
+                    rewritten[key] = source_id_map.get(str(item), item)
+                else:
+                    rewritten[key] = cls._rewrite_inventory_item_refs(item, source_id_map)
+            return rewritten
+        if isinstance(value, list):
+            return [cls._rewrite_inventory_item_refs(item, source_id_map) for item in value]
+        return value
 
     def _default_task_creation_batch(
         self,
@@ -6822,6 +7442,110 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
             or "no actionable task was created"
         )
 
+    def _replay_task_creator_json_submission(
+        self,
+        creator_result: Any,
+        tools: List[Any],
+        *,
+        phase: PlanPhase,
+        batch: TaskCreationBatch,
+        attempt: int,
+    ) -> tuple[Any, str]:
+        """Submit a complete text-returned create_tasks payload through the bound tool once."""
+
+        response_text = extract_result_text(creator_result)
+        replay_context = {
+            "phase_id": phase.id,
+            "batch_index": batch.index,
+            "batch_total": batch.total,
+            "attempt": attempt,
+        }
+        try:
+            parsed = parse_json_response_with_metadata(response_text, require_object=True)
+            payload = parsed.value
+        except (json.JSONDecodeError, ValueError) as error:
+            self._emit_workflow_event(
+                {
+                    "type": "task_creator_json_submission_replay",
+                    "status": "ineligible",
+                    "reason": error.__class__.__name__,
+                    **replay_context,
+                }
+            )
+            return creator_result, ""
+
+        if set(payload) != {"tasks"} or not isinstance(payload.get("tasks"), list):
+            self._emit_workflow_event(
+                {
+                    "type": "task_creator_json_submission_replay",
+                    "status": "ineligible",
+                    "reason": "invalid_create_tasks_argument_shape",
+                    **replay_context,
+                }
+            )
+            return creator_result, ""
+
+        create_tasks_tool = next((tool for tool in tools if get_tool_name(tool) == "create_tasks"), None)
+        if create_tasks_tool is None:
+            raise WorkflowInvariantError("task_creator requires a create_tasks tool for JSON submission replay")
+
+        self._record_efficiency_correction("task_creator_json_submission_replay")
+        payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        payload_fingerprint = hashlib.sha256(payload_text.encode("utf-8", errors="replace")).hexdigest()
+        try:
+            tool_result = create_tasks_tool(**payload)
+            decoded_result = json.loads(str(tool_result))
+            success = isinstance(decoded_result, dict) and decoded_result.get("complete") is True
+            output_summary = self._short(tool_result, 500)
+            replay_failure_reason = "" if success else "create_tasks replay did not report completion"
+        except Exception as error:
+            tool_result = error
+            success = False
+            output_summary = self._short(error, 500)
+            replay_failure_reason = output_summary or "create_tasks replay failed"
+
+        synthetic = ToolOutcome(
+            sequence=max(
+                (outcome.sequence for outcome in getattr(creator_result, "outcomes", [])),
+                default=0,
+            ) + 1,
+            tool_use_id="controller-task-creator-json-submission",
+            tool_name="create_tasks",
+            success=success,
+            correctable=not success,
+            input_summary=payload_text[:6000],
+            output_summary=output_summary,
+            input_fingerprint=payload_fingerprint,
+            output_fingerprint=hashlib.sha256(
+                str(tool_result).encode("utf-8", errors="replace")
+            ).hexdigest(),
+        )
+        if isinstance(creator_result, TaskExecutorCycleResult):
+            creator_result.outcomes.append(synthetic)
+        else:
+            creator_result = TaskExecutorCycleResult(text=response_text, outcomes=[synthetic])
+
+        replay_status = "accepted" if success else "rejected"
+        self._emit_workflow_event(
+            {
+                "type": "task_creator_json_submission_replay",
+                "status": replay_status,
+                "payload_sha256": payload_fingerprint,
+                "task_count": len(payload["tasks"]),
+                **replay_context,
+            }
+        )
+        self._log_workflow(
+            "task creator JSON submission replay status=%s phase=%s batch=%s/%s attempt=%s task_count=%s",
+            replay_status,
+            phase.id,
+            batch.index,
+            batch.total,
+            attempt,
+            len(payload["tasks"]),
+        )
+        return creator_result, replay_failure_reason
+
     def _run_worker_agent(
         self,
         role: str,
@@ -6900,6 +7624,7 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
         self,
         phase: Optional[PlanPhase] = None,
         batch: Optional[TaskCreationBatch] = None,
+        invocation_observer: Optional[Callable[[Dict[str, Any], Any, Optional[Exception]], None]] = None,
     ) -> List[Any]:
         if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
             raise WorkflowInvariantError("create_tasks tool is required for task_creator")
@@ -6917,6 +7642,7 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
             phase_title=phase.title if phase else "",
             phase_objective=phase.criteria if phase else "",
             required_finding_refs=required_finding_refs,
+            invocation_observer=invocation_observer,
         )]
 
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
@@ -8273,6 +8999,8 @@ Output only the revised task prompt:
         phase: PlanPhase,
         batch: Optional[TaskCreationBatch] = None,
     ) -> str:
+        task_creator_phase = self._task_creator_phase_projection(phase)
+        task_creator_plan = self._task_creator_plan_projection(plan, task_creator_phase)
         if batch and batch.snapshot_ref:
             existing_task_context = self._task_creator_batch_existing_task_context(phase, batch)
             batch_context = f"""## Controller-Owned Creation Batch
@@ -8313,10 +9041,10 @@ the task explicitly tests that difference.
 {self.runtime.config.objective}
 
 ## Complete Plan
-{plan.to_toon()}
+{task_creator_plan.to_toon()}
 
 ## Active Phase
-{json.dumps(phase.to_dict(), indent=2, sort_keys=True)}
+{json.dumps(task_creator_phase.to_dict(), indent=2, sort_keys=True)}
 
 ## Existing Tasks Across All Phases
 {existing_task_context}
@@ -8337,7 +9065,30 @@ generic replacement for an existing verification task.
 ## Eligible Semantic Memories
 {self._memory_summary()}
 
-{self._task_creator_contract(plan, phase, snapshot_only=bool(batch and batch.snapshot_ref))}"""
+{self._task_creator_contract(task_creator_plan, task_creator_phase, snapshot_only=bool(batch and batch.snapshot_ref))}"""
+
+    @staticmethod
+    def _task_creator_phase_projection(phase: PlanPhase) -> PlanPhase:
+        """Return a bounded phase view for task creation without mutating the stored plan."""
+
+        original_criteria = phase.criteria.strip()
+        bounded_criteria = _route_scoped_phase_objective(original_criteria)
+        if original_criteria and not bounded_criteria:
+            bounded_criteria = f"Perform {phase.title.strip()} for the assigned frozen inventory unit"
+        if bounded_criteria == original_criteria:
+            return phase
+        return replace(phase, criteria=bounded_criteria)
+
+    @staticmethod
+    def _task_creator_plan_projection(plan: OperationPlan, phase: PlanPhase) -> OperationPlan:
+        """Return a task-creator-only plan view with the active phase projection."""
+
+        if all(existing.id != phase.id for existing in plan.phases):
+            return plan
+        return replace(
+            plan,
+            phases=[phase if existing.id == phase.id else existing for existing in plan.phases],
+        )
 
     def _task_creator_compact_existing_task_context(self, phase: PlanPhase) -> str:
         """Return bounded task state without serializing the operation-wide task contracts."""
@@ -8767,6 +9518,17 @@ Do not return `continue` merely because work is incomplete when the task history
             if task is not None and task.kind == "finding_validation"
             else ""
         )
+        execution_evidence_methodology = (
+            "\n\n## Execution Evidence Prerequisite\n"
+            "If the frozen acceptance contract includes execution_requirements, execute the declared method against "
+            "the frozen subject and preserve its concrete result as a current-operation artifact. The controller "
+            "matches that task-local tool outcome to the requirement automatically when record_task_acceptance is "
+            "called. Raw commands, memories, and unsupported claims are not execution evidence."
+            if task is not None and any(
+                criterion.execution_requirements for criterion in task.acceptance.criteria
+            )
+            else ""
+        )
         return f"""## Task Executor Contract (Controller-owned)
 Execute only the assigned task objective. The objective is one single assigned task unit named by the acceptance
 contract; do not broaden it. Treat plan constraints and module access, safety, execution, evidence, and
@@ -8794,7 +9556,7 @@ ledger does not replace storing substantive artifact evidence. Successful accept
 evidence references as one operation observation for later tasks. The controller binds the tool to the assigned task,
 criterion, and coverage IDs; never guess or submit those IDs. End with a concise summary of completed work,
 partial progress, or a concrete blocker. Python owns task, phase, and operation state transitions; never claim or
-perform them.{finding_submission_methodology}{finding_validation_methodology}"""
+perform them.{finding_submission_methodology}{finding_validation_methodology}{execution_evidence_methodology}"""
 
     @staticmethod
     def _tool_selection_policy() -> str:
@@ -9088,9 +9850,464 @@ tools and durable evidence before relying on it."""
             if not outcome.success or outcome.tool_name in consumer_tools:
                 continue
             references.update(getattr(outcome, "artifact_refs", ()) or ())
-            text = " ".join((str(outcome.output_summary or ""), str(outcome.raw_output_summary or "")))
+            text = " ".join(
+                (
+                    str(outcome.input_summary or ""),
+                    str(outcome.output_summary or ""),
+                    str(outcome.raw_output_summary or ""),
+                )
+            )
             references.update(re.findall(r"(?:artifact|artifact_id):[^\s\\\]\}\)\"']+", text))
+            references.update(MultiAgentWorkflowController._operation_local_artifact_refs_in_text(text))
         return sorted(references)
+
+    @staticmethod
+    def _operation_local_artifact_refs_in_text(text: str) -> List[str]:
+        """Extract existing operation-local files from tool text as canonical artifact references."""
+
+        references = []
+        for candidate in _ABSOLUTE_ARTIFACT_PATH_PATTERN.findall(str(text or "")):
+            path = candidate.rstrip(".,;:!?")
+            if not path:
+                continue
+            try:
+                reference = canonical_artifact_reference(f"artifact:{path}")
+            except (OSError, TypeError, ValueError):
+                continue
+            if reference not in references:
+                references.append(reference)
+        return references
+
+    @staticmethod
+    def _canonical_execution_method(method: str) -> str:
+        """Return one protocol-neutral execution capability name."""
+
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(method or "").strip().lower()).strip("_")
+        if normalized in _EXECUTION_METHOD_ALIASES:
+            return _EXECUTION_METHOD_ALIASES[normalized]
+        shell_capabilities = _SHELL_EXECUTION_CAPABILITIES.get(normalized, frozenset())
+        tool_capabilities = _TOOL_EXECUTION_CAPABILITIES.get(normalized, frozenset())
+        combined = shell_capabilities | tool_capabilities
+        if len(combined) == 1:
+            return next(iter(combined))
+        tokens = set(normalized.split("_"))
+        for token in ("analysis", "analyze", "analyzer", "audit", "inspect", "review"):
+            if token in tokens:
+                return "analyze"
+        if tokens.intersection({"crawl", "crawling", "fuzz", "fuzzing"}):
+            return "crawl"
+        if tokens.intersection({"http", "request", "client"}):
+            return "request"
+        if tokens.intersection({"network", "recon", "scan", "scanning", "enumeration"}):
+            return "enumerate"
+        if tokens.intersection({"sast", "source", "forensics", "capture"}):
+            return "analyze"
+        if tokens.intersection({"exploit", "exploitation", "testing", "injection"}):
+            return "execute"
+        return normalized
+
+    @classmethod
+    def _outcome_execution_capabilities(cls, outcome: ToolOutcome) -> frozenset[str]:
+        """Return deterministic capabilities observed for one successful tool outcome."""
+
+        capabilities = _TOOL_EXECUTION_CAPABILITIES.get(outcome.tool_name, frozenset())
+        if outcome.tool_name != "shell":
+            return capabilities
+        try:
+            payload = json.loads(outcome.input_summary)
+        except (TypeError, ValueError):
+            payload = {}
+        command = str(payload.get("command") or payload.get("cmd") or "") if isinstance(payload, dict) else ""
+        try:
+            executable = Path(shlex.split(command)[0]).name.lower() if command else ""
+        except ValueError:
+            executable = ""
+        configured = _SHELL_EXECUTION_CAPABILITIES.get(executable)
+        if configured is not None:
+            return configured
+        specs = get_shell_command_specs([executable])
+        return frozenset(
+            capability
+            for spec in specs
+            for raw_capability in spec.get("capabilities", [])
+            if (capability := cls._canonical_execution_method(raw_capability))
+            in {"analyze", "compare", "crawl", "enumerate", "execute", "request"}
+        )
+
+    @staticmethod
+    def _outcome_matches_execution_subject(
+        plan: OperationPlan,
+        task: Task,
+        subject_ref: str,
+        outcome: ToolOutcome,
+    ) -> bool:
+        """Return whether an observed invocation is bound to the frozen subject."""
+
+        subject = str(subject_ref or "").strip()
+        haystack = " ".join((outcome.input_summary, outcome.output_summary, outcome.raw_output_summary))
+        if subject.startswith("target:"):
+            target_id = subject.split(":", 1)[1]
+            assigned_targets = [
+                target
+                for target in plan.targets
+                if target.target_id == target_id
+                and (not task.target_ids or target.target_id in task.target_ids)
+            ]
+            assigned_values = {
+                str(target.value or "").strip().rstrip("/").lower()
+                for target in assigned_targets
+            }
+            return any(value and value in haystack.lower() for value in assigned_values)
+        if subject.startswith("/"):
+            route_pattern = re.escape(subject)
+            route_pattern = re.sub(r":[A-Za-z_][A-Za-z0-9_]*", r"[^/?#\\s]+", route_pattern)
+            return bool(re.search(route_pattern, haystack))
+        normalized_subject = subject.rstrip("/").lower()
+        if normalized_subject and normalized_subject in haystack.lower():
+            return True
+        assigned = {
+            target.value.rstrip("/").lower()
+            for target in plan.targets
+            if not task.target_ids or target.target_id in task.target_ids
+        }
+        return any(value and value in haystack.lower() for value in assigned)
+
+    def _resolve_controller_execution_evidence(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        criterion: AcceptanceCriterion,
+        tool_outcomes: List[ToolOutcome],
+    ) -> Dict[str, List[str]]:
+        """Bind task-local tool provenance to frozen execution requirements."""
+
+        if not criterion.execution_requirements:
+            return {}
+        procedure = task.acceptance.basis.procedure
+        expected_capabilities = {
+            self._canonical_execution_method(method)
+            for method in (procedure.methods if procedure is not None else ("analyze",))
+            if str(method).strip()
+        }
+        candidates = []
+        for outcome in tool_outcomes:
+            if not outcome.success or outcome.tool_name in _NON_EXECUTION_RECEIPT_TOOLS:
+                continue
+            capabilities = self._outcome_execution_capabilities(outcome)
+            candidates.append((outcome, capabilities))
+
+        resolved: Dict[str, List[str]] = {}
+        details: Dict[str, Dict[str, Any]] = {}
+        for requirement in criterion.execution_requirements:
+            matched = [
+                (outcome, capabilities)
+                for outcome, capabilities in candidates
+                if self._outcome_matches_execution_subject(
+                    plan,
+                    task,
+                    requirement.subject_ref,
+                    outcome,
+                )
+            ]
+            observed_capabilities = set().union(*(capabilities for _outcome, capabilities in matched)) if matched else set()
+            references = self._valid_required_output_artifact_refs(
+                plan, task, tool_outcomes, requirement
+            )
+            if not references:
+                continue
+            if (
+                procedure is None or procedure.output_kind != "inventory_manifest"
+            ) and expected_capabilities and not expected_capabilities.issubset(observed_capabilities):
+                unknown_producer = any(not capabilities for _outcome, capabilities in matched)
+                if not unknown_producer:
+                    continue
+            resolved[requirement.id] = references
+            details[requirement.id] = {
+                "artifact_refs": references,
+                "capabilities": sorted(observed_capabilities),
+                "receipt_mode": (
+                    "validated_inventory_manifest"
+                    if procedure is not None and procedure.output_kind == "inventory_manifest"
+                    else "unknown_tool_artifact"
+                    if expected_capabilities and not expected_capabilities.issubset(observed_capabilities)
+                    else "capability_matched"
+                ),
+                "subject_ref": requirement.subject_ref,
+                "tool_use_ids": sorted({outcome.tool_use_id for outcome, _capabilities in matched}),
+            }
+
+        if resolved:
+            current_task = next(
+                (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+                task,
+            )
+            context = dict(current_task.recovery_context)
+            receipts = dict(context.get("execution_evidence_receipts") or {})
+            controller_details = dict(context.get("controller_execution_evidence") or {})
+            for requirement_id, references in resolved.items():
+                receipts[requirement_id] = list(dict.fromkeys([*receipts.get(requirement_id, []), *references]))
+                controller_details[requirement_id] = details[requirement_id]
+            context["execution_evidence_receipts"] = receipts
+            context["controller_execution_evidence"] = controller_details
+            self.state.store_task(replace(current_task, recovery_context=context))
+        self._emit_controller_execution_evidence(task, criterion, resolved, expected_capabilities)
+        return resolved
+
+    def _valid_required_output_artifact_refs(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        tool_outcomes: List[ToolOutcome],
+        requirement: Optional[ExecutionRequirement] = None,
+    ) -> List[str]:
+        """Return current-operation artifacts that satisfy the task's frozen output contract.
+
+        This deliberately validates the output type separately from the observed execution method. A valid
+        output with insufficient method provenance is an execution-prerequisite issue; no valid output at all is
+        an output-prerequisite issue.
+        """
+
+        procedure = task.acceptance.basis.procedure
+        if procedure is None:
+            return []
+        references = []
+        for outcome in tool_outcomes:
+            if not outcome.success or outcome.tool_name in _NON_EXECUTION_RECEIPT_TOOLS:
+                continue
+            if requirement is not None and not self._outcome_matches_execution_subject(
+                plan, task, requirement.subject_ref, outcome
+            ):
+                continue
+            for reference in self._artifact_refs_from_tool_outcomes([outcome]):
+                if not self._execution_artifact_is_current_operation(reference):
+                    continue
+                if procedure.output_kind == "inventory_manifest":
+                    try:
+                        self._load_controller_inventory_manifest(plan, reference)
+                    except ValueError:
+                        continue
+                if reference not in references:
+                    references.append(reference)
+        return references
+
+    def _has_valid_required_output(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        tool_outcomes: List[ToolOutcome],
+    ) -> bool:
+        """Whether every frozen execution binding has a current valid typed output artifact."""
+
+        requirements = [
+            requirement
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        ]
+        return bool(requirements) and all(
+            self._valid_required_output_artifact_refs(plan, task, tool_outcomes, requirement)
+            for requirement in requirements
+        )
+
+    def _emit_output_prerequisite_recovery(
+        self,
+        task: Task,
+        *,
+        outcome: str,
+        allowed_tool_names: List[str],
+    ) -> None:
+        """Emit controller-owned output-prerequisite recovery state for auditability."""
+
+        procedure = task.acceptance.basis.procedure
+        output_kind = procedure.output_kind if procedure is not None else ""
+        event = {
+            "type": "task_output_prerequisite_recovery",
+            "task_uid": task.task_uid,
+            "phase": task.phase,
+            "outcome": outcome,
+            "output_kind": output_kind,
+            "allowed_tool_names": sorted(allowed_tool_names),
+        }
+        attributes = {
+            "workflow.event.name": "task_output_prerequisite_recovery",
+            "workflow.task.uid": task.task_uid,
+            "workflow.phase.id": task.phase,
+            "workflow.output_prerequisite.outcome": outcome,
+            "workflow.output_prerequisite.kind": output_kind,
+            "gen_ai.agent.tools": json.dumps(sorted(allowed_tool_names)),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("task_output_prerequisite_recovery", attributes=attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit output-prerequisite recovery trace span", exc_info=True)
+        self._emit_workflow_event(event)
+
+    @staticmethod
+    def _execution_artifact_is_current_operation(reference: str) -> bool:
+        """Return whether an artifact reference resolves inside the current operation root."""
+
+        if not reference.startswith(("artifact:", "artifact_id:")):
+            return False
+        try:
+            path = Path(_artifact_path_from_ref(reference)).resolve()
+            root = Path(_operation_output_root()).resolve()
+            return path.is_relative_to(root) and path.is_file()
+        except (OSError, ValueError):
+            return False
+
+    def _emit_controller_execution_evidence(
+        self,
+        task: Task,
+        criterion: AcceptanceCriterion,
+        resolved: Dict[str, List[str]],
+        expected_capabilities: set[str],
+    ) -> None:
+        """Emit structured proof-resolution telemetry to the log and current task trace."""
+
+        required_ids = {requirement.id for requirement in criterion.execution_requirements}
+        outcome = "matched" if required_ids.issubset(resolved) else "unresolved"
+        event = {
+            "type": "controller_execution_evidence",
+            "task_uid": task.task_uid,
+            "phase": task.phase,
+            "criterion_id": criterion.id,
+            "outcome": outcome,
+            "expected_capabilities": sorted(expected_capabilities),
+            "matched_requirement_ids": sorted(resolved),
+            "missing_requirement_ids": sorted(required_ids - set(resolved)),
+        }
+        attributes = {
+            "workflow.event.name": "controller_execution_evidence",
+            "workflow.task.uid": task.task_uid,
+            "workflow.phase.id": task.phase,
+            "workflow.execution_evidence.outcome": outcome,
+            "workflow.execution_evidence.matched": json.dumps(sorted(resolved)),
+            "workflow.execution_evidence.missing": json.dumps(sorted(required_ids - set(resolved))),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("controller_execution_evidence", attributes=attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit controller execution-evidence trace span", exc_info=True)
+        self._emit_workflow_event(event)
+
+    def _emit_controller_acceptance_replay(self, task: Task, outcome: str, error: str) -> None:
+        """Emit the deterministic replay of a retained semantic acceptance submission."""
+
+        attributes = {
+            "workflow.event.name": "controller_acceptance_replay",
+            "workflow.task.uid": task.task_uid,
+            "workflow.phase.id": task.phase,
+            "workflow.acceptance_replay.outcome": outcome,
+            "workflow.acceptance_replay.error": self._short(error, 500),
+        }
+        try:
+            tracer = otel_trace.get_tracer(__name__)
+            with tracer.start_as_current_span("controller_acceptance_replay", attributes=attributes):
+                pass
+        except Exception:
+            logger.debug("Failed to emit controller acceptance-replay trace span", exc_info=True)
+        self._emit_workflow_event({
+            "type": "controller_acceptance_replay",
+            "task_uid": task.task_uid,
+            "phase": task.phase,
+            "outcome": outcome,
+            "error": self._short(error, 500),
+        })
+
+    def _replay_controller_acceptance(
+        self,
+        task: Task,
+        acceptance_tool: Callable[..., Any],
+        payload: Dict[str, Any],
+        *,
+        outcome: str = "accepted",
+    ) -> Optional[WorkflowDecision]:
+        """Replay one retained acceptance payload without leaking rejection beyond the task."""
+
+        try:
+            acceptance_tool(**payload)
+        except (TypeError, ValueError) as error:
+            self._emit_controller_acceptance_replay(task, "rejected", str(error))
+            return WorkflowDecision(
+                status="partial_failure",
+                reason=f"Controller acceptance replay was rejected: {self._short(error, 500)}",
+            )
+        self._clear_pending_controller_acceptance(task)
+        self._emit_controller_acceptance_replay(task, outcome, "")
+        return None
+
+    def _reconcile_pending_controller_acceptance(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        acceptance_tool: Callable[..., Any],
+        tool_outcomes: List[ToolOutcome],
+        cycle_outcomes: List[ToolOutcome],
+    ) -> tuple[Optional[WorkflowDecision], set[str]]:
+        """Replay a same-cycle acceptance submission after its tool outcomes become authoritative."""
+
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        pending = current_task.recovery_context.get("pending_controller_acceptance")
+        if not isinstance(pending, dict) or not pending:
+            return None, set()
+        pending_payload = {
+            field: pending[field]
+            for field in ("status", "disposition", "summary", "evidence_refs")
+            if field in pending
+        }
+        if not pending_payload:
+            return None, set()
+        for criterion in task.acceptance.criteria:
+            self._resolve_controller_execution_evidence(plan, task, criterion, tool_outcomes)
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            current_task,
+        )
+        receipts = dict(current_task.recovery_context.get("execution_evidence_receipts") or {})
+        required_ids = {
+            requirement.id
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        }
+        if not required_ids.issubset(receipts):
+            return None, set()
+        replay_failure = self._replay_controller_acceptance(
+            task,
+            acceptance_tool,
+            pending_payload,
+            outcome="accepted_deferred_reconciliation",
+        )
+        if replay_failure is not None:
+            return replay_failure, set()
+        ignored_failure_ids = {
+            outcome.tool_use_id
+            for outcome in cycle_outcomes
+            if (
+                outcome.tool_name == "record_task_acceptance"
+                and not outcome.success
+                and self._acceptance_payload_from_outcome(outcome) == pending_payload
+            )
+        }
+        return None, ignored_failure_ids
+
+    def _clear_pending_controller_acceptance(self, task: Task) -> None:
+        """Remove a retained submission after deterministic acceptance replay."""
+
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        if "pending_controller_acceptance" not in current_task.recovery_context:
+            return
+        context = dict(current_task.recovery_context)
+        context.pop("pending_controller_acceptance", None)
+        self.state.store_task(replace(current_task, recovery_context=context))
 
     def _retain_task_artifact_evidence(self, task: Task, outcomes: List[ToolOutcome]) -> Task:
         """Persist successful task-owned artifacts before a fresh executor context can lose them."""
@@ -9116,16 +10333,19 @@ tools and durable evidence before relying on it."""
         })
         return persisted
 
-    @staticmethod
-    def _valid_inventory_artifact_refs(tool_outcomes: List[ToolOutcome]) -> List[str]:
+    def _valid_inventory_artifact_refs(
+        self,
+        plan: OperationPlan,
+        tool_outcomes: List[ToolOutcome],
+    ) -> List[str]:
         """Return current-task successful artifacts that satisfy the inventory-manifest contract."""
 
         valid = []
-        for reference in MultiAgentWorkflowController._artifact_refs_from_tool_outcomes(tool_outcomes):
-            if not reference.startswith("artifact:"):
+        for reference in self._artifact_refs_from_tool_outcomes(tool_outcomes):
+            if not self._execution_artifact_is_current_operation(reference):
                 continue
             try:
-                _load_inventory_manifest(reference)
+                self._load_controller_inventory_manifest(plan, reference)
             except ValueError:
                 continue
             valid.append(reference)

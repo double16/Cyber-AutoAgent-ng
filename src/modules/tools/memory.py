@@ -54,7 +54,7 @@ import tempfile
 import threading
 import uuid
 from functools import wraps
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -442,12 +442,49 @@ class EvidenceRequirement:
 
 
 @dataclass(frozen=True)
+class ExecutionRequirement:
+    """One controller-owned proof that task execution reached a frozen subject."""
+
+    id: str
+    description: str
+    subject_ref: str
+
+    def __post_init__(self) -> None:
+        normalized_id = re.sub(r"\s+", "-", str(self.id or "").strip().lower())
+        if not normalized_id:
+            raise ValueError("execution requirement id required")
+        if not str(self.description or "").strip():
+            raise ValueError("execution requirement description required")
+        if not str(self.subject_ref or "").strip():
+            raise ValueError("execution requirement subject_ref required")
+        object.__setattr__(self, "id", normalized_id)
+        object.__setattr__(self, "description", str(self.description).strip())
+        object.__setattr__(self, "subject_ref", str(self.subject_ref).strip())
+
+    @staticmethod
+    def from_obj(obj: Any) -> "ExecutionRequirement":
+        if isinstance(obj, ExecutionRequirement):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("execution requirement must be an object/dict")
+        return ExecutionRequirement(
+            id=str(obj.get("id", "")),
+            description=str(obj.get("description", "")),
+            subject_ref=str(obj.get("subject_ref", "")),
+        )
+
+    def to_dict(self) -> Dict[str, str]:
+        return {"id": self.id, "description": self.description, "subject_ref": self.subject_ref}
+
+
+@dataclass(frozen=True)
 class AcceptanceCriterion:
     """One immutable, independently reportable task completion criterion."""
 
     id: str
     description: str
     evidence_requirements: Tuple[EvidenceRequirement, ...]
+    execution_requirements: Tuple[ExecutionRequirement, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_id = re.sub(r"\s+", "-", str(self.id or "").strip().lower())
@@ -463,11 +500,17 @@ class AcceptanceCriterion:
         if moving_scope:
             raise ValueError("acceptance criterion uses moving scope with words like 'all', 'across', 'key workflows'; reference the finite basis instead")
         requirements = tuple(EvidenceRequirement.from_obj(item) for item in self.evidence_requirements)
+        execution_requirements = tuple(
+            ExecutionRequirement.from_obj(item) for item in self.execution_requirements
+        )
         if not requirements:
             raise ValueError("acceptance criterion evidence_requirements required")
         object.__setattr__(self, "id", normalized_id)
         object.__setattr__(self, "description", str(self.description).strip())
         object.__setattr__(self, "evidence_requirements", requirements)
+        if len({item.id for item in execution_requirements}) != len(execution_requirements):
+            raise ValueError("acceptance criterion execution requirement IDs must be unique")
+        object.__setattr__(self, "execution_requirements", execution_requirements)
 
     @staticmethod
     def from_obj(obj: Any) -> "AcceptanceCriterion":
@@ -479,6 +522,7 @@ class AcceptanceCriterion:
             id=str(obj.get("id", "")),
             description=str(obj.get("description", "")),
             evidence_requirements=obj.get("evidence_requirements", []),
+            execution_requirements=obj.get("execution_requirements", []),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -486,6 +530,7 @@ class AcceptanceCriterion:
             "id": self.id,
             "description": self.description,
             "evidence_requirements": [requirement.to_dict() for requirement in self.evidence_requirements],
+            "execution_requirements": [requirement.to_dict() for requirement in self.execution_requirements],
         }
 
 
@@ -5909,6 +5954,40 @@ def _normalize_task_proposal(proposal: TaskProposal) -> _NormalizedTaskProposal:
     return _NormalizedTaskProposal(proposal=proposal, basis_kind=basis_kind, limits=limits)
 
 
+def _proposal_execution_requirements(
+    proposal: TaskProposal,
+    plan: OperationPlan,
+    criterion_id: str,
+) -> Tuple[ExecutionRequirement, ...]:
+    """Derive narrow, controller-owned execution obligations for procedure work."""
+
+    if proposal.inferred_basis_kind != "procedure":
+        return ()
+    selected_ids = proposal.target_ids or [target.target_id for target in plan.targets]
+    selected_targets = [target for target in plan.targets if target.target_id in selected_ids]
+    routes = _procedure_proposal_endpoint_routes(proposal, selected_targets)
+    subjects = routes or [f"target:{target_id}" for target_id in selected_ids]
+    method_aliases = {
+        "spider": "crawl",
+        "spidering": "crawl",
+        "web_spider": "crawl",
+        "web_spidering": "crawl",
+    }
+    canonical_methods = [
+        method_aliases.get(re.sub(r"[^a-z0-9]+", "_", method.lower()).strip("_"), method)
+        for method in proposal.methods
+    ]
+    method_text = ", ".join(dict.fromkeys(canonical_methods))
+    return tuple(
+        ExecutionRequirement(
+            id=f"{criterion_id}-execution-{index}",
+            description=f"Produce execution evidence for {method_text} against {subject}.",
+            subject_ref=subject,
+        )
+        for index, subject in enumerate(subjects, start=1)
+    )
+
+
 def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -> AcceptanceContract:
     """Compile a small task proposal into the full immutable acceptance contract."""
 
@@ -5926,6 +6005,7 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
                 ),
                 min_count=1,
             )],
+            execution_requirements=_proposal_execution_requirements(proposal, plan, criterion_id),
         )
         for criterion_id, criterion in zip(criterion_ids, proposal.criteria)
     ]
@@ -6037,10 +6117,14 @@ def _phase_specific_coverage_criterion(
 
 
 _INVENTORY_WIDE_PHASE_SCOPE_PATTERNS = (
+    re.compile(r"\ball\s+(?:discovered|reachable)\b", re.I),
     re.compile(r"\b(?:all|every)\s+(?:discovered\s+)?(?:entities|endpoints|items|routes|workflows)\b", re.I),
     re.compile(r"\b(?:across|throughout)\s+(?:the\s+)?(?:baseline\s+)?(?:inventory|application)\b", re.I),
     re.compile(r"\b(?:the\s+)?entire\s+(?:baseline\s+)?(?:inventory|application)\b", re.I),
+    re.compile(r"\bin\s+(?:the\s+)?baseline\s+inventory\b", re.I),
     re.compile(r"\bfrom\s+the\s+baseline\s+inventory\b", re.I),
+    re.compile(r"\b(?:across|throughout)\s+key\s+workflows\b", re.I),
+    re.compile(r"\bkey\s+workflows\b", re.I),
 )
 
 
@@ -6748,6 +6832,7 @@ def build_create_tasks_tool(
     phase_title: str = "",
     phase_objective: str = "",
     required_finding_refs: Optional[set[str]] = None,
+    invocation_observer: Optional[Callable[[Dict[str, Any], Any, Optional[Exception]], None]] = None,
 ) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
 
@@ -6758,17 +6843,25 @@ def build_create_tasks_tool(
         """Create the active phase's durable tasks and stop after the first successful call."""
 
         nonlocal completed
-        if completed:
-            raise ValueError("Task creation already completed for this role run")
-        result = _create_tasks_from_proposals(
-            tasks,
-            prompt_token_limit=prompt_token_limit,
-            coverage_item_ids=coverage_item_ids,
-            expected_snapshot_ref=expected_snapshot_ref,
-            phase_title=phase_title,
-            phase_objective=phase_objective,
-            required_finding_refs=required_finding_refs,
-        )
+        tool_input = {"tasks": tasks}
+        try:
+            if completed:
+                raise ValueError("Task creation already completed for this role run")
+            result = _create_tasks_from_proposals(
+                tasks,
+                prompt_token_limit=prompt_token_limit,
+                coverage_item_ids=coverage_item_ids,
+                expected_snapshot_ref=expected_snapshot_ref,
+                phase_title=phase_title,
+                phase_objective=phase_objective,
+                required_finding_refs=required_finding_refs,
+            )
+        except Exception as error:
+            if invocation_observer is not None:
+                invocation_observer(tool_input, None, error)
+            raise
+        if invocation_observer is not None:
+            invocation_observer(tool_input, result, None)
         if int(json.loads(result).get("created_count", 0)) > 0:
             completed = True
         return result
@@ -6897,6 +6990,95 @@ def _validate_acceptance_result_evidence(
         raise ValueError(f"Coverage ledger mismatch; missing={missing}, unknown={unknown}")
 
 
+def _acceptance_evidence_relevance_error(task: Task, result: AcceptanceResult) -> str:
+    """Reject a manifest used as proof for one frozen inventory endpoint.
+
+    This is intentionally based on the inventory item kind and frozen item IDs rather
+    than HTTP URL syntax, so inventories from other modules retain the same guard.
+    """
+
+    if task.acceptance.mode != "coverage" or task.acceptance.basis.kind != "snapshot":
+        return ""
+    expected_ids = set(task.acceptance.basis.item_ids)
+    if not expected_ids:
+        return ""
+    source_endpoint_ids = set()
+    for source_ref in task.acceptance.basis.source_refs:
+        try:
+            manifest, _snapshot_hash = _load_inventory_manifest(source_ref)
+        except ValueError:
+            continue
+        source_endpoint_ids.update(
+            str(item.get("id") or "")
+            for item in manifest.get("items", [])
+            if isinstance(item, dict) and str(item.get("kind") or "") == "endpoint"
+        )
+    if not source_endpoint_ids.intersection(expected_ids):
+        return ""
+    inventory_refs = []
+    for reference in result.evidence_refs:
+        try:
+            _load_inventory_manifest(reference)
+        except ValueError:
+            continue
+        inventory_refs.append(reference)
+    if not inventory_refs:
+        return ""
+    return (
+        "Acceptance evidence is not relevant to the frozen inventory subject. "
+        "An inventory manifest cannot prove a single endpoint assessment: "
+        + ", ".join(sorted(set(inventory_refs)))
+        + ". Do not retry acceptance with this manifest. Retain or create durable evidence for the assigned "
+        "subject, then submit acceptance with that returned reference."
+    )
+
+
+def _snapshot_task_artifact_reference(task: Task, reference: str) -> str:
+    """Copy acceptance artifacts to immutable, task-owned current-operation storage."""
+
+    if not reference.startswith("artifact:"):
+        return reference
+    source = Path(_artifact_path_from_ref(reference))
+    task_segment = hashlib.sha256(task.task_uid.encode("utf-8")).hexdigest()[:16]
+    destination_dir = Path(_operation_output_root()) / "task_evidence" / task_segment
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+    destination = destination_dir / f"{source.stem}-{digest}{source.suffix}"
+    if not destination.exists():
+        shutil.copy2(source, destination)
+    return canonical_artifact_reference(str(destination))
+
+
+def _snapshot_task_acceptance_artifacts(task: Task, results: List[AcceptanceResult]) -> List[AcceptanceResult]:
+    """Return ledger results whose artifact evidence cannot be overwritten by later tasks."""
+
+    references: Dict[str, str] = {}
+
+    def snapshot(reference: str) -> str:
+        if reference not in references:
+            references[reference] = _snapshot_task_artifact_reference(task, reference)
+        return references[reference]
+
+    return [
+        AcceptanceResult(
+            criterion_id=result.criterion_id,
+            status=result.status,
+            disposition=result.disposition,
+            summary=result.summary,
+            evidence_refs=tuple(snapshot(reference) for reference in result.evidence_refs),
+            coverage=tuple(
+                CoverageResult(
+                    item_id=item.item_id,
+                    status=item.status,
+                    evidence_refs=tuple(snapshot(reference) for reference in item.evidence_refs),
+                )
+                for item in result.coverage
+            ),
+        )
+        for result in results
+    ]
+
+
 _CONFIRMED_SECURITY_CLAIM = re.compile(
     r"\b(?:confirmed|demonstrated|verified|exploitable)\b.{0,80}"
     r"\b(?:vulnerabilit|injection|execution|inclusion|bypass|impact|exposure)\b|"
@@ -6975,6 +7157,11 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
         unknown_ids = sorted(result_ids - known_ids)
         raise ValueError(f"Acceptance results must exactly match frozen criteria; missing={missing_ids}, unknown={unknown_ids}")
 
+    for result in normalized_results:
+        relevance_error = _acceptance_evidence_relevance_error(task, result)
+        if relevance_error:
+            raise ValueError(relevance_error)
+
     existing = store.get_acceptance_results(op_id, task.task_uid)
     if existing:
         if {result.criterion_id for result in existing} != known_ids:
@@ -6998,6 +7185,8 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
     for result in normalized_results:
         _validate_acceptance_disposition(result)
         _validate_acceptance_result_evidence(task, criteria[result.criterion_id], result)
+
+    normalized_results = _snapshot_task_acceptance_artifacts(task, normalized_results)
 
     store.store_acceptance_results(op_id, task.task_uid, normalized_results)
     recorded_results = store.get_acceptance_results(op_id, task.task_uid)
@@ -7152,6 +7341,9 @@ def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult])
             created_at=task.created_at,
             kind=task.kind,
             reference_id=task.reference_id,
+            replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
+            recovery_context=task.recovery_context,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ),
@@ -7208,7 +7400,39 @@ def _bind_acceptance_finding_reference(
     return normalized
 
 
-def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None) -> Any:
+def _task_execution_receipts(task: Task, criterion: AcceptanceCriterion) -> Dict[str, List[str]]:
+    """Return validated controller receipts persisted in the task recovery context."""
+
+    raw_receipts = task.recovery_context.get("execution_evidence_receipts", {})
+    if not isinstance(raw_receipts, dict):
+        return {}
+    receipts: Dict[str, List[str]] = {}
+    allowed_ids = {requirement.id for requirement in criterion.execution_requirements}
+    for requirement_id, references in raw_receipts.items():
+        if requirement_id not in allowed_ids or not isinstance(references, list):
+            continue
+        canonical = []
+        for reference in references:
+            try:
+                normalized = _canonical_evidence_reference(reference)
+            except ValueError:
+                continue
+            if not normalized.startswith(("artifact:", "artifact_id:")):
+                continue
+            if normalized not in canonical:
+                canonical.append(normalized)
+        if canonical:
+            receipts[requirement_id] = canonical
+    return receipts
+
+
+def build_record_task_acceptance_tool(
+    task_uid: str,
+    task: Optional[Task] = None,
+    execution_evidence_resolver: Optional[
+        Callable[[Task, AcceptanceCriterion], Dict[str, List[str]]]
+    ] = None,
+) -> Any:
     """Build a model-facing acceptance tool bound to one controller-selected task."""
 
     normalized_uid = str(task_uid or "").strip()
@@ -7289,6 +7513,53 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     ) -> str:
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
+        current_task = next(
+            (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
+            task,
+        )
+        receipts = _task_execution_receipts(current_task, criterion)
+        if execution_evidence_resolver is not None:
+            resolved = execution_evidence_resolver(current_task, criterion)
+            for requirement_id, references in resolved.items():
+                if requirement_id not in {item.id for item in criterion.execution_requirements}:
+                    continue
+                receipts[requirement_id] = list(
+                    dict.fromkeys([*receipts.get(requirement_id, []), *references])
+                )
+        missing_requirements = [
+            requirement for requirement in criterion.execution_requirements if not receipts.get(requirement.id)
+        ]
+        if missing_requirements:
+            missing_text = "; ".join(
+                f"{requirement.id} ({requirement.description})" for requirement in missing_requirements
+            )
+            if execution_evidence_resolver is not None:
+                context = dict(current_task.recovery_context)
+                context["pending_controller_acceptance"] = {
+                    "status": status,
+                    "disposition": disposition,
+                    "summary": summary,
+                    "evidence_refs": list(evidence_refs),
+                    "missing_requirement_ids": [requirement.id for requirement in missing_requirements],
+                }
+                _ensure_memory_client().store_task(
+                    task=replace(current_task, recovery_context=context),
+                    user_id=_user_id(),
+                )
+                raise ValueError(
+                    "Acceptance is incomplete: execution evidence is required before acceptance. "
+                    "Missing execution requirements: "
+                    + missing_text
+                    + ". Do not retry record_task_acceptance. The controller retained this acceptance submission "
+                    "and will first reconcile completed tool outcomes from this cycle; it will run one bounded "
+                    "task-local execution-evidence repair only if proof is still missing."
+                )
+            raise ValueError(
+                "Execution evidence is required before acceptance. Missing execution requirements: "
+                + missing_text
+                + ". Do not retry acceptance yet. Complete the exact missing execution prerequisite and retain "
+                "its current-operation artifact; the controller will attach the proof automatically."
+            )
         if not evidence_refs:
             eligible = ", ".join(eligible_evidence_refs) or "none"
             raise ValueError(
@@ -7306,6 +7577,12 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
                     "inventory manifest first, then submit its returned artifact reference."
                 ) from error
             raise
+        execution_evidence_refs = [
+            reference
+            for requirement in criterion.execution_requirements
+            for reference in receipts.get(requirement.id, [])
+        ]
+        evidence_refs = list(dict.fromkeys([*evidence_refs, *execution_evidence_refs]))
         evidence_refs = _bind_acceptance_finding_reference(normalized_uid, disposition, evidence_refs)
         coverage = tuple(
             CoverageResult(item_id=item_id, status=status, evidence_refs=tuple(evidence_refs))

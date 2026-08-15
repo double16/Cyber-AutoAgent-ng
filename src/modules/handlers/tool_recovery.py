@@ -149,17 +149,34 @@ def _result_success(result: Any, exception: Optional[Exception] = None) -> bool:
 
 
 def _artifact_references(*values: Any) -> tuple[str, ...]:
-    """Capture canonical-looking artifact references before result summaries are bounded."""
+    """Capture canonical artifact references from tool results before summaries are bounded."""
 
     references = []
-    for value in values:
+
+    def add(reference: Any) -> None:
+        value = str(reference or "").strip()
+        if value and value not in references:
+            references.append(value)
+
+    def visit(value: Any, field_name: str = "") -> None:
         if isinstance(value, dict):
-            text = json.dumps(value, ensure_ascii=False, default=str)
-        else:
-            text = str(value or "")
+            for key, item in value.items():
+                visit(item, str(key).lower())
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item, field_name)
+            return
+        text = str(value or "")
+        if field_name == "artifact_id" and text and not text.startswith("artifact_id:"):
+            add(f"artifact_id:{text}")
+        elif field_name in {"artifact", "artifact_ref"} and text.startswith(("artifact:", "artifact_id:")):
+            add(text)
         for reference in re.findall(r"(?:artifact|artifact_id):[^\s\\\]\}\)\"']+", text):
-            if reference not in references:
-                references.append(reference)
+            add(reference)
+
+    for value in values:
+        visit(value)
     return tuple(references[:16])
 
 
@@ -195,6 +212,8 @@ def is_correctable_tool_failure(tool_name: str, tool_input: Any, output: str) ->
 
     if _is_diagnostic_tool(tool_name, tool_input):
         return False
+    if tool_name == "shell" and "service target is outside the assigned task boundary" in str(output).lower():
+        return True
     if tool_name in {"read_artifact", "http_request"}:
         return True
     if _REDIRECT_BODY_FAILURE_PATTERN.search(output):
@@ -210,6 +229,12 @@ def format_tool_repair_error(tool_name: str, output: str) -> str:
     """Return concise, actionable tool failures without exposing raw validator diagnostics to the agent."""
 
     normalized = str(output or "").lower()
+    if tool_name == "shell" and "service target is outside the assigned task boundary" in normalized:
+        return (
+            "The controller rejected the command before execution because its target is outside the assigned task "
+            "boundary. Use the concrete allowed target and corrected command stated in the rejection; do not repeat "
+            "the rejected command or broaden the task. Controller rejection: " + _bounded_text(output, 900)
+        )
     if tool_name == "store_finding":
         if "evidence assertion" in normalized and "marker" not in normalized:
             return (
@@ -316,6 +341,7 @@ class ToolOutcome:
     output_fingerprint: str = ""
     raw_output_summary: str = ""
     artifact_refs: tuple[str, ...] = ()
+    structured_input: Optional[Dict[str, Any]] = None
 
 
 class ToolOutcomeJournal:
@@ -349,7 +375,7 @@ class ToolOutcomeJournal:
                 input_summary = str(redacted_input)
         else:
             input_summary = str(redacted_input)
-        artifact_refs = _artifact_references(tool_input, output, raw_output)
+        artifact_refs = _artifact_references(output, raw_output)
         outcome = ToolOutcome(
             sequence=self._sequence,
             tool_use_id=_bounded_text(tool_use_id, 100),
@@ -363,6 +389,11 @@ class ToolOutcomeJournal:
             output_fingerprint=_value_fingerprint(output),
             raw_output_summary=_bounded_text(raw_output if raw_output is not None else output),
             artifact_refs=artifact_refs,
+            structured_input=(
+                redacted_input
+                if tool_name == "record_task_acceptance" and isinstance(redacted_input, dict)
+                else None
+            ),
         )
         self._entries.append(outcome)
         return outcome
@@ -482,7 +513,8 @@ class TaskFailureRecoveryHook(HookProvider):
             self._block(event, tool_id, "Do not repeat the identical failed invocation; change its input or method.")
             return
         if self._is_correction(tool_name, tool_input):
-            if self._correction_attempts >= self.max_corrections:
+            correction_limit = 1 if self.failure_category == "task_scope_violation" else self.max_corrections
+            if self._correction_attempts >= correction_limit:
                 self.exhausted = True
                 self._block(event, tool_id, "The configured correction allowance has been exhausted.")
                 return
@@ -604,7 +636,9 @@ class TaskFailureRecoveryHook(HookProvider):
                     self._finding_repair_artifact_read_complete = False
             elif self.failure_category == "artifact_unavailable":
                 self._artifact_retry_used = True
-            elif self._correction_attempts >= self.max_corrections:
+            elif self._correction_attempts >= (
+                1 if self.failure_category == "task_scope_violation" else self.max_corrections
+            ):
                 self.exhausted = True
                 self._stop_event_loop(event, "correction_failed")
             return
@@ -641,6 +675,8 @@ class TaskFailureRecoveryHook(HookProvider):
 
     @staticmethod
     def _failure_category(tool_name: str, tool_input: Any, output: str) -> str:
+        if tool_name == "shell" and "service target is outside the assigned task boundary" in output.lower():
+            return "task_scope_violation"
         if tool_name == "read_artifact":
             return "artifact_unavailable"
         if _REDIRECT_BODY_FAILURE_PATTERN.search(output):

@@ -2234,6 +2234,26 @@ def test_route_scoped_phase_objective_removes_dangling_inventory_scope_prepositi
     assert scoped == "Map authorization boundaries"
 
 
+def test_route_scoped_phase_objective_removes_key_workflows():
+    scoped = mod._route_scoped_phase_objective(
+        "Generate testable hypotheses across key workflows in the inventory."
+    )
+
+    assert scoped == "Generate testable hypotheses in the inventory"
+    assert "key workflows" not in scoped.lower()
+
+    criterion = mod._phase_specific_coverage_criterion(
+        "endpoint",
+        "Document route hypotheses",
+        "Attack Hypothesis Generation",
+        "Generate testable hypotheses across key workflows in the inventory.",
+        "http://target.test/login",
+        ["endpoint-1"],
+    )
+
+    assert "key workflows" not in criterion.description.lower()
+
+
 def test_phase_specific_coverage_criterion_binds_route_and_frozen_items():
     criterion = mod._phase_specific_coverage_criterion(
         "endpoint",
@@ -2515,7 +2535,10 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
         coverage_item_ids={"endpoint-0", "endpoint-1"},
         expected_snapshot_ref=canonical_manifest,
         phase_title="Trust Boundary & Workflow Mapping",
-        phase_objective="Map authentication mechanisms and authorization boundaries across the baseline inventory.",
+        phase_objective=(
+            "Map authentication mechanisms and authorization boundaries across key workflows "
+            "in the baseline inventory."
+        ),
     )
 
     result = create_tool(tasks=[{
@@ -2538,6 +2561,7 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
     assert all("Trust Boundary & Workflow Mapping" in task.acceptance.criteria[0].description for task in store.tasks)
     assert all("baseline inventory" not in task.objective.lower() for task in store.tasks)
     assert all("baseline inventory" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
+    assert all("key workflows" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
 
 
 def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(fake_memory_client):
@@ -2894,6 +2918,194 @@ def test_bound_acceptance_tool_normalizes_aliases_before_validation(fake_memory_
     assert recorded.disposition == "no_vulnerability"
 
 
+def test_acceptance_artifact_is_snapshotted_to_task_owned_storage(fake_memory_client):
+    _client, store = fake_memory_client
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "shared-result.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("first result")
+    task = mod.Task(
+        task_uid="owned-artifact",
+        title="Record immutable result",
+        objective="Record the result",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="one artifact",
+                source_refs=["target:target-1"],
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Retain one result",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    mod.build_record_task_acceptance_tool(task.task_uid)(
+        status="satisfied",
+        disposition="observation",
+        summary="Result retained",
+        evidence_refs=["artifact:artifacts/shared-result.txt"],
+    )
+
+    recorded = store.get_acceptance_results("op1", task.task_uid)[0]
+    assert recorded.evidence_refs[0].startswith("artifact:task_evidence/")
+    assert Path(mod._artifact_path_from_ref(recorded.evidence_refs[0])).read_text() == "first result"
+    artifact.write_text("later task replacement")
+    assert Path(mod._artifact_path_from_ref(recorded.evidence_refs[0])).read_text() == "first result"
+
+
+def test_endpoint_coverage_acceptance_rejects_manifest_as_subject_evidence(fake_memory_client):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    task = mod.Task(
+        task_uid="endpoint-evidence",
+        title="Assess inventory endpoint",
+        objective="Assess the frozen endpoint",
+        acceptance=mod.AcceptanceContract(
+            mode="coverage",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="one endpoint",
+                source_refs=[f"artifact:{manifest}"],
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Assess the selected endpoint",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(ValueError, match="cannot prove a single endpoint assessment"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Assessment complete",
+            evidence_refs=[f"artifact:{manifest}"],
+        )
+
+    assert store.get_acceptance_results("op1", task.task_uid) == []
+
+
+def test_controller_execution_evidence_is_required_before_acceptance(fake_memory_client):
+    _client, store = fake_memory_client
+    artifact = _write_inventory_manifest()
+    execution_artifact = Path(mod._operation_output_root()) / "artifacts" / "execution-result.txt"
+    execution_artifact.parent.mkdir(parents=True, exist_ok=True)
+    execution_artifact.write_text("controller-validated execution")
+    task = mod.Task(
+        task_uid="execution-receipt",
+        title="Execute one bounded check",
+        objective="Perform the assigned check",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(kind="snapshot", description="bounded", source_refs=["target:target-1"]),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Preserve a terminal result",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+                execution_requirements=[mod.ExecutionRequirement(
+                    id="criterion-1-execution-1",
+                    description="Execute the assigned check against /api/example.",
+                    subject_ref="/api/example",
+                )],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(ValueError, match="Execution evidence is required before acceptance"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="assessed_negative",
+            disposition="no_vulnerability",
+            summary="No vulnerability demonstrated",
+            evidence_refs=[f"artifact:{artifact}"],
+        )
+
+    resolver_calls = []
+
+    def resolve(current_task, criterion):
+        resolver_calls.append((current_task.task_uid, criterion.id))
+        return {"criterion-1-execution-1": [f"artifact:{execution_artifact}"]}
+
+    result = mod.build_record_task_acceptance_tool(
+        task.task_uid,
+        execution_evidence_resolver=resolve,
+    )(
+        status="assessed_negative",
+        disposition="no_vulnerability",
+        summary="No vulnerability demonstrated",
+        evidence_refs=[f"artifact:{artifact}"],
+    )
+    assert json.loads(result)["complete"] is True
+    assert resolver_calls == [(task.task_uid, "criterion-1")]
+    recorded = store.get_acceptance_results("op1", task.task_uid)[0]
+    assert len(recorded.evidence_refs) == 2
+    assert {
+        Path(mod._artifact_path_from_ref(reference)).read_text()
+        for reference in recorded.evidence_refs
+    } == {artifact.read_text(), "controller-validated execution"}
+
+
+def test_acceptance_payload_is_retained_when_live_execution_proof_is_not_yet_visible(fake_memory_client):
+    _client, store = fake_memory_client
+    artifact = _write_inventory_manifest()
+    task = mod.Task(
+        task_uid="pending-controller-proof",
+        title="Execute one bounded check",
+        objective="Perform the assigned check",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(kind="snapshot", description="bounded", source_refs=["target:target-1"]),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Preserve a terminal result",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+                execution_requirements=[mod.ExecutionRequirement(
+                    id="criterion-1-execution-1",
+                    description="Execute the assigned check",
+                    subject_ref="target:target-1",
+                )],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(
+        ValueError,
+        match="Acceptance is incomplete: execution evidence is required before acceptance",
+    ):
+        mod.build_record_task_acceptance_tool(
+            task.task_uid,
+            execution_evidence_resolver=lambda _task, _criterion: {},
+        )(
+            status="assessed_negative",
+            disposition="no_vulnerability",
+            summary="No vulnerability demonstrated",
+            evidence_refs=[f"artifact:{artifact}"],
+        )
+
+    persisted = next(item for item in store.get_tasks("op1") if item.task_uid == task.task_uid)
+    assert persisted.recovery_context["pending_controller_acceptance"]["evidence_refs"] == [f"artifact:{artifact}"]
+    assert persisted.recovery_context["pending_controller_acceptance"]["missing_requirement_ids"] == [
+        "criterion-1-execution-1"
+    ]
+    assert store.get_acceptance_results("op1", task.task_uid) == []
+
+
 def test_bound_acceptance_tool_runtime_schema_accepts_aliases_before_function_validation(fake_memory_client):
     _client, store = fake_memory_client
     task = mod.Task(
@@ -3019,6 +3231,42 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
         "replacement_of",
         "supersedes_criteria",
     }
+
+
+def test_bound_create_tasks_tool_reports_rejection_to_observer(fake_memory_client):
+    del fake_memory_client
+    observed = []
+    create_tool = mod.build_create_tasks_tool(
+        invocation_observer=lambda tool_input, result, error: observed.append((tool_input, result, error))
+    )
+
+    with pytest.raises(ValueError, match="title"):
+        create_tool(tasks=[{"objective": "Invalid"}])
+
+    assert observed[0][0] == {"tasks": [{"objective": "Invalid"}]}
+    assert observed[0][1] is None
+    assert isinstance(observed[0][2], ValueError)
+
+
+def test_bound_create_tasks_tool_reports_success_to_observer(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+    )
+    observed = []
+    create_tool = mod.build_create_tasks_tool(
+        invocation_observer=lambda tool_input, result, error: observed.append((tool_input, result, error))
+    )
+    proposal = task_proposal("Inventory", "Run bounded inventory work", "inventory")
+
+    result = create_tool(tasks=[proposal])
+
+    assert json.loads(result)["complete"] is True
+    assert observed == [({"tasks": [proposal]}, result, None)]
+    assert len(store.tasks) == 1
 
 
 def test_bound_create_tasks_tool_requires_and_persists_candidate_source_refs(fake_memory_client):
@@ -3201,7 +3449,7 @@ def test_bound_acceptance_validates_coverage_ledger_and_manifest_hash(fake_memor
     assert json.loads(result)["complete"] is True
     assert store.get_acceptance_results("op1", task.task_uid)[0].coverage[0].item_id == "endpoint-1"
     assert store.get_acceptance_results("op1", task.task_uid)[0].coverage[0].status == "assessed_negative"
-    assert store.get_tasks("op1")[0].evidence == [mod.canonical_artifact_reference(str(manifest))]
+    assert store.get_tasks("op1")[0].evidence[0].startswith("artifact:task_evidence/")
 
 
 def test_bound_acceptance_rejects_changed_snapshot_and_wrong_evidence_kind(fake_memory_client):
@@ -3586,7 +3834,7 @@ def test_inventory_acceptance_allows_target_bound_filesystem_looking_route(fake_
 
     assert result["complete"] is True
     recorded = store.get_acceptance_results("op1", task.task_uid)[0]
-    assert recorded.evidence_refs == ("artifact:inventory_manifest.json",)
+    assert recorded.evidence_refs[0].startswith("artifact:task_evidence/")
 
 
 def test_store_plan_does_not_complete_terminal_phases_with_actionable_tasks(fake_memory_client):
@@ -3692,7 +3940,7 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     published = _client._fake_backend.add_calls[0]
     assert published["messages"][0]["content"].startswith('Task acceptance for "Map parameters".')
     assert "Criterion endpoint:/login.php [satisfied; observation]: Login form mapped" in published["messages"][0]["content"]
-    assert mod.canonical_artifact_reference(str(manifest)) in published["messages"][0]["content"]
+    assert "artifact:task_evidence/" in published["messages"][0]["content"]
     assert published["metadata"]["category"] == "observation"
     assert published["metadata"]["source"] == "task_acceptance"
     assert published["metadata"]["task_uid"] == "task-1"

@@ -64,33 +64,16 @@
 - Use template literals for string concatenation
 
 ## Design Choices
-- If a design decision is given by the user that generally applies, add it to AGENTS.md.
 - Complexity leans towards deterministic code and away from the LLM where appropriate. Reasoning belongs in the LLM.
+- Execution-proof and provenance checks are controller-owned bookkeeping. Do not require an LLM to call a separate
+  receipt tool when Python can correlate task-local tool outcomes, frozen subjects, and durable artifacts.
 - Generic controller, memory, and acceptance code must be protocol-, target-, tool-, and model-neutral. Put
   module-specific behavior in typed adapters, operation plugins, or declarative catalogs.
 - Structured metadata is authoritative for workflow control. Do not infer phase dependencies, task kinds, evidence
   kinds, or scope from titles, filenames, generated prose, or incidental tool-output wording.
 - Keep evidence availability separate from semantic conclusions. Readability, non-empty content, status codes, and
   successful tool execution establish availability only; they do not independently prove support or contradiction.
-- Automatic semantic dispositions require a narrow declarative validation rule. A contradiction rule must match every
-  cited artifact before Python may record a negative disposition.
-- Canonicalization may normalize syntax or complete an unambiguous logical or relative reference. It must not silently
-  change an explicit service authority, network identity, or filesystem root for execution authorization. A
-  non-authorizing persisted record may correct one unique, conservatively matched target typo when the correction is
-  logged and canonicalized to an already assigned target.
-- Deterministic repair must be information-preserving and unambiguous. If multiple corrections remain possible, give
-  bounded recovery the valid choices instead of guessing or applying every candidate.
-- A failed task becomes `superseded` only after linked replacement tasks conclusively cover its frozen acceptance
-  criteria. Count superseded work as recovered terminal history, not as a phase or operation failure, while preserving
-  the original status reason and replacement lineage for audit.
-- Optional LLM metadata must not terminate an operation. Validate it inside a bounded semantic repair path; after one
-  failed semantic repair, preserve evidence, emit structured failure telemetry, and contain the failure to that task.
-- Recovery progress requires new durable state appropriate to the frozen acceptance contract. Reasoning cycles,
-  read-only calls, catalog inspection, and repeated artifact reads are not evidence progress.
-- State whether a bounded repair permits one model cycle or one tool invocation. Tool-constrained workflow recovery
-  means one tool invocation unless its contract explicitly says otherwise.
-- Repetition detection must use canonical inputs, outputs, references, and content fingerprints instead of hardcoded
-  producer names or filename prefixes.
+- Available tools are not limited to those available at the time of coding. Tools may be added, such as through MCP, during runtime.
 - Tool-schema changes should be additive where practical. Normalize supported legacy inputs at the boundary, use
   canonical forms internally, and reject unknown values.
 - Generic workflow tests must cover representative HTTP, network, and source/filesystem cases. Incident fixtures may
@@ -103,17 +86,12 @@
   small, evidence-backed scope and add tests for both a matching and a non-matching candidate/artifact case.
 - Fixed-enum tool schemas must advertise canonical values while pre-processing common semantic synonyms into those canonical values; unknown values remain invalid. Strands tool runtime validation strips `Annotated[BeforeValidator(...)]` metadata when it rebuilds a tool input model, so tool-facing aliased enum parameters must use string runtime annotations, provide an explicit canonical `inputSchema`, and normalize plus strictly validate inside the function. Add runtime-schema tests; Pydantic-only direct-call tests are insufficient.
 - Reporting/evaluation budget reserves may reserve tokens and cost only. Duration/time must not be reserved for reporting or evaluation.
-- Report `Total Operation Time` is assessment execution time only: it ends when execution terminates and excludes
-  report generation and evaluation.
-- Budget of any kind may be exceeded while required reporting completes.
+- Budget of any kind may be exceeded while required reporting and evaluation completes.
 - Planning and task fan-out are independent of operation budget constraints. Budgets govern execution, evaluation, and termination, not the number of planned task records; there should be no budget-aware scheduling.
 - The workflow should prefer new task creation to reduce complexity in the LLM as long as losing the LLM context does not reduce precision. Producing artifacts from one task to feed another task is encouraged.
 - In shared memory mode, prior-operation memories are advisory investigation context only. Render their origin and do
   not allow them to satisfy current-operation acceptance, findings, proof, completion, or report evidence without
   current-operation revalidation.
-- Evaluator-requested repairs must distinguish acceptance closure from missing execution evidence.
-- Phase dependency policy must use structured plan fields such as `requires_finding_candidates`; never infer phase
-  dependencies or budget behavior from generated phase numbers or titles.
 
 ## Application Best Practices
 - Budget is reporting only after reporting or evaluation stages are reached.
@@ -134,13 +112,4 @@
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.
 
 ## Cyber Operations Log Review
-- Read the session header and tail first to establish the operation ID, start/end time, final metrics, budget limits, termination reason, and `assessment_complete` event.
-- Use `rg -n` with narrow, case-insensitive patterns to locate phase transitions, task creation/evaluation, budget-limit events, `workflow_coverage_summary`, `progress_update`, and `assessment_complete`; avoid dumping the entire log because reasoning payloads can be very large.
-- Inspect targeted line-numbered ranges with `sed -n` around each phase transition and the final completion block. Preserve exact line numbers when reporting findings so conclusions are auditable.
-- Reconcile the plan with execution: compare planned phase count to applicable phases, phase statuses, task counts, and per-task status counts. Treat `not_applicable`, omitted inventory items, and `partial_failure` as explicit coverage results rather than assuming completion means exhaustive work.
-- Cross-check `workflow_coverage_summary` against final health. In particular, check `applicable_phase_count`, `phase_inconsistent`, failure counts, and the validation-candidate rationale; an excellent health score can coexist with a skipped phase or incomplete coverage.
-- Distinguish logical completion from resource termination. Compare elapsed duration with `maxDurationMinutes`, and inspect token/cost limits and `termination_reason`; `progressPercent` is budget/utilization progress, not phase completion.
-- Do not recommend changing task fan-out based on lack of budget. Lack of budget is for the user to control.
-- Broken or missing tools are acceptable, the operation will remove them from consideration, do not flag or offer plans to address.
-- Do not complain or recommend changes because reporting or evaluation taking time and that it should be budgeted.
-- Do not complain or recommend changes because an operation continues to run when it knows from the health status that it will not finish. Coverage is most important, the user can continue the operation later, and the report already recommends to the user how much more budget to allocate.
+- See forensics.md for guidance on reviewing cyber operations logs.

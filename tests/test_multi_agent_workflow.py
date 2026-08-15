@@ -1,6 +1,8 @@
 import inspect
 import json
 from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -26,6 +28,7 @@ from modules.tools.memory import (
     AcceptanceContract,
     AcceptanceCriterion,
     EvidenceRequirement,
+    ExecutionRequirement,
     AcceptanceResult,
     OperationPlan,
     OperationTarget,
@@ -83,6 +86,41 @@ def _artifact_acceptance(criterion_id="artifact-output"):
             )
         ],
     )
+
+
+def test_execution_evidence_capabilities_are_derived_from_observed_tools():
+    request = ToolOutcome(
+        sequence=1,
+        tool_use_id="request-1",
+        tool_name="http_request",
+        success=True,
+        correctable=False,
+        input_summary="",
+        output_summary="",
+    )
+    crawl = ToolOutcome(
+        sequence=2,
+        tool_use_id="crawl-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary='{"command":"katana -u http://target.test"}',
+        output_summary="",
+    )
+    source_analysis = ToolOutcome(
+        sequence=3,
+        tool_use_id="source-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary='{"command":"opengrep scan src"}',
+        output_summary="",
+    )
+
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(request) == {"request"}
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"crawl"}
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(source_analysis) == {"analyze"}
+    assert MultiAgentWorkflowController._canonical_execution_method("web-spider") == "crawl"
 
 
 def Task(*args, **kwargs):
@@ -699,6 +737,787 @@ def _runtime(progress=0, env_ints=None, env_floats=None):
         ],
         optional_tools_list=[_tool("mcp_scan"), _tool("module_probe")],
     )
+
+
+def test_controller_resolves_task_local_request_artifact_as_execution_evidence(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Assess the assigned endpoint",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Request the assigned endpoint",
+            "/api/products/:id",
+        )],
+    )
+    task = TaskModel(
+        task_uid="execution-proof",
+        title="Assess product",
+        objective="Assess product",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded request",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["http_request"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    artifact = tmp_path / "artifacts" / "response.json"
+    artifact.parent.mkdir()
+    artifact.write_text("{}")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="request-1",
+        tool_name="http_request",
+        success=True,
+        correctable=False,
+        input_summary='{"url":"http://target.test/api/products/42"}',
+        output_summary="artifact:artifacts/response.json",
+        artifact_refs=("artifact:artifacts/response.json",),
+    )
+
+    resolved = controller._resolve_controller_execution_evidence(plan, task, criterion, [outcome])
+
+    assert resolved == {"criterion-1-execution-1": ["artifact:artifacts/response.json"]}
+    persisted = next(item for item in state.tasks if item.task_uid == task.task_uid)
+    assert persisted.recovery_context["controller_execution_evidence"]["criterion-1-execution-1"][
+        "tool_use_ids"
+    ] == ["request-1"]
+
+
+@pytest.mark.parametrize("subject_ref", ["/api/products/:id", "target:target-1"])
+def test_controller_does_not_use_unrelated_analysis_artifact_as_execution_evidence(
+    monkeypatch,
+    tmp_path,
+    subject_ref,
+):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Analyze the assigned subject",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Analyze the assigned subject",
+            subject_ref,
+        )],
+    )
+    task = TaskModel(
+        task_uid="unrelated-analysis-proof",
+        title="Analyze subject",
+        objective="Analyze subject",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded analysis",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["analyze"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    artifact = tmp_path / "artifacts" / "unrelated.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("unrelated analysis")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="analysis-1",
+        tool_name="editor",
+        success=True,
+        correctable=False,
+        input_summary='{"path":"/tmp/unrelated-source.txt"}',
+        output_summary="artifact:artifacts/unrelated.txt",
+        artifact_refs=("artifact:artifacts/unrelated.txt",),
+    )
+
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [outcome]) == {}
+
+
+def test_controller_matches_target_execution_subject_to_concrete_target_value():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "/workspace/source", "filesystem")],
+    )
+    task = TaskModel(
+        task_uid="source-analysis-proof",
+        title="Analyze source",
+        objective="Analyze source",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+    )
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="analysis-1",
+        tool_name="editor",
+        success=True,
+        correctable=False,
+        input_summary='{"path":"/workspace/source/app.py"}',
+        output_summary="analysis complete",
+    )
+
+    assert MultiAgentWorkflowController._outcome_matches_execution_subject(
+        plan,
+        task,
+        "target:target-1",
+        outcome,
+    )
+
+
+def test_controller_accepts_valid_inventory_manifest_from_unknown_mcp_producer(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Create the inventory",
+        evidence_requirements=[EvidenceRequirement(kind="inventory_manifest")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce execution evidence for crawl against target:target-1.",
+            "target:target-1",
+        )],
+    )
+    task = TaskModel(
+        task_uid="mcp-inventory",
+        title="Create inventory",
+        objective="Create inventory",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Crawl the target",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["crawl", "spider"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "inventory_manifest",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+    artifact = tmp_path / "artifacts" / "mcp-inventory.json"
+    artifact.parent.mkdir()
+    artifact.write_text("{}")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda _plan, reference: ({"schema_version": 1, "items": [{}], "unassessed_gaps": []}, reference),
+    )
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="mcp-1",
+        tool_name="mcp_inventory_producer",
+        success=True,
+        correctable=False,
+        input_summary='{"target":"http://target.test"}',
+        output_summary="artifact:artifacts/mcp-inventory.json",
+        artifact_refs=("artifact:artifacts/mcp-inventory.json",),
+    )
+
+    resolved = controller._resolve_controller_execution_evidence(plan, task, criterion, [outcome])
+
+    assert resolved == {"criterion-1-execution-1": ["artifact:artifacts/mcp-inventory.json"]}
+
+
+def test_controller_accepts_target_bound_artifact_from_unknown_mcp_producer(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Analysis", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Run the assigned procedure",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce execution evidence for a custom procedure.",
+            "target:target-1",
+        )],
+    )
+    task = TaskModel(
+        task_uid="mcp-artifact",
+        title="Run custom procedure",
+        objective="Run custom procedure",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Custom procedure",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["custom_method"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+    artifact = tmp_path / "artifacts" / "mcp-result.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("result")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="mcp-1",
+        tool_name="mcp_custom_producer",
+        success=True,
+        correctable=False,
+        input_summary='{"target":"http://target.test"}',
+        output_summary="artifact:artifacts/mcp-result.txt",
+        artifact_refs=("artifact:artifacts/mcp-result.txt",),
+    )
+
+    resolved = controller._resolve_controller_execution_evidence(plan, task, criterion, [outcome])
+
+    assert resolved == {"criterion-1-execution-1": ["artifact:artifacts/mcp-result.txt"]}
+
+
+def test_controller_excludes_editor_from_execution_receipts(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Analysis", status="active")],
+        targets=[OperationTarget("target-1", "/workspace/source", "filesystem")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Analyze source",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Analyze the assigned source",
+            "target:target-1",
+        )],
+    )
+    task = Task(
+        task_uid="editor-receipt",
+        title="Analyze source",
+        objective="Analyze source",
+        acceptance=_artifact_acceptance(),
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+    artifact = tmp_path / "artifacts" / "editor-output.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("edited")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="editor-1",
+        tool_name="editor",
+        success=True,
+        correctable=False,
+        input_summary='{"path":"/workspace/source/app.py"}',
+        output_summary="artifact:artifacts/editor-output.txt",
+        artifact_refs=("artifact:artifacts/editor-output.txt",),
+    )
+
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [outcome]) == {}
+
+
+def test_controller_does_not_resolve_unknown_execution_capability(monkeypatch, tmp_path):
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Perform a custom operation",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement("execution-1", "Custom operation", "target:target-1")],
+    )
+    task = TaskModel(
+        task_uid="unknown-proof",
+        title="Custom operation",
+        objective="Custom operation",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Custom procedure",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["custom_method"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "target.test", "network")],
+    )
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, []) == {}
+
+
+def test_controller_acceptance_replay_contains_rejection_within_task():
+    task = TaskModel(
+        task_uid="pending-replay",
+        title="Pending replay",
+        objective="Complete replay",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        recovery_context={"pending_controller_acceptance": {"status": "satisfied"}},
+    )
+    state = FakeState(_plan(), tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    def reject_replay(**_payload):
+        raise ValueError("artifact is invalid")
+
+    decision = controller._replay_controller_acceptance(
+        task,
+        reject_replay,
+        {"status": "satisfied"},
+    )
+
+    assert decision is not None
+    assert decision.status == "partial_failure"
+    assert "artifact is invalid" in decision.reason
+    assert state.tasks[0].recovery_context["pending_controller_acceptance"] == {"status": "satisfied"}
+    assert any(
+        event["type"] == "controller_acceptance_replay" and event["outcome"] == "rejected"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_controller_acceptance_replay_clears_pending_payload_after_success():
+    task = TaskModel(
+        task_uid="successful-replay",
+        title="Successful replay",
+        objective="Complete replay",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        recovery_context={"pending_controller_acceptance": {"status": "satisfied"}},
+    )
+    state = FakeState(_plan(), tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    replayed = []
+
+    decision = controller._replay_controller_acceptance(
+        task,
+        lambda **payload: replayed.append(payload),
+        {"status": "satisfied"},
+    )
+
+    assert decision is None
+    assert replayed == [{"status": "satisfied"}]
+    assert "pending_controller_acceptance" not in state.tasks[0].recovery_context
+    assert any(
+        event["type"] == "controller_acceptance_replay" and event["outcome"] == "accepted"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_controller_reconciles_same_cycle_inventory_evidence_before_acceptance_recovery(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Create the inventory",
+        evidence_requirements=[EvidenceRequirement(kind="inventory_manifest")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce execution evidence for crawl against target:target-1.",
+            "target:target-1",
+        )],
+    )
+    pending_payload = {
+        "status": "satisfied",
+        "disposition": "observation",
+        "summary": "Katana crawl was converted into an inventory manifest.",
+        "evidence_refs": ["artifact:artifacts/inventory_manifest.json"],
+    }
+    task = TaskModel(
+        task_uid="deferred-inventory-acceptance",
+        title="Create inventory",
+        objective="Crawl the target",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        recovery_context={"pending_controller_acceptance": pending_payload},
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Crawl the target",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["crawl"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "inventory_manifest",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    artifact = tmp_path / "artifacts" / "inventory_manifest.json"
+    artifact.parent.mkdir()
+    artifact.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda _plan, reference: ({"schema_version": 1, "items": [{}], "unassessed_gaps": []}, reference),
+    )
+    manifest_outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="manifest-1",
+        tool_name="recon_output_to_inventory_manifest",
+        success=True,
+        correctable=False,
+        input_summary='{"target":"http://target.test"}',
+        output_summary="artifact:artifacts/inventory_manifest.json",
+        artifact_refs=("artifact:artifacts/inventory_manifest.json",),
+    )
+    provisional_failure = ToolOutcome(
+        sequence=2,
+        tool_use_id="acceptance-provisional",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=False,
+        input_summary=json.dumps(pending_payload, sort_keys=True),
+        output_summary="Execution evidence is required before acceptance.",
+        structured_input=pending_payload,
+    )
+
+    decision, ignored_failures = controller._reconcile_pending_controller_acceptance(
+        plan,
+        task,
+        lambda **payload: state.record_task_acceptance(task, payload),
+        [manifest_outcome, provisional_failure],
+        [manifest_outcome, provisional_failure],
+    )
+
+    assert decision is None
+    assert ignored_failures == {"acceptance-provisional"}
+    assert state.list_task_acceptance_results(task.task_uid)[0].summary == pending_payload["summary"]
+    assert "pending_controller_acceptance" not in state.tasks[0].recovery_context
+    assert any(
+        event["type"] == "controller_acceptance_replay"
+        and event["outcome"] == "accepted_deferred_reconciliation"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_controller_keeps_pending_acceptance_when_same_cycle_evidence_is_invalid(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Create the inventory",
+        evidence_requirements=[EvidenceRequirement(kind="inventory_manifest")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce execution evidence for crawl against target:target-1.",
+            "target:target-1",
+        )],
+    )
+    pending_payload = {
+        "status": "satisfied",
+        "disposition": "observation",
+        "summary": "Inventory was created.",
+        "evidence_refs": ["artifact:artifacts/inventory_manifest.json"],
+    }
+    task = TaskModel(
+        task_uid="invalid-deferred-inventory",
+        title="Create inventory",
+        objective="Crawl the target",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        recovery_context={"pending_controller_acceptance": pending_payload},
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Crawl the target",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["crawl"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "inventory_manifest",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    artifact = tmp_path / "artifacts" / "inventory_manifest.json"
+    artifact.parent.mkdir()
+    artifact.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", Mock(side_effect=ValueError("invalid")))
+    provisional_failure = ToolOutcome(
+        sequence=1,
+        tool_use_id="acceptance-provisional",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=False,
+        input_summary=json.dumps(pending_payload, sort_keys=True),
+        output_summary="Execution evidence is required before acceptance.",
+        structured_input=pending_payload,
+    )
+    manifest_outcome = ToolOutcome(
+        sequence=2,
+        tool_use_id="manifest-1",
+        tool_name="recon_output_to_inventory_manifest",
+        success=True,
+        correctable=False,
+        input_summary='{"target":"http://target.test"}',
+        output_summary="artifact:artifacts/inventory_manifest.json",
+        artifact_refs=("artifact:artifacts/inventory_manifest.json",),
+    )
+
+    decision, ignored_failures = controller._reconcile_pending_controller_acceptance(
+        plan,
+        task,
+        lambda **_payload: pytest.fail("invalid manifest must not be replayed"),
+        [manifest_outcome, provisional_failure],
+        [manifest_outcome, provisional_failure],
+    )
+
+    assert decision is None
+    assert ignored_failures == set()
+    assert state.tasks[0].recovery_context["pending_controller_acceptance"] == pending_payload
+    assert state.list_task_acceptance_results(task.task_uid) == []
+
+
+def test_output_prerequisite_requires_typed_current_operation_artifact(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Inventory", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    requirement = ExecutionRequirement(
+        "criterion-1-execution-1",
+        "Produce execution evidence for crawl against target:target-1.",
+        "target:target-1",
+    )
+    task = TaskModel(
+        task_uid="output-prerequisite",
+        title="Create inventory",
+        objective="Crawl the target",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Crawl the target",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["crawl"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "inventory_manifest",
+                },
+            ),
+            criteria=[AcceptanceCriterion(
+                id="criterion-1",
+                description="Create the inventory",
+                evidence_requirements=[EvidenceRequirement(kind="inventory_manifest")],
+                execution_requirements=[requirement],
+            )],
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+    artifact = tmp_path / "artifacts" / "recon.json"
+    artifact.parent.mkdir()
+    artifact.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="recon-1",
+        tool_name="specialized_recon_orchestrator",
+        success=True,
+        correctable=False,
+        input_summary='{"target":"http://target.test"}',
+        output_summary="artifact:artifacts/recon.json",
+        artifact_refs=("artifact:artifacts/recon.json",),
+    )
+
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", Mock(side_effect=ValueError("invalid")))
+    assert controller._has_valid_required_output(plan, task, [outcome]) is False
+
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda _plan, reference: ({"schema_version": 1, "items": [{}], "unassessed_gaps": []}, reference),
+    )
+    assert controller._has_valid_required_output(plan, task, [outcome]) is True
+
+
+def test_output_prerequisite_prompt_keeps_acceptance_replay_controller_owned():
+    plan = _plan()
+    task = Task(task_uid="output-repair", title="Output repair", objective="Create required output", phase=1, status="active")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+
+    prompt = controller._output_prerequisite_recovery_prompt(plan, task, [], next_cycle=2)
+
+    assert "Required output kind: inventory_manifest" in prompt
+    assert "controller retained the prior acceptance submission" in prompt.lower()
+    assert "Do not call or attempt to describe record_task_acceptance." in prompt
 
 
 def test_plan_phase_accepts_partial_failure_and_blocked_statuses():
@@ -1511,9 +2330,9 @@ def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy(monkey
     bound_task_uids = []
     original_factory = workflow_mod.build_record_task_acceptance_tool
 
-    def build_bound_tool(task_uid, task):
+    def build_bound_tool(task_uid, task, execution_evidence_resolver=None):
         bound_task_uids.append(task_uid)
-        return original_factory(task_uid, task)
+        return original_factory(task_uid, task, execution_evidence_resolver)
 
     monkeypatch.setattr(workflow_mod, "build_record_task_acceptance_tool", build_bound_tool)
 
@@ -1738,6 +2557,96 @@ def test_endpoint_evidence_inventory_rejection_is_recoverable():
     assert "do not repeat the rejected record_task_acceptance call" in instruction
     assert "artifact:artifacts/login_response.txt" in instruction
     assert "endpoint-1" in instruction
+
+
+def test_phase_inventory_merge_deduplicates_and_preserves_source_provenance(monkeypatch, tmp_path):
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    manifests = {
+        "artifact:first.json": {
+            "items": [{
+                "id": "endpoint-1",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "http://target.test/login",
+                "attributes": {"interaction": {
+                    "operations": ["GET"],
+                    "inputs": [{"name": "username", "location": "query"}],
+                }},
+            }],
+            "unassessed_gaps": ["first gap"],
+        },
+        "artifact:second.json": {
+            "items": [
+                {
+                    "id": "endpoint-1",
+                    "target_id": "target-1",
+                    "kind": "endpoint",
+                    "value": "http://target.test/login",
+                    "attributes": {"interaction": {
+                        "operations": ["POST"],
+                        "inputs": [{"name": "password", "location": "body"}],
+                    }},
+                },
+                {
+                    "id": "service-1",
+                    "target_id": "target-1",
+                    "kind": "service",
+                    "value": "ssh",
+                    "attributes": {},
+                },
+                {
+                    "id": "parameter-1",
+                    "target_id": "target-1",
+                    "kind": "parameter",
+                    "value": "endpoint-1",
+                    "attributes": {"endpoint_id": "endpoint-1"},
+                },
+            ],
+            "unassessed_gaps": ["second gap"],
+        },
+    }
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.memory._operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        workflow_mod,
+        "canonical_artifact_reference",
+        lambda path: f"artifact:{Path(path).relative_to(tmp_path)}",
+    )
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda _plan, reference: (manifests[reference], reference),
+    )
+
+    reference = controller._merge_phase_inventory_manifests(
+        _plan(),
+        1,
+        ["artifact:first.json", "artifact:second.json"],
+    )
+
+    merged_path = tmp_path / reference.removeprefix("artifact:")
+    payload = json.loads(merged_path.read_text())
+    assert reference.startswith("artifact:artifacts/phase-1-inventory-merged-")
+    assert len(payload["items"]) == 3
+    endpoint = next(item for item in payload["items"] if item["kind"] == "endpoint")
+    parameter = next(item for item in payload["items"] if item["kind"] == "parameter")
+    assert endpoint["attributes"]["source_manifest_refs"] == ["artifact:first.json", "artifact:second.json"]
+    assert endpoint["attributes"]["interaction"]["operations"] == ["GET", "POST"]
+    assert endpoint["attributes"]["interaction"]["inputs"] == [
+        {"location": "query", "name": "username"},
+        {"location": "body", "name": "password"},
+    ]
+    assert parameter["value"] == "endpoint-1"
+    assert parameter["attributes"]["endpoint_id"] == endpoint["id"]
+    assert payload["unassessed_gaps"] == ["first gap", "second gap"]
+    assert controller._merge_phase_inventory_manifests(
+        _plan(), 1, ["artifact:second.json", "artifact:first.json"]
+    ) == reference
 
 
 def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation(monkeypatch):
@@ -3028,7 +3937,7 @@ def test_task_executor_continues_when_selected_memory_lookup_fails():
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
 
 
-def test_task_prompt_normalization_rejects_conflicting_memory_references():
+def test_task_prompt_normalization_drops_stale_memory_references_and_prefers_indices():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
@@ -3043,20 +3952,22 @@ def test_task_prompt_normalization_rejects_conflicting_memory_references():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    with pytest.raises(workflow_mod.TaskPromptBuildError, match="unknown selection"):
-        controller._normalize_task_prompt_spec(
-            {
-                "prompt": "execute active",
-                "memory_indices": [1, 1, 99],
-                "memory_ids": ["memory-1", "memory-2-corrupted"],
-                "tools": [],
-                "shell_commands": [],
-            },
-            Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
-        )
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "execute active",
+            "memory_indices": [1, 1, 99],
+            "memory_ids": ["memory-1", "memory-2-corrupted"],
+            "tools": [],
+            "shell_commands": [],
+        },
+        Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
+    )
+
+    assert normalized["memory_ids"] == ["memory-2"]
+    assert normalized["memory_indices"] == [1]
 
 
-def test_malformed_memory_id_fails_prompt_prevalidation():
+def test_malformed_memory_id_is_dropped_during_prompt_prevalidation():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
@@ -3071,19 +3982,20 @@ def test_malformed_memory_id_fails_prompt_prevalidation():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    with pytest.raises(workflow_mod.TaskPromptBuildError, match="unknown selection"):
-        controller._normalize_task_prompt_spec(
-            {
-                "prompt": "execute active",
-                "memory_ids": ["98d09291-78dc-443c-aba2-f2c4b467fc"],
-                "tools": [],
-                "shell_commands": [],
-            },
-            task,
-        )
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "execute active",
+            "memory_ids": ["98d09291-78dc-443c-aba2-f2c4b467fc"],
+            "tools": [],
+            "shell_commands": [],
+        },
+        task,
+    )
+
+    assert normalized["memory_ids"] == []
 
 
-def test_malformed_memory_id_does_not_reach_prompt_critic():
+def test_malformed_memory_id_reaches_prompt_critic_with_valid_prompt():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
@@ -3099,6 +4011,8 @@ def test_malformed_memory_id_does_not_reach_prompt_critic():
                 '{"prompt":"execute active","memory_ids":'
                 '["98d09291-78dc-443c-aba2-f2c4b467fc"],"tools":[],"shell_commands":[]}'
             )
+        if role == "task_prompt_critic":
+            return '{"approved":true,"feedback":[]}'
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -3108,13 +4022,14 @@ def test_malformed_memory_id_does_not_reach_prompt_critic():
         text_runner=text_runner,
     )
 
-    with pytest.raises(workflow_mod.TaskPromptBuildError, match="unknown selection"):
-        controller._build_task_prompt(
-            _plan(),
-            _plan().phases[0],
-            Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
-        )
-    assert [role for role, _prompt in calls] == ["task_prompt_builder"]
+    prompt_spec = controller._build_task_prompt(
+        _plan(),
+        _plan().phases[0],
+        Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
+    )
+
+    assert prompt_spec["memory_ids"] == []
+    assert [role for role, _prompt in calls] == ["task_prompt_builder", "task_prompt_critic"]
 
 
 def test_task_executor_uses_deterministic_template_for_unknown_selected_shell_commands(monkeypatch):
@@ -3625,6 +4540,106 @@ def test_durable_artifact_references_exclude_consumer_tool_mentions():
     assert MultiAgentWorkflowController._artifact_refs_from_tool_outcomes(outcomes) == [
         "artifact:artifacts/inventory_manifest.json"
     ]
+
+
+def test_durable_artifact_references_capture_operation_local_absolute_paths(monkeypatch, tmp_path):
+    operation_root = tmp_path / "operation"
+    artifacts = operation_root / "artifacts"
+    artifacts.mkdir(parents=True)
+    katana = artifacts / "katana_crawl.txt"
+    browser = artifacts / "browser_page.html"
+    katana.write_text("http://target.test/", encoding="utf-8")
+    browser.write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr("modules.tools.memory._operation_output_root", lambda: str(operation_root))
+    outcome = ToolOutcome(
+        1,
+        "crawl",
+        "shell",
+        True,
+        False,
+        f'{{"command":"katana -o {katana}"}}',
+        f"HTML content saved to artifact: {browser}",
+    )
+
+    assert MultiAgentWorkflowController._artifact_refs_from_tool_outcomes([outcome]) == [
+        "artifact:artifacts/browser_page.html",
+        "artifact:artifacts/katana_crawl.txt",
+    ]
+
+
+def test_absolute_artifact_discovery_rejects_outside_missing_and_directory_paths(monkeypatch, tmp_path):
+    operation_root = tmp_path / "operation"
+    operation_root.mkdir()
+    directory = operation_root / "artifacts"
+    directory.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    missing = operation_root / "missing.txt"
+    monkeypatch.setattr("modules.tools.memory._operation_output_root", lambda: str(operation_root))
+    text = f"{outside} {missing} {directory}"
+
+    assert MultiAgentWorkflowController._operation_local_artifact_refs_in_text(text) == []
+
+
+def test_acceptance_recovery_context_retains_absolute_tool_artifacts(monkeypatch, tmp_path):
+    operation_root = tmp_path / "operation"
+    artifacts = operation_root / "artifacts"
+    artifacts.mkdir(parents=True)
+    katana = artifacts / "katana_crawl.txt"
+    browser = artifacts / "browser_page.html"
+    katana.write_text("http://target.test/", encoding="utf-8")
+    browser.write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr("modules.tools.memory._operation_output_root", lambda: str(operation_root))
+    task = Task(task_uid="task", title="Task", objective="Assess behavior", phase=1, status="active")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    outcome = ToolOutcome(
+        1,
+        "crawl",
+        "shell",
+        True,
+        False,
+        f"katana -o {katana}",
+        f"Browser output saved to {browser}",
+    )
+
+    context = controller._acceptance_recovery_context(task, [], [outcome], None)
+
+    assert [item["reference"] for item in context] == [
+        "artifact:artifacts/browser_page.html",
+        "artifact:artifacts/katana_crawl.txt",
+    ]
+    assert all(item["usable"] == "true" for item in context)
+
+
+def test_manifest_recovery_accepts_current_operation_artifact_id(monkeypatch):
+    plan = _plan()
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+    )
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="mcp-manifest",
+        tool_name="mcp_inventory_producer",
+        success=True,
+        correctable=False,
+        input_summary="target",
+        output_summary="artifact_id:mcp-inventory.json",
+        artifact_refs=("artifact_id:mcp-inventory.json",),
+    )
+    monkeypatch.setattr(controller, "_execution_artifact_is_current_operation", lambda _reference: True)
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda _plan, reference: ({"items": [{}]}, reference),
+    )
+
+    assert controller._valid_inventory_artifact_refs(plan, [outcome]) == ["artifact_id:mcp-inventory.json"]
 
 
 def test_acceptance_recovery_context_includes_only_successful_task_created_memory_refs(monkeypatch):
@@ -5022,6 +6037,14 @@ def test_acceptance_recovery_details_classifies_missing_artifact_as_prerequisite
     )
 
     assert details["code"] == "missing_artifact_prerequisite"
+
+
+def test_acceptance_recovery_details_classifies_missing_execution_as_prerequisite():
+    details = MultiAgentWorkflowController._acceptance_recovery_details(
+        "Execution evidence is required before acceptance. Missing execution requirements: execution-1"
+    )
+
+    assert details["code"] == "missing_execution_prerequisite"
 
 
 def test_advisory_checkpoint_can_continue_below_phase_hard_cap():
@@ -6880,6 +7903,161 @@ def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
     assert len(state.tasks) == 1
 
 
+def test_task_creator_replays_complete_text_json_submission_without_prompt_changes(monkeypatch):
+    state = FakeState(_plan())
+    tool_calls = []
+
+    def task_creator_tools(phase=None, batch=None, invocation_observer=None):
+        del phase, batch
+
+        def create_tasks(tasks):
+            tool_calls.append(tasks)
+            result = '{"complete": true, "created_count": 1}'
+            invocation_observer({"tasks": tasks}, result, None)
+            state.store_task(Task(task_uid="replayed", title="Replayed", objective="run", phase=1, status="pending"))
+            return result
+
+        create_tasks.__name__ = "create_tasks"
+        return [create_tasks]
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        work_runner=lambda *_args: json.dumps({"tasks": [{"title": "Replay this proposal"}]}),
+        executor_session_factory=retained_work_runner(
+            lambda *_args: json.dumps({"tasks": [{"title": "Replay this proposal"}]})
+        ),
+    )
+    monkeypatch.setattr(controller, "_task_creator_tools", task_creator_tools)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert tool_calls == [[{"title": "Replay this proposal"}]]
+    assert outcome.created_count == 1
+    assert state.tasks[0].task_uid == "replayed"
+    assert controller.runtime.callback_handler.efficiency_events == [
+        ("task_creator_json_submission_replay", None)
+    ]
+    assert any(
+        event.get("type") == "task_creator_json_submission_replay" and event.get("status") == "accepted"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_task_creator_does_not_replay_text_after_a_real_create_tasks_call(monkeypatch):
+    state = FakeState(_plan())
+    tool_calls = []
+
+    def task_creator_tools(phase=None, batch=None, invocation_observer=None):
+        del phase, batch
+
+        def create_tasks(tasks):
+            tool_calls.append(tasks)
+            result = '{"complete": true, "created_count": 1}'
+            invocation_observer({"tasks": tasks}, result, None)
+            state.store_task(Task(task_uid="called", title="Called", objective="run", phase=1, status="pending"))
+            return result
+
+        create_tasks.__name__ = "create_tasks"
+        return [create_tasks]
+
+    def work_runner(_role, _prompt, tools, _system_prompt, _run_policy):
+        tools[0](tasks=[{"title": "Called proposal"}])
+        return json.dumps({"tasks": [{"title": "Would duplicate"}]})
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
+    )
+    monkeypatch.setattr(controller, "_task_creator_tools", task_creator_tools)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert tool_calls == [[{"title": "Called proposal"}]]
+    assert outcome.created_count == 1
+    assert controller.runtime.callback_handler.efficiency_events == []
+
+
+def test_task_creator_does_not_replay_incomplete_text_json(monkeypatch):
+    state = FakeState(_plan())
+    tool_calls = []
+
+    def task_creator_tools(phase=None, batch=None, invocation_observer=None):
+        del phase, batch, invocation_observer
+
+        def create_tasks(tasks):
+            tool_calls.append(tasks)
+            return '{"complete": true, "created_count": 1}'
+
+        create_tasks.__name__ = "create_tasks"
+        return [create_tasks]
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        work_runner=lambda *_args: '{"tasks": [{"title": "truncated"}',
+        executor_session_factory=retained_work_runner(
+            lambda *_args: '{"tasks": [{"title": "truncated"}'
+        ),
+    )
+    monkeypatch.setattr(controller, "_task_creator_tools", task_creator_tools)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert tool_calls == []
+    assert outcome.created_count == 0
+    assert any(
+        event.get("type") == "task_creator_json_submission_replay" and event.get("status") == "ineligible"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_task_creator_rejected_text_json_replay_uses_existing_correction_path(monkeypatch):
+    state = FakeState(_plan())
+    tool_calls = []
+
+    def task_creator_tools(phase=None, batch=None, invocation_observer=None):
+        del phase, batch
+
+        def create_tasks(tasks):
+            tool_calls.append(tasks)
+            error = ValueError("proposal validation failed")
+            invocation_observer({"tasks": tasks}, None, error)
+            raise error
+
+        create_tasks.__name__ = "create_tasks"
+        return [create_tasks]
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+        work_runner=lambda *_args: json.dumps({"tasks": [{"title": "Rejected proposal"}]}),
+        executor_session_factory=retained_work_runner(
+            lambda *_args: json.dumps({"tasks": [{"title": "Rejected proposal"}]})
+        ),
+    )
+    monkeypatch.setattr(controller, "_task_creator_tools", task_creator_tools)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert tool_calls == [[{"title": "Rejected proposal"}]]
+    assert "proposal validation failed" in outcome.failure_reason
+    assert any(
+        event.get("type") == "task_creator_json_submission_replay" and event.get("status") == "rejected"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
 def test_task_creator_opens_and_cleans_one_session_for_all_default_attempts():
     prompts = []
     lifecycle = []
@@ -7106,6 +8284,27 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
     assert "ordinary HTTP procedure proposal must name exactly one endpoint route" in prompt
     assert "ordered multi-step workflow" in prompt
     assert "Split an ordinary multi-route HTTP procedure into one route-scoped proposal" in prompt
+
+
+def test_task_creator_prompt_uses_bounded_active_phase_view_without_mutating_plan():
+    plan = _plan()
+    phase = replace(
+        plan.phases[0],
+        criteria="Generate testable hypotheses across key workflows from the frozen inventory.",
+    )
+    plan.phases[0] = phase
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    prompt = controller._task_creator_prompt(plan, phase)
+
+    assert phase.criteria == "Generate testable hypotheses across key workflows from the frozen inventory."
+    assert "Generate testable hypotheses across key workflows from the frozen inventory" not in prompt
+    assert "Generate testable hypotheses from the frozen inventory" in prompt
 
 
 def test_task_creator_prompt_exposes_replacement_parent_criteria():
@@ -7556,17 +8755,17 @@ def test_task_shell_scope_guard_rejects_logical_target_id_and_exposes_concrete_e
         state_store=FakeState(plan, tasks=[task]),
     )
 
-    error = controller._validate_task_shell_commands(plan, task, ["curl -sS -i https://target-1/api/spawn"])
+    error = controller._validate_task_shell_commands(plan, task, ["curl -sS -i https://target-1:8443/api/spawn"])
 
     assert error is not None
     assert "not executed" in error
     assert "http://192.0.2.10:3001" in error
-    assert "Logical target IDs" in error
+    assert "logical target ID as a hostname" in error
     event = next(
         event for event in controller.runtime.callback_handler.events if event["type"] == "task_command_scope_validation"
     )
     assert event["decision"] == "blocked"
-    assert event["violations"][0]["literal"] == "https://target-1/api/spawn"
+    assert event["violations"][0]["literal"] == "https://target-1:8443/api/spawn"
 
 
 def test_task_shell_scope_guard_allows_assigned_endpoint_and_recovery_prompts_keep_it():
@@ -7617,6 +8816,68 @@ def test_task_shell_scope_guard_allows_assigned_endpoint_and_recovery_prompts_ke
         assert "http://192.0.2.10:3001" in prompt
         assert "never use them as hostnames" in prompt
         assert "target-1 [network]" not in prompt
+
+
+def test_task_shell_scope_guard_ignores_urls_in_echoed_response_payload():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="http://192.0.2.10:3001")],
+    )
+    task = Task(
+        task_uid="active",
+        title="Capture response",
+        objective="Capture the assigned response",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+
+    command = (
+        "echo '{\"external_url\":\"https://example-bucket.invalid/config\"}' "
+        "> artifacts/api_config_response.json"
+    )
+
+    assert controller._validate_task_shell_commands(plan, task, [command]) is None
+
+
+def test_task_shell_scope_guard_allows_external_outbound_url_after_echoed_payload():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", type="network", value="http://192.0.2.10:3001")],
+    )
+    task = Task(
+        task_uid="active",
+        title="Capture response",
+        objective="Capture the assigned response",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+
+    command = (
+        "printf '%s' '{\"external_url\":\"https://example-bucket.invalid/config\"}' "
+        "; curl -sS https://outside.example.invalid/ https://target-1.example.invalid/"
+    )
+
+    assert controller._validate_task_shell_commands(plan, task, [command]) is None
 
 
 def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():

@@ -113,6 +113,21 @@ def test_outcome_journal_retains_externalized_artifact_references():
     assert outcome.artifact_refs == ("artifact:artifacts/specialized_recon_orchestrator_result.log",)
 
 
+def test_outcome_journal_extracts_structured_mcp_artifact_id_from_result_only():
+    journal = ToolOutcomeJournal()
+
+    outcome = journal.append(
+        tool_use_id="mcp-inventory",
+        tool_name="mcp_inventory_producer",
+        success=True,
+        correctable=False,
+        tool_input={"artifact_id": "input-must-not-be-trusted.json"},
+        output={"artifact_id": "mcp-inventory.json"},
+    )
+
+    assert outcome.artifact_refs == ("artifact_id:mcp-inventory.json",)
+
+
 def test_failed_corrections_exhaust_configured_allowance_without_blocking_independent_work():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster --not-an-option http://target"}
@@ -538,6 +553,29 @@ def test_outcome_journal_retains_record_task_acceptance_input_as_json():
     )
 
     assert json.loads(outcome.input_summary) == payload
+    assert outcome.structured_input == payload
+
+
+def test_outcome_journal_retains_full_acceptance_payload_for_controller_replay():
+    journal = ToolOutcomeJournal()
+    payload = {
+        "status": "satisfied",
+        "disposition": "observation",
+        "summary": "x" * 900,
+        "evidence_refs": ["artifact:artifacts/result.txt"],
+    }
+
+    outcome = journal.append(
+        tool_use_id="acceptance",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=False,
+        tool_input=payload,
+        output="execution prerequisite missing",
+    )
+
+    assert len(outcome.input_summary) == 500
+    assert outcome.structured_input == payload
 
 
 def test_correctable_classifier_does_not_retry_ordinary_negative_result():
@@ -546,6 +584,23 @@ def test_correctable_classifier_does_not_retry_ordinary_negative_result():
     assert is_correctable_tool_failure("shell", tool_input, "error: unrecognized argument --bad") is True
     assert is_correctable_tool_failure("shell", tool_input, "HTTP 404: route was not found") is False
     assert is_correctable_tool_failure("shell", tool_input, "scan completed; zero results") is False
+
+
+def test_shell_scope_rejection_is_correctable_with_controller_target_guidance():
+    output = (
+        "The shell command was not executed because its service target is outside the assigned task boundary. "
+        "Allowed targets: http://192.0.2.10:3001."
+    )
+
+    assert is_correctable_tool_failure("shell", {"command": "curl https://target-1/api"}, output) is True
+    assert "http://192.0.2.10:3001" in format_tool_repair_error("shell", output)
+
+
+def test_removed_execution_receipt_tool_has_no_special_recovery_behavior():
+    output = "Error: Artifact does not exist: artifact:none"
+
+    assert is_correctable_tool_failure("record_execution_evidence", {}, output) is False
+    assert format_tool_repair_error("record_execution_evidence", output) == output
 
 
 def test_startup_dependency_failure_quarantines_only_failed_executable():

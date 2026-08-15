@@ -195,6 +195,20 @@ predicted filenames from overriding accepted evidence. Task creators use a close
 criterion descriptions, snapshot references, and target IDs. Python generates readable unique criterion IDs and
 evidence requirements and owns the remaining contract and lifecycle fields.
 
+Before an acceptance ledger is persisted, controller validation copies artifact evidence into a task-owned immutable
+path within the operation root. Independent inventory-producing tasks therefore cannot overwrite one another's
+accepted outputs. When a following phase consumes multiple completed inventory manifests, Python creates one merged,
+provenance-preserving snapshot for fan-out. A manifest is not valid proof for a task frozen to a single inventory
+subject; that rejection occurs before ledger persistence. Prompt-memory selectors are advisory: stale IDs or indices
+are logged and dropped while valid selected context remains available to the executor.
+
+Execution requirements remain frozen in the task contract, but execution proof is controller-owned. The controller
+matches successful task-local tool capabilities and normalized subjects to durable current-operation artifacts when
+the executor submits acceptance. If proof is missing, Python retains the semantic acceptance payload, permits one
+bounded repair against the exact missing requirement, and replays acceptance without another model bookkeeping call.
+Merged phase inventories use content-addressed immutable paths and union complementary protocol-neutral interaction
+metadata so later task creation cannot mutate an earlier frozen snapshot or discard methods and inputs.
+
 Complete task acceptance also publishes one bounded operation observation containing the task objective, criterion
 statuses, concrete summaries, evidence references, and aggregate coverage counts. Publication is replay-safe and lets
 later task-prompt-builders select accepted information by memory ID. A memory-backend failure is reported in the tool
