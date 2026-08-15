@@ -163,13 +163,12 @@ def _coerce_str(arg: bytes | str | None) -> str:
     return str(arg)
 
 
-def _specialized_recon_orchestrator_impl(
+@tool
+def specialized_recon_orchestrator(
         target: str,
         recon_type: str = "comprehensive",
-        *,
-        output_file: str,
-        inventory_manifest: str,
-        validate_output_paths: bool,
+        output_file: Optional[str] = None,
+        inventory_manifest: Optional[str] = None,
 ) -> str:
     """
     Orchestrates automated web recon for a target. It scans for subdomains, live hosts/tech stack, crawled endpoints, JS files, URL/form parameters, and hidden/high-value services.
@@ -415,11 +414,7 @@ def _specialized_recon_orchestrator_impl(
                 technologies=[item for item in technologies if item],
                 parameters=results.get("parameters", []) or [],
             )
-            results["inventory_manifest"] = write_inventory_manifest(
-                inventory_manifest,
-                manifest,
-                validate_path=validate_output_paths,
-            )
+            results["inventory_manifest"] = write_inventory_manifest(inventory_manifest, manifest)
         except Exception as error:
             results["inventory_manifest"] = {
                 "path": os.path.abspath(inventory_manifest),
@@ -433,24 +428,6 @@ def _specialized_recon_orchestrator_impl(
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(result_str)
     return result_str
-
-
-@tool
-def specialized_recon_orchestrator(
-        target: str,
-        recon_type: str = "comprehensive",
-        *,
-        output_file: str,
-        inventory_manifest: str,
-) -> str:
-    """Run web reconnaissance and write its result and inventory manifest."""
-    return _specialized_recon_orchestrator_impl(
-        target,
-        recon_type=recon_type,
-        output_file=output_file,
-        inventory_manifest=inventory_manifest,
-        validate_output_paths=True,
-    )
 
 
 def _generate_recon_tasks(results: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1534,22 +1511,21 @@ def main() -> int:
         choices=["subdomain", "fingerprint", "comprehensive"],
         help="Type of recon to run (default: comprehensive)",
     )
-    parser.add_argument("--output-file", "-o", default="/dev/null", help="Path to write results to disk")
+    parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
     parser.add_argument(
         "--inventory-manifest",
         "--inventory_manifest",
-        default="/dev/null",
+        default=None,
         help="Path to write an additional validated inventory manifest",
     )
 
     args = parser.parse_args()
     print(
-        _specialized_recon_orchestrator_impl(
+        specialized_recon_orchestrator(
             args.target,
             recon_type=args.recon_type,
             output_file=args.output_file,
             inventory_manifest=args.inventory_manifest,
-            validate_output_paths=False,
         )
     )
     return 0

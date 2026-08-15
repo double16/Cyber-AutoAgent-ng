@@ -526,56 +526,15 @@ def records_to_inventory_manifest(
     }
 
 
-def write_inventory_manifest(
-    path: str,
-    manifest: Dict[str, Any],
-    *,
-    validate_path: bool = True,
-) -> Dict[str, Any]:
+def write_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
     """Atomically write and validate one inventory manifest."""
 
-    if validate_path:
-        absolute_path = _inventory_manifest_output_path(path)
-    else:
-        if not path:
-            raise ValueError("inventory manifest output path is required")
-        absolute_path = os.path.abspath(path)
+    absolute_path = _inventory_manifest_output_path(path)
     from modules.tools.memory import _load_inventory_manifest, canonical_artifact_reference
 
-    if os.path.realpath(absolute_path) == os.path.realpath(os.devnull):
-        from modules.tools.memory import _operation_output_root
-
-        operation_root = _operation_output_root()
-        descriptor, temporary = tempfile.mkstemp(prefix=".inventory-manifest-", suffix=".json", dir=operation_root)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                json.dump(manifest, output, indent=2, sort_keys=True)
-                output.write("\n")
-            temporary_reference = canonical_artifact_reference(temporary)
-            validated, digest = _load_inventory_manifest(temporary_reference)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        return {
-            "path": absolute_path,
-            "item_count": len(validated["items"]),
-            "validation_status": "valid",
-            "sha256": digest,
-        }
-
     directory = os.path.dirname(absolute_path)
-    temporary_directory = directory
-    if not validate_path:
-        from modules.tools.memory import _operation_output_root
-
-        temporary_directory = _operation_output_root()
     os.makedirs(directory, exist_ok=True)
-    os.makedirs(temporary_directory, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=".inventory-manifest-",
-        suffix=".json",
-        dir=temporary_directory,
-    )
+    descriptor, temporary = tempfile.mkstemp(prefix=".inventory-manifest-", suffix=".json", dir=directory)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             json.dump(manifest, output, indent=2, sort_keys=True)
@@ -587,15 +546,14 @@ def write_inventory_manifest(
         if os.path.exists(temporary):
             os.unlink(temporary)
 
-    result = {
+    reference = canonical_artifact_reference(absolute_path)
+    return {
         "path": absolute_path,
+        "artifact_ref": reference,
         "item_count": len(validated["items"]),
         "validation_status": "valid",
         "sha256": digest,
     }
-    if validate_path:
-        result["artifact_ref"] = canonical_artifact_reference(absolute_path)
-    return result
 
 
 def _inventory_manifest_output_path(path: str) -> str:

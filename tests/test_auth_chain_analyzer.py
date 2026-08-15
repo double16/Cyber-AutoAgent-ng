@@ -7,7 +7,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from modules.handlers.utils import get_tool_spec
 import modules.operation_plugins.web.tools.auth_chain_analyzer as aca
 import modules.tools.recon_inventory_manifest as manifest_tool
 
@@ -46,40 +45,6 @@ def _loads(out: str) -> dict:
     return json.loads(out)
 
 
-def _run(*args, **kwargs):
-    kwargs.setdefault("output_file", "/dev/null")
-    kwargs.setdefault("inventory_manifest", "/dev/null")
-    return aca.auth_chain_analyzer(*args, **kwargs)
-
-
-def test_auth_chain_tool_schema_requires_output_paths():
-    schema = get_tool_spec(aca.auth_chain_analyzer)["inputSchema"]["json"]
-
-    assert {"output_file", "inventory_manifest"} <= set(schema["required"])
-
-
-def test_auth_chain_requires_output_paths():
-    with pytest.raises(TypeError):
-        aca.auth_chain_analyzer("https://example.com")
-
-
-def test_auth_chain_cli_defaults_to_unvalidated_dev_null_paths(monkeypatch, capsys):
-    captured = {}
-
-    def fake_impl(*args, **kwargs):
-        captured.update(kwargs)
-        return "{}"
-
-    monkeypatch.setattr(aca, "_auth_chain_analyzer_impl", fake_impl)
-    monkeypatch.setattr("sys.argv", ["auth_chain_analyzer", "https://example.com"])
-
-    assert aca.main() == 0
-    assert captured["output_file"] == "/dev/null"
-    assert captured["inventory_manifest"] == "/dev/null"
-    assert captured["validate_output_paths"] is False
-    assert capsys.readouterr().out == "{}\n"
-
-
 def test_auth_chain_analyzer_adds_scheme_and_emits_json(monkeypatch):
     monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda url: [])
     monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
@@ -90,7 +55,7 @@ def test_auth_chain_analyzer_adds_scheme_and_emits_json(monkeypatch):
     monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
     monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
 
-    out = _run("example.com", auth_type="auto")
+    out = aca.auth_chain_analyzer("example.com", auth_type="auto")
     j = _loads(out)
 
     assert j["tool"] == "auth_chain_analyzer"
@@ -130,26 +95,21 @@ def test_auth_chain_inventory_manifest_is_additive(monkeypatch, tmp_path):
     )
     captured = {}
 
-    def write_manifest(path, manifest, **kwargs):
+    def write_manifest(path, manifest):
         captured.update({"path": path, "manifest": manifest})
         return {"path": path, "validation_status": "valid", "item_count": len(manifest["items"])}
 
     monkeypatch.setattr(manifest_tool, "write_inventory_manifest", write_manifest)
 
-    regular = _loads(
-        _run(
-            "https://target.test",
-            inventory_manifest=str(tmp_path / "regular-inventory.json"),
-        )
-    )
+    regular = _loads(aca.auth_chain_analyzer("https://target.test"))
     additional = _loads(
-        _run(
+        aca.auth_chain_analyzer(
             "https://target.test",
             inventory_manifest=str(tmp_path / "auth-inventory.json"),
         )
     )
 
-    assert regular["inventory_manifest"]["validation_status"] == "valid"
+    assert "inventory_manifest" not in regular
     assert additional["inventory_manifest"]["validation_status"] == "valid"
     assert captured["path"] == str(tmp_path / "auth-inventory.json")
     assert {item["kind"] for item in captured["manifest"]["items"]} >= {
@@ -164,7 +124,7 @@ def test_auth_chain_error_keeps_requested_manifest_metadata(monkeypatch, tmp_pat
     monkeypatch.setattr(aca, "_discover_auth_endpoints", Mock(side_effect=RuntimeError("analysis failed")))
 
     result = _loads(
-        _run(
+        aca.auth_chain_analyzer(
             "https://target.test",
             inventory_manifest=str(tmp_path / "auth-inventory.json"),
         )
@@ -197,7 +157,7 @@ def test_auth_chain_reports_manifest_validation_failure_without_replacing_analys
     )
 
     result = _loads(
-        _run(
+        aca.auth_chain_analyzer(
             "https://target.test",
             inventory_manifest=str(tmp_path / "auth-inventory.json"),
         )
@@ -218,7 +178,7 @@ def test_auth_chain_analyzer_handles_bypass_results_none(monkeypatch):
     monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: None)
     monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
 
-    j = _loads(_run("https://t.example", auth_type="auto"))
+    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto"))
     assert j["findings"] == []
     assert j["summary"]["confirmed_exploits"] == 0
 
@@ -246,7 +206,7 @@ def test_auth_chain_analyzer_wraps_single_bypass_dict(monkeypatch):
     monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: bypass)
     monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
 
-    j = _loads(_run("https://t.example", auth_type="auto"))
+    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto"))
     assert len(j["findings"]) == 1
     f = j["findings"][0]
     assert f["status"] == "confirmed"
@@ -273,7 +233,7 @@ def test_decision_logic_prefers_bypass_validation_when_opps_exist(monkeypatch):
     monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
     monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [{"id": "x", "confidence": 0.8}])
 
-    j = _loads(_run("https://t.example", auth_type="auto"))
+    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto"))
     assert j["decision"]["primary_auth"] == "session"
     assert j["decision"]["best_attack_surface"] == "bypass_validation"
     assert j["decision"]["next_phase"] == "bypass_testing"
@@ -439,7 +399,7 @@ def test_jwt_tool_and_top_level_error_paths(monkeypatch):
     assert tokens[0]["token_preview"].endswith("...")
 
     monkeypatch.setattr(aca, "_discover_auth_endpoints", Mock(side_effect=RuntimeError("boom")))
-    error = json.loads(_run("https://t.example", auth_type="bad"))
+    error = json.loads(aca.auth_chain_analyzer("https://t.example", auth_type="bad"))
     assert "boom" in error["error"]
     assert error["auth_type"] == "auto"
 

@@ -232,31 +232,6 @@ def test_converter_tool_schema_advertises_canonical_formats():
     assert set(schema["required"]) == {"source_artifact", "output_file"}
 
 
-def test_unvalidated_manifest_write_accepts_external_cli_path(monkeypatch, tmp_path):
-    import modules.tools.memory as memory
-
-    operation_root = tmp_path / "operation"
-    operation_root.mkdir()
-    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(operation_root))
-
-    manifest = manifest_tool.records_to_inventory_manifest(
-        [{"url": "https://target.test/login", "method": "GET"}],
-        target_id="target-1",
-        target="https://target.test",
-    )
-    output_path = tmp_path / "external" / "inventory.json"
-
-    result = manifest_tool.write_inventory_manifest(
-        str(output_path),
-        manifest,
-        validate_path=False,
-    )
-
-    assert output_path.is_file()
-    assert result["validation_status"] == "valid"
-    assert result["path"] == str(output_path)
-
-
 def test_converter_reads_artifact_normalizes_alias_and_writes_valid_manifest(tmp_path, monkeypatch):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
