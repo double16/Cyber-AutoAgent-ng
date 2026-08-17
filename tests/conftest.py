@@ -15,6 +15,7 @@ from modules.config.models.capabilities import (
     get_model_output_limit,
     get_model_pricing,
 )
+from modules.operation_plugins.web.tools import result_cache
 
 # Disable dotenv loading in tests
 os.environ["PYTHON_DOTENV_DISABLED"] = "true"
@@ -26,6 +27,12 @@ os.environ["DEV_CLIENT_OFFLINE"] = "true"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 os.environ["ENABLE_LANGFUSE_PROMPTS"] = "false"
+
+
+@pytest.fixture(autouse=True)
+def isolate_tool_result_cache(monkeypatch, tmp_path):
+    """Keep filesystem-backed tool result cache entries isolated between tests."""
+    monkeypatch.setattr(result_cache, "RESULT_CACHE_DIR", tmp_path / "tool-result-cache")
 
 
 # Ensure provider override envs do not leak into tests expecting defaults

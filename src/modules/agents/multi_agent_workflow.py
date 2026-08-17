@@ -110,6 +110,7 @@ from modules.tools.shell import scoped_shell_command_validator
 from modules.config.taxonomy_catalog import get_taxonomy_catalog, validate_taxonomy_mappings
 from modules.tools.tool_catalog import get_shell_command_help_context, get_shell_command_specs
 from modules.utils.json_repair import parse_json_response, parse_json_response_with_metadata
+from modules.utils.sdk_error_sanitization import sanitize_sdk_error
 
 logger = logging.getLogger(__name__)
 
@@ -428,6 +429,7 @@ def default_text_runner(runtime: AgentRuntimeResources) -> AgentTextRunner:
                 result = agent(prompt)
                 return extract_result_text(result)
             except MaxTokensReachedException as error:
+                sanitize_sdk_error(error)
                 classification, removed = classify_and_discard_max_token_output(agent)
                 setattr(error, "max_token_classification", classification)
                 callback_handler = getattr(runtime, "callback_handler", None)
@@ -1278,7 +1280,9 @@ class MultiAgentWorkflowController:
         self._record_efficiency_correction("max_token_exhaustion")
 
     def _short(self, value: Any, limit: int = 300) -> str:
-        text = str(value or "").replace("\n", " ").strip()
+        text = (
+            sanitize_sdk_error(value) if isinstance(value, BaseException) else str(value or "")
+        ).replace("\n", " ").strip()
         return text[:limit] + "..." if len(text) > limit else text
 
     def _task_label(self, task: Optional[Task]) -> str:
@@ -6062,7 +6066,7 @@ Return exactly one decision for each candidate.
             ):
                 raise
             raise TaskPromptBuildError(
-                str(error),
+                sanitize_sdk_error(error),
                 repairable=True,
                 feedback=error.feedback if isinstance(error, TaskPromptBuildError) else repair_context_feedback,
                 failure_source=active_role,
@@ -8530,6 +8534,7 @@ Allowed evidence references:
             try:
                 response = self.text_runner(role, current_prompt, tools, system_prompt)
             except MaxTokensReachedException as error:
+                sanitize_sdk_error(error)
                 self._emit_workflow_activity(
                     role,
                     "failed",
@@ -8729,7 +8734,7 @@ Allowed evidence references:
     ) -> Dict[str, Dict[str, Any]]:
         """Return a conservative evaluator result after schema retries are exhausted."""
         key_text = ", ".join(response_keys) or "none"
-        error_text = str(error or "invalid evaluator decision schema")
+        error_text = sanitize_sdk_error(error) or "invalid evaluator decision schema"
         reason = (
             f"{role} response failed the required decision schema after bounded retries; received keys: {key_text}. "
             f"Existing evidence was preserved and the result was marked partial_failure. Error: {error_text}"

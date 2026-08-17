@@ -36,6 +36,49 @@ def _as_json(result_str: str) -> Dict[str, Any]:
     return json.loads(result_str)
 
 
+def test_specialized_recon_reuses_cached_normalized_target(monkeypatch):
+    calls = {"setup": 0}
+
+    def setup(errors=None):
+        calls["setup"] += 1
+        return {"success": True, "tools": [], "failed": []}
+
+    monkeypatch.setattr(sro, "_setup_specialized_tools", setup)
+    monkeypatch.setattr(sro, "_analyze_live_hosts", lambda hosts, errors=None: {"hosts": [], "technologies": []})
+    monkeypatch.setattr(sro, "_analyze_attack_surface", lambda results: results["intelligence"])
+    monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
+    monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
+
+    first = _as_json(sro.specialized_recon_orchestrator("Example.com/path", recon_type="fingerprint"))
+    second = _as_json(sro.specialized_recon_orchestrator("example.com", recon_type="fingerprint"))
+
+    assert first == second
+    assert calls["setup"] == 1
+
+
+def test_specialized_recon_cache_key_includes_recon_type(monkeypatch):
+    calls = {"setup": 0}
+
+    def setup(errors=None):
+        calls["setup"] += 1
+        return {"success": True, "tools": [], "failed": []}
+
+    monkeypatch.setattr(sro, "_setup_specialized_tools", setup)
+    monkeypatch.setattr(sro, "_advanced_subdomain_enum", lambda target, errors=None: [])
+    monkeypatch.setattr(sro, "_analyze_live_hosts", lambda hosts, errors=None: {"hosts": [], "technologies": []})
+    monkeypatch.setattr(
+        sro, "_deep_web_intelligence", lambda hosts, errors=None: {"endpoints": [], "js_files": [], "parameters": []}
+    )
+    monkeypatch.setattr(sro, "_analyze_attack_surface", lambda results: results["intelligence"])
+    monkeypatch.setattr(sro, "_generate_recon_tasks", lambda results: [])
+    monkeypatch.setattr(sro, "_generate_recon_recommendations", lambda results: [])
+
+    sro.specialized_recon_orchestrator("example.com", recon_type="fingerprint")
+    sro.specialized_recon_orchestrator("example.com", recon_type="comprehensive")
+
+    assert calls["setup"] == 2
+
+
 @pytest.fixture
 def fake_subprocess(monkeypatch):
     """

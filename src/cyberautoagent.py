@@ -120,6 +120,7 @@ from modules.tools.memory import (
 from modules.tools.oast import close_oast_providers
 from modules.tools.tool_catalog import get_shell_command_help_context
 from modules.utils.telemetry import flush_traces
+from modules.utils.sdk_error_sanitization import sanitize_sdk_error
 from modules.utils.target_validation import TargetValidationResult, TargetValidator, validate_operation_targets
 
 load_dotenv()
@@ -929,6 +930,7 @@ def run_workflow_agent_with_max_token_recovery(
                 run_policy=current_run_policy,
             )
         except MaxTokensReachedException as error:
+            sanitize_sdk_error(error)
             classification, removed = classify_and_discard_max_token_output(agent)
             setattr(error, "max_token_classification", classification)
             repeated_pattern = is_repeated_max_token_pattern(agent, classification)
@@ -1959,6 +1961,7 @@ def main():
                         try:
                             run_result, result_message = run_workflow_agent(agent, prompt, run_policy)
                         except MaxTokensReachedException as error:
+                            sanitize_sdk_error(error)
                             classification = getattr(error, "max_token_classification", None)
                             kind = getattr(classification, "kind", "output_truncation")
                             outcomes = journal.since(snapshot) if journal is not None else []
@@ -2031,6 +2034,7 @@ def main():
                         "Operation budget limit reached. Switching to final report.",
                     )
             except MaxTokensReachedException as error:
+                sanitize_sdk_error(error)
                 print_status("Token limit reached - generating final report", "WARNING")
                 logger.debug("Termination exception", exc_info=error)
                 try:
@@ -2043,14 +2047,14 @@ def main():
                     logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
             except WorkflowInvariantError as error:
                 logger.exception("Workflow invariant error occurred", exc_info=error)
-                termination_reason = str(error)
+                termination_reason = sanitize_sdk_error(error)
                 print_status(f"Agent error: {termination_reason}", "ERROR")
                 if callback_handler:
                     callback_handler.emit_termination("error", termination_reason)
                 raise
             except Exception as error:
                 logger.exception("Unexpected agent error occurred", exc_info=error)
-                termination_reason = str(error)
+                termination_reason = sanitize_sdk_error(error)
                 print_status(f"Agent error: {termination_reason}", "ERROR")
                 if callback_handler:
                     callback_handler.emit_termination("error", termination_reason)

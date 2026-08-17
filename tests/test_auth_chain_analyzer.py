@@ -45,6 +45,55 @@ def _loads(out: str) -> dict:
     return json.loads(out)
 
 
+def test_auth_chain_reuses_cache_for_normalized_target(monkeypatch):
+    calls = {"discover": 0}
+
+    def discover(url):
+        calls["discover"] += 1
+        return []
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", discover)
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+
+    first = _loads(aca.auth_chain_analyzer("example.test", auth_type="auto"))
+    second = _loads(aca.auth_chain_analyzer("https://example.test", auth_type="auto"))
+
+    assert first == second
+    assert calls["discover"] == 1
+
+
+def test_auth_chain_cache_key_includes_auth_type(monkeypatch):
+    calls = {"discover": 0}
+
+    def discover(url):
+        calls["discover"] += 1
+        return []
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", discover)
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+
+    aca.auth_chain_analyzer("https://example.test", auth_type="jwt")
+    aca.auth_chain_analyzer("https://example.test", auth_type="oauth")
+
+    assert calls["discover"] == 2
+
+
 def test_auth_chain_analyzer_adds_scheme_and_emits_json(monkeypatch):
     monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda url: [])
     monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
