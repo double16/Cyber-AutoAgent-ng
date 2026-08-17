@@ -2208,10 +2208,11 @@ class MultiAgentWorkflowController:
                 + "\n\n## Supplemental Shell Commands\n"
                 + self._shell_command_catalog(selected_shell_commands)
             )
+        execution_prompt_context = execution_prompt
         execution_prompt = (
             execution_prompt.rstrip()
             + "\n\n"
-            + self._task_executor_contract(task)
+            + self._task_executor_contract(task, self._tool_names(tools))
             + "\n\n"
             + self._tool_selection_policy()
         )
@@ -2737,7 +2738,17 @@ class MultiAgentWorkflowController:
                     evaluator_synthesis_repair_active or max_token_synthesis_recovery_active
                 )
                 max_token_synthesis_cycle = max_token_synthesis_recovery_active
-                worker_result = run_executor(actor_prompt, current_policy, closure_tools)
+                cycle_tools = tools if closure_tools is None else closure_tools
+                cycle_prompt = (
+                    execution_prompt_context.rstrip()
+                    + "\n\n"
+                    + self._task_executor_contract(task, self._tool_names(cycle_tools))
+                    + "\n\n"
+                    + self._tool_selection_policy()
+                    if actor_prompt == execution_prompt
+                    else actor_prompt
+                )
+                worker_result = run_executor(cycle_prompt, current_policy, closure_tools)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
                 if synthesis_repair_cycle:
@@ -9069,6 +9080,11 @@ while planning.
 
     def _task_prompt_builder_prompt(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> str:
         validation_tool = self._validation_tool_name(task)
+        persistence_tool_names = self._task_executor_persistence_tool_names(task)
+        persistence_guidance = self._task_persistence_guidance(
+            persistence_tool_names,
+            audience="task_prompt",
+        )
         acceptance_action = (
             f"Call `{validation_tool}` with the independent outcome and required evidence. A successful call "
             "deterministically records the frozen acceptance ledger, so do not call `record_task_acceptance`."
@@ -9078,7 +9094,7 @@ while planning.
         )
         disposition_guidance = (
             ""
-            if validation_tool
+            if validation_tool or "store_finding" not in persistence_tool_names
             else "Confirmed security behavior must use finding_candidate or existing_finding disposition and "
             "reference the finding returned by `store_finding`; negative and non-finding results use "
             "no_vulnerability or observation."
@@ -9098,10 +9114,8 @@ The generated prompt must instruct the task-executor agent:
   Preserve recorded operations and input locations. Do not replace POST with GET, read with execute, or another
   protocol-native operation unless the task explicitly requires that comparison.
 - Require every acceptance summary to state the concrete result or negative result. Successful acceptance publishes
-  those summaries and evidence references as one operation observation for later tasks. Use `store_observation` only
-  for useful interim facts not represented by the acceptance ledger.
-- Store each security claim with `store_finding` and reusable lessons with `store_knowledge`, then stop with a brief
-  summary once the assigned task is done, partial, or blocked.
+  those summaries and evidence references as one operation observation for later tasks.
+{persistence_guidance}
 - Use the core `swarm` tool only when this assigned task has independent capability branches, materially different
   hypotheses, or a concrete recovery need after a failed approach. Do not use it for one deterministic request,
   minor payload variations, or sequential prerequisites that require one shared state.
@@ -9187,6 +9201,10 @@ Shell command selection guidance:
         prompt_spec: Dict[str, Any],
     ) -> str:
         validation_tool = self._validation_tool_name(task)
+        persistence_guidance = self._task_persistence_guidance(
+            self._task_executor_persistence_tool_names(task),
+            audience="critic",
+        )
         acceptance_requirement = (
             f"requires {validation_tool} and does not require a subsequent record_task_acceptance call"
             if validation_tool
@@ -9200,8 +9218,8 @@ Approve only when the draft:
 - treats every plan constraint as a mandatory execution guardrail;
 - prevents execution of later phases, adjacent tasks, and newly created follow-up tasks;
 - preserves explicit `scheme://host:port` URL and `host:port` netloc service scope when present;
-- requires concrete, reusable acceptance summaries for requested informational and negative results, and uses
-  `store_observation` only for useful interim facts outside the acceptance ledger;
+- requires concrete, reusable acceptance summaries for requested informational and negative results;
+{persistence_guidance}
 - faithfully covers every immutable acceptance criterion, {acceptance_requirement}, and neither expands nor
   narrows the frozen manifest;
 - uses `swarm` only when the assigned task has independent capability branches, materially different hypotheses, or a
@@ -9803,8 +9821,81 @@ Do not return `continue` merely because work is incomplete when the task history
         )
 
     @staticmethod
-    def _task_executor_contract(task: Optional[Task] = None) -> str:
+    def _tool_names(tools: List[Any]) -> set[str]:
+        """Return the canonical names of tools supplied to one agent invocation."""
+
+        return {get_tool_name(tool) for tool in tools}
+
+    def _task_executor_persistence_tool_names(self, task: Task) -> set[str]:
+        """Return persistence tools supplied during a task's normal executor cycle."""
+
+        names = self._tool_names(build_role_tools(self.runtime, include_create_tasks=False))
+        names.discard("store_finding")
+        if task.kind not in {"finding_validation", "objective_validation"}:
+            names.add("store_finding")
+        return names & {"store_observation", "store_finding"}
+
+    @staticmethod
+    def _task_persistence_guidance(tool_names: set[str], *, audience: str) -> str:
+        """Render only persistence directions supported by the current invocation."""
+
+        lines: List[str] = []
+        if "store_observation" in tool_names:
+            text = (
+                "Use `store_observation` only for useful interim facts outside the acceptance ledger."
+                if audience == "task_prompt"
+                else "require use of `store_observation` only for useful interim facts outside the acceptance ledger;"
+                if audience == "critic"
+                else "Store useful interim facts outside the acceptance ledger with `store_observation`."
+            )
+            lines.append(f"- {text}" if audience in {"task_prompt", "critic"} else text)
+        if "store_finding" in tool_names:
+            text = (
+                "Store each security claim with `store_finding` before task closure."
+                if audience == "task_prompt"
+                else "require each security claim to use `store_finding` before task closure;"
+                if audience == "critic"
+                else "Store each security claim with `store_finding` only after behavioral proof, required controls, "
+                "impact, and artifact references are complete. Do not include CWE or MITRE ATT&CK mappings."
+            )
+            lines.append(f"- {text}" if audience in {"task_prompt", "critic"} else text)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _task_executor_contract(
+        task: Optional[Task] = None,
+        available_tool_names: Optional[set[str]] = None,
+    ) -> str:
         """Return the controller-owned execution boundary shared by all modules."""
+
+        tool_names = (
+            {"store_observation", "store_finding"}
+            if available_tool_names is None
+            else available_tool_names
+        )
+        persistence_guidance = MultiAgentWorkflowController._task_persistence_guidance(
+            tool_names,
+            audience="executor",
+        )
+        observation_requirement_guidance = (
+            "When an acceptance criterion requires observation evidence, call `store_observation` and copy its "
+            "returned `memory_ref` into the criterion's `evidence_refs`; an artifact reference cannot satisfy an "
+            "observation requirement."
+            if "store_observation" in tool_names
+            else ""
+        )
+        follow_up_persistence_guidance = (
+            "If new follow-up work is discovered, record it with "
+            + ", ".join(
+                f"`{tool_name}`"
+                for tool_name in ("store_observation", "store_finding")
+                if tool_name in tool_names
+            )
+            + "; do not create or execute follow-up tasks in this run."
+            if tool_names & {"store_observation", "store_finding"}
+            else "If new follow-up work is discovered, report it in the terminal summary; do not create or execute "
+            "follow-up tasks in this run."
+        )
         validation_tool = MultiAgentWorkflowController._validation_tool_name(task) if task is not None else ""
         acceptance_instruction = (
             f"For this validation task, call `{validation_tool}` once with the independent outcome and "
@@ -9816,7 +9907,7 @@ Do not return `continue` merely because work is incomplete when the task history
         )
         disposition_instruction = (
             ""
-            if validation_tool
+            if validation_tool or "store_finding" not in tool_names
             else "## Acceptance Disposition Decision Table\n"
             "Use canonical dispositions in the tool call; common semantic synonyms are normalized before strict "
             "validation, but unknown values remain invalid.\n"
@@ -9836,6 +9927,7 @@ Do not return `continue` merely because work is incomplete when the task history
             "use controls or failed requests as positive markers."
             if task is not None
             and task.kind not in {"finding_validation", "objective_validation"}
+            and "store_finding" in tool_names
             and any(
                 requirement.kind == "finding_candidate"
                 for criterion in task.acceptance.criteria
@@ -9882,18 +9974,14 @@ or scan other ports on the same host. Port-specific checks are acceptable only f
 scheme-appropriate service tooling is preferred. Do not turn one route, parameter group, or inventory item into a
 phase-wide scan, application-wide vulnerability sweep, or test of unrelated modules. Do not continue into adjacent
 tasks or later phase objectives. Once the assigned unit's criterion is evidenced, rejected, or blocked, stop; do not
-use remaining time to broaden scope. Store
-useful interim facts outside the acceptance ledger with `store_observation`, reusable lessons with `store_knowledge`,
-and each security claim with `store_finding`; reference durable artifact paths rather than pasting large outputs.
-When an acceptance criterion requires observation evidence, call `store_observation` and copy its returned
-`memory_ref` into the criterion's `evidence_refs`; an artifact reference cannot satisfy an observation requirement.
+use remaining time to broaden scope. {persistence_guidance}
+{observation_requirement_guidance}
 Acceptance `evidence_refs` must be durable references only: use `artifact:`, `artifact_id:`, `memory:`, or
 `finding:`. Raw shell commands, tool IDs, URLs, and pasted tool output are invalid. Save command or browser output
 with the appropriate artifact-producing tool before calling `record_task_acceptance`.
 A finding submission creates a
-separate verification task, so do not validate that new task in this run. If new follow-up work is discovered, record
-it with `store_observation`, `store_knowledge`, or `store_finding`; do not create or execute follow-up tasks in this
-run. Python schedules any required follow-up work after the current task. For the assigned task: {acceptance_instruction}
+separate verification task, so do not validate that new task in this run. {follow_up_persistence_guidance} Python
+schedules any required follow-up work after the current task. For the assigned task: {acceptance_instruction}
 {disposition_instruction} This
 ledger does not replace storing substantive artifact evidence. Successful acceptance publishes the summary and
 evidence references as one operation observation for later tasks. The controller binds the tool to the assigned task,

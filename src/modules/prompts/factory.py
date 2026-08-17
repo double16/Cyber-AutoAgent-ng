@@ -49,6 +49,33 @@ _LF_TEMPLATE_TO_NAME = {
 }
 
 OVERLAY_FILENAME = "adaptive_prompt.json"
+_TOOLS_AND_CAPABILITIES_BLOCK = re.compile(
+    r"<tools_and_capabilities>.*?</tools_and_capabilities>", re.DOTALL
+)
+_NON_EXECUTOR_ROLES = frozenset(
+    {
+        "plan_creator",
+        "plan_critic",
+        "task_creator",
+        "task_prompt_builder",
+        "task_prompt_critic",
+    }
+)
+
+
+def get_role_system_prompt(system_prompt: str, agent_type: Optional[str]) -> str:
+    """Remove executor-only protocols for planning and prompt-construction roles."""
+
+    if agent_type not in _NON_EXECUTOR_ROLES or "<role_boundary>" in system_prompt:
+        return system_prompt
+    base_prompt = _TOOLS_AND_CAPABILITIES_BLOCK.sub("", system_prompt).rstrip()
+    return (
+        f"{base_prompt}\n\n<role_boundary>\n"
+        "You are a controller support role. Return only the requested structured plan, task, prompt, or critique. "
+        "Do not perform target interaction, shell work, evidence collection, finding persistence, or generic tool "
+        "discovery. Use only a tool explicitly registered for this role and required by the current request.\n"
+        "</role_boundary>"
+    )
 
 
 def _lf_env_true(name: str) -> bool:

@@ -2753,6 +2753,35 @@ def test_task_executor_contract_disables_follow_up_task_creation():
     assert "create_tasks" not in contract
 
 
+@pytest.mark.parametrize(
+    ("tool_names", "expects_observation", "expects_finding"),
+    [
+        ({"store_observation", "store_finding"}, True, True),
+        ({"store_observation"}, True, False),
+        ({"store_finding"}, False, True),
+        (set(), False, False),
+    ],
+)
+def test_task_executor_contract_only_names_available_persistence_tools(
+    tool_names,
+    expects_observation,
+    expects_finding,
+):
+    task = TaskModel(
+        task_uid="endpoint",
+        title="Assess endpoint http://target.test/login",
+        objective="Assess login",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+    )
+
+    contract = MultiAgentWorkflowController._task_executor_contract(task, tool_names)
+
+    assert ("store_observation" in contract) is expects_observation
+    assert ("store_finding" in contract) is expects_finding
+
+
 def test_endpoint_evidence_guard_rejects_inventory_manifest(monkeypatch):
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -4672,7 +4701,9 @@ def test_task_executor_recovers_in_same_session_and_evaluator_receives_authorita
         "enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)"
     )
     assert captured["executor_prompts"][0].endswith(
-        controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy()
+        controller._task_executor_contract(state.tasks[0], {"store_finding"})
+        + "\n\n"
+        + controller._tool_selection_policy()
     )
     assert captured["executor_prompts"][1] == "correct the missing wordlist"
     assert "## Controller-observed tool outcomes" in captured["evaluator_prompt"]
@@ -5283,7 +5314,11 @@ def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
     assert executor_calls[0].startswith("enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)")
-    assert executor_calls[0].endswith(controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy())
+    assert executor_calls[0].endswith(
+        controller._task_executor_contract(state.tasks[0], {"store_finding"})
+        + "\n\n"
+        + controller._tool_selection_policy()
+    )
     assert executor_calls[1] == "retry once"
     assert state.tasks[0].status == "partial_failure"
     assert "remained unresolved" in state.tasks[0].status_reason
@@ -8949,7 +8984,8 @@ def test_task_prompt_builder_requires_reusable_acceptance_summaries():
 
     assert "Require every acceptance summary to state the concrete result or negative result" in prompt
     assert "publishes" in prompt
-    assert "Use `store_observation` only" in prompt
+    assert "store_observation" not in prompt
+    assert "store_finding" in prompt
 
 
 def test_task_prompt_builder_adds_bounded_task_scoped_swarm_contract():
