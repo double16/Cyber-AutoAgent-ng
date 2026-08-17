@@ -9,11 +9,30 @@ import os
 import shlex
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 from strands import tool
 
 logger = logging.getLogger(__name__)
+
+ShellCommandValidator = Callable[[List[Union[str, Dict]]], Optional[str]]
+_shell_command_validator: ContextVar[Optional[ShellCommandValidator]] = ContextVar(
+    "shell_command_validator",
+    default=None,
+)
+
+
+@contextmanager
+def scoped_shell_command_validator(validator: ShellCommandValidator) -> Iterator[None]:
+    """Apply a controller-owned command validator for the current execution scope."""
+
+    token = _shell_command_validator.set(validator)
+    try:
+        yield
+    finally:
+        _shell_command_validator.reset(token)
 
 
 def _safe_text(value: Any) -> str:
@@ -294,6 +313,15 @@ def shell(
             pass
 
     commands = normalize_commands(command)
+
+    validator = _shell_command_validator.get()
+    if validator is not None:
+        error = validator(commands)
+        if error:
+            return {
+                "status": "error",
+                "content": [{"text": error}],
+            }
 
     # Set defaults for parameters
     if timeout is None:

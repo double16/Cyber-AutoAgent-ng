@@ -73,6 +73,7 @@ export type AdditionalStreamEvent =
   | { type: 'tool_start'; tool_name: string; tool_input: any; [key: string]: any }
   | { type: 'tool_input_update'; tool_id: string; tool_input: any; [key: string]: any }
   | { type: 'tool_input_corrected'; tool_id: string; tool_input: any; [key: string]: any }
+  | { type: 'memory_added'; memory_id?: string; memory_ref?: string; category?: string; content_preview?: string; content_length?: number; [key: string]: any }
   | { type: 'command'; content: string; [key: string]: any }
   | { type: 'output'; content: string; exitCode?: number; duration?: number; [key: string]: any }
   | { type: 'tool_discovery_start'; message?: string; [key: string]: any }
@@ -98,6 +99,8 @@ export type AdditionalStreamEvent =
   | { type: 'batch'; id?: string; events: DisplayStreamEvent[]; [key: string]: any }
   | { type: 'tool_output'; tool: string; status?: string; output?: any; [key: string]: any }
   | { type: 'operation_init'; operation_id?: string; target?: string; objective?: string; memory?: any; [key: string]: any }
+  | { type: 'operation_terminated'; termination_reason?: string; completion_status?: any; workflow_coverage_summary?: any[]; model_usage_snapshot?: any; [key: string]: any }
+  | { type: 'operation_finalized'; termination_reason?: string; report_status?: string; report_path?: string; evaluation_status?: string; [key: string]: any }
   | { type: 'report_paths'; operation_id?: string; target?: string; outputDir?: string; reportPath?: string; logPath?: string; artifactsPath?: string; [key: string]: any }
   | { type: 'workflow_activity'; content?: string; activity?: string; action?: string; role?: string; status?: string; phase_id?: number; phase_title?: string; task_uid?: string; task_title?: string; attempt?: number; attempt_total?: number; cycle?: number; cycle_total?: number; iteration?: number; iteration_total?: number; [key: string]: any }
   | { type: 'preflight_check'; operation_id?: string; target_id?: string; target?: string; target_type?: string; status: 'pass' | 'fail' | 'skip'; checks?: string[]; reason?: string; resolved_addresses?: string[]; [key: string]: any }
@@ -201,6 +204,70 @@ export const mapContainerReportPath = (
   } catch {
     return raw;
   }
+};
+
+type ReportDetails = {
+  path: string | null;
+  content: string | null;
+};
+
+export const deriveReportDetails = (
+  events: DisplayStreamEvent[],
+  outputBaseDir?: string | null
+): ReportDetails => {
+  let latestPath: string | null = null;
+  let fallback: string | null = null;
+
+  events.forEach(event => {
+    if (event.type === 'report_paths') {
+      const candidate =
+        (event as any).reportPath ??
+        (event as any).report_path ??
+        (event as any).report ??
+        null;
+      if (candidate) {
+        latestPath = mapContainerReportPath(String(candidate), outputBaseDir);
+      }
+    } else if ((event as any).type === 'assessment_complete') {
+      const raw = (event as any).report_path;
+      if (typeof raw === 'string' && raw) {
+        latestPath = mapContainerReportPath(raw, outputBaseDir);
+      }
+    } else if (event.type === 'report_content') {
+      if ('content' in event && typeof (event as any).content === 'string') {
+        fallback = (event as any).content;
+      } else if ('content' in event && (event as any).content) {
+        try {
+          fallback = JSON.stringify((event as any).content);
+        } catch {
+          fallback = String((event as any).content);
+        }
+      }
+    }
+  });
+
+  return { path: latestPath, content: fallback };
+};
+
+export const deriveOperationContext = (
+  events: DisplayStreamEvent[],
+  reportPath: string | null
+): OperationContext => {
+  let operationId: string | null = null;
+  let target: string | null = null;
+
+  events.forEach(event => {
+    if (event.type === 'operation_init') {
+      if ('operation_id' in event && (event as any).operation_id) {
+        operationId = String((event as any).operation_id);
+      }
+      if ('target' in event && (event as any).target) {
+        target = String((event as any).target);
+      }
+    }
+  });
+
+  return { operationId, target, reportPath };
 };
 
 export const getReportPathCandidates = (
@@ -1092,7 +1159,7 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
         case 'memory_get':
         case 'memory_retrieve':
         case 'memory_list': {
-          const action = event.tool_name.substring(5);
+          const action = event.tool_name.substring(7);
           const rawContent = latestInput?.plan || latestInput?.content || latestInput?.query || '';
           // Ensure content is always a string (handle plan objects, etc.)
           let content: string;
@@ -1639,10 +1706,10 @@ const method = latestInput.method || 'GET';
           : path.resolve(projectRoot || process.cwd(), configured);
       })();
       const displayPath = (raw: string): string => mapContainerReportPath(raw, outputBaseDir);
-      const outputDir = displayPath((event as any).outputDir || '');
-      const reportPath = displayPath((event as any).reportPath || '');
-      const logPath = displayPath((event as any).logPath || '');
-      const artifactsPath = displayPath((event as any).artifactsPath || '');
+      const outputDir = displayPath((event as any).outputDir ?? (event as any).output_dir ?? '');
+      const reportPath = displayPath((event as any).reportPath ?? (event as any).report_path ?? '');
+      const logPath = displayPath((event as any).logPath ?? (event as any).log_path ?? '');
+      const artifactsPath = displayPath((event as any).artifactsPath ?? (event as any).artifacts_path ?? '');
       const fields = [opId, target, outputDir, reportPath, logPath, artifactsPath];
       return (
         <Box flexDirection="column" marginTop={1} marginBottom={1}>
@@ -1658,6 +1725,31 @@ const method = latestInput.method || 'GET';
             {artifactsPath ? (<Text>Artifacts: {artifactsPath}</Text>) : null}
             {fields.every(value => !value) ? (<Text dimColor>Paths unavailable</Text>) : null}
           </Box>
+        </Box>
+      );
+    }
+
+    case 'operation_terminated': {
+      const coverage = Array.isArray((event as any).workflow_coverage_summary)
+        ? (event as any).workflow_coverage_summary
+        : [];
+      const complete = Boolean((event as any).completion_status?.assessment_complete);
+      return (
+        <Box flexDirection="column" marginTop={1} paddingX={1}>
+          <Text color={complete ? 'green' : 'yellow'} bold>
+            {complete ? 'OPERATION TERMINATED: ASSESSMENT COMPLETE' : 'OPERATION TERMINATED: INCOMPLETE'}
+          </Text>
+          <Text>Reason: {(event as any).termination_reason || 'unknown'}</Text>
+          <Text>Coverage: {coverage.length} phase(s)</Text>
+        </Box>
+      );
+    }
+
+    case 'operation_finalized': {
+      return (
+        <Box flexDirection="column" marginTop={1} paddingX={1}>
+          <Text color="green" bold>OPERATION FINALIZED</Text>
+          <Text>Report: {(event as any).report_status || 'unknown'} | Evaluation: {(event as any).evaluation_status || 'not_run'}</Text>
         </Box>
       );
     }
@@ -2474,52 +2566,15 @@ export const StreamDisplay: React.FC<StreamDisplayProps> = React.memo(({ events,
   
   const projectRoot = React.useMemo(() => resolveProjectRoot(), []);
 
-  const reportDetails = React.useMemo(() => {
-    let latestPath: string | null = null;
-    let fallback: string | null = null;
+  const reportDetails = React.useMemo(
+    () => deriveReportDetails(events, outputBaseDir),
+    [events, outputBaseDir]
+  );
 
-    events.forEach(event => {
-      if (event.type === 'report_paths') {
-        const candidate =
-          (event as any).reportPath ??
-          (event as any).report_path ??
-          (event as any).report ??
-          null;
-        if (candidate) {
-          latestPath = String(candidate);
-        }
-      } else if ((event as any).type === 'assessment_complete') {
-        const raw = (event as any).report_path;
-        if (typeof raw === 'string' && raw) {
-          latestPath = mapContainerReportPath(raw, outputBaseDir);
-        }
-      } else if (event.type === 'report_content') {
-        if ('content' in event && typeof (event as any).content === 'string') {
-          fallback = (event as any).content as string;
-        } else if ('content' in event && (event as any).content) {
-          try {
-            fallback = JSON.stringify((event as any).content);
-          } catch {
-            fallback = String((event as any).content);
-          }
-        }
-      }
-    });
-    return { path: latestPath, content: fallback };
-  }, [events, outputBaseDir]);
-
-  // Capture operation context (operation_id and target) from events for artifact resolution
-  const operationContext = React.useMemo<OperationContext>(() => {
-    let opId: string | null = null;
-    let target: string | null = null;
-    for (const e of events) {
-      if (e.type === 'operation_init') {
-        if ('operation_id' in e && (e as any).operation_id) opId = String((e as any).operation_id);
-        if ('target' in e && (e as any).target) target = String((e as any).target);
-      }
-    }
-    return { operationId: opId, target, reportPath: reportDetails.path };
-  }, [events, reportDetails.path]);
+  const operationContext = React.useMemo(
+    () => deriveOperationContext(events, reportDetails.path),
+    [events, reportDetails.path]
+  );
 
   // Soft virtualization: render only the most recent N groups to cap Ink/Yoga node count
   // This dramatically reduces memory pressure after long sessions while preserving recent context.
@@ -2659,51 +2714,15 @@ export const StaticStreamDisplay: React.FC<{
     }
   }, [config.outputDir, projectRoot]);
 
-  const reportDetails = React.useMemo(() => {
-    let latestPath: string | null = null;
-    let fallback: string | null = null;
-    events.forEach(event => {
-      if (event.type === 'report_paths') {
-        const candidate =
-          (event as any).reportPath ??
-          (event as any).report_path ??
-          (event as any).report ??
-          null;
-        if (candidate) {
-          latestPath = mapContainerReportPath(String(candidate), outputBaseDir);
-        }
-      } else if ((event as any).type === 'assessment_complete') {
-        const raw = (event as any).report_path;
-        if (typeof raw === 'string' && raw) {
-          latestPath = mapContainerReportPath(raw, outputBaseDir);
-        }
-      } else if (event.type === 'report_content') {
-        if ('content' in event && typeof (event as any).content === 'string') {
-          fallback = (event as any).content as string;
-        } else if ('content' in event && (event as any).content) {
-          try {
-            fallback = JSON.stringify((event as any).content);
-          } catch {
-            fallback = String((event as any).content);
-          }
-        }
-      }
-    });
-    return { path: latestPath, content: fallback };
-  }, [events, outputBaseDir]);
+  const reportDetails = React.useMemo(
+    () => deriveReportDetails(events, outputBaseDir),
+    [events, outputBaseDir]
+  );
 
-  // Capture operation context (operation_id and target) for artifact resolution
-  const operationContext = React.useMemo<OperationContext>(() => {
-    let opId: string | null = null;
-    let target: string | null = null;
-    for (const e of events) {
-      if (e.type === 'operation_init') {
-        if ('operation_id' in e && (e as any).operation_id) opId = String((e as any).operation_id);
-        if ('target' in e && (e as any).target) target = String((e as any).target);
-      }
-    }
-    return { operationId: opId, target, reportPath: reportDetails.path };
-  }, [events, reportDetails.path]);
+  const operationContext = React.useMemo(
+    () => deriveOperationContext(events, reportDetails.path),
+    [events, reportDetails.path]
+  );
 
   // Flatten groups into discrete render items with stable keys.
   type Item = { key: string; render: () => React.ReactNode };

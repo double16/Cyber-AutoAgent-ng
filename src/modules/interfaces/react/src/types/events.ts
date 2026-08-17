@@ -131,6 +131,8 @@ export enum EventType {
   // =============================================================================
   /** Memory storage operation */
   MEMORY_STORE = 'memory_store',
+  /** A new semantic-memory record was durably created */
+  MEMORY_ADDED = 'memory_added',
   /** Memory retrieval operation */
   MEMORY_RETRIEVE = 'memory_retrieve',
   /** Memory search query */
@@ -379,12 +381,17 @@ export interface HttpEvent extends BaseEvent {
 
 // Memory events
 export interface MemoryEvent extends BaseEvent {
-  type: EventType.MEMORY_STORE | EventType.MEMORY_RETRIEVE | EventType.MEMORY_SEARCH;
-  operation: 'store' | 'retrieve' | 'search';
+  type: EventType.MEMORY_STORE | EventType.MEMORY_ADDED | EventType.MEMORY_RETRIEVE | EventType.MEMORY_SEARCH;
+  operation?: 'store' | 'retrieve' | 'search';
   key?: string;
   value?: any;
   results?: any[];
   query?: string;
+  memory_id?: string;
+  memory_ref?: string;
+  category?: string;
+  content_preview?: string;
+  content_length?: number;
 }
 
 // Think events

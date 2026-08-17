@@ -15,6 +15,7 @@ from modules.tools.memory import (
     create_tasks,
 )
 from modules.tools.artifact import read_artifact
+from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.browser import (
     initialize_browser,
     browser_goto_url,
@@ -54,6 +55,7 @@ __all__ = [
     "store_objective_candidate",
     "record_objective_validation",
     "read_artifact",
+    "recon_output_to_inventory_manifest",
     "memory_retrieve",
     "memory_list",
     "create_tasks",

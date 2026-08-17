@@ -25,7 +25,7 @@ from strands_tools import (
 )
 
 # These tools have the @tool decorator, the function is to be imported
-from strands_tools.editor import editor
+from strands_tools.editor import editor as strands_editor
 from strands_tools.load_tool import load_tool
 from strands_tools.sleep import sleep
 from strands_tools.tavily import tavily_search
@@ -82,6 +82,8 @@ from modules.handlers.utils import (
     tool_rename,
 )
 from modules.tools.artifact import read_artifact
+from modules.tools.editor import create_absolute_path_editor
+from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.browser import (
     browser_evaluate_js,
     browser_get_cookies,
@@ -111,6 +113,7 @@ from modules.tools.memory import (
     memory_retrieve,
     record_finding_validation,
     record_objective_validation,
+    set_memory_event_emitter,
     store_finding,
     store_objective_candidate,
     store_knowledge,
@@ -580,6 +583,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     # Core tools are available to workflow workers unless a role narrows them further.
     # Plan/task mutation remains owned by Python workflow code; create_tasks is included only for roles that need it.
+    editor = create_absolute_path_editor(strands_editor)
     core_tools_list = [
         swarm,
         shell,
@@ -594,6 +598,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         memory_retrieve,
         memory_list,
         read_artifact,
+        recon_output_to_inventory_manifest,
         create_tasks,
         sleep,
         python_repl,
@@ -798,6 +803,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
             "ui_mode": config_manager.getenv("CYBER_UI_MODE", "cli").lower(),
         },
     )
+    set_memory_event_emitter(callback_handler.emit_ui_event)
 
     sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "false") or "false").strip().lower()
     if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
@@ -897,8 +903,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     # Initialize concurrent tool executor for parallel execution
     tool_executor = ConcurrentToolExecutor()
 
-    trace_attributes_tool_names = [get_tool_name(tool) for tool in tools_list]
-
     # Register toolUseId hook for patching toolUseId, must be last
     tool_use_id_hook = ToolUseIdHook()
     hooks.append(tool_use_id_hook)
@@ -951,10 +955,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         if config.provider in ["bedrock", "litellm"]
         else "local",
         "gen_ai.request.model": config.model_id,
-        # Tool configuration
-        "tools.available": len(trace_attributes_tool_names),
-        "tools.names": trace_attributes_tool_names,
-        "tools.parallel_limit": 8,
         # Memory configuration
         "memory.enabled": True,
         "memory.path": config_manager.getenv("QDRANT_URL") or os.path.join(server_config.output.base_dir, "qdrant"),

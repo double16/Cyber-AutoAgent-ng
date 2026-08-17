@@ -562,7 +562,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     )) ||
     String((event as any).type) === 'evaluation_step_complete' ||
     String((event as any).type) === 'evaluation_complete' ||
-    String((event as any).type) === 'assessment_complete'
+    String((event as any).type) === 'assessment_complete' ||
+    String((event as any).type) === 'operation_finalized'
   );
 
   // Unified helpers for delayed thinking spinner scheduling/cancellation
@@ -1622,32 +1623,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (completionPhaseActiveRef.current) {
           appendCompletionPhaseEvent(displayRcEvent);
         }
-        // Synthesize a paths section immediately below the report
-        try {
-          const opId = operationIdRef.current || '';
-          const target = targetRef.current || '';
-          const safeTarget = target ? target.replace(/^https?:\/\//, '').replace(/\.{2}|\.\//g, '').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^[_\.]+|[_\.]+$/g, '') : '';
-          const base = safeTarget && opId ? `./outputs/${safeTarget}/${opId}` : '';
-          const reportPath = base ? `${base}/security_assessment_report.md` : '';
-          const logPath = base ? `${base}/cyber_operations.log` : '';
-          const artifactsPath = base ? `${base}/artifacts` : '';
-          const pathsEvent: DisplayStreamEvent = {
-            type: 'report_paths',
-            operation_id: opId,
-            target,
-            outputDir: base,
-            reportPath,
-            logPath,
-            artifactsPath,
-          } as unknown as DisplayStreamEvent;
-
-          results.push(pathsEvent);
-
-          if (completionPhaseActiveRef.current) {
-            appendCompletionPhaseEvent(pathsEvent);
-          }
-        } catch {}
-        // Then flush any buffered operation summary (paths) so they appear beneath the report as well
+        // Then flush any buffered operation summary beneath the report. The backend's
+        // report_paths event is the sole source of truth for the paths panel.
         if (opSummaryBufferRef.current.length > 0) {
           results.push(...opSummaryBufferRef.current);
           opSummaryBufferRef.current = [];
@@ -1680,6 +1657,21 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           appendCompletionPhaseEvent(acEvent);
           completionPhaseActiveRef.current = false;
         }
+        deactivateThinking();
+        break;
+      }
+
+      case 'operation_terminated': {
+        const terminatedEvent = event as DisplayStreamEvent;
+        results.push(terminatedEvent);
+        deactivateThinking();
+        break;
+      }
+
+      case 'operation_finalized': {
+        const finalizedEvent = event as DisplayStreamEvent;
+        results.push(finalizedEvent);
+        if (completionPhaseActiveRef.current) completionPhaseActiveRef.current = false;
         deactivateThinking();
         break;
       }

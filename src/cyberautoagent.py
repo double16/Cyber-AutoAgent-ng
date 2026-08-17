@@ -32,6 +32,7 @@ import threading
 import time
 import traceback
 import warnings
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -119,6 +120,7 @@ from modules.tools.memory import (
 from modules.tools.oast import close_oast_providers
 from modules.tools.tool_catalog import get_shell_command_help_context
 from modules.utils.telemetry import flush_traces
+from modules.utils.sdk_error_sanitization import sanitize_sdk_error
 from modules.utils.target_validation import TargetValidationResult, TargetValidator, validate_operation_targets
 
 load_dotenv()
@@ -186,10 +188,11 @@ def run_target_preflight(
     logger: Any,
     emitter: Optional[EventEmitter] = None,
     validator: Optional[TargetValidator] = None,
+    targets: Optional[list[OperationTarget]] = None,
 ) -> tuple[list[OperationTarget], list[TargetValidationResult]]:
-    """Resolve, validate, emit, and log one preflight result per target."""
+    """Resolve or validate, emit, and log one preflight result per target."""
 
-    targets = resolve_operation_targets(logical_target, objective)
+    targets = list(targets) if targets is not None else resolve_operation_targets(logical_target, objective)
     results = validate_operation_targets(targets, validator=validator)
     event_emitter = emitter or get_emitter(operation_id=operation_id)
     for result in results:
@@ -204,6 +207,106 @@ def run_target_preflight(
             f" reason={result.reason}" if result.reason else "",
         )
     return targets, results
+
+
+def _is_continuation_objective_placeholder(objective: str, module: str) -> bool:
+    """Identify objectives synthesized by the TUI when no objective was supplied."""
+
+    normalized = " ".join(str(objective or "").split()).casefold()
+    module_name = " ".join(str(module or "").replace("_", " ").split()).casefold()
+    return normalized in {
+        "",
+        f"perform {module_name} assessment",
+        f"comprehensive {module_name} security assessment",
+    }
+
+
+def resolve_objective_from_environment(objective: str) -> str:
+    """Resolve the explicit CLI environment sentinel before classifying an objective."""
+
+    if " ".join(str(objective or "").split()).casefold() != "via environment":
+        return objective
+
+    environment_objective = os.environ.get("CYBER_OBJECTIVE", "").strip()
+    if not environment_objective:
+        raise ValueError("--objective 'via environment' requires a non-empty CYBER_OBJECTIVE")
+    return environment_objective
+
+
+def restore_continuation_state(
+    *,
+    output_dir: str,
+    logical_target: str,
+    operation_id: str,
+    incoming_objective: str,
+    module: str,
+    continuation_requested: bool,
+    logger: Any,
+) -> tuple[str, Optional[list[OperationTarget]]]:
+    """Restore the persisted objective and executable target registry for continuation."""
+
+    if not continuation_requested:
+        return incoming_objective, None
+
+    db_path = get_application_database_path({"output_dir": output_dir})
+    if not os.path.isfile(db_path):
+        logger.warning(
+            "Continuation state unavailable for %s: application database does not exist; "
+            "falling back to current objective and target resolution",
+            operation_id,
+        )
+        return incoming_objective, None
+
+    try:
+        store = create_application_store(db_path, logical_target=logical_target, read_only=True)
+        plan = store.get_plan(operation_id)
+    except FileNotFoundError:
+        logger.warning(
+            "Continuation state unavailable for %s: persisted operation database is unavailable; "
+            "falling back to current objective and target resolution",
+            operation_id,
+        )
+        return incoming_objective, None
+    except ValueError as error:
+        raise RuntimeError(f"Persisted continuation plan is invalid: {error}") from error
+    except Exception as error:
+        logger.warning(
+            "Unable to read persisted continuation state for %s (%s); "
+            "falling back to current objective and target resolution",
+            operation_id,
+            error,
+        )
+        return incoming_objective, None
+
+    if plan is None:
+        logger.warning(
+            "No persisted plan found for continuation %s; falling back to current objective "
+            "and target resolution",
+            operation_id,
+        )
+        return incoming_objective, None
+
+    objective = incoming_objective
+    if _is_continuation_objective_placeholder(incoming_objective, module):
+        objective = plan.objective
+        logger.info("Restored objective from persisted operation plan for %s", operation_id)
+    else:
+        logger.info("Using explicitly supplied continuation objective for %s", operation_id)
+
+    if not plan.targets:
+        logger.warning(
+            "Persisted continuation plan %s has no executable targets; falling back to target resolution",
+            operation_id,
+        )
+        return objective, None
+
+    restored_targets = list(plan.targets)
+    logger.info(
+        "Restored %d executable target(s) from persisted operation plan for %s",
+        len(restored_targets),
+        operation_id,
+    )
+    return objective, restored_targets
 
 
 def setup_telemetry(logger):
@@ -596,20 +699,31 @@ def run_agent_until_terminal_state(
                 tool_name = str(repeated_tool_loop.get("tool_name", "unknown"))
                 repeat_count = int(repeated_tool_loop.get("repeat_count", 0) or 0)
                 cycle_length = int(repeated_tool_loop.get("cycle_length", 1) or 1)
+                result_reused = repeated_tool_loop.get("result_reused", True) is not False
                 if cycle_length > 1:
                     raw_tool_names = repeated_tool_loop.get("tool_names", [])
                     tool_names = list(dict.fromkeys(
                         str(item) for item in raw_tool_names if str(item).strip()
                     )) if isinstance(raw_tool_names, list) else []
                     tool_summary = f" involving {', '.join(tool_names)}" if tool_names else ""
+                    reuse_summary = (
+                        "matching completed results were reused"
+                        if result_reused
+                        else "no reusable completed result was available"
+                    )
                     message = (
                         f"Stopped agent after {repeat_count} repetitions of a {cycle_length}-call tool cycle"
-                        f"{tool_summary}; matching completed results were reused."
+                        f"{tool_summary}; {reuse_summary}."
                     )
                 else:
+                    reuse_summary = (
+                        "the latest completed result was reused"
+                        if result_reused
+                        else "no reusable completed result was available"
+                    )
                     message = (
                         f"Stopped agent after {repeat_count} consecutive identical calls to {tool_name}; "
-                        "the latest completed result was reused."
+                        f"{reuse_summary}."
                     )
                 logger.warning(message)
                 return AgentRunResult(
@@ -816,6 +930,7 @@ def run_workflow_agent_with_max_token_recovery(
                 run_policy=current_run_policy,
             )
         except MaxTokensReachedException as error:
+            sanitize_sdk_error(error)
             classification, removed = classify_and_discard_max_token_output(agent)
             setattr(error, "max_token_classification", classification)
             repeated_pattern = is_repeated_max_token_pattern(agent, classification)
@@ -836,6 +951,21 @@ def run_workflow_agent_with_max_token_recovery(
                 repeated_pattern,
                 "retry" if can_retry else "propagate",
             )
+            agent_callback = getattr(agent, "_cyber_callback_handler", None) or callback_handler
+            if not getattr(error, "_max_token_efficiency_recorded", False):
+                record_max_token_exhaustion = getattr(agent_callback, "record_max_token_exhaustion", None)
+                if callable(record_max_token_exhaustion):
+                    record_max_token_exhaustion(
+                        role=role,
+                        classification=classification.kind,
+                        exhaustion_ordinal=max_token_recovery_attempts + 1,
+                        agent=agent,
+                    )
+                else:
+                    record_efficiency_event = getattr(agent_callback, "record_efficiency_event", None)
+                    if callable(record_efficiency_event):
+                        record_efficiency_event("max_token_exhaustion", agent=agent)
+                setattr(error, "_max_token_efficiency_recorded", True)
             if not can_retry:
                 raise
 
@@ -850,7 +980,6 @@ def run_workflow_agent_with_max_token_recovery(
                     actionless_mode="required_tool",
                 )
 
-            agent_callback = getattr(agent, "_cyber_callback_handler", None) or callback_handler
             journal = getattr(agent_callback, "tool_outcome_journal", None)
             journal_entries = journal.entries() if journal is not None else []
             completed_tools = [outcome.tool_name for outcome in journal_entries if outcome.success]
@@ -889,6 +1018,7 @@ def finalize_report_and_evaluation(
         logger.warning("No callback_handler available for evaluation trigger")
         return
     completion_status: dict[str, Any] | None = None
+    evaluation_status = "not_run"
     try:
         try:
             plan = get_memory_client(silent=True).get_active_plan()
@@ -896,10 +1026,18 @@ def finalize_report_and_evaluation(
             logger.warning("Unable to determine workflow completion before report generation: %s", error)
             plan = None
         completion_status = _build_report_completion_status(plan, callback_handler)
-        try:
-            callback_handler.emit_model_usage_snapshot()
-        except Exception as error:
-            logger.warning("Unable to persist model usage before report generation: %s", error)
+        coverage = _workflow_coverage_summary(plan)
+        completion_status["workflow_coverage_summary"] = coverage
+        termination_emitter = getattr(callback_handler, "emit_operation_terminated", None)
+        if callable(termination_emitter):
+            termination_emitter(completion_status, coverage)
+        else:
+            legacy_snapshot = getattr(callback_handler, "emit_model_usage_snapshot", None)
+            if callable(legacy_snapshot):
+                try:
+                    legacy_snapshot()
+                except Exception as error:
+                    logger.warning("Unable to persist model usage before report generation: %s", error)
         callback_handler.ensure_report_generated(
             agent,
             target,
@@ -909,6 +1047,7 @@ def finalize_report_and_evaluation(
         )
         logger.info("Triggering evaluation on completion")
         callback_handler.trigger_evaluation_on_completion()
+        evaluation_status = "attempted"
     except Exception as error:
         logger.warning("Error in final report/evaluation: %s", error)
     finally:
@@ -916,18 +1055,61 @@ def finalize_report_and_evaluation(
             if completion_status is None:
                 plan = get_memory_client(silent=True).get_active_plan()
                 completion_status = _build_report_completion_status(plan, callback_handler)
-            workflow_complete = bool(completion_status.get("workflow_complete"))
-            termination_complete = completion_status.get("termination_reason") == "complete"
-            if workflow_complete and termination_complete:
-                callback_handler.emit_assessment_complete()
-            else:
-                logger.info(
-                    "Skipping assessment_complete: workflow_complete=%s termination_reason=%s",
-                    workflow_complete,
-                    completion_status.get("termination_reason"),
+                coverage = _workflow_coverage_summary(plan)
+                completion_status["workflow_coverage_summary"] = coverage
+                termination_emitter = getattr(callback_handler, "emit_operation_terminated", None)
+                if callable(termination_emitter):
+                    termination_emitter(completion_status, coverage)
+                else:
+                    legacy_snapshot = getattr(callback_handler, "emit_model_usage_snapshot", None)
+                    if callable(legacy_snapshot):
+                        try:
+                            legacy_snapshot()
+                        except Exception as snapshot_error:
+                            logger.warning("Unable to persist model usage before report generation: %s", snapshot_error)
+            finalization_emitter = getattr(callback_handler, "emit_operation_finalized", None)
+            if callable(finalization_emitter):
+                finalization_emitter(
+                    report_status=getattr(callback_handler, "_report_status", "failed"),
+                    evaluation_status=evaluation_status,
                 )
+            elif (
+                completion_status.get("workflow_complete")
+                and completion_status.get("termination_reason") == "complete"
+            ):
+                callback_handler.emit_assessment_complete()
         except Exception as error:
-            logger.warning("Unable to determine or emit assessment completion: %s", error)
+            logger.warning("Unable to emit operation finalization: %s", error)
+
+
+def _workflow_coverage_summary(plan: Any) -> list[dict[str, Any]]:
+    """Build the authoritative terminal coverage view from durable workflow state."""
+    if plan is None:
+        return []
+    phases = getattr(plan, "phases", [])
+    if not isinstance(phases, (list, tuple)):
+        return []
+    try:
+        state = get_memory_client(silent=True)
+    except Exception:
+        return []
+    rows = []
+    for phase in phases:
+        try:
+            tasks = state.list_tasks(phase=phase.id)
+        except Exception:
+            tasks = []
+        counts = Counter(str(task.status) for task in tasks)
+        rows.append(
+            {
+                "phase_id": phase.id,
+                "title": phase.title,
+                "status": phase.status,
+                "task_count": len(tasks),
+                "task_status_counts": dict(sorted(counts.items())),
+            }
+        )
+    return rows
 
 
 def _build_report_completion_status(plan: Any, callback_handler: Any) -> dict[str, Any]:
@@ -998,6 +1180,7 @@ def cleanup_operation_resources(
     operation_start: float,
     telemetry: Any,
     logger: Any,
+    operation_targets: Optional[list[OperationTarget]] = None,
 ) -> None:
     """Close operation resources and persist final report/evaluation state."""
     browser.close_browser()
@@ -1037,7 +1220,11 @@ def cleanup_operation_resources(
         try:
             target_values = [
                 target.value
-                for target in resolve_operation_targets(args.target, args.objective)
+                for target in (
+                    operation_targets
+                    if operation_targets is not None
+                    else resolve_operation_targets(args.target, args.objective)
+                )
             ]
             logger.debug("Cleaning memory for exact target values: %s", target_values)
             clean_operation_memory(operation_id, target_values)
@@ -1273,9 +1460,15 @@ def main():
 
     ensure_workspace_marker_files()
 
-    # React UI passes objective via environment variable
-    # Only apply env override if in React UI mode to preserve CLI arg priority
+    # React UI passes the `via environment` sentinel to avoid shell escaping issues.
+    # Resolve it before continuation logic classifies generated placeholder objectives.
     env_objective = os.environ.get("CYBER_OBJECTIVE")
+    try:
+        args.objective = resolve_objective_from_environment(args.objective)
+    except ValueError as error:
+        parser.error(str(error))
+
+    # Preserve the existing React environment override for callers that do not use the sentinel.
     if env_objective and os.environ.get("CYBER_UI_MODE") == "react":
         args.objective = env_objective
 
@@ -1424,6 +1617,20 @@ def main():
     )
     logger = setup_logging(log_file=log_file, verbose=verbose_mode)
 
+    continuation_requested = bool(args.cont) and not bool(args.report)
+    if continuation_requested:
+        args.objective, restored_targets = restore_continuation_state(
+            output_dir=server_config.output.base_dir,
+            logical_target=args.target,
+            operation_id=operation_id,
+            incoming_objective=args.objective,
+            module=args.module,
+            continuation_requested=True,
+            logger=logger,
+        )
+    else:
+        restored_targets = None
+
     if args.report:
         try:
             require_existing_operation(
@@ -1444,6 +1651,7 @@ def main():
             objective=args.objective,
             operation_id=operation_id,
             logger=logger,
+            targets=restored_targets,
         )
         try:
             preflight_store = create_application_store(
@@ -1753,6 +1961,7 @@ def main():
                         try:
                             run_result, result_message = run_workflow_agent(agent, prompt, run_policy)
                         except MaxTokensReachedException as error:
+                            sanitize_sdk_error(error)
                             classification = getattr(error, "max_token_classification", None)
                             kind = getattr(classification, "kind", "output_truncation")
                             outcomes = journal.since(snapshot) if journal is not None else []
@@ -1762,6 +1971,9 @@ def main():
                                 outcomes=outcomes,
                                 max_tokens_exhausted=True,
                                 max_tokens_classification=kind,
+                                max_token_efficiency_accounted=bool(
+                                    getattr(error, "_max_token_efficiency_recorded", False)
+                                ),
                                 max_tokens_reason=(
                                     f"{role_label} repeated the same reasoning loop after its bounded recovery."
                                     if kind == "reasoning_loop"
@@ -1822,6 +2034,7 @@ def main():
                         "Operation budget limit reached. Switching to final report.",
                     )
             except MaxTokensReachedException as error:
+                sanitize_sdk_error(error)
                 print_status("Token limit reached - generating final report", "WARNING")
                 logger.debug("Termination exception", exc_info=error)
                 try:
@@ -1830,29 +2043,18 @@ def main():
                             "max_tokens",
                             "Model token limit reached. Switching to final report.",
                         )
-                        try:
-                            plan = get_memory_client(silent=True).get_active_plan()
-                        except Exception:
-                            plan = None
-                        callback_handler.ensure_report_generated(
-                            None,
-                            args.target,
-                            args.objective,
-                            args.module,
-                            completion_status=_build_report_completion_status(plan, callback_handler),
-                        )
                 except Exception as max_tokens_finish_error:
                     logger.error("Failed to complete for token limit error", exc_info=max_tokens_finish_error)
             except WorkflowInvariantError as error:
                 logger.exception("Workflow invariant error occurred", exc_info=error)
-                termination_reason = str(error)
+                termination_reason = sanitize_sdk_error(error)
                 print_status(f"Agent error: {termination_reason}", "ERROR")
                 if callback_handler:
                     callback_handler.emit_termination("error", termination_reason)
                 raise
             except Exception as error:
                 logger.exception("Unexpected agent error occurred", exc_info=error)
-                termination_reason = str(error)
+                termination_reason = sanitize_sdk_error(error)
                 print_status(f"Agent error: {termination_reason}", "ERROR")
                 if callback_handler:
                     callback_handler.emit_termination("error", termination_reason)
@@ -1995,6 +2197,7 @@ def main():
             operation_start=operation_start,
             telemetry=telemetry,
             logger=logger,
+            operation_targets=operation_targets,
         )
         restore_memory_environment()
 

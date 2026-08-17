@@ -765,7 +765,7 @@ export class DirectDockerService extends EventEmitter {
         this.releaseContainerStream(false);
         this.activeContainer = undefined;
         this.activeContainerOwner = false;
-        // Only emit "complete" when backend signaled operation_complete
+        // Only emit "complete" when backend signaled finalization.
         if (this.seenOperationComplete) this.emit('complete');
         else this.emit('stopped');
       });

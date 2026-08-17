@@ -374,7 +374,7 @@ Cyber-AutoAgent supports multiple model providers for maximum flexibility:
 ### Ollama Provider (Local)
 - **Best for**: Privacy, offline use, cost control, local development
 - **Requirements**: Local Ollama installation
-- **Default Models**: `qwen3-coder:30b-a3b-q4_K_M` (LLM), `mxbai-embed-large:latest` (embeddings)
+- **Default Models**: `qwen3.6:27b` (LLM), `mxbai-embed-large:latest` (embeddings)
 - **Benefits**: No cloud dependencies, complete privacy, no API costs
 
 ### LiteLLM Provider (Universal)
@@ -545,7 +545,7 @@ curl -fsSL https://ollama.ai/install.sh | sh
 
 # Start service and pull models
 ollama serve
-ollama pull qwen3-coder:30b-a3b-q4_K_M
+ollama pull qwen3.6:27b
 ollama pull llama3.2:3b
 ollama pull mxbai-embed-large:latest
 ```
@@ -573,13 +573,13 @@ Configure the system to use model `qwen3-coder-30b:32k`. Other models can have t
 The recommended context window is 48KB (49152), 32KB can work. If memory constraints require lower, set the `MAX_TOKENS`
 environment variable to 4096 or slightly lower to allow more input tokens.
 
-As of Feb 2026, these models are known to work with varying degrees of success:
-- qwen3-coder:30b or higher
-- qwen3:4b-instruct or higher
-- qwen2.5-coder:7b-instruct
-- llama3.2:3b
+As of August 2026, these models are known to work with varying degrees of success:
+- qwen3.6:27b
+- gemma4:26b
+- gpt-oss:20b
 - glm-4.7-flash (runs slow)
-- gpt-oss:20b or higher
+- qwen3-coder:30b
+- qwen3:9b
 
 ### Docker Deployment (Recommended)
 
@@ -666,7 +666,7 @@ The unified structure organizes all artifacts under operation-specific directori
 - `--max-duration`: Optional duration budget in minutes
 - `--max-tokens`: Optional total token budget
 - `--max-cost`: Optional total cost budget
-- `--model`: Model ID to use (default: remote=claude-sonnet-4-5, local=qwen3-coder:30b-a3b-q4_K_M)
+- `--model`: Model ID to use (default: remote=claude-sonnet-4-5, local=qwen3.6:27b)
 - `--region`: AWS region for Bedrock, default: us-east-1
 - `--verbose`: Enable verbose output with detailed debug logging
 - `--confirmations`: Enable tool confirmation prompts (default: disabled)
@@ -980,7 +980,7 @@ curl http://localhost:11434/api/version
 **Required Models Missing**
 ```bash
 # Pull required models
-ollama pull qwen3-coder:30b-a3b-q4_K_M
+ollama pull qwen3.6:27b
 ollama pull mxbai-embed-large:latest
 
 # List available models
@@ -992,7 +992,7 @@ ollama list
 # Check Ollama is accessible
 curl -X POST http://localhost:11434/api/generate \
   -H "Content-Type: application/json" \
-  -d '{"model": "qwen3-coder:30b-a3b-q4_K_M", "prompt": "test", "stream": false}'
+  -d '{"model": "qwen3.6:27b", "prompt": "test", "stream": false}'
 ```
 
 **Docker Networking (Local Mode)**

@@ -1,8 +1,10 @@
 import hashlib
 import json
 import os
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from jsonschema import Draft202012Validator
@@ -46,6 +48,116 @@ def test_shared_semantic_enum_normalization(adapter_type, alias, canonical):
 def test_shared_semantic_enum_normalization_keeps_unknown_values_invalid(adapter_type):
     with pytest.raises(ValidationError):
         TypeAdapter(adapter_type).validate_python("invented-state")
+
+
+def test_task_service_scope_violations_enforces_assigned_scheme_host_and_port_only():
+    plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[
+            mod.OperationTarget(
+                target_id="target-1", type="network", value="custom-scheme://service.example:4280"
+            ),
+            mod.OperationTarget(target_id="target-2", type="network", value="other.example:8443"),
+        ],
+    )
+    task = mod.Task(
+        task_uid="task-1",
+        title="Assess service",
+        objective="Collect bounded evidence",
+        acceptance=make_acceptance("service-boundary"),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+
+    assert mod.task_service_scope_violations(
+        plan,
+        task,
+        "Request custom-scheme://service.example:4280/api?mode=read and retain artifact:/tmp/evidence.json.",
+    ) == []
+    assert mod.task_service_scope_violations(plan, task, "Check service.example:4280/status.") == []
+
+    violations = mod.task_service_scope_violations(
+        plan,
+        task,
+        "Do not use https://service.example:4280 or custom-scheme://service.example:4200.",
+    )
+
+    assert len(violations) == 2
+    assert "https://service.example:4280" in violations[0]
+    assert "custom-scheme://service.example:4200" in violations[1]
+    assert "target-1=custom-scheme://service.example:4280" in violations[0]
+
+    invalid_port = mod.task_service_scope_violations(plan, task, "Check service.example:99999.")
+
+    assert len(invalid_port) == 1
+    assert "invalid service reference" in invalid_port[0]
+
+    host_only_plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", type="network", value="service.example")],
+    )
+    assert mod.task_service_scope_violations(
+        host_only_plan, task, "Check https://unrelated.example:443."
+    ) == []
+
+
+def test_task_scope_ignores_non_network_tokens_but_detects_numeric_hostname_references():
+    plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", type="network", value="10.0.0.5:4280")],
+    )
+    task = mod.Task(
+        task_uid="task-1",
+        title="Assess service",
+        objective="Collect bounded evidence",
+        acceptance=make_acceptance("service-boundary"),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+
+    assert mod.task_service_scope_violations(plan, task, "Started at 2026-08-08T20:15.") == []
+    assert mod.task_service_scope_violations(plan, task, "Use image 12invalid.example:4280 locally.") == []
+    assert mod.task_service_scope_violations(plan, task, "Use python:3.12 for the local helper.") == []
+    assert mod.task_service_scope_violations(plan, task, "Probe 10.0.0.5:4280.") == []
+    assert mod.task_service_scope_violations(plan, task, "Mention 10.0.0.6:4280 as data.") == []
+    assert len(mod.task_service_scope_violations(plan, task, "Probe http://10.0.0.6:4280/")) == 1
+
+
+def test_technology_task_scope_does_not_treat_version_as_host_port():
+    plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Hypotheses", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", type="network", value="http://service.example:4280")],
+    )
+    acceptance = make_acceptance("validate-the-assigned-technology")
+    task = mod.Task(
+        task_uid="technology",
+        title="Validate technology apache http server:2.4.68",
+        objective="Validate technology apache http server:2.4.68",
+        acceptance=acceptance,
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+
+    assert mod.task_service_scope_violations(plan, task, task.title) == []
+    assert len(mod.task_service_scope_violations(plan, task, "Use http://other.example:4280.")) == 1
 
 
 class FakeApplicationStore:
@@ -288,6 +400,77 @@ def test_database_store_is_shared_when_operation_context_changes(tmp_path, monke
 
     assert second is first
     assert second.db_path == str(tmp_path / "cyber_autoagent.db")
+
+
+def test_sqlite_store_initialization_recovers_corrupt_database_before_operation(tmp_path, monkeypatch):
+    database = tmp_path / "cyber_autoagent.db"
+    database.write_bytes(b"not a sqlite database")
+    recovered = []
+
+    def recover(store):
+        recovered.append(store.db_path)
+        store._replace_with_fresh_database()
+        return True
+
+    monkeypatch.setattr(mod.SQLiteApplicationStore, "_recover_database", recover)
+
+    store = mod.SQLiteApplicationStore(str(database), logical_target="target")
+
+    assert recovered == [str(database)]
+    assert store._sqlite_integrity_check(str(database)).lower() == "ok"
+    assert len(list(tmp_path.glob("cyber_autoagent.corrupt-*.db"))) == 1
+
+
+def test_sqlite_store_initialization_replaces_database_when_recovery_fails(tmp_path, monkeypatch):
+    database = tmp_path / "cyber_autoagent.db"
+    database.write_bytes(b"not a sqlite database")
+    monkeypatch.setattr(mod.SQLiteApplicationStore, "_recover_database", lambda _store: False)
+
+    store = mod.SQLiteApplicationStore(str(database), logical_target="target")
+
+    assert store._sqlite_integrity_check(str(database)).lower() == "ok"
+    assert len(list(tmp_path.glob("cyber_autoagent.corrupt-*.db"))) == 1
+
+
+def test_sqlite_store_recovers_one_runtime_operation_and_retries(tmp_path, monkeypatch):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "runtime.db"), logical_target="target")
+    original_connect = store._connect
+    attempts = {"connect": 0, "recovery": 0}
+
+    def flaky_connect():
+        attempts["connect"] += 1
+        if attempts["connect"] == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return original_connect()
+
+    def recover(_error):
+        attempts["recovery"] += 1
+        return True
+
+    monkeypatch.setattr(store, "_connect", flaky_connect)
+    monkeypatch.setattr(store, "_recover_runtime_database", recover)
+
+    assert store.get_plan("operation") is None
+    assert attempts == {"connect": 2, "recovery": 1}
+
+
+def test_sqlite_store_fails_closed_when_runtime_recovery_fails(tmp_path, monkeypatch):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "runtime-fail.db"), logical_target="target")
+    attempts = {"recovery": 0}
+
+    def fail_connect():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def fail_recovery(_error):
+        attempts["recovery"] += 1
+        return False
+
+    monkeypatch.setattr(store, "_connect", fail_connect)
+    monkeypatch.setattr(store, "_recover_runtime_database", fail_recovery)
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        store.get_plan("operation")
+    assert attempts == {"recovery": 1}
 
 
 def test_read_only_plan_store_does_not_create_missing_database(tmp_path, monkeypatch):
@@ -749,6 +932,94 @@ def test_task_proposal_defaults_basis_description_to_objective():
     assert proposal.effective_basis_description == "Check target"
 
 
+def test_create_tasks_rejects_accidental_multi_route_http_proposal_atomically(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    proposal = task_proposal(
+        "NoSQL injection assessment",
+        "Test POST /api/auth/login and GET /api/products/:id for NoSQL injection.",
+        "Record NoSQL injection results for both routes.",
+        target_ids=["target-1"],
+    )
+
+    with pytest.raises(ValueError, match="multiple distinct endpoint routes: /api/auth/login, /api/products/:id"):
+        mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert store.tasks == []
+
+
+def test_create_tasks_accepts_single_http_route_method_and_query_variants(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    proposal = task_proposal(
+        "Login injection assessment",
+        "Test POST /api/auth/login?mode=baseline and GET http://target.test/api/auth/login/.",
+        "Record evidence for the login endpoint.",
+        target_ids=["target-1"],
+    )
+
+    result = mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert json.loads(result)["created_count"] == 1
+    assert len(store.tasks) == 1
+
+
+def test_create_tasks_accepts_declared_multi_route_workflow(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    proposal = task_proposal(
+        "Authenticated purchase workflow assessment",
+        "Test POST /api/auth/login followed by POST /api/orders as one authenticated workflow.",
+        "Record the ordered workflow outcome.",
+        target_ids=["target-1"],
+    )
+
+    result = mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert json.loads(result)["created_count"] == 1
+    assert len(store.tasks) == 1
+
+
+def test_create_tasks_does_not_apply_http_route_atomicity_to_filesystem_targets(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess source",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="/repo", type="filesystem")],
+    )
+    proposal = task_proposal(
+        "Source analysis",
+        "Inspect /repo/app.py and /repo/config.py for unsafe input handling.",
+        "Store source-analysis evidence.",
+        target_ids=["target-1"],
+    )
+
+    result = mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert json.loads(result)["created_count"] == 1
+    assert len(store.tasks) == 1
+
+
 @pytest.mark.parametrize("reference", ["shell:curl https://target.test", "tooluse_123", "https://target.test"])
 def test_canonical_evidence_reference_rejects_non_durable_references(reference):
     with pytest.raises(ValueError, match="Acceptance evidence references must use"):
@@ -1141,6 +1412,7 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
         "methods",
         "limits",
         "snapshot_refs",
+        "finding_refs",
         "output_kind",
         "criteria",
         "target_ids",
@@ -1462,6 +1734,17 @@ def test_create_tasks_preserves_explicit_replacement_lineage(fake_memory_client)
     replacement = next(task for task in store.tasks if task.task_uid != "parent-task")
     assert replacement.replacement_of == "parent-task"
     assert replacement.supersedes_criteria == ["criterion-1"]
+
+    with pytest.raises(ValueError, match=r"allowed criterion IDs: criterion-1"):
+        mod.create_tasks([{
+            "title": "Invalid replacement",
+            "objective": "Attempt to resolve the failed combined test",
+            "methods": ["test"],
+            "criteria": [{"description": "Record evidence for the parent intent"}],
+            "target_ids": ["target-1"],
+            "replacement_of": "parent-task",
+            "supersedes_criteria": ["unknown-criterion"],
+        }])
 
 
 def test_create_tasks_rejects_unknown_replacement_parent(fake_memory_client):
@@ -1951,6 +2234,26 @@ def test_route_scoped_phase_objective_removes_dangling_inventory_scope_prepositi
     assert scoped == "Map authorization boundaries"
 
 
+def test_route_scoped_phase_objective_removes_key_workflows():
+    scoped = mod._route_scoped_phase_objective(
+        "Generate testable hypotheses across key workflows in the inventory."
+    )
+
+    assert scoped == "Generate testable hypotheses in the inventory"
+    assert "key workflows" not in scoped.lower()
+
+    criterion = mod._phase_specific_coverage_criterion(
+        "endpoint",
+        "Document route hypotheses",
+        "Attack Hypothesis Generation",
+        "Generate testable hypotheses across key workflows in the inventory.",
+        "http://target.test/login",
+        ["endpoint-1"],
+    )
+
+    assert "key workflows" not in criterion.description.lower()
+
+
 def test_phase_specific_coverage_criterion_binds_route_and_frozen_items():
     criterion = mod._phase_specific_coverage_criterion(
         "endpoint",
@@ -1981,13 +2284,53 @@ def test_acceptance_evidence_error_advertises_canonical_reference_syntax():
     assert "Raw URLs" in message
 
 
-def test_inventory_url_normalization_preserves_boundary_and_repairs_common_route_errors():
+def test_inventory_url_normalization_preserves_boundary_and_repeated_route_segments():
     value = mod._canonical_inventory_url(
         "http://host.docker.internal:4280/vulnerabilities/sqli/vulnerabilities/sqli/?id=1&&",
         "http://host.docker.internal:4280",
     )
 
-    assert value == "http://host.docker.internal:4280/vulnerabilities/sqli/?id=1"
+    assert value == (
+        "http://host.docker.internal:4280/vulnerabilities/sqli/vulnerabilities/sqli/?id=1"
+    )
+
+
+def test_inventory_url_normalization_removes_serialized_quote_artifacts():
+    assert mod._canonical_inventory_url(
+        r'\"http://host.docker.internal:4280/\"instructions.php\"\"',
+        "http://host.docker.internal:4280",
+    ) == "http://host.docker.internal:4280/instructions.php"
+    assert mod._canonical_inventory_url(
+        r'http://host.docker.internal:4280/\".\"',
+        "http://host.docker.internal:4280",
+    ) == "http://host.docker.internal:4280/"
+
+
+def test_inventory_manifest_deduplicates_normalized_endpoints(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    payload["items"].append({
+        "id": "endpoint-duplicate",
+        "target_id": "target-1",
+        "kind": "endpoint",
+        "value": r'http://target.test/\"login\"',
+        "attributes": {},
+    })
+    manifest.write_text(json.dumps(payload))
+
+    loaded, _digest = mod._load_inventory_manifest(f"artifact:{manifest}")
+
+    assert [item["id"] for item in loaded["items"] if item["kind"] == "endpoint"] == ["endpoint-1"]
+    persisted = json.loads(manifest.read_text())
+    assert len(persisted["items"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -2062,6 +2405,49 @@ def test_coverage_route_grouping_does_not_expand_with_context_window():
 
     assert at_48k == at_200k
     assert len(at_48k) == 20
+
+
+def test_coverage_route_grouping_keeps_orphan_parameters_as_inventory_only():
+    manifest = {
+        "items": [
+            {
+                "id": "endpoint-1",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "https://target.test/search",
+            },
+            {
+                "id": "parameter-1",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "query",
+                "attributes": {"endpoint_id": "endpoint-1"},
+            },
+            {
+                "id": "parameter-2",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "orphaned_parameter",
+            },
+            {
+                "id": "parameter-3",
+                "target_id": "target-1",
+                "kind": "parameter",
+                "value": "https://target.test/looks-like-a-route",
+            },
+        ]
+    }
+
+    groups = mod._coverage_route_groups(manifest, prompt_token_limit=48_000)
+
+    assert groups == [
+        (
+            "target-1",
+            "endpoint",
+            "https://target.test/search",
+            ["endpoint-1", "parameter-1"],
+        )
+    ]
 
 
 def test_create_tasks_binds_canonical_manifest_per_route_independent_of_context(fake_memory_client):
@@ -2149,7 +2535,10 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
         coverage_item_ids={"endpoint-0", "endpoint-1"},
         expected_snapshot_ref=canonical_manifest,
         phase_title="Trust Boundary & Workflow Mapping",
-        phase_objective="Map authentication mechanisms and authorization boundaries across the baseline inventory.",
+        phase_objective=(
+            "Map authentication mechanisms and authorization boundaries across key workflows "
+            "in the baseline inventory."
+        ),
     )
 
     result = create_tool(tasks=[{
@@ -2172,6 +2561,7 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
     assert all("Trust Boundary & Workflow Mapping" in task.acceptance.criteria[0].description for task in store.tasks)
     assert all("baseline inventory" not in task.objective.lower() for task in store.tasks)
     assert all("baseline inventory" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
+    assert all("key workflows" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
 
 
 def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(fake_memory_client):
@@ -2528,6 +2918,194 @@ def test_bound_acceptance_tool_normalizes_aliases_before_validation(fake_memory_
     assert recorded.disposition == "no_vulnerability"
 
 
+def test_acceptance_artifact_is_snapshotted_to_task_owned_storage(fake_memory_client):
+    _client, store = fake_memory_client
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "shared-result.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("first result")
+    task = mod.Task(
+        task_uid="owned-artifact",
+        title="Record immutable result",
+        objective="Record the result",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="one artifact",
+                source_refs=["target:target-1"],
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Retain one result",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    mod.build_record_task_acceptance_tool(task.task_uid)(
+        status="satisfied",
+        disposition="observation",
+        summary="Result retained",
+        evidence_refs=["artifact:artifacts/shared-result.txt"],
+    )
+
+    recorded = store.get_acceptance_results("op1", task.task_uid)[0]
+    assert recorded.evidence_refs[0].startswith("artifact:task_evidence/")
+    assert Path(mod._artifact_path_from_ref(recorded.evidence_refs[0])).read_text() == "first result"
+    artifact.write_text("later task replacement")
+    assert Path(mod._artifact_path_from_ref(recorded.evidence_refs[0])).read_text() == "first result"
+
+
+def test_endpoint_coverage_acceptance_rejects_manifest_as_subject_evidence(fake_memory_client):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    task = mod.Task(
+        task_uid="endpoint-evidence",
+        title="Assess inventory endpoint",
+        objective="Assess the frozen endpoint",
+        acceptance=mod.AcceptanceContract(
+            mode="coverage",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="one endpoint",
+                source_refs=[f"artifact:{manifest}"],
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Assess the selected endpoint",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(ValueError, match="cannot prove a single endpoint assessment"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Assessment complete",
+            evidence_refs=[f"artifact:{manifest}"],
+        )
+
+    assert store.get_acceptance_results("op1", task.task_uid) == []
+
+
+def test_controller_execution_evidence_is_required_before_acceptance(fake_memory_client):
+    _client, store = fake_memory_client
+    artifact = _write_inventory_manifest()
+    execution_artifact = Path(mod._operation_output_root()) / "artifacts" / "execution-result.txt"
+    execution_artifact.parent.mkdir(parents=True, exist_ok=True)
+    execution_artifact.write_text("controller-validated execution")
+    task = mod.Task(
+        task_uid="execution-receipt",
+        title="Execute one bounded check",
+        objective="Perform the assigned check",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(kind="snapshot", description="bounded", source_refs=["target:target-1"]),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Preserve a terminal result",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+                execution_requirements=[mod.ExecutionRequirement(
+                    id="criterion-1-execution-1",
+                    description="Execute the assigned check against /api/example.",
+                    subject_ref="/api/example",
+                )],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(ValueError, match="Execution evidence is required before acceptance"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="assessed_negative",
+            disposition="no_vulnerability",
+            summary="No vulnerability demonstrated",
+            evidence_refs=[f"artifact:{artifact}"],
+        )
+
+    resolver_calls = []
+
+    def resolve(current_task, criterion):
+        resolver_calls.append((current_task.task_uid, criterion.id))
+        return {"criterion-1-execution-1": [f"artifact:{execution_artifact}"]}
+
+    result = mod.build_record_task_acceptance_tool(
+        task.task_uid,
+        execution_evidence_resolver=resolve,
+    )(
+        status="assessed_negative",
+        disposition="no_vulnerability",
+        summary="No vulnerability demonstrated",
+        evidence_refs=[f"artifact:{artifact}"],
+    )
+    assert json.loads(result)["complete"] is True
+    assert resolver_calls == [(task.task_uid, "criterion-1")]
+    recorded = store.get_acceptance_results("op1", task.task_uid)[0]
+    assert len(recorded.evidence_refs) == 2
+    assert {
+        Path(mod._artifact_path_from_ref(reference)).read_text()
+        for reference in recorded.evidence_refs
+    } == {artifact.read_text(), "controller-validated execution"}
+
+
+def test_acceptance_payload_is_retained_when_live_execution_proof_is_not_yet_visible(fake_memory_client):
+    _client, store = fake_memory_client
+    artifact = _write_inventory_manifest()
+    task = mod.Task(
+        task_uid="pending-controller-proof",
+        title="Execute one bounded check",
+        objective="Perform the assigned check",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(kind="snapshot", description="bounded", source_refs=["target:target-1"]),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Preserve a terminal result",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+                execution_requirements=[mod.ExecutionRequirement(
+                    id="criterion-1-execution-1",
+                    description="Execute the assigned check",
+                    subject_ref="target:target-1",
+                )],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(
+        ValueError,
+        match="Acceptance is incomplete: execution evidence is required before acceptance",
+    ):
+        mod.build_record_task_acceptance_tool(
+            task.task_uid,
+            execution_evidence_resolver=lambda _task, _criterion: {},
+        )(
+            status="assessed_negative",
+            disposition="no_vulnerability",
+            summary="No vulnerability demonstrated",
+            evidence_refs=[f"artifact:{artifact}"],
+        )
+
+    persisted = next(item for item in store.get_tasks("op1") if item.task_uid == task.task_uid)
+    assert persisted.recovery_context["pending_controller_acceptance"]["evidence_refs"] == [f"artifact:{artifact}"]
+    assert persisted.recovery_context["pending_controller_acceptance"]["missing_requirement_ids"] == [
+        "criterion-1-execution-1"
+    ]
+    assert store.get_acceptance_results("op1", task.task_uid) == []
+
+
 def test_bound_acceptance_tool_runtime_schema_accepts_aliases_before_function_validation(fake_memory_client):
     _client, store = fake_memory_client
     task = mod.Task(
@@ -2646,12 +3224,73 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
         "methods",
         "limits",
         "snapshot_refs",
+        "finding_refs",
         "output_kind",
         "criteria",
         "target_ids",
         "replacement_of",
         "supersedes_criteria",
     }
+
+
+def test_bound_create_tasks_tool_reports_rejection_to_observer(fake_memory_client):
+    del fake_memory_client
+    observed = []
+    create_tool = mod.build_create_tasks_tool(
+        invocation_observer=lambda tool_input, result, error: observed.append((tool_input, result, error))
+    )
+
+    with pytest.raises(ValueError, match="title"):
+        create_tool(tasks=[{"objective": "Invalid"}])
+
+    assert observed[0][0] == {"tasks": [{"objective": "Invalid"}]}
+    assert observed[0][1] is None
+    assert isinstance(observed[0][2], ValueError)
+
+
+def test_bound_create_tasks_tool_reports_success_to_observer(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+    )
+    observed = []
+    create_tool = mod.build_create_tasks_tool(
+        invocation_observer=lambda tool_input, result, error: observed.append((tool_input, result, error))
+    )
+    proposal = task_proposal("Inventory", "Run bounded inventory work", "inventory")
+
+    result = create_tool(tasks=[proposal])
+
+    assert json.loads(result)["complete"] is True
+    assert observed == [({"tasks": [proposal]}, result, None)]
+    assert len(store.tasks) == 1
+
+
+def test_bound_create_tasks_tool_requires_and_persists_candidate_source_refs(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Impact Demonstration", status="active")],
+    )
+    proposal = task_proposal("Demonstrate impact", "Demonstrate the assigned finding", "impact")
+
+    with pytest.raises(ValueError, match="requires at least one canonical finding_refs"):
+        mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+
+    proposal["finding_refs"] = ["finding:unknown"]
+    with pytest.raises(ValueError, match="includes unavailable finding_refs"):
+        mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+
+    proposal["finding_refs"] = ["finding:candidate-1"]
+    result = mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+
+    assert json.loads(result)["created_count"] == 1
+    assert store.tasks[-1].evidence == ["finding:candidate-1"]
 
 
 def test_task_proposal_limits_remove_nullable_unused_values():
@@ -2810,7 +3449,7 @@ def test_bound_acceptance_validates_coverage_ledger_and_manifest_hash(fake_memor
     assert json.loads(result)["complete"] is True
     assert store.get_acceptance_results("op1", task.task_uid)[0].coverage[0].item_id == "endpoint-1"
     assert store.get_acceptance_results("op1", task.task_uid)[0].coverage[0].status == "assessed_negative"
-    assert store.get_tasks("op1")[0].evidence == [mod.canonical_artifact_reference(str(manifest))]
+    assert store.get_tasks("op1")[0].evidence[0].startswith("artifact:task_evidence/")
 
 
 def test_bound_acceptance_rejects_changed_snapshot_and_wrong_evidence_kind(fake_memory_client):
@@ -2927,6 +3566,80 @@ def test_store_observation_reference_satisfies_bound_acceptance(fake_memory_clie
 
     assert observation["memory_ref"] == "memory:m1"
     assert result["complete"] is True
+
+
+def test_store_knowledge_returns_memory_reference_for_acceptance(fake_memory_client):
+    _client, store = fake_memory_client
+    task = mod.Task(
+        task_uid="knowledge-round-trip",
+        title="Generate hypotheses",
+        objective="Record hypotheses",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="Stored hypothesis knowledge",
+                source_refs=("memory:m1",),
+            ),
+            criteria=[
+                mod.AcceptanceCriterion(
+                    id="hypotheses",
+                    description="Record hypotheses",
+                    evidence_requirements=[mod.EvidenceRequirement(kind="durable_evidence")],
+                )
+            ],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    knowledge = json.loads(mod.store_knowledge("Hypotheses recorded"))
+    accepted = json.loads(
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Hypotheses recorded",
+            evidence_refs=[knowledge["memory_ref"]],
+        )
+    )
+
+    assert knowledge["stored"] is True
+    assert knowledge["created"] is True
+    assert knowledge["memory_ref"] == "memory:m1"
+    assert accepted["complete"] is True
+
+
+def test_store_observation_uses_active_task_target_and_rejects_conflicting_location(
+    fake_memory_client, monkeypatch
+):
+    client, store = fake_memory_client
+    plan = mod.OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", type="network", value="http://target.test:4280")],
+    )
+    task = mod.Task(
+        task_uid="active-observation",
+        title="Observe target",
+        objective="Observe target",
+        acceptance=make_acceptance("observation"),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    store.store_task("op1", task)
+    monkeypatch.setattr(mod, "_get_active_plan", lambda: plan)
+
+    mod.store_observation("Observed response", metadata={"location": "http://target.test:4280/path"})
+
+    assert client._fake_backend.add_calls[-1]["metadata"]["target_id"] == "target-1"
+    assert client._fake_backend.add_calls[-1]["metadata"]["target"] == "http://target.test:4280"
+    with pytest.raises(ValueError, match="assigned target boundary"):
+        mod.store_observation("Wrong target", metadata={"target": "http://other.test:4280"})
 
 
 def test_evidence_reference_kind_validates_memory_findings_and_prefixes(fake_memory_client):
@@ -3121,7 +3834,7 @@ def test_inventory_acceptance_allows_target_bound_filesystem_looking_route(fake_
 
     assert result["complete"] is True
     recorded = store.get_acceptance_results("op1", task.task_uid)[0]
-    assert recorded.evidence_refs == ("artifact:inventory_manifest.json",)
+    assert recorded.evidence_refs[0].startswith("artifact:task_evidence/")
 
 
 def test_store_plan_does_not_complete_terminal_phases_with_actionable_tasks(fake_memory_client):
@@ -3227,7 +3940,7 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     published = _client._fake_backend.add_calls[0]
     assert published["messages"][0]["content"].startswith('Task acceptance for "Map parameters".')
     assert "Criterion endpoint:/login.php [satisfied; observation]: Login form mapped" in published["messages"][0]["content"]
-    assert mod.canonical_artifact_reference(str(manifest)) in published["messages"][0]["content"]
+    assert "artifact:task_evidence/" in published["messages"][0]["content"]
     assert published["metadata"]["category"] == "observation"
     assert published["metadata"]["source"] == "task_acceptance"
     assert published["metadata"]["task_uid"] == "task-1"
@@ -3505,7 +4218,8 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
 
 def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_path):
     client, store = fake_memory_client
-    proof = tmp_path / "proof.txt"
+    proof = Path(mod._operation_output_root()) / "proof.txt"
+    proof.parent.mkdir(parents=True, exist_ok=True)
     proof.write_text("proof")
 
     assert mod._normalize_evidence({"a": 1}) == ['{"a": 1}']
@@ -3861,6 +4575,50 @@ def test_acceptance_disposition_requires_finding_for_confirmed_behavior(fake_mem
     assert store.get_acceptance_results("op1", task.task_uid)[0].evidence_refs[-1] == "finding:candidate-1"
 
 
+def test_bound_acceptance_tool_lists_current_task_evidence_when_refs_are_missing(fake_memory_client):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    task = mod.Task(
+        task_uid="acceptance-evidence-context",
+        title="Evidence context",
+        objective="Record a negative result",
+        acceptance=make_acceptance("outcome"),
+        evidence=[f"artifact:{manifest}"],
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(ValueError, match=r"eligible_evidence_refs=.*artifact:inventory\.json"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="no_vulnerability",
+            summary="No vulnerability was demonstrated",
+            evidence_refs=[],
+        )
+
+
+def test_inventory_acceptance_missing_artifact_has_prerequisite_repair_error(fake_memory_client):
+    _client, store = fake_memory_client
+    task = mod.Task(
+        task_uid="missing-manifest",
+        title="Inventory",
+        objective="Create inventory",
+        acceptance=make_acceptance("outcome"),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(ValueError, match="submitted manifest file does not exist.*Do not retry acceptance"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Inventory produced",
+            evidence_refs=["artifact:artifacts/missing-inventory.json"],
+        )
+
+
 def test_acceptance_finding_auto_binding_rejects_missing_and_ambiguous_candidates(fake_memory_client):
     _client, store = fake_memory_client
     manifest = _write_inventory_manifest()
@@ -3954,6 +4712,62 @@ def test_qdrant_memory_client_scope_and_workflow_methods(fake_memory_client, mon
     assert overview["has_memories"] is True
 
 
+def test_qdrant_shared_retrieval_filters_results_to_overlapping_target_values():
+    class FakeQdrant:
+        def __init__(self):
+            self.last_scroll_filter = None
+            self.last_query_filter = None
+            self.points = [
+                SimpleNamespace(
+                    id="same-target",
+                    payload={
+                        "memory": "prior operation target context",
+                        "target_values": ["https://target.test"],
+                        "operation_id": "OP-prior",
+                        "active": True,
+                    },
+                ),
+                SimpleNamespace(
+                    id="other-target",
+                    payload={
+                        "memory": "unrelated target context",
+                        "target_values": ["https://other.test"],
+                        "operation_id": "OP-prior",
+                        "active": True,
+                    },
+                ),
+            ]
+
+        def scroll(self, **kwargs):
+            self.last_scroll_filter = kwargs["scroll_filter"]
+            return self.points, None
+
+        def query_points(self, **kwargs):
+            self.last_query_filter = kwargs["query_filter"]
+            return SimpleNamespace(points=self.points)
+
+        def retrieve(self, **_kwargs):
+            return [self.points[1]]
+
+    client = mod.QdrantMemoryClient.__new__(mod.QdrantMemoryClient)
+    client.target_values = ["https://target.test"]
+    client.memory_mode = "shared"
+    client.operation_id = "OP-current"
+    client.collection_name = "test_memories"
+    client.qdrant = FakeQdrant()
+    client.embeddings = SimpleNamespace(embed_query=lambda _query: [0.1])
+
+    listed = mod.QdrantMemoryClient.list_memories(client)
+    searched = mod.QdrantMemoryClient.search(client, "prior context")
+
+    assert [memory["id"] for memory in listed] == ["same-target"]
+    assert [memory["id"] for memory in searched] == ["same-target"]
+    assert mod.QdrantMemoryClient.get_memory_by_id(client, "other-target") is None
+    assert client.qdrant.last_scroll_filter.must[0].key == "target_values"
+    assert len(client.qdrant.last_scroll_filter.must) == 1
+    assert client.qdrant.last_query_filter.must[0].match.any == ["https://target.test"]
+
+
 def test_qdrant_memory_rejects_invalid_mode_and_missing_target():
     assert mod.QdrantMemoryClient._memory_mode("shared") == "shared"
     assert mod.QdrantMemoryClient._memory_mode("operation") == "operation"
@@ -3961,3 +4775,10 @@ def test_qdrant_memory_rejects_invalid_mode_and_missing_target():
         mod.QdrantMemoryClient._memory_mode("fresh")
     with pytest.raises(ValueError, match="OperationTarget"):
         mod.QdrantMemoryClient._target_values({})
+
+    client = mod.QdrantMemoryClient.__new__(mod.QdrantMemoryClient)
+    client.target_values = []
+    client.memory_mode = "shared"
+    client.operation_id = "OP-current"
+    with pytest.raises(ValueError, match="canonical OperationTarget"):
+        mod.QdrantMemoryClient._scope_filter(client)

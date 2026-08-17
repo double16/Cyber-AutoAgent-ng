@@ -187,13 +187,33 @@ def test_report_budget_estimator_zero_evidence_and_pricing_fallback(monkeypatch)
         pricing_fallback={"input": 1.0, "output": 2.0},
     )
 
-    assert estimate.input_tokens == 5405
-    assert estimate.output_tokens == 3105
-    assert estimate.total_tokens == 8510
-    assert estimate.cost == pytest.approx((5405 + (3105 * 2)) / 1_000_000)
+    expected_input = math.ceil(
+        (rb._REPORT_ACTOR_INPUT_TOKENS + rb._REPORT_CRITIC_INPUT_TOKENS + (2 * rb._REPORT_REVISION_INPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    expected_output = math.ceil(
+        (rb._REPORT_ACTOR_OUTPUT_TOKENS + rb._REPORT_CRITIC_OUTPUT_TOKENS + (2 * rb._REPORT_REVISION_OUTPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.input_tokens == expected_input
+    assert estimate.output_tokens == expected_output
+    assert estimate.total_tokens == expected_input + expected_output
+    assert estimate.cost == pytest.approx((expected_input + (expected_output * 2)) / 1_000_000)
     assert estimate.findings == 0
     assert estimate.observations == 0
-    assert estimate.remaining_steps == 2
+    assert estimate.remaining_steps == 3
+
+
+def test_report_budget_estimator_reads_refinement_cycles_from_configuration(monkeypatch):
+    configured_cycles = Mock(return_value=3)
+    monkeypatch.setattr(rb, "get_report_refinement_cycles", configured_cycles)
+
+    coordinator = OperationEventCoordinator("OP_EST_CONFIG", MagicMock())
+
+    assert coordinator._report_refinement_cycles == 3
+    configured_cycles.assert_called_once_with()
 
 
 def test_report_budget_estimator_pricing_override_precedes_model_pricing():
@@ -210,7 +230,17 @@ def test_report_budget_estimator_pricing_override_precedes_model_pricing():
         pricing_override=True,
     )
 
-    assert estimate.cost == pytest.approx((5405 + (3105 * 2)) / 1_000_000)
+    expected_input = math.ceil(
+        (rb._REPORT_ACTOR_INPUT_TOKENS + rb._REPORT_CRITIC_INPUT_TOKENS + (2 * rb._REPORT_REVISION_INPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    expected_output = math.ceil(
+        (rb._REPORT_ACTOR_OUTPUT_TOKENS + rb._REPORT_CRITIC_OUTPUT_TOKENS + (2 * rb._REPORT_REVISION_OUTPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.cost == pytest.approx((expected_input + (expected_output * 2)) / 1_000_000)
     models_client.get_pricing.assert_not_called()
 
 
@@ -230,9 +260,17 @@ def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
 
     assert estimate.findings == 1
     assert estimate.observations == 2
-    assert estimate.input_tokens == math.ceil((2500 + 1900 + 1440 + 1425 + 2200) * 1.15)
-    assert estimate.output_tokens == math.ceil((1500 + 1800 + 900 + 900 + 1200) * 1.15)
-    assert estimate.remaining_steps == 5
+    assert estimate.input_tokens == math.ceil(
+        (rb._REPORT_ACTOR_INPUT_TOKENS + rb._REPORT_CRITIC_INPUT_TOKENS + (2 * rb._REPORT_REVISION_INPUT_TOKENS))
+        * 4
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.output_tokens == math.ceil(
+        (rb._REPORT_ACTOR_OUTPUT_TOKENS + rb._REPORT_CRITIC_OUTPUT_TOKENS + (2 * rb._REPORT_REVISION_OUTPUT_TOKENS))
+        * 4
+        * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.remaining_steps == 4
 
     coordinator.set_report_items(
         [
@@ -247,7 +285,33 @@ def test_report_budget_estimator_categories_and_exact_progress(monkeypatch):
     assert tightened.findings == 1
     assert tightened.observations == 1
     assert tightened.remaining_steps == 3
-    assert tightened.input_tokens == math.ceil((1810 + 1420 + 2200) * 1.15)
+    assert tightened.input_tokens == math.ceil(
+        (rb._REPORT_ACTOR_INPUT_TOKENS + rb._REPORT_CRITIC_INPUT_TOKENS + (2 * rb._REPORT_REVISION_INPUT_TOKENS))
+        * 3
+        * rb._REPORT_SAFETY_MARGIN
+    )
+
+
+def test_report_budget_estimator_without_refinement_reserves_actor_calls_only():
+    coordinator = OperationEventCoordinator("OP_EST_NO_REFINEMENT", MagicMock())
+    coordinator.set_report_items(
+        [{"category": "finding", "severity": "HIGH", "content": "confirmed"}],
+        refinement_cycles=0,
+    )
+
+    estimate = coordinator.report_budget_estimate(
+        provider_id="litellm",
+        model_id="test-model",
+        pricing_fallback={"input": 0.0, "output": 0.0},
+    )
+
+    assert estimate.remaining_steps == 4
+    assert estimate.input_tokens == math.ceil(
+        rb._REPORT_ACTOR_INPUT_TOKENS * 4 * rb._REPORT_SAFETY_MARGIN
+    )
+    assert estimate.output_tokens == math.ceil(
+        rb._REPORT_ACTOR_OUTPUT_TOKENS * 4 * rb._REPORT_SAFETY_MARGIN
+    )
 
 
 def test_reasoning_termination_metrics_and_basic_helpers():
@@ -280,6 +344,18 @@ def test_reasoning_termination_metrics_and_basic_helpers():
     assert handler._extract_code_from_input({"value": [1, 2]}).startswith("{")
     assert handler._extract_output_text([{"json": {"a": 1}}, {"message": "m"}, "s"])
     assert handler._collapse_repeated_sentences("A. A. B.") == "A. B."
+
+
+def test_reasoning_handler_drops_provider_control_markers_before_emitting():
+    handler = make_handler()
+
+    handler._handle_reasoning("<|channel>thought\nInspect the artifact.")
+    handler._emit_accumulated_reasoning(force=True)
+    handler._handle_reasoning("<|channel>|thought")
+    handler._emit_accumulated_reasoning(force=True)
+
+    reasoning_events = [event for event in handler._events if event["type"] == "reasoning"]
+    assert [event["content"] for event in reasoning_events] == ["Inspect the artifact."]
 
 
 def test_tool_announcement_streaming_update_and_message_processing():
@@ -356,9 +432,9 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert "error" in types
     assert "task_done" not in types
     assert "task_started" not in types
-    assert handler.memory_ops == 1
-    assert handler.evidence_count == 1
-    assert handler.coordinator.report_findings == 1
+    assert handler.memory_ops == 0
+    assert handler.evidence_count == 0
+    assert handler.coordinator.report_findings == 0
 
 
 def test_shell_help_text_with_timeout_option_is_not_reported_as_timeout():
@@ -436,17 +512,22 @@ def test_non_task_state_tool_result_does_not_emit_task_lifecycle_events():
     assert "task_started" not in event_types(handler)
 
 
-def test_store_observation_success_updates_report_estimate_without_memory_reads(monkeypatch):
-    handler = make_handler()
+def test_memory_added_updates_report_estimate_without_memory_reads(monkeypatch):
+    events = []
     monkeypatch.setattr(rb, "token_calc", lambda chars, model_id=None: int(chars))
+    monkeypatch.setattr(rb, "get_models_client", lambda: None)
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
+    emitter = SimpleNamespace(emit=events.append)
+    handler = AgentEventHandler(
+        operation_id="OP_MEMORY_EVENT",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        start_metrics_thread=False,
+    )
 
-    handler.tool_name_buffer["high_obs"] = "store_observation"
-    handler.tool_input_buffer["high_obs"] = {
-        "content": "x" * 37,
-        "metadata": {"category": "observation", "severity": "HIGH"},
-    }
-    handler._process_tool_result_from_message(
-        {"toolUseId": "high_obs", "status": "success", "content": [{"text": "stored"}]}
+    handler.emit_ui_event(
+        {"type": "memory_added", "category": "observation", "content_length": 37}
     )
 
     assert handler.memory_ops == 1
@@ -454,6 +535,29 @@ def test_store_observation_success_updates_report_estimate_without_memory_reads(
     assert handler.coordinator.report_findings == 0
     assert handler.coordinator.report_observations == 1
     assert handler.coordinator.report_observation_content_tokens == 37
+
+
+def test_non_evidence_memory_added_updates_only_memory_count(monkeypatch):
+    events = []
+    monkeypatch.setattr(rb, "get_models_client", lambda: None)
+    monkeypatch.setattr(AgentEventHandler, "_start_metrics_thread", lambda self: None)
+    emitter = SimpleNamespace(emit=events.append)
+    handler = AgentEventHandler(
+        operation_id="OP_MEMORY_EVENT",
+        provider_id="litellm",
+        model_id="model",
+        emitter=emitter,
+        start_metrics_thread=False,
+    )
+
+    handler.emit_ui_event(
+        {"type": "memory_added", "category": "knowledge", "content_length": 24}
+    )
+
+    assert handler.memory_ops == 1
+    assert handler.evidence_count == 0
+    assert handler.coordinator.memory_ops == 1
+    assert handler.coordinator.evidence_count == 0
 
 
 @pytest.mark.parametrize(
@@ -466,7 +570,7 @@ def test_store_observation_success_updates_report_estimate_without_memory_reads(
         ),
     ],
 )
-def test_non_evidence_memory_tools_increment_only_memory_operations(tool_name, tool_input):
+def test_memory_tool_completion_does_not_increment_memory_operations(tool_name, tool_input):
     handler = make_handler()
     handler.tool_name_buffer["memory"] = tool_name
     handler.tool_input_buffer["memory"] = tool_input
@@ -475,9 +579,9 @@ def test_non_evidence_memory_tools_increment_only_memory_operations(tool_name, t
         {"toolUseId": "memory", "status": "success", "content": [{"text": "stored"}]}
     )
 
-    assert handler.memory_ops == 1
+    assert handler.memory_ops == 0
     assert handler.evidence_count == 0
-    assert handler.coordinator.memory_ops == 1
+    assert handler.coordinator.memory_ops == 0
     assert handler.coordinator.evidence_count == 0
     assert handler.coordinator.report_findings == 0
     assert handler.coordinator.report_observations == 0
@@ -591,11 +695,12 @@ def test_callback_events_use_agent_attached_metadata(monkeypatch):
 
     handler(agent=agent, complete=True)
 
-    complete_event = [event for event in events if event["type"] == "operation_complete"][-1]
-    assert complete_event["agent_type"] == "task_executor"
-    assert complete_event["agent_name"] == "Cyber-AutoAgent task_executor"
-    assert complete_event["agent_run_id"] == "task_executor-1"
-    assert complete_event["parent_agent_run_id"] == "operation-1"
+    completion_event = [event for event in events if event["type"] == "thinking_end"][-1]
+    assert completion_event["agent_type"] == "task_executor"
+    assert completion_event["agent_name"] == "Cyber-AutoAgent task_executor"
+    assert completion_event["agent_run_id"] == "task_executor-1"
+    assert completion_event["parent_agent_run_id"] == "operation-1"
+    assert not any(event["type"] == "operation_complete" for event in events)
     assert handler.agent_type == "operation_controller"
 
 
@@ -699,6 +804,7 @@ def test_operation_coordinator_groups_usage_by_provider_model_and_latency():
             "efficiency": 100.0,
             "model_calls": 0,
             "correction_loops": 0,
+            "correction_categories": {},
         },
         {
             "provider": "ollama",
@@ -714,6 +820,7 @@ def test_operation_coordinator_groups_usage_by_provider_model_and_latency():
             "efficiency": 100.0,
             "model_calls": 0,
             "correction_loops": 0,
+            "correction_categories": {},
         },
     ]
 
@@ -736,7 +843,14 @@ def test_process_metrics_captures_provider_reported_inference_latency():
 def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
     handler = make_handler()
     handler.process_metrics(
-        SimpleNamespace(accumulated_usage={"inputTokens": 12, "outputTokens": 4})
+        SimpleNamespace(
+            accumulated_usage={
+                "inputTokens": 12,
+                "outputTokens": 4,
+                "cacheReadInputTokens": 3,
+                "cacheWriteInputTokens": 2,
+            }
+        )
     )
 
     with patch("modules.tools.memory.persist_operation_model_metrics") as persist_metrics:
@@ -745,13 +859,15 @@ def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
     assert len(handler._events) == 1
     snapshot = handler._events[0]
     assert snapshot["type"] == "model_usage_snapshot"
-    assert snapshot["stage"] == "assessment_complete"
+    assert snapshot["stage"] == "operation_terminated"
     metrics = snapshot["metrics"]
     assert metrics["modelUsage"] == handler.model_usage()
     assert metrics["capturedAt"].endswith("+00:00")
     assert metrics["inputTokens"] == 12
     assert metrics["outputTokens"] == 4
     assert metrics["totalTokens"] == 16
+    assert metrics["cacheReadTokens"] == 3
+    assert metrics["cacheWriteTokens"] == 2
     assert metrics["cost"] >= 0.0
     assert metrics["duration"] == "0s"
     persist_metrics.assert_called_once_with(
@@ -762,16 +878,16 @@ def test_emit_model_usage_snapshot_persists_current_usage_and_flushes():
     handler.emitter.flush_immediate.assert_called_once()
 
 
-def test_emit_model_usage_snapshot_skips_report_only_handlers():
+def test_emit_model_usage_snapshot_persists_report_only_handlers_at_termination():
     handler = make_handler()
     handler.operation_mode = "report_only"
 
     with patch("modules.tools.memory.persist_operation_model_metrics") as persist_metrics:
         handler.emit_model_usage_snapshot()
 
-    assert handler._events == []
-    persist_metrics.assert_not_called()
-    handler.emitter.flush_immediate.assert_not_called()
+    assert handler._events[0]["stage"] == "operation_terminated"
+    persist_metrics.assert_called_once()
+    handler.emitter.flush_immediate.assert_called_once()
 
 
 def test_emit_model_usage_snapshot_continues_when_metric_persistence_fails():
@@ -785,7 +901,105 @@ def test_emit_model_usage_snapshot_continues_when_metric_persistence_fails():
         handler.emit_model_usage_snapshot()
 
     assert handler._events[0]["type"] == "model_usage_snapshot"
+    assert handler._events[0]["snapshot_persisted"] is False
     handler.emitter.flush_immediate.assert_called_once()
+
+
+def test_operation_lifecycle_emits_one_termination_snapshot_and_one_finalization():
+    handler = make_handler()
+    handler._stop_metrics_thread = Mock()
+    completion = {"assessment_complete": False, "termination_reason": "budget_limit"}
+
+    with patch("modules.tools.memory.persist_operation_model_metrics"):
+        handler.emit_operation_terminated(completion, [{"phase_id": 1, "status": "partial_failure"}])
+        handler.emit_operation_terminated(completion, [])
+    handler.emit_operation_finalized(report_status="fallback", evaluation_status="attempted")
+    handler.emit_operation_finalized(report_status="generated")
+
+    assert [event["type"] for event in handler._events].count("model_usage_snapshot") == 1
+    terminal = next(event for event in handler._events if event["type"] == "operation_terminated")
+    assert terminal["workflow_coverage_summary"] == [{"phase_id": 1, "status": "partial_failure"}]
+    assert terminal["model_usage_snapshot"]["stage"] == "operation_terminated"
+    finalized = [event for event in handler._events if event["type"] == "operation_finalized"]
+    assert finalized == [
+        {
+            "type": "operation_finalized",
+            "operation_id": "OP_TEST",
+            "termination_reason": None,
+            "report_status": "fallback",
+            "report_path": None,
+            "evaluation_status": "attempted",
+        }
+    ]
+
+
+def test_report_error_delegates_to_report_generator_fallback(tmp_path, monkeypatch):
+    handler = make_handler()
+    handler.memory_ops = 1
+    monkeypatch.setattr(rb, "get_output_path", lambda *_args: str(tmp_path))
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.generate_security_report",
+        Mock(side_effect=RuntimeError("cancel scope failed")),
+    )
+    fallback = Mock(
+        return_value={
+            "report_path": str(tmp_path / "security_assessment_report.md"),
+            "report_json_path": str(tmp_path / "security_assessment_report.json"),
+            "content": "# Deterministic fallback",
+            "status": "fallback",
+        }
+    )
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.generate_deterministic_fallback_report",
+        fallback,
+    )
+
+    handler.ensure_report_generated(
+        SimpleNamespace(model=SimpleNamespace()),
+        "target",
+        "objective",
+        "web",
+        completion_status={"termination_reason": "budget_limit", "assessment_complete": False},
+    )
+
+    assert handler._report_status == "fallback"
+    fallback.assert_called_once()
+    assert any(event["type"] == "report_content" for event in handler._events)
+    report_paths = next(event for event in handler._events if event["type"] == "report_paths")
+    assert report_paths["report_json_path"].endswith("security_assessment_report.json")
+
+
+def test_incomplete_operation_without_evidence_emits_fallback_artifact_paths(tmp_path, monkeypatch):
+    handler = make_handler()
+    monkeypatch.setattr(rb, "get_output_path", lambda *_args: str(tmp_path))
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.generate_security_report",
+        Mock(),
+    )
+    fallback = Mock(
+        return_value={
+            "report_path": str(tmp_path / "security_assessment_report.md"),
+            "report_json_path": str(tmp_path / "security_assessment_report.json"),
+            "content": "# Deterministic fallback",
+            "status": "fallback",
+        }
+    )
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.generate_deterministic_fallback_report",
+        fallback,
+    )
+
+    handler.ensure_report_generated(
+        agent=None,
+        target="target",
+        objective="objective",
+        module="web",
+        completion_status={"assessment_complete": False, "termination_reason": "error"},
+    )
+
+    assert handler._report_status == "fallback"
+    fallback.assert_called_once()
+    assert any(event["type"] == "report_paths" for event in handler._events)
 
 
 def test_model_efficiency_is_higher_when_corrections_are_lower():
@@ -800,6 +1014,36 @@ def test_model_efficiency_is_higher_when_corrections_are_lower():
     assert rows["model-a"]["efficiency"] > rows["model-b"]["efficiency"]
     assert rows["model-a"]["efficiency"] == 100.0
     assert rows["model-b"]["efficiency"] == 50.0
+
+
+def test_model_efficiency_records_max_token_exhaustion_category():
+    coordinator = OperationEventCoordinator("OP_MAX_TOKENS", MagicMock())
+    coordinator.record_model_call("litellm", "model-a")
+    coordinator.record_efficiency_correction("litellm", "model-a", "max_token_exhaustion")
+
+    row = coordinator.model_usage()[0]
+
+    assert row["efficiency"] == 50.0
+    assert row["correction_categories"] == {"max_token_exhaustion": 1}
+
+
+def test_handler_emits_structured_max_token_exhaustion_event():
+    handler = make_handler()
+
+    handler.record_max_token_exhaustion(
+        role="task_executor",
+        classification="output_truncation",
+        exhaustion_ordinal=1,
+    )
+
+    assert handler._events == [{
+        "type": "model_max_token_exhaustion",
+        "operation_id": "OP_TEST",
+        "role": "task_executor",
+        "classification": "output_truncation",
+        "exhaustion_ordinal": 1,
+    }]
+    assert handler.model_usage()[0]["correction_categories"] == {"max_token_exhaustion": 1}
 
 
 def test_operation_coordinator_retains_effective_context_window_per_model():
@@ -875,14 +1119,14 @@ def test_sub_agent_progress_and_metrics_use_operation_aggregates(monkeypatch):
 
     assert progress_event["agent_name"] == "evidence_reviewer"
     assert progress_event["duration"] == "5m 0s"
-    assert progress_event["progressPercent"] == 869
+    assert progress_event["progressPercent"] == 28860
     assert metrics_event["metrics"]["inputTokens"] == 125
     assert metrics_event["metrics"]["outputTokens"] == 60
     assert metrics_event["metrics"]["totalTokens"] == 185
     assert metrics_event["metrics"]["cost"] == pytest.approx(0.000245)
     assert metrics_event["metrics"]["duration"] == "5m 0s"
-    assert metrics_event["metrics"]["progressPercent"] == 869
-    assert metrics_event["metrics"]["reportEstimate"]["totalTokens"] == 8510
+    assert metrics_event["metrics"]["progressPercent"] == 28860
+    assert metrics_event["metrics"]["reportEstimate"]["totalTokens"] == 288420
 
 
 def test_constructor_emits_init_and_metrics(monkeypatch):
@@ -1423,6 +1667,37 @@ def test_assessment_complete_stops_metrics_when_event_emission_fails():
     handler._stop_metrics_thread.assert_called_once_with()
 
 
+def test_shell_and_http_output_handlers_emit_completion_and_deduplicate_results():
+    handler = make_handler()
+    handler.tool_name_buffer["shell-empty"] = "shell"
+    handler._process_shell_output("", [], "success", tool_use_id="shell-empty")
+
+    handler._process_shell_output(
+        "Execution Summary:\nCommand: id\nStatus: success\nOutput:\nuid=1000",
+        [],
+        "success",
+        tool_use_id="shell-result",
+    )
+    emitted_count = len(handler._events)
+    handler._process_shell_output(
+        "Execution Summary:\nCommand: id\nStatus: success\nOutput:\nuid=1000",
+        [],
+        "success",
+        tool_use_id="shell-result",
+    )
+
+    handler.tool_name_buffer["http-empty"] = "http_request"
+    handler._process_http_output("", [], "success", tool_use_id="http-empty")
+    handler._process_http_output("HTTP/1.1 200 OK\n\nbody", [], "success", tool_use_id="http-result")
+
+    outputs = [event for event in handler._events if event["type"] == "output"]
+    assert outputs[0]["content"] == "Command completed"
+    assert any(event["content"] == "uid=1000" for event in outputs)
+    assert any(event["content"] == "Request completed" for event in outputs)
+    assert any(event["content"] == "HTTP/1.1 200 OK\n\nbody" for event in outputs)
+    assert len(handler._events) == emitted_count + 2
+
+
 def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     handler = make_handler()
     handler.memory_ops = 1
@@ -1591,7 +1866,8 @@ def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatc
     assert handler.sdk_input_tokens == 12
     assert handler.sdk_output_tokens == 7
     assert "error" in event_types(handler)
-    assert "operation_complete" in event_types(handler)
+    assert "operation_complete" not in event_types(handler)
+    assert "thinking_end" in event_types(handler)
 
     handler._process_tool_announcement(
         {"name": "handoff_to_agent", "id": "h2", "input": {"handoff_to": "web", "message": "go"}}

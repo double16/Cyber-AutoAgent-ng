@@ -118,8 +118,11 @@ current draft; rejection sends feedback to `plan_creator` for revision. The
 the final configured review fails the workflow so an unapproved plan is never persisted or executed.
 
 Task prompt generation uses the same bounded pattern. `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` defaults to
-two critic reviews and accepts `0` to disable critique. A final rejection or invalid structured response after JSON
-retries marks only the active task `partial_failure`, without invoking its executor or evaluator.
+two critic reviews and accepts `0` to disable critique. After JSON retries, malformed or unavailable builder/critic
+output and non-scope prompt defects that survive one bounded repair use a deterministic controller task template.
+The template has no model-selected optional tools or shell commands, and selects only canonical memory references.
+The controller emits `task_prompt_fallback` for that recovery. Only a valid critic response explicitly identifying a
+hard target-scope violation marks the active task `partial_failure` without invoking its executor or evaluator.
 
 Task execution then uses a second bounded actor/critic loop:
 
@@ -191,6 +194,20 @@ evaluators receive that canonical per-criterion ledger and may read only its res
 predicted filenames from overriding accepted evidence. Task creators use a closed flat schema with explicit limits,
 criterion descriptions, snapshot references, and target IDs. Python generates readable unique criterion IDs and
 evidence requirements and owns the remaining contract and lifecycle fields.
+
+Before an acceptance ledger is persisted, controller validation copies artifact evidence into a task-owned immutable
+path within the operation root. Independent inventory-producing tasks therefore cannot overwrite one another's
+accepted outputs. When a following phase consumes multiple completed inventory manifests, Python creates one merged,
+provenance-preserving snapshot for fan-out. A manifest is not valid proof for a task frozen to a single inventory
+subject; that rejection occurs before ledger persistence. Prompt-memory selectors are advisory: stale IDs or indices
+are logged and dropped while valid selected context remains available to the executor.
+
+Execution requirements remain frozen in the task contract, but execution proof is controller-owned. The controller
+matches successful task-local tool capabilities and normalized subjects to durable current-operation artifacts when
+the executor submits acceptance. If proof is missing, Python retains the semantic acceptance payload, permits one
+bounded repair against the exact missing requirement, and replays acceptance without another model bookkeeping call.
+Merged phase inventories use content-addressed immutable paths and union complementary protocol-neutral interaction
+metadata so later task creation cannot mutate an earlier frozen snapshot or discard methods and inputs.
 
 Complete task acceptance also publishes one bounded operation observation containing the task objective, criterion
 statuses, concrete summaries, evidence references, and aggregate coverage counts. Publication is replay-safe and lets
@@ -451,7 +468,7 @@ graph TB
 - **Benefits**: Latest models, managed infrastructure, reliable performance
 
 ### Ollama Provider (Local)
-- **Primary**: qwen3-coder:30b-a3b-q4_K_M (default)
+- **Primary**: qwen3.6:27b (default)
 - **Embeddings**: mxbai-embed-large:latest
 - **Benefits**: Privacy, offline, no API costs, local control
 

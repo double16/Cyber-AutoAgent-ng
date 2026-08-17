@@ -488,6 +488,19 @@ const runAutoAssessment = async () => {
           const message = formatAutoRunTerminationEvent(event);
           if (message) loggingService.info(message);
         }
+        else if (event.type === 'operation_terminated') {
+          const coverage = Array.isArray(event.workflow_coverage_summary)
+            ? `${event.workflow_coverage_summary.length} phase(s)`
+            : 'coverage unavailable';
+          const snapshot = event.model_usage_snapshot || {};
+          const persistence = snapshot.snapshot_persisted === false ? ' (metrics persistence failed)' : '';
+          loggingService.info(`⏹️ Operation terminated: ${event.termination_reason || 'unknown'} | ${coverage}${persistence}`);
+        }
+        else if (event.type === 'operation_finalized') {
+          loggingService.info(
+            `🏁 Operation finalized: report ${event.report_status || 'unknown'} | evaluation ${event.evaluation_status || 'not_run'}`
+          );
+        }
         else if (event.type === 'task_started') {
             lastTaskTitle = event.title;
             loggingService.info(`🚀 Starting task ${event.title ? `"${event.title}"` : ''}${formatTaskScope(event)}`);

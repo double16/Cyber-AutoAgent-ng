@@ -1032,7 +1032,7 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
         parsed = top.get("parsed", {}) if isinstance(top.get("parsed"), dict) else {}
         vuln = (
             parsed.get("vulnerability")
-            or safe_truncate(str(top.get("content", "")), 60)
+            or str(top.get("content", ""))
         ).strip()
         top_metadata = top.get("metadata", {}) if isinstance(top.get("metadata"), dict) else {}
         where = str(

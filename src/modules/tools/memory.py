@@ -41,22 +41,28 @@ Key Features:
    • Vector Store (Qdrant)
 """
 
+import base64
 import hashlib
 import ipaddress
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import uuid
-from dataclasses import dataclass, field
+from functools import wraps
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional, Protocol, Tuple
+from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Protocol, Tuple
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import litellm
+import yaml
 from langchain_aws import BedrockEmbeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_ollama import OllamaEmbeddings
@@ -89,6 +95,7 @@ logger = get_logger("Tools.Memory")
 _MEMORY_CONFIG: Optional[Dict[str, str]] = None
 _MEMORY_CLIENT: Optional["QdrantMemoryClient"] = None
 _DATABASE_STORE: Optional["ApplicationStore"] = None
+_MEMORY_EVENT_EMITTER: Optional[Callable[[Dict[str, Any]], None]] = None
 
 # Local Qdrant clients share one outputs-backed database within this process.
 _QDRANT_WRITE_LOCK = threading.Lock()
@@ -435,12 +442,49 @@ class EvidenceRequirement:
 
 
 @dataclass(frozen=True)
+class ExecutionRequirement:
+    """One controller-owned proof that task execution reached a frozen subject."""
+
+    id: str
+    description: str
+    subject_ref: str
+
+    def __post_init__(self) -> None:
+        normalized_id = re.sub(r"\s+", "-", str(self.id or "").strip().lower())
+        if not normalized_id:
+            raise ValueError("execution requirement id required")
+        if not str(self.description or "").strip():
+            raise ValueError("execution requirement description required")
+        if not str(self.subject_ref or "").strip():
+            raise ValueError("execution requirement subject_ref required")
+        object.__setattr__(self, "id", normalized_id)
+        object.__setattr__(self, "description", str(self.description).strip())
+        object.__setattr__(self, "subject_ref", str(self.subject_ref).strip())
+
+    @staticmethod
+    def from_obj(obj: Any) -> "ExecutionRequirement":
+        if isinstance(obj, ExecutionRequirement):
+            return obj
+        if not isinstance(obj, dict):
+            raise ValueError("execution requirement must be an object/dict")
+        return ExecutionRequirement(
+            id=str(obj.get("id", "")),
+            description=str(obj.get("description", "")),
+            subject_ref=str(obj.get("subject_ref", "")),
+        )
+
+    def to_dict(self) -> Dict[str, str]:
+        return {"id": self.id, "description": self.description, "subject_ref": self.subject_ref}
+
+
+@dataclass(frozen=True)
 class AcceptanceCriterion:
     """One immutable, independently reportable task completion criterion."""
 
     id: str
     description: str
     evidence_requirements: Tuple[EvidenceRequirement, ...]
+    execution_requirements: Tuple[ExecutionRequirement, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_id = re.sub(r"\s+", "-", str(self.id or "").strip().lower())
@@ -456,11 +500,17 @@ class AcceptanceCriterion:
         if moving_scope:
             raise ValueError("acceptance criterion uses moving scope with words like 'all', 'across', 'key workflows'; reference the finite basis instead")
         requirements = tuple(EvidenceRequirement.from_obj(item) for item in self.evidence_requirements)
+        execution_requirements = tuple(
+            ExecutionRequirement.from_obj(item) for item in self.execution_requirements
+        )
         if not requirements:
             raise ValueError("acceptance criterion evidence_requirements required")
         object.__setattr__(self, "id", normalized_id)
         object.__setattr__(self, "description", str(self.description).strip())
         object.__setattr__(self, "evidence_requirements", requirements)
+        if len({item.id for item in execution_requirements}) != len(execution_requirements):
+            raise ValueError("acceptance criterion execution requirement IDs must be unique")
+        object.__setattr__(self, "execution_requirements", execution_requirements)
 
     @staticmethod
     def from_obj(obj: Any) -> "AcceptanceCriterion":
@@ -472,6 +522,7 @@ class AcceptanceCriterion:
             id=str(obj.get("id", "")),
             description=str(obj.get("description", "")),
             evidence_requirements=obj.get("evidence_requirements", []),
+            execution_requirements=obj.get("execution_requirements", []),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -479,6 +530,7 @@ class AcceptanceCriterion:
             "id": self.id,
             "description": self.description,
             "evidence_requirements": [requirement.to_dict() for requirement in self.evidence_requirements],
+            "execution_requirements": [requirement.to_dict() for requirement in self.execution_requirements],
         }
 
 
@@ -839,6 +891,7 @@ class Task:
     target_ids: List[str] = field(default_factory=list)
     replacement_of: Optional[str] = None
     supersedes_criteria: List[str] = field(default_factory=list)
+    recovery_context: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -852,6 +905,9 @@ class Task:
             raise ValueError("task status is invalid")
         object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
+        if not isinstance(self.recovery_context, dict):
+            raise ValueError("recovery_context must be an object")
+        object.__setattr__(self, "recovery_context", dict(self.recovery_context))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
         if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded"):
@@ -888,6 +944,7 @@ class Task:
             reference_id=obj.get("reference_id"),
             replacement_of=obj.get("replacement_of"),
             supersedes_criteria=_normalize_target_ids(obj.get("supersedes_criteria", [])),
+            recovery_context=dict(obj.get("recovery_context") or {}),
             target_scope=str(obj.get("target_scope", "all") or "all"),
             target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
@@ -908,6 +965,7 @@ class Task:
             "reference_id": self.reference_id,
             "replacement_of": self.replacement_of,
             "supersedes_criteria": self.supersedes_criteria,
+            "recovery_context": self.recovery_context,
             "target_scope": self.target_scope,
             "target_ids": self.target_ids,
         })
@@ -960,6 +1018,7 @@ class PlanPhase:
     title: str
     status: PlanStatus
     criteria: str = ""
+    requires_finding_candidates: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, int) or self.id < 0:
@@ -976,6 +1035,8 @@ class PlanPhase:
             object.__setattr__(self, "criteria", "")  # type: ignore[misc]
         if not isinstance(self.criteria, str):
             raise ValueError("phase.criteria must be a string")
+        if not isinstance(self.requires_finding_candidates, bool):
+            raise ValueError("phase.requires_finding_candidates must be a boolean")
 
     @staticmethod
     def from_obj(obj: Any) -> "PlanPhase":
@@ -986,6 +1047,7 @@ class PlanPhase:
             title=str(obj.get("title", "")),
             status=str(obj.get("status", "pending")),  # validated in __post_init__
             criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
+            requires_finding_candidates=obj.get("requires_finding_candidates", False),
         )
 
     @staticmethod
@@ -994,7 +1056,7 @@ class PlanPhase:
 
     @staticmethod
     def csv_format() -> str:
-        return "id,title,status,criteria"
+        return "id,title,status,criteria,requires_finding_candidates"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -1003,7 +1065,7 @@ class PlanPhase:
         lines = []
         if include_format:
             lines.append(f"{self.toon_format()}:")
-        lines.append(f"  {self.id},{title},{status},{criteria}")
+        lines.append(f"  {self.id},{title},{status},{criteria},{str(self.requires_finding_candidates).lower()}")
         return "\n".join(lines).strip()
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1012,6 +1074,7 @@ class PlanPhase:
             "title": self.title,
             "status": self.status,
             "criteria": self.criteria,
+            "requires_finding_candidates": self.requires_finding_candidates,
         })
 
 
@@ -1209,6 +1272,29 @@ def _normalize_model_metric_rows(rows: Any) -> List[Dict[str, Any]]:
         total_tokens = nonnegative_int("total_tokens")
         if total_tokens != input_tokens + output_tokens:
             raise ValueError("model metric total_tokens must equal input_tokens plus output_tokens")
+        raw_categories = raw_row.get("correction_categories", {})
+        if raw_categories is None:
+            raw_categories = {}
+        if not isinstance(raw_categories, dict):
+            raise ValueError("model metric correction_categories must be an object")
+        correction_categories = {}
+        for category, count in raw_categories.items():
+            normalized_category = str(category).strip()
+            if not normalized_category:
+                raise ValueError("model metric correction_categories keys must be non-empty strings")
+            if isinstance(count, bool):
+                raise ValueError("model metric correction_categories values must be non-negative integers")
+            try:
+                normalized_count = int(count)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "model metric correction_categories values must be non-negative integers"
+                ) from error
+            if normalized_count < 0:
+                raise ValueError("model metric correction_categories values must be non-negative integers")
+            correction_categories[normalized_category] = normalized_count
+        if sum(correction_categories.values()) > nonnegative_int("correction_loops"):
+            raise ValueError("model metric correction_categories cannot exceed correction_loops")
         normalized_rows.append(
             {
                 "provider": provider,
@@ -1223,6 +1309,7 @@ def _normalize_model_metric_rows(rows: Any) -> List[Dict[str, Any]]:
                 "inference_time_ms": nonnegative_float("inference_time_ms"),
                 "model_calls": nonnegative_int("model_calls"),
                 "correction_loops": nonnegative_int("correction_loops"),
+                "correction_categories": dict(sorted(correction_categories.items())),
                 "efficiency": nonnegative_float("efficiency"),
             }
         )
@@ -1254,6 +1341,20 @@ class ApplicationStore(Protocol):
 
     def list_operation_model_metrics(self, operation_id: str) -> List[Dict[str, Any]]: ...
 
+    def store_finding_evidence_receipt(
+        self,
+        operation_id: str,
+        receipt_uid: str,
+        source_task_uid: str,
+        artifact_ref: str,
+        marker: str,
+        artifact_fingerprint: str,
+    ) -> None: ...
+
+    def get_finding_evidence_receipts(
+        self, operation_id: str, receipt_uids: List[str]
+    ) -> List[Dict[str, str]]: ...
+
 
 class SQLiteApplicationStore:
     """SQLite persistence for application workflow state.
@@ -1263,16 +1364,216 @@ class SQLiteApplicationStore:
     targets and operations.
     """
 
+    _RUNTIME_RECOVERABLE_METHODS = frozenset({
+        "ensure_operation",
+        "has_operation",
+        "append_operation_model_metrics",
+        "list_operation_model_metrics",
+        "store_plan",
+        "get_plan",
+        "store_task",
+        "get_tasks",
+        "store_acceptance_results",
+        "get_acceptance_results",
+        "has_acceptance_memory_publication",
+        "mark_acceptance_memory_published",
+        "store_preflight_results",
+        "list_preflight_results",
+        "get_finding_by_fingerprint",
+        "get_finding",
+        "list_findings",
+        "store_finding_candidate",
+        "store_finding_evidence_receipt",
+        "get_finding_evidence_receipts",
+        "link_finding_source_task",
+        "store_finding_validation",
+        "update_finding_taxonomy_annotation",
+        "update_finding_attack_enrichment",
+        "resolve_finding",
+        "get_objective_candidate",
+        "get_objective_candidate_by_fingerprint",
+        "list_objective_candidates",
+        "store_objective_candidate",
+        "store_objective_validation",
+    })
+
+    def __getattribute__(self, name: str) -> Any:
+        """Wrap public persistence calls so a live database error gets one safe retry."""
+
+        value = object.__getattribute__(self, name)
+        recoverable = object.__getattribute__(self, "_RUNTIME_RECOVERABLE_METHODS")
+        if name not in recoverable or not callable(value):
+            return value
+
+        @wraps(value)
+        def recovered_call(*args: Any, **kwargs: Any) -> Any:
+            retry = object.__getattribute__(self, "_call_with_runtime_recovery")
+            return retry(lambda: value(*args, **kwargs))
+
+        return recovered_call
+
     def __init__(self, db_path: str, logical_target: str, read_only: bool = False):
         self.db_path = db_path
         self.logical_target = logical_target
         self.read_only = read_only
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._runtime_recovery_in_progress = False
         if self.read_only:
             if not os.path.isfile(self.db_path):
                 raise FileNotFoundError(f"Application database does not exist: {self.db_path}")
         else:
+            self._initialize_writable_database()
+
+    def _recover_runtime_database(self, error: Exception) -> bool:
+        """Attempt one fail-closed repair after a live SQLite failure."""
+
+        if self.read_only or self._runtime_recovery_in_progress:
+            return False
+        self._runtime_recovery_in_progress = True
+        try:
+            backup = self._backup_database_for_recovery()
+            recovered = self._recover_database()
+            integral = recovered and self._sqlite_integrity_check(self.db_path).lower() == "ok"
+            logger.warning(
+                "SQLite runtime recovery database=%s backup=%s recovered=%s error=%s",
+                Path(self.db_path).name,
+                backup.name,
+                integral,
+                type(error).__name__,
+            )
+            return integral
+        except (OSError, sqlite3.DatabaseError) as recovery_error:
+            logger.error(
+                "SQLite runtime recovery failed database=%s original=%s recovery=%s",
+                Path(self.db_path).name,
+                type(error).__name__,
+                type(recovery_error).__name__,
+            )
+            return False
+        finally:
+            self._runtime_recovery_in_progress = False
+
+    def _call_with_runtime_recovery(self, operation: Callable[[], Any]) -> Any:
+        """Retry one store operation after a successful runtime recovery."""
+
+        try:
+            return operation()
+        except (sqlite3.DatabaseError, OSError) as error:
+            if not self._recover_runtime_database(error):
+                raise
+            return operation()
+
+    @staticmethod
+    def _sqlite_integrity_check(db_path: str) -> str:
+        """Return SQLite's integrity result, raising when the database cannot be inspected."""
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+        return str(row[0] if row else "missing integrity result").strip()
+
+    @staticmethod
+    def _recovery_backup_path(db_path: str) -> Path:
+        source = Path(db_path)
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+        return source.with_name(f"{source.stem}.corrupt-{timestamp}{source.suffix}")
+
+    def _backup_database_for_recovery(self) -> Path:
+        """Preserve the database and sidecars before an automatic recovery attempt."""
+
+        source = Path(self.db_path)
+        backup = self._recovery_backup_path(self.db_path)
+        if source.exists():
+            shutil.copy2(source, backup)
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(f"{source}{suffix}")
+            if sidecar.exists():
+                shutil.copy2(sidecar, Path(f"{backup}{suffix}"))
+        return backup
+
+    def _recover_database(self) -> bool:
+        """Recover the current database through sqlite3 .recover and atomically validate the result."""
+
+        source = Path(self.db_path)
+        with tempfile.NamedTemporaryFile(
+            prefix=f"{source.stem}.recovered-", suffix=source.suffix, dir=source.parent, delete=False
+        ) as temporary:
+            recovered_path = Path(temporary.name)
+        try:
+            recovered_sql = subprocess.run(
+                ["sqlite3", str(source), ".recover"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if recovered_sql.returncode != 0 or not recovered_sql.stdout.strip():
+                return False
+            restored = subprocess.run(
+                ["sqlite3", str(recovered_path)],
+                input=recovered_sql.stdout,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if restored.returncode != 0:
+                return False
+            SQLiteMigrationRunner(str(recovered_path)).migrate()
+            with sqlite3.connect(recovered_path) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if self._sqlite_integrity_check(str(recovered_path)).lower() != "ok":
+                return False
+            for suffix in ("-wal", "-shm", "-journal"):
+                Path(f"{source}{suffix}").unlink(missing_ok=True)
+            os.replace(recovered_path, source)
+            return True
+        finally:
+            recovered_path.unlink(missing_ok=True)
+
+    def _replace_with_fresh_database(self) -> None:
+        """Create and atomically install a fresh migrated database after failed recovery."""
+
+        source = Path(self.db_path)
+        with tempfile.NamedTemporaryFile(
+            prefix=f"{source.stem}.fresh-", suffix=source.suffix, dir=source.parent, delete=False
+        ) as temporary:
+            fresh_path = Path(temporary.name)
+        try:
+            SQLiteMigrationRunner(str(fresh_path)).migrate()
+            with sqlite3.connect(fresh_path) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if self._sqlite_integrity_check(str(fresh_path)).lower() != "ok":
+                raise RuntimeError("fresh SQLite database failed integrity check")
+            for suffix in ("-wal", "-shm", "-journal"):
+                Path(f"{source}{suffix}").unlink(missing_ok=True)
+            os.replace(fresh_path, source)
+        finally:
+            fresh_path.unlink(missing_ok=True)
+
+    def _initialize_writable_database(self) -> None:
+        """Migrate, validate, and recover the writable store before an operation can use it."""
+
+        database_exists = Path(self.db_path).exists()
+        try:
             SQLiteMigrationRunner(self.db_path).migrate()
+            integrity = self._sqlite_integrity_check(self.db_path)
+            if integrity.lower() == "ok":
+                return
+            raise sqlite3.DatabaseError(f"integrity_check={integrity}")
+        except (OSError, sqlite3.DatabaseError) as error:
+            if not database_exists:
+                raise
+            backup = self._backup_database_for_recovery()
+            recovered = self._recover_database()
+            if not recovered:
+                self._replace_with_fresh_database()
+            logger.warning(
+                "SQLite initialization recovery database=%s backup=%s recovered=%s error=%s",
+                Path(self.db_path).name,
+                backup.name,
+                recovered,
+                type(error).__name__,
+            )
+            if self._sqlite_integrity_check(self.db_path).lower() != "ok":
+                raise RuntimeError("SQLite initialization recovery did not produce an integral database")
 
     def _connect(self) -> sqlite3.Connection:
         """Open the application database, enforcing configured access."""
@@ -1330,8 +1631,8 @@ class SQLiteApplicationStore:
                     INSERT INTO operation_model_metrics (
                         logical_target, operation_id, captured_at, provider, model, context_window_tokens,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost,
-                        inference_time_ms, model_calls, correction_loops, efficiency
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        inference_time_ms, model_calls, correction_loops, correction_categories, efficiency
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -1350,6 +1651,7 @@ class SQLiteApplicationStore:
                             row["inference_time_ms"],
                             row["model_calls"],
                             row["correction_loops"],
+                            json.dumps(row["correction_categories"], sort_keys=True),
                             row["efficiency"],
                         )
                         for row in normalized_rows
@@ -1364,7 +1666,7 @@ class SQLiteApplicationStore:
                     """
                     SELECT captured_at, provider, model, context_window_tokens, input_tokens, output_tokens,
                            cache_read_tokens, cache_write_tokens, total_tokens, cost, inference_time_ms,
-                           model_calls, correction_loops, efficiency
+                           model_calls, correction_loops, correction_categories, efficiency
                     FROM operation_model_metrics
                     WHERE logical_target = ? AND operation_id = ?
                     ORDER BY captured_at, provider, model
@@ -1386,7 +1688,8 @@ class SQLiteApplicationStore:
                 "inference_time_ms": float(row[10]),
                 "model_calls": int(row[11]),
                 "correction_loops": int(row[12]),
-                "efficiency": float(row[13]),
+                "correction_categories": json.loads(row[13]) if row[13] else {},
+                "efficiency": float(row[14]),
             }
             for row in rows
         ]
@@ -1464,9 +1767,10 @@ class SQLiteApplicationStore:
                     INSERT INTO tasks (
                         logical_target, task_uid, operation_id, title, objective, acceptance_contract, phase,
                         status, status_reason, evidence,
-                        created_at, updated_at, kind, reference_id, target_scope, target_ids
+                        created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context,
+                        target_scope, target_ids
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(logical_target, operation_id, task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
@@ -1477,6 +1781,9 @@ class SQLiteApplicationStore:
                         evidence=excluded.evidence,
                         kind=excluded.kind,
                         reference_id=excluded.reference_id,
+                        replacement_of=excluded.replacement_of,
+                        supersedes_criteria=excluded.supersedes_criteria,
+                        recovery_context=excluded.recovery_context,
                         target_scope=excluded.target_scope,
                         target_ids=excluded.target_ids,
                         updated_at=excluded.updated_at
@@ -1495,6 +1802,9 @@ class SQLiteApplicationStore:
                     task_dict["updated_at"],
                     task.kind,
                     task.reference_id,
+                    task.replacement_of,
+                    json.dumps(task.supersedes_criteria),
+                    json.dumps(task.recovery_context, sort_keys=True),
                     task.target_scope,
                     json.dumps(task.target_ids),
                 ))
@@ -1506,7 +1816,8 @@ class SQLiteApplicationStore:
             with self._connect() as conn:
                 cursor = conn.execute(
                     "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
-                    "created_at, updated_at, kind, reference_id, target_scope, target_ids "
+                    "created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
+                    "target_scope, target_ids "
                     "FROM tasks WHERE logical_target = ? AND operation_id = ?",
                     (self.logical_target, operation_id),
                 )
@@ -1525,8 +1836,11 @@ class SQLiteApplicationStore:
                             updated_at=row[9],
                             kind=row[10] or "standard",
                             reference_id=row[11],
-                            target_scope=row[12] or "all",
-                            target_ids=json.loads(row[13] or "[]"),
+                            replacement_of=row[12],
+                            supersedes_criteria=json.loads(row[13] or "[]"),
+                            recovery_context=json.loads(row[14] or "{}"),
+                            target_scope=row[15] or "all",
+                            target_ids=json.loads(row[16] or "[]"),
                         )
                     )
         return tasks
@@ -1788,6 +2102,64 @@ class SQLiteApplicationStore:
                     ),
                 )
 
+    def store_finding_evidence_receipt(
+        self,
+        operation_id: str,
+        receipt_uid: str,
+        source_task_uid: str,
+        artifact_ref: str,
+        marker: str,
+        artifact_fingerprint: str,
+    ) -> None:
+        """Persist one task-bound, artifact-backed finding-evidence receipt."""
+
+        with self._lock:
+            with self._connect() as conn:
+                self._register_operation(conn, operation_id)
+                conn.execute(
+                    "INSERT INTO finding_evidence_receipts "
+                    "(logical_target, operation_id, receipt_uid, source_task_uid, artifact_ref, marker, "
+                    "artifact_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self.logical_target,
+                        operation_id,
+                        receipt_uid,
+                        source_task_uid,
+                        artifact_ref,
+                        marker,
+                        artifact_fingerprint,
+                        datetime.now().isoformat(),
+                    ),
+                )
+
+    def get_finding_evidence_receipts(
+        self, operation_id: str, receipt_uids: List[str]
+    ) -> List[Dict[str, str]]:
+        """Load receipts scoped to this target and operation in caller-supplied order."""
+
+        if not receipt_uids:
+            return []
+        placeholders = ", ".join("?" for _ in receipt_uids)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT receipt_uid, source_task_uid, artifact_ref, marker, artifact_fingerprint "
+                    "FROM finding_evidence_receipts WHERE logical_target = ? AND operation_id = ? "
+                    f"AND receipt_uid IN ({placeholders})",
+                    (self.logical_target, operation_id, *receipt_uids),
+                ).fetchall()
+        by_uid = {
+            str(row[0]): {
+                "receipt_uid": str(row[0]),
+                "source_task_uid": str(row[1]),
+                "artifact_ref": str(row[2]),
+                "marker": str(row[3]),
+                "artifact_fingerprint": str(row[4]),
+            }
+            for row in rows
+        }
+        return [by_uid[receipt_uid] for receipt_uid in receipt_uids if receipt_uid in by_uid]
+
     def link_finding_source_task(self, operation_id: str, finding_uid: str, task_uid: str) -> None:
         """Durably associate an idempotent finding candidate with a source task."""
 
@@ -1805,6 +2177,26 @@ class SQLiteApplicationStore:
                 if task_uid not in source_task_uids:
                     source_task_uids.append(task_uid)
                     candidate_data["source_task_uids"] = source_task_uids
+                    receipts = candidate_data.setdefault("source_task_receipts", [])
+                    if not any(
+                        isinstance(receipt, dict) and receipt.get("task_uid") == task_uid
+                        for receipt in receipts
+                    ):
+                        receipts.append(
+                            {
+                                "task_uid": task_uid,
+                                "finding_uid": finding_uid,
+                                "status": "persisted",
+                                "evidence_refs": list(
+                                    dict.fromkeys(
+                                        [
+                                            *candidate_data.get("artifacts", []),
+                                            f"finding:{finding_uid}",
+                                        ]
+                                    )
+                                ),
+                            }
+                        )
                     conn.execute(
                         "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
                         "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
@@ -2352,16 +2744,36 @@ def normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
 
 _RE_PROOF_PACK_FILE_PATTERN = re.compile(r"artifact(?:\s+paths?)?:\s*(\S+)", re.IGNORECASE)
 
+
+def _proof_pack_path_from_value(value: Any) -> str:
+    """Resolve one proof-pack file only when it belongs to this operation's root."""
+
+    reference = str(value or "").strip()
+    if not reference:
+        raise ValueError("proof-pack path is required")
+    if reference.startswith(("artifact:", "artifact_id:")):
+        return _artifact_path_from_ref(reference)
+
+    root = os.path.realpath(_operation_output_root())
+    candidate = reference if os.path.isabs(reference) else os.path.join(root, reference)
+    resolved = os.path.realpath(candidate)
+    if os.path.commonpath([root, resolved]) != root:
+        raise ValueError(f"Proof-pack path is outside the current operation output: {reference}")
+    if not os.path.isfile(resolved):
+        raise ValueError(f"Proof-pack file does not exist: {reference}")
+    return resolved
+
+
 def _has_valid_proof_pack(finding: Any) -> bool:
     """Validate proof_pack structure and artifact existence (fail-closed).
 
     Expectations:
     - proof_pack is a dict with key 'artifacts': List[str] of file paths (absolute or relative)
     - Optional 'rationale': short string tying artifacts to impact
-    - Every listed artifact path MUST exist at validation time
+    - Every usable proof path MUST resolve inside the current operation output and exist at validation time
 
     Notes:
-    - No content parsing or domain heuristics are used here; presence of files only
+    - No content parsing or domain heuristics are used here; operation-local file presence only
     - Any exception or malformed input results in False (fail-closed)
     """
     try:
@@ -2374,19 +2786,20 @@ def _has_valid_proof_pack(finding: Any) -> bool:
                 stack.extend(e.values())
             else:
                 e_str = str(e)
-                if e_str.startswith(("artifact:", "artifact_id:")):
-                    try:
-                        _artifact_path_from_ref(e_str)
-                    except ValueError:
-                        pass
-                    else:
-                        return True
-                if os.path.exists(e_str):
+                try:
+                    _proof_pack_path_from_value(e_str)
+                except ValueError:
+                    pass
+                else:
                     return True
                 matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
                 file_paths = [path.strip() for paths in matches for path in paths.split(",")]
                 for path in file_paths:
-                    if os.path.exists(path):
+                    try:
+                        _proof_pack_path_from_value(path)
+                    except ValueError:
+                        continue
+                    else:
                         return True
     except Exception:
         return False
@@ -2495,7 +2908,40 @@ def _store_memory_entry(
         memory_id = _memory_id_from_result(_exact_memory_match(recovered, cleaned_content))
     if not memory_id:
         raise RuntimeError("Memory was stored, but the backend did not return a durable ID")
+    _emit_memory_added(memory_id, category, cleaned_content)
     return _MemoryStoreResult(created=True, memory_id=memory_id)
+
+
+def set_memory_event_emitter(emitter: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Set the callback used to publish successful durable memory writes."""
+
+    global _MEMORY_EVENT_EMITTER
+    _MEMORY_EVENT_EMITTER = emitter
+
+
+def _emit_memory_added(memory_id: str, category: str, content: str) -> None:
+    """Publish one best-effort event after a new memory receives a durable ID."""
+
+    emitter = _MEMORY_EVENT_EMITTER
+    if not callable(emitter):
+        return
+    preview_limit = 240
+    preview = content[:preview_limit]
+    if len(content) > preview_limit:
+        preview += "..."
+    try:
+        emitter(
+            {
+                "type": "memory_added",
+                "memory_id": memory_id,
+                "memory_ref": f"memory:{memory_id}",
+                "category": category,
+                "content_preview": preview,
+                "content_length": len(content),
+            }
+        )
+    except Exception:
+        logger.debug("Unable to emit memory-added event", exc_info=True)
 
 
 def _operation_output_root() -> str:
@@ -2520,6 +2966,175 @@ def _validated_artifact_paths(artifacts: Any, *, require_one: bool = False) -> L
     return validated
 
 
+def _artifact_fingerprints(references: List[str]) -> Dict[str, str]:
+    """Snapshot evidence identity without assuming an HTTP or tool output format."""
+
+    fingerprints: Dict[str, str] = {}
+    for reference in references:
+        path = Path(_artifact_path_from_ref(reference))
+        try:
+            fingerprints[reference] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise ValueError(f"Unable to fingerprint finding artifact: {reference}") from error
+    return fingerprints
+
+
+def _json_pointer_value(payload: Any, pointer: str) -> Any:
+    """Resolve one RFC 6901 JSON Pointer without evaluating model-authored code."""
+
+    if pointer == "":
+        return payload
+    if not pointer.startswith("/"):
+        raise ValueError("json_value evidence assertion pointer must be empty or start with /")
+    current = payload
+    for raw_part in pointer[1:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (IndexError, TypeError, ValueError) as error:
+                raise ValueError(f"json_value evidence assertion pointer does not exist: {pointer}") from error
+        elif isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            raise ValueError(f"json_value evidence assertion pointer does not exist: {pointer}")
+    return current
+
+
+def _assertion_matches_artifact(assertion: Dict[str, Any], reference: str) -> bool:
+    """Evaluate one canonical, data-only assertion against an artifact."""
+
+    path = Path(_artifact_path_from_ref(reference))
+    assertion_type = str(assertion.get("type") or ("literal_text" if "marker" in assertion else ""))
+    try:
+        if assertion_type == "literal_text":
+            value = str(assertion.get("value", assertion.get("marker", "")))
+            return bool(value) and value in path.read_text(encoding="utf-8", errors="replace")
+        if assertion_type == "byte_sequence":
+            encoding = assertion["encoding"]
+            expected = (
+                bytes.fromhex(assertion["value"])
+                if encoding == "hex"
+                else base64.b64decode(assertion["value"], validate=True)
+            )
+            return bool(expected) and expected in path.read_bytes()
+        if assertion_type == "json_value":
+            actual = _json_pointer_value(json.loads(path.read_text(encoding="utf-8")), assertion["pointer"])
+            operator = assertion["operator"]
+            if operator == "exists":
+                return True
+            if operator == "equals":
+                return actual == assertion.get("expected")
+            expected = assertion.get("expected")
+            return (
+                expected in actual
+                if isinstance(actual, (str, list, dict))
+                else False
+            )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+        return False
+    return False
+
+
+def _canonical_assertion_predicate(assertion: Dict[str, Any]) -> str:
+    """Return an artifact-independent identity for a canonical evidence assertion."""
+
+    predicate = {key: value for key, value in assertion.items() if key not in {"artifact", "marker"}}
+    if not predicate.get("type") and assertion.get("marker"):
+        predicate = {"type": "literal_text", "value": str(assertion["marker"])}
+    return json.dumps(
+        predicate,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _validated_evidence_assertions(
+    assertions: Any,
+    allowed_artifacts: List[str],
+    *,
+    require_one: bool = False,
+) -> List[Dict[str, Any]]:
+    """Normalize and validate typed evidence predicates against cited artifacts."""
+
+    if assertions is None:
+        assertions = []
+    if not isinstance(assertions, list):
+        raise ValueError("evidence_assertions must be a list")
+    validated: List[Dict[str, str]] = []
+    for assertion in assertions:
+        if not isinstance(assertion, dict):
+            raise ValueError("each evidence assertion must be an object")
+        reference = _validated_artifact_paths([assertion.get("artifact")], require_one=True)[0]
+        if reference not in allowed_artifacts:
+            raise ValueError("evidence assertion artifact must be among the cited artifacts")
+        assertion_type = str(assertion.get("type") or ("literal_text" if "marker" in assertion else "")).strip()
+        if assertion_type not in {"literal_text", "byte_sequence", "json_value"}:
+            raise ValueError("evidence assertion type must be literal_text, byte_sequence, or json_value")
+        normalized: Dict[str, Any] = {"artifact": reference, "type": assertion_type}
+        if assertion_type == "literal_text":
+            value = _clean_memory_text(assertion.get("value", assertion.get("marker")), "evidence assertion value")
+            if not value:
+                raise ValueError("literal_text evidence assertion value must not be empty")
+            normalized["value"] = value
+            # Retain the legacy field in persisted records and receipts during the additive transition.
+            normalized["marker"] = value
+        elif assertion_type == "byte_sequence":
+            encoding = str(assertion.get("encoding") or "").lower().strip()
+            value = str(assertion.get("value") or "").strip()
+            if encoding not in {"hex", "base64"} or not value:
+                raise ValueError("byte_sequence evidence assertion requires value and encoding hex or base64")
+            normalized.update({"encoding": encoding, "value": value})
+        else:
+            pointer = str(assertion.get("pointer") or "")
+            operator = str(assertion.get("operator") or "").lower().strip()
+            if operator not in {"exists", "equals", "contains"}:
+                raise ValueError("json_value evidence assertion operator must be exists, equals, or contains")
+            if operator != "exists" and "expected" not in assertion:
+                raise ValueError(f"json_value {operator} evidence assertion requires expected")
+            normalized.update({"pointer": pointer, "operator": operator})
+            if "expected" in assertion:
+                normalized["expected"] = assertion["expected"]
+        if not _assertion_matches_artifact(normalized, reference):
+            raise ValueError(f"evidence assertion was not satisfied by {reference}")
+        if normalized not in validated:
+            validated.append(normalized)
+    if require_one and not validated:
+        raise ValueError("At least one evidence assertion is required")
+    return validated
+
+
+def _matching_evidence_assertions(
+    candidate_assertions: Any,
+    validation_assertions: Any,
+    validation_artifacts: List[str],
+    validation_fingerprints: Any,
+) -> bool:
+    """Return whether validation re-proved every candidate evidence predicate."""
+
+    try:
+        candidate_predicates = {
+            _canonical_assertion_predicate(item)
+            for item in _validated_evidence_assertions(candidate_assertions, [
+                str(item.get("artifact")) for item in candidate_assertions if isinstance(item, dict)
+            ], require_one=True)
+        }
+        validated = _validated_evidence_assertions(
+            validation_assertions, validation_artifacts, require_one=True
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    if not candidate_predicates or candidate_predicates != {
+        _canonical_assertion_predicate(item) for item in validated
+    }:
+        return False
+    expected_fingerprints = validation_fingerprints if isinstance(validation_fingerprints, dict) else {}
+    try:
+        return expected_fingerprints == _artifact_fingerprints(validation_artifacts)
+    except ValueError:
+        return False
+
+
 @tool
 def store_observation(
     content: str,
@@ -2533,6 +3148,36 @@ def store_observation(
     """
 
     merged = _clean_metadata(metadata)
+    source_task = _active_finding_source_task(_get_database_store(), _operation_id())
+    try:
+        plan = _get_active_plan()
+    except (RuntimeError, ValueError):
+        plan = None
+    if source_task is not None and plan is not None:
+        selected_targets = _selected_task_targets(plan, source_task)
+        if len(selected_targets) == 1:
+            target = selected_targets[0]
+            supplied_location = str(merged.get("target") or merged.get("location") or "").strip()
+            if supplied_location and "://" in supplied_location and target.type == "network":
+                submitted = urlsplit(supplied_location)
+                registered = urlsplit(target.value)
+                try:
+                    matches = (
+                        submitted.scheme.lower() == registered.scheme.lower()
+                        and submitted.hostname is not None
+                        and registered.hostname is not None
+                        and submitted.hostname.lower().rstrip(".") == registered.hostname.lower().rstrip(".")
+                        and submitted.port == registered.port
+                    )
+                except ValueError:
+                    matches = False
+                if not matches:
+                    raise ValueError(
+                        "observation target/location must match the active task's assigned target boundary"
+                    )
+            merged["target_id"] = target.target_id
+            merged["target"] = target.value
+            merged.pop("location", None)
     if artifacts:
         merged["artifacts"] = _validated_artifact_paths(artifacts)
     result = _store_memory_entry(content, "observation", merged)
@@ -2550,10 +3195,17 @@ def store_knowledge(content: str, metadata: Optional[Dict[str, Any]] = None) -> 
     """Store one reusable technique, lesson, or durable internal note.
 
     Knowledge remains retrievable but is excluded from security assessment reports.
+    The returned memory_ref may be supplied as durable evidence for record_task_acceptance.
     """
 
-    _store_memory_entry(content, "knowledge", metadata)
-    return "Knowledge stored."
+    result = _store_memory_entry(content, "knowledge", metadata)
+    return json.dumps(
+        {
+            "stored": True,
+            "created": result.created,
+            "memory_ref": f"memory:{result.memory_id}",
+        }
+    )
 
 
 def _finding_fingerprint(title: str, claim: str, target: str, technique: str) -> str:
@@ -2566,12 +3218,216 @@ def _finding_fingerprint(title: str, claim: str, target: str, technique: str) ->
 def _active_finding_source_task_uid(store: Any, operation_id: str) -> str:
     """Return the sole active non-verification task when a workflow executor owns the call."""
 
+    task = _active_finding_source_task(store, operation_id)
+    return task.task_uid if task is not None else ""
+
+
+def _active_finding_source_task(store: Any, operation_id: str) -> Optional[Task]:
+    """Return the sole active non-verification task when a workflow executor owns the call."""
+
     active = [
         task
         for task in store.get_tasks(operation_id)
         if task.status == "active" and task.kind not in {"finding_validation", "objective_validation"}
     ]
-    return active[0].task_uid if len(active) == 1 else ""
+    return active[0] if len(active) == 1 else None
+
+
+def _effective_url_port(parsed: Any) -> Optional[int]:
+    """Return an explicit or conventional URL port without assuming HTTP-only targets."""
+
+    try:
+        if parsed.port is not None:
+            return parsed.port
+    except ValueError:
+        return None
+    return {"http": 80, "https": 443}.get(str(parsed.scheme or "").lower())
+
+
+def _selected_finding_targets(plan: OperationPlan, task: Optional[Task]) -> List[OperationTarget]:
+    """Return operation targets assigned to a finding-producing task."""
+
+    selected_ids = set(task.target_ids) if task is not None and task.target_scope == "subset" else set()
+    return [target for target in plan.targets if not selected_ids or target.target_id in selected_ids]
+
+
+def _url_target_match(submitted: Any, target: OperationTarget) -> bool:
+    registered = urlsplit(str(target.value or "").strip())
+    try:
+        return bool(
+            submitted.scheme
+            and registered.scheme
+            and submitted.hostname
+            and registered.hostname
+            and submitted.scheme.lower() == registered.scheme.lower()
+            and submitted.hostname.lower().rstrip(".") == registered.hostname.lower().rstrip(".")
+            and _effective_url_port(submitted) == _effective_url_port(registered)
+        )
+    except ValueError:
+        return False
+
+
+def _single_edit_hostname_match(left: str, right: str) -> bool:
+    """Recognize one conservative hostname typo without granting execution authority."""
+
+    left = str(left or "").lower().rstrip(".")
+    right = str(right or "").lower().rstrip(".")
+    if not left or not right or min(len(left), len(right)) < 5 or abs(len(left) - len(right)) > 1:
+        return False
+    if left == right:
+        return True
+    if len(left) == len(right):
+        differences = [index for index, pair in enumerate(zip(left, right)) if pair[0] != pair[1]]
+        if len(differences) == 1:
+            return True
+        return (
+            len(differences) == 2
+            and differences[1] == differences[0] + 1
+            and left[differences[0]] == right[differences[1]]
+            and left[differences[1]] == right[differences[0]]
+        )
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    short_index = long_index = differences = 0
+    while short_index < len(shorter) and long_index < len(longer):
+        if shorter[short_index] == longer[long_index]:
+            short_index += 1
+        else:
+            differences += 1
+            if differences > 1:
+                return False
+        long_index += 1
+    return True
+
+
+def _url_target_typo_match(submitted: Any, target: OperationTarget) -> bool:
+    """Match one unique service hostname typo while preserving scheme and port."""
+
+    registered = urlsplit(str(target.value or "").strip())
+    try:
+        return bool(
+            submitted.scheme
+            and registered.scheme
+            and submitted.hostname
+            and registered.hostname
+            and submitted.scheme.lower() == registered.scheme.lower()
+            and _effective_url_port(submitted) == _effective_url_port(registered)
+            and _single_edit_hostname_match(submitted.hostname, registered.hostname)
+        )
+    except ValueError:
+        return False
+
+
+def _path_is_within(candidate: str, root: str) -> bool:
+    """Return whether a resolved filesystem location is equal to or below an assigned root."""
+
+    try:
+        return os.path.commonpath([candidate, root]) == root
+    except ValueError:
+        return False
+
+
+def _canonicalize_finding_target(
+    target_value: str,
+    plan: Optional[OperationPlan],
+    source_task: Optional[Task],
+) -> Tuple[str, List[str]]:
+    """Resolve a finding location without changing explicitly supplied target identity."""
+
+    if not isinstance(plan, OperationPlan):
+        return target_value, []
+    value = str(target_value or "").strip()
+    selected = _selected_finding_targets(plan, source_task)
+    allowed = ", ".join(f"{target.target_id}={target.value}" for target in selected)
+    logical_matches = [target for target in selected if value == target.target_id]
+    if len(logical_matches) == 1:
+        return logical_matches[0].value, [logical_matches[0].target_id]
+
+    submitted = urlsplit(value)
+    if "://" in value and submitted.scheme:
+        matches = [target for target in selected if _url_target_match(submitted, target)]
+        for target in selected:
+            if target in matches or not submitted.hostname:
+                continue
+            if target.type == "network" and submitted.hostname.lower().rstrip(".") == target.value.lower().rstrip("."):
+                matches.append(target)
+            elif target.type == "network_range":
+                try:
+                    if ipaddress.ip_address(submitted.hostname) in ipaddress.ip_network(target.value, strict=False):
+                        matches.append(target)
+                except ValueError:
+                    continue
+        typo_corrected = False
+        if not matches:
+            typo_matches = [target for target in selected if _url_target_typo_match(submitted, target)]
+            if len(typo_matches) == 1:
+                matches = typo_matches
+                typo_corrected = True
+        if len(matches) != 1:
+            raise ValueError(
+                "finding target authority must match exactly one assigned target; "
+                f"submitted={value}; allowed targets: {allowed}"
+            )
+        registered = urlsplit(matches[0].value)
+        if typo_corrected:
+            logger.warning(
+                "Canonicalized unique finding hostname typo submitted=%s assigned=%s target_id=%s",
+                submitted.hostname,
+                registered.hostname,
+                matches[0].target_id,
+            )
+        if not registered.scheme:
+            return urlunsplit(
+                (submitted.scheme.lower(), submitted.netloc, submitted.path or "/", submitted.query, "")
+            ), [matches[0].target_id]
+        canonical = urlunsplit(
+            (registered.scheme.lower(), registered.netloc, submitted.path or "/", submitted.query, "")
+        )
+        return canonical, [matches[0].target_id]
+
+    service_targets = [
+        target for target in selected
+        if "://" in str(target.value) and urlsplit(str(target.value)).scheme
+    ]
+    if value.startswith("/") and len(service_targets) == 1 and len(selected) == 1:
+        registered = str(service_targets[0].value).rstrip("/") + "/"
+        return urljoin(registered, value), [service_targets[0].target_id]
+
+    filesystem_matches = []
+    for target in selected:
+        if target.type != "filesystem":
+            continue
+        root = os.path.realpath(target.value)
+        candidate = os.path.realpath(value if os.path.isabs(value) else os.path.join(root, value))
+        if _path_is_within(candidate, root):
+            filesystem_matches.append((target, candidate))
+    if len(filesystem_matches) == 1:
+        return filesystem_matches[0][1], [filesystem_matches[0][0].target_id]
+    if len(service_targets) == 1 and len(selected) == 1 and not filesystem_matches:
+        registered = str(service_targets[0].value).rstrip("/") + "/"
+        return urljoin(registered, value), [service_targets[0].target_id]
+
+    try:
+        submitted_ip = ipaddress.ip_address(value.strip("[]"))
+    except ValueError:
+        submitted_ip = None
+    network_matches = []
+    for target in selected:
+        if target.type == "network_range" and submitted_ip is not None:
+            try:
+                if submitted_ip in ipaddress.ip_network(target.value, strict=False):
+                    network_matches.append(target)
+            except ValueError:
+                continue
+        elif target.type == "network" and value.rstrip("/") == target.value.rstrip("/"):
+            network_matches.append(target)
+    if len(network_matches) == 1:
+        return value, [network_matches[0].target_id]
+    if filesystem_matches or network_matches or value.startswith("/"):
+        raise ValueError(f"finding target is ambiguous within assigned targets: {allowed}")
+    raise ValueError(
+        "finding target must be an assigned logical target, an in-scope absolute location, or an unambiguous "
+        f"relative location; submitted={value}; allowed targets: {allowed}"
+    )
 
 
 def _finding_tool_result(finding_uid: str, verification_task_uid: str, status: str) -> str:
@@ -2587,7 +3443,93 @@ def _finding_tool_result(finding_uid: str, verification_task_uid: str, status: s
     )
 
 
-@tool
+def _record_source_task_finding_receipt(
+    source_task: Optional[Task],
+    candidate: Dict[str, Any],
+    finding_uid: str,
+) -> None:
+    """Record candidate persistence without treating it as task-acceptance evidence.
+
+    A persisted candidate is useful progress, but it is not proof that the source
+    task's frozen criterion has been satisfied.  Keep this receipt inside the
+    candidate record so a later validation failure can be reported without
+    rewriting an immutable acceptance ledger.
+    """
+
+    if source_task is None:
+        return
+    receipts = candidate.setdefault("source_task_receipts", [])
+    if not any(item.get("task_uid") == source_task.task_uid for item in receipts if isinstance(item, dict)):
+        receipts.append(
+            {
+                "task_uid": source_task.task_uid,
+                "finding_uid": finding_uid,
+                "status": "persisted",
+                "evidence_refs": list(dict.fromkeys([*candidate["artifacts"], f"finding:{finding_uid}"])),
+            }
+        )
+
+
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "claim": {"type": "string"},
+                "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]},
+                "target": {"type": "string"},
+                "technique": {"type": "string"},
+                "expected_result": {"type": "string"},
+                "observed_result": {"type": "string"},
+                "reproduction_steps": {"type": "array", "items": {"type": "string"}},
+                "artifacts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "evidence_assertions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "artifact": {"type": "string"},
+                            "type": {
+                                "type": "string",
+                                "enum": ["literal_text", "byte_sequence", "json_value"],
+                            },
+                            "marker": {"type": "string"},
+                            "value": {},
+                            "encoding": {"type": "string", "enum": ["hex", "base64"]},
+                            "pointer": {"type": "string"},
+                            "operator": {"type": "string", "enum": ["exists", "equals", "contains"]},
+                            "expected": {},
+                        },
+                        "oneOf": [
+                            {"required": ["artifact", "marker"]},
+                            {
+                                "properties": {"type": {"const": "literal_text"}},
+                                "required": ["artifact", "type", "value"],
+                            },
+                            {
+                                "properties": {"type": {"const": "byte_sequence"}},
+                                "required": ["artifact", "type", "encoding", "value"],
+                            },
+                            {
+                                "properties": {"type": {"const": "json_value"}},
+                                "required": ["artifact", "type", "pointer", "operator"],
+                            },
+                        ],
+                    },
+                    "description": (
+                        "Typed positive predicates observed in cited artifacts. Legacy marker is literal_text."
+                    ),
+                },
+            },
+            "required": [
+                "title", "claim", "severity", "target", "technique", "expected_result", "observed_result",
+                "reproduction_steps", "artifacts", "evidence_assertions",
+            ],
+        }
+    }
+)
 def store_finding(
     title: str,
     claim: str,
@@ -2598,12 +3540,15 @@ def store_finding(
     observed_result: str,
     reproduction_steps: List[str],
     artifacts: NonEmptyArtifactRefs,
+    evidence_assertions: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Submit one finding candidate and create its dedicated verification task.
 
-    This tool never creates a verified finding directly. Every distinct candidate is verified by a separate,
-    same-phase task before it can affect confirmed risk totals. Taxonomy classification is performed by a separate,
-    read-only workflow agent after this candidate is persisted.
+    This tool never creates a verified finding directly. Each candidate must include typed positive-evidence assertions
+    satisfied by its cited artifacts; a separate same-phase task must independently reproduce every assertion before the
+    finding can affect confirmed risk totals. Taxonomy classification is performed by a separate, read-only workflow
+    agent after this candidate is persisted. The candidate location is bound to its assigned service, network, or
+    filesystem target before persistence.
     """
 
     candidate = {
@@ -2636,13 +3581,37 @@ def store_finding(
     if any(term in observed_lower for term in weak_evidence_terms):
         raise ValueError("observed_result must describe concrete observed evidence, not assumptions")
     candidate["artifacts"] = _validated_artifact_paths(artifacts, require_one=True)
-
+    candidate["artifact_fingerprints"] = _artifact_fingerprints(candidate["artifacts"])
+    op_id = _operation_id()
+    store = _get_database_store()
+    source_task = _active_finding_source_task(store, op_id)
+    candidate["evidence_assertions"] = _validated_evidence_assertions(
+        evidence_assertions, candidate["artifacts"], require_one=True
+    )
+    source_task_uid = source_task.task_uid if source_task is not None else ""
+    candidate["evidence_receipts"] = []
+    if source_task is not None:
+        for assertion in candidate["evidence_assertions"]:
+            receipt_uid = str(uuid.uuid4())
+            store.store_finding_evidence_receipt(
+                op_id,
+                receipt_uid,
+                source_task.task_uid,
+                assertion["artifact"],
+                str(assertion.get("marker") or _canonical_assertion_predicate(assertion)),
+                candidate["artifact_fingerprints"][assertion["artifact"]],
+            )
+            candidate["evidence_receipts"].append(f"finding_evidence:{receipt_uid}")
+    try:
+        active_plan = _get_active_plan()
+    except ValueError:
+        active_plan = None
+    candidate["target"], bound_target_ids = _canonicalize_finding_target(
+        candidate["target"], active_plan, source_task
+    )
     fingerprint = _finding_fingerprint(
         candidate["title"], candidate["claim"], candidate["target"], candidate["technique"]
     )
-    op_id = _operation_id()
-    store = _get_database_store()
-    source_task_uid = _active_finding_source_task_uid(store, op_id)
     existing = store.get_finding_by_fingerprint(op_id, fingerprint)
     if existing:
         if source_task_uid:
@@ -2663,6 +3632,8 @@ def store_finding(
     candidate["finding_uid"] = finding_uid
     candidate["validation_status"] = "pending"
     candidate["source_task_uids"] = [source_task_uid] if source_task_uid else []
+    candidate["source_task_receipts"] = []
+    _record_source_task_finding_receipt(source_task, candidate, finding_uid)
     content = (
         f"[VULNERABILITY] {candidate['title']} [WHERE] {candidate['target']} "
         f"[IMPACT] {candidate['claim']} [EVIDENCE] {candidate['observed_result']} "
@@ -2671,14 +3642,38 @@ def store_finding(
     _store_memory_entry(content, "finding_candidate", candidate)
 
     current_phase = _get_plan_current_phase()
-    target_ids = _target_ids_for_literal(candidate["target"])
+    target_ids = bound_target_ids or _target_ids_for_literal(candidate["target"])
     target_scope: TargetScope = "subset" if target_ids else "all"
+    candidate["verification_packet"] = {
+        "version": 1,
+        "source_task": {
+            "task_uid": source_task_uid,
+            "title": source_task.title if source_task is not None else "",
+            "objective": source_task.objective if source_task is not None else "",
+        },
+        "target": candidate["target"],
+        "target_scope": target_scope,
+        "target_ids": target_ids,
+        "claim": candidate["claim"],
+        "technique": candidate["technique"],
+        "expected_result": candidate["expected_result"],
+        "observed_result": candidate["observed_result"],
+        "reproduction_steps": candidate["reproduction_steps"],
+        "evidence_assertions": candidate["evidence_assertions"],
+        "artifacts": candidate["artifacts"],
+        "artifact_fingerprints": candidate["artifact_fingerprints"],
+    }
     task = Task(
         task_uid=task_uid,
         title=f"Verify finding: {candidate['title']}",
         objective=(
             f"Independently verify finding candidate {finding_uid} against {candidate['target']}. "
-            "Reproduce the claimed behavior, capture direct or differential artifacts, call "
+            f"Expected result: {candidate['verification_packet']['expected_result']} Observed candidate result: "
+            f"{candidate['verification_packet']['observed_result']} Source evidence: "
+            f"{', '.join(candidate['verification_packet']['artifacts'])}. "
+            "Required positive evidence markers: "
+            f"{', '.join(assertion['marker'] for assertion in candidate['evidence_assertions'])}. "
+            "Reproduce every marker in fresh direct or differential artifacts, call "
             "record_finding_validation with the outcome, and stop."
         ),
         acceptance=AcceptanceContract(
@@ -2707,6 +3702,196 @@ def store_finding(
     store.store_finding_candidate(op_id, finding_uid, fingerprint, candidate, task_uid)
     _ensure_memory_client().store_task(task=task, user_id=_user_id())
     return _finding_tool_result(finding_uid, task_uid, "pending_validation")
+
+
+def _load_finding_validation_guards() -> List[Dict[str, Any]]:
+    """Load the small, declarative catalog of unambiguous validation contradictions."""
+
+    try:
+        payload = yaml.safe_load(_FINDING_VALIDATION_GUARDS_PATH.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError("finding validation guard catalog is unavailable or invalid") from error
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise ValueError("finding validation guard catalog must declare version 1")
+    rules = payload.get("rules")
+    if not isinstance(rules, list):
+        raise ValueError("finding validation guard catalog rules must be a list")
+    validated = []
+    for item in rules:
+        if not isinstance(item, dict):
+            raise ValueError("finding validation guard rules must be objects")
+        rule_id = str(item.get("id") or "").strip()
+        claim_terms = item.get("claim_terms")
+        all_of = item.get("contradiction_all_of")
+        any_of = item.get("contradiction_any_of")
+        json_shape = str(item.get("contradiction_json_shape") or "").strip()
+        confirmation_requirement = str(item.get("confirmation_requirement") or "").strip()
+        if (
+            not rule_id
+            or not isinstance(claim_terms, list)
+            or not all(isinstance(term, str) and term.strip() for term in claim_terms)
+            or (not confirmation_requirement and sum(bool(value) for value in (all_of, any_of, json_shape)) != 1)
+            or (confirmation_requirement and confirmation_requirement not in {"response_comparison", "rate_limit_probe"})
+            or (json_shape and json_shape not in {"flat_json_object"})
+        ):
+            raise ValueError(f"finding validation guard rule {rule_id or '<unknown>'} is invalid")
+        markers = all_of or any_of
+        if markers and (
+            not isinstance(markers, list)
+            or not all(isinstance(marker, str) and marker.strip() for marker in markers)
+        ):
+            raise ValueError(f"finding validation guard rule {rule_id} has invalid contradiction markers")
+        validated.append({
+            "id": rule_id,
+            "claim_terms": [term.lower().strip() for term in claim_terms],
+            "contradiction_all_of": [marker.lower().strip() for marker in all_of or []],
+            "contradiction_any_of": [marker.lower().strip() for marker in any_of or []],
+            "contradiction_json_shape": json_shape,
+            "confirmation_requirement": confirmation_requirement,
+        })
+    return validated
+
+
+def _finding_validation_contradictions(
+    candidate: Dict[str, Any], evidence_artifacts: List[str]
+) -> List[str]:
+    """Return catalog rule IDs contradicted by every cited confirmation artifact."""
+
+    if not evidence_artifacts:
+        return []
+
+    claim_text = " ".join(
+        str(candidate.get(field) or "") for field in ("title", "claim", "technique")
+    ).lower()
+    artifact_texts = []
+    for reference in evidence_artifacts:
+        try:
+            artifact_texts.append(Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace").lower())
+        except (OSError, ValueError):
+            return []
+    contradictions = []
+    for rule in _load_finding_validation_guards():
+        if not any(term in claim_text for term in rule["claim_terms"]):
+            continue
+        markers_all = rule["contradiction_all_of"]
+        markers_any = rule["contradiction_any_of"]
+        json_shape = rule["contradiction_json_shape"]
+        if not markers_all and not markers_any and not json_shape:
+            continue
+        if json_shape == "flat_json_object":
+            matches = all(_is_flat_json_object(text) for text in artifact_texts)
+        else:
+            matches = all(
+                all(marker in text for marker in markers_all)
+                if markers_all
+                else any(marker in text for marker in markers_any)
+                for text in artifact_texts
+            )
+        if matches:
+            contradictions.append(rule["id"])
+    return contradictions
+
+
+def _is_flat_json_object(text: str) -> bool:
+    """Return whether text is a JSON object whose values contain no nested objects or arrays."""
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and bool(payload) and all(
+        not isinstance(value, (dict, list)) for value in payload.values()
+    )
+
+
+def _finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return opt-in positive confirmation requirements matched by a finding claim."""
+
+    claim_text = " ".join(
+        str(candidate.get(field) or "") for field in ("title", "claim", "technique")
+    ).lower()
+    requirements = []
+    for rule in _load_finding_validation_guards():
+        requirement = rule.get("confirmation_requirement")
+        if requirement and any(term in claim_text for term in rule["claim_terms"]):
+            requirements.append({"id": rule["id"], "kind": str(requirement)})
+    return requirements
+
+
+def _read_json_artifact(reference: str) -> Tuple[str, Dict[str, Any]]:
+    canonical = _validated_artifact_paths([reference], require_one=True)[0]
+    try:
+        payload = json.loads(Path(_artifact_path_from_ref(canonical)).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("validation_manifest must be a readable JSON artifact") from error
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise ValueError("validation_manifest must declare version 1")
+    return canonical, payload
+
+
+def _response_signature(reference: str) -> Dict[str, str]:
+    """Derive a stable response signature from one resolved response artifact."""
+
+    canonical = _validated_artifact_paths([reference], require_one=True)[0]
+    try:
+        text = Path(_artifact_path_from_ref(canonical)).read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise ValueError(f"Unable to read validation response artifact: {canonical}") from error
+    status_match = re.search(r"\bHTTP(?:/\d(?:\.\d)?)?\s+(\d{3})\b|\bstatus(?:_code)?\s*[:=]\s*(\d{3})\b", text, re.I)
+    status = next((value for value in status_match.groups() if value), "") if status_match else ""
+    body = re.split(r"\r?\n\r?\n", text, maxsplit=1)[-1]
+    return {
+        "artifact": canonical,
+        "status": status,
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
+def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -> Dict[str, Any]:
+    """Validate narrow, artifact-derived positive predicates for matched claim families."""
+
+    manifest_ref, manifest = _read_json_artifact(reference)
+    requirements = _finding_confirmation_requirements(candidate)
+    checks = manifest.get("checks")
+    if not isinstance(checks, dict):
+        raise ValueError("validation_manifest must contain a checks object")
+    derived: Dict[str, Any] = {}
+    for requirement in requirements:
+        rule_id = requirement["id"]
+        check = checks.get(rule_id)
+        if not isinstance(check, dict):
+            raise ValueError(f"validation_manifest is missing required check: {rule_id}")
+        if requirement["kind"] == "response_comparison":
+            existing = _response_signature(check.get("known_existing_artifact", ""))
+            nonexistent = _response_signature(check.get("known_nonexistent_artifact", ""))
+            if (existing["status"], existing["body_sha256"]) == (
+                nonexistent["status"], nonexistent["body_sha256"],
+            ):
+                raise ValueError("user_enumeration confirmation requires materially different response signatures")
+            derived[rule_id] = {"known_existing": existing, "known_nonexistent": nonexistent}
+        elif requirement["kind"] == "rate_limit_probe":
+            attempts = check.get("attempts")
+            if not isinstance(attempts, list) or len(attempts) < 10:
+                raise ValueError("lack_of_rate_limiting confirmation requires at least 10 recorded attempts")
+            normalized_attempts = []
+            for expected_index, attempt in enumerate(attempts, 1):
+                if not isinstance(attempt, dict) or int(attempt.get("sequence", 0) or 0) != expected_index:
+                    raise ValueError("rate-limit attempts must be ordered sequentially from 1")
+                signature = _response_signature(attempt.get("response_artifact", ""))
+                artifact_text = Path(_artifact_path_from_ref(signature["artifact"])).read_text(
+                    encoding="utf-8", errors="replace"
+                ).lower()
+                if signature["status"] == "429" or any(
+                    marker in artifact_text for marker in ("too many requests", "rate limit", "account locked", "locked out")
+                ):
+                    raise ValueError("rate-limit probe contains throttling or lockout evidence")
+                normalized_attempts.append(signature)
+            derived[rule_id] = {"attempt_count": len(normalized_attempts), "attempts": normalized_attempts}
+    return {
+        "manifest": manifest_ref,
+        "requirements": requirements,
+        "derived": derived,
+    }
 
 
 @tool(
@@ -2744,6 +3929,10 @@ def store_finding(
                     "default": None,
                     "description": "Negative-control artifacts for differential validation.",
                 },
+                "validation_manifest": {
+                    "type": "string",
+                    "description": "Versioned JSON artifact with claim-specific validation evidence when required.",
+                },
             },
             "required": ["finding_uid", "outcome", "summary", "reproduction_steps"],
         }
@@ -2757,8 +3946,10 @@ def record_finding_validation(
     evidence_strategy: str = "direct",
     evidence_artifacts: Optional[List[str]] = None,
     control_artifacts: Optional[List[str]] = None,
+    evidence_assertions: Optional[List[Dict[str, str]]] = None,
+    validation_manifest: Optional[str] = None,
 ) -> str:
-    """Record the result of the active, dedicated finding-verification task."""
+    """Record a validation outcome, deterministically re-proving candidate evidence for confirmations."""
 
     op_id = _operation_id()
     store = _get_database_store()
@@ -2781,6 +3972,52 @@ def record_finding_validation(
     controls = _validated_artifact_paths(control_artifacts)
     if normalized_outcome == "confirmed" and strategy == "differential" and not controls:
         raise ValueError("Differential confirmation requires at least one negative-control artifact")
+    manifest_attestation: Dict[str, Any] = {}
+    if normalized_outcome == "confirmed":
+        requirements = _finding_confirmation_requirements(record.get("candidate_data") or {})
+        if requirements:
+            if not validation_manifest:
+                required = ", ".join(item["id"] for item in requirements)
+                raise ValueError(f"confirmed validation requires validation_manifest for: {required}")
+            manifest_attestation = _validate_confirmation_manifest(
+                record.get("candidate_data") or {}, validation_manifest
+            )
+            evidence = list(dict.fromkeys([*evidence, manifest_attestation["manifest"]]))
+        candidate_assertions = (record.get("candidate_data") or {}).get("evidence_assertions")
+        assertions = []
+        for candidate_assertion in candidate_assertions or []:
+            if not isinstance(candidate_assertion, dict):
+                raise ValueError("finding candidate has no valid positive evidence assertions")
+            matching_artifact = next(
+                (
+                    reference
+                    for reference in evidence
+                    if _assertion_matches_artifact(candidate_assertion, reference)
+                ),
+                None,
+            )
+            if matching_artifact is None:
+                raise ValueError(
+                    "confirmed validation evidence did not reproduce candidate assertion: "
+                    + _canonical_assertion_predicate(candidate_assertion)
+                )
+            reproduced = dict(candidate_assertion)
+            reproduced["artifact"] = matching_artifact
+            assertions.append(reproduced)
+        if not _matching_evidence_assertions(
+            candidate_assertions,
+            assertions,
+            evidence,
+            _artifact_fingerprints(evidence),
+        ):
+            raise ValueError("confirmed validation assertions must re-prove every candidate evidence assertion")
+        contradictions = _finding_validation_contradictions(record.get("candidate_data") or {}, evidence)
+        if contradictions:
+            raise ValueError(
+                "confirmed finding validation is contradicted by cited evidence: " + ", ".join(contradictions)
+            )
+    else:
+        assertions = []
 
     validation = {
         "finding_uid": finding_uid,
@@ -2790,6 +4027,9 @@ def record_finding_validation(
         "evidence_strategy": strategy,
         "evidence_artifacts": evidence,
         "control_artifacts": controls,
+        "evidence_assertions": assertions,
+        "evidence_artifact_fingerprints": _artifact_fingerprints(evidence),
+        "validation_manifest_attestation": manifest_attestation,
         "validation_status": "submitted",
     }
     if not validation["reproduction_steps"]:
@@ -2818,6 +4058,60 @@ def record_finding_validation(
     )
 
 
+def build_record_finding_validation_tool(task: Task) -> Any:
+    """Bind finding validation to the candidate assigned to one verification task."""
+
+    if task.kind != "finding_validation" or not task.reference_id:
+        raise ValueError("record_finding_validation requires a bound finding-validation task")
+    finding_uid = task.reference_id
+
+    def record_bound_finding_validation(
+        outcome: str,
+        summary: str,
+        reproduction_steps: List[str],
+        evidence_strategy: str = "direct",
+        evidence_artifacts: Optional[List[str]] = None,
+        control_artifacts: Optional[List[str]] = None,
+        validation_manifest: Optional[str] = None,
+    ) -> str:
+        return record_finding_validation(
+            finding_uid,
+            outcome,
+            summary,
+            reproduction_steps,
+            evidence_strategy,
+            evidence_artifacts,
+            control_artifacts,
+            None,
+            validation_manifest,
+        )
+
+    record_bound_finding_validation.__name__ = "record_finding_validation"
+    record_bound_finding_validation.__doc__ = """Record the independent outcome for this assigned finding candidate.
+
+The controller binds this tool to the only finding assigned to the task. Supply fresh evidence artifacts and an
+outcome; Python re-proves the candidate's immutable markers and records the frozen task acceptance.
+"""
+    return tool(
+        record_bound_finding_validation,
+        inputSchema={
+            "json": {
+                "type": "object",
+                "properties": {
+                    "outcome": {"type": "string", "enum": ["confirmed", "not_confirmed"]},
+                    "summary": {"type": "string"},
+                    "reproduction_steps": {"type": "array", "items": {"type": "string"}},
+                    "evidence_strategy": {"type": "string", "enum": ["direct", "differential"]},
+                    "evidence_artifacts": {"type": "array", "items": {"type": "string"}},
+                    "control_artifacts": {"type": "array", "items": {"type": "string"}},
+                    "validation_manifest": {"type": "string"},
+                },
+                "required": ["outcome", "summary", "reproduction_steps"],
+            }
+        },
+    )
+
+
 def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> Optional[str]:
     """Materialize the evaluator-approved resolution for a verification task."""
 
@@ -2831,7 +4125,21 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
 
     candidate = record["candidate_data"]
     validation = record.get("validation_data")
-    confirmed = evaluator_status == "done" and validation and validation.get("outcome") == "confirmed"
+    confirmed = (
+        evaluator_status == "done"
+        and validation
+        and validation.get("outcome") == "confirmed"
+        and _matching_evidence_assertions(
+            candidate.get("evidence_assertions"),
+            validation.get("evidence_assertions"),
+            validation.get("evidence_artifacts", []),
+            validation.get("evidence_artifact_fingerprints"),
+        )
+        and (
+            not _finding_confirmation_requirements(candidate)
+            or bool(validation.get("validation_manifest_attestation"))
+        )
+    )
     if confirmed:
         metadata = dict(candidate)
         metadata.update(validation)
@@ -2842,6 +4150,7 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
                 "validation_status": "verified",
                 "artifacts": validation["evidence_artifacts"],
                 "negative_control_artifacts": validation["control_artifacts"],
+                "candidate_evidence_assertions": candidate["evidence_assertions"],
             }
         )
         _store_memory_entry(candidate["claim"], "finding", metadata)
@@ -3292,6 +4601,10 @@ class TaskProposal(_StrictTaskWireModel):
         default_factory=list,
         description="Existing task, memory, artifact, or finding references; use [] for procedure proposals",
     )
+    finding_refs: List[str] = Field(
+        default_factory=list,
+        description="Canonical persisted finding references required by finding-dependent work",
+    )
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
     criteria: List[TaskProposalCriterion] = Field(min_length=1, max_length=1)
     target_ids: List[str] = Field(default_factory=list)
@@ -3520,6 +4833,7 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                         },
                     },
                     "snapshot_refs": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "finding_refs": {"type": "array", "items": {"type": "string"}, "default": []},
                     "output_kind": {"type": "string", "enum": ["artifact", "inventory_manifest"]},
                     "criteria": {
                         "type": "array",
@@ -3731,6 +5045,189 @@ def _validate_proposal_service_scope(proposal: TaskProposal, selected_targets: L
             f"task scope exceeds explicit service target boundary ({'; '.join(details)}); "
             f"allowed ports are {sorted(allowed_ports)}"
         )
+
+
+_EXPLICIT_SERVICE_URL_REFERENCE_PATTERN = re.compile(
+    r"(?<![\w+.-])[a-z][a-z0-9+.-]*://[^\s\"'<>`]+",
+    re.IGNORECASE,
+)
+
+
+_SCOPE_HOSTNAME_PATTERN = re.compile(
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?"
+)
+_FINDING_VALIDATION_GUARDS_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "system" / "finding_validation_guards.yaml"
+)
+
+
+def _is_valid_bare_scope_host_port(reference: str) -> bool:
+    """Return whether a scheme-less reference contains an intentional host:port literal."""
+
+    parsed = urlsplit(f"//{reference}")
+    host = (parsed.hostname or "").rstrip(".")
+    if not host:
+        return False
+    if reference.startswith("["):
+        try:
+            return isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+        except ValueError:
+            return False
+    return bool(_SCOPE_HOSTNAME_PATTERN.fullmatch(host))
+
+
+def _bare_scope_host_is_assigned(reference: str, targets: List[OperationTarget]) -> bool:
+    """Return whether a bare host:port token names an assigned host or in-scope IP."""
+
+    parsed = urlsplit(f"//{reference}")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host or not _is_valid_bare_scope_host_port(reference):
+        return False
+    for target in targets:
+        assigned_host = (_explicit_target_host(target) or "").lower().rstrip(".")
+        if assigned_host and host == assigned_host:
+            return True
+        if target.type == "network" and host == str(target.value).lower().rstrip("."):
+            return True
+        if target.type == "network_range":
+            try:
+                if ipaddress.ip_address(host) in ipaddress.ip_network(target.value, strict=False):
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def _selected_task_targets(plan: OperationPlan, task: Task) -> List[OperationTarget]:
+    """Return only the executable targets assigned to a task."""
+
+    if task.target_scope == "subset":
+        selected_ids = set(task.target_ids)
+        return [target for target in plan.targets if target.target_id in selected_ids]
+    return list(plan.targets)
+
+
+def _explicit_service_references(
+    text: str,
+    *,
+    include_bare_host_ports: bool = True,
+    assigned_targets: Optional[List[OperationTarget]] = None,
+) -> List[str]:
+    """Extract URL or host:port literals without interpreting artifact paths as targets."""
+
+    references = []
+    seen = set()
+    url_matches = list(_EXPLICIT_SERVICE_URL_REFERENCE_PATTERN.finditer(text or ""))
+    for match in url_matches:
+        reference = match.group(0).rstrip(".,;:)]}")
+        if reference and reference not in seen:
+            references.append(reference)
+            seen.add(reference)
+    if not include_bare_host_ports:
+        return references
+    for match in _RE_HOST_PORT_TARGET.finditer(text or ""):
+        if any(start <= match.start() and match.end() <= end for start, end in (item.span() for item in url_matches)):
+            continue
+        reference = match.group(0).rstrip(".,;:)]}")
+        if (
+            reference
+            and _bare_scope_host_is_assigned(reference, assigned_targets or [])
+            and reference not in seen
+        ):
+            references.append(reference)
+            seen.add(reference)
+    return references
+
+
+def task_service_scope_validation_details(plan: OperationPlan, task: Task, text: str) -> List[Dict[str, Any]]:
+    """Return structured service-boundary violations for task text.
+
+    A task assigned to an explicit service may mention a route or query, but every explicit URL or host:port
+    literal must retain an assigned host and port. URL literals must retain the registered scheme as well.
+    Bare host:port literals are accepted for an explicitly registered URL because they do not assert a different
+    scheme. Filesystem and artifact prose is deliberately ignored.
+    """
+
+    selected_targets = _selected_task_targets(plan, task)
+    service_targets = []
+    for target in selected_targets:
+        host = _explicit_target_host(target)
+        port = _explicit_target_port(target)
+        if host and port is not None:
+            value = str(target.value).strip()
+            parsed = urlsplit(value if "://" in value else f"//{value}")
+            service_targets.append(
+                {
+                    "target_id": target.target_id,
+                    "value": str(target.value),
+                    "scheme": parsed.scheme.lower() or None,
+                    "host": host.lower().rstrip("."),
+                    "port": port,
+                }
+            )
+    if not service_targets:
+        return []
+
+    technology_only = all(
+        criterion.id == "validate-the-assigned-technology" for criterion in task.acceptance.criteria
+    )
+    violations = []
+    for reference in _explicit_service_references(
+        text,
+        include_bare_host_ports=not technology_only,
+        assigned_targets=selected_targets,
+    ):
+        parsed = urlsplit(reference if "://" in reference else f"//{reference}")
+        try:
+            port = parsed.port
+        except ValueError:
+            violations.append({
+                "literal": reference,
+                "scheme": parsed.scheme.lower() or None,
+                "host": (parsed.hostname or "").lower().rstrip("."),
+                "port": None,
+                "reason": "invalid_port",
+                "allowed_targets": service_targets,
+            })
+            continue
+        host = (parsed.hostname or "").lower().rstrip(".")
+        scheme = parsed.scheme.lower() or None
+        matches = [
+            target
+            for target in service_targets
+            if target["host"] == host
+            and target["port"] == port
+            and (scheme is None or target["scheme"] is None or target["scheme"] == scheme)
+        ]
+        if not matches:
+            violations.append({
+                "literal": reference,
+                "scheme": scheme,
+                "host": host,
+                "port": port,
+                "reason": "boundary_mismatch",
+                "allowed_targets": service_targets,
+            })
+    return violations
+
+
+def task_service_scope_violations(plan: OperationPlan, task: Task, text: str) -> List[str]:
+    """Return human-readable exact service-boundary violations for task text."""
+
+    messages = []
+    for violation in task_service_scope_validation_details(plan, task, text):
+        allowed = ", ".join(
+            f"{target['target_id']}={target['value']}" for target in violation["allowed_targets"]
+        )
+        if violation["reason"] == "invalid_port":
+            messages.append(f"invalid service reference `{violation['literal']}`; allowed targets: {allowed}")
+        else:
+            messages.append(
+                f"service reference `{violation['literal']}` differs from assigned scheme/host/port boundary; "
+                f"allowed targets: {allowed}"
+            )
+    return messages
 
 
 def resolve_bound_executable_target(requested_target: str) -> str:
@@ -4274,6 +5771,29 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
     for item, normalized_value in normalized_values:
         item["value"] = normalized_value
         normalized_inventory = True
+    endpoint_keys = set()
+    deduplicated_items = []
+    duplicate_endpoint_count = 0
+    for item in manifest["items"]:
+        if str(item.get("kind")) != "endpoint":
+            deduplicated_items.append(item)
+            continue
+        route = _normalized_route(str(item.get("value") or ""))
+        key = (str(item.get("target_id") or ""), route[0] if route else "")
+        if route and key in endpoint_keys:
+            duplicate_endpoint_count += 1
+            normalized_inventory = True
+            continue
+        if route:
+            endpoint_keys.add(key)
+        deduplicated_items.append(item)
+    if duplicate_endpoint_count:
+        manifest["items"] = deduplicated_items
+        logger.info(
+            "Removed duplicate inventory endpoints reference=%s duplicate_count=%d",
+            canonical_artifact_reference(reference),
+            duplicate_endpoint_count,
+        )
     if reconcile:
         manifest = _reconcile_inventory_manifest(path, manifest)
     elif normalized_inventory:
@@ -4282,22 +5802,13 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
     return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _collapse_duplicate_vulnerability_path(path: str) -> str:
-    segments = [segment for segment in path.split("/") if segment]
-    if segments.count("vulnerabilities") < 2:
-        return path
-    for width in range(1, len(segments) // 2 + 1):
-        for start in range(0, len(segments) - (2 * width) + 1):
-            if segments[start:start + width] == segments[start + width:start + (2 * width)]:
-                collapsed = segments[:start + width] + segments[start + (2 * width):]
-                return "/" + "/".join(collapsed) + ("/" if path.endswith("/") else "")
-    return path
-
-
 def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> str:
     """Canonicalize one HTTP inventory route and enforce its registered service boundary."""
 
-    parsed = urlsplit(str(value or "").strip())
+    raw_value = str(value or "").strip().replace(r'\"', '"')
+    if raw_value.startswith('"') and raw_value.endswith('"') and len(raw_value) >= 2:
+        raw_value = raw_value[1:-1].strip()
+    parsed = urlsplit(raw_value)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"inventory endpoint must be an absolute HTTP(S) URL: {value}")
     if registered_target:
@@ -4307,8 +5818,18 @@ def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> st
                 raise ValueError(
                     "inventory endpoint does not preserve the registered target scheme/host/port boundary"
                 )
-    path = re.sub(r"/{2,}", "/", parsed.path or "/")
-    path = _collapse_duplicate_vulnerability_path(path)
+    cleaned_segments = []
+    for segment in (parsed.path or "/").split("/"):
+        cleaned = segment.strip('"')
+        if not cleaned or cleaned == ".":
+            continue
+        cleaned_segments.append(cleaned)
+    path = "/" + "/".join(cleaned_segments)
+    if parsed.path.endswith("/") and path != "/":
+        path += "/"
+    if any(character in path or character in parsed.query for character in ('"', "\\")):
+        raise ValueError("inventory endpoint contains unsupported raw quote or backslash route syntax")
+    path = re.sub(r"/{2,}", "/", path)
     query = parsed.query.rstrip("&")
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, query, ""))
 
@@ -4433,6 +5954,40 @@ def _normalize_task_proposal(proposal: TaskProposal) -> _NormalizedTaskProposal:
     return _NormalizedTaskProposal(proposal=proposal, basis_kind=basis_kind, limits=limits)
 
 
+def _proposal_execution_requirements(
+    proposal: TaskProposal,
+    plan: OperationPlan,
+    criterion_id: str,
+) -> Tuple[ExecutionRequirement, ...]:
+    """Derive narrow, controller-owned execution obligations for procedure work."""
+
+    if proposal.inferred_basis_kind != "procedure":
+        return ()
+    selected_ids = proposal.target_ids or [target.target_id for target in plan.targets]
+    selected_targets = [target for target in plan.targets if target.target_id in selected_ids]
+    routes = _procedure_proposal_endpoint_routes(proposal, selected_targets)
+    subjects = routes or [f"target:{target_id}" for target_id in selected_ids]
+    method_aliases = {
+        "spider": "crawl",
+        "spidering": "crawl",
+        "web_spider": "crawl",
+        "web_spidering": "crawl",
+    }
+    canonical_methods = [
+        method_aliases.get(re.sub(r"[^a-z0-9]+", "_", method.lower()).strip("_"), method)
+        for method in proposal.methods
+    ]
+    method_text = ", ".join(dict.fromkeys(canonical_methods))
+    return tuple(
+        ExecutionRequirement(
+            id=f"{criterion_id}-execution-{index}",
+            description=f"Produce execution evidence for {method_text} against {subject}.",
+            subject_ref=subject,
+        )
+        for index, subject in enumerate(subjects, start=1)
+    )
+
+
 def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -> AcceptanceContract:
     """Compile a small task proposal into the full immutable acceptance contract."""
 
@@ -4450,6 +6005,7 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
                 ),
                 min_count=1,
             )],
+            execution_requirements=_proposal_execution_requirements(proposal, plan, criterion_id),
         )
         for criterion_id, criterion in zip(criterion_ids, proposal.criteria)
     ]
@@ -4561,10 +6117,14 @@ def _phase_specific_coverage_criterion(
 
 
 _INVENTORY_WIDE_PHASE_SCOPE_PATTERNS = (
+    re.compile(r"\ball\s+(?:discovered|reachable)\b", re.I),
     re.compile(r"\b(?:all|every)\s+(?:discovered\s+)?(?:entities|endpoints|items|routes|workflows)\b", re.I),
     re.compile(r"\b(?:across|throughout)\s+(?:the\s+)?(?:baseline\s+)?(?:inventory|application)\b", re.I),
     re.compile(r"\b(?:the\s+)?entire\s+(?:baseline\s+)?(?:inventory|application)\b", re.I),
+    re.compile(r"\bin\s+(?:the\s+)?baseline\s+inventory\b", re.I),
     re.compile(r"\bfrom\s+the\s+baseline\s+inventory\b", re.I),
+    re.compile(r"\b(?:across|throughout)\s+key\s+workflows\b", re.I),
+    re.compile(r"\bkey\s+workflows\b", re.I),
 )
 
 
@@ -4676,6 +6236,78 @@ def _normalized_route(value: str) -> Optional[Tuple[str, str]]:
     return route_url, route_url
 
 
+_PROPOSAL_RELATIVE_ENDPOINT_PATTERN = re.compile(
+    r"(?:\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+|"
+    r"\b(?:endpoint|route|path)\s*(?:is|at|:)?\s*)"
+    r"(?P<path>/[^\s\"'<>`]+)",
+    re.IGNORECASE,
+)
+_PROPOSAL_WORKFLOW_WORDING_PATTERN = re.compile(r"\b(?:workflow|flow)\b", re.IGNORECASE)
+
+
+def _normalized_http_route_path(value: str) -> Optional[str]:
+    """Return a normalized HTTP route path without scheme, authority, or query."""
+
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    return path.rstrip("/") or "/"
+
+
+def _procedure_proposal_endpoint_routes(
+    proposal: TaskProposal,
+    selected_targets: List[OperationTarget],
+) -> List[str]:
+    """Return distinct HTTP endpoint routes explicitly named by a procedure proposal."""
+
+    http_targets = [
+        target
+        for target in selected_targets
+        if (parsed := urlsplit(str(target.value).strip())).scheme.lower() in {"http", "https"}
+        and parsed.netloc
+    ]
+    if not http_targets:
+        return []
+
+    text = _proposal_scope_text(proposal)
+    routes = set()
+    for reference in _explicit_service_references(
+        text,
+        include_bare_host_ports=False,
+        assigned_targets=http_targets,
+    ):
+        normalized = _normalized_http_route_path(reference)
+        if normalized is not None:
+            routes.add(normalized)
+    for match in _PROPOSAL_RELATIVE_ENDPOINT_PATTERN.finditer(text):
+        raw_path = match.group("path").rstrip(".,;)]}")
+        if not raw_path:
+            continue
+        normalized = re.sub(r"/{2,}", "/", urlsplit(raw_path).path or "/")
+        routes.add(normalized.rstrip("/") or "/")
+    return sorted(routes)
+
+
+def _validate_procedure_proposal_route_atomicity(
+    proposal: TaskProposal,
+    selected_targets: List[OperationTarget],
+) -> None:
+    """Reject accidental multi-route HTTP work while allowing declared workflows."""
+
+    if proposal.inferred_basis_kind != "procedure":
+        return
+    routes = _procedure_proposal_endpoint_routes(proposal, selected_targets)
+    if len(routes) <= 1 or _PROPOSAL_WORKFLOW_WORDING_PATTERN.search(_proposal_scope_text(proposal)):
+        return
+    raise ValueError(
+        "procedure proposal contains multiple distinct endpoint routes: "
+        + ", ".join(routes)
+        + ". Resubmit separate route-scoped proposals. Use workflow or flow wording only for a genuine ordered "
+        "multi-step workflow."
+    )
+
+
 def _coverage_route_groups(
     manifest: Dict[str, Any],
     *,
@@ -4690,14 +6322,30 @@ def _coverage_route_groups(
         for item in manifest["items"]
         if item["kind"] == "endpoint"
     }
+    endpoint_route_keys = {
+        (str(item["target_id"]), route[0])
+        for item in endpoints_by_id.values()
+        if (route := _normalized_route(str(item["value"]))) is not None
+    }
     for item in manifest["items"]:
         item_id = str(item["id"])
         kind = str(item["kind"])
-        route = _normalized_route(str(item["value"])) if kind in {"endpoint", "parameter"} else None
-        if kind == "parameter" and route is None:
+        if kind == "parameter":
             endpoint_id = str(item.get("attributes", {}).get("endpoint_id", ""))
             endpoint = endpoints_by_id.get(endpoint_id)
             route = _normalized_route(str(endpoint["value"])) if endpoint else None
+            if route is None:
+                parameter_route = _normalized_route(str(item["value"]))
+                if parameter_route and (str(item["target_id"]), parameter_route[0]) in endpoint_route_keys:
+                    # Older recon manifests may encode a parameter as a URL with
+                    # a query string instead of recording endpoint_id.
+                    route = parameter_route
+            if route is None:
+                # A parameter without an owning endpoint is useful inventory metadata,
+                # but cannot be assessed safely as an independent network target.
+                continue
+        else:
+            route = _normalized_route(str(item["value"])) if kind == "endpoint" else None
         if route is not None:
             route_key, label = route
             group_key = (str(item["target_id"]), f"route:{route_key}")
@@ -4818,6 +6466,7 @@ def _create_tasks_from_proposals(
     expected_snapshot_ref: Optional[str] = None,
     phase_title: str = "",
     phase_objective: str = "",
+    required_finding_refs: Optional[set[str]] = None,
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
@@ -4861,6 +6510,18 @@ def _create_tasks_from_proposals(
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
         title = proposal.title.strip()
         objective = proposal.objective.strip()
+        finding_refs = list(dict.fromkeys(
+            str(reference).strip() for reference in proposal.finding_refs if str(reference).strip()
+        ))
+        if required_finding_refs is not None:
+            if not finding_refs:
+                raise ValueError("finding-dependent task proposal requires at least one canonical finding_refs entry")
+            invalid_finding_refs = sorted(set(finding_refs) - required_finding_refs)
+            if invalid_finding_refs:
+                raise ValueError(
+                    "finding-dependent task proposal includes unavailable finding_refs: "
+                    + ", ".join(invalid_finding_refs)
+                )
         replacement_of = str(proposal.replacement_of or "").strip() or None
         supersedes_criteria = list(dict.fromkeys(
             str(criterion_id).strip() for criterion_id in proposal.supersedes_criteria if str(criterion_id).strip()
@@ -4875,8 +6536,10 @@ def _create_tasks_from_proposals(
                 raise ValueError("replacement_of must reference a partial_failure or blocked task")
             parent_criteria = {criterion.id for criterion in parent.acceptance.criteria}
             if not supersedes_criteria or not set(supersedes_criteria).issubset(parent_criteria):
+                allowed_criteria = ", ".join(sorted(parent_criteria)) or "none"
                 raise ValueError(
-                    "supersedes_criteria must identify existing acceptance criteria on the parent task"
+                    "supersedes_criteria must identify existing acceptance criteria on the parent task; "
+                    f"allowed criterion IDs: {allowed_criteria}"
                 )
         elif supersedes_criteria:
             raise ValueError("supersedes_criteria requires replacement_of")
@@ -4887,6 +6550,10 @@ def _create_tasks_from_proposals(
             plan=plan,
             proposal=proposal,
         )
+        selected_targets = [
+            target for target in plan.targets if not target_ids or target.target_id in set(target_ids)
+        ]
+        _validate_procedure_proposal_route_atomicity(proposal, selected_targets)
         acceptance = _freeze_and_validate_acceptance(
             _proposal_acceptance_contract(proposal, plan),
             [*existing_tasks, *staged_tasks],
@@ -5098,7 +6765,7 @@ def _create_tasks_from_proposals(
                 title=group_title,
                 objective=group_objective,
                 acceptance=group_acceptance,
-                evidence=[],
+                evidence=finding_refs,
                 phase=current_phase,
                 status="pending",
                 target_scope=group_target_scope,
@@ -5164,6 +6831,8 @@ def build_create_tasks_tool(
     expected_snapshot_ref: Optional[str] = None,
     phase_title: str = "",
     phase_objective: str = "",
+    required_finding_refs: Optional[set[str]] = None,
+    invocation_observer: Optional[Callable[[Dict[str, Any], Any, Optional[Exception]], None]] = None,
 ) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
 
@@ -5174,16 +6843,25 @@ def build_create_tasks_tool(
         """Create the active phase's durable tasks and stop after the first successful call."""
 
         nonlocal completed
-        if completed:
-            raise ValueError("Task creation already completed for this role run")
-        result = _create_tasks_from_proposals(
-            tasks,
-            prompt_token_limit=prompt_token_limit,
-            coverage_item_ids=coverage_item_ids,
-            expected_snapshot_ref=expected_snapshot_ref,
-            phase_title=phase_title,
-            phase_objective=phase_objective,
-        )
+        tool_input = {"tasks": tasks}
+        try:
+            if completed:
+                raise ValueError("Task creation already completed for this role run")
+            result = _create_tasks_from_proposals(
+                tasks,
+                prompt_token_limit=prompt_token_limit,
+                coverage_item_ids=coverage_item_ids,
+                expected_snapshot_ref=expected_snapshot_ref,
+                phase_title=phase_title,
+                phase_objective=phase_objective,
+                required_finding_refs=required_finding_refs,
+            )
+        except Exception as error:
+            if invocation_observer is not None:
+                invocation_observer(tool_input, None, error)
+            raise
+        if invocation_observer is not None:
+            invocation_observer(tool_input, result, None)
         if int(json.loads(result).get("created_count", 0)) > 0:
             completed = True
         return result
@@ -5237,7 +6915,18 @@ def _validate_acceptance_result_evidence(
     references = list(dict.fromkeys(references))
     for reference in references:
         if reference.startswith("artifact:"):
-            _artifact_path_from_ref(reference)
+            try:
+                _artifact_path_from_ref(reference)
+            except ValueError as error:
+                requires_inventory = any(
+                    requirement.kind == "inventory_manifest" for requirement in criterion.evidence_requirements
+                )
+                if requires_inventory and "does not exist" in str(error).lower():
+                    raise ValueError(
+                        "The submitted manifest file does not exist. Do not retry acceptance. Create a validated "
+                        "inventory manifest first, then submit its returned artifact reference."
+                    ) from error
+                raise
         elif reference.startswith("memory:"):
             _evidence_reference_kind(reference, "memory")
         elif reference.startswith("finding:"):
@@ -5299,6 +6988,95 @@ def _validate_acceptance_result_evidence(
         missing = sorted(expected_ids - actual_ids)
         unknown = sorted(actual_ids - expected_ids)
         raise ValueError(f"Coverage ledger mismatch; missing={missing}, unknown={unknown}")
+
+
+def _acceptance_evidence_relevance_error(task: Task, result: AcceptanceResult) -> str:
+    """Reject a manifest used as proof for one frozen inventory endpoint.
+
+    This is intentionally based on the inventory item kind and frozen item IDs rather
+    than HTTP URL syntax, so inventories from other modules retain the same guard.
+    """
+
+    if task.acceptance.mode != "coverage" or task.acceptance.basis.kind != "snapshot":
+        return ""
+    expected_ids = set(task.acceptance.basis.item_ids)
+    if not expected_ids:
+        return ""
+    source_endpoint_ids = set()
+    for source_ref in task.acceptance.basis.source_refs:
+        try:
+            manifest, _snapshot_hash = _load_inventory_manifest(source_ref)
+        except ValueError:
+            continue
+        source_endpoint_ids.update(
+            str(item.get("id") or "")
+            for item in manifest.get("items", [])
+            if isinstance(item, dict) and str(item.get("kind") or "") == "endpoint"
+        )
+    if not source_endpoint_ids.intersection(expected_ids):
+        return ""
+    inventory_refs = []
+    for reference in result.evidence_refs:
+        try:
+            _load_inventory_manifest(reference)
+        except ValueError:
+            continue
+        inventory_refs.append(reference)
+    if not inventory_refs:
+        return ""
+    return (
+        "Acceptance evidence is not relevant to the frozen inventory subject. "
+        "An inventory manifest cannot prove a single endpoint assessment: "
+        + ", ".join(sorted(set(inventory_refs)))
+        + ". Do not retry acceptance with this manifest. Retain or create durable evidence for the assigned "
+        "subject, then submit acceptance with that returned reference."
+    )
+
+
+def _snapshot_task_artifact_reference(task: Task, reference: str) -> str:
+    """Copy acceptance artifacts to immutable, task-owned current-operation storage."""
+
+    if not reference.startswith("artifact:"):
+        return reference
+    source = Path(_artifact_path_from_ref(reference))
+    task_segment = hashlib.sha256(task.task_uid.encode("utf-8")).hexdigest()[:16]
+    destination_dir = Path(_operation_output_root()) / "task_evidence" / task_segment
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+    destination = destination_dir / f"{source.stem}-{digest}{source.suffix}"
+    if not destination.exists():
+        shutil.copy2(source, destination)
+    return canonical_artifact_reference(str(destination))
+
+
+def _snapshot_task_acceptance_artifacts(task: Task, results: List[AcceptanceResult]) -> List[AcceptanceResult]:
+    """Return ledger results whose artifact evidence cannot be overwritten by later tasks."""
+
+    references: Dict[str, str] = {}
+
+    def snapshot(reference: str) -> str:
+        if reference not in references:
+            references[reference] = _snapshot_task_artifact_reference(task, reference)
+        return references[reference]
+
+    return [
+        AcceptanceResult(
+            criterion_id=result.criterion_id,
+            status=result.status,
+            disposition=result.disposition,
+            summary=result.summary,
+            evidence_refs=tuple(snapshot(reference) for reference in result.evidence_refs),
+            coverage=tuple(
+                CoverageResult(
+                    item_id=item.item_id,
+                    status=item.status,
+                    evidence_refs=tuple(snapshot(reference) for reference in item.evidence_refs),
+                )
+                for item in result.coverage
+            ),
+        )
+        for result in results
+    ]
 
 
 _CONFIRMED_SECURITY_CLAIM = re.compile(
@@ -5379,6 +7157,11 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
         unknown_ids = sorted(result_ids - known_ids)
         raise ValueError(f"Acceptance results must exactly match frozen criteria; missing={missing_ids}, unknown={unknown_ids}")
 
+    for result in normalized_results:
+        relevance_error = _acceptance_evidence_relevance_error(task, result)
+        if relevance_error:
+            raise ValueError(relevance_error)
+
     existing = store.get_acceptance_results(op_id, task.task_uid)
     if existing:
         if {result.criterion_id for result in existing} != known_ids:
@@ -5402,6 +7185,8 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
     for result in normalized_results:
         _validate_acceptance_disposition(result)
         _validate_acceptance_result_evidence(task, criteria[result.criterion_id], result)
+
+    normalized_results = _snapshot_task_acceptance_artifacts(task, normalized_results)
 
     store.store_acceptance_results(op_id, task.task_uid, normalized_results)
     recorded_results = store.get_acceptance_results(op_id, task.task_uid)
@@ -5556,6 +7341,9 @@ def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult])
             created_at=task.created_at,
             kind=task.kind,
             reference_id=task.reference_id,
+            replacement_of=task.replacement_of,
+            supersedes_criteria=task.supersedes_criteria,
+            recovery_context=task.recovery_context,
             target_scope=task.target_scope,
             target_ids=task.target_ids,
         ),
@@ -5612,7 +7400,39 @@ def _bind_acceptance_finding_reference(
     return normalized
 
 
-def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None) -> Any:
+def _task_execution_receipts(task: Task, criterion: AcceptanceCriterion) -> Dict[str, List[str]]:
+    """Return validated controller receipts persisted in the task recovery context."""
+
+    raw_receipts = task.recovery_context.get("execution_evidence_receipts", {})
+    if not isinstance(raw_receipts, dict):
+        return {}
+    receipts: Dict[str, List[str]] = {}
+    allowed_ids = {requirement.id for requirement in criterion.execution_requirements}
+    for requirement_id, references in raw_receipts.items():
+        if requirement_id not in allowed_ids or not isinstance(references, list):
+            continue
+        canonical = []
+        for reference in references:
+            try:
+                normalized = _canonical_evidence_reference(reference)
+            except ValueError:
+                continue
+            if not normalized.startswith(("artifact:", "artifact_id:")):
+                continue
+            if normalized not in canonical:
+                canonical.append(normalized)
+        if canonical:
+            receipts[requirement_id] = canonical
+    return receipts
+
+
+def build_record_task_acceptance_tool(
+    task_uid: str,
+    task: Optional[Task] = None,
+    execution_evidence_resolver: Optional[
+        Callable[[Task, AcceptanceCriterion], Dict[str, List[str]]]
+    ] = None,
+) -> Any:
     """Build a model-facing acceptance tool bound to one controller-selected task."""
 
     normalized_uid = str(task_uid or "").strip()
@@ -5668,6 +7488,22 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
         )
         manifest, _snapshot_hash = _load_inventory_manifest(artifact_ref)
         coverage_item_ids = tuple(str(item["id"]) for item in manifest["items"])
+    eligible_evidence_refs = []
+    for reference in task.evidence:
+        try:
+            canonical = _canonical_evidence_reference(reference)
+        except ValueError:
+            continue
+        if canonical not in eligible_evidence_refs:
+            eligible_evidence_refs.append(canonical)
+    for reference in task.acceptance.basis.source_refs:
+        try:
+            canonical = _canonical_evidence_reference(reference)
+        except ValueError:
+            continue
+        if canonical not in eligible_evidence_refs:
+            eligible_evidence_refs.append(canonical)
+    eligible_evidence_refs = eligible_evidence_refs[:8]
 
     def record_task_acceptance(
         status: str,
@@ -5677,10 +7513,76 @@ def build_record_task_acceptance_tool(task_uid: str, task: Optional[Task] = None
     ) -> str:
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
-        evidence_refs = [
-            _canonical_evidence_reference(reference)
-            for reference in evidence_refs
+        current_task = next(
+            (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
+            task,
+        )
+        receipts = _task_execution_receipts(current_task, criterion)
+        if execution_evidence_resolver is not None:
+            resolved = execution_evidence_resolver(current_task, criterion)
+            for requirement_id, references in resolved.items():
+                if requirement_id not in {item.id for item in criterion.execution_requirements}:
+                    continue
+                receipts[requirement_id] = list(
+                    dict.fromkeys([*receipts.get(requirement_id, []), *references])
+                )
+        missing_requirements = [
+            requirement for requirement in criterion.execution_requirements if not receipts.get(requirement.id)
         ]
+        if missing_requirements:
+            missing_text = "; ".join(
+                f"{requirement.id} ({requirement.description})" for requirement in missing_requirements
+            )
+            if execution_evidence_resolver is not None:
+                context = dict(current_task.recovery_context)
+                context["pending_controller_acceptance"] = {
+                    "status": status,
+                    "disposition": disposition,
+                    "summary": summary,
+                    "evidence_refs": list(evidence_refs),
+                    "missing_requirement_ids": [requirement.id for requirement in missing_requirements],
+                }
+                _ensure_memory_client().store_task(
+                    task=replace(current_task, recovery_context=context),
+                    user_id=_user_id(),
+                )
+                raise ValueError(
+                    "Acceptance is incomplete: execution evidence is required before acceptance. "
+                    "Missing execution requirements: "
+                    + missing_text
+                    + ". Do not retry record_task_acceptance. The controller retained this acceptance submission "
+                    "and will first reconcile completed tool outcomes from this cycle; it will run one bounded "
+                    "task-local execution-evidence repair only if proof is still missing."
+                )
+            raise ValueError(
+                "Execution evidence is required before acceptance. Missing execution requirements: "
+                + missing_text
+                + ". Do not retry acceptance yet. Complete the exact missing execution prerequisite and retain "
+                "its current-operation artifact; the controller will attach the proof automatically."
+            )
+        if not evidence_refs:
+            eligible = ", ".join(eligible_evidence_refs) or "none"
+            raise ValueError(
+                "acceptance result evidence_refs required; eligible_evidence_refs=" + eligible
+            )
+        try:
+            evidence_refs = [_canonical_evidence_reference(reference) for reference in evidence_refs]
+        except ValueError as error:
+            requires_inventory = any(
+                requirement.kind == "inventory_manifest" for requirement in criterion.evidence_requirements
+            )
+            if requires_inventory and "does not exist" in str(error).lower():
+                raise ValueError(
+                    "The submitted manifest file does not exist. Do not retry acceptance. Create a validated "
+                    "inventory manifest first, then submit its returned artifact reference."
+                ) from error
+            raise
+        execution_evidence_refs = [
+            reference
+            for requirement in criterion.execution_requirements
+            for reference in receipts.get(requirement.id, [])
+        ]
+        evidence_refs = list(dict.fromkeys([*evidence_refs, *execution_evidence_refs]))
         evidence_refs = _bind_acceptance_finding_reference(normalized_uid, disposition, evidence_refs)
         coverage = tuple(
             CoverageResult(item_id=item_id, status=status, evidence_refs=tuple(evidence_refs))
@@ -6021,10 +7923,13 @@ class QdrantMemoryClient:
         metadata: Optional[Dict[str, Any]] = None,
         operation_id: Optional[str] = None,
     ) -> qdrant_models.Filter:
+        target_values = [str(value).strip() for value in self.target_values if str(value).strip()]
+        if not target_values:
+            raise ValueError("Qdrant memory retrieval requires at least one canonical OperationTarget value")
         must: List[Any] = [
             qdrant_models.FieldCondition(
                 key="target_values",
-                match=qdrant_models.MatchAny(any=self.target_values),
+                match=qdrant_models.MatchAny(any=target_values),
             )
         ]
         effective_operation = None
@@ -6059,6 +7964,15 @@ class QdrantMemoryClient:
             "target_values": list(payload.get("target_values") or []),
             "score": getattr(point, "score", None),
         }
+
+    def _memory_matches_target_values(self, memory: Dict[str, Any]) -> bool:
+        """Return whether a retrieved memory shares at least one current target value."""
+
+        stored_values = memory.get("target_values") if isinstance(memory, dict) else None
+        if not isinstance(stored_values, list):
+            return False
+        current_values = {str(value).strip() for value in self.target_values if str(value).strip()}
+        return bool(current_values.intersection(str(value).strip() for value in stored_values if str(value).strip()))
 
     def store_memory(
         self,
@@ -6117,10 +8031,11 @@ class QdrantMemoryClient:
         )
         start = (effective_page - 1) * effective_limit
         page_points = points[start:start + effective_limit]
+        memories = [self._point_to_memory(point) for point in page_points]
         return [
-            self._point_to_memory(point)
-            for point in page_points
-            if bool((point.payload or {}).get("active", True))
+            memory
+            for point, memory in zip(page_points, memories)
+            if bool((point.payload or {}).get("active", True)) and self._memory_matches_target_values(memory)
         ]
 
     def get_memory_by_id(
@@ -6139,7 +8054,7 @@ class QdrantMemoryClient:
         if not points:
             return None
         memory = self._point_to_memory(points[0])
-        allowed = memory["target_values"] and bool(set(memory["target_values"]) & set(self.target_values))
+        allowed = self._memory_matches_target_values(memory)
         if self.memory_mode == "operation":
             allowed = allowed and memory["operation_id"] == self.operation_id
         return memory if allowed else None
@@ -6173,7 +8088,13 @@ class QdrantMemoryClient:
             with_payload=True,
             with_vectors=False,
         )
-        return [self._point_to_memory(point) for point in result.points if bool((point.payload or {}).get("active", True))]
+        return [
+            memory
+            for point in result.points
+            if bool((point.payload or {}).get("active", True))
+            for memory in [self._point_to_memory(point)]
+            if self._memory_matches_target_values(memory)
+        ]
 
     def store_plan(
         self,
@@ -6323,6 +8244,7 @@ class QdrantMemoryClient:
                             reference_id=t.reference_id,
                             replacement_of=t.replacement_of,
                             supersedes_criteria=t.supersedes_criteria,
+                            recovery_context=t.recovery_context,
                             target_scope=t.target_scope,
                             target_ids=t.target_ids,
                         )
@@ -6376,6 +8298,7 @@ class QdrantMemoryClient:
                 reference_id=target.reference_id,
                 replacement_of=target.replacement_of,
                 supersedes_criteria=target.supersedes_criteria,
+                recovery_context=target.recovery_context,
                 target_scope=target.target_scope,
                 target_ids=target.target_ids,
             )
@@ -6406,6 +8329,7 @@ class QdrantMemoryClient:
                         reference_id=p.reference_id,
                         replacement_of=p.replacement_of,
                         supersedes_criteria=p.supersedes_criteria,
+                        recovery_context=p.recovery_context,
                         target_scope=p.target_scope,
                         target_ids=p.target_ids,
                     )
@@ -6685,7 +8609,8 @@ def get_memory_client(silent: bool = False) -> QdrantMemoryClient:
 
 
 def clear_memory_client() -> None:
-    global _MEMORY_CLIENT, _MEMORY_CONFIG, _DATABASE_STORE
+    global _MEMORY_CLIENT, _MEMORY_CONFIG, _DATABASE_STORE, _MEMORY_EVENT_EMITTER
     _MEMORY_CLIENT = None
     _MEMORY_CONFIG = None
     _DATABASE_STORE = None
+    _MEMORY_EVENT_EMITTER = None

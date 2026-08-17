@@ -83,7 +83,7 @@ export CYBER_AGENT_LLM_MODEL=us.anthropic.claude-sonnet-4-5-20250929-v1:0
 ```bash
 export OLLAMA_HOST=http://localhost:11434
 export OLLAMA_CONTEXT_LENGTH=32768
-export CYBER_AGENT_LLM_MODEL=qwen3-coder:30b-a3b-q4_K_M
+export CYBER_AGENT_LLM_MODEL=qwen3.6:27b
 ```
 
 ### LiteLLM (300+ Providers)

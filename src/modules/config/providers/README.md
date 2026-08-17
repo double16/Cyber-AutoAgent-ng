@@ -102,7 +102,7 @@ export CYBER_AGENT_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0
 
 **Model Format:**
 ```bash
-qwen3-coder:30b-a3b-q4_K_M
+qwen3.6:27b
 llama3.2:3b
 mistral:7b-instruct
 ```
@@ -112,7 +112,7 @@ mistral:7b-instruct
 export OLLAMA_HOST=http://localhost:11434
 export OLLAMA_CONTEXT_LENGTH=32768
 export OLLAMA_TIMEOUT=120
-export CYBER_AGENT_LLM_MODEL=qwen3-coder:30b-a3b-q4_K_M
+export CYBER_AGENT_LLM_MODEL=qwen3.6:27b
 export CYBER_AGENT_EMBEDDING_MODEL=nomic-embed-text:latest
 ```
 

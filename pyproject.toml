@@ -59,6 +59,7 @@ dependencies = [
     "ddgs~=9.14.1",
     "rapidfuzz~=3.14.3",
     "psutil~=7.2.2",
+    "pyyaml~=6.0",
 ]
 
 [project.optional-dependencies]
@@ -86,6 +87,7 @@ Documentation = "https://github.com/double16/Cyber-AutoAgent-ng#readme"
 [project.scripts]
 caa = "cyberautoagent:main"
 cyber-autoagent = "cyberautoagent:main"
+caa-export-langfuse-session = "modules.langfuse_session_export:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

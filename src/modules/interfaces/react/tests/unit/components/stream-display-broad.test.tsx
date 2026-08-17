@@ -43,6 +43,27 @@ describe('StreamDisplay broad event rendering', () => {
     expect(output).toContain('Paths unavailable');
   });
 
+  it('renders backend snake-case report paths without prior event normalization', async () => {
+    const { EventLine, render } = await load();
+    const output = render(
+      <EventLine
+        event={{
+          type: 'report_paths',
+          output_dir: '/app/outputs/dvwa/OP_1',
+          report_path: '/app/outputs/dvwa/OP_1/security_assessment_report.md',
+          log_path: '/app/outputs/dvwa/OP_1/cyber_operations.log',
+          artifacts_path: '/app/outputs/dvwa/OP_1/artifacts',
+        } as any}
+        animationsEnabled={false}
+      />
+    ).lastFrame();
+
+    expect(output).toContain('OP_1/security_assessment_report.md');
+    expect(output).toContain('OP_1/cyber_operations.log');
+    expect(output).toContain('OP_1/artifacts');
+    expect(output).not.toContain('Paths unavailable');
+  });
+
   it('does not render streamed report content as an inline snippet', async () => {
     const {EventLine, render} = await load();
     const output = render(
@@ -463,7 +484,12 @@ describe('StreamDisplay broad event rendering', () => {
   });
 
   it('resolves report path candidates across absolute, relative, inferred, and unsafe inputs', async () => {
-    const { mapContainerReportPath, getReportPathCandidates } = await load();
+    const {
+      deriveOperationContext,
+      deriveReportDetails,
+      mapContainerReportPath,
+      getReportPathCandidates,
+    } = await load();
 
     expect(mapContainerReportPath('/app/outputs/example/op/report.md', '/tmp/out'))
       .toBe('/tmp/out/example/op/report.md');
@@ -490,6 +516,45 @@ describe('StreamDisplay broad event rendering', () => {
     expect(absolute[0]).toBe('/var/reports/final.md');
 
     expect(getReportPathCandidates({}, null, null, null)).toEqual([]);
+
+    const reportDetails = deriveReportDetails([
+      { type: 'report_content', content: { summary: 'fallback preview' } },
+      {
+        type: 'report_paths',
+        report_path: '/app/outputs/dvwa/OP_1/security_assessment_report.md',
+      },
+      {
+        type: 'assessment_complete',
+        report_path: '/app/outputs/dvwa/OP_1/final_report.md',
+      },
+    ], '/host/outputs');
+    expect(reportDetails).toEqual({
+      path: '/host/outputs/dvwa/OP_1/final_report.md',
+      content: '{"summary":"fallback preview"}',
+    });
+
+    expect(deriveOperationContext([
+      { type: 'operation_init', operation_id: 'OP_1', target: 'dvwa' },
+      { type: 'operation_init', operation_id: 'OP_2', target: 'example.com' },
+    ], reportDetails.path)).toEqual({
+      operationId: 'OP_2',
+      target: 'example.com',
+      reportPath: '/host/outputs/dvwa/OP_1/final_report.md',
+    });
+
+    expect(deriveReportDetails([
+      { type: 'report_content', content: 'inline fallback' },
+      { type: 'report_paths', reportPath: '/app/outputs/dvwa/OP_3/report.md' },
+    ], '/host/outputs')).toEqual({
+      path: '/host/outputs/dvwa/OP_3/report.md',
+      content: 'inline fallback',
+    });
+    expect(deriveReportDetails([], '/host/outputs')).toEqual({ path: null, content: null });
+    expect(deriveOperationContext([], null)).toEqual({
+      operationId: null,
+      target: null,
+      reportPath: null,
+    });
   });
 
   it('reads bounded report previews from disk without loading entire large reports', async () => {

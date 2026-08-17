@@ -86,6 +86,12 @@ SQLite schema changes are forward-only SQL files in `src/modules/storage/migrati
 prefix. Startup applies each migration transactionally and records its filename and checksum in `schema_migrations`.
 An applied migration must never be edited; add the next numbered file instead.
 
+Before writable workflow state is initialized, the application runs SQLite `PRAGMA integrity_check`. If the existing
+database is unreadable or fails that check, it preserves timestamped `cyber_autoagent.corrupt-*.db` forensic copies
+and any SQLite `-wal`, `-shm`, or `-journal` sidecars. It then attempts SQLite's native `.recover` command and
+validates the recovered database before installing it. If recovery fails, the application starts with a fresh migrated
+database; the preserved files remain available for operator-led forensic recovery.
+
 At assessment finalization, SQLite appends one metrics row per provider/model. Continued operations retain earlier
 captures; reports render every capture in timestamp order rather than combining them. Report-only runs read this
 history without adding metric rows.
@@ -122,6 +128,15 @@ Agents use provider-neutral names:
 
 Workflow bookkeeping tools are intentionally separate from semantic retrieval. Qdrant does not replace SQLite as the
 authoritative source for task, phase, acceptance, or validation status.
+
+`store_finding` validates typed positive assertions in durable artifacts, records internal candidate-persistence
+receipts, and fingerprints cited evidence. Existing `marker` assertions remain valid and normalize to `literal_text`.
+New assertions may use exact text, an encoded byte sequence, or a JSON Pointer with a narrow data-only operator;
+arbitrary executable predicates are not accepted. When a source task's frozen criterion is solely candidate
+persistence, the controller records that task acceptance from the returned finding reference; this does not verify the
+security claim.
+The separate verification task receives the candidate's structured reproduction packet and records the finding outcome
+from fresh evidence.
 
 Workflow prompts exclude automatically published task-acceptance memories and any semantic plan/task bookkeeping.
 Those records remain available for audit and reporting, while agents receive the controller-owned task history and

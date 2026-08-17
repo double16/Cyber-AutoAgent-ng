@@ -121,7 +121,7 @@ bedrock_model = create_bedrock_model(
 
 # Ollama
 ollama_model = create_ollama_model(
-    model_id="qwen3-coder:30b-a3b-q4_K_M"
+    model_id="qwen3.6:27b"
 )
 
 # LiteLLM (Azure)

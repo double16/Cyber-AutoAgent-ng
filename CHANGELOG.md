@@ -2,6 +2,7 @@
 
 ### Features
 
+- Add webcrack and shuji JavaScript reverse-engineering tools.
 - Consolidate authoritative workflow state into `outputs/cyber_autoagent.db`.
 - Replace semantic-memory backends with Qdrant 1.18, using `outputs/qdrant` by default or a configured service.
 - Change memory modes to 'shared' and 'operation' for clarity.
@@ -49,6 +50,36 @@
 
 ### Fixes
 
+- Preserve the wrapped Strands editor instructions in the relative-path editor wrapper so agents retain its
+  command-specific calling guidance.
+- Retain existing operation-local files named by successful tool inputs and outputs as canonical artifact evidence,
+  so fresh recovery cycles receive durable Katana, browser, and other tool-produced artifacts.
+- Classify missing typed task outputs separately from missing execution provenance, give the actor one generic
+  output-only repair turn without an unavailable acceptance tool, and let the controller validate and replay the
+  retained acceptance submission deterministically.
+- Render a bounded active-phase objective for snapshot task creation and route-scoped acceptance criteria without
+  mutating the stored operation plan, preventing controller-generated moving-scope rejections.
+- Replay complete, repaired task-creator JSON submissions through the bound `create_tasks` tool when a model omits
+  its required tool call.
+- Resolve relative editor-tool paths against the process current directory before invoking the Strands editor.
+- Preserve accepted artifact evidence in task-owned immutable paths, merge independent phase inventory snapshots with
+  provenance before downstream fan-out, reject inventory manifests as proof for a single frozen inventory subject,
+  and tolerate stale prompt-memory selectors while retaining valid context.
+- Resolve procedure execution evidence deterministically from task-local tool outcomes and artifacts, removing the
+  model-facing receipt call and replaying retained acceptance after one exact prerequisite repair when needed.
+- Report incomplete `record_task_acceptance` submissions that are waiting on execution proof as tool errors while
+  still retaining the pending acceptance payload for controller replay.
+- Require controller execution receipts to match the frozen target or subject, preserve their artifacts in the
+  immutable acceptance ledger, and contain rejected deterministic acceptance replays within the task workflow.
+- Normalize crawler aliases in execution receipts and accept target-scoped, validated inventory manifests from
+  built-in or MCP evidence producers without requiring a controller-known tool name.
+- Reconcile retained acceptance submissions against completed same-cycle tool outcomes before scheduling an
+  execution-evidence repair, preventing valid crawl and inventory evidence from being discarded as absent.
+- Allow arbitrary URLs in shell commands while rejecting URLs that use a logical operation target ID as the hostname.
+- Make merged phase inventories immutable and content-addressed while preserving complementary interaction metadata,
+  stable item relationships, source provenance, and conflicting source values.
+- Treat a shell command rejected for task-target scope as one bounded, in-session corrective failure with the concrete
+  assigned target retained in the repair guidance.
 - Format inline React TUI report previews as terminal-friendly Markdown.
 - Emit explicit report, log, and artifacts paths so the React TUI populates the ARTIFACTS AND LOGS section reliably.
 - Keep the React footer spinner task title within the live terminal width so long task names do not wrap off screen.

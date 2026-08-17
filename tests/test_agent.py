@@ -32,7 +32,7 @@ class TestModelConfigs:
         """Test local model configuration defaults"""
         config = get_default_model_configs("ollama")
 
-        assert config["llm_model"] == "qwen3-coder:30b-a3b-q4_K_M"
+        assert config["llm_model"] == "qwen3.6:27b"
         assert config["embedding_model"] == "mxbai-embed-large:latest"
         assert config["embedding_dims"] == 1024
 

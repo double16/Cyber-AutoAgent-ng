@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import cyberautoagent
 from modules.handlers.tool_recovery import ToolOutcomeJournal
 
+ORIGINAL_RUN_TARGET_PREFLIGHT = cyberautoagent.run_target_preflight
+
 
 @pytest.fixture(autouse=True)
 def restore_working_directory_after_test():
@@ -57,6 +59,110 @@ def bypass_live_memory_client(monkeypatch):
     """Keep CLI workflow tests independent of local Qdrant/Ollama availability."""
 
     monkeypatch.setattr(cyberautoagent, "get_memory_client", Mock())
+
+
+def test_restore_continuation_state_uses_persisted_objective_and_targets(tmp_path):
+    from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, SQLiteApplicationStore
+
+    operation_id = "OP_20260812_120000"
+    store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical")
+    targets = [OperationTarget("target-1", "https://service.example:8443", "network")]
+    store.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Assess the authenticated service",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(1, "Recon", "active", "Map the service")],
+            targets=targets,
+        ),
+    )
+
+    objective, restored = cyberautoagent.restore_continuation_state(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id=operation_id,
+        incoming_objective="Perform web assessment",
+        module="web",
+        continuation_requested=True,
+        logger=Mock(),
+    )
+
+    assert objective == "Assess the authenticated service"
+    assert restored == targets
+
+
+def test_via_environment_resolves_before_placeholder_classification(monkeypatch):
+    monkeypatch.setenv("CYBER_OBJECTIVE", "Perform web assessment")
+
+    objective = cyberautoagent.resolve_objective_from_environment("via environment")
+
+    assert objective == "Perform web assessment"
+    assert cyberautoagent._is_continuation_objective_placeholder(objective, "web") is True
+
+
+def test_via_environment_requires_a_non_empty_objective(monkeypatch):
+    monkeypatch.delenv("CYBER_OBJECTIVE", raising=False)
+
+    with pytest.raises(ValueError, match="CYBER_OBJECTIVE"):
+        cyberautoagent.resolve_objective_from_environment("via environment")
+
+
+def test_restore_continuation_state_preserves_explicit_objective(tmp_path):
+    from modules.tools.memory import OperationPlan, PlanPhase, SQLiteApplicationStore
+
+    operation_id = "OP_20260812_120001"
+    store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical")
+    store.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Persisted objective",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(1, "Recon", "active", "Map the service")],
+        ),
+    )
+
+    objective, restored = cyberautoagent.restore_continuation_state(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id=operation_id,
+        incoming_objective="Continue only the authentication checks",
+        module="web",
+        continuation_requested=True,
+        logger=Mock(),
+    )
+
+    assert objective == "Continue only the authentication checks"
+    assert restored is None
+
+
+def test_run_target_preflight_validates_supplied_targets_without_resolving(monkeypatch):
+    from modules.tools.memory import OperationTarget
+
+    targets = [OperationTarget("target-1", "service.example", "network")]
+    monkeypatch.setattr(
+        cyberautoagent,
+        "resolve_operation_targets",
+        Mock(side_effect=AssertionError("continuation targets must not be re-resolved")),
+    )
+    expected = cyberautoagent.TargetValidationResult(
+        "target-1", "service.example", "network", "pass", ("test",)
+    )
+    monkeypatch.setattr(cyberautoagent, "validate_operation_targets", Mock(return_value=[expected]))
+    logger = Mock()
+
+    resolved, results = ORIGINAL_RUN_TARGET_PREFLIGHT(
+        logical_target="logical",
+        objective="unused",
+        operation_id="OP_test",
+        logger=logger,
+        emitter=Mock(),
+        targets=targets,
+    )
+
+    assert resolved == targets
+    assert len(results) == 1
 
 
 class TestCLIArguments:
@@ -1347,6 +1453,39 @@ def test_run_agent_until_terminal_state_stops_repeated_tool_loop_without_error(m
     assert logger.warning.called
 
 
+def test_run_agent_until_terminal_state_describes_uncacheable_repeated_tool_loop(monkeypatch):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    logger = SimpleNamespace(debug=Mock(), warning=Mock(), info=Mock())
+
+    class RepeatedToolAgent:
+        def __init__(self):
+            self.messages = []
+            self._cyber_callback_handler = callback
+
+        def __call__(self, message):
+            del message
+            return SimpleNamespace(
+                metrics=None,
+                state={
+                    "repeated_tool_loop": {
+                        "repeat_count": 3,
+                        "tool_name": "shell",
+                        "result_reused": False,
+                    }
+                },
+            )
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+
+    result = _run_agent_helper(RepeatedToolAgent(), callback, logger=logger)
+
+    assert result.reason == "repeated_tool_loop"
+    assert "no reusable completed result was available" in result.message
+
+
 def test_run_agent_until_terminal_state_describes_multi_call_tool_cycle(monkeypatch):
     callback = CliCallback()
     callback.should_stop = Mock(return_value=False)
@@ -1760,7 +1899,7 @@ def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
         tool_input={"command": "curl target"},
         output="200 OK",
     )
-    callback = SimpleNamespace(tool_outcome_journal=journal)
+    callback = SimpleNamespace(tool_outcome_journal=journal, record_max_token_exhaustion=Mock())
     agent = SimpleNamespace(
         _cyber_agent_type="task_executor",
         _cyber_callback_handler=callback,
@@ -1812,10 +1951,16 @@ def test_workflow_task_executor_recovers_once_from_reasoning_loop(monkeypatch):
     assert policies[1].max_model_turns == 1
     assert policies[1].max_tool_calls == 1
     assert agent.messages == []
+    callback.record_max_token_exhaustion.assert_called_once_with(
+        role="task_executor",
+        classification="reasoning_loop",
+        exhaustion_ordinal=1,
+        agent=agent,
+    )
 
 
 def test_workflow_task_executor_propagates_second_max_tokens(monkeypatch):
-    callback = SimpleNamespace(tool_outcome_journal=ToolOutcomeJournal())
+    callback = SimpleNamespace(tool_outcome_journal=ToolOutcomeJournal(), record_max_token_exhaustion=Mock())
     agent = SimpleNamespace(
         _cyber_agent_type="task_executor",
         _cyber_callback_handler=callback,
@@ -1848,6 +1993,7 @@ def test_workflow_task_executor_propagates_second_max_tokens(monkeypatch):
     assert len(calls) == 2
     assert exc_info.value.max_token_classification.kind == "reasoning_loop"
     assert agent.messages == []
+    assert callback.record_max_token_exhaustion.call_count == 2
 
 
 def test_finalize_report_and_evaluation_runs_once(monkeypatch):
@@ -1888,6 +2034,7 @@ def test_finalize_report_and_evaluation_runs_once(monkeypatch):
         "incomplete_reason": None,
         "unresolved_task_count": None,
         "incomplete_phase_ids": [],
+        "workflow_coverage_summary": [],
     }
     callback.trigger_evaluation_on_completion.assert_called_once()
     callback.emit_assessment_complete.assert_called_once()
@@ -2034,7 +2181,7 @@ def test_finalize_report_and_evaluation_handles_missing_handler_and_errors(monke
     )
 
     logger.warning.assert_called_with(
-        "Unable to determine or emit assessment completion: %s",
+        "Unable to emit operation finalization: %s",
         callback.emit_assessment_complete.side_effect,
     )
 

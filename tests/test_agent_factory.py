@@ -166,8 +166,6 @@ def test_agent_factory_sets_load_tools_from_directory_default(monkeypatch):
     monkeypatch.setattr(factory, "get_shared_conversation_manager", lambda: object())
     monkeypatch.setattr(factory, "get_capabilities", lambda provider, model_id: FakeCaps(supports_reasoning=False))
     monkeypatch.setattr(factory, "_resolve_prompt_token_limit", lambda provider, model_id: 123)
-    monkeypatch.setattr(factory, "get_tool_name", lambda t: "tool-x")
-
     cfg = factory.AgentFactoryConfig(hooks=[DummyHook()], base_trace_attributes={"k": "v"})
     make_agent = factory.init_agent_factory(cfg)
 
@@ -312,7 +310,7 @@ def test_agent_factory_allow_reasoning_content_false_on_exception(monkeypatch):
     assert getattr(agent, "_allow_reasoning_content") is False
 
 
-def test_agent_factory_trace_attributes_include_tools_and_names(monkeypatch):
+def test_agent_factory_trace_attributes_do_not_duplicate_strands_tool_metadata(monkeypatch):
     install_fake_tooluseidhook(monkeypatch)
     fake_cm = FakeConfigManager(provider="bedrock")
 
@@ -323,8 +321,6 @@ def test_agent_factory_trace_attributes_include_tools_and_names(monkeypatch):
     monkeypatch.setattr(factory, "get_capabilities", lambda provider, model_id: FakeCaps(supports_reasoning=False))
     monkeypatch.setattr(factory, "_resolve_prompt_token_limit", lambda provider, model_id: 1)
 
-    monkeypatch.setattr(factory, "get_tool_name", lambda t: f"name:{t}")
-
     cfg = factory.AgentFactoryConfig(base_trace_attributes={"base": 1})
     make_agent = factory.init_agent_factory(cfg)
 
@@ -333,8 +329,8 @@ def test_agent_factory_trace_attributes_include_tools_and_names(monkeypatch):
 
     assert ta["base"] == 1
     assert ta["langfuse.agent.type"] == "TypeA"
-    assert ta["tools.available"] == 3
-    assert ta["tools.names"] == ["name:t1", "name:t2", "name:t3"]
+    assert "tools.available" not in ta
+    assert "tools.names" not in ta
 
 
 def test_agent_factory_sets_prompt_token_limit_only_when_truthy(monkeypatch):

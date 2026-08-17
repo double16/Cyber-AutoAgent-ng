@@ -342,6 +342,13 @@ export class EventAggregator {
           duration: event.duration
         } as DisplayStreamEvent);
         break;
+
+      case 'operation_terminated':
+      case 'operation_finalized':
+        this.activeThinking = false;
+        this.activeReasoningSession = false;
+        results.push(event as DisplayStreamEvent);
+        break;
         
       default:
         // Pass through other events as-is

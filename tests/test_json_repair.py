@@ -78,6 +78,21 @@ def test_parse_json_response_extracts_one_object_from_prose_with_metadata():
     assert parsed.metadata.repaired is False
 
 
+def test_parse_json_response_unwraps_a_double_quoted_json_fence():
+    response = json.dumps('```json\n{"tasks": []}\n```')
+
+    parsed = parse_json_response_with_metadata(response, require_object=True)
+
+    assert parsed.value == {"tasks": []}
+    assert parsed.metadata.extracted is True
+    assert parsed.metadata.repaired is True
+
+
+def test_parse_json_response_does_not_unwrap_an_ordinary_json_string():
+    with pytest.raises(ValueError, match="JSON object"):
+        parse_json_response(json.dumps("not a fenced payload"), require_object=True)
+
+
 def test_parse_json_response_repairs_an_extracted_object():
     parsed = parse_json_response_with_metadata('Result: {"approved": true,}')
 

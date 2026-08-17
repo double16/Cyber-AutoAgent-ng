@@ -161,7 +161,7 @@ describe('PythonExecutionService broad environment construction', () => {
         expect(opts.env.EVAL_SUMMARY_MAX_CHARS).toBe('9000');
         expect(opts.env.CYBER_AGENT_PRICING_OUTPUT).toBe('0.009');
         expect(opts.env.EXTRA_ENV).toBe('extra');
-        expect(events.some(event => event.type === 'operation_complete')).toBe(true);
+        expect(events.some(event => event.type === 'operation_finalized')).toBe(true);
     });
 });
 

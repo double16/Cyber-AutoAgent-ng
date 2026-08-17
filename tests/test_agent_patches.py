@@ -4,7 +4,8 @@ from __future__ import annotations
 import pytest
 
 from strands.hooks.events import AfterToolCallEvent
-from modules.agents.patches import patch_model_class_tool_use_id, unpatch_model_class_tool_use_id, ToolUseIdHook
+from modules.agents.patches import ToolUseIdHook, patch_model_class_tool_use_id, unpatch_model_class_tool_use_id
+from modules.utils.reasoning_sanitization import ReasoningSanitizationState, sanitize_reasoning_control_text
 
 
 def _list_id_factory(ids: list[str]):
@@ -404,6 +405,118 @@ async def test_missing_name_is_filled_with_old_tooluseid_when_forced_bad():
 def test_patch_is_idempotent():
     patch_model_class_tool_use_id(FakeModelBasicBad, id_factory=_list_id_factory(["fixed-1"]))
     patch_model_class_tool_use_id(FakeModelBasicBad, id_factory=_list_id_factory(["fixed-2"]))  # no-op
+
+
+def test_reasoning_sanitizer_removes_known_markers_without_changing_other_text():
+    clean, removed = sanitize_reasoning_control_text(
+        "<|channel>thought\nInspect headers.<|message|> Continue. <|unknown|>"
+    )
+
+    assert clean == "\nInspect headers. Continue. <|unknown|>"
+    assert removed == 2
+
+
+def test_reasoning_sanitizer_removes_malformed_channel_marker_without_changing_unknown_markers():
+    clean, removed = sanitize_reasoning_control_text(
+        "<|channel>|thought\nInspect headers. <|unknown|>"
+    )
+
+    assert clean == "\nInspect headers. <|unknown|>"
+    assert removed == 1
+
+
+def test_reasoning_sanitizer_reassembles_split_marker_before_emitting_text():
+    state = ReasoningSanitizationState()
+
+    first, first_removed = sanitize_reasoning_control_text("<|chan", state, "reasoning")
+    second, second_removed = sanitize_reasoning_control_text("nel>thought\nInspect headers.", state, "reasoning")
+
+    assert first == ""
+    assert first_removed == 0
+    assert second == "\nInspect headers."
+    assert second_removed == 1
+
+
+def test_reasoning_sanitizer_reassembles_split_malformed_channel_marker_before_emitting_text():
+    state = ReasoningSanitizationState()
+
+    first, first_removed = sanitize_reasoning_control_text("<|channel>", state, "reasoning")
+    second, second_removed = sanitize_reasoning_control_text("|thought\nInspect headers.", state, "reasoning")
+
+    assert first == ""
+    assert first_removed == 0
+    assert second == "\nInspect headers."
+    assert second_removed == 1
+
+
+def test_reasoning_sanitizer_reassembles_partially_streamed_malformed_channel_label():
+    state = ReasoningSanitizationState()
+
+    first, first_removed = sanitize_reasoning_control_text("<|channel>|tho", state, "reasoning")
+    second, second_removed = sanitize_reasoning_control_text("ught\nInspect headers.", state, "reasoning")
+
+    assert first == ""
+    assert first_removed == 0
+    assert second == "\nInspect headers."
+    assert second_removed == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_patch_sanitizes_reasoning_before_yielding_telemetry_events():
+    class FakeModelReasoningMarkers:
+        async def stream(self):
+            yield {
+                "message": {
+                    "content": [
+                        {"toolUse": {"name": "read_artifact", "toolUseId": "read_artifact"}},
+                        {"reasoningContent": {"reasoningText": {"text": "<|channel>"}}},
+                    ]
+                }
+            }
+            yield {
+                "message": {
+                    "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "thought\nInspect the artifact."}}}
+                    ]
+                }
+            }
+
+    patch_model_class_tool_use_id(FakeModelReasoningMarkers)
+    events = [event async for event in FakeModelReasoningMarkers().stream()]
+    unpatch_model_class_tool_use_id(FakeModelReasoningMarkers)
+
+    second_reasoning = events[1]["message"]["content"][0]["reasoningContent"]["reasoningText"]["text"]
+    assert events[0]["message"]["content"] == [{"toolUse": {"name": "read_artifact", "toolUseId": "read_artifact"}}]
+    assert second_reasoning == "\nInspect the artifact."
+    assert events[0]["message"]["content"][0]["toolUse"]["toolUseId"] == "read_artifact"
+
+
+@pytest.mark.asyncio
+async def test_stream_patch_sanitizes_malformed_channel_marker_before_yielding_telemetry_events():
+    class FakeModelMalformedReasoningMarkers:
+        async def stream(self):
+            yield {
+                "message": {
+                    "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "<|channel>"}}},
+                    ]
+                }
+            }
+            yield {
+                "message": {
+                    "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "|thought\nInspect the artifact."}}}
+                    ]
+                }
+            }
+
+    patch_model_class_tool_use_id(FakeModelMalformedReasoningMarkers)
+    events = [event async for event in FakeModelMalformedReasoningMarkers().stream()]
+    unpatch_model_class_tool_use_id(FakeModelMalformedReasoningMarkers)
+
+    second_reasoning = events[1]["message"]["content"][0]["reasoningContent"]["reasoningText"]["text"]
+    assert events[0]["message"]["content"] == []
+    assert second_reasoning == "\nInspect the artifact."
 
 
 @pytest.mark.asyncio

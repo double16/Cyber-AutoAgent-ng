@@ -13,8 +13,10 @@ def _clear_caches():
     tc._get_cyber_tools.cache_clear()
     tc._get_shell_command_help.cache_clear()
     yield
-    tc._get_cyber_tools.cache_clear()
-    tc._get_shell_command_help.cache_clear()
+    if hasattr(tc._get_cyber_tools, "cache_clear"):
+        tc._get_cyber_tools.cache_clear()
+    if hasattr(tc._get_shell_command_help, "cache_clear"):
+        tc._get_shell_command_help.cache_clear()
 
 
 def _write_env(tmp_path: Path, cyber_tools: dict):

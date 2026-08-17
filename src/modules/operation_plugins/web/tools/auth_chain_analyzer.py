@@ -10,11 +10,17 @@ import tempfile
 import urllib3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
 from strands import tool
+
+from modules.operation_plugins.web.tools.result_cache import (
+    build_result_cache_key,
+    cache_result,
+    get_cached_result,
+)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -33,7 +39,8 @@ def _coerce_str(arg: bytes | str | None) -> str:
 def auth_chain_analyzer(
         target_url: str,
         auth_type: str = "auto",
-        output_file: Optional[str] = None
+        output_file: Optional[str] = None,
+        inventory_manifest: Optional[str] = None,
 ) -> str:
     """
     Map auth flows + identify/validate auth bypass surfaces for a target. Supported: JWT, OAuth, SAML, cookies, sessions.
@@ -54,6 +61,7 @@ def auth_chain_analyzer(
     - target_url: base URL/domain (scheme optional; https assumed)
     - auth_type: "jwt"|"oauth"|"saml"|"session"|"auto" (use specific type to reduce noise)
     - output_file: path to write results to disk
+    - inventory_manifest: path for validated inventory manifest.
 
     RETURNS (JSON)
     - summary: mechanism/token types, confirmed_exploits count
@@ -75,6 +83,18 @@ def auth_chain_analyzer(
     if auth_type not in ["jwt", "oauth", "saml", "session", "auto"]:
         auth_type = "auto"
     auth_type = auth_type.lower()
+
+    cache_key = build_result_cache_key(target_url=target_url, auth_type=auth_type)
+    cached_result = get_cached_result("auth_chain_analyzer", cache_key)
+    if cached_result:
+        cached_payload = json.loads(cached_result)
+        report = cached_payload.get("report", cached_payload)
+        cached_analysis = cached_payload.get("inventory_source")
+        if inventory_manifest:
+            _write_auth_inventory_manifest(report, inventory_manifest, target_url, cached_analysis)
+        output = json.dumps(report, ensure_ascii=False, indent=2)
+        _write_result_file(output_file, output)
+        return output
 
     results = {
         "target": target_url,
@@ -164,8 +184,6 @@ def auth_chain_analyzer(
         # Preserve any previously discovered vulnerabilities; append bypass test results.
         results["vulnerabilities"].extend(bypass_results)
 
-        successful_bypasses = [b for b in bypass_results if isinstance(b, dict) and b.get("successful", False)]
-
         # Convert bypass results into structured findings for the agent.
         for b in bypass_results:
             if not isinstance(b, dict):
@@ -235,27 +253,114 @@ def auth_chain_analyzer(
             "next_phase": "bypass_testing" if best_surface in {"bypass_validation", "exploitation"} else "recon",
         }
 
-        # Output JSON only
+        cache_result(
+            "auth_chain_analyzer",
+            cache_key,
+            json.dumps({"report": report, "inventory_source": results}, ensure_ascii=False, indent=2),
+        )
+        if inventory_manifest:
+            _write_auth_inventory_manifest(report, inventory_manifest, target_url, results)
         output = json.dumps(report, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        output = json.dumps(
-            {
-                "tool": "auth_chain_analyzer",
-                "target": target_url,
-                "auth_type": auth_type,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error": str(e),
-            },
-            ensure_ascii=False,
-            indent=2,
+        error_report = {
+            "tool": "auth_chain_analyzer",
+            "target": target_url,
+            "auth_type": auth_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": str(e),
+        }
+        if inventory_manifest:
+            error_report["inventory_manifest"] = {
+                "path": os.path.abspath(inventory_manifest),
+                "validation_status": "error",
+                "error": "Authentication analysis did not complete, so no inventory manifest was produced.",
+            }
+        output = json.dumps(error_report, ensure_ascii=False, indent=2)
+
+    _write_result_file(output_file, output)
+    return output
+
+
+def _write_result_file(output_file: Optional[str], result: str) -> None:
+    """Write a tool result when the caller requested an output artifact."""
+    if not output_file:
+        return
+    directory = os.path.dirname(output_file)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as file:
+        file.write(result)
+
+
+def _write_auth_inventory_manifest(
+        report: Dict[str, Any],
+        inventory_manifest: str,
+        target_url: str,
+        results: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Materialize a requested inventory manifest from an auth analysis report."""
+    try:
+        from modules.tools.recon_inventory_manifest import (
+            records_to_inventory_manifest,
+            resolve_inventory_target,
+            write_inventory_manifest,
         )
 
-    if output_file:
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(output)
-    return output
+        evidence = report.get("evidence", {}) or {}
+        auth_endpoints = results.get("auth_endpoints", []) if results else (evidence.get("auth_endpoints", {}) or {}).get("top", [])
+        auth_endpoints = auth_endpoints or []
+        records = []
+        for endpoint in auth_endpoints:
+            if isinstance(endpoint, dict):
+                records.append(
+                    {
+                        "url": endpoint.get("url")
+                        or endpoint.get("full_url")
+                        or urljoin(
+                            target_url.rstrip("/") + "/",
+                            str(endpoint.get("endpoint") or endpoint.get("path") or ""),
+                        ),
+                        "method": endpoint.get("method", "GET"),
+                        "status": endpoint.get("status_code") or endpoint.get("status"),
+                    }
+                )
+            else:
+                records.append({"url": endpoint, "method": "GET"})
+        flow_analysis = evidence.get("flow_analysis", {}) or {}
+        workflows = []
+        authentication_steps = (
+            (results.get("flow_analysis", {}) or {}).get("authentication_steps", [])
+            if results
+            else (flow_analysis.get("authentication_steps", {}) or {}).get("items", [])
+        ) or []
+        for step in authentication_steps:
+            if isinstance(step, dict):
+                value = step.get("description") or step.get("endpoint") or step.get("step") or step.get("name")
+                workflows.append({"value": value, "attributes": {"auth_step": step}})
+            else:
+                workflows.append({"value": str(step), "attributes": {}})
+        mechanisms = results.get("auth_mechanisms", []) if results else (evidence.get("auth_mechanisms", {}) or {}).get("items", [])
+        technologies = [
+            f"Authentication: {mechanism.get('type')}"
+            for mechanism in mechanisms
+            if isinstance(mechanism, dict) and mechanism.get("type")
+        ]
+        resolved_manifest_target, manifest_target_id = resolve_inventory_target(target_url)
+        manifest = records_to_inventory_manifest(
+            records,
+            target_id=manifest_target_id,
+            target=resolved_manifest_target,
+            workflows=workflows,
+            technologies=technologies,
+        )
+        report["inventory_manifest"] = write_inventory_manifest(inventory_manifest, manifest)
+    except Exception as manifest_error:
+        report["inventory_manifest"] = {
+            "path": os.path.abspath(inventory_manifest),
+            "validation_status": "error",
+            "error": str(manifest_error),
+        }
 
 
 def _append_unique(list: List, item: Any):
@@ -1830,9 +1935,22 @@ def main() -> int:
         help="Authentication type to focus on (default: auto)",
     )
     parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
+    parser.add_argument(
+        "--inventory-manifest",
+        "--inventory_manifest",
+        default=None,
+        help="Path to write an additional validated inventory manifest",
+    )
 
     args = parser.parse_args()
-    print(auth_chain_analyzer(args.target_url, auth_type=args.auth_type, output_file=args.output_file))
+    print(
+        auth_chain_analyzer(
+            args.target_url,
+            auth_type=args.auth_type,
+            output_file=args.output_file,
+            inventory_manifest=args.inventory_manifest,
+        )
+    )
     return 0
 
 

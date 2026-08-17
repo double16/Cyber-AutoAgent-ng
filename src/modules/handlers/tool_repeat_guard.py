@@ -239,6 +239,22 @@ class ToolRepeatGuardHook(HookProvider):
                 and event.selected_tool is not None
             )
             if not can_reuse:
+                # A missing selected tool cannot produce a reusable result and will otherwise
+                # be retried indefinitely by the model. Canceled calls are handled in _after_tool.
+                if event.selected_tool is None and self._stop_repeated_loop(
+                    state,
+                    event,
+                    cycle,
+                    repeat_count,
+                    result_reused=False,
+                ):
+                    logger.warning(
+                        "Stopping agent after repeated uncacheable tool-call cycle: "
+                        "tool=%s cycle_length=%d repeat=%d",
+                        str(event.tool_use.get("name", "unknown")),
+                        len(cycle),
+                        repeat_count,
+                    )
                 return
 
             state.suppressed += 1
@@ -297,6 +313,7 @@ class ToolRepeatGuardHook(HookProvider):
         event: BeforeToolCallEvent | AfterToolCallEvent,
         cycle: tuple[str, ...],
         repeat_count: int,
+        result_reused: bool | None = None,
     ) -> bool:
         """Stop the current agent after a repeated executed or canceled call cycle."""
 
@@ -307,11 +324,14 @@ class ToolRepeatGuardHook(HookProvider):
         if request_state.get("stop_event_loop") is True:
             return False
         request_state["stop_event_loop"] = True
-        request_state[REPEATED_TOOL_LOOP_STATE_KEY] = {
+        loop_state = {
             "cycle_length": len(cycle),
             "repeat_count": repeat_count,
             "tool_name": str(event.tool_use.get("name", "unknown")),
             "tool_names": [state.tool_names.get(item, "unknown") for item in cycle],
             "cycle_signature": _cycle_signature(cycle),
         }
+        if result_reused is not None:
+            loop_state["result_reused"] = result_reused
+        request_state[REPEATED_TOOL_LOOP_STATE_KEY] = loop_state
         return True

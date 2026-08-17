@@ -25,6 +25,54 @@ def b64s(s: str) -> str:
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
+def test_advanced_payload_reuses_cache_for_equivalent_headers_and_writes_output(monkeypatch, tmp_path):
+    calls = {"setup": 0}
+
+    def setup():
+        calls["setup"] += 1
+        return {"tools": [], "failed": []}
+
+    monkeypatch.setattr(apc, "setup_payload_tools", setup)
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *args, **kwargs: ["q"])
+    monkeypatch.setattr(apc, "_analyze_payload_intelligence", lambda results: {})
+    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda test_type, results: [])
+
+    first = apc.advanced_payload_coordinator(
+        "example.test/path",
+        test_type="param_discovery",
+        headers={"X-First": "1", "X-Second": "2"},
+    )
+    output_file = tmp_path / "cached.json"
+    second = apc.advanced_payload_coordinator(
+        "https://example.test/path",
+        test_type="param_discovery",
+        headers={"X-Second": "2", "X-First": "1"},
+        output_file=str(output_file),
+    )
+
+    assert first == second
+    assert calls["setup"] == 1
+    assert output_file.read_text(encoding="utf-8") == second
+
+
+def test_advanced_payload_cache_key_includes_request_inputs(monkeypatch):
+    calls = {"setup": 0}
+
+    def setup():
+        calls["setup"] += 1
+        return {"tools": [], "failed": []}
+
+    monkeypatch.setattr(apc, "setup_payload_tools", setup)
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *args, **kwargs: [])
+    monkeypatch.setattr(apc, "_analyze_payload_intelligence", lambda results: {})
+    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda test_type, results: [])
+
+    apc.advanced_payload_coordinator("https://example.test", test_type="param_discovery", parameters="q")
+    apc.advanced_payload_coordinator("https://example.test", test_type="param_discovery", parameters="page")
+
+    assert calls["setup"] == 2
+
+
 # -------------------------
 # _b64
 # -------------------------
@@ -1397,4 +1445,3 @@ def test_advanced_payload_small_helpers_and_normalization(monkeypatch):
     assert result["target"] == "https://example.com"
     assert result["test_type"] == "ssti"
     assert result["parameters_discovered"] == ["a", "b", "c", "d", "e", "f"]
-

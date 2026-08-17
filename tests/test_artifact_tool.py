@@ -17,6 +17,30 @@ def test_read_artifact_returns_bounded_lines(tmp_path: Path):
     assert "'total_lines': 4" in result
 
 
+def test_read_artifact_prefers_artifact_directory_for_relative_paths(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "evidence.txt").write_text("artifact copy", encoding="utf-8")
+    (tmp_path / "evidence.txt").write_text("root copy", encoding="utf-8")
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        result = read_artifact("evidence.txt")
+
+    assert "artifact copy" in result
+    assert "artifact:artifacts/evidence.txt" in result
+
+
+def test_read_artifact_falls_back_to_operation_root_for_relative_paths(tmp_path: Path):
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "evidence.txt").write_text("root file", encoding="utf-8")
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        result = read_artifact("tools/evidence.txt")
+
+    assert "root file" in result
+    assert "artifact:tools/evidence.txt" in result
+
+
 def test_read_artifact_rejects_traversal_and_missing_files(tmp_path: Path):
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("secret", encoding="utf-8")
@@ -26,6 +50,8 @@ def test_read_artifact_rejects_traversal_and_missing_files(tmp_path: Path):
             read_artifact(str(outside))
         with pytest.raises(ValueError, match="does not exist"):
             read_artifact("missing.txt")
+        with pytest.raises(ValueError, match="outside"):
+            read_artifact("../../outside.txt")
 
 
 @pytest.mark.parametrize("start_line,max_lines", [(0, 10), (1, 0), (1, 501)])

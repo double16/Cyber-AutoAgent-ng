@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +58,41 @@ def test_store_observation_fixes_category_and_never_promotes(memory_client, oper
     assert metadata["severity"] == "HIGH"
 
 
+def test_new_memory_write_emits_durable_memory_event(memory_client, operation_ids):
+    events = []
+    mod.set_memory_event_emitter(events.append)
+
+    try:
+        store_observation("A newly stored observation")
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert events == [
+        {
+            "type": "memory_added",
+            "memory_id": "m-new",
+            "memory_ref": "memory:m-new",
+            "category": "observation",
+            "content_preview": "A newly stored observation",
+            "content_length": len("A newly stored observation"),
+        }
+    ]
+
+
+def test_memory_added_event_bounds_long_content_preview(memory_client, operation_ids):
+    events = []
+    content = "x" * 241
+    mod.set_memory_event_emitter(events.append)
+
+    try:
+        store_observation(content)
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert events[0]["content_preview"] == ("x" * 240) + "..."
+    assert events[0]["content_length"] == 241
+
+
 def test_store_knowledge_is_internal_category(memory_client, operation_ids):
     store_knowledge("Use a test/control pair", {"knowledge_type": "technique"})
 
@@ -78,6 +114,46 @@ def test_typed_memory_cleaning_and_duplicates(memory_client, operation_ids):
         "memory_ref": "memory:m-existing",
     }
     memory_client.store_memory.assert_not_called()
+
+
+def test_duplicate_memory_write_does_not_emit_memory_added_event(memory_client, operation_ids):
+    events = []
+    memory_client.search.return_value = [{"id": "m-existing", "memory": "Existing observation"}]
+    mod.set_memory_event_emitter(events.append)
+
+    try:
+        store_observation("Existing observation")
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert events == []
+
+
+def test_failed_memory_write_does_not_emit_memory_added_event(memory_client, operation_ids):
+    events = []
+    memory_client.store_memory.side_effect = RuntimeError("backend unavailable")
+    mod.set_memory_event_emitter(events.append)
+
+    try:
+        with pytest.raises(RuntimeError, match="backend unavailable"):
+            store_observation("Unavailable observation")
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert events == []
+
+
+def test_memory_event_callback_failure_does_not_interrupt_storage(memory_client, operation_ids):
+    def fail_event(_event):
+        raise RuntimeError("event transport unavailable")
+
+    mod.set_memory_event_emitter(fail_event)
+    try:
+        result = json.loads(store_observation("Stored despite event transport failure"))
+    finally:
+        mod.set_memory_event_emitter(None)
+
+    assert result["memory_ref"] == "memory:m-new"
 
 
 def test_duplicate_without_id_creates_referenceable_memory(memory_client, operation_ids):
@@ -171,6 +247,7 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
                 "Admin data was returned",
                 ["Send an unauthenticated request", "Compare the response"],
                 [str(artifact)],
+                [{"artifact": str(artifact), "marker": "admin data"}],
             )
         )
 
@@ -184,8 +261,308 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     assert result["verification_task_ref"] == f"task:{result['verification_task_uid']}"
     assert task.status == "pending"
     assert task.target_scope == "all"
+    assert "admin data" in task.objective
     candidate = plan_store.store_finding_candidate.call_args.args[3]
     assert candidate["source_task_uids"] == [source_task.task_uid]
+    assert candidate["artifact_fingerprints"] == {
+        "artifact:admin-response.txt": hashlib.sha256(artifact.read_bytes()).hexdigest()
+    }
+    assert candidate["source_task_receipts"] == [{
+        "task_uid": source_task.task_uid,
+        "finding_uid": result["finding_uid"],
+        "status": "persisted",
+        "evidence_refs": ["artifact:admin-response.txt", f"finding:{result['finding_uid']}"],
+    }]
+    assert candidate["verification_packet"] == {
+        "version": 1,
+        "source_task": {
+            "task_uid": "source-task",
+            "title": "Assess admin",
+            "objective": "Assess admin authorization",
+        },
+        "target": "https://target/admin",
+        "target_scope": "all",
+        "target_ids": [],
+        "claim": "An unauthenticated user can access admin data",
+        "technique": "auth_bypass",
+        "expected_result": "Unauthenticated request is denied",
+        "observed_result": "Admin data was returned",
+        "reproduction_steps": ["Send an unauthenticated request", "Compare the response"],
+        "evidence_assertions": [{
+            "artifact": "artifact:admin-response.txt",
+            "type": "literal_text",
+            "value": "admin data",
+            "marker": "admin data",
+        }],
+        "artifacts": ["artifact:admin-response.txt"],
+        "artifact_fingerprints": candidate["artifact_fingerprints"],
+    }
+
+
+def test_store_finding_persists_internal_task_bound_evidence_receipts(memory_client, operation_ids, tmp_path: Path):
+    artifact = tmp_path / "response.txt"
+    artifact.write_text("HTTP 200 admin data", encoding="utf-8")
+    task = Task(
+        task_uid="source-task",
+        title="Assess admin",
+        objective="Assess admin authorization",
+        acceptance=make_acceptance("source").to_dict(),
+        phase=1,
+        status="active",
+    )
+    plan_store = MagicMock()
+    plan_store.get_tasks.return_value = [task]
+    plan_store.get_finding_by_fingerprint.return_value = None
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_plan_current_phase", return_value=1),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry"),
+    ):
+        store_finding(
+            "Authorization bypass", "Admin data exposed", "HIGH", "https://target/admin", "auth_bypass",
+            "Denied", "Admin data returned", ["Request target"], [str(artifact)],
+            [{"artifact": str(artifact), "marker": "admin data"}],
+        )
+
+    candidate = plan_store.store_finding_candidate.call_args.args[3]
+    assert candidate["evidence_assertions"] == [{
+        "artifact": "artifact:response.txt",
+        "type": "literal_text",
+        "value": "admin data",
+        "marker": "admin data",
+    }]
+    assert candidate["evidence_receipts"][0].startswith("finding_evidence:")
+    stored = plan_store.store_finding_evidence_receipt.call_args.args
+    assert stored[2:5] == (task.task_uid, "artifact:response.txt", "admin data")
+
+
+def test_typed_evidence_assertions_validate_binary_and_json_artifacts(tmp_path: Path):
+    binary = tmp_path / "capture.bin"
+    binary.write_bytes(b"prefix\x00\xffproofsuffix")
+    structured = tmp_path / "result.json"
+    structured.write_text('{"result":{"roles":["user","admin"]}}', encoding="utf-8")
+
+    with patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)):
+        references = mod._validated_artifact_paths([str(binary), str(structured)])
+        assertions = mod._validated_evidence_assertions(
+            [
+                {
+                    "artifact": str(binary),
+                    "type": "byte_sequence",
+                    "encoding": "hex",
+                    "value": "00ff70726f6f66",
+                },
+                {
+                    "artifact": str(structured),
+                    "type": "json_value",
+                    "pointer": "/result/roles",
+                    "operator": "contains",
+                    "expected": "admin",
+                },
+            ],
+            references,
+            require_one=True,
+        )
+
+    assert [assertion["type"] for assertion in assertions] == ["byte_sequence", "json_value"]
+
+
+def test_typed_evidence_assertion_rejects_unsatisfied_predicate(tmp_path: Path):
+    artifact = tmp_path / "result.json"
+    artifact.write_text('{"result":"denied"}', encoding="utf-8")
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match="was not satisfied"),
+    ):
+        references = mod._validated_artifact_paths([str(artifact)])
+        mod._validated_evidence_assertions(
+            [{
+                "artifact": str(artifact),
+                "type": "json_value",
+                "pointer": "/result",
+                "operator": "equals",
+                "expected": "allowed",
+            }],
+            references,
+            require_one=True,
+        )
+
+
+def test_store_finding_canonicalizes_service_boundary_and_retains_route_query(
+    memory_client, operation_ids, tmp_path: Path
+):
+    artifact = tmp_path / "xss-response.html"
+    artifact.write_text("<pre>Hello <script>alert(1)</script></pre>", encoding="utf-8")
+    plan = mod.OperationPlan(
+        objective="Assess DVWA",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Validation", status="active")],
+        targets=[
+            mod.OperationTarget(
+                target_id="target-1",
+                type="network",
+                value="http://host.docker.internal:4280",
+            )
+        ],
+    )
+    source_task = Task(
+        task_uid="source-task",
+        title="Assess XSS",
+        objective="Assess reflected XSS",
+        acceptance=make_acceptance("source").to_dict(),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    plan_store = MagicMock()
+    plan_store.get_tasks.return_value = [source_task]
+    plan_store.get_finding_by_fingerprint.return_value = None
+
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_active_plan", return_value=plan),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry") as store_entry,
+    ):
+        store_finding(
+            "Reflected XSS",
+            "The name parameter reflects executable script content.",
+            "HIGH",
+            "http://host.docker-internal:4280/vulnerabilities/xss_r/?name=test",
+            "reflected_xss",
+            "Input is encoded before rendering.",
+            "The response contained the submitted script tag without encoding.",
+            ["Send the script payload to name", "Inspect the response body"],
+            [str(artifact)],
+            [{"artifact": str(artifact), "marker": "<script>alert(1)</script>"}],
+        )
+
+    candidate = plan_store.store_finding_candidate.call_args.args[3]
+    assert candidate["target"] == "http://host.docker.internal:4280/vulnerabilities/xss_r/?name=test"
+    stored_task = memory_client.store_task.call_args.kwargs["task"]
+    assert stored_task.target_scope == "subset"
+    assert stored_task.target_ids == ["target-1"]
+    assert "http://host.docker.internal:4280/vulnerabilities/xss_r/?name=test" in stored_task.objective
+    assert "host.docker-internal" not in store_entry.call_args.args[0]
+
+
+def test_store_finding_rejects_ambiguous_multi_service_target(memory_client, operation_ids, tmp_path: Path):
+    artifact = tmp_path / "response.txt"
+    artifact.write_text("response", encoding="utf-8")
+    plan = mod.OperationPlan(
+        objective="Assess services",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[
+            mod.OperationTarget(target_id="target-1", type="network", value="http://one.test:8080"),
+            mod.OperationTarget(target_id="target-2", type="network", value="http://two.test:8080"),
+        ],
+    )
+    source_task = Task(
+        task_uid="source-task",
+        title="Assess services",
+        objective="Assess services",
+        acceptance=make_acceptance("source").to_dict(),
+        phase=1,
+        status="active",
+    )
+    plan_store = MagicMock()
+    plan_store.get_tasks.return_value = [source_task]
+
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_active_plan", return_value=plan),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry") as store_entry,
+        pytest.raises(ValueError, match="exactly one assigned target"),
+    ):
+        store_finding(
+            "Reflected XSS",
+            "Script content was reflected.",
+            "MEDIUM",
+            "http://typo.test:8080/xss",
+            "reflected_xss",
+            "Input is encoded.",
+            "The response reflected the script tag.",
+            ["Send payload"],
+            [str(artifact)],
+            [{"artifact": str(artifact), "marker": "response"}],
+        )
+
+    store_entry.assert_not_called()
+    plan_store.store_finding_candidate.assert_not_called()
+    memory_client.store_task.assert_not_called()
+
+
+def test_finding_target_resolver_handles_network_range_and_filesystem_locations(tmp_path: Path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_file = source_root / "app.py"
+    source_file.write_text("print('safe')", encoding="utf-8")
+    plan = mod.OperationPlan(
+        objective="Assess assigned targets",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[
+            mod.OperationTarget(target_id="network-1", type="network_range", value="10.20.0.0/24"),
+            mod.OperationTarget(target_id="service-1", type="network", value="10.30.0.4:22"),
+            mod.OperationTarget(target_id="source-1", type="filesystem", value=str(source_root)),
+        ],
+    )
+
+    network_task = Task(
+        task_uid="network-task",
+        title="Assess host",
+        objective="Assess host",
+        acceptance=make_acceptance("network").to_dict(),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["network-1"],
+    )
+    source_task = Task(
+        task_uid="source-task",
+        title="Assess source",
+        objective="Assess source",
+        acceptance=make_acceptance("source").to_dict(),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["source-1"],
+    )
+    service_task = Task(
+        task_uid="service-task",
+        title="Assess service",
+        objective="Assess service",
+        acceptance=make_acceptance("service").to_dict(),
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["service-1"],
+    )
+
+    assert mod._canonicalize_finding_target("10.20.0.7", plan, network_task) == (
+        "10.20.0.7",
+        ["network-1"],
+    )
+    assert mod._canonicalize_finding_target("app.py", plan, source_task) == (
+        str(source_file.resolve()),
+        ["source-1"],
+    )
+    assert mod._canonicalize_finding_target("10.30.0.4:22", plan, service_task) == (
+        "10.30.0.4:22",
+        ["service-1"],
+    )
+    with pytest.raises(ValueError, match="allowed targets"):
+        mod._canonicalize_finding_target("10.21.0.7", plan, network_task)
+    with pytest.raises(ValueError, match="ambiguous|allowed targets"):
+        mod._canonicalize_finding_target("../outside.py", plan, source_task)
 
 
 def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Path):
@@ -209,6 +586,7 @@ def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Pat
     with (
         patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._ensure_memory_client", return_value=MagicMock()),
     ):
         result = json.loads(
             store_finding(
@@ -221,6 +599,7 @@ def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Pat
                 "Access",
                 ["Request /x"],
                 [str(artifact)],
+                [{"artifact": str(artifact), "marker": "Access"}],
             )
         )
 
@@ -235,10 +614,45 @@ def test_store_finding_is_idempotent(memory_client, operation_ids, tmp_path: Pat
     memory_client.store_task.assert_not_called()
 
 
+def test_store_finding_records_source_task_persistence_receipt(tmp_path: Path, operation_ids):
+    artifact = tmp_path / "proof.txt"
+    artifact.write_text("proof", encoding="utf-8")
+    source_task = Task(
+        task_uid="source-task",
+        title="Assess XSS",
+        objective="Assess XSS",
+        acceptance=make_acceptance("source").to_dict(),
+        phase=1,
+        status="active",
+    )
+    candidate = {
+        "title": "Reflected XSS",
+        "observed_result": "The response reflected the submitted script.",
+        "artifacts": ["artifact:proof.txt"],
+    }
+
+    mod._record_source_task_finding_receipt(source_task, candidate, "finding-1")
+
+    assert candidate["source_task_receipts"] == [{
+        "task_uid": "source-task",
+        "finding_uid": "finding-1",
+        "status": "persisted",
+        "evidence_refs": ["artifact:proof.txt", "finding:finding-1"],
+    }]
+
+
 def test_store_finding_schema_requires_artifacts():
     schema = get_tool_spec(store_finding)["inputSchema"]["json"]
 
     assert "artifacts" in schema["required"]
+    assertion_schema = schema["properties"]["evidence_assertions"]["items"]
+    assert assertion_schema["properties"]["type"]["enum"] == [
+        "literal_text",
+        "byte_sequence",
+        "json_value",
+    ]
+    assert assertion_schema["properties"]["encoding"]["enum"] == ["hex", "base64"]
+    assert assertion_schema["properties"]["operator"]["enum"] == ["exists", "equals", "contains"]
     assert "cwe_mappings" not in schema["properties"]
     assert "mitre_attack_mappings" not in schema["properties"]
 
@@ -264,6 +678,7 @@ def test_store_finding_leaves_taxonomy_annotation_to_the_workflow(memory_client,
             "The stored payload executed",
             ["Submit payload", "Load the comment"],
             [str(artifact)],
+            [{"artifact": str(artifact), "marker": "Stored XSS proof"}],
         )
 
     candidate = plan_store.store_finding_candidate.call_args.args[3]
@@ -314,7 +729,10 @@ def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, o
         kind="finding_validation", reference_id="finding-1"
     )
     plan_store = MagicMock()
-    plan_store.get_finding.return_value = {"verification_task_uid": "task-1"}
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {"evidence_assertions": [{"artifact": "artifact:response.txt", "marker": "HTTP 200"}]},
+    }
     plan_store.get_tasks.return_value = [task]
     acceptance_results = []
     plan_store.get_acceptance_results.side_effect = lambda *_args: list(acceptance_results)
@@ -327,7 +745,8 @@ def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, o
         patch("src.modules.tools.memory._store_memory_entry"),
     ):
         result = record_finding_validation(
-            "finding-1", "confirmed", "Confirmed", ["Request target"], "direct", [str(artifact)]
+            "finding-1", "confirmed", "Confirmed", ["Request target"], "direct", [str(artifact)], None,
+            [{"artifact": str(artifact), "marker": "HTTP 200"}],
         )
 
     payload = json.loads(result)
@@ -353,6 +772,248 @@ def test_differential_confirmation_requires_control(tmp_path: Path, operation_id
             record_finding_validation(
                 "finding-1", "confirmed", "Confirmed", ["Test"], "differential", [str(artifact)]
             )
+
+
+def test_confirmed_enumeration_and_rate_limit_require_resolved_manifest(tmp_path: Path, operation_ids, memory_client):
+    existing = tmp_path / "existing.txt"
+    nonexistent = tmp_path / "nonexistent.txt"
+    existing.write_text("HTTP/1.1 200 OK\n\npositive-marker existing user", encoding="utf-8")
+    nonexistent.write_text("HTTP/1.1 200 OK\n\npositive-marker unknown user", encoding="utf-8")
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps({
+        "version": 1,
+        "checks": {
+            "user_enumeration": {
+                "known_existing_artifact": str(existing),
+                "known_nonexistent_artifact": str(nonexistent),
+            },
+            "lack_of_rate_limiting": {
+                "attempts": [
+                    {"sequence": index, "response_artifact": str(existing)}
+                    for index in range(1, 11)
+                ]
+            },
+        },
+    }), encoding="utf-8")
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    task = Task("task-1", "Verify", "Verify", acceptance, 1, "active",
+                kind="finding_validation", reference_id="finding-1")
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "title": "User Enumeration and Lack of Rate Limiting",
+            "claim": "User enumeration and lack of rate limiting",
+            "technique": "Authentication testing",
+            "evidence_assertions": [{"artifact": "artifact:existing.txt", "marker": "positive-marker"}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    acceptance_results = []
+    plan_store.get_acceptance_results.side_effect = lambda *_args: list(acceptance_results)
+    plan_store.store_acceptance_results.side_effect = (
+        lambda _op_id, _task_uid, results: acceptance_results.extend(results)
+    )
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry"),
+    ):
+        payload = json.loads(record_finding_validation(
+            "finding-1", "confirmed", "Confirmed", ["Replay requests"], "direct", [str(existing)], None,
+            None, str(manifest),
+        ))
+
+    assert payload["outcome"] == "confirmed"
+    validation = plan_store.store_finding_validation.call_args.args[2]
+    assert validation["validation_manifest_attestation"]["derived"]["lack_of_rate_limiting"]["attempt_count"] == 10
+
+
+def test_confirmed_enumeration_rejects_identical_response_signatures(tmp_path: Path, operation_ids):
+    response = tmp_path / "response.txt"
+    response.write_text("HTTP/1.1 200 OK\n\npositive-marker identical", encoding="utf-8")
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps({
+        "version": 1,
+        "checks": {"user_enumeration": {
+            "known_existing_artifact": str(response),
+            "known_nonexistent_artifact": str(response),
+        }},
+    }), encoding="utf-8")
+    task = Task("task-1", "Verify", "Verify", make_acceptance().to_dict(), 1, "active",
+                kind="finding_validation", reference_id="finding-1")
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "title": "User Enumeration",
+            "claim": "User enumeration",
+            "technique": "Authentication testing",
+            "evidence_assertions": [{"artifact": "artifact:response.txt", "marker": "positive-marker"}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match="materially different"),
+    ):
+        record_finding_validation(
+            "finding-1", "confirmed", "Confirmed", ["Replay requests"], "direct", [str(response)], None,
+            None, str(manifest),
+        )
+
+    plan_store.store_finding_validation.assert_not_called()
+
+
+def test_confirmed_lfi_validation_rejects_cited_open_failure(tmp_path: Path, operation_ids):
+    artifact = tmp_path / "lfi.txt"
+    artifact.write_text(
+        "Warning: include(../../../../etc/passwd): Failed to open stream\n"
+        "Warning: include(): Failed opening '../../../../etc/passwd'\n",
+        encoding="utf-8",
+    )
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    task = Task(
+        "task-1", "Verify", "Verify claim", acceptance, 1, "active",
+        kind="finding_validation", reference_id="finding-1",
+    )
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "title": "LFI",
+            "claim": "Local file inclusion",
+            "technique": "LFI",
+            "evidence_assertions": [{"artifact": "artifact:lfi.txt", "marker": "Failed to open stream"}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        with pytest.raises(ValueError, match="local_file_inclusion_open_failure"):
+            record_finding_validation(
+                "finding-1", "confirmed", "Claim reproduced", ["Replay request"], "direct", [str(artifact)], None,
+                [{"artifact": str(artifact), "marker": "Failed to open stream"}],
+            )
+
+    plan_store.store_finding_validation.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("artifact_content", "should_reject"),
+    [
+        ('{"user":"Leaf"}', True),
+        ('{"user":{"id":1,"details":{"role":"admin"}}}', False),
+    ],
+)
+def test_confirmed_nested_json_validation_requires_nested_response(
+    tmp_path: Path,
+    operation_ids,
+    artifact_content: str,
+    should_reject: bool,
+):
+    artifact = tmp_path / "response.json"
+    artifact.write_text(artifact_content, encoding="utf-8")
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    task = Task(
+        "task-1", "Verify", "Verify claim", acceptance, 1, "active",
+        kind="finding_validation", reference_id="finding-1",
+    )
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "title": "Endpoint returns nested JSON structure",
+            "claim": "The endpoint returns a nested JSON object containing user details.",
+            "technique": "Information Disclosure",
+            "evidence_assertions": [{"artifact": "artifact:response.json", "marker": '"user"'}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    memory_client = MagicMock()
+    memory_client.store_memory.return_value = {"results": [{"id": "memory-validation"}]}
+    def invocation():
+        return record_finding_validation(
+            "finding-1", "confirmed", "Claim reproduced", ["Replay request"], "direct", [str(artifact)], None,
+            [{"artifact": str(artifact), "marker": '"user"'}],
+        )
+
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._ensure_memory_client", return_value=memory_client),
+        patch("src.modules.tools.memory._record_task_acceptance", return_value='{"complete": true}'),
+    ):
+        if should_reject:
+            with pytest.raises(ValueError, match="nested_json_claim_flat_response"):
+                invocation()
+        else:
+            invocation()
+
+    if should_reject:
+        plan_store.store_finding_validation.assert_not_called()
+    else:
+        plan_store.store_finding_validation.assert_called_once()
+
+
+def test_confirmed_validation_rejects_missing_positive_evidence_marker(tmp_path: Path, operation_ids):
+    artifact = tmp_path / "not-found.html"
+    artifact.write_text("<title>404 Not Found</title>", encoding="utf-8")
+    task = Task(
+        "task-1", "Verify", "Verify", make_acceptance().to_dict(), 1, "active",
+        kind="finding_validation", reference_id="finding-1",
+    )
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "evidence_assertions": [{"artifact": "artifact:not-found.html", "marker": "<script>alert(1)</script>"}]
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match="did not reproduce candidate assertion"),
+    ):
+        record_finding_validation(
+            "finding-1",
+            "confirmed",
+            "Claim reproduced",
+            ["Replay request"],
+            "direct",
+            [str(artifact)],
+            None,
+            [{"artifact": str(artifact), "marker": "<script>alert(1)</script>"}],
+        )
 
 
 def test_not_confirmed_validation_materializes_negative_acceptance(tmp_path: Path, operation_ids, memory_client):
@@ -403,6 +1064,28 @@ def test_finding_validation_schema_advertises_only_canonical_enum_values():
 
     assert schema["properties"]["outcome"]["enum"] == ["confirmed", "not_confirmed"]
     assert schema["properties"]["evidence_strategy"]["enum"] == ["direct", "differential"]
+    assert schema["properties"]["validation_manifest"]["type"] == "string"
+    assert "evidence_assertions" not in schema["properties"]
+    assert "evidence_assertions" not in schema["required"]
+
+
+def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identifier():
+    task = Task(
+        task_uid="verify-task",
+        title="Verify finding",
+        objective="Verify finding",
+        acceptance=make_acceptance("verify").to_dict(),
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+
+    schema = get_tool_spec(mod.build_record_finding_validation_tool(task))["inputSchema"]["json"]
+
+    assert "finding_uid" not in schema["properties"]
+    assert schema["properties"]["validation_manifest"]["type"] == "string"
+    assert schema["required"] == ["outcome", "summary", "reproduction_steps"]
 
 
 def test_finding_validation_runtime_schema_accepts_aliases():
@@ -889,7 +1572,10 @@ def test_objective_validation_helpers_and_existing_resolution_are_idempotent(ope
         assert finalize_objective_validation(validation_task, "done", "Done") == "objective_rejected"
 
 
-def test_finalize_finding_validation_promotes_only_approved_confirmation(operation_ids):
+def test_finalize_finding_validation_promotes_only_approved_confirmation(operation_ids, tmp_path: Path):
+    artifact = tmp_path / "proof.txt"
+    artifact.write_text("positive proof", encoding="utf-8")
+    artifact_ref = "artifact:proof.txt"
     task = Task(
         "task-1", "Verify", "Verify", make_acceptance().to_dict(), 1, "active",
         kind="finding_validation", reference_id="finding-1"
@@ -899,19 +1585,23 @@ def test_finalize_finding_validation_promotes_only_approved_confirmation(operati
         "candidate_data": {
             "claim": "Confirmed claim",
             "severity": "HIGH",
+            "evidence_assertions": [{"artifact": artifact_ref, "marker": "positive proof"}],
             "taxonomy": {"cwe": [{"id": "CWE-79"}], "mitre_attack": [], "provenance": {}},
         },
         "validation_data": {
             "outcome": "confirmed",
-            "evidence_artifacts": ["/artifact"],
+            "evidence_artifacts": [artifact_ref],
             "control_artifacts": [],
             "evidence_strategy": "direct",
+            "evidence_assertions": [{"artifact": artifact_ref, "marker": "positive proof"}],
+            "evidence_artifact_fingerprints": {artifact_ref: hashlib.sha256(artifact.read_bytes()).hexdigest()},
         },
         "resolution": None,
     }
     with (
         patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         resolution = finalize_finding_validation(task, "done", "Evidence approved")
 

@@ -195,6 +195,14 @@ Inventory item `kind` is one of `endpoint`, `parameter`, `workflow`, `service`, 
 such as discovered parameters, in `attributes`. The executor receives this exact contract whenever a criterion
 requires `inventory_manifest`; ordinary JSON outputs must use the generic `artifact` evidence kind.
 
+Web discovery tasks should prefer deterministic manifest production. Pass `--inventory-manifest` (or the additive
+`inventory_manifest` tool argument) to `specialized_recon_orchestrator` or `auth_chain_analyzer` while retaining their
+normal output. The generally available `recon_output_to_inventory_manifest` tool converts katana, feroxbuster, ffuf,
+gobuster, dirsearch, httpx, gospider, and plain URL-list artifacts; the source artifact remains unchanged. URL-list
+auto-detection samples at most the first five non-empty lines before the converter processes the complete artifact.
+It also accepts an existing inventory manifest as `source_artifact` and writes a distinct, validated manifest copy;
+manifest input bypasses recon parsing and preserves its target IDs and inventory structure for controller validation.
+
 Before an inventory is frozen, Python extracts same-scope navigation and form destinations from current-operation HTML
 artifacts and merges unambiguous missing routes. Fan-out then dispatches by kind: endpoints and their parameters share
 route tasks, workflows and services receive matching assessment tasks, and technologies receive component-validation
@@ -237,9 +245,12 @@ that findings, observations, validation counts, and target coverage are partial.
 unchanged from budget utilization.
 
 Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS`, which defaults to two
-critic reviews. Setting it to `0` uses the initial builder output without critique. A final rejection or invalid
-builder/critic response after configured JSON retries marks the active task `partial_failure`; the executor and
-evaluator are not invoked for that task.
+critic reviews. Setting it to `0` uses the initial builder output without critique. After the configured JSON retries,
+an unavailable or malformed builder/critic response, or a non-scope prompt defect that survives one bounded repair,
+uses a controller-owned deterministic task template. That template selects no model-proposed optional tools or shell
+commands and uses only canonical memory references. It emits `task_prompt_fallback` with a stable reason such as
+`task_prompt_critic_invalid_json`. A valid critic response that explicitly identifies a hard target-scope violation
+remains `partial_failure`; the executor and evaluator are not invoked for that task.
 
 Task execution cycling is controlled by `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`, which defaults to three normal
 executor passes and has a minimum of one. `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS` independently allows one
@@ -275,6 +286,17 @@ executables and durable operations remain available, but failed output cannot be
 Recovery does not consume an actor/critic pass;
 if it remains unresolved, Python marks the task `partial_failure` without asking the evaluator to approve it. Evaluators
 receive controller-observed tool outcomes and treat them as authoritative over contradictory worker narration.
+
+Output-token truncation uses one controller-selected recovery invocation. If existing canonical references already
+satisfy the frozen evidence requirements, only the terminal closure tool is available. Otherwise, exactly one
+evidence-producing tool invocation is allowed, and it progresses only when it creates a new artifact, memory, or
+finding reference. Successful reads, catalog lookups, and reasoning without new durable state do not count.
+
+Target binding is type-aware. Explicit service authorities must match assigned scheme, host, and effective port;
+network hosts may bind through CIDR membership; filesystem locations must remain below their resolved assigned root;
+and logical IDs or unambiguous relative locations resolve to their assigned target. Finding persistence may correct a
+unique one-edit hostname typo to the registered authority for record consistency, but task execution scope remains an
+exact boundary and never receives fuzzy authorization.
 
 Every `store_finding` call requires at least one durable artifact reference and returns canonical `finding_ref` and
 `verification_task_ref` values. Python links the finding to the currently active source task and creates one narrow,
@@ -458,6 +480,20 @@ created by that task. Multiple source-task findings require an unambiguous canon
 `existing_finding` remains explicit. `create_tasks` remains
 limited to new follow-up work and never completes or records acceptance for the assigned task.
 
+### Acceptance disposition selection
+
+Use the canonical acceptance dispositions as follows. Common semantic synonyms are normalized before strict runtime
+validation, but the tool schema advertises only canonical values and unknown values remain invalid.
+
+| Disposition | Use when |
+|---|---|
+| `finding_candidate` | The current task successfully called `store_finding` and records that new finding. |
+| `existing_finding` | The evidence supports an already-recorded finding. |
+| `no_vulnerability` | The assigned work produced an assessed-negative result. |
+| `observation` | The result is informational and not a security finding. |
+
+Do not use `finding_candidate` solely because a task confirmed a finding created by another task.
+
 `task_evaluator` returns:
 
 ```json
@@ -490,6 +526,11 @@ Short-lived agents reduce dependence on preserving one huge conversation. Each w
 - active task objective, when applicable
 - relevant Qdrant memory items
 - selected tool names and short descriptions
+
+Task-executor correction cycles start a fresh worker session. Their compact continuation prompt carries the assigned
+objective, frozen criterion, latest durable evidence, and required corrective action instead of replaying the prior
+tool transcript. Task-creator corrections remain retained within a single creation batch so schema repairs preserve
+the rejected proposal intent.
 
 Conversation pruning still protects useful evidence and memory context, but plan/task authority lives in SQLite and Python helpers rather than prompt state.
 

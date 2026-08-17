@@ -1,3 +1,4 @@
+import hashlib
 import json
 from unittest.mock import MagicMock, patch
 
@@ -11,8 +12,14 @@ from modules.handlers.report_generator import (
     _cleanup_report_agent,
     _configured_nonnegative_int,
     _extract_text_from_result,
+    _emit_report_progress,
     _format_artifact_excerpt,
     _format_execution_history,
+    _format_executive_deterministic_sections,
+    _format_finding_with_narrative,
+    _format_summary_table,
+    _format_operation_plan,
+    _format_operation_tasks,
     _format_observation,
     _markdown_table_cell,
     _format_model_usage_table,
@@ -24,6 +31,7 @@ from modules.handlers.report_generator import (
     _ground_report_item,
     _has_artifact_reference,
     _artifact_references,
+    _omit_cross_operation_artifact_references,
     _normalize_report_category,
     _normalize_budget_config,
     _normalize_artifact_reference,
@@ -40,11 +48,17 @@ from modules.handlers.report_generator import (
     _canonical_report_data,
     _canonical_report_json,
     _informational_observation_context,
+    _inventory_endpoint_values,
     _is_reportable_informational_observation,
+    _resolve_inventory_ids_for_display,
     _format_verified_findings_summary,
+    _compact_finding_context,
+    _compact_next_steps_source,
+    _current_operation_report_memories,
     _validate_narrative_consistency,
     _format_report_consistency_warnings,
     build_report_sections,
+    generate_deterministic_fallback_report,
     generate_security_report,
 )
 from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task, clear_memory_client
@@ -71,6 +85,105 @@ def test_canonical_report_data_owns_counts_and_json_separates_narrative():
     assert canonical["artifact_references"] == ["artifact:artifacts/proof.txt"]
     assert report["canonical"]["severity_counts"]["critical"] == 1
     assert report["narrative"]["executive"] == "one critical finding"
+
+
+def test_compact_finding_context_excludes_raw_metadata_and_bounds_evidence():
+    finding = {
+        "title": "Stored XSS",
+        "severity": "HIGH",
+        "content": "evidence " * 500,
+        "metadata": {"artifacts": ["artifact:artifacts/proof.txt"], "secret": "do-not-send"},
+    }
+
+    context = _compact_finding_context(finding, "https://example.test")
+
+    assert context["target"] == "https://example.test"
+    assert context["artifact_references"] == ["artifact:artifacts/proof.txt"]
+    assert len(context["evidence_summary"]) <= 1200
+    assert "secret" not in context
+
+
+def test_compact_next_steps_source_excludes_raw_history_and_tools_used():
+    source = _compact_next_steps_source(
+        target="https://example.test",
+        objective="Assess the target",
+        completion_status={"assessment_complete": False},
+        sections={
+            "phase_coverage": [{"phase_id": 1, "title": "Mapping", "status": "done", "raw": "omit"}],
+            "task_status_counts": {"done": 1},
+            "total_task_count": 2,
+            "completed_task_count": 1,
+            "execution_history": "large raw history",
+        },
+        latest_run={
+            "metrics": {"duration": "10m", "total_tokens": 100},
+            "tools_used": ["shell"],
+            "tool_failures": {"shell:error": 2},
+        },
+        configured_budget={"duration": 30},
+        validation_candidates=[],
+    )
+
+    assert source["phase_coverage"] == [{"phase_id": 1, "title": "Mapping", "status": "done"}]
+    assert "execution_history" not in source
+    assert "tools_used" not in source
+    assert source["tool_failure_counts"] == {"shell:error": 2}
+
+
+def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
+    sections = {
+        "summary_table": "| Finding |\n|---|\n| SQLi |",
+        "severity_counts": {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+        "verified_findings_total": 1,
+        "finding_validation_failure_count": 2,
+        "observation_count": 3,
+        "completion_status": {"assessment_complete": False, "incomplete_reason": "Coverage remains partial."},
+        "raw_evidence": [
+            {
+                "title": "Unverified [claim]",
+                "category": "validation_failure",
+                "metadata": {"validation_reason": "<script>alert(1)</script>"},
+            },
+            {
+                "title": "Observed [header]",
+                "category": "observation",
+                "content": "<script>alert(1)</script>",
+            },
+        ],
+    }
+    finding = {
+        "title": "SQL injection",
+        "severity": "HIGH",
+        "content": "Differential response observed.",
+        "metadata": {"artifacts": ["artifact:artifacts/proof.txt"]},
+    }
+
+    executive = _format_executive_deterministic_sections(sections)
+    detail = _format_finding_with_narrative(finding, 0, "#### Impact\n\nSupported impact.\n\n#### Remediation\n\nPatch it.\n\n#### TECHNICAL APPENDIX\n\nNotes.")
+    tasks = _format_operation_tasks({"items": ["Task,Test target,outcome,2,done,,,,,,https://example.test,1/1"]})
+
+    assert "### Key Findings" in executive
+    assert "### Claim Status" in executive
+    assert "#### Evidence" in detail
+    assert "#### Attack Path Analysis\n\nNot established from supplied evidence" in detail
+    assert "| 2 | Task | done | https://example.test | 1/1 |" in tasks
+    assert "Unverified \\[claim\\]" in executive
+    assert "\\<script\\>alert(1)\\</script\\>" in executive
+    plan = _format_operation_plan(
+        {"phases": [{"id": 1, "title": "Mapping", "status": "done", "criteria": "Inventory routes"}]}
+    )
+    assert "| 1 | done | **Mapping:** Inventory routes |" in plan
+
+
+def test_report_progress_counts_only_llm_authored_sections():
+    callback = MagicMock()
+
+    _emit_report_progress(callback, "OP_TEST", 1, 4, "validation_failure", "Requires validation")
+    _emit_report_progress(callback, "OP_TEST", 2, 4, "observation", "Observation")
+    _emit_report_progress(callback, "OP_TEST", 3, 4, "executive", "Executive summary")
+
+    callback.mark_report_step_started.assert_called_once_with()
+    assert callback.emit_ui_event.call_count == 3
 
 
 def test_report_observations_exclude_workflow_bookkeeping_but_retain_real_observations():
@@ -158,6 +271,19 @@ def test_narrative_consistency_ignores_workflow_terms_after_finding_keywords():
     assert not any("unknown finding" in warning for warning in warnings)
 
 
+def test_narrative_consistency_ignores_finding_hypotheses_without_candidates():
+    canonical = {
+        "findings": [],
+        "artifact_references": [],
+        "phase_coverage": [],
+        "completion_status": {"assessment_complete": False},
+    }
+
+    warnings = _validate_narrative_consistency("Finding hypotheses remain unconfirmed.", canonical)
+
+    assert not any("unknown finding" in warning for warning in warnings)
+
+
 def test_narrative_consistency_flags_false_empty_observation_claim():
     canonical = {
         "observations": [{"id": "observation-1", "category": "observation"}],
@@ -183,6 +309,7 @@ def test_format_model_usage_table_and_elapsed_time_fallbacks():
                 "cache_write_tokens": 5,
                 "cost": 0.1234567,
                 "inference_time_ms": 2500,
+                "correction_categories": {"max_token_exhaustion": 1},
             }
         ],
         "bedrock",
@@ -192,13 +319,13 @@ def test_format_model_usage_table_and_elapsed_time_fallbacks():
     assert "| Capture Timestamp | Provider | Model | Context Window | Input Tokens | Output Tokens |" in table
     assert (
         "| N/A | ollama | llama3 | 128,000 | 1,200 | 300 | 10 | 5 | 1,500 | $0.123457 | "
-        "0 hours 0 minutes | N/A |"
+        "0 hours 0 minutes | N/A | max_token_exhaustion: 1 |"
         in table
     )
     assert "| fallback-model |" not in table
 
     fallback = _format_model_usage_table([], "bedrock", "fallback-model", 200000)
-    assert "| N/A | bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A |" in fallback
+    assert "| N/A | bedrock | fallback-model | 200,000 | 0 | 0 | 0 | 0 | 0 | $0.000000 | N/A | N/A | — |" in fallback
 
 
 def test_report_model_metrics_use_all_persisted_timestamped_rows(monkeypatch):
@@ -310,19 +437,81 @@ def test_format_execution_history_is_stable_and_escapes_markdown_cells():
     assert "http://one.test" in history
 
 
-def test_markdown_table_cell_code_formats_xml_html_tags_only():
-    assert _markdown_table_cell("<input name='username'> | plain") == "`<input name='username'>` \\| plain"
-    assert _markdown_table_cell("already `code` and plain") == "already `code` and plain"
+def test_markdown_table_cell_escapes_external_markdown_and_html():
+    assert _markdown_table_cell("<input name='username'> | [plain]") == "\\<input name='username'\\> \\| \\[plain\\]"
+    assert _markdown_table_cell("already `code` and *plain*") == "already \\`code\\` and \\*plain\\*"
 
 
-def test_observation_recorded_detail_formats_xml_html_tags():
+def test_inventory_endpoint_resolution_uses_manifest_values_and_preserves_identifiers(tmp_path):
+    manifest = tmp_path / "inventory_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "endpoint-1",
+                        "target_id": "target-1",
+                        "kind": "service",
+                        "value": "https://target.test",
+                    }
+                ]
+            }
+        )
+    )
+    task = MagicMock()
+    task.acceptance.basis.source_refs = ("artifact:artifacts/inventory_manifest.json",)
+    task.evidence = []
+
+    with patch("modules.handlers.report_generator._artifact_path_from_ref", return_value=str(manifest)):
+        endpoint_values = _inventory_endpoint_values([task])
+
+    displayed = _resolve_inventory_ids_for_display(
+        {
+            "id": "endpoint-1",
+            "content": "Created hypotheses for endpoint-1; endpoint-99 remains unknown.",
+            "metadata": {"target_id": "target-1", "validation_reason": "Endpoint endpoint-1 responded."},
+        },
+        endpoint_values,
+    )
+
+    assert endpoint_values == {"endpoint-1": "https://target.test"}
+    assert displayed["id"] == "endpoint-1"
+    assert displayed["metadata"]["target_id"] == "target-1"
+    assert displayed["content"] == "Created hypotheses for https://target.test; endpoint-99 remains unknown."
+    assert displayed["metadata"]["validation_reason"] == "Endpoint https://target.test responded."
+
+
+def test_inventory_endpoint_resolution_leaves_conflicting_values_unresolved(tmp_path):
+    first = tmp_path / "first_manifest.json"
+    second = tmp_path / "second_manifest.json"
+    for path, value in ((first, "https://one.test"), (second, "https://two.test")):
+        path.write_text(json.dumps({"items": [{"id": "endpoint-1", "value": value}]}))
+
+    first_task = MagicMock()
+    first_task.acceptance.basis.source_refs = ("artifact:artifacts/first_manifest.json",)
+    first_task.evidence = []
+    second_task = MagicMock()
+    second_task.acceptance.basis.source_refs = ("artifact:artifacts/second_manifest.json",)
+    second_task.evidence = []
+
+    with patch(
+        "modules.handlers.report_generator._artifact_path_from_ref",
+        side_effect=[str(first), str(second)],
+    ):
+        endpoint_values = _inventory_endpoint_values([first_task, second_task])
+
+    assert endpoint_values == {}
+    assert _resolve_inventory_ids_for_display("endpoint-1", endpoint_values) == "endpoint-1"
+
+
+def test_observation_recorded_detail_escapes_xml_html_tags_and_links():
     content = _format_observation(
         {"title": "Observed markup", "content": "Response contained <input name='user'> and </form>."},
         0,
     )
 
-    assert "`<input name='user'>`" in content
-    assert "`</form>`" in content
+    assert "\\<input name='user'\\>" in content
+    assert "\\</form\\>" in content
 
 
 def test_observation_recorded_detail_removes_acceptance_prefix_and_duplicate_evidence():
@@ -423,6 +612,36 @@ def test_artifact_reference_parser_accepts_canonical_and_bare_paths_without_fals
     }
     assert _has_artifact_reference(text)
     assert _normalize_artifact_reference("`outputs/proof.log`,") == "artifact:outputs/proof.log"
+
+
+def test_shared_memory_artifact_references_are_omitted_without_losing_narrative():
+    value = {
+        "content": "Prior result used artifact:artifacts/prior/proof.txt and remains relevant.",
+        "metadata": {"evidence_refs": ["outputs/prior/request.log"], "category": "observation"},
+    }
+
+    sanitized, omitted = _omit_cross_operation_artifact_references(value)
+
+    assert omitted == 2
+    assert "remains relevant" in sanitized["content"]
+    assert "artifact:artifacts/prior/proof.txt" not in sanitized["content"]
+    assert sanitized["metadata"]["evidence_refs"] == ["[prior-operation artifact omitted]"]
+    assert _artifact_references(sanitized) == set()
+
+
+def test_shared_report_memories_exclude_prior_operation_claims_entirely():
+    current, excluded, source_operations = _current_operation_report_memories(
+        [
+            {"id": "current", "memory": "current evidence", "metadata": {"operation_id": "OP_CURRENT"}},
+            {"id": "prior", "memory": "stale version claim", "metadata": {"operation_id": "OP_PRIOR"}},
+            {"id": "unknown", "memory": "unattributed claim", "metadata": {}},
+        ],
+        "OP_CURRENT",
+    )
+
+    assert [item["id"] for item in current] == ["current"]
+    assert excluded == 2
+    assert source_operations == {"OP_PRIOR", "unknown prior operation"}
 
 
 def test_grounding_normalizes_bare_reference_and_preserves_markdown_syntax():
@@ -914,6 +1133,54 @@ def test_operation_log_parser_filters_bookkeeping_and_extracts_shell_commands(tm
     assert parsed["reportable_tools_used"] == ["shell", "http_request", "curl", "nmap"]
 
 
+def test_operation_log_parser_silently_rejects_malformed_shell_executable_tokens(tmp_path):
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-02 11:00:00",
+                event(
+                    {
+                        "type": "tool_start",
+                        "tool_name": "shell",
+                        "tool_input": {
+                            "command": "FOO=1 timeout 30 sqlmap -u target; curl -s target; id\"; search?x=1"
+                        },
+                    }
+                ),
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["reportable_tools_used"] == ["shell", "sqlmap", "curl"]
+
+
+def test_operation_log_parser_uses_execution_termination_timestamp_for_duration(tmp_path):
+    def event(value):
+        return f"__CYBER_EVENT__{json.dumps(value)}__CYBER_EVENT_END__"
+
+    log_path = tmp_path / "cyber_operations.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "CYBER-AUTOAGENT SESSION STARTED: 2026-01-02T11:00:00",
+                event({"type": "metrics_update", "metrics": {"duration": "9m"}}),
+                event({"type": "operation_terminated", "timestamp": "2026-01-02T11:30:00"}),
+                event({"type": "operation_finalized", "timestamp": "2026-01-02T11:45:30"}),
+            ]
+        )
+    )
+
+    parsed = _parse_latest_operation_log(str(log_path))
+
+    assert parsed["metrics"]["duration"] == "30m 0s"
+
+
 def test_latest_operation_log_parser_uses_assessment_model_usage_snapshot(tmp_path):
     usage = [
         {
@@ -1304,13 +1571,55 @@ def test_report_category_helpers_cover_structured_and_free_form_artifacts():
         {"validation_status": "verified", "artifacts": ["/tmp/proof.txt"]},
         "Negative control saved at /tmp/control.txt",
         {},
-    ) == "finding"
+    ) == "validation_failure"
+
+
+def test_summary_table_preserves_full_finding_location():
+    location = "http://host.docker.internal:4280/dvwa/vulnerabilities/xss_rce/?name=proof"
+    title = "User Enumeration and Lack of Rate Limiting on /vulnerabilities/brute"
+
+    table = _format_summary_table(
+        [{"severity": "HIGH", "parsed": {"vulnerability": title, "where": location}}]
+    )
+
+    assert title in table
+    assert "http://host.docker.internal:4280/dvwa/vulnerabilities/xss\\_rce/?name=proof" in table
     assert _normalize_report_category(
         "finding",
         {"status": "verified", "proof_pack": "legacy"},
         "Control case without an artifact",
         {"evidence": "/tmp/proof.txt"},
     ) == "validation_failure"
+
+
+@pytest.mark.parametrize(
+    ("artifact_content", "expected_category"),
+    [
+        ('{"user":"Leaf"}', "validation_failure"),
+        ('{"user":{"id":1,"details":{"role":"admin"}}}', "finding"),
+    ],
+)
+def test_report_rechecks_nested_json_claim_shape(tmp_path, monkeypatch, artifact_content, expected_category):
+    artifact = tmp_path / "response.json"
+    artifact.write_text(artifact_content, encoding="utf-8")
+    reference = "artifact:artifacts/response.json"
+    assertion = {"artifact": reference, "type": "literal_text", "value": '"user"'}
+    metadata = {
+        "validation_status": "verified",
+        "evidence_strategy": "direct",
+        "artifacts": [reference],
+        "evidence_artifacts": [reference],
+        "candidate_evidence_assertions": [assertion],
+        "evidence_assertions": [assertion],
+        "evidence_artifact_fingerprints": {reference: hashlib.sha256(artifact.read_bytes()).hexdigest()},
+        "title": "Endpoint returns nested JSON structure",
+        "claim": "The endpoint returns a nested JSON object containing user details.",
+        "technique": "Information Disclosure",
+    }
+    monkeypatch.setattr(report_generator_module, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    monkeypatch.setattr("modules.tools.memory._artifact_path_from_ref", lambda _reference: str(artifact))
+
+    assert _normalize_report_category("finding", metadata, "", {}) == expected_category
 
 
 def test_format_target_coverage_counts_scoped_tasks_and_report_items():
@@ -1444,6 +1753,92 @@ def test_report_consistency_accepts_matching_canonical_state():
 
     assert _validate_report_consistency(sections, completion) == []
     assert _format_report_consistency_warnings([]) == ""
+
+
+def test_report_consistency_reports_omitted_shared_memory_artifacts_as_one_warning():
+    sections = {
+        "raw_evidence": [],
+        "verified_findings_total": 0,
+        "finding_count": 0,
+        "validation_failure_count": 0,
+        "finding_validation_failure_count": 0,
+        "task_status_counts": {},
+        "total_task_count": 0,
+        "completed_task_count": 0,
+        "phase_coverage": [],
+        "evidence_integrity_errors": [
+            {
+                "kind": "cross_operation_artifact_refs_omitted",
+                "count": 2,
+                "source_operations": ["OP_20260813_161308"],
+            }
+        ],
+    }
+    completion = {"assessment_complete": True, "workflow_complete": True}
+
+    errors = _validate_report_consistency(sections, completion)
+
+    assert errors == [
+        "Excluded 2 artifact reference(s) from shared-memory evidence originating in prior operation(s): "
+        "OP_20260813_161308."
+    ]
+
+
+def test_report_consistency_reports_excluded_advisory_memories():
+    sections = {
+        "raw_evidence": [],
+        "verified_findings_total": 0,
+        "finding_count": 0,
+        "validation_failure_count": 0,
+        "finding_validation_failure_count": 0,
+        "task_status_counts": {},
+        "total_task_count": 0,
+        "completed_task_count": 0,
+        "phase_coverage": [],
+        "evidence_integrity_errors": [{
+            "kind": "cross_operation_advisory_memories_excluded",
+            "count": 3,
+            "source_operations": ["OP_PRIOR"],
+        }],
+    }
+
+    errors = _validate_report_consistency(
+        sections,
+        {"assessment_complete": True, "workflow_complete": True},
+    )
+
+    assert errors == [
+        "Excluded 3 advisory shared-memory record(s) from current-operation report evidence: OP_PRIOR."
+    ]
+
+
+def test_report_consistency_counts_superseded_tasks_as_recovered_completion():
+    sections = {
+        "raw_evidence": [],
+        "verified_findings_total": 0,
+        "finding_count": 0,
+        "validation_failure_count": 0,
+        "finding_validation_failure_count": 0,
+        "task_status_counts": {"done": 1, "superseded": 1},
+        "total_task_count": 2,
+        "completed_task_count": 1,
+        "phase_coverage": [{
+            "phase_id": 1,
+            "status": "done",
+            "task_status_counts": {"done": 1, "superseded": 1},
+        }],
+        "evidence_integrity_errors": [],
+    }
+    completion = {"assessment_complete": True, "workflow_complete": True}
+
+    errors = _validate_report_consistency(sections, completion)
+    canonical = _canonical_report_data(sections)
+
+    assert errors == ["Completed task count did not match successful terminal task statuses."]
+    assert sections["completed_task_count"] == 2
+    assert sections["superseded_task_count"] == 1
+    assert canonical["completed_task_count"] == 2
+    assert canonical["superseded_task_count"] == 1
 
 
 @pytest.fixture(autouse=True)
@@ -1605,6 +2000,19 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     # Create the proof file
     (tmp_path / "proof.txt").write_text("proof")
     (tmp_path / "negative-control.txt").write_text("control")
+    proof_ref = str(tmp_path / "proof.txt")
+    proof_assertion = {"artifact": proof_ref, "marker": "proof"}
+    mock_client.list_memories.return_value[0]["metadata"].update(
+        {
+            "artifacts": [proof_ref],
+            "candidate_evidence_assertions": [proof_assertion],
+            "evidence_assertions": [proof_assertion],
+            "evidence_artifact_fingerprints": {
+                proof_ref: hashlib.sha256((tmp_path / "proof.txt").read_bytes()).hexdigest()
+            },
+        }
+    )
+    monkeypatch.setattr(report_generator_module, "_artifact_path_from_ref", lambda _reference: proof_ref)
 
     # Run build_report_sections
     sections = build_report_sections(op_id, "example.com", "Test Objective")
@@ -1802,6 +2210,143 @@ def test_generate_security_report_no_evidence(mock_build_sections, tmp_path):
     callback_handler.emit_ui_event.assert_not_called()
 
 
+def test_deterministic_fallback_report_renders_canonical_sections_without_narrative(tmp_path, monkeypatch):
+    mock_config = MagicMock()
+    mock_config.get_provider.return_value = "ollama"
+    mock_config.get_llm_config.return_value.model_id = "test-model"
+    monkeypatch.setattr(report_generator_module, "get_config_manager", lambda: mock_config)
+    monkeypatch.setattr(report_generator_module, "get_output_path", lambda **_kwargs: str(tmp_path))
+    monkeypatch.setattr(report_generator_module, "list_persisted_operation_model_metrics", lambda _operation_id: [])
+    monkeypatch.setattr(
+        report_generator_module,
+        "build_report_sections",
+        lambda **_kwargs: {
+            "operation_id": "OP_FALLBACK",
+            "target": "https://example.test",
+            "objective": "Assess the target",
+            "module": "web",
+            "raw_evidence": [
+                {
+                    "id": "finding-1",
+                    "title": "Stored XSS",
+                    "category": "finding",
+                    "severity": "HIGH",
+                    "content": "Verified script execution.",
+                    "metadata": {"artifacts": ["artifact:artifacts/proof.txt"]},
+                },
+                {
+                    "id": "candidate-1",
+                    "title": "Possible SQL injection",
+                    "category": "validation_failure",
+                    "content": "Candidate was not reproduced.",
+                    "metadata": {"validation_reason": "No decisive evidence."},
+                },
+                {
+                    "id": "observation-1",
+                    "title": "Server banner",
+                    "category": "observation",
+                    "content": "Server disclosed its version.",
+                    "metadata": {"target": "https://example.test"},
+                },
+            ],
+            "severity_counts": {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+            "verified_findings_total": 1,
+            "validation_failure_count": 1,
+            "task_status_counts": {"done": 1, "partial_failure": 1},
+            "total_task_count": 2,
+            "completed_task_count": 1,
+            "phase_coverage": [{"phase_id": 1, "status": "partial_failure", "task_status_counts": {"done": 1, "partial_failure": 1}}],
+            "target_coverage": "| Target | Coverage |\n|---|---|\n| example.test | partial |",
+            "execution_history": "## EXECUTION HISTORY\n\nRecorded task history.",
+            "summary_table": "| Severity | Count |\n|---|---:|\n| HIGH | 1 |",
+            "latest_run": {"metrics": {"duration": "2m"}, "configured_budget": {"duration": 60}},
+            "reportable_tools_used": ["nmap"],
+        },
+    )
+
+    result = generate_deterministic_fallback_report(
+        target="https://example.test",
+        objective="Assess the target",
+        operation_id="OP_FALLBACK",
+        config_params={"completion_status": {"assessment_complete": False, "termination_reason": "budget_limit"}},
+        error=RuntimeError("report agent unavailable"),
+    )
+
+    markdown = (tmp_path / "security_assessment_report.md").read_text()
+    payload = json.loads((tmp_path / "security_assessment_report.json").read_text())
+    assert result["status"] == "fallback"
+    assert "Deterministic fallback report" in markdown
+    assert "Stored XSS" in markdown
+    assert "Possible SQL injection" in markdown
+    assert "Server banner" in markdown
+    assert "## TARGET COVERAGE" in markdown
+    assert "## EXECUTION HISTORY" in markdown
+    assert "## APPENDIX A: ASSESSMENT METHODOLOGY" in markdown
+    assert "## APPENDIX B: RECOMMENDED NEXT STEPS" in markdown
+    assert "### Execution Metrics" in markdown
+    assert "model-authored methodology prose" in markdown
+    assert "AI-Generated Content Disclaimer" not in markdown
+    assert "report agent unavailable" in markdown
+    assert payload["report_status"] == "fallback"
+    assert payload["narrative"] == {}
+    assert payload["canonical"]["verified_findings_total"] == 1
+
+
+def test_fallback_report_uses_controller_snapshot_when_store_sections_fail(tmp_path, monkeypatch):
+    monkeypatch.setattr("modules.handlers.report_generator.get_output_path", lambda **_kwargs: str(tmp_path))
+    monkeypatch.setattr(
+        "modules.handlers.report_generator.build_report_sections",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("disk I/O error")),
+    )
+
+    result = generate_deterministic_fallback_report(
+        target="https://example.test",
+        objective="Assess the target",
+        operation_id="OP_SNAPSHOT",
+        config_params={
+            "operation_state_snapshot": {
+                "plan": {"phases": [{"id": 1, "title": "Recon", "status": "done"}]},
+                "tasks": [{"phase": 1, "title": "Recon", "status": "done", "target_ids": ["target-1"]}],
+                "findings": [],
+            },
+            "completion_status": {"assessment_complete": False, "termination_reason": "error"},
+        },
+        error=OSError("disk I/O error"),
+    )
+
+    assert result["status"] == "fallback"
+    assert "| 1 | Recon | done |" in result["content"]
+
+
+def test_sanitize_mermaid_diagrams_quotes_supported_node_and_edge_labels():
+    source = """```mermaid
+graph TD
+A((double \"quote))
+B(single)
+C[square]
+D{brace}
+E>angle]
+A -- edge label --> B
+A -->|pipe label| B
+Alice->>Bob: sequence label
+subgraph group label
+end
+```"""
+
+    rendered = report_generator_module._sanitize_mermaid_diagrams(source)
+
+    assert 'A(("double &#34;quote"))' in rendered
+    assert 'B("single")' in rendered
+    assert 'C["square"]' in rendered
+    assert 'D{"brace"}' in rendered
+    assert 'E>"angle"]' in rendered
+    assert '-- "edge label" -->' in rendered
+    assert '|"pipe label"|' in rendered
+    assert 'Alice->>Bob: "sequence label"' in rendered
+    assert 'subgraph "group label"' in rendered
+    assert report_generator_module._sanitize_mermaid_diagrams("No diagram") == "No diagram"
+
+
 @patch("modules.handlers.report_generator.ReportGenerator")
 @patch("modules.handlers.report_generator.get_output_path")
 @patch("modules.handlers.report_generator.build_report_sections")
@@ -1900,7 +2445,10 @@ def test_generate_security_report_emits_indexed_report_progress(
     ]
     assert all(event["operation_stage"] == "final_report" for event in progress_events)
     assert progress_events[1]["report_step_label"] == "Finding: High Finding"
-    callback_handler.set_report_items.assert_called_once_with(mock_build_sections.return_value["raw_evidence"])
+    callback_handler.set_report_items.assert_called_once_with(
+        mock_build_sections.return_value["raw_evidence"],
+        refinement_cycles=0,
+    )
     assert len(created_agents) == 5
     assert len({id(agent) for agent in created_agents}) == 5
     assert all(agent.cleanup.call_count == 1 for agent in created_agents)

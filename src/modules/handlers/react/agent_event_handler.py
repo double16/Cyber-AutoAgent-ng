@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -28,11 +28,12 @@ from modules.handlers.utils import (
     sanitize_target_name, format_duration,
 )
 
-from ...config import get_config_manager
+from ...config import get_config_manager, get_report_refinement_cycles
 from ...config.models import get_models_client
 from ...config.models.factory import get_model_id_from_agent, get_provider_from_agent
 from ...config.system import EnvironmentReader
 from ...config.types import DEFAULT_MAX_DURATION
+from ...utils.reasoning_sanitization import sanitize_reasoning_control_text
 from ...utils.text_reducer import collapse_first_repeated_sequence
 from ..base import BudgetLimitReached
 from ..conversation_budget import token_calc
@@ -50,6 +51,16 @@ logger = get_logger("Handlers.AgentEvent")
 _DEFAULT_REASONING_DEDUPE_TTL_S = 20.0
 _AGENT_USAGE_CACHE_SIZE = 128
 _AGENT_USAGE_UUID_ATTR = "_caa_agent_event_usage_uuid"
+_REPORT_SAFETY_MARGIN = 1.15
+
+# Calibrated from report regeneration
+_REPORT_ACTOR_INPUT_TOKENS = 2_600
+_REPORT_ACTOR_OUTPUT_TOKENS = 1_800
+_REPORT_CRITIC_INPUT_TOKENS = 3_200
+_REPORT_CRITIC_OUTPUT_TOKENS = 1_600
+_REPORT_REVISION_INPUT_TOKENS = 22_000
+_REPORT_REVISION_OUTPUT_TOKENS = 15_200
+_REPORT_GLOBAL_NARRATIVE_SECTIONS = 3
 
 EVALUATION_RESULT_STATUS_ALIASES = {
     "complete": "completed",
@@ -116,6 +127,7 @@ class _AgentUsageEntry:
 class _ModelEfficiencyEntry:
     model_calls: int = 0
     correction_loops: int = 0
+    correction_categories: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -165,7 +177,9 @@ class OperationEventCoordinator:
         self._report_observation_content_token_items: List[int] = []
         self._report_exact_counts = False
         self._report_steps_started = 0
+        self._report_refinement_cycles = get_report_refinement_cycles()
         self._operation_health_provider: Optional[Callable[[], Dict[str, Any]]] = None
+        self._operation_state_snapshot_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
     def next_agent_run_id(self, agent_name: str) -> str:
         with self._lock:
@@ -202,6 +216,27 @@ class OperationEventCoordinator:
             snapshot = provider()
         except Exception as error:
             logger.debug("Unable to compute operation health: %s", error, exc_info=True)
+            return None
+        return dict(snapshot) if isinstance(snapshot, dict) else None
+
+    def set_operation_state_snapshot_provider(
+        self,
+        provider: Optional[Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Set the best-effort state snapshot provider for failure fallback reporting."""
+
+        with self._lock:
+            self._operation_state_snapshot_provider = provider
+
+    def operation_state_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            provider = self._operation_state_snapshot_provider
+        if provider is None:
+            return None
+        try:
+            snapshot = provider()
+        except Exception as error:
+            logger.debug("Unable to collect operation state snapshot: %s", error, exc_info=True)
             return None
         return dict(snapshot) if isinstance(snapshot, dict) else None
 
@@ -245,11 +280,14 @@ class OperationEventCoordinator:
         category: str,
     ) -> None:
         """Record one bounded correction/recovery loop for a model."""
-        del category  # Categories remain available at call sites for auditability.
         key = (str(provider_id or "unknown"), str(model_id or "unknown"))
+        normalized_category = str(category or "unknown").strip() or "unknown"
         with self._lock:
             entry = self._model_efficiency.setdefault(key, _ModelEfficiencyEntry())
             entry.correction_loops += 1
+            entry.correction_categories[normalized_category] = (
+                entry.correction_categories.get(normalized_category, 0) + 1
+            )
 
     def model_usage(self) -> List[Dict[str, Any]]:
         """Return operation usage grouped by provider and model."""
@@ -291,6 +329,7 @@ class OperationEventCoordinator:
                         "efficiency": score,
                         "model_calls": efficiency.model_calls,
                         "correction_loops": efficiency.correction_loops,
+                        "correction_categories": dict(sorted(efficiency.correction_categories.items())),
                     }
                 )
             return rows
@@ -322,7 +361,7 @@ class OperationEventCoordinator:
 
             normalized_category = str(category or "").strip().lower()
             content_tokens = token_calc(max(0, int(content_length or 0)), model_id=model_id)
-            if normalized_category in {"finding", "finding_candidate", "validation_failure"}:
+            if normalized_category == "finding":
                 self.report_findings += 1
                 self.report_finding_content_tokens += content_tokens
                 self._report_finding_content_token_items.append(content_tokens)
@@ -331,7 +370,12 @@ class OperationEventCoordinator:
                 self.report_observation_content_tokens += content_tokens
                 self._report_observation_content_token_items.append(content_tokens)
 
-    def set_report_items(self, items: List[Dict[str, Any]], model_id: Optional[str] = None) -> None:
+    def set_report_items(
+        self,
+        items: List[Dict[str, Any]],
+        model_id: Optional[str] = None,
+        refinement_cycles: int = 2,
+    ) -> None:
         findings = 0
         observations = 0
         finding_content_tokens = 0
@@ -342,10 +386,9 @@ class OperationEventCoordinator:
             if not isinstance(item, dict):
                 continue
             category = str(item.get("category") or "").strip().lower()
-            severity = str(item.get("severity") or "").strip().upper()
             content = item.get("content") or item.get("memory") or ""
             content_tokens = token_calc(len(str(content)), model_id=model_id)
-            if category == "finding" or severity in {"CRITICAL", "HIGH"}:
+            if category == "finding":
                 findings += 1
                 finding_content_tokens += content_tokens
                 finding_items.append(content_tokens)
@@ -362,10 +405,11 @@ class OperationEventCoordinator:
             self._report_observation_content_token_items = observation_items
             self._report_exact_counts = True
             self._report_steps_started = 0
+            self._report_refinement_cycles = max(0, int(refinement_cycles))
 
     def mark_report_step_started(self) -> None:
         with self._lock:
-            total_steps = 2 + self.report_findings + self.report_observations
+            total_steps = _REPORT_GLOBAL_NARRATIVE_SECTIONS + self.report_findings
             self._report_steps_started = min(total_steps, self._report_steps_started + 1)
 
     def report_budget_estimate(
@@ -379,32 +423,26 @@ class OperationEventCoordinator:
         with self._lock:
             findings = int(self.report_findings)
             observations = int(self.report_observations)
-            finding_content_tokens = int(self.report_finding_content_tokens)
-            observation_content_tokens = int(self.report_observation_content_tokens)
-            finding_items = list(self._report_finding_content_token_items)
-            observation_items = list(self._report_observation_content_token_items)
             steps_started = int(self._report_steps_started)
+            refinement_cycles = int(self._report_refinement_cycles)
 
-        remaining_steps = max(0, 2 + findings + observations - steps_started)
+        remaining_steps = max(0, _REPORT_GLOBAL_NARRATIVE_SECTIONS + findings - steps_started)
         if remaining_steps <= 0:
             return ReportBudgetEstimate(findings=findings, observations=observations, remaining_steps=0)
 
-        if len(finding_items) != findings:
-            finding_items = [0] * findings
-            if findings > 0:
-                finding_items[-1] = finding_content_tokens
-        if len(observation_items) != observations:
-            observation_items = [0] * observations
-            if observations > 0:
-                observation_items[-1] = observation_content_tokens
-
-        step_costs: List[tuple[int, int]] = [(2500, 1500)]
-        step_costs.extend((1800 + content_tokens, 1800) for content_tokens in finding_items)
-        step_costs.extend((1400 + content_tokens, 900) for content_tokens in observation_items)
-        step_costs.append((2200, 1200))
-        remaining_costs = step_costs[steps_started:]
-        input_tokens = math.ceil(sum(item[0] for item in remaining_costs) * 1.15)
-        output_tokens = math.ceil(sum(item[1] for item in remaining_costs) * 1.15)
+        base_input_tokens = _REPORT_ACTOR_INPUT_TOKENS
+        base_output_tokens = _REPORT_ACTOR_OUTPUT_TOKENS
+        if refinement_cycles:
+            base_input_tokens += _REPORT_CRITIC_INPUT_TOKENS
+            base_output_tokens += _REPORT_CRITIC_OUTPUT_TOKENS
+        input_tokens = math.ceil(
+            remaining_steps * (base_input_tokens + (refinement_cycles * _REPORT_REVISION_INPUT_TOKENS))
+            * _REPORT_SAFETY_MARGIN
+        )
+        output_tokens = math.ceil(
+            remaining_steps * (base_output_tokens + (refinement_cycles * _REPORT_REVISION_OUTPUT_TOKENS))
+            * _REPORT_SAFETY_MARGIN
+        )
         cost = self._estimate_report_cost(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -698,7 +736,12 @@ class AgentEventHandler(PrintingCallbackHandler):
         self._report_generation_active = False
         self._evaluation_report_path: Optional[str] = None
         self._completed_report_path: Optional[str] = None
+        self._report_status = "not_started"
         self._assessment_completion_emitted = False
+        self._operation_terminated_emitted = False
+        self._operation_finalized_emitted = False
+        self._model_usage_snapshot_emitted = False
+        self._model_usage_snapshot: Optional[Dict[str, Any]] = None
 
         # Termination tracking (workflow completion, user abort, or budget limit)
         self._termination_emitted = False
@@ -799,6 +842,19 @@ class AgentEventHandler(PrintingCallbackHandler):
         """
         try:
             event = dict(event)
+            if event.get("type") == "memory_added":
+                category = str(event.get("category") or "")
+                content_length = int(event.get("content_length") or 0)
+                evidence = category in {"observation", "finding_candidate", "finding"}
+                self.memory_ops += 1
+                if evidence:
+                    self.evidence_count += 1
+                self.coordinator.record_memory(
+                    evidence=evidence,
+                    category=category,
+                    content_length=content_length,
+                    model_id=self.model_id,
+                )
             active_metadata = getattr(self, "_active_agent_metadata", None) or {}
             event.setdefault("operation_id", self.operation_id)
             event.setdefault("agent_run_id", active_metadata.get("agent_run_id") or self.agent_run_id)
@@ -827,6 +883,14 @@ class AgentEventHandler(PrintingCallbackHandler):
         """Return the shared point-in-time operation health snapshot."""
 
         return self.coordinator.operation_health_snapshot()
+
+    def set_operation_state_snapshot_provider(
+        self,
+        provider: Optional[Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Set the operation-wide state snapshot provider shared by every agent handler."""
+
+        self.coordinator.set_operation_state_snapshot_provider(provider)
 
     def operation_health_budget_diagnostics(self) -> Dict[str, Any]:
         """Return assessment progress and terminal-budget inputs for operation health."""
@@ -1004,7 +1068,16 @@ class AgentEventHandler(PrintingCallbackHandler):
             self._handle_completion()
 
         if kwargs.get("error") and "MaxTokensReached" in str(kwargs.get("error")):
-            self.record_efficiency_event("output_token_retry", agent=kwargs.get("agent"))
+            error = kwargs.get("error")
+            agent = kwargs.get("agent")
+            self.record_max_token_exhaustion(
+                role=str(getattr(agent, "_cyber_agent_type", "unknown")),
+                classification="unknown",
+                exhaustion_ordinal=1,
+                agent=agent,
+            )
+            if isinstance(error, BaseException):
+                setattr(error, "_max_token_efficiency_recorded", True)
             self.emit_ui_event(
                 {
                     "type": "error",
@@ -1152,6 +1225,27 @@ class AgentEventHandler(PrintingCallbackHandler):
         provider_id, model_id = self._model_identity(agent or self._last_agent)
         coordinator.record_efficiency_correction(provider_id, model_id, category)
 
+    def record_max_token_exhaustion(
+        self,
+        *,
+        role: str,
+        classification: str,
+        exhaustion_ordinal: int,
+        agent: Any = None,
+    ) -> None:
+        """Account for and expose one observed max-token exhaustion."""
+
+        self.record_efficiency_event("max_token_exhaustion", agent=agent)
+        self.emit_ui_event(
+            {
+                "type": "model_max_token_exhaustion",
+                "operation_id": self.operation_id,
+                "role": str(role or "unknown"),
+                "classification": str(classification or "unknown"),
+                "exhaustion_ordinal": max(1, int(exhaustion_ordinal)),
+            }
+        )
+
     def _record_model_call_if_new(self, usage: Dict[str, Any], agent: Any = None) -> None:
         """Count one inference when cumulative usage advances for an agent."""
         coordinator = self.coordinator
@@ -1281,9 +1375,13 @@ class AgentEventHandler(PrintingCallbackHandler):
             "report_estimate": estimate,
         }
 
-    def set_report_items(self, items: List[Dict[str, Any]]) -> None:
+    def set_report_items(self, items: List[Dict[str, Any]], refinement_cycles: int = 2) -> None:
         if self.coordinator is not None:
-            self.coordinator.set_report_items(items, model_id=self.model_id)
+            self.coordinator.set_report_items(
+                items,
+                model_id=self.model_id,
+                refinement_cycles=refinement_cycles,
+            )
 
     def model_usage(self) -> List[Dict[str, Any]]:
         """Return provider/model usage rows for final report rendering."""
@@ -1291,35 +1389,95 @@ class AgentEventHandler(PrintingCallbackHandler):
             return []
         return self.coordinator.model_usage()
 
-    def emit_model_usage_snapshot(self) -> None:
-        """Persist assessment model usage before report generation adds its own calls."""
-        if self.operation_mode == "report_only":
-            return
+    def emit_model_usage_snapshot(self) -> Dict[str, Any]:
+        """Persist and freeze assessment-only model usage at operation termination."""
+        existing_snapshot = getattr(self, "_model_usage_snapshot", None)
+        if existing_snapshot is not None:
+            return existing_snapshot
         totals = self._operation_usage_totals()
         input_tokens = int(totals["input_tokens"])
         output_tokens = int(totals["output_tokens"])
+        cache_read_tokens = int(totals["cache_read_tokens"])
+        cache_write_tokens = int(totals["cache_write_tokens"])
         model_usage = self.model_usage()
         captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-        if model_usage:
+        persisted = False
+        persistence_error = None
+        for attempt in range(3):
             try:
                 from modules.tools.memory import persist_operation_model_metrics
 
                 persist_operation_model_metrics(model_usage, captured_at, operation_id=self.operation_id)
+                persisted = True
+                break
             except Exception as error:
-                logger.warning("Unable to persist assessment model metrics: %s", error)
+                persistence_error = str(error)
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+        if not persisted:
+            logger.warning("Unable to persist assessment model metrics after retries: %s", persistence_error)
+        self._model_usage_snapshot = {
+            "type": "model_usage_snapshot",
+            "stage": "operation_terminated",
+            "snapshot_persisted": persisted,
+            "persistence_error": persistence_error if not persisted else None,
+            "metrics": {
+                "capturedAt": captured_at,
+                "modelUsage": model_usage,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "cacheReadTokens": cache_read_tokens,
+                "cacheWriteTokens": cache_write_tokens,
+                "totalTokens": input_tokens + output_tokens,
+                "cost": float(totals["cost"]),
+                "duration": format_duration(self.total_operation_time_seconds()),
+            },
+        }
+        self._model_usage_snapshot_emitted = True
+        self.emit_ui_event(self._model_usage_snapshot)
+        if hasattr(self.emitter, "flush_immediate"):
+            self.emitter.flush_immediate()
+        return self._model_usage_snapshot
+
+    def emit_operation_terminated(
+        self,
+        completion_status: Dict[str, Any],
+        workflow_coverage_summary: List[Dict[str, Any]],
+    ) -> None:
+        """Emit the authoritative post-execution lifecycle event exactly once."""
+        if getattr(self, "_operation_terminated_emitted", False):
+            return
+        snapshot = self.emit_model_usage_snapshot()
+        self._operation_terminated_emitted = True
+        self._stop_metrics_thread()
         self.emit_ui_event(
             {
-                "type": "model_usage_snapshot",
-                "stage": "assessment_complete",
-                "metrics": {
-                    "capturedAt": captured_at,
-                    "modelUsage": model_usage,
-                    "inputTokens": input_tokens,
-                    "outputTokens": output_tokens,
-                    "totalTokens": input_tokens + output_tokens,
-                    "cost": float(totals["cost"]),
-                    "duration": format_duration(self.total_operation_time_seconds()),
-                },
+                "type": "operation_terminated",
+                "operation_id": self.operation_id,
+                "termination_reason": completion_status.get("termination_reason"),
+                "termination_message": completion_status.get("termination_message"),
+                "completion_status": completion_status,
+                "workflow_coverage_summary": workflow_coverage_summary,
+                "model_usage_snapshot": snapshot,
+                "health": self.operation_health_snapshot(),
+            }
+        )
+        if hasattr(self.emitter, "flush_immediate"):
+            self.emitter.flush_immediate()
+
+    def emit_operation_finalized(self, *, report_status: str, evaluation_status: str = "not_run") -> None:
+        """Emit the authoritative post-report/evaluation lifecycle event exactly once."""
+        if getattr(self, "_operation_finalized_emitted", False):
+            return
+        self._operation_finalized_emitted = True
+        self.emit_ui_event(
+            {
+                "type": "operation_finalized",
+                "operation_id": self.operation_id,
+                "termination_reason": self.termination_reason,
+                "report_status": report_status,
+                "report_path": self._completed_report_path,
+                "evaluation_status": evaluation_status,
             }
         )
         if hasattr(self.emitter, "flush_immediate"):
@@ -1478,6 +1636,7 @@ class AgentEventHandler(PrintingCallbackHandler):
 
         We avoid emitting identical reasoning fragments repeatedly within a short window.
         """
+        text, _ = sanitize_reasoning_control_text(text)
         if not text:
             return
         try:
@@ -2007,46 +2166,6 @@ class AgentEventHandler(PrintingCallbackHandler):
             "outcome": outcome,
             "executed": executed,
         }
-
-        # Update live metrics for memory operations and evidence collection
-        try:
-            memory_tools = {
-                "store_observation",
-                "store_knowledge",
-                "store_finding",
-                "record_finding_validation",
-            }
-            if tool_name in memory_tools and success:
-                # Increment memory operation count on successful storage actions
-                if isinstance(tool_input, dict):
-                    self.memory_ops += 1
-                    # Only observations and finding candidates contribute evidence/report items.
-                    if tool_name in {"store_observation", "store_finding"}:
-                        category = "finding_candidate" if tool_name == "store_finding" else "observation"
-                        metadata = tool_input.get("metadata", {}) if isinstance(tool_input.get("metadata"), dict) else {}
-                        severity = str(metadata.get("severity", "") or tool_input.get("severity", ""))
-                        content = tool_input.get("content") or tool_input.get("claim") or ""
-                        self.evidence_count += 1
-                        if self.coordinator is not None:
-                            self.coordinator.record_memory(
-                                evidence=True,
-                                category=category,
-                                severity=severity,
-                                content_length=len(str(content)),
-                                model_id=self.model_id,
-                            )
-                    elif self.coordinator is not None:
-                        category = "knowledge" if tool_name == "store_knowledge" else "finding_validation"
-                        content = tool_input.get("content") or tool_input.get("summary") or ""
-                        self.coordinator.record_memory(
-                            evidence=False,
-                            category=category,
-                            content_length=len(str(content)),
-                            model_id=self.model_id,
-                        )
-        except Exception:
-            # Never allow metrics update errors to disrupt output
-            pass
 
         # Calculate duration if we have start time
         duration = None
@@ -2628,6 +2747,8 @@ class AgentEventHandler(PrintingCallbackHandler):
             return
 
         combined_reasoning = collapse_first_repeated_sequence("".join(self.reasoning_buffer)).strip()
+        combined_reasoning, _ = sanitize_reasoning_control_text(combined_reasoning)
+        combined_reasoning = combined_reasoning.strip()
         if not combined_reasoning:
             # Nothing meaningful; clear and return
             self.reasoning_buffer = []
@@ -3065,40 +3186,9 @@ class AgentEventHandler(PrintingCallbackHandler):
         # This method only updates the internal counters
 
     def _handle_completion(self) -> None:
-        """Handle completion events."""
+        """Flush transient execution state; lifecycle events are emitted by finalization."""
         self._emit_accumulated_reasoning(force=True)
-
-        # End any active thinking indicator
         self.emit_ui_event({"type": "thinking_end"})
-
-        # Emit explicit completion summary for UI/logs
-        try:
-            totals = self._operation_usage_totals()
-            input_tokens = int(totals["input_tokens"])
-            output_tokens = int(totals["output_tokens"])
-            total_tokens = input_tokens + output_tokens
-            cost = float(totals.get("cost", self._compute_total_cost_from_usage()))
-            self.emit_ui_event(
-                {
-                    "type": "operation_complete",
-                    "operation": self.operation_id,
-                    "duration": format_duration(self._operation_elapsed_seconds()),
-                    "metrics": {
-                        "inputTokens": input_tokens,
-                        "outputTokens": output_tokens,
-                        "totalTokens": total_tokens,
-                        "cost": cost,
-                        # Cache metrics for prompt caching cost calculation
-                        "cacheReadTokens": int(totals["cache_read_tokens"]),
-                        "cacheWriteTokens": int(totals["cache_write_tokens"]),
-                        "modelUsage": self.coordinator.model_usage(),
-                        "memoryOps": self.coordinator.memory_ops,
-                        "evidence": self.coordinator.evidence_count,
-                    },
-                }
-            )
-        except Exception:
-            pass
 
     def _is_valid_input(self, tool_input: Any) -> bool:
         """Check if tool input is valid."""
@@ -3350,6 +3440,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             # Accept any non-empty report content
             if report_content:
                 self._completed_report_path = report_path
+                self._report_status = "generated"
                 self.emit_ui_event({"type": "report_content", "content": report_content})
                 self.emit_ui_event(
                     {
@@ -3383,24 +3474,92 @@ class AgentEventHandler(PrintingCallbackHandler):
 
                 logger.info("Report saved to %s", report_path)
             else:
-                logger.info(
-                    "Report generation skipped - no evidence collected during operation"
-                )
-                try:
-                    self.emit_ui_event(
-                        {
-                            "type": "output",
-                            "content": "No memories or evidence were collected during this operation. Skipping report generation.",
-                        }
+                if isinstance(completion_status, dict) and not completion_status.get("assessment_complete"):
+                    self._emit_deterministic_fallback_report(
+                        target=target,
+                        objective=objective,
+                        completion_status=completion_status,
+                        config_params=config_params,
+                        report_path=report_path,
+                        error=RuntimeError(
+                            "Normal report generation produced no report for an incomplete operation."
+                        ),
                     )
-                except Exception:
-                    pass
+                else:
+                    self._report_status = "skipped"
+                    logger.info(
+                        "Report generation skipped - no evidence collected during operation"
+                    )
+                    try:
+                        self.emit_ui_event(
+                            {
+                                "type": "output",
+                                "content": "No memories or evidence were collected during this operation. Skipping report generation.",
+                            }
+                        )
+                    except Exception:
+                        pass
 
         except Exception as e:
             logger.error("Error generating final report: %s", e)
+            try:
+                self._emit_deterministic_fallback_report(
+                    target=target,
+                    objective=objective,
+                    completion_status=completion_status,
+                    config_params=locals().get("config_params", {"completion_status": completion_status}),
+                    report_path=locals().get("report_path"),
+                    error=e,
+                )
+            except Exception as fallback_error:
+                logger.error("Unable to generate deterministic fallback report: %s", fallback_error)
+                self._report_status = "failed"
             self.emit_ui_event(
                 {"type": "error", "content": f"Error generating report: {str(e)}"}
             )
+
+    def _emit_deterministic_fallback_report(
+        self,
+        *,
+        target: str,
+        objective: str,
+        completion_status: Optional[Dict[str, Any]],
+        config_params: Dict[str, Any],
+        report_path: Optional[str],
+        error: Exception,
+    ) -> None:
+        """Generate fallback artifacts and publish their paths without rendering report content here."""
+        from modules.handlers.report_generator import generate_deterministic_fallback_report
+
+        fallback_config = dict(config_params)
+        snapshot = self.coordinator.operation_state_snapshot()
+        if snapshot:
+            fallback_config["operation_state_snapshot"] = snapshot
+        fallback = generate_deterministic_fallback_report(
+            target=target,
+            objective=objective,
+            operation_id=self.operation_id,
+            config_params=fallback_config,
+            callback_handler=self,
+            filename=report_path,
+            error=error,
+        )
+        output_dir = os.path.dirname(fallback["report_path"])
+        self._completed_report_path = fallback["report_path"]
+        self._evaluation_report_path = fallback["report_path"]
+        self._report_status = fallback["status"]
+        self.emit_ui_event({"type": "report_content", "content": fallback["content"][:15000]})
+        self.emit_ui_event(
+            {
+                "type": "report_paths",
+                "target": sanitize_target_name(target),
+                "output_dir": output_dir,
+                "report_path": fallback["report_path"],
+                "report_json_path": fallback["report_json_path"],
+                "log_path": os.path.join(output_dir, "cyber_operations.log"),
+                "artifacts_path": os.path.join(output_dir, "artifacts"),
+            }
+        )
 
     def emit_assessment_complete(self) -> None:
         """Emit the terminal assessment event once report and evaluation work has ended."""

@@ -31,6 +31,31 @@
 - For multi-line strings, use triple quotes and limit each line to 100 characters.
 - Environment variables used for configuration must be given an example in .env.example and forwarded through docker-compose.yml.
 
+### uv in the sandbox
+- Configure `uv` to use the persistent project-local `.uv-cache` directory. The default user cache may be outside the
+  sandbox's writable paths and can cause `uv` to fail before Python starts.
+- From the repository root, initialize and synchronize the environment with:
+
+  ```bash
+  mkdir -p .uv-cache
+  UV_CACHE_DIR="$PWD/.uv-cache" uv sync --all-extras
+  ```
+
+- Prefix subsequent `uv` commands with the same cache setting. Use the repository's `.venv` through `uv run`; do not
+  activate a different virtual environment or invoke tools from a system Python.
+- Examples:
+
+  ```bash
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run python3 --version
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest -q
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
+  ```
+
+- If `.uv-cache` is not present, create it before running commands. Keep it project-local and persistent between agent
+  turns; do not use a temporary directory unless the project-local path is unavailable.
+
 ## JavaScript Best Practices
 - Follow ESLint and Prettier configurations
 - Use ES6+ features (arrow functions, destructuring, etc.)
@@ -39,10 +64,34 @@
 - Use template literals for string concatenation
 
 ## Design Choices
+- Complexity leans towards deterministic code and away from the LLM where appropriate. Reasoning belongs in the LLM.
+- Execution-proof and provenance checks are controller-owned bookkeeping. Do not require an LLM to call a separate
+  receipt tool when Python can correlate task-local tool outcomes, frozen subjects, and durable artifacts.
+- Generic controller, memory, and acceptance code must be protocol-, target-, tool-, and model-neutral. Put
+  module-specific behavior in typed adapters, operation plugins, or declarative catalogs.
+- Structured metadata is authoritative for workflow control. Do not infer phase dependencies, task kinds, evidence
+  kinds, or scope from titles, filenames, generated prose, or incidental tool-output wording.
+- Keep evidence availability separate from semantic conclusions. Readability, non-empty content, status codes, and
+  successful tool execution establish availability only; they do not independently prove support or contradiction.
+- Available tools are not limited to those available at the time of coding. Tools may be added, such as through MCP, during runtime.
+- Tool-schema changes should be additive where practical. Normalize supported legacy inputs at the boundary, use
+  canonical forms internally, and reject unknown values.
+- Generic workflow tests must cover representative HTTP, network, and source/filesystem cases. Incident fixtures may
+  reproduce a particular model, target, or tool failure, but assertions must test the general invariant rather than
+  making that model's wording, target's paths, or tool's artifact names universal behavior.
+- `src/modules/config/system/finding_validation_guards.yaml` is the declarative catalog for narrow, unambiguous
+  finding-validation rules. Update it when a finding class needs either a deterministic rejection based on
+  contradiction markers present in every cited artifact, or a required positive validation mode such as response
+  comparison or a rate-limit probe. Do not use it for heuristic or uncertain vulnerability inference; preserve its
+  small, evidence-backed scope and add tests for both a matching and a non-matching candidate/artifact case.
 - Fixed-enum tool schemas must advertise canonical values while pre-processing common semantic synonyms into those canonical values; unknown values remain invalid. Strands tool runtime validation strips `Annotated[BeforeValidator(...)]` metadata when it rebuilds a tool input model, so tool-facing aliased enum parameters must use string runtime annotations, provide an explicit canonical `inputSchema`, and normalize plus strictly validate inside the function. Add runtime-schema tests; Pydantic-only direct-call tests are insufficient.
 - Reporting/evaluation budget reserves may reserve tokens and cost only. Duration/time must not be reserved for reporting or evaluation.
-- Budget of any kind may be exceeded while required reporting completes.
+- Budget of any kind may be exceeded while required reporting and evaluation completes.
 - Planning and task fan-out are independent of operation budget constraints. Budgets govern execution, evaluation, and termination, not the number of planned task records; there should be no budget-aware scheduling.
+- The workflow should prefer new task creation to reduce complexity in the LLM as long as losing the LLM context does not reduce precision. Producing artifacts from one task to feed another task is encouraged.
+- In shared memory mode, prior-operation memories are advisory investigation context only. Render their origin and do
+  not allow them to satisfy current-operation acceptance, findings, proof, completion, or report evidence without
+  current-operation revalidation.
 
 ## Application Best Practices
 - Budget is reporting only after reporting or evaluation stages are reached.
@@ -63,11 +112,4 @@
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.
 
 ## Cyber Operations Log Review
-- Read the session header and tail first to establish the operation ID, start/end time, final metrics, budget limits, termination reason, and `assessment_complete` event.
-- Use `rg -n` with narrow, case-insensitive patterns to locate phase transitions, task creation/evaluation, budget-limit events, `workflow_coverage_summary`, `progress_update`, and `assessment_complete`; avoid dumping the entire log because reasoning payloads can be very large.
-- Inspect targeted line-numbered ranges with `sed -n` around each phase transition and the final completion block. Preserve exact line numbers when reporting findings so conclusions are auditable.
-- Reconcile the plan with execution: compare planned phase count to applicable phases, phase statuses, task counts, and per-task status counts. Treat `not_applicable`, omitted inventory items, and `partial_failure` as explicit coverage results rather than assuming completion means exhaustive work.
-- Cross-check `workflow_coverage_summary` against final health. In particular, check `applicable_phase_count`, `phase_inconsistent`, failure counts, and the validation-candidate rationale; an excellent health score can coexist with a skipped phase or incomplete coverage.
-- Distinguish logical completion from resource termination. Compare elapsed duration with `maxDurationMinutes`, and inspect token/cost limits and `termination_reason`; `progressPercent` is budget/utilization progress, not phase completion.
-- Do not recommend changing task fan-out based on lack of budget. Lack of budget is for the user to control.
-- Broken or missing tools are acceptable, the operation will remove them from consideration, do not flag or offer plans to address.
+- See forensics.md for guidance on reviewing cyber operations logs.

@@ -22,6 +22,12 @@ import requests
 import urllib3
 from strands import tool, ToolContext
 
+from modules.operation_plugins.web.tools.result_cache import (
+    build_result_cache_key,
+    cache_result,
+    get_cached_result,
+)
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # We need to bound the tool, or it can take a very long time.
@@ -173,6 +179,20 @@ def advanced_payload_coordinator(
                          "comprehensive"]:
         test_type = "comprehensive"
     test_type = test_type.lower()
+    http_method = (http_method or "GET").upper()
+
+    cache_key = build_result_cache_key(
+        target_url=target_url,
+        test_type=test_type,
+        parameters=parameters or "",
+        http_method=http_method,
+        cookies=cookies or {},
+        headers=headers or {},
+    )
+    cached_result = get_cached_result("advanced_payload_coordinator", cache_key)
+    if cached_result:
+        _write_result_file(output_file, cached_result)
+        return cached_result
 
     request_config = RequestConfig(
         target_url=target_url,
@@ -349,11 +369,20 @@ def advanced_payload_coordinator(
 
     # Return a compact, agent-friendly JSON payload (no human prose)
     result_str = json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True)
-    if output_file:
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(result_str)
+    cache_result("advanced_payload_coordinator", cache_key, result_str)
+    _write_result_file(output_file, result_str)
     return result_str
+
+
+def _write_result_file(output_file: Optional[str], result: str) -> None:
+    """Write a tool result when the caller requested an output artifact."""
+    if not output_file:
+        return
+    directory = os.path.dirname(output_file)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as file:
+        file.write(result)
 
 
 def setup_payload_tools(tools_limit: Set[str] = None) -> Dict[str, Any]:
@@ -1317,7 +1346,6 @@ def _coordinate_injection_testing(
                 test_url = _add_or_replace_query_param(target_url, param, "*")
 
             sstimap_out = ""
-            sstimap_timeout = False
             try:
                 cmd = [
                     "sstimap",
@@ -1348,7 +1376,6 @@ def _coordinate_injection_testing(
                     sstimap_out = result.stdout
             except subprocess.TimeoutExpired as e:
                 sstimap_out = _coerce_str(e.stdout)
-                sstimap_timeout = True
             except Exception:
                 pass
 
@@ -1377,7 +1404,6 @@ def _coordinate_injection_testing(
                 test_url = _add_or_replace_query_param(target_url, param, "FUZZ")
 
             lfimap_out = ""
-            lfimap_timeout = False
             try:
                 cmd = [
                     "lfimap",
@@ -1406,7 +1432,6 @@ def _coordinate_injection_testing(
                     lfimap_out = result.stdout
             except subprocess.TimeoutExpired as e:
                 lfimap_out = _coerce_str(e.stdout)
-                lfimap_timeout = True
             except Exception:
                 pass
 
@@ -1427,7 +1452,6 @@ def _coordinate_injection_testing(
     # XBEN-073-24
     if "commix" in tools and parameters_under_test and (not focus or "Command Injection" in focus):
         commix_out = ""
-        commix_timeout = False
         try:
             test_url = target_url
             if not request_config.inject_in_body():
@@ -1472,7 +1496,6 @@ def _coordinate_injection_testing(
                 commix_out = result.stdout
         except subprocess.TimeoutExpired as e:
             commix_out = _coerce_str(e.stdout)
-            commix_timeout = True
         except Exception:
             pass
 

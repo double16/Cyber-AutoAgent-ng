@@ -66,13 +66,21 @@ def test_active_task_message_for_active_task_and_confidence():
 
 def test_has_valid_proof_pack_finds_existing_paths(monkeypatch, tmp_path):
     proof = tmp_path / "proof.txt"
+    nested_proof = tmp_path / "evidence" / "nested-proof.txt"
+    nested_proof.parent.mkdir()
     proof.write_text("ok")
+    nested_proof.write_text("ok")
+    outside_proof = tmp_path.parent / "outside-proof.txt"
+    outside_proof.write_text("outside")
+    monkeypatch.setattr(mod, "_operation_output_root", lambda: str(tmp_path))
 
     assert mod._has_valid_proof_pack({"proof_pack": {"artifacts": [str(proof)]}}) is True
+    assert mod._has_valid_proof_pack({"proof_pack": {"artifacts": ["artifact:proof.txt"]}}) is True
     assert mod._has_valid_proof_pack(f"artifact path: {proof}") is True
+    assert mod._has_valid_proof_pack({"proof_pack": {"artifacts": ["evidence/nested-proof.txt"]}}) is True
     assert mod._has_valid_proof_pack({"proof_pack": {"artifacts": [str(tmp_path / "missing")]}}) is False
-
-    monkeypatch.setattr(mod.os.path, "exists", lambda path: (_ for _ in ()).throw(OSError("bad")))
+    assert mod._has_valid_proof_pack({"proof_pack": {"artifacts": [str(outside_proof)]}}) is False
+    assert mod._has_valid_proof_pack({"proof_pack": {"artifacts": ["../outside-proof.txt"]}}) is False
     assert mod._has_valid_proof_pack({"artifact": "anything"}) is False
 
 

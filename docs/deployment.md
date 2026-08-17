@@ -236,7 +236,7 @@ docker run --rm \
   --target "testsite.local" \
   --objective "Basic security scan" \
   --provider ollama \
-  --model qwen3-coder:30b-a3b-q4_K_M
+  --model qwen3.6:27b
 ```
 
 ## Production Deployment
@@ -521,7 +521,7 @@ export QDRANT_URL=http://localhost:6333  # Optional memory service
 ```bash
 export OLLAMA_HOST=http://localhost:11434
 export OLLAMA_CONTEXT_LENGTH=32768
-export CYBER_AGENT_LLM_MODEL=qwen3-coder:30b-a3b-q4_K_M
+export CYBER_AGENT_LLM_MODEL=qwen3.6:27b
 export CYBER_AGENT_EMBEDDING_MODEL=nomic-embed-text:latest
 export CYBER_CONTEXT_WINDOW_FALLBACKS='[
   {"qwen3-coder:30b": ["qwen3-coder:14b", "llama3.2:3b"]}

@@ -6,6 +6,7 @@ Tests for report_builder operation_id filtering logic.
 - Memories with different operation_id are EXCLUDED
 - Memories WITHOUT operation_id (untagged) are included for backward compatibility
 """
+import hashlib
 import os
 import re
 from unittest.mock import patch
@@ -24,7 +25,7 @@ def memory_client_clear():
 
 
 @patch("modules.tools.memory.QdrantMemoryClient")
-def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
+def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path, monkeypatch):
     op_id = "OP_ALLOFIT"
 
     output_dir = tmp_path / "outputs"
@@ -143,6 +144,29 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path):
                 "metadata": {"category": "observation"},
             },
         ]
+        for item in mock_client.list_memories.return_value:
+            metadata = item["metadata"]
+            if metadata.get("validation_status") != "verified":
+                continue
+            marker = f"positive-evidence-{item['id']}"
+            artifact = operation_dir / f"proof-{item['id']}.txt"
+            artifact.write_text(marker, encoding="utf-8")
+            reference = f"artifact:proof-{item['id']}.txt"
+            assertion = {"artifact": reference, "marker": marker}
+            metadata.update(
+                {
+                    "artifacts": [reference],
+                    "candidate_evidence_assertions": [assertion],
+                    "evidence_assertions": [assertion],
+                    "evidence_artifact_fingerprints": {
+                        reference: hashlib.sha256(artifact.read_bytes()).hexdigest()
+                    },
+                }
+            )
+        monkeypatch.setattr(
+            "modules.handlers.report_generator._artifact_path_from_ref",
+            lambda reference: str(operation_dir / str(reference).removeprefix("artifact:")),
+        )
 
         with open(operation_dir / "cyber_operations.log", "w", encoding="utf-8") as f:
             f.write(f'__CYBER_EVENT__{{"type": "metrics_update", "metrics": {{"tokens": 209251, "inputTokens": 208136, "outputTokens": 1115, "totalTokens": 209251, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.75, "duration": "20m 0s", "budget": {{ "maxDurationMinutes": 60, "maxTokens": null, "maxCost": null }}, "progress": 0.1, "progressPercent": 10, "memoryOps": 2, "evidence": 1}}, "id": "{op_id}_171", "timestamp": "2026-01-26T21:29:49.060488"}}__CYBER_EVENT_END__\n')
@@ -290,7 +314,7 @@ def test_report_builder_filters_by_operation_id(mock_client_cls):
 @patch("modules.tools.memory.QdrantMemoryClient")
 @patch.dict(os.environ, {"CYBER_MEMORY_MODE": "shared"})
 def test_report_builder_cross_operation(mock_client_cls):
-    """Report builder should filter evidence by operation_id for per-operation reports."""
+    """Shared-mode reports should keep prior and unattributed memories advisory."""
     op_id = "OP_123"
     # Mock list_memories to return both tagged and untagged
     mock_client = mock_client_cls.return_value
@@ -319,17 +343,22 @@ def test_report_builder_cross_operation(mock_client_cls):
     assert any(
         "/a" in e.get("content", "") for e in out.get("raw_evidence", []) or []
     ), "Expected matching evidence from current operation"
-    # Evidence from OTHER operations should be EXCLUDED (filtered out)
-    assert any(
+    # Evidence from OTHER operations remains retrieval context but is not report evidence.
+    assert not any(
         "/b" in e.get("content", "") for e in out.get("raw_evidence", []) or []
-    ), "Should INCLUDE evidence from other operations"
-    # Untagged evidence (no operation_id) should be included for backward compatibility
-    assert any(
+    ), "Should exclude advisory evidence from other operations"
+    # Untagged evidence cannot be attributed to this operation and is also advisory.
+    assert not any(
         "/c" in e.get("content", "") for e in out.get("raw_evidence", []) or []
-    ), "Should include untagged evidence for backward compatibility"
+    ), "Should exclude unattributed advisory evidence"
 
     assert out.get("severity_counts", {}) == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    assert out["validation_failure_count"] == 3
+    assert out["validation_failure_count"] == 1
+    assert out["evidence_integrity_errors"] == [{
+        "kind": "cross_operation_advisory_memories_excluded",
+        "count": 2,
+        "source_operations": ["OP_OTHER", "unknown prior operation"],
+    }]
 
 
 @patch("modules.tools.memory.QdrantMemoryClient")

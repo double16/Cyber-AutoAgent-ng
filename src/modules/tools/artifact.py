@@ -8,26 +8,55 @@ from strands import tool
 from modules.tools.memory import _artifact_path_from_ref, _operation_output_root
 
 
+def _resolved_operation_path(candidate: str, root: str) -> str:
+    """Resolve one candidate and reject paths that escape the operation root."""
+
+    resolved = os.path.realpath(candidate)
+    if os.path.commonpath([root, resolved]) != root:
+        raise ValueError("Artifact path is outside the current operation output")
+    return resolved
+
+
+def resolve_operation_artifact_path(path: str) -> str:
+    """Resolve a readable current-operation artifact path without allowing escapes.
+
+    Canonical artifact references and absolute paths must resolve inside the operation
+    output directory. Relative paths prefer its ``artifacts/`` directory and then
+    fall back to the operation output directory itself.
+    """
+
+    root = os.path.realpath(_operation_output_root())
+    if str(path).startswith(("artifact:", "artifact_id:")):
+        resolved = _resolved_operation_path(_artifact_path_from_ref(path), root)
+    elif os.path.isabs(path):
+        resolved = _resolved_operation_path(path, root)
+    else:
+        resolved = ""
+        for candidate in (os.path.join(root, "artifacts", path), os.path.join(root, path)):
+            candidate_resolved = _resolved_operation_path(candidate, root)
+            if os.path.isfile(candidate_resolved):
+                resolved = candidate_resolved
+                break
+        if not resolved:
+            raise ValueError("Artifact does not exist")
+    if not os.path.isfile(resolved):
+        raise ValueError("Artifact does not exist")
+    return resolved
+
+
 @tool
 def read_artifact(path: str, start_line: int = 1, max_lines: int = 200) -> str:
     """Read a bounded text excerpt from an artifact in the current operation output.
 
     Args:
-        path: Absolute path or path relative to the current operation output directory.
+        path: Canonical artifact reference, safe absolute path, or relative path. Relative paths resolve from
+            artifacts/ first, then from the current operation output directory.
         start_line: One-based first line to return.
         max_lines: Number of lines to return, from 1 through 500.
     """
 
-    root = _operation_output_root()
-    if str(path).startswith(("artifact:", "artifact_id:")):
-        resolved = _artifact_path_from_ref(path)
-    else:
-        candidate = path if os.path.isabs(path) else os.path.join(root, path)
-        resolved = os.path.realpath(candidate)
-    if os.path.commonpath([root, resolved]) != root:
-        raise ValueError("Artifact path is outside the current operation output")
-    if not os.path.isfile(resolved):
-        raise ValueError("Artifact does not exist")
+    root = os.path.realpath(_operation_output_root())
+    resolved = resolve_operation_artifact_path(path)
     if start_line < 1:
         raise ValueError("start_line must be at least 1")
     if max_lines < 1 or max_lines > 500:

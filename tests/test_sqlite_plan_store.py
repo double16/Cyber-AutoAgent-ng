@@ -3,7 +3,15 @@ import sqlite3
 
 import pytest
 
-from modules.tools.memory import AcceptanceResult, CoverageResult, OperationPlan, PlanPhase, SQLiteApplicationStore, Task
+from modules.tools.memory import (
+    AcceptanceResult,
+    CoverageResult,
+    OperationPlan,
+    OperationTarget,
+    PlanPhase,
+    SQLiteApplicationStore,
+    Task,
+)
 from tests.helpers.acceptance import make_acceptance
 
 
@@ -23,6 +31,24 @@ def test_sqlite_plan_store_init(tmp_path):
             "AND name='task_acceptance_memory_publications'"
         )
         assert cursor.fetchone() is not None
+
+
+def test_plan_phase_finding_candidate_dependency_round_trips():
+    phase = PlanPhase.from_obj(
+        {
+            "id": 2,
+            "title": "Candidate correlation",
+            "status": "pending",
+            "criteria": "Analyze persisted candidates",
+            "requires_finding_candidates": True,
+        }
+    )
+
+    assert phase.requires_finding_candidates is True
+    assert PlanPhase.from_obj(phase.to_dict()).requires_finding_candidates is True
+    assert PlanPhase.from_obj({"id": 1, "title": "Recon", "status": "pending"}).requires_finding_candidates is False
+    with pytest.raises(ValueError, match="requires_finding_candidates"):
+        PlanPhase.from_obj({"id": 1, "title": "Recon", "status": "pending", "requires_finding_candidates": "yes"})
 
 
 def test_sqlite_plan_store_persists_immutable_preflight_results(tmp_path):
@@ -128,6 +154,23 @@ def test_sqlite_plan_store_plan_operations(tmp_path):
     assert retrieved_updated.updated_at > retrieved_plan.updated_at
 
 
+def test_sqlite_plan_store_round_trips_operation_targets(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "targets.db"), "target")
+    plan = OperationPlan(
+        objective="Assess the service",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active", criteria="Map the service")],
+        targets=[OperationTarget("target-1", "https://service.example:8443", "network")],
+    )
+
+    store.store_plan("op-1", plan)
+    restored = store.get_plan("op-1")
+
+    assert restored is not None
+    assert restored.targets == plan.targets
+
+
 def test_sqlite_plan_store_task_operations(tmp_path):
     db_path = str(tmp_path / "test.db")
     store = SQLiteApplicationStore(db_path, "target")
@@ -177,6 +220,42 @@ def test_sqlite_plan_store_task_operations(tmp_path):
     assert updated_tasks[0].updated_at > tasks[0].updated_at
 
 
+def test_sqlite_plan_store_round_trips_task_replacement_lineage(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    operation_id = "test-op"
+    store = SQLiteApplicationStore(db_path, "target")
+    parent = Task(
+        task_uid="parent",
+        title="Original task",
+        objective="Complete the assigned security check",
+        acceptance=make_acceptance("criterion-1"),
+        phase=1,
+        status="partial_failure",
+    )
+    replacement = Task(
+        task_uid="replacement",
+        title="Replacement task",
+        objective="Complete the unresolved security check",
+        acceptance=make_acceptance("criterion-1"),
+        phase=1,
+        status="done",
+        replacement_of="parent",
+        supersedes_criteria=["criterion-1"],
+        recovery_context={
+            "parent_task_uid": "parent",
+            "original_objective": "Complete the assigned security check",
+        },
+    )
+
+    store.store_task(operation_id, parent)
+    store.store_task(operation_id, replacement)
+
+    reloaded = {task.task_uid: task for task in SQLiteApplicationStore(db_path, "target").get_tasks(operation_id)}
+    assert reloaded["replacement"].replacement_of == "parent"
+    assert reloaded["replacement"].supersedes_criteria == ["criterion-1"]
+    assert reloaded["replacement"].recovery_context == replacement.recovery_context
+
+
 def test_sqlite_finding_ledger_operations(tmp_path):
     store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
     store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
@@ -185,7 +264,18 @@ def test_sqlite_finding_ledger_operations(tmp_path):
 
     record = store.get_finding_by_fingerprint("op", "fingerprint")
     assert record["finding_uid"] == "finding-1"
-    assert record["candidate_data"] == {"claim": "claim", "source_task_uids": ["source-task"]}
+    assert record["candidate_data"] == {
+        "claim": "claim",
+        "source_task_uids": ["source-task"],
+        "source_task_receipts": [
+            {
+                "task_uid": "source-task",
+                "finding_uid": "finding-1",
+                "status": "persisted",
+                "evidence_refs": ["finding:finding-1"],
+            }
+        ],
+    }
 
     store.store_finding_validation("op", "finding-1", {"outcome": "confirmed"})
     store.resolve_finding("op", "finding-1", "verified")
@@ -195,6 +285,22 @@ def test_sqlite_finding_ledger_operations(tmp_path):
     assert resolved["resolution"] == "verified"
     assert store.list_findings("op") == [resolved]
     assert store.list_findings("other-operation") == []
+
+
+def test_sqlite_finding_evidence_receipts_are_operation_and_task_scoped(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "receipt.db"), "target")
+    store.store_finding_evidence_receipt(
+        "op", "receipt-1", "task-1", "artifact:artifacts/result.txt", "decisive marker", "a" * 64
+    )
+
+    assert store.get_finding_evidence_receipts("op", ["receipt-1"]) == [{
+        "receipt_uid": "receipt-1",
+        "source_task_uid": "task-1",
+        "artifact_ref": "artifact:artifacts/result.txt",
+        "marker": "decisive marker",
+        "artifact_fingerprint": "a" * 64,
+    }]
+    assert store.get_finding_evidence_receipts("other-operation", ["receipt-1"]) == []
 
 
 def test_sqlite_objective_validation_ledger_operations(tmp_path):
@@ -426,6 +532,7 @@ def _model_metric_row(**overrides):
         "inference_time_ms": 456.0,
         "model_calls": 3,
         "correction_loops": 1,
+        "correction_categories": {"max_token_exhaustion": 1},
         "efficiency": 75.0,
     }
     return {**row, **overrides}
@@ -451,6 +558,7 @@ def test_sqlite_application_store_appends_timestamped_model_metric_captures(tmp_
         "2026-08-06T12:10:00.000001+00:00",
     ]
     assert [row["total_tokens"] for row in rows] == [150, 250]
+    assert rows[0]["correction_categories"] == {"max_token_exhaustion": 1}
 
 
 def test_sqlite_application_store_model_metrics_are_target_scoped_and_validated(tmp_path):
@@ -465,4 +573,10 @@ def test_sqlite_application_store_model_metrics_are_target_scoped_and_validated(
             "OP_1",
             "2026-08-06T12:00:00.000001+00:00",
             [_model_metric_row(total_tokens=1)],
+        )
+    with pytest.raises(ValueError, match="correction_categories"):
+        second.append_operation_model_metrics(
+            "OP_1",
+            "2026-08-06T12:00:00.000001+00:00",
+            [_model_metric_row(correction_categories={"max_token_exhaustion": 2})],
         )

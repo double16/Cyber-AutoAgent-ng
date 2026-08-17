@@ -48,7 +48,7 @@ def test_output_interception_react_only(
     mock_setup_intercept,
     monkeypatch,
 ):
-    mock_rbh.return_value = SimpleNamespace(emitter=None)
+    mock_rbh.return_value = SimpleNamespace(emitter=None, emit_ui_event=lambda _event: None)
     mock_hooks.side_effect = FakeReactHooks
     mock_model = _stateless_model_mock()
     mock_create_model.return_value = mock_model

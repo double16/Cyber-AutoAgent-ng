@@ -13,6 +13,7 @@ import pytest
 from modules.config.manager import (
     ConfigManager,
     get_config_manager,
+    get_report_refinement_cycles,
     get_default_model_configs,
     get_model_config,
     get_ollama_host, MAX_TOKENS_REASONING_LIMIT,
@@ -215,7 +216,7 @@ class TestConfigManager:
 
             assert config.server_type == "ollama"
             assert config.llm.provider == ModelProvider.OLLAMA
-            assert config.llm.model_id == "qwen3-coder:30b-a3b-q4_K_M"
+            assert config.llm.model_id == "qwen3.6:27b"
             assert config.embedding.provider == ModelProvider.OLLAMA
             assert config.embedding.model_id == "mxbai-embed-large:latest"
             assert config.region == "ollama"
@@ -257,7 +258,7 @@ class TestConfigManager:
 
         assert isinstance(config, LLMConfig)
         assert config.provider == ModelProvider.OLLAMA
-        assert config.model_id == "qwen3-coder:30b-a3b-q4_K_M"
+        assert config.model_id == "qwen3.6:27b"
 
     def test_get_embedding_config(self):
         """Test getting embedding configuration."""
@@ -323,9 +324,9 @@ class TestConfigManager:
         local_config = self.config_manager.get_swarm_config("ollama")
         assert isinstance(local_config, SwarmConfig)
         assert local_config.llm.provider == ModelProvider.OLLAMA
-        assert local_config.llm.model_id == "qwen3-coder:30b-a3b-q4_K_M"
+        assert local_config.llm.model_id == "qwen3.6:27b"
         assert local_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
-        assert local_config.llm.max_tokens == 3072
+        assert local_config.llm.max_tokens == 4096
 
         # Test remote swarm config
         remote_config = self.config_manager.get_swarm_config("bedrock")
@@ -953,6 +954,14 @@ class TestGlobalFunctions:
         manager2 = get_config_manager()
         assert manager1 is manager2
 
+    def test_get_report_refinement_cycles_clamps_invalid_values(self):
+        manager = MagicMock()
+        manager.getenv_int.side_effect = [3, -1, True]
+
+        assert get_report_refinement_cycles(manager) == 3
+        assert get_report_refinement_cycles(manager) == 0
+        assert get_report_refinement_cycles(manager) == 2
+
     def test_get_model_config(self):
         """Test get_model_config function."""
         config = get_model_config("ollama")
@@ -967,7 +976,7 @@ class TestGlobalFunctions:
         assert "llm_model" in config
         assert "embedding_model" in config
         assert "embedding_dims" in config
-        assert config["llm_model"] == "qwen3-coder:30b-a3b-q4_K_M"
+        assert config["llm_model"] == "qwen3.6:27b"
         assert config["embedding_model"] == "mxbai-embed-large:latest"
         assert config["embedding_dims"] == 1024
 
@@ -1070,7 +1079,7 @@ class TestEnvironmentIntegration:
         # Test local model configuration
         local_config = config_manager.get_local_model_config("llama3.2:3b", "ollama")
         assert local_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
-        assert local_config["max_tokens"] == 4096
+        assert local_config["max_tokens"] == 4000
         assert "host" in local_config
         assert local_config["host"].startswith("http://")
 

@@ -184,6 +184,15 @@ def repair_json_text(text: str) -> str:
     return re.sub(r",\s*([}\]])", r"\1", repaired)
 
 
+def _quoted_fenced_json_candidate(value: Any) -> str | None:
+    """Return JSON inside one decoded Markdown fence, if ``value`` is exactly that fence."""
+
+    if not isinstance(value, str):
+        return None
+    match = _CODE_BLOCK_RE.fullmatch(value.strip())
+    return match.group(1).strip() if match else None
+
+
 def parse_json_response_with_metadata(text: str, *, require_object: bool = False) -> JSONParseResult:
     """Parse one unambiguous JSON value from a structured response.
 
@@ -200,6 +209,14 @@ def parse_json_response_with_metadata(text: str, *, require_object: bool = False
         parsed = json.loads(stripped)
         extracted = False
         repaired = False
+        quoted_fence = _quoted_fenced_json_candidate(parsed)
+        if quoted_fence is not None:
+            try:
+                parsed = json.loads(quoted_fence)
+            except json.JSONDecodeError:
+                parsed = json.loads(repair_json_text(quoted_fence))
+            extracted = True
+            repaired = True
     except json.JSONDecodeError as initial_error:
         candidates = _balanced_json_candidates(text)
         if len(candidates) != 1:

@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 import modules.operation_plugins.web.tools.auth_chain_analyzer as aca
+import modules.tools.recon_inventory_manifest as manifest_tool
 
 
 class DummyResp:
@@ -44,6 +45,55 @@ def _loads(out: str) -> dict:
     return json.loads(out)
 
 
+def test_auth_chain_reuses_cache_for_normalized_target(monkeypatch):
+    calls = {"discover": 0}
+
+    def discover(url):
+        calls["discover"] += 1
+        return []
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", discover)
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+
+    first = _loads(aca.auth_chain_analyzer("example.test", auth_type="auto"))
+    second = _loads(aca.auth_chain_analyzer("https://example.test", auth_type="auto"))
+
+    assert first == second
+    assert calls["discover"] == 1
+
+
+def test_auth_chain_cache_key_includes_auth_type(monkeypatch):
+    calls = {"discover": 0}
+
+    def discover(url):
+        calls["discover"] += 1
+        return []
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", discover)
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+
+    aca.auth_chain_analyzer("https://example.test", auth_type="jwt")
+    aca.auth_chain_analyzer("https://example.test", auth_type="oauth")
+
+    assert calls["discover"] == 2
+
+
 def test_auth_chain_analyzer_adds_scheme_and_emits_json(monkeypatch):
     monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda url: [])
     monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
@@ -66,6 +116,105 @@ def test_auth_chain_analyzer_adds_scheme_and_emits_json(monkeypatch):
     assert "findings" in j
     assert "next_steps" in j
     assert "decision" in j
+
+
+def test_auth_chain_inventory_manifest_is_additive(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        aca,
+        "_discover_auth_endpoints",
+        lambda url: [{"path": "/login", "full_url": f"{url}/login", "status": 200}],
+    )
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [{"type": "Session-based"}])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {
+            "authentication_steps": [{"description": "Submit credentials"}],
+            "bypass_opportunities": [],
+            "privilege_escalation": [],
+        },
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+    monkeypatch.setattr(
+        manifest_tool,
+        "resolve_inventory_target",
+        lambda target, target_id="target-1": (target, target_id),
+    )
+    captured = {}
+
+    def write_manifest(path, manifest):
+        captured.update({"path": path, "manifest": manifest})
+        return {"path": path, "validation_status": "valid", "item_count": len(manifest["items"])}
+
+    monkeypatch.setattr(manifest_tool, "write_inventory_manifest", write_manifest)
+
+    regular = _loads(aca.auth_chain_analyzer("https://target.test"))
+    additional = _loads(
+        aca.auth_chain_analyzer(
+            "https://target.test",
+            inventory_manifest=str(tmp_path / "auth-inventory.json"),
+        )
+    )
+
+    assert "inventory_manifest" not in regular
+    assert additional["inventory_manifest"]["validation_status"] == "valid"
+    assert captured["path"] == str(tmp_path / "auth-inventory.json")
+    assert {item["kind"] for item in captured["manifest"]["items"]} >= {
+        "endpoint",
+        "service",
+        "technology",
+        "workflow",
+    }
+
+
+def test_auth_chain_error_keeps_requested_manifest_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", Mock(side_effect=RuntimeError("analysis failed")))
+
+    result = _loads(
+        aca.auth_chain_analyzer(
+            "https://target.test",
+            inventory_manifest=str(tmp_path / "auth-inventory.json"),
+        )
+    )
+
+    assert result["error"] == "analysis failed"
+    assert result["inventory_manifest"]["validation_status"] == "error"
+    assert "no inventory manifest was produced" in result["inventory_manifest"]["error"]
+
+
+def test_auth_chain_reports_manifest_validation_failure_without_replacing_analysis(monkeypatch, tmp_path):
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda url: [])
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {
+            "authentication_steps": [],
+            "bypass_opportunities": [],
+            "privilege_escalation": [],
+        },
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+    monkeypatch.setattr(
+        manifest_tool,
+        "write_inventory_manifest",
+        Mock(side_effect=ValueError("manifest has no inventory items")),
+    )
+
+    result = _loads(
+        aca.auth_chain_analyzer(
+            "https://target.test",
+            inventory_manifest=str(tmp_path / "auth-inventory.json"),
+        )
+    )
+
+    assert result["summary"]["auth_endpoints"] == 0
+    assert result["inventory_manifest"]["validation_status"] == "error"
+    assert result["inventory_manifest"]["error"] == "manifest has no inventory items"
 
 
 def test_auth_chain_analyzer_handles_bypass_results_none(monkeypatch):

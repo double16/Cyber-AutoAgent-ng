@@ -1010,6 +1010,18 @@ def get_config_manager() -> ConfigManager:
     return CONFIG_MANAGER_INSTANCE
 
 
+def get_report_refinement_cycles(config_manager: Optional[ConfigManager] = None) -> int:
+    """Return the configured non-negative bound for report actor/critic refinement."""
+    manager = config_manager or get_config_manager()
+    try:
+        value = manager.getenv_int("CYBER_REPORT_REFINEMENT_CYCLES", 2)
+    except Exception:
+        return 2
+    if not isinstance(value, int) or isinstance(value, bool):
+        return 2
+    return max(0, value)
+
+
 def get_model_config(server: str, **overrides) -> ServerConfig:
     """Get model configuration for the specified server.
 
