@@ -1418,6 +1418,10 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
         "target_ids",
         "replacement_of",
         "supersedes_criteria",
+        "workstream",
+        "task_role",
+        "depends_on_workstreams",
+        "inapplicability_reason",
     }
     schema_text = json.dumps(task_schema["properties"])
     for removed in ("acceptance", "phase", "status", "target_scope", "gap_policy", "stop_condition", "basis_kind"):
@@ -3230,6 +3234,10 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
         "target_ids",
         "replacement_of",
         "supersedes_criteria",
+        "workstream",
+        "task_role",
+        "depends_on_workstreams",
+        "inapplicability_reason",
     }
 
 

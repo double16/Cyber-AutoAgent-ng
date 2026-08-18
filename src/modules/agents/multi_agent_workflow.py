@@ -2076,11 +2076,19 @@ class MultiAgentWorkflowController:
             pending_tasks.sort(
                 key=lambda task: (
                     0 if task.kind in VALIDATION_TASK_KINDS else 1,
+                    1 if self._task_planning_role(task) == "synthesis" else 0,
                     task.created_at or "",
                 )
             )
             return pending_tasks[0]
         return None
+
+    @staticmethod
+    def _task_planning_role(task: Task) -> str:
+        """Read controller-owned planning metadata without interpreting task prose."""
+
+        context = task.recovery_context.get("phase_task_contract")
+        return str(context.get("task_role") or "mapping") if isinstance(context, dict) else "mapping"
 
     def _run_task(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         with self._task_trace_context(plan, phase, task):
@@ -7570,6 +7578,7 @@ review existing memories. Return only the requested JSON decision."""
                 "Supply one or more of those values in every proposal's finding_refs array. Hypotheses, target IDs, "
                 "task summaries, and inferred vulnerability names are not substitutes.\n"
             )
+        phase_task_contract_context = self._phase_task_contract_prompt(phase)
         procedure_rules = f"""- For bounded procedure work, supply non-empty `methods`, `snapshot_refs: []`, and one or more positive integer
   `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
   stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
@@ -7642,6 +7651,7 @@ Correction rules:
 
 Canonical inventory manifest contract:
 {inventory_manifest_contract_text()}
+{phase_task_contract_context}
 
 Target scoping:
 - Omit `target_ids` when the task intentionally covers every executable target.
@@ -7980,8 +7990,47 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
             phase_title=phase.title if phase else "",
             phase_objective=phase.criteria if phase else "",
             required_finding_refs=required_finding_refs,
+            phase_task_contract=self._phase_task_contract(phase),
             invocation_observer=invocation_observer,
         )]
+
+    def _phase_task_contract(self, phase: PlanPhase) -> Any:
+        """Load the active module's opt-in, declarative planning contract."""
+
+        from modules.operation_plugins.planning_contracts import load_phase_task_contract
+
+        module = str(getattr(self.runtime.config, "module", "") or "")
+        return load_phase_task_contract(module, phase.id)
+
+    def _phase_task_contract_prompt(self, phase: PlanPhase) -> str:
+        """Render the active declarative contract without interpreting task prose."""
+
+        contract = self._phase_task_contract(phase)
+        if contract is None:
+            return ""
+        mapping_workstreams = ", ".join(sorted(contract.mapping_workstreams))
+        synthesis = ""
+        if contract.mode == "fanout_with_synthesis":
+            synthesis = (
+                f"\n- Include exactly one `task_role: \"synthesis\"` proposal with `workstream: "
+                f"\"{contract.synthesis_workstream}\"`, `output_kind: \"{contract.synthesis_output_kind}\"`, "
+                "and `depends_on_workstreams` containing every submitted mapping workstream."
+            )
+        direct_exception = ""
+        if contract.allow_direct_single_step:
+            direct_exception = (
+                "\n- A direct single-step exception is allowed only as one proposal with "
+                f"`task_role: \"direct_single_step\"`, workstream in "
+                f"{json.dumps(sorted(contract.direct_single_step_workstreams))}, and a concrete "
+                "`inapplicability_reason`."
+            )
+        return (
+            "\nModule phase task fan-out contract (controller-enforced):\n"
+            f"- Submit at least {contract.min_mapping_tasks} distinct `task_role: \"mapping\"` proposals.\n"
+            f"- Each mapping proposal must set exactly one `workstream` from: {mapping_workstreams}.\n"
+            "- Mapping proposals must leave `depends_on_workstreams` empty; do not combine workstreams in one task."
+            f"{synthesis}{direct_exception}\n"
+        )
 
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
         pending = self.state.list_tasks(phase=phase.id, status=["pending", "active"])

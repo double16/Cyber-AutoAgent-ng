@@ -10,6 +10,13 @@ requires a flag.
 
 1. **Challenge Surface Mapping** — Characterize the bounded inventory of authorized hosts, endpoints, parameters, roles,
    literal hints, and capability classes. Document duplicates, exclusions, and unreachable paths with artifacts.
+
+### Phase-1 task fan-out
+
+Create separate artifact-producing tasks for at least three applicable workstreams: challenge hints, endpoint and
+capability discovery, access-context mapping, and flag-path investigation. Queue one challenge-surface synthesis task
+after the mapping tasks. A one-task direct flag path is allowed only when its structured exception records a concrete
+reason.
 2. **Generate Exploit Hypotheses from the Challenge Surface** — Derive testable hypotheses from challenge hints,
    exposed capabilities, inputs, and trust boundaries without treating clues as findings.
 3. **Exploit Testing** — Test prioritized hypotheses with expected and actual results, negative controls, and artifacts.

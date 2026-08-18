@@ -4616,6 +4616,19 @@ class TaskProposal(_StrictTaskWireModel):
         default_factory=list,
         description="Parent acceptance criterion IDs resolved by this replacement task",
     )
+    workstream: Optional[str] = Field(
+        default=None,
+        description="Module-declared planning workstream when the active phase has a task contract",
+    )
+    task_role: str = Field(default="mapping", description="Planning role: mapping, synthesis, or direct_single_step")
+    depends_on_workstreams: List[str] = Field(
+        default_factory=list,
+        description="Declared workstream prerequisites for a synthesis task",
+    )
+    inapplicability_reason: Optional[str] = Field(
+        default=None,
+        description="Concrete reason required for a direct single-step planning exception",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -4683,6 +4696,14 @@ class TaskProposal(_StrictTaskWireModel):
             raise ValueError("objective required")
         if self.basis_description is not None and not self.basis_description.strip():
             raise ValueError("basis_description must be non-empty when provided")
+        if self.workstream is not None and not self.workstream.strip():
+            raise ValueError("workstream must be non-empty when supplied")
+        if self.task_role not in {"mapping", "synthesis", "direct_single_step"}:
+            raise ValueError("task_role must be mapping, synthesis, or direct_single_step")
+        if any(not item.strip() for item in self.depends_on_workstreams):
+            raise ValueError("depends_on_workstreams must not contain empty values")
+        if self.inapplicability_reason is not None and not self.inapplicability_reason.strip():
+            raise ValueError("inapplicability_reason must be non-empty when supplied")
         snapshot_fields = bool(self.snapshot_refs)
         if self.methods and snapshot_fields:
             raise ValueError("proposal must not mix procedure and snapshot fields")
@@ -4745,6 +4766,10 @@ _TASK_PROPOSAL_FIELD_CORRECTIONS = {
         'array of parent acceptance criterion IDs when replacing work',
         '"supersedes_criteria":["criterion-1"]',
     ),
+    "workstream": ('module-declared non-empty workstream', '"workstream":"bounded_crawl"'),
+    "task_role": ('mapping, synthesis, or direct_single_step', '"task_role":"mapping"'),
+    "depends_on_workstreams": ('array of declared prerequisite workstreams', '"depends_on_workstreams":["bounded_crawl"]'),
+    "inapplicability_reason": ('non-empty reason for direct_single_step only', '"inapplicability_reason":"flag is exposed by the root response"'),
 }
 
 
@@ -4844,6 +4869,10 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                     "target_ids": {"type": "array", "items": {"type": "string"}},
                     "replacement_of": {"type": ["string", "null"]},
                     "supersedes_criteria": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "workstream": {"type": ["string", "null"]},
+                    "task_role": {"type": "string", "enum": ["mapping", "synthesis", "direct_single_step"], "default": "mapping"},
+                    "depends_on_workstreams": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "inapplicability_reason": {"type": ["string", "null"]},
                 },
             },
             "TaskProposalCriterion": {
@@ -6467,6 +6496,7 @@ def _create_tasks_from_proposals(
     phase_title: str = "",
     phase_objective: str = "",
     required_finding_refs: Optional[set[str]] = None,
+    phase_task_contract: Any = None,
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
@@ -6488,6 +6518,10 @@ def _create_tasks_from_proposals(
         proposals = TypeAdapter(TaskProposalList).validate_python(tasks)
     except ValidationError as error:
         raise ValueError(_compact_task_proposal_validation_error(error)) from error
+    if phase_task_contract is not None:
+        from modules.operation_plugins.planning_contracts import validate_phase_task_proposals
+
+        validate_phase_task_proposals(phase_task_contract, proposals)
     if coverage_item_ids is not None and len(proposals) != 1:
         raise ValueError(
             "controller-bound inventory batch requires exactly one snapshot proposal; "
@@ -6553,6 +6587,18 @@ def _create_tasks_from_proposals(
         selected_targets = [
             target for target in plan.targets if not target_ids or target.target_id in set(target_ids)
         ]
+        planning_context = {}
+        if phase_task_contract is not None:
+            planning_context = {
+                "phase_task_contract": {
+                    "module": phase_task_contract.module,
+                    "phase_id": phase_task_contract.phase_id,
+                    "workstream": proposal.workstream,
+                    "task_role": proposal.task_role,
+                    "depends_on_workstreams": list(proposal.depends_on_workstreams),
+                    "inapplicability_reason": proposal.inapplicability_reason,
+                }
+            }
         _validate_procedure_proposal_route_atomicity(proposal, selected_targets)
         acceptance = _freeze_and_validate_acceptance(
             _proposal_acceptance_contract(proposal, plan),
@@ -6772,6 +6818,7 @@ def _create_tasks_from_proposals(
                 target_ids=group_target_ids,
                 replacement_of=replacement_of,
                 supersedes_criteria=supersedes_criteria,
+                recovery_context=planning_context,
             ))
             proposal_created_count += 1
         logger.info(
@@ -6832,6 +6879,7 @@ def build_create_tasks_tool(
     phase_title: str = "",
     phase_objective: str = "",
     required_finding_refs: Optional[set[str]] = None,
+    phase_task_contract: Any = None,
     invocation_observer: Optional[Callable[[Dict[str, Any], Any, Optional[Exception]], None]] = None,
 ) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
@@ -6855,6 +6903,7 @@ def build_create_tasks_tool(
                 phase_title=phase_title,
                 phase_objective=phase_objective,
                 required_finding_refs=required_finding_refs,
+                phase_task_contract=phase_task_contract,
             )
         except Exception as error:
             if invocation_observer is not None:
