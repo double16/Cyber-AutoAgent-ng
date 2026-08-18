@@ -22,7 +22,7 @@ from modules.agents.multi_agent_workflow import (
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import MaxTokenClassification
-from modules.handlers.tool_recovery import ToolOutcome
+from modules.handlers.tool_recovery import ToolOutcome, ToolOutcomeJournal
 from modules.tools.memory import (
     AcceptanceBasis,
     AcceptanceContract,
@@ -36,6 +36,7 @@ from modules.tools.memory import (
     SQLiteApplicationStore,
     Task as TaskModel,
 )
+from modules.tools import memory as memory_mod
 
 
 def _acceptance(criterion_id="task-outcome"):
@@ -121,6 +122,128 @@ def test_execution_evidence_capabilities_are_derived_from_observed_tools():
     assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"crawl"}
     assert MultiAgentWorkflowController._outcome_execution_capabilities(source_analysis) == {"analyze"}
     assert MultiAgentWorkflowController._canonical_execution_method("web-spider") == "crawl"
+
+
+def test_execution_evidence_capabilities_include_wrapped_shell_command():
+    crawl = ToolOutcome(
+        sequence=1,
+        tool_use_id="crawl-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary='{"command":"cd /tmp\\ntimeout 60 katana -u http://target.test/ -o crawl.txt"}',
+        output_summary="",
+    )
+
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"crawl"}
+
+
+def test_execution_evidence_capabilities_use_environment_command_alias():
+    scan = ToolOutcome(
+        sequence=1,
+        tool_use_id="scan-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary='{"command":"testssl https://target.test"}',
+        output_summary="",
+    )
+
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(scan) == {"execute", "request"}
+
+
+def test_shell_outcome_retains_existing_declared_output_artifact(monkeypatch, tmp_path):
+    artifact = tmp_path / "artifacts" / "crawl.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("http://target.test/\n", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="crawl-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary=json.dumps({"command": f"cd {artifact.parent}\ntimeout 60 scanner -o {artifact.name}"}),
+        output_summary="",
+    )
+
+    assert MultiAgentWorkflowController._artifact_refs_from_tool_outcomes([outcome]) == [
+        "artifact:artifacts/crawl.txt"
+    ]
+
+
+def test_journaled_katana_outcome_satisfies_crawl_execution_requirement(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Crawl the assigned root route",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce crawl evidence for the assigned root route",
+            "/",
+        )],
+    )
+    task = TaskModel(
+        task_uid="katana-execution-proof",
+        title="Crawl target",
+        objective="Crawl the assigned target",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded crawl",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["crawl"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    artifact = tmp_path / "artifacts" / "katana_output.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("http://target.test/\n", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    journal = ToolOutcomeJournal()
+    outcome = journal.append(
+        tool_use_id="katana-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        tool_input={
+            "command": f"cd {artifact.parent} && katana -u http://target.test -o {artifact.name}",
+        },
+        output="crawl completed",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+
+    resolved = controller._resolve_controller_execution_evidence(plan, task, criterion, [outcome])
+
+    assert outcome.structured_input == {
+        "command": f"cd {artifact.parent} && katana -u http://target.test -o {artifact.name}",
+    }
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(outcome) == {"crawl"}
+    assert resolved == {"criterion-1-execution-1": ["artifact:artifacts/katana_output.txt"]}
 
 
 def Task(*args, **kwargs):
@@ -8952,11 +9075,7 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "spec_scan,Run a targeted scan." in prompt
     assert "`tools` JSON field contains optional-tool names only" in prompt
     assert "Never return core-tool names in `tools`" in prompt
-    assert "Select any reasonably useful optional-tool working set" in prompt
     assert "Overlapping capabilities are allowed" in prompt
-    assert "Select any reasonably useful command working set" in prompt
-    assert "no single-tool, exclusivity, minimal-selection, or redundancy requirement" in prompt
-    assert "Selection makes a command available; it does not require the executor to use it" in prompt
     assert "capability required by the task that supplied native tools do not provide" not in prompt
     assert "mandatory execution guardrail" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
@@ -9011,6 +9130,61 @@ def test_task_prompt_builder_adds_bounded_task_scoped_swarm_contract():
     assert "explicit handoff triggers" in prompt
     assert "parent executor consolidates results" in prompt
     assert "must not create or execute workflow tasks" in prompt
+
+
+def test_task_prompts_delegate_loop_recovery_to_controller_without_retry_ceiling():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Test recovery",
+        objective="Test the assigned endpoint",
+        phase=1,
+        status="active",
+    )
+
+    builder_prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+    executor_contract = controller._task_executor_contract(task, {"store_observation"})
+
+    combined = f"{builder_prompt}\n{executor_contract}"
+    assert "actual registered tool calls" in combined
+    assert "controller-owned executor contract supplies the terminal acceptance protocol" in combined
+    assert "controller supplies a loop or recovery instruction" in executor_contract
+    assert "one correction" not in combined
+    assert "correction fails" not in combined
+    assert "retry" not in combined.lower()
+
+
+def test_task_prompt_critic_checks_pseudo_calls_and_tool_selection_limits():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Test prompt",
+        objective="Test the assigned endpoint",
+        phase=1,
+        status="active",
+    )
+
+    prompt = controller._task_prompt_critic_prompt(
+        _plan(),
+        _plan().phases[0],
+        task,
+        {"prompt": "Use the target.", "memory_ids": [], "tools": [], "shell_commands": []},
+    )
+
+    assert "actual registered tool calls" in prompt
+    assert "pseudo-syntax" in prompt
+    assert "Controller-Appended Terminal Protocol" in prompt
+    assert "record_task_acceptance` exactly once" in prompt
 
 
 def test_task_prompt_critic_defines_swarm_acceptance_rules():
@@ -9864,11 +10038,8 @@ def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
     assert "http_request" in prompt
     assert "curl" in prompt
     assert "Tool overlap is permitted" in prompt
-    assert "include both a native tool and a shell command for the same capability" in " ".join(prompt.split())
     assert "Core tools are supplied automatically and must not appear in `tools`" in prompt
-    assert "There is no single-tool" in prompt
     assert "relevant and available" not in prompt
-    assert "Reject a selection only when it has no reasonable relationship to the task" in " ".join(prompt.split())
 
 
 def test_task_prompt_spec_accepts_tools_and_commands_in_either_selection_list(monkeypatch):
@@ -9934,6 +10105,62 @@ def test_task_prompt_spec_filters_common_shell_commands_before_validation(monkey
 
     assert normalized["tools"] == ["module_probe"]
     assert normalized["shell_commands"] == ["httpx"]
+
+
+def test_task_prompt_spec_allows_over_limit_selections_without_rationale():
+    runtime = _runtime()
+    for name in ("probe_a", "probe_b", "probe_c", "probe_d"):
+        runtime.optional_tools_list.append(_tool(name))
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Inspect", objective="Inspect target", phase=1, status="pending")
+    prompt_spec = {
+        "prompt": "Inspect the target",
+        "tools": ["probe_a", "probe_b", "probe_c", "probe_d"],
+        "shell_commands": [],
+    }
+
+    normalized = controller._normalize_task_prompt_spec(prompt_spec, task)
+
+    assert normalized["tools"] == ["probe_a", "probe_b", "probe_c", "probe_d"]
+
+
+def test_task_terminal_protocol_summary_covers_normal_validation_and_candidate_tasks():
+    normal_task = Task(task_uid="normal", title="Normal", objective="Inspect", phase=1, status="pending")
+    validation_task = Task(
+        task_uid="validation",
+        title="Validate",
+        objective="Validate",
+        phase=1,
+        kind="finding_validation",
+        status="pending",
+    )
+    candidate_task = Task(
+        task_uid="candidate",
+        title="Candidate",
+        objective="Assess",
+        phase=1,
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["task:source"]),
+            criteria=[
+                AcceptanceCriterion(
+                    id="candidate",
+                    description="Store finding",
+                    evidence_requirements=[EvidenceRequirement(kind="finding_candidate")],
+                )
+            ],
+        ),
+        status="pending",
+    )
+
+    assert "record_task_acceptance` exactly once" in MultiAgentWorkflowController._task_terminal_protocol_summary(normal_task)
+    assert "record_finding_validation" in MultiAgentWorkflowController._task_terminal_protocol_summary(validation_task)
+    assert "store_finding" in MultiAgentWorkflowController._task_terminal_protocol_summary(candidate_task)
 
 
 def test_task_prompt_spec_still_rejects_unknown_names_after_common_command_filtering():
@@ -10084,7 +10311,7 @@ def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
     assert row.endswith(",scan;validate")
     description = row.split(",", maxsplit=2)[1]
     assert len(description) == 250
-    assert "keys prompt, memory_indices, memory_ids, tools, shell_commands" in prompt
+    assert "keys prompt, memory_indices, memory_ids, tools,\nshell_commands." in prompt
 
 
 def test_shell_command_catalog_is_empty_without_shell_tool(monkeypatch):
@@ -10317,8 +10544,8 @@ def test_prompt_builder_context_includes_task_history():
     assert "## Task history" in prompt
     assert "Execute only the assigned task objective below" in prompt
     assert "Do not continue into later phase objectives" in prompt
-    assert "create durable pending tasks" in prompt
-    assert "Do not execute newly created follow-up tasks" in prompt
+    assert "preserve it as task-local durable context" in prompt
+    assert "do not investigate or execute that follow-up work" in prompt
     assert "Python workflow will decide whether to create another task" not in prompt
     assert "Worked" in prompt
     assert "Blocked" in prompt

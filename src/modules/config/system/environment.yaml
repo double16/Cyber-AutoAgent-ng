@@ -3,19 +3,23 @@ cyber_tools:
   nmap:
     description: "Network discovery and security auditing"
     caps: [network_recon]
+    execution_caps: [enumerate]
     # the tools container would need elevated caps for nmap to run
     # canary: {args: ["--help"]}
   nikto:
     description: "Web server scanner"
     caps: [web_scanning]
+    execution_caps: [request, execute]
     canary: {args: ["--help"]}
   sqlmap:
     description: "SQL injection detection and exploitation"
     caps: [injection_testing, exploitation_framework]
+    execution_caps: [request, execute]
     canary: {args: ["--help"]}
   gobuster:
     description: "Directory/file brute-forcer"
     caps: [web_crawling, web_fuzzing]
+    execution_caps: [crawl]
     canary: {args: ["-h"]}
   whatweb:
     description: "Web technology fingerprinting"
@@ -81,10 +85,12 @@ cyber_tools:
   nuclei:
     description: "Templated vulnerability scanner"
     caps: [web_scanning]
+    execution_caps: [request, execute]
     canary: {args: ["-h"]}
   naabu:
     description: "Fast TCP port scanner (SYN/CONNECT)"
     caps: [network_recon]
+    execution_caps: [enumerate]
     canary: {args: ["-h"]}
   amass:
     description: "In-depth DNS enumeration and attack surface mapping"
@@ -104,17 +110,21 @@ cyber_tools:
   ffuf:
     description: "Fast web fuzzer"
     caps: [web_fuzzing]
+    execution_caps: [crawl]
     canary: {args: ["-h"]}
   feroxbuster:
     description: "Fast recursive content discovery"
     caps: [web_crawling, web_fuzzing]
+    execution_caps: [crawl]
     canary: {args: ["-h"]}
   dirb:
     description: "HTTP(S) web content scanner"
     caps: [web_fuzzing]
+    execution_caps: [crawl]
   dirsearch:
     description: "Web path/directory discovery scanner"
     caps: [web_content_discovery, web_fuzzing]
+    execution_caps: [crawl]
     canary: {args: ["-h"]}
 # 2026-07-21: arjun has issues writing to a JSON output file, keep it installed for advanced_payload_coordinator
 #  arjun:
@@ -128,6 +138,7 @@ cyber_tools:
   wfuzz:
     description: "Web application bruteforcer"
     caps: [web_fuzzing]
+    execution_caps: [crawl]
     canary: {args: ["-h"]}
   wpscan:
     description: "WordPress security scanner"
@@ -154,10 +165,12 @@ cyber_tools:
   gospider:
     description: "Web spider for finding URLs and endpoints"
     caps: [web_crawling]
+    execution_caps: [crawl]
     canary: {args: ["-h"]}
   httprobe:
     description: "Probes for working HTTP and HTTPS servers"
     caps: [web_recon]
+    execution_caps: [request]
     canary: {args: ["-h"]}
   subjack:
     description: "Subdomain takeover tool"
@@ -174,14 +187,17 @@ cyber_tools:
   httpx:
     description: "HTTP probing and technology detection (ProjectDiscovery)"
     caps: [web_recon, http_client]
+    execution_caps: [request]
     canary: {args: ["--help"]}
   katana:
     description: "Fast web crawler (ProjectDiscovery)"
     caps: [web_crawling, web_recon]
+    execution_caps: [crawl]
     canary: {args: ["-h"]}
   opengrep:
     description: "Static source code analysis"
     caps: [sast]
+    execution_caps: [analyze]
     help:
       - "opengrep scan --help"
       - "opengrep scan -help"
@@ -204,6 +220,7 @@ cyber_tools:
   masscan:
     description: "Very fast port scanner"
     caps: [network_recon]
+    execution_caps: [enumerate]
 
   # SMB/NetBIOS
   smbclient:
@@ -258,6 +275,7 @@ cyber_tools:
   testssl.sh:
     description: "Comprehensive TLS/SSL configuration tester"
     caps: [network_recon, web_recon]
+    execution_caps: [request, execute]
     command: "testssl"
     canary: {args: ["--help"]}
 
@@ -312,6 +330,7 @@ cyber_tools:
   curl:
     description: "HTTP client for URL requests. Reflection, exploit, validation, and artifact-producing tasks must capture the body using -o [filename]."
     caps: [http_client, ftp_client]
+    execution_caps: [request]
     canary: {args: ["-h"]}
   tcpdump:
     description: "Network packet capture"

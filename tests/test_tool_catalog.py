@@ -157,6 +157,22 @@ def test_get_shell_command_specs_deduplicates_command_overrides_and_skips_empty_
     assert [spec["command"] for spec in specs] == ["shared"]
 
 
+def test_execution_capabilities_match_tool_keys_and_command_aliases(monkeypatch, tmp_path):
+    _write_env(
+        tmp_path,
+        {
+            "scanner": {"command": "scan-cli", "execution_caps": ["crawl", "unknown"]},
+            "requester": {"execution_caps": "request"},
+        },
+    )
+    _patch_environment_file(monkeypatch, tmp_path)
+
+    assert tc.get_shell_command_execution_capabilities("scanner") == {"crawl"}
+    assert tc.get_shell_command_execution_capabilities("SCAN-CLI") == {"crawl"}
+    assert tc.get_shell_command_execution_capabilities("requester") == {"request"}
+    assert tc.get_shell_command_execution_capabilities("missing") == set()
+
+
 def test_curl_is_configured_as_shell_command():
     curl = tc._get_cyber_tools()["curl"]
 

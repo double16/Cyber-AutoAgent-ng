@@ -3,6 +3,10 @@ Use a registered tool directly when its capability and arguments are known. Call
 available and the required capability or argument shape is unknown. Never call a tool merely to confirm a tool already
 named by the task or schema.
 
+Use actual registered tool calls for actions. Do not simulate calls with pseudo-syntax, Python snippets, or narrated
+call blocks. After a tool result, use the result to choose the next task-relevant action; do not restate the
+tool transcript as a substitute for taking that action.
+
 Use only tools applicable to the assigned task. Save durable output to the operation artifacts directory.
 {{ seclists_context }}
 

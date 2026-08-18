@@ -14,6 +14,7 @@ from modules.config.system import environment, get_logger
 logger = get_logger("Tools.Catalog")
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 _SEPARATOR = "=" * 80
+_EXECUTION_CAPABILITIES = frozenset({"analyze", "compare", "crawl", "enumerate", "execute", "request"})
 
 
 @lru_cache()
@@ -69,6 +70,32 @@ def get_shell_command_specs(available: List[str]) -> List[Dict[str, Any]]:
         )
         seen_commands.add(command)
     return specs
+
+
+def get_shell_command_execution_capabilities(executable: str) -> frozenset[str]:
+    """Return canonical receipt capabilities for a configured shell executable.
+
+    Matches either the YAML tool key or its command override. Selection-oriented
+    ``caps`` deliberately remain separate from controller receipt metadata.
+    """
+
+    normalized = str(executable or "").strip().casefold()
+    if not normalized:
+        return frozenset()
+    for tool_name, raw_config in _get_cyber_tools().items():
+        config = raw_config if isinstance(raw_config, dict) else {}
+        command = str(config.get("command") or tool_name).strip()
+        if normalized not in {str(tool_name).casefold(), command.casefold()}:
+            continue
+        capabilities = config.get("execution_caps") or []
+        if isinstance(capabilities, str):
+            capabilities = [capabilities]
+        return frozenset(
+            str(capability).strip().casefold()
+            for capability in capabilities
+            if str(capability).strip().casefold() in _EXECUTION_CAPABILITIES
+        )
+    return frozenset()
 
 
 def remove_shell_command(available: List[str], executable: str) -> List[str]:
