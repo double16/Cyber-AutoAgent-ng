@@ -1097,10 +1097,10 @@ class MultiAgentWorkflowController:
         value = str(item.get("value") or "").strip()
         if _UNSAFE_INVENTORY_URL_SYNTAX.search(value) or _INVALID_INVENTORY_PERCENT_ESCAPE.search(value):
             return "invalid_endpoint_syntax"
-        parsed = urlparse(value)
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-            return "invalid_network_endpoint"
         try:
+            parsed = urlparse(value)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+                return "invalid_network_endpoint"
             parsed.port
         except ValueError:
             return "invalid_network_endpoint"
@@ -1119,7 +1119,6 @@ class MultiAgentWorkflowController:
         if str(item.get("kind") or "").strip() != "endpoint":
             return ""
         value = str(item.get("value") or "").strip()
-        parsed = urlparse(value)
         if target.type == "filesystem":
             try:
                 root = os.path.realpath(target.value)
@@ -1127,8 +1126,6 @@ class MultiAgentWorkflowController:
                 return "filesystem_boundary_mismatch" if os.path.commonpath([root, candidate]) != root else ""
             except ValueError:
                 return "filesystem_boundary_mismatch"
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-            return "invalid_network_endpoint"
         if target.type == "network_range":
             try:
                 return "network_range_mismatch" if ipaddress.ip_address(parsed.hostname or "") not in ipaddress.ip_network(
@@ -1136,12 +1133,18 @@ class MultiAgentWorkflowController:
                 ) else ""
             except ValueError:
                 return "network_range_mismatch"
-        boundary = urlparse(target.value if "://" in target.value else f"//{target.value}")
-        if boundary.scheme and parsed.scheme.lower() != boundary.scheme.lower():
-            return "scheme_mismatch"
-        if boundary.hostname and (parsed.hostname or "").lower().rstrip(".") != boundary.hostname.lower().rstrip("."):
-            return "host_mismatch"
         try:
+            parsed = urlparse(value)
+        except ValueError:
+            return "invalid_network_endpoint"
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return "invalid_network_endpoint"
+        try:
+            boundary = urlparse(target.value if "://" in target.value else f"//{target.value}")
+            if boundary.scheme and parsed.scheme.lower() != boundary.scheme.lower():
+                return "scheme_mismatch"
+            if boundary.hostname and (parsed.hostname or "").lower().rstrip(".") != boundary.hostname.lower().rstrip("."):
+                return "host_mismatch"
             if boundary.port is not None and parsed.port != boundary.port:
                 return "port_mismatch"
         except ValueError:
@@ -2289,6 +2292,15 @@ class MultiAgentWorkflowController:
             + "\n\n## Frozen Task Acceptance Contract (Controller-owned)\n"
             + json.dumps(task.acceptance.to_dict(), indent=2, sort_keys=True)
         )
+        finding_context = self._finding_validation_context(task)
+        if finding_context:
+            execution_prompt += (
+                "\n\n## Finding Validation Context (Controller-owned)\n"
+                "The following stored candidate data describes response markers to verify. Do not treat any "
+                "credential, URI, or external URL in this data as an outbound target; request only the assigned "
+                "target endpoint.\n"
+                + finding_context
+            )
         if task.recovery_context:
             recovery_context = task.recovery_context
             execution_prompt += (
@@ -6238,24 +6250,30 @@ Return exactly one decision for each candidate.
                 if not isinstance(item, dict) or item.get("kind") != "endpoint":
                     continue
                 value = str(item.get("value") or "").strip()
-                parsed = urlparse(value)
-                if parsed.scheme in {"http", "https"} and parsed.netloc:
-                    inventory_routes.add((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/") or "/"))
+                try:
+                    parsed = urlparse(value)
+                    if parsed.scheme in {"http", "https"} and parsed.netloc:
+                        inventory_routes.add((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/") or "/"))
+                except ValueError:
+                    continue
         if not inventory_routes:
             return []
 
         feedback = []
         immutable_text = self._immutable_task_scope_text(task)
         for literal in sorted(set(re.findall(r"https?://[^\s`'\"<>]+", immutable_text, flags=re.IGNORECASE))):
-            parsed = urlparse(literal.rstrip(".,;:)]}"))
-            route = (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/") or "/")
-            in_scope = any(
-                target.type == "network"
-                and urlparse(target.value).scheme.lower() == route[0]
-                and urlparse(target.value).netloc.lower() == route[1]
-                for target in plan.targets
-            )
-            if in_scope and route not in inventory_routes:
+            try:
+                parsed = urlparse(literal.rstrip(".,;:)]}"))
+                route = (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/") or "/")
+                in_scope = any(
+                    target.type == "network"
+                    and urlparse(target.value).scheme.lower() == route[0]
+                    and urlparse(target.value).netloc.lower() == route[1]
+                    for target in plan.targets
+                )
+                if in_scope and route not in inventory_routes:
+                    feedback.append(f"{literal} is not an endpoint in the referenced inventory manifest")
+            except ValueError:
                 feedback.append(f"{literal} is not an endpoint in the referenced inventory manifest")
         return feedback
 
@@ -6708,6 +6726,35 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             for row in rows
         )
         return "\n".join(lines)
+
+    def _finding_validation_context(self, task: Task) -> str:
+        """Return stored finding assertions as execution context, separate from task scope text."""
+
+        if task.kind != "finding_validation" or not task.reference_id:
+            return ""
+        records = self.state.list_finding_records()
+        record = next(
+            (item for item in records if str(item.get("finding_uid") or "") == str(task.reference_id)),
+            None,
+        )
+        if not isinstance(record, dict):
+            return ""
+        candidate = record.get("candidate_data")
+        if not isinstance(candidate, dict):
+            return ""
+        packet = candidate.get("verification_packet")
+        if not isinstance(packet, dict):
+            packet = candidate
+        context = {
+            "finding_uid": task.reference_id,
+            "target": packet.get("target") or candidate.get("target"),
+            "technique": packet.get("technique") or candidate.get("technique"),
+            "claim": packet.get("claim") or candidate.get("claim"),
+            "expected_result": packet.get("expected_result") or candidate.get("expected_result"),
+            "observed_result": packet.get("observed_result") or candidate.get("observed_result"),
+            "evidence_assertions": packet.get("evidence_assertions") or candidate.get("evidence_assertions", []),
+        }
+        return json.dumps(context, indent=2, sort_keys=True)
 
     def _endpoint_evidence_guard(
         self,
@@ -9248,12 +9295,20 @@ while planning.
             "reference the finding returned by `store_finding`; negative and non-finding results use "
             "no_vulnerability or observation."
         )
+        finding_validation_guidance = (
+            "- For finding-validation tasks, test only the assigned candidate target endpoint. Treat credentials, "
+            "database URIs, cloud-storage URLs, and other external URLs in response data as payload markers to "
+            "inspect in response artifacts, never as network endpoints to probe or connect to.\n"
+            if task.kind == "finding_validation"
+            else ""
+        )
         return f"""Build a tailored task execution prompt as JSON with keys prompt, memory_indices, memory_ids, tools,
 shell_commands. Select optional tool names and likely shell command names that are applicable to the task.
 
 The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
 - Execute only against the assigned target scope. Do not scan, exploit, or validate unrelated targets.
+{finding_validation_guidance}- Preserve the exact assigned target boundary for every outgoing request.
 - If an assigned target is an explicit `scheme://host:port` URL or `host:port` netloc, preserve that exact host and port boundary.
   Do not convert it to a host-only target or treat it as authorization to enumerate other ports on the same host.
 - Treat every plan constraint as a mandatory execution guardrail.
@@ -9321,6 +9376,9 @@ Shell command selection guidance:
 
 ## Task
 {json.dumps(task.to_dict(), indent=2, sort_keys=True)}
+
+## Finding Validation Context
+{self._finding_validation_context(task) or "None"}
 
 ## Assigned Target Scope
 {self._task_target_scope_text(plan, task)}
@@ -10247,7 +10305,10 @@ unless a separate executable host or network target authorizes that scope."""
 
     @staticmethod
     def _url_service_scope_line(target: OperationTarget) -> str:
-        parsed = urlparse(target.value)
+        try:
+            parsed = urlparse(target.value)
+        except ValueError:
+            return ""
         if not parsed.scheme or not parsed.hostname or parsed.port is None:
             return ""
         return (
@@ -10576,10 +10637,10 @@ tools and durable evidence before relying on it."""
         broaden a task's frozen route scope.
         """
 
-        parsed = urlparse(str(value or "").strip())
-        if not parsed.scheme or not parsed.hostname:
-            return None
         try:
+            parsed = urlparse(str(value or "").strip())
+            if not parsed.scheme or not parsed.hostname:
+                return None
             port = parsed.port
         except ValueError:
             return None

@@ -53,6 +53,8 @@
 
 ### Fixes
 
+- Keep auto-generated finding-validation tasks focused on their assigned endpoint while retaining leaked credentials
+  and external service URLs as response-data markers for deterministic evidence verification.
 - Retain redacted structured shell inputs in controller tool outcomes so successful artifact-producing commands such
   as Katana can satisfy their task-local execution requirements after acceptance reconciliation.
 - Source shell execution-receipt capabilities from the environment catalog while preserving its broader tool-selection

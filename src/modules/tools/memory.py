@@ -3668,13 +3668,9 @@ def store_finding(
         title=f"Verify finding: {candidate['title']}",
         objective=(
             f"Independently verify finding candidate {finding_uid} against {candidate['target']}. "
-            f"Expected result: {candidate['verification_packet']['expected_result']} Observed candidate result: "
-            f"{candidate['verification_packet']['observed_result']} Source evidence: "
-            f"{', '.join(candidate['verification_packet']['artifacts'])}. "
-            "Required positive evidence markers: "
-            f"{', '.join(assertion['marker'] for assertion in candidate['evidence_assertions'])}. "
-            "Reproduce every marker in fresh direct or differential artifacts, call "
-            "record_finding_validation with the outcome, and stop."
+            "Re-test the target to reproduce the reported finding behavior, capture required evidence "
+            "in fresh direct or differential artifacts, call record_finding_validation with the outcome, "
+            "and stop."
         ),
         acceptance=AcceptanceContract(
             mode="outcome",

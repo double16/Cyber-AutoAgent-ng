@@ -192,7 +192,7 @@ def test_journaled_katana_outcome_satisfies_crawl_execution_requirement(monkeypa
             "/",
         )],
     )
-    task = TaskModel(
+    task = Task(
         task_uid="katana-execution-proof",
         title="Crawl target",
         objective="Crawl the assigned target",
@@ -1357,7 +1357,7 @@ def test_controller_excludes_editor_from_execution_receipts(monkeypatch, tmp_pat
             "target:target-1",
         )],
     )
-    task = Task(
+    task = TaskModel(
         task_uid="editor-receipt",
         title="Analyze source",
         objective="Analyze source",
@@ -9286,6 +9286,54 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert 'curl -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" <url>' in prompt
     assert "curl -sS -D - -o /dev/null <url>" in prompt
     assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
+
+
+def test_finding_validation_prompt_separates_payload_markers_from_target_scope():
+    task = TaskModel(
+        task_uid="verify-1",
+        title="Verify configuration exposure",
+        objective="Independently verify finding candidate finding-1 against http://192.168.253.101:3001/api/config.",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(
+        _plan(),
+        tasks=[task],
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "candidate_data": {
+                    "verification_packet": {
+                        "target": "http://192.168.253.101:3001/api/config",
+                        "technique": "credential_exposure",
+                        "expected_result": "Unauthenticated access is denied",
+                        "observed_result": "postgres://bc:bc@db:5432/bc",
+                        "evidence_assertions": [
+                            {"artifact": "artifact:config.json", "marker": "https://bucket.s3.amazonaws.com"}
+                        ],
+                    }
+                },
+            }
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+    context = controller._finding_validation_context(task)
+
+    assert "payload markers" in prompt
+    assert "never as network endpoints to probe or connect to" in prompt
+    assert "postgres://bc:bc@db:5432/bc" in context
+    assert "https://bucket.s3.amazonaws.com" in context
+    assert "## Finding Validation Context" in prompt
 
 
 def test_task_prompt_builder_requires_reusable_acceptance_summaries():
