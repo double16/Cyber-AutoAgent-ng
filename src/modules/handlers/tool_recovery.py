@@ -391,7 +391,7 @@ class ToolOutcomeJournal:
             artifact_refs=artifact_refs,
             structured_input=(
                 redacted_input
-                if tool_name == "record_task_acceptance" and isinstance(redacted_input, dict)
+                if isinstance(redacted_input, dict)
                 else None
             ),
         )

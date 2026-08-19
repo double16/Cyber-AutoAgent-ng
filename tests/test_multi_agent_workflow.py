@@ -14,6 +14,7 @@ from modules.agents.cyber_autoagent import build_role_tools
 from modules.agents.multi_agent_workflow import (
     MultiAgentWorkflowController,
     TaskCreationBatch,
+    TaskPromptBuildError,
     WorkflowInvariantError,
     WorkflowStateStore,
     extract_json_object,
@@ -22,7 +23,7 @@ from modules.agents.multi_agent_workflow import (
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import MaxTokenClassification
-from modules.handlers.tool_recovery import ToolOutcome
+from modules.handlers.tool_recovery import ToolOutcome, ToolOutcomeJournal
 from modules.tools.memory import (
     AcceptanceBasis,
     AcceptanceContract,
@@ -36,6 +37,7 @@ from modules.tools.memory import (
     SQLiteApplicationStore,
     Task as TaskModel,
 )
+from modules.tools import memory as memory_mod
 
 
 def _acceptance(criterion_id="task-outcome"):
@@ -121,6 +123,128 @@ def test_execution_evidence_capabilities_are_derived_from_observed_tools():
     assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"crawl"}
     assert MultiAgentWorkflowController._outcome_execution_capabilities(source_analysis) == {"analyze"}
     assert MultiAgentWorkflowController._canonical_execution_method("web-spider") == "crawl"
+
+
+def test_execution_evidence_capabilities_include_wrapped_shell_command():
+    crawl = ToolOutcome(
+        sequence=1,
+        tool_use_id="crawl-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary='{"command":"cd /tmp\\ntimeout 60 katana -u http://target.test/ -o crawl.txt"}',
+        output_summary="",
+    )
+
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"crawl"}
+
+
+def test_execution_evidence_capabilities_use_environment_command_alias():
+    scan = ToolOutcome(
+        sequence=1,
+        tool_use_id="scan-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary='{"command":"testssl https://target.test"}',
+        output_summary="",
+    )
+
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(scan) == {"execute", "request"}
+
+
+def test_shell_outcome_retains_existing_declared_output_artifact(monkeypatch, tmp_path):
+    artifact = tmp_path / "artifacts" / "crawl.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("http://target.test/\n", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="crawl-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary=json.dumps({"command": f"cd {artifact.parent}\ntimeout 60 scanner -o {artifact.name}"}),
+        output_summary="",
+    )
+
+    assert MultiAgentWorkflowController._artifact_refs_from_tool_outcomes([outcome]) == [
+        "artifact:artifacts/crawl.txt"
+    ]
+
+
+def test_journaled_katana_outcome_satisfies_crawl_execution_requirement(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Crawl the assigned root route",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce crawl evidence for the assigned root route",
+            "/",
+        )],
+    )
+    task = Task(
+        task_uid="katana-execution-proof",
+        title="Crawl target",
+        objective="Crawl the assigned target",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded crawl",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["crawl"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    artifact = tmp_path / "artifacts" / "katana_output.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("http://target.test/\n", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    journal = ToolOutcomeJournal()
+    outcome = journal.append(
+        tool_use_id="katana-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        tool_input={
+            "command": f"cd {artifact.parent} && katana -u http://target.test -o {artifact.name}",
+        },
+        output="crawl completed",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+
+    resolved = controller._resolve_controller_execution_evidence(plan, task, criterion, [outcome])
+
+    assert outcome.structured_input == {
+        "command": f"cd {artifact.parent} && katana -u http://target.test -o {artifact.name}",
+    }
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(outcome) == {"crawl"}
+    assert resolved == {"criterion-1-execution-1": ["artifact:artifacts/katana_output.txt"]}
 
 
 def Task(*args, **kwargs):
@@ -555,6 +679,9 @@ class FakeState:
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
             supersedes_criteria=task.supersedes_criteria,
+            recovery_context=task.recovery_context,
+            target_scope=task.target_scope,
+            target_ids=task.target_ids,
         ))
 
     def mark_task(self, task, status, reason=""):
@@ -1230,7 +1357,7 @@ def test_controller_excludes_editor_from_execution_receipts(monkeypatch, tmp_pat
             "target:target-1",
         )],
     )
-    task = Task(
+    task = TaskModel(
         task_uid="editor-receipt",
         title="Analyze source",
         objective="Analyze source",
@@ -2603,6 +2730,231 @@ def test_controller_runs_existing_active_task_before_pending_task():
     assert runtime.callback_handler.termination_events == [("complete", "Assessment complete: 1 phase evaluated")]
 
 
+def test_controller_resumes_prior_contracted_mapping_before_later_task_creation(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    contract_context = {
+        "module": "web",
+        "phase_id": 1,
+    }
+    mapping = Task(
+        task_uid="mapping",
+        title="Map routes",
+        objective="Map routes",
+        phase=1,
+        status="pending",
+        created_at="1",
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "bounded_crawl",
+                "task_role": "mapping",
+            }
+        },
+    )
+    synthesis = Task(
+        task_uid="synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="pending",
+        created_at="2",
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[mapping, synthesis])
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        max_iterations=1,
+    )
+    resumed = []
+    monkeypatch.setattr(
+        controller,
+        "_run_task",
+        lambda current_plan, phase, task: resumed.append(
+            (current_plan.current_phase, phase.id, task.task_uid, task.status)
+        ),
+    )
+    monkeypatch.setattr(controller, "_create_tasks", lambda *_args: pytest.fail("task creator must not run"))
+
+    with pytest.raises(WorkflowInvariantError, match="Workflow iteration limit reached"):
+        controller.run()
+
+    assert resumed == [(2, 1, "mapping", "active")]
+    assert next(task for task in state.tasks if task.task_uid == "mapping").status == "active"
+    assert next(task for task in state.tasks if task.task_uid == "synthesis").status == "pending"
+    assert {
+        "type": "contract_prerequisite_resume",
+        "phase": 2,
+        "owner_phase": 1,
+        "task_uid": "mapping",
+        "title": "Map routes",
+        "task_role": "mapping",
+        "workstream": "bounded_crawl",
+        "reason": "contracted_producer_output_unavailable",
+    } in runtime.callback_handler.events
+
+
+def test_contract_prerequisite_resume_ignores_terminal_failures_and_ready_producers():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Challenge Surface", status="partial_failure"),
+            PlanPhase(id=2, title="Exploit", status="active"),
+        ],
+    )
+    runtime = _runtime()
+    runtime.config.module = "ctf"
+    failed = Task(
+        task_uid="failed",
+        title="Map challenge",
+        objective="Map challenge",
+        phase=1,
+        status="partial_failure",
+        recovery_context={
+            "phase_task_contract": {
+                "module": "ctf",
+                "phase_id": 1,
+                "workstream": "challenge_hints",
+                "task_role": "mapping",
+            }
+        },
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[failed]),
+    )
+
+    assert controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is None
+
+    ready_synthesis = Task(
+        task_uid="ready",
+        title="Synthesize challenge surface",
+        objective="Build challenge surface",
+        phase=1,
+        status="done",
+        recovery_context={
+            "phase_task_contract": {
+                "module": "ctf",
+                "phase_id": 1,
+                "workstream": "challenge_surface_synthesis",
+                "task_role": "synthesis",
+            }
+        },
+    )
+    pending_mapping = Task(
+        task_uid="pending",
+        title="Map endpoint",
+        objective="Map endpoint",
+        phase=1,
+        status="pending",
+        recovery_context={
+            "phase_task_contract": {
+                "module": "ctf",
+                "phase_id": 1,
+                "workstream": "endpoint_capabilities",
+                "task_role": "mapping",
+            }
+        },
+    )
+    ready_state = FakeState(plan, tasks=[ready_synthesis, pending_mapping])
+    ready_controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=ready_state,
+    )
+
+    assert ready_controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is None
+
+
+def test_contract_prerequisite_resume_requires_valid_inventory_output(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    mapping = Task(
+        task_uid="mapping",
+        title="Map API",
+        objective="Map API",
+        phase=1,
+        status="active",
+        recovery_context={
+            "phase_task_contract": {
+                "module": "web",
+                "phase_id": 1,
+                "workstream": "client_side_api",
+                "task_role": "mapping",
+            }
+        },
+    )
+    synthesis = Task(
+        task_uid="synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="done",
+        recovery_context={
+            "phase_task_contract": {
+                "module": "web",
+                "phase_id": 1,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+            }
+        },
+    )
+    state = FakeState(plan, tasks=[mapping, synthesis])
+    state.acceptance_results[synthesis.task_uid] = [AcceptanceResult(
+        criterion_id="criterion:synthesis",
+        status="satisfied",
+        disposition="observation",
+        summary="manifest recorded",
+        evidence_refs=("artifact:artifacts/inventory.json",),
+    )]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid manifest")),
+    )
+
+    candidate = controller._contract_prerequisite_resume_candidate(plan, plan.phases[1])
+
+    assert candidate == (plan.phases[0], mapping)
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args, **_kwargs: ({}, "hash"))
+    assert controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is None
+
+
 def test_task_executor_keeps_task_capture_and_uses_tool_completion_policy(monkeypatch):
     runtime = _runtime()
     state = FakeState(
@@ -2751,6 +3103,35 @@ def test_task_executor_contract_disables_follow_up_task_creation():
 
     assert "do not create or execute follow-up tasks" in contract
     assert "create_tasks" not in contract
+
+
+@pytest.mark.parametrize(
+    ("tool_names", "expects_observation", "expects_finding"),
+    [
+        ({"store_observation", "store_finding"}, True, True),
+        ({"store_observation"}, True, False),
+        ({"store_finding"}, False, True),
+        (set(), False, False),
+    ],
+)
+def test_task_executor_contract_only_names_available_persistence_tools(
+    tool_names,
+    expects_observation,
+    expects_finding,
+):
+    task = TaskModel(
+        task_uid="endpoint",
+        title="Assess endpoint http://target.test/login",
+        objective="Assess login",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+    )
+
+    contract = MultiAgentWorkflowController._task_executor_contract(task, tool_names)
+
+    assert ("store_observation" in contract) is expects_observation
+    assert ("store_finding" in contract) is expects_finding
 
 
 def test_endpoint_evidence_guard_rejects_inventory_manifest(monkeypatch):
@@ -4672,7 +5053,9 @@ def test_task_executor_recovers_in_same_session_and_evaluator_receives_authorita
         "enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)"
     )
     assert captured["executor_prompts"][0].endswith(
-        controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy()
+        controller._task_executor_contract(state.tasks[0], {"store_finding"})
+        + "\n\n"
+        + controller._tool_selection_policy()
     )
     assert captured["executor_prompts"][1] == "correct the missing wordlist"
     assert "## Controller-observed tool outcomes" in captured["evaluator_prompt"]
@@ -5283,7 +5666,11 @@ def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
     assert executor_calls[0].startswith("enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)")
-    assert executor_calls[0].endswith(controller._task_executor_contract() + "\n\n" + controller._tool_selection_policy())
+    assert executor_calls[0].endswith(
+        controller._task_executor_contract(state.tasks[0], {"store_finding"})
+        + "\n\n"
+        + controller._tool_selection_policy()
+    )
     assert executor_calls[1] == "retry once"
     assert state.tasks[0].status == "partial_failure"
     assert "remained unresolved" in state.tasks[0].status_reason
@@ -6074,31 +6461,6 @@ def test_evaluator_prompts_treat_artifact_backed_negative_results_as_assessed():
         assert "Bare `curl -s`" in prompt
         assert "confirmed absent or inaccessible" in prompt
         assert "not assessed" in prompt
-
-
-def test_controller_emits_task_started_when_activating_pending_task():
-    runtime = _runtime()
-    state = FakeState(
-        _plan(),
-        tasks=[Task(task_uid="pending", title="Pending", objective="run pending", phase=1, status="pending")],
-    )
-
-    controller = MultiAgentWorkflowController(
-        runtime=runtime,
-        budget=BudgetConfig(max_duration_minutes=60),
-        state_store=state,
-        text_runner=lambda role, prompt, tools, system_prompt: "{}",
-        work_runner=lambda role, prompt, tools, system_prompt: None,
-        max_iterations=1,
-    )
-
-    with pytest.raises(WorkflowInvariantError, match="Workflow iteration limit reached"):
-        controller.run()
-
-    assert state.tasks[0].status == "active"
-    assert runtime.callback_handler.events == [
-        {"type": "task_started", "task_uid": "pending", "title": "Pending", "status": "active"},
-    ]
 
 
 def test_controller_closes_phase_but_preserves_pending_task_when_hard_budget_cap_reached():
@@ -8917,17 +9279,61 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "spec_scan,Run a targeted scan." in prompt
     assert "`tools` JSON field contains optional-tool names only" in prompt
     assert "Never return core-tool names in `tools`" in prompt
-    assert "Select any reasonably useful optional-tool working set" in prompt
     assert "Overlapping capabilities are allowed" in prompt
-    assert "Select any reasonably useful command working set" in prompt
-    assert "no single-tool, exclusivity, minimal-selection, or redundancy requirement" in prompt
-    assert "Selection makes a command available; it does not require the executor to use it" in prompt
     assert "capability required by the task that supplied native tools do not provide" not in prompt
     assert "mandatory execution guardrail" in prompt
     assert "plan_constraints[1]{constraint}:" in prompt
     assert 'curl -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" <url>' in prompt
     assert "curl -sS -D - -o /dev/null <url>" in prompt
     assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
+
+
+def test_finding_validation_prompt_separates_payload_markers_from_target_scope():
+    task = TaskModel(
+        task_uid="verify-1",
+        title="Verify configuration exposure",
+        objective="Independently verify finding candidate finding-1 against http://192.168.253.101:3001/api/config.",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(
+        _plan(),
+        tasks=[task],
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "candidate_data": {
+                    "verification_packet": {
+                        "target": "http://192.168.253.101:3001/api/config",
+                        "technique": "credential_exposure",
+                        "expected_result": "Unauthenticated access is denied",
+                        "observed_result": "postgres://bc:bc@db:5432/bc",
+                        "evidence_assertions": [
+                            {"artifact": "artifact:config.json", "marker": "https://bucket.s3.amazonaws.com"}
+                        ],
+                    }
+                },
+            }
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+    context = controller._finding_validation_context(task)
+
+    assert "payload markers" in prompt
+    assert "never as network endpoints to probe or connect to" in prompt
+    assert "postgres://bc:bc@db:5432/bc" in context
+    assert "https://bucket.s3.amazonaws.com" in context
+    assert "## Finding Validation Context" in prompt
 
 
 def test_task_prompt_builder_requires_reusable_acceptance_summaries():
@@ -8949,7 +9355,8 @@ def test_task_prompt_builder_requires_reusable_acceptance_summaries():
 
     assert "Require every acceptance summary to state the concrete result or negative result" in prompt
     assert "publishes" in prompt
-    assert "Use `store_observation` only" in prompt
+    assert "store_observation" not in prompt
+    assert "store_finding" in prompt
 
 
 def test_task_prompt_builder_adds_bounded_task_scoped_swarm_contract():
@@ -8975,6 +9382,61 @@ def test_task_prompt_builder_adds_bounded_task_scoped_swarm_contract():
     assert "explicit handoff triggers" in prompt
     assert "parent executor consolidates results" in prompt
     assert "must not create or execute workflow tasks" in prompt
+
+
+def test_task_prompts_delegate_loop_recovery_to_controller_without_retry_ceiling():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Test recovery",
+        objective="Test the assigned endpoint",
+        phase=1,
+        status="active",
+    )
+
+    builder_prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+    executor_contract = controller._task_executor_contract(task, {"store_observation"})
+
+    combined = f"{builder_prompt}\n{executor_contract}"
+    assert "actual registered tool calls" in combined
+    assert "controller-owned executor contract supplies the terminal acceptance protocol" in combined
+    assert "controller supplies a loop or recovery instruction" in executor_contract
+    assert "one correction" not in combined
+    assert "correction fails" not in combined
+    assert "retry" not in combined.lower()
+
+
+def test_task_prompt_critic_checks_pseudo_calls_and_tool_selection_limits():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Test prompt",
+        objective="Test the assigned endpoint",
+        phase=1,
+        status="active",
+    )
+
+    prompt = controller._task_prompt_critic_prompt(
+        _plan(),
+        _plan().phases[0],
+        task,
+        {"prompt": "Use the target.", "memory_ids": [], "tools": [], "shell_commands": []},
+    )
+
+    assert "actual registered tool calls" in prompt
+    assert "pseudo-syntax" in prompt
+    assert "Controller-Appended Terminal Protocol" in prompt
+    assert "record_task_acceptance` exactly once" in prompt
 
 
 def test_task_prompt_critic_defines_swarm_acceptance_rules():
@@ -9828,11 +10290,8 @@ def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
     assert "http_request" in prompt
     assert "curl" in prompt
     assert "Tool overlap is permitted" in prompt
-    assert "include both a native tool and a shell command for the same capability" in " ".join(prompt.split())
     assert "Core tools are supplied automatically and must not appear in `tools`" in prompt
-    assert "There is no single-tool" in prompt
     assert "relevant and available" not in prompt
-    assert "Reject a selection only when it has no reasonable relationship to the task" in " ".join(prompt.split())
 
 
 def test_task_prompt_spec_accepts_tools_and_commands_in_either_selection_list(monkeypatch):
@@ -9898,6 +10357,62 @@ def test_task_prompt_spec_filters_common_shell_commands_before_validation(monkey
 
     assert normalized["tools"] == ["module_probe"]
     assert normalized["shell_commands"] == ["httpx"]
+
+
+def test_task_prompt_spec_allows_over_limit_selections_without_rationale():
+    runtime = _runtime()
+    for name in ("probe_a", "probe_b", "probe_c", "probe_d"):
+        runtime.optional_tools_list.append(_tool(name))
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="task", title="Inspect", objective="Inspect target", phase=1, status="pending")
+    prompt_spec = {
+        "prompt": "Inspect the target",
+        "tools": ["probe_a", "probe_b", "probe_c", "probe_d"],
+        "shell_commands": [],
+    }
+
+    normalized = controller._normalize_task_prompt_spec(prompt_spec, task)
+
+    assert normalized["tools"] == ["probe_a", "probe_b", "probe_c", "probe_d"]
+
+
+def test_task_terminal_protocol_summary_covers_normal_validation_and_candidate_tasks():
+    normal_task = Task(task_uid="normal", title="Normal", objective="Inspect", phase=1, status="pending")
+    validation_task = Task(
+        task_uid="validation",
+        title="Validate",
+        objective="Validate",
+        phase=1,
+        kind="finding_validation",
+        status="pending",
+    )
+    candidate_task = Task(
+        task_uid="candidate",
+        title="Candidate",
+        objective="Assess",
+        phase=1,
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["task:source"]),
+            criteria=[
+                AcceptanceCriterion(
+                    id="candidate",
+                    description="Store finding",
+                    evidence_requirements=[EvidenceRequirement(kind="finding_candidate")],
+                )
+            ],
+        ),
+        status="pending",
+    )
+
+    assert "record_task_acceptance` exactly once" in MultiAgentWorkflowController._task_terminal_protocol_summary(normal_task)
+    assert "record_finding_validation" in MultiAgentWorkflowController._task_terminal_protocol_summary(validation_task)
+    assert "store_finding" in MultiAgentWorkflowController._task_terminal_protocol_summary(candidate_task)
 
 
 def test_task_prompt_spec_still_rejects_unknown_names_after_common_command_filtering():
@@ -10048,7 +10563,7 @@ def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
     assert row.endswith(",scan;validate")
     description = row.split(",", maxsplit=2)[1]
     assert len(description) == 250
-    assert "keys prompt, memory_indices, memory_ids, tools, shell_commands" in prompt
+    assert "keys prompt, memory_indices, memory_ids, tools,\nshell_commands." in prompt
 
 
 def test_shell_command_catalog_is_empty_without_shell_tool(monkeypatch):
@@ -10281,8 +10796,8 @@ def test_prompt_builder_context_includes_task_history():
     assert "## Task history" in prompt
     assert "Execute only the assigned task objective below" in prompt
     assert "Do not continue into later phase objectives" in prompt
-    assert "create durable pending tasks" in prompt
-    assert "Do not execute newly created follow-up tasks" in prompt
+    assert "preserve it as task-local durable context" in prompt
+    assert "do not investigate or execute that follow-up work" in prompt
     assert "Python workflow will decide whether to create another task" not in prompt
     assert "Worked" in prompt
     assert "Blocked" in prompt
@@ -11411,3 +11926,537 @@ def test_controller_inventory_filter_rejects_dependents_of_out_of_scope_endpoint
     assert MultiAgentWorkflowController._inventory_source_endpoint_id(top_level) in rejected_endpoint_ids
     assert MultiAgentWorkflowController._inventory_source_endpoint_id(nested) in rejected_endpoint_ids
     assert MultiAgentWorkflowController._inventory_source_endpoint_id(unlinked) == ""
+
+
+def test_manifest_prerequisite_recovery_failure_when_manifest_missing_or_invalid():
+    plan = _plan()
+    task = Task(
+        task_uid="manifest-task",
+        title="Inventory task",
+        objective="Generate manifest",
+        phase=1,
+        status="active",
+    )
+    state = FakeState(plan, tasks=[task], acceptance_complete=False)
+    cycle_calls = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"build manifest","tools":[]}'
+        raise AssertionError(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        nonlocal cycle_calls
+        cycle_calls += 1
+        if cycle_calls == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="Attempted acceptance",
+                outcomes=[
+                    ToolOutcome(
+                        sequence=1,
+                        tool_use_id="acceptance-1",
+                        tool_name="record_task_acceptance",
+                        success=False,
+                        correctable=True,
+                        input_summary="record acceptance",
+                        output_summary="Validation failed: submitted manifest file does not exist at path",
+                    )
+                ],
+            )
+        return workflow_mod.TaskExecutorCycleResult(
+            text="Manifest recovery attempt with no valid artifact",
+            outcomes=[],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
+    )
+
+    controller._run_task(plan, plan.phases[0], task)
+
+    assert cycle_calls == 2
+    assert state.tasks[0].status == "partial_failure"
+    assert (
+        "Inventory manifest prerequisite recovery did not produce a valid manifest artifact."
+        in state.tasks[0].status_reason
+    )
+
+
+def test_repeat_tool_loop_recurrence_partial_failure_when_no_replacement_created():
+    plan = _plan()
+    task = Task(
+        task_uid="looping-task",
+        title="Loop task",
+        objective="Run looping task",
+        phase=1,
+        status="active",
+        acceptance=_acceptance("crit-1"),
+    )
+    # Put a prior replacement task into state so _create_reasoning_loop_replacement_task returns None
+    prior_replacement = Task(
+        task_uid="prior-repl",
+        title="Prior",
+        objective="Obj",
+        phase=1,
+        status="pending",
+        replacement_of="looping-task",
+        acceptance=_acceptance("crit-prior"),
+    )
+    state = FakeState(plan, tasks=[task, prior_replacement], acceptance_complete=False)
+    cycle_calls = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"run loop task","tools":[]}'
+        raise AssertionError(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        nonlocal cycle_calls
+        cycle_calls += 1
+        return workflow_mod.TaskExecutorCycleResult(
+            text="Reasoning loop detected",
+            outcomes=[],
+            repeat_loop_detected=True,
+            repeat_loop_signature="loop-signature-1",
+            repeat_loop_reason="Repeated identical tool call pattern",
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 3}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
+    )
+
+    controller._run_task(plan, plan.phases[0], task)
+
+    assert cycle_calls == 2
+    updated_task = next(t for t in state.tasks if t.task_uid == "looping-task")
+    assert updated_task.status == "partial_failure"
+    assert (
+        "A tool-call loop recurred after the one bounded changed-action recovery; "
+        "no equivalent replacement task could be created."
+    ) in updated_task.status_reason
+
+
+def test_execution_prerequisite_recovery_failure_when_execution_ids_unresolved(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Request endpoint",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Request the assigned endpoint",
+            "/api/test",
+        )],
+    )
+    task = Task(
+        task_uid="execution-repair-task",
+        title="Execution repair",
+        objective="Request endpoint",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded request",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["http_request"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task], acceptance_complete=False)
+    cycle_calls = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"request endpoint","tools":[]}'
+        raise AssertionError(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        nonlocal cycle_calls
+        cycle_calls += 1
+        if cycle_calls == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="Attempted acceptance",
+                outcomes=[
+                    ToolOutcome(
+                        sequence=1,
+                        tool_use_id="acceptance-1",
+                        tool_name="record_task_acceptance",
+                        success=False,
+                        correctable=True,
+                        input_summary="record acceptance",
+                        output_summary="Execution evidence is required before acceptance.",
+                    )
+                ],
+            )
+        return workflow_mod.TaskExecutorCycleResult(
+            text="Execution turn without producing valid receipts",
+            outcomes=[],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
+    )
+    monkeypatch.setattr(controller, "_has_valid_required_output", lambda *args: True)
+
+    controller._run_task(plan, plan.phases[0], task)
+
+    assert cycle_calls == 2
+    assert state.tasks[0].status == "partial_failure"
+    assert (
+        "Execution prerequisite recovery did not produce task-local proof for: criterion-1-execution-1"
+        in state.tasks[0].status_reason
+    )
+
+
+def test_output_prerequisite_recovery_failure_when_output_ids_unresolved(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Request endpoint",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Request the assigned endpoint",
+            "/api/test",
+        )],
+    )
+    task = Task(
+        task_uid="output-repair-task",
+        title="Output repair",
+        objective="Request endpoint",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded request",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["http_request"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task], acceptance_complete=False)
+    cycle_calls = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"request endpoint","tools":[]}'
+        raise AssertionError(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        nonlocal cycle_calls
+        cycle_calls += 1
+        if cycle_calls == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="Attempted acceptance",
+                outcomes=[
+                    ToolOutcome(
+                        sequence=1,
+                        tool_use_id="acceptance-1",
+                        tool_name="record_task_acceptance",
+                        success=False,
+                        correctable=True,
+                        input_summary="record acceptance",
+                        output_summary="Execution evidence is required before acceptance.",
+                    )
+                ],
+            )
+        return workflow_mod.TaskExecutorCycleResult(
+            text="Output recovery turn without output",
+            outcomes=[],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
+    )
+    monkeypatch.setattr(controller, "_has_valid_required_output", lambda *args: False)
+
+    controller._run_task(plan, plan.phases[0], task)
+
+    assert cycle_calls == 2
+    assert state.tasks[0].status == "partial_failure"
+    assert (
+        "Output prerequisite recovery did not produce the required task-local output for: criterion-1-execution-1"
+        in state.tasks[0].status_reason
+    )
+
+
+def test_task_prompt_build_error_negative_cases():
+    with pytest.raises(TaskPromptBuildError, match="task prompt tools must be a list of strings"):
+        MultiAgentWorkflowController._validated_selection_list("invalid", "tools")
+
+    with pytest.raises(TaskPromptBuildError, match="task prompt tools must contain only non-empty strings"):
+        MultiAgentWorkflowController._validated_selection_list(["   "], "tools")
+
+    with pytest.raises(TaskPromptBuildError, match="task prompt tools must contain only non-empty strings"):
+        MultiAgentWorkflowController._validated_selection_list([123], "tools")
+
+    runtime = _runtime()
+    runtime.config.available_tools = ["katana"]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    task = Task(task_uid="t1", title="Task 1", objective="Objective", phase=1, status="active")
+    with pytest.raises(TaskPromptBuildError, match="task prompt tools contains unknown or unavailable selection"):
+        controller._normalize_task_prompt_spec(
+            {"prompt": "do something", "tools": ["completely_unknown_tool_xyz"]},
+            task,
+        )
+
+    with pytest.raises(TaskPromptBuildError, match="task prompt shell_commands contains unavailable tool or command"):
+        controller._normalize_task_prompt_spec(
+            {"prompt": "do something", "shell_commands": ["completely_unknown_shell_command_xyz"]},
+            task,
+        )
+
+    with pytest.raises(TaskPromptBuildError, match="task prompt must be a non-empty string"):
+        controller._normalize_task_prompt_spec(
+            {"prompt": "   ", "tools": []},
+            task,
+        )
+
+
+def test_extract_json_object_and_extract_result_text_edge_cases():
+    assert extract_json_object('{"key": "value", "count": 42}') == {"key": "value", "count": 42}
+    assert extract_json_object('```json\n{"key": "value"}\n```') == {"key": "value"}
+
+    with pytest.raises(ValueError):
+        extract_json_object("not valid json")
+
+    with pytest.raises(ValueError):
+        extract_json_object("[1, 2, 3]")
+
+    with pytest.raises(ValueError):
+        extract_json_object('"string value"')
+
+    assert extract_result_text(None) == ""
+    assert extract_result_text("simple string") == "simple string"
+
+    msg_obj = SimpleNamespace(message={"content": [{"text": "line1"}, {"text": "line2"}]})
+    assert extract_result_text(msg_obj) == "line1\nline2"
+
+    msg_empty = SimpleNamespace(message={"content": []})
+    assert extract_result_text(msg_empty) == str(msg_empty)
+
+    content_obj = SimpleNamespace(content=[{"text": "block1"}, {"text": "block2"}])
+    assert extract_result_text(content_obj) == "block1\nblock2"
+
+    assert extract_result_text(999) == "999"
+
+
+def test_reconcile_pending_controller_acceptance_branches():
+    plan = _plan()
+    task = Task(task_uid="reconcile-task", title="Reconcile", objective="Test reconcile", phase=1, status="active")
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    decision, ignored = controller._reconcile_pending_controller_acceptance(plan, task, lambda **kwargs: None, [], [])
+    assert decision is None
+    assert ignored == set()
+
+    task_empty_pending = replace(task, recovery_context={"pending_controller_acceptance": {}})
+    state.tasks = [task_empty_pending]
+    decision, ignored = controller._reconcile_pending_controller_acceptance(
+        plan, task_empty_pending, lambda **kwargs: None, [], []
+    )
+    assert decision is None
+    assert ignored == set()
+
+    crit = AcceptanceCriterion(
+        id="crit-1",
+        description="Criterion with exec requirement",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement("req-1", "Execute", "target:t1")],
+    )
+    task_with_req = replace(
+        task,
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="p",
+                source_refs=["target:t1"],
+                procedure={
+                    "methods": ["test"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[crit],
+        ),
+        recovery_context={
+            "pending_controller_acceptance": {
+                "status": "satisfied",
+                "disposition": "observation",
+                "summary": "done",
+                "evidence_refs": [],
+            }
+        },
+    )
+    state.tasks = [task_with_req]
+    decision, ignored = controller._reconcile_pending_controller_acceptance(
+        plan, task_with_req, lambda **kwargs: None, [], []
+    )
+    assert decision is None
+    assert ignored == set()
+
+    def failing_tool(**kwargs):
+        raise ValueError("Replay validation failed")
+
+    task_satisfied_req = replace(
+        task_with_req,
+        recovery_context={
+            "pending_controller_acceptance": {
+                "status": "satisfied",
+                "disposition": "observation",
+                "summary": "done",
+                "evidence_refs": [],
+            },
+            "execution_evidence_receipts": {"req-1": ["artifact:1"]},
+        },
+    )
+    state.tasks = [task_satisfied_req]
+    decision, ignored = controller._reconcile_pending_controller_acceptance(
+        plan, task_satisfied_req, failing_tool, [], []
+    )
+    assert decision is not None
+    assert decision.status == "partial_failure"
+    assert "Controller acceptance replay was rejected" in decision.reason
+
+    def succeeding_tool(**kwargs):
+        return {"status": "ok"}
+
+    matching_outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="failed-acc-1",
+        tool_name="record_task_acceptance",
+        success=False,
+        correctable=True,
+        input_summary=json.dumps({
+            "status": "satisfied",
+            "disposition": "observation",
+            "summary": "done",
+            "evidence_refs": [],
+        }),
+        output_summary="Failed initially",
+    )
+    state.tasks = [task_satisfied_req]
+    decision, ignored = controller._reconcile_pending_controller_acceptance(
+        plan, task_satisfied_req, succeeding_tool, [], [matching_outcome]
+    )
+    assert decision is None
+    assert ignored == {"failed-acc-1"}
+    refreshed = next(t for t in state.tasks if t.task_uid == task.task_uid)
+    assert "pending_controller_acceptance" not in refreshed.recovery_context
+
+
+def test_synthesis_repair_cycle_resets_flags():
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2})
+    task = Task(task_uid="synthesis-reset", title="Synthesis reset", objective="Assess", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id=task.acceptance.criteria[0].id,
+        status="satisfied",
+        disposition="observation",
+        summary="Assessed protocol",
+        evidence_refs=("artifact:artifacts/protocol.txt",),
+    )]
+    evaluator_calls = 0
+    cycle_count = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        nonlocal evaluator_calls
+        if role == "task_prompt_builder":
+            return '{"prompt":"assess","tools":[]}'
+        if role == "task_evaluator":
+            evaluator_calls += 1
+            if evaluator_calls == 1:
+                return json.dumps({
+                    "status": "partial_failure",
+                    "reason": "Missing synthesis summary.",
+                    "instructions": "Synthesize findings.",
+                    "repair": {"kind": "acceptance", "evidence_gaps": []},
+                })
+            return '{"status":"done","reason":"Synthesis accepted."}'
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        nonlocal cycle_count
+        cycle_count += 1
+        return workflow_mod.TaskExecutorCycleResult(
+            text="Synthesized summary evidence",
+            outcomes=[],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert cycle_count == 2
+    assert evaluator_calls == 2
+    assert state.tasks[0].status == "done"

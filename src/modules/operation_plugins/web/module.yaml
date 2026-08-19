@@ -27,3 +27,15 @@ module_interface:
   accepts_from: []
   provides_to: []
   finding_categories: ["web-vulnerabilities", "authentication-flaws", "business-logic", "injection-vulnerabilities", "xss-bypasses", "idor-discoveries", "auth-bypasses", "injection-points", "file-traversal", "ssrf"]
+planning:
+  phase_task_contracts:
+    - phase_id: 1
+      mode: fanout_with_synthesis
+      min_mapping_tasks: 3
+      mapping_workstreams:
+        - entrypoint_technology
+        - bounded_crawl
+        - client_side_api
+        - auth_workflow
+      synthesis_workstream: inventory_synthesis
+      synthesis_output_kind: inventory_manifest

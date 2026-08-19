@@ -37,6 +37,12 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 - Pending work can persist across runs to enable long-lived coverage goals
 - Prompt adaptation happens inside the Python-owned role-agent workflow
 
+**[module-task-planning.md](module-task-planning.md)**
+- Declarative multi-workstream task contracts
+- Module-specific phase-1 fan-out behavior
+- Synthesis dependencies and task metadata
+- Runtime budget and execution-proof limitations
+
 ### Interface and User Experience
 
 **[terminal-frontend.md](terminal-frontend.md)**
@@ -78,6 +84,7 @@ This directory contains comprehensive technical documentation for Cyber-AutoAgen
 | Monitoring operations         | [observability-evaluation.md](observability-evaluation.md) |
 | Production deployment         | [deployment.md](deployment.md)                             |
 | Understanding UI architecture | [terminal-frontend.md](terminal-frontend.md)               |
+| Understanding module task fan-out | [module-task-planning.md](module-task-planning.md)       |
 
 ## Getting Started
 

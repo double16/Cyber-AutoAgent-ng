@@ -261,8 +261,9 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     assert result["verification_task_ref"] == f"task:{result['verification_task_uid']}"
     assert task.status == "pending"
     assert task.target_scope == "all"
-    assert "admin data" in task.objective
     candidate = plan_store.store_finding_candidate.call_args.args[3]
+    assert "admin data" not in task.objective
+    assert candidate["verification_packet"]["observed_result"] == "Admin data was returned"
     assert candidate["source_task_uids"] == [source_task.task_uid]
     assert candidate["artifact_fingerprints"] == {
         "artifact:admin-response.txt": hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -710,6 +711,62 @@ def test_store_finding_rejects_assumed_observed_result(memory_client, operation_
                 ["Request /x"],
                 [str(artifact)],
             )
+
+
+def test_store_finding_verification_task_keeps_payload_urls_out_of_objective(
+    memory_client, operation_ids, tmp_path: Path
+):
+    artifact = tmp_path / "config.json"
+    artifact.write_text(
+        '{"database": "postgres://bc:bc@db:5432/bc", '
+        '"bucket": "https://neuralegion-open-bucket.s3.amazonaws.com", '
+        '"cache": "mongodb://db:27017/config"}',
+        encoding="utf-8",
+    )
+    plan_store = MagicMock()
+    plan_store.get_finding_by_fingerprint.return_value = None
+    plan_store.get_tasks.return_value = []
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_plan_current_phase", return_value=1),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry"),
+    ):
+        store_finding(
+            "Unauthenticated configuration exposure",
+            "The endpoint exposes sensitive service configuration",
+            "HIGH",
+            "http://192.168.253.101:3001/api/config",
+            "credential_exposure",
+            "No authentication required",
+            artifact.read_text(encoding="utf-8"),
+            ["Request /api/config"],
+            [str(artifact)],
+            [
+                {"artifact": str(artifact), "marker": "postgres://bc:bc@db:5432/bc"},
+                {"artifact": str(artifact), "marker": "https://neuralegion-open-bucket.s3.amazonaws.com"},
+                {"artifact": str(artifact), "marker": "mongodb://db:27017/config"},
+            ],
+        )
+
+    task = memory_client.store_task.call_args.kwargs["task"]
+    assert task.kind == "finding_validation"
+    assert task.objective == (
+        f"Independently verify finding candidate {task.reference_id} against "
+        "http://192.168.253.101:3001/api/config. Re-test the target to reproduce the reported finding "
+        "behavior, capture required evidence in fresh direct or differential artifacts, call "
+        "record_finding_validation with the outcome, and stop."
+    )
+    assert "postgres://" not in task.objective
+    assert "s3.amazonaws.com" not in task.objective
+    assert "mongodb://" not in task.objective
+    candidate = plan_store.store_finding_candidate.call_args.args[3]
+    assert candidate["verification_packet"]["observed_result"] == artifact.read_text(encoding="utf-8")
+    assert [item["marker"] for item in candidate["verification_packet"]["evidence_assertions"]] == [
+        "postgres://bc:bc@db:5432/bc",
+        "https://neuralegion-open-bucket.s3.amazonaws.com",
+        "mongodb://db:27017/config",
+    ]
 
 
 def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, operation_ids, memory_client):

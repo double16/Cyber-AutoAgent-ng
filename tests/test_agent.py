@@ -538,6 +538,50 @@ def test_create_agent_reuses_runtime_resources(monkeypatch):
     assert runtime.callback_handler is callback_handler
 
 
+def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.init_kwargs = kwargs
+            self.tool_registry = Mock()
+
+    config = AgentConfig(target="example.com", objective="test", provider="ollama", model_id="llama")
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_TEST",
+        server_config=SimpleNamespace(),
+        config_manager=SimpleNamespace(),
+        callback_handler=Mock(),
+        tools_list=[],
+        tool_executor=object(),
+        system_prompt_payload="base payload",
+        system_prompt="base text",
+        hooks=[],
+        conversation_manager=None,
+        sdk_context_manager=None,
+        trace_attributes={},
+        prompt_token_limit=123,
+    )
+    system_prompt = "<tools_and_capabilities>call tool_catalog</tools_and_capabilities>"
+
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=True)))
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
+
+    create_agent(
+        "example.com",
+        "test",
+        runtime_resources=runtime,
+        system_prompt=system_prompt,
+        tools=[],
+        agent_type="task_prompt_builder",
+    )
+
+    kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
+    assert "tool_catalog" not in kwargs["system_prompt"]
+    assert "controller support role" in kwargs["system_prompt"]
+
+
 def test_create_agent_uses_role_specific_event_handler(monkeypatch):
     class FakeAgent:
         def __init__(self, **kwargs):

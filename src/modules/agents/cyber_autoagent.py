@@ -1036,6 +1036,9 @@ def create_agent(
     """Create autonomous agent from shared runtime resources."""
     runtime = runtime_resources or create_agent_runtime_resources(target, objective, config)
     config = runtime.config
+    resolved_system_prompt = system_prompt if system_prompt is not None else runtime.system_prompt_payload
+    if isinstance(resolved_system_prompt, str):
+        resolved_system_prompt = prompts.get_role_system_prompt(resolved_system_prompt, agent_type)
 
     agent_logger = logging.getLogger("CyberAutoAgent")
     agent_logger.debug("Creating autonomous agent")
@@ -1053,7 +1056,7 @@ def create_agent(
 
     if system_prompt:
         trace_attributes.update({
-            "system_prompt": system_prompt,
+            "system_prompt": resolved_system_prompt,
         })
 
     callback_handler = runtime.callback_handler
@@ -1122,7 +1125,7 @@ def create_agent(
         "name": name or f"Cyber-AutoAgent {config.op_id or runtime.operation_id}",
         "tools": tools if tools is not None else build_role_tools(runtime),
         "tool_executor": runtime.tool_executor,
-        "system_prompt": system_prompt if system_prompt is not None else runtime.system_prompt_payload,
+        "system_prompt": resolved_system_prompt,
         "callback_handler": callback_handler,
         "hooks": agent_hooks or None,
         "load_tools_from_directory": tools is None,

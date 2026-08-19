@@ -36,3 +36,18 @@ module_interface:
   accepts_from: []
   provides_to: []
   finding_categories: ["ctf-flags", "xss-bypasses", "idor-discoveries", "auth-bypasses", "injection-points", "file-traversal", "ssrf"]
+planning:
+  phase_task_contracts:
+    - phase_id: 1
+      mode: fanout_with_synthesis
+      min_mapping_tasks: 3
+      mapping_workstreams:
+        - challenge_hints
+        - endpoint_capabilities
+        - access_context
+        - flag_path
+      synthesis_workstream: challenge_surface_synthesis
+      synthesis_output_kind: artifact
+      allow_direct_single_step: true
+      direct_single_step_workstreams:
+        - flag_path

@@ -9,6 +9,13 @@ inapplicable and document the reason.
 
 1. **Attack Surface Mapping** — Produce and freeze the bounded inventory of authorized services, applications,
    endpoints, parameters, authentication, roles, tenants, and important workflows.
+
+### Phase-1 task fan-out
+
+Create separate artifact-producing tasks for at least three applicable workstreams: entry-point and technology mapping,
+bounded crawl and route discovery, client-side/API extraction, and authentication/workflow mapping. Create one final
+inventory-synthesis task only after those mapping tasks are queued; it is the sole task that produces the canonical
+inventory manifest.
 2. **Generate Attack Hypotheses from the Mapped Attack Surface** — Derive testable hypotheses from technology,
    input, trust-boundary, and workflow observations. Do not treat a hypothesis as a finding.
 3. **Vulnerability Discovery and Exploitability Testing** — Test prioritized hypotheses and record expected and actual

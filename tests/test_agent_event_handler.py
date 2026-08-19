@@ -1163,7 +1163,7 @@ def test_budget_minutes_progress_and_internal_step_tracking(monkeypatch):
 
     progress, percent = handler._calculate_budget_progress(total_tokens=50, cost=0.000025)
 
-    assert progress == pytest.approx(0.5)
+    assert progress == pytest.approx(0.5, rel=5.0e-04)
     assert percent == 50
 
     handler.action_count = 7

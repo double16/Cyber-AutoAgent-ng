@@ -58,6 +58,14 @@ Python owns phase, task, evaluation, and operation transitions. Module prompts g
 control over those transitions. Finding validation remains an independent workflow task; custom tools should produce
 durable evidence for that task rather than deciding that a finding is verified.
 
+### Task planning contracts
+
+The `web`, `web_recon`, and `ctf` modules optionally declare phase-task contracts under
+`planning.phase_task_contracts`. These contracts require multiple distinct phase-1 workstreams and, for selected
+modules, one synthesis task. They are validated during task creation and persist planning metadata without requiring
+a database migration. See [Module Task Planning Contracts](module-task-planning.md) for the fields, bundled module
+behavior, and runtime limitations.
+
 ## Discovery and inheritance
 
 The loader searches these roots in order:
@@ -132,6 +140,9 @@ mechanism directly.
 | `threat_emulation` | Threat emulation and ATT&CK-oriented workflows | 0 |
 | `context_navigator` | Post-access environment discovery | 0 |
 | `code_security` | Static code security analysis | 0 |
+
+Only the three modules listed in the task-planning documentation currently opt into declarative fan-out contracts.
+`code_security`, `context_navigator`, and `threat_emulation` continue to use generic task planning.
 
 The repository does not encode a production/experimental status field in module manifests. Treat module maturity as a
 project-level decision rather than a loader-enforced property.

@@ -2,6 +2,9 @@
 
 ### Features
 
+- Add opt-in module task fan-out contracts so web, web reconnaissance, and CTF mapping phases create distinct,
+  controller-validated workstreams instead of one broad task.
+
 - Add webcrack and shuji JavaScript reverse-engineering tools.
 - Consolidate authoritative workflow state into `outputs/cyber_autoagent.db`.
 - Replace semantic-memory backends with Qdrant 1.18, using `outputs/qdrant` by default or a configured service.
@@ -50,6 +53,16 @@
 
 ### Fixes
 
+- Keep auto-generated finding-validation tasks focused on their assigned endpoint while retaining leaked credentials
+  and external service URLs as response-data markers for deterministic evidence verification.
+- Retain redacted structured shell inputs in controller tool outcomes so successful artifact-producing commands such
+  as Katana can satisfy their task-local execution requirements after acceptance reconciliation.
+- Source shell execution-receipt capabilities from the environment catalog while preserving its broader tool-selection
+  capability taxonomy.
+- Recognize capabilities and declared artifacts from compound Bash shell commands, so wrappers such as `cd` and
+  `timeout` no longer hide task-local crawler execution evidence.
+- Refine generated executor prompts to keep one controller-owned terminal acceptance protocol, require real registered
+  tool calls, and preserve adaptive exploration while honoring controller recovery guidance.
 - Preserve the wrapped Strands editor instructions in the relative-path editor wrapper so agents retain its
   command-specific calling guidance.
 - Retain existing operation-local files named by successful tool inputs and outputs as canonical artifact evidence,

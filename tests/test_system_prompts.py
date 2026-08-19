@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from modules.config.types import BudgetConfig
-from modules.prompts import get_system_prompt, load_prompt_template
+from modules.prompts import get_role_system_prompt, get_system_prompt, load_prompt_template
 
 real_load_prompt_template = load_prompt_template
 
@@ -37,6 +37,9 @@ class TestGetSystemPrompt:
         assert "Budget is intended to improve coverage" not in prompt
         assert "Coverage-First Doctrine" not in prompt
         assert "MUST pivot to different method OR deploy swarm" not in prompt
+        assert "INSTRUCTION PRECEDENCE" in prompt
+        assert "Before EVERY action" not in prompt
+        assert "Evidence: <artifact or constraint>; Action:" in prompt
 
     @patch("modules.prompts.factory.load_prompt_template")
     def test_get_system_prompt_with_tools_context(self, mock_load_prompt_template):
@@ -181,10 +184,63 @@ class TestGetSystemPrompt:
     def test_tools_guide_permits_overlapping_applicable_methods(self):
         prompt = load_prompt_template("tools_guide.md")
 
-        assert "Use any native tool, optional tool, or shell command applicable to the task" in prompt
-        assert "Overlap between native tools, optional tools" in prompt
-        assert "required capability absent from native tools" not in prompt
-        assert "Medium confidence (50-80%) → Parallel shell" not in prompt
+        assert "capability and arguments are known" in prompt
+        assert "Call `tool_catalog` only when it is" in prompt
+        assert "Do not install, enable, or search for new tools" in prompt
+        assert "Ask-Enable-Retry" not in prompt
+
+    def test_non_executor_role_prompt_removes_tool_protocols(self):
+        prompt = get_system_prompt(
+            target="test.com",
+            objective="test objective",
+            operation_id="OP_20240101_120000",
+            budget=_budget(),
+        )
+
+        role_prompt = get_role_system_prompt(prompt, "task_prompt_builder")
+
+        assert "<tools_and_capabilities>" not in role_prompt
+        assert "tool_catalog" not in role_prompt
+        assert "store_observation" not in role_prompt
+        assert "store_finding" not in role_prompt
+        assert "<role_boundary>" in role_prompt
+        assert "INSTRUCTION PRECEDENCE" in role_prompt
+
+    def test_executor_role_prompt_retains_registered_tool_guidance(self):
+        prompt = get_system_prompt(
+            target="test.com",
+            objective="test objective",
+            operation_id="OP_20240101_120000",
+            budget=_budget(),
+        )
+
+        role_prompt = get_role_system_prompt(prompt, "task_executor")
+
+        assert role_prompt == prompt
+        assert "store_observation" not in role_prompt
+        assert "store_finding" not in role_prompt
+
+    def test_shared_prompt_has_tool_neutral_evidence_lifecycle(self):
+        prompt = get_system_prompt(
+            target="test.com",
+            objective="test objective",
+            operation_id="OP_20240101_120000",
+            budget=_budget(),
+        )
+        shared_prompt = prompt.split("<tools_and_capabilities>", maxsplit=1)[0]
+
+        assert "registered tool schema for persistence" in shared_prompt
+        assert "store_observation" not in shared_prompt
+        assert "store_finding" not in shared_prompt
+
+    def test_non_executor_role_prompt_adds_boundary_after_tool_block_is_already_removed(self):
+        prompt = "Shared role rules only"
+
+        role_prompt = get_role_system_prompt(prompt, "task_creator")
+
+        assert role_prompt.startswith(prompt)
+        assert "<role_boundary>" in role_prompt
+        assert "generic tool discovery" in role_prompt
 
 
 if __name__ == "__main__":

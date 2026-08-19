@@ -9,6 +9,12 @@ inapplicable and document the reason. Keep all coverage and gap documentation wi
 
 1. **Surface and Trust-Boundary Mapping** — Map services, entry points, technology, authentication, sessions, roles,
    tenants, user journeys, and endpoint parameters with artifact evidence.
+
+### Phase-1 task fan-out
+
+Create separate artifact-producing tasks for at least three applicable workstreams: service and entry-point mapping,
+technology and trust-boundary mapping, access-context/session mapping, workflow/high-value-area mapping, and safe
+read-only verification. Do not combine these into one broad mapping task or cross the module's non-exploitation boundary.
 2. **Access Context Mapping** — Compare applicable access contexts and document authenticated coverage or the absence
    of authorized test credentials.
 3. **Workflow and High-Value Area Mapping** — Map prioritized workflows and high-value areas.
