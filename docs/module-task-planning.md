@@ -74,11 +74,16 @@ include validator tests for both accepted and rejected proposal sets.
 The controller prioritizes mapping tasks before synthesis tasks within a phase. Synthesis proposals declare their
 mapping workstream dependencies so the intended ordering is visible in durable task metadata.
 
-The contract currently guarantees validated fan-out at task creation; it does not reserve execution time for every
-planned task. Phase budget caps can still terminate a phase while some contracted tasks remain pending. If that
-happens, later phases may create prerequisite work based on the missing snapshot, and the operation can finish with
-partial failure. In particular, a synthesis task that remains pending at a phase cap is not itself proof that a
-canonical inventory exists.
+The contract guarantees validated fan-out at task creation; it does not reserve execution time for every planned
+task. Phase budget caps can still defer contracted tasks. Before a later phase creates work for a missing contracted
+producer, the controller resumes actionable (`active` or `pending`) mapping work before synthesis work from that
+earlier contract. The resumed task keeps its owning phase context while consuming the later phase's available budget,
+so the old phase cap is not applied a second time.
+
+Terminal `partial_failure` and `blocked` contract tasks are not retried automatically. They retain the normal
+replacement-task workflow. If no actionable producer task remains and the required output is still unavailable, the
+later phase may create bounded prerequisite work and the operation can still finish with partial failure. A pending
+or failed synthesis task is never proof that a canonical inventory exists.
 
 When reviewing an operation, verify both layers:
 

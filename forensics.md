@@ -1,3 +1,5 @@
+- If no operation or the latest operation is requested, find it by finding the latest log using `find outputs -name "cyber_operations.log" -print0 | xargs -0 ls -t | head -n 1`, which gives the logical target and operation ID in the form `outputs/{logical target}/{operation ID}/cyber_operations.log`
+- If no log file is given by the user, find it by running `find outputs -path "*/{operation ID}/cyber_operations.log"`
 - Read the session header and tail first to establish the operation ID, start/end time, final metrics, budget limits, termination reason, and `assessment_complete` event.
 - Use `rg -n` with narrow, case-insensitive patterns to locate phase transitions, task creation/evaluation, budget-limit events, `workflow_coverage_summary`, `progress_update`, and `assessment_complete`; avoid dumping the entire log because reasoning payloads can be very large.
 - Inspect targeted line-numbered ranges with `sed -n` around each phase transition and the final completion block. Preserve exact line numbers when reporting findings so conclusions are auditable.
@@ -6,5 +8,6 @@
 - Distinguish logical completion from resource termination. Compare elapsed duration with `maxDurationMinutes`, and inspect token/cost limits and `termination_reason`; `progressPercent` is budget/utilization progress, not phase completion.
 - Do not recommend changing task fan-out based on lack of budget. Lack of budget is for the user to control.
 - Broken or missing tools are acceptable, the operation will remove them from consideration, do not flag or offer plans to address.
+- Review langfuse traces using the operation ID as the session ID.
 - Do not complain or recommend changes because reporting or evaluation taking time and that it should be budgeted.
 - Do not complain or recommend changes because an operation continues to run when it knows from the health status that it will not finish. Coverage is most important, the user can continue the operation later, and the report already recommends to the user how much more budget to allocate.

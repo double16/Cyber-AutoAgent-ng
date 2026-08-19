@@ -1656,6 +1656,29 @@ class MultiAgentWorkflowController:
                         self._emit_workflow_completion(updated_plan)
                         return
                     continue
+            resume_candidate = self._contract_prerequisite_resume_candidate(plan, phase)
+            if resume_candidate is not None:
+                resume_phase, resume_task = resume_candidate
+                if resume_task.status == "pending":
+                    resume_task = self._activate_task(resume_task)
+                self._log_workflow(
+                    "resuming contracted prerequisite task=%s owner_phase=%s before task creation in phase=%s",
+                    self._task_label(resume_task),
+                    resume_phase.id,
+                    phase.id,
+                )
+                self._emit_workflow_event({
+                    "type": "contract_prerequisite_resume",
+                    "phase": phase.id,
+                    "owner_phase": resume_phase.id,
+                    "task_uid": resume_task.task_uid,
+                    "title": resume_task.title,
+                    "task_role": self._task_planning_role(resume_task),
+                    "workstream": self._task_planning_workstream(resume_task),
+                    "reason": "contracted_producer_output_unavailable",
+                })
+                self._run_task(plan, resume_phase, resume_task)
+                continue
             self._log_workflow("creating tasks phase=%s existing_task_count=%s", self._phase_label(phase), before_count)
             creation = self._create_tasks(plan, phase)
             task = self._get_or_activate_task(phase.id)
@@ -2061,7 +2084,6 @@ class MultiAgentWorkflowController:
     def _activate_task(self, task: Task) -> Task:
         active_task = self.state.activate_task(task)
         self._log_workflow("task activated task=%s phase=%s", self._task_label(active_task), active_task.phase)
-        self._emit_task_started(active_task)
         return active_task
 
     def _active_task_for_phase(self, phase_id: int) -> Optional[Task]:
@@ -2089,6 +2111,99 @@ class MultiAgentWorkflowController:
 
         context = task.recovery_context.get("phase_task_contract")
         return str(context.get("task_role") or "mapping") if isinstance(context, dict) else "mapping"
+
+    @staticmethod
+    def _task_planning_workstream(task: Task) -> str:
+        """Read controller-owned planning workstream metadata without task-prose inference."""
+
+        context = task.recovery_context.get("phase_task_contract")
+        return str(context.get("workstream") or "") if isinstance(context, dict) else ""
+
+    def _contract_prerequisite_resume_candidate(
+        self,
+        plan: OperationPlan,
+        active_phase: PlanPhase,
+    ) -> Optional[Tuple[PlanPhase, Task]]:
+        """Return earlier actionable contract work before creating a duplicate prerequisite.
+
+        This gate is intentionally narrow: it applies only before task creation in
+        a later phase when an earlier fan-out contract's synthesis producer has not
+        successfully completed. It preserves phase-budget accounting for the active
+        phase while executing the resumed task with its owning phase context.
+        """
+
+        if active_phase.id <= 1:
+            return None
+
+        ordered_phases = sorted(
+            (phase for phase in plan.phases if phase.id < active_phase.id),
+            key=lambda phase: phase.id,
+        )
+        for owner_phase in ordered_phases:
+            contract = self._phase_task_contract(owner_phase)
+            if contract is None or contract.mode != "fanout_with_synthesis":
+                continue
+            contract_tasks = [
+                task
+                for task in self.state.list_tasks(phase=owner_phase.id)
+                if self._task_matches_phase_task_contract(task, contract)
+            ]
+            if self._contract_synthesis_output_ready(contract, contract_tasks):
+                continue
+            actionable = [task for task in contract_tasks if task.status in {"active", "pending"}]
+            if not actionable:
+                continue
+            active = [task for task in actionable if task.status == "active"]
+            if active:
+                active.sort(key=lambda task: task.created_at or "")
+                return owner_phase, active[0]
+            actionable.sort(
+                key=lambda task: (
+                    1 if self._task_planning_role(task) == "synthesis" else 0,
+                    task.created_at or "",
+                )
+            )
+            return owner_phase, actionable[0]
+        return None
+
+    def _task_matches_phase_task_contract(self, task: Task, contract: Any) -> bool:
+        """Return whether task metadata belongs to the active contract declaration."""
+
+        context = task.recovery_context.get("phase_task_contract")
+        if not isinstance(context, dict):
+            return False
+        try:
+            phase_id = int(context.get("phase_id") or 0)
+        except (TypeError, ValueError):
+            return False
+        return str(context.get("module") or "") == contract.module and phase_id == contract.phase_id
+
+    def _contract_synthesis_output_ready(self, contract: Any, tasks: List[Task]) -> bool:
+        """Require a successful contracted synthesis producer before later work proceeds."""
+
+        synthesis_tasks = [
+            task
+            for task in tasks
+            if self._task_planning_role(task) == "synthesis"
+            and self._task_planning_workstream(task) == contract.synthesis_workstream
+            and task.status == "done"
+        ]
+        if not synthesis_tasks:
+            return False
+        if contract.synthesis_output_kind != "inventory_manifest":
+            return True
+        for task in synthesis_tasks:
+            candidates = list(task.evidence)
+            for result in self.state.list_task_acceptance_results(task.task_uid):
+                candidates.extend(result.evidence_refs)
+            for candidate in dict.fromkeys(candidates):
+                try:
+                    reference = canonical_artifact_reference(candidate)
+                    self._load_controller_inventory_manifest(plan=self.state.get_plan(), reference=reference)
+                except ValueError:
+                    continue
+                return True
+        return False
 
     def _run_task(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         with self._task_trace_context(plan, phase, task):
