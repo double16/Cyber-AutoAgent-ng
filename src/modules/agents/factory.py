@@ -188,8 +188,9 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 swarm_model_id = request_model_id
         # TODO: accept model parameters such as temperature
 
+        effective_role = agent_type or name or "swarm"
         try:
-            strands_model = create_strands_model(provider, swarm_model_id, "swarm")
+            strands_model = create_strands_model(provider, swarm_model_id, effective_role)
         except Exception as exc:  # fall back to main LLM if swarm override is misconfigured
             provider_from_spec = provider
             model_from_spec = swarm_model_id
@@ -202,7 +203,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 exc,
                 swarm_model_id,
             )
-            strands_model = create_strands_model(provider, swarm_model_id, "swarm")
+            strands_model = create_strands_model(provider, swarm_model_id, effective_role)
 
         try:
             caps = get_capabilities(provider, swarm_model_id)

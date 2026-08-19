@@ -58,6 +58,7 @@ class OllamaModel(Model):
         stop_sequences: list[str] | None
         temperature: float | None
         top_p: float | None
+        top_k: int | None
         stream: bool | None
 
     def __init__(
@@ -206,6 +207,7 @@ class OllamaModel(Model):
                         ("num_predict", self.config.get("max_tokens")),
                         ("temperature", self.config.get("temperature")),
                         ("top_p", self.config.get("top_p")),
+                        ("top_k", self.config.get("top_k")),
                         ("stop", self.config.get("stop_sequences")),
                     ]
                     if value is not None
@@ -306,6 +308,95 @@ class OllamaModel(Model):
             case _:
                 raise RuntimeError(f"chunk_type=<{event['chunk_type']} | unknown type")
 
+    async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any]) -> Any:
+        """Execute chat request with progressive parameter stripping upon provider errors."""
+        from modules.config.models.agent_profiles import get_agent_settings_registry
+        registry = get_agent_settings_registry()
+        model_id = str(request.get("model", self.config.get("model_id", "")))
+
+        current_request = dict(request)
+        current_options = dict(current_request.get("options") or {})
+
+        while True:
+            try:
+                return await client.chat(**current_request)
+            except Exception as exc:
+                err_msg = str(exc).lower()
+
+                # 1. Fallback for 'think' parameter if mentioned in error
+                if "think" in current_request and ("think" in err_msg or "reasoning" in err_msg):
+                    val = current_request["think"]
+                    if isinstance(val, str):
+                        # Step 1: string -> bool
+                        bool_val = val in ("medium", "high", "xhigh")
+                        current_request["think"] = bool_val
+                        logger.warning(
+                            "Ollama rejected string think='%s' for %s (%s). Falling back to think=%s",
+                            val, model_id, exc, bool_val,
+                        )
+                        registry.record_parameter_fallback("ollama", model_id, "think", bool_val, "Ollama think string rejected")
+                        continue
+                    else:
+                        # Step 2: bool -> omit
+                        current_request.pop("think", None)
+                        logger.warning(
+                            "Ollama rejected boolean think=%s for %s (%s). Omitting think parameter",
+                            val, model_id, exc,
+                        )
+                        registry.record_parameter_fallback("ollama", model_id, "think", None, "Ollama think boolean rejected")
+                        continue
+
+                # 2. Fallback for options: top_k -> temperature -> top_p
+                if "top_k" in current_options and (
+                    "top_k" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("top_k", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected top_k for %s (%s). Omitting top_k", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "top_k", None, "Ollama top_k rejected")
+                    continue
+
+                if "temperature" in current_options and (
+                    "temperature" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("temperature", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected temperature for %s (%s). Omitting temperature", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "temperature", None, "Ollama temperature rejected")
+                    continue
+
+                if "top_p" in current_options and (
+                    "top_p" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("top_p", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected top_p for %s (%s). Omitting top_p", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "top_p", None, "Ollama top_p rejected")
+                    continue
+
+                # 3. Fallback for 'think' if not mentioned in error but still active
+                if "think" in current_request:
+                    val = current_request["think"]
+                    if isinstance(val, str):
+                        bool_val = val in ("medium", "high", "xhigh")
+                        current_request["think"] = bool_val
+                        logger.warning(
+                            "Ollama request failed with think='%s' for %s (%s). Falling back to think=%s",
+                            val, model_id, exc, bool_val,
+                        )
+                        registry.record_parameter_fallback("ollama", model_id, "think", bool_val, "Ollama think string rejected")
+                        continue
+                    else:
+                        current_request.pop("think", None)
+                        logger.warning(
+                            "Ollama request failed with think=%s for %s (%s). Omitting think parameter",
+                            val, model_id, exc,
+                        )
+                        registry.record_parameter_fallback("ollama", model_id, "think", None, "Ollama think boolean rejected")
+                        continue
+
+                raise
+
     @override
     async def stream(
             self,
@@ -339,7 +430,7 @@ class OllamaModel(Model):
         tool_requested = [False]  # holder pattern
 
         client = ollama.AsyncClient(self.host, **self.client_args)
-        response = await client.chat(**request)
+        response = await self._chat_with_fallback(client, request)
 
         logger.debug("got response from model")
         yield self.format_chunk({"chunk_type": "message_start"})
@@ -409,7 +500,7 @@ class OllamaModel(Model):
         formatted_request["stream"] = False
 
         client = ollama.AsyncClient(self.host, **self.client_args)
-        response = await client.chat(**formatted_request)
+        response = await self._chat_with_fallback(client, formatted_request)
 
         try:
             content = response.message.content.strip()

@@ -2843,7 +2843,67 @@ Canonical operation data:
     with open(next_steps_file, "w") as f:
         f.write(next_steps_content)
     report_parts_files.append(next_steps_file)
+
+    # Deterministically generate Appendix C: Model & Agent Parameter Adjustments
+    param_adjustments_content = _format_parameter_adjustments_appendix()
+    param_adjustments_file = os.path.join(output_path, "report_parameter_adjustments.md")
+    with open(param_adjustments_file, "w") as f:
+        f.write(param_adjustments_content)
+    report_parts_files.append(param_adjustments_file)
+
     return report_step_index
+
+
+def _format_parameter_adjustments_appendix(registry: Optional[Any] = None) -> str:
+    """Render Appendix C: Model & Agent Parameter Adjustments into deterministic Markdown."""
+    from modules.config.models.agent_profiles import get_agent_settings_registry
+
+    reg = registry or get_agent_settings_registry()
+    comparison = reg.export_profile_comparison()
+    adjustments = reg.export_adjustment_records()
+
+    parts = [
+        _PAGE_BREAK,
+        '<a name="appendix-c-model-agent-parameter-adjustments"></a>\n',
+        "## APPENDIX C: MODEL & AGENT PARAMETER ADJUSTMENTS\n\n",
+        "This appendix documents initial baseline model parameters, runtime parameter adaptations "
+        "(such as reasoning loop recovery and token limit escalations), and provider capability fallback events.\n\n",
+        "### Agent Role Configurations\n\n",
+        "| Agent Role | Parameter | Baseline | Final | Status |\n",
+        "| :--- | :--- | :--- | :--- | :--- |\n",
+    ]
+
+    for role, comp in sorted(comparison.items()):
+        base = comp["baseline"]
+        final = comp["final"]
+        status = "Adjusted" if comp["adjusted"] else "Nominal"
+
+        base_summary = (
+            f"Temp: {base.get('temperature')}, Reasoning: {base.get('reasoning_level')}, "
+            f"MaxTokens: {base.get('max_tokens')}, TopP: {base.get('top_p')}, TopK: {base.get('top_k')}"
+        )
+        final_summary = (
+            f"Temp: {final.get('temperature')}, Reasoning: {final.get('reasoning_level')}, "
+            f"MaxTokens: {final.get('max_tokens')}, TopP: {final.get('top_p')}, TopK: {final.get('top_k')}"
+        )
+        parts.append(f"| `{role}` | Multi-param | {base_summary} | {final_summary} | {status} |\n")
+
+    parts.append("\n### Runtime Parameter Adaptations and Fallback Log\n\n")
+
+    if not adjustments:
+        parts.append("No runtime parameter adaptations or provider fallback events were triggered during this operation.\n")
+    else:
+        parts.append(
+            "| Timestamp (UTC) | Agent / Target | Parameter | Previous | Adapted Value | Trigger Reason | Permanent |\n"
+        )
+        parts.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+        for rec in adjustments:
+            parts.append(
+                f"| {rec.timestamp} | `{rec.agent_type}` | `{rec.parameter_name}` | `{rec.old_value}` | "
+                f"`{rec.new_value}` | {rec.trigger_reason} | {rec.permanent} |\n"
+            )
+
+    return "".join(parts)
 
 
 def _assemble_security_assessment_report(
@@ -2871,7 +2931,8 @@ def _assemble_security_assessment_report(
         final_f.write("- [Target Coverage](#target-coverage)\n")
         final_f.write("- [Execution History](#execution-history)\n")
         final_f.write("- [Appendix A: Assessment Methodology](#appendix-a-assessment-methodology)\n")
-        final_f.write("- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n\n")
+        final_f.write("- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n")
+        final_f.write("- [Appendix C: Model & Agent Parameter Adjustments](#appendix-c-model-agent-parameter-adjustments)\n\n")
         final_f.write(completion_notice)
 
         for part_file in report_parts_files:
@@ -3099,6 +3160,7 @@ def generate_deterministic_fallback_report(
             str(sections.get("execution_history") or "## EXECUTION HISTORY\n\nNo task history was recorded.") + "\n\n",
             _format_deterministic_methodology(sections, model_metrics),
             _format_next_steps_appendix(next_steps),
+            _format_parameter_adjustments_appendix(),
             f"\n- Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
             f"- Operation ID: {operation_id}\n",
         ]

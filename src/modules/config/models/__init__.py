@@ -1,22 +1,43 @@
 """Model-related configuration modules."""
 
-from modules.config.models.factory import (
-    create_bedrock_model,
-    create_ollama_model,
-    create_litellm_model,
-    create_strands_model,
+from modules.config.models.agent_profiles import (
+    DEFAULT_AGENT_PROFILES,
+    AgentModelSettings,
+    AgentSettingsRegistry,
+    ParameterAdjustmentRecord,
+    ReasoningLevel,
+    get_agent_settings_registry,
+    normalize_agent_type,
+    reset_agent_settings_registry,
+    translate_reasoning_to_provider,
 )
 from modules.config.models.capabilities import (
     allows_reasoning_content_replay,
     get_capabilities,
     get_model_input_limit,
     get_model_output_limit,
-    get_provider_default_limit,
     get_model_pricing,
+    get_provider_default_limit,
 )
 from modules.config.models.dev_client import get_models_client
+from modules.config.models.factory import (
+    create_bedrock_model,
+    create_litellm_model,
+    create_ollama_model,
+    create_strands_model,
+)
 
 __all__ = [
+    # Agent Profiles and Settings Registry
+    "DEFAULT_AGENT_PROFILES",
+    "AgentModelSettings",
+    "AgentSettingsRegistry",
+    "ParameterAdjustmentRecord",
+    "ReasoningLevel",
+    "get_agent_settings_registry",
+    "normalize_agent_type",
+    "reset_agent_settings_registry",
+    "translate_reasoning_to_provider",
     # Model factory
     "create_bedrock_model",
     "create_ollama_model",

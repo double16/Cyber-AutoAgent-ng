@@ -8731,6 +8731,8 @@ Allowed evidence references:
         last_response_keys: List[str] = []
         parse_retries = 0
         schema_retries = 0
+        pending_reasoning: Optional[tuple[str, str]] = None
+        pending_token_escalation: bool = False
         schema_retry_limit = 1 if role == "task_evaluator" else self.json_retries
         maximum_attempts = 1 + max(self.json_retries, schema_retry_limit)
         for attempt in range(maximum_attempts):
@@ -8747,6 +8749,15 @@ Allowed evidence references:
             self._log_workflow("json agent role=%s attempt=%s max_retries=%s", role, attempt + 1, self.json_retries)
             try:
                 response = self.text_runner(role, current_prompt, tools, system_prompt)
+                if pending_reasoning:
+                    target_lvl, rsn = pending_reasoning
+                    from modules.config.models.agent_profiles import get_agent_settings_registry
+                    get_agent_settings_registry().apply_reasoning_repair(role, target_lvl, rsn, permanent=True)
+                    pending_reasoning = None
+                if pending_token_escalation:
+                    from modules.config.models.agent_profiles import get_agent_settings_registry
+                    get_agent_settings_registry().record_token_recovery_success(role, boost_amount=2048)
+                    pending_token_escalation = False
             except MaxTokensReachedException as error:
                 sanitize_sdk_error(error)
                 self._emit_workflow_activity(
@@ -8774,6 +8785,30 @@ Allowed evidence references:
                     kind,
                     ratio,
                 )
+
+                from modules.config.models.agent_profiles import (
+                    ReasoningLevel,
+                    get_agent_settings_registry,
+                )
+                registry = get_agent_settings_registry()
+                current_settings = registry.get_settings(role)
+                if kind == "reasoning_loop":
+                    pending_reasoning = (ReasoningLevel.NONE.value, "reasoning loop recovery success")
+                    registry.apply_reasoning_repair(role, ReasoningLevel.NONE, "reasoning loop retry", permanent=False)
+                elif current_settings.reasoning_level != ReasoningLevel.NONE or getattr(
+                    classification, "is_reasoning_induced", False
+                ):
+                    target_lvl = (
+                        ReasoningLevel.LOW.value
+                        if current_settings.reasoning_level
+                        in (ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MEDIUM)
+                        else ReasoningLevel.NONE.value
+                    )
+                    pending_reasoning = (target_lvl, "reasoning max token reduction success")
+                    registry.apply_reasoning_repair(role, target_lvl, "reasoning max token retry", permanent=False)
+                else:
+                    pending_token_escalation = True
+
                 current_prompt = self._json_max_token_retry_prompt(prompt, kind)
                 continue
             last_response = response

@@ -1043,7 +1043,7 @@ def create_agent(
     agent_logger = logging.getLogger("CyberAutoAgent")
     agent_logger.debug("Creating autonomous agent")
 
-    model = create_strands_model(config.provider, config.model_id, "primary")
+    model = create_strands_model(config.provider, config.model_id, agent_type or "task_executor")
 
     trace_attributes = dict(runtime.trace_attributes)
     if agent_type:

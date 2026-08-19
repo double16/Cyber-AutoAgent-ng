@@ -19,7 +19,7 @@ import re
 import ollama
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from modules.config.providers import get_ollama_host
 from modules.config.providers.ollama_config import get_ollama_timeout
@@ -465,6 +465,200 @@ def get_model_pricing(model_id: str) -> Optional[tuple[float, float]]:
     return None
 
 
+def classify_parameter_error(error: Exception) -> Optional[str]:
+    """Classify an exception to identify if a specific LLM parameter caused the failure."""
+    err_msg = str(error).lower()
+
+    if "temperature" in err_msg and any(
+        w in err_msg
+        for w in [
+            "unsupported",
+            "invalid",
+            "not supported",
+            "unknown",
+            "unexpected",
+            "extra fields",
+            "must be 1",
+            "fixed",
+            "does not support",
+        ]
+    ):
+        return "temperature"
+    if "top_k" in err_msg and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "extra fields", "does not support"]
+    ):
+        return "top_k"
+    if "top_p" in err_msg and any(
+        w in err_msg
+        for w in [
+            "unsupported",
+            "invalid",
+            "not supported",
+            "unknown",
+            "unexpected",
+            "extra fields",
+            "not allowed with",
+            "does not support",
+        ]
+    ):
+        return "top_p"
+    if "reasoning_effort" in err_msg and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "does not support"]
+    ):
+        return "reasoning_effort"
+    if "thinking" in err_msg and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "budget", "does not support"]
+    ):
+        return "thinking"
+    if re.search(r"\bthink\b", err_msg) and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "level", "does not support", "option", "parameter"]
+    ):
+        return "think"
+    if "effort" in err_msg and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "does not support"]
+    ):
+        return "effort"
+
+    return None
+
+
+def apply_parameter_fallback_to_model(model: Any, provider: str, model_id: str, param_name: str) -> bool:
+    """Strip or downgrade the offending parameter from the model instance."""
+    modified = False
+
+    # 1. Handle OllamaModel
+    if hasattr(model, "config") and isinstance(model.config, dict):
+        if param_name in ("temperature", "top_p", "top_k", "max_tokens"):
+            if model.config.get(param_name) is not None:
+                model.config[param_name] = None
+                modified = True
+            options = model.config.get("options")
+            if isinstance(options, dict) and param_name in options:
+                options.pop(param_name, None)
+                modified = True
+        elif param_name == "think":
+            add_args = model.config.get("additional_args")
+            if isinstance(add_args, dict) and "think" in add_args:
+                val = add_args["think"]
+                if isinstance(val, str):
+                    add_args["think"] = val in ("medium", "high", "xhigh")
+                    modified = True
+                else:
+                    add_args.pop("think", None)
+                    modified = True
+
+    # 2. Handle LiteLLMModel / Strands models with params and client_args
+    if hasattr(model, "params") and isinstance(model.params, dict):
+        if param_name in model.params:
+            model.params.pop(param_name, None)
+            modified = True
+    if hasattr(model, "client_args") and isinstance(model.client_args, dict):
+        if param_name in model.client_args:
+            model.client_args.pop(param_name, None)
+            modified = True
+        if param_name in ("reasoning_effort", "thinking", "effort"):
+            if "reasoning_effort" in model.client_args:
+                model.client_args.pop("reasoning_effort", None)
+                modified = True
+            if "thinking" in model.client_args:
+                model.client_args.pop("thinking", None)
+                modified = True
+        if param_name == "thinking_config" or param_name == "thinking":
+            if "thinking_config" in model.client_args:
+                model.client_args.pop("thinking_config", None)
+                modified = True
+
+    # 3. Handle BedrockModel
+    if hasattr(model, "temperature") and param_name == "temperature":
+        if getattr(model, "temperature", None) is not None:
+            setattr(model, "temperature", None)
+            modified = True
+    if hasattr(model, "additional_request_fields") and isinstance(model.additional_request_fields, dict):
+        if param_name in ("effort", "thinking", "reasoning_effort"):
+            if "output_config" in model.additional_request_fields:
+                model.additional_request_fields.pop("output_config", None)
+                modified = True
+            if "thinking" in model.additional_request_fields:
+                model.additional_request_fields.pop("thinking", None)
+                modified = True
+
+    return modified
+
+
+def wrap_model_with_fallback(model: Any, provider: str, model_id: str) -> Any:
+    """Wrap model stream and structured_output methods with progressive parameter fallback."""
+    import functools
+    from modules.config.models.agent_profiles import get_agent_settings_registry
+
+    original_stream = getattr(model, "stream", None)
+    original_structured_output = getattr(model, "structured_output", None)
+
+    if callable(original_stream):
+        @functools.wraps(original_stream)
+        async def fallback_stream(*args, **kwargs):
+            registry = get_agent_settings_registry()
+            while True:
+                try:
+                    async for event in original_stream(*args, **kwargs):
+                        yield event
+                    return
+                except Exception as exc:
+                    param_name = classify_parameter_error(exc)
+                    if param_name:
+                        logger.warning(
+                            "Model API call failed due to parameter '%s' on %s/%s (%s). Retrying with parameter stripped.",
+                            param_name,
+                            provider,
+                            model_id,
+                            exc,
+                        )
+                        applied = apply_parameter_fallback_to_model(model, provider, model_id, param_name)
+                        registry.record_parameter_fallback(
+                            provider, model_id, param_name, None, f"Provider rejected parameter {param_name}"
+                        )
+                        if applied:
+                            continue
+                    raise
+
+        setattr(model, "stream", fallback_stream)
+
+    if callable(original_structured_output):
+        @functools.wraps(original_structured_output)
+        async def fallback_structured_output(*args, **kwargs):
+            registry = get_agent_settings_registry()
+            while True:
+                try:
+                    async for event in original_structured_output(*args, **kwargs):
+                        yield event
+                    return
+                except Exception as exc:
+                    param_name = classify_parameter_error(exc)
+                    if param_name:
+                        logger.warning(
+                            "Model structured output failed due to parameter '%s' on %s/%s (%s). Retrying with parameter stripped.",
+                            param_name,
+                            provider,
+                            model_id,
+                            exc,
+                        )
+                        applied = apply_parameter_fallback_to_model(model, provider, model_id, param_name)
+                        registry.record_parameter_fallback(
+                            provider, model_id, param_name, None, f"Provider rejected parameter {param_name}"
+                        )
+                        if applied:
+                            continue
+                    raise
+
+        setattr(model, "structured_output", fallback_structured_output)
+
+    return model
+
+
 __all__ = [
     # Capabilities
     "Capabilities",
@@ -477,4 +671,8 @@ __all__ = [
     "MODEL_FAMILY_PATTERNS",
     # Pricing
     "get_model_pricing",
+    # Parameter Fallback
+    "classify_parameter_error",
+    "apply_parameter_fallback_to_model",
+    "wrap_model_with_fallback",
 ]

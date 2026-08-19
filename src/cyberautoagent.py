@@ -916,9 +916,12 @@ def run_workflow_agent_with_max_token_recovery(
     current_prompt = prompt
     current_run_policy = run_policy
     max_token_recovery_attempts = 0
+    pending_reasoning_repair: Optional[tuple[str, str, str]] = None
+    pending_token_escalation: Optional[str] = None
+
     while True:
         try:
-            return run_agent_until_terminal_state(
+            result = run_agent_until_terminal_state(
                 agent=agent,
                 callback_handler=callback_handler,
                 current_message=current_prompt,
@@ -929,12 +932,36 @@ def run_workflow_agent_with_max_token_recovery(
                 logger=logger,
                 run_policy=current_run_policy,
             )
+            # If we had a pending reasoning repair and recovery succeeded, lock in the permanent promotion
+            if pending_reasoning_repair:
+                rep_role, rep_level, rep_reason = pending_reasoning_repair
+                from modules.config.models.agent_profiles import get_agent_settings_registry
+                get_agent_settings_registry().apply_reasoning_repair(rep_role, rep_level, rep_reason, permanent=True)
+                pending_reasoning_repair = None
+
+            # If we had a pending token recovery and recovery succeeded, record token recovery success (3 strikes -> permanent)
+            if pending_token_escalation:
+                from modules.config.models.agent_profiles import get_agent_settings_registry
+                get_agent_settings_registry().record_token_recovery_success(pending_token_escalation, boost_amount=2048)
+                pending_token_escalation = None
+
+            return result
         except MaxTokensReachedException as error:
             sanitize_sdk_error(error)
-            classification, removed = classify_and_discard_max_token_output(agent)
+            from modules.config.models.agent_profiles import (
+                ReasoningLevel,
+                get_agent_settings_registry,
+                mutate_agent_model_max_tokens,
+                mutate_agent_model_reasoning,
+            )
+            registry = get_agent_settings_registry()
+            role = str(getattr(agent, "_cyber_agent_type", "task_executor"))
+            current_settings = registry.get_settings(role)
+            classification, removed = classify_and_discard_max_token_output(
+                agent, active_reasoning_level=current_settings.reasoning_level.value
+            )
             setattr(error, "max_token_classification", classification)
             repeated_pattern = is_repeated_max_token_pattern(agent, classification)
-            role = str(getattr(agent, "_cyber_agent_type", "unknown"))
             output_limit = getattr(getattr(agent, "model", None), "_output_tokens", None)
             can_retry = role == "task_executor" and max_token_recovery_attempts < 1 and not repeated_pattern
             logger.warning(
@@ -968,6 +995,25 @@ def run_workflow_agent_with_max_token_recovery(
                 setattr(error, "_max_token_efficiency_recorded", True)
             if not can_retry:
                 raise
+
+            # Apply runtime parameter adaptation for retry
+            if classification.kind == "reasoning_loop":
+                # 1. Reasoning loop repair: retry with reasoning level NONE
+                mutate_agent_model_reasoning(agent, ReasoningLevel.NONE)
+                pending_reasoning_repair = (role, ReasoningLevel.NONE.value, "reasoning loop recovery success")
+            elif current_settings.reasoning_level != ReasoningLevel.NONE or classification.is_reasoning_induced:
+                # 2. Reasoning-induced max tokens: step down reasoning level to LOW or NONE
+                target_level = (
+                    ReasoningLevel.LOW
+                    if current_settings.reasoning_level in (ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MEDIUM)
+                    else ReasoningLevel.NONE
+                )
+                mutate_agent_model_reasoning(agent, target_level)
+                pending_reasoning_repair = (role, target_level.value, "reasoning max token reduction success")
+            else:
+                # 3. Non-reasoning max token exhaustion: bounded token increase (+2048)
+                mutate_agent_model_max_tokens(agent, boost_amount=2048)
+                pending_token_escalation = role
 
             reset_agent_conversation_for_recovery(agent)
             if run_policy is not None:

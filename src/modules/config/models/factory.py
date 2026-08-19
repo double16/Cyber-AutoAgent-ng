@@ -14,7 +14,7 @@ import os
 import sys
 from functools import lru_cache
 from math import floor
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import ollama
 from google.genai.types import HttpRetryOptions, HttpOptions
@@ -26,10 +26,6 @@ from modules.config.providers.ollama_config import get_ollama_timeout
 from modules.config.system import EnvironmentReader
 from modules.config.system.logger import get_logger
 from modules.config.system.defaults import LLMRoleType
-from modules.config.types import (
-    DEFAULT_TEMPERATURE_EXECUTION,
-    DEFAULT_TEMPERATURE_SWARM,
-)
 from modules.config.models.capabilities import (
     get_model_input_limit,
     get_provider_default_limit,
@@ -412,60 +408,71 @@ def _handle_model_creation_error(provider: str, error: Exception) -> None:
 
 @dataclasses.dataclass(frozen=True)
 class _CreateModelParameters:
-    llm_temp: float
+    llm_temp: Optional[float]
     llm_max: int
-    role: LLMRoleType
+    role: str
+    top_k: Optional[int] = None
+    top_p: Optional[float] = None
+    reasoning_level: Any = None
 
 
-def _get_parameters_by_role(provider: str, model_id: str, role: Optional[LLMRoleType], config: Dict[str, Any]) -> _CreateModelParameters:
-    # Select parameter source by model role (primary vs swarm)
+def _get_parameters_by_role(
+    provider: str,
+    model_id: str,
+    role: Optional[Union[LLMRoleType, str]],
+    config: Dict[str, Any],
+) -> _CreateModelParameters:
+    from modules.config.models.agent_profiles import (
+        ReasoningLevel,
+        get_agent_settings_registry,
+        normalize_agent_type,
+    )
+
+    registry = get_agent_settings_registry()
+    canonical_role = normalize_agent_type(str(role) if role else None)
+    agent_settings = registry.get_settings(canonical_role, provider, model_id)
+
+    llm_temp = agent_settings.temperature
+    llm_max = agent_settings.max_tokens
+    top_k = agent_settings.top_k
+    top_p = agent_settings.top_p
+    reasoning_level = agent_settings.reasoning_level
+    out_role = canonical_role
+
+    # Check server_config limits if available
     try:
         config_manager = _get_config_manager()
         server_config = config_manager.get_server_config(provider)
-        llm_temp = server_config.llm.temperature
-        llm_max = server_config.llm.max_tokens
-        if not role:
-            role = "unknown"
-        # Detect swarm if role is not specified.
-        is_swarm = False
-        if role == "swarm":
-            is_swarm = True
-        elif role != "unknown":
-            is_swarm = False
-        elif (
-                server_config.swarm
-                and server_config.swarm.llm
-                and server_config.swarm.llm.model_id == model_id
-                and server_config.swarm.llm.model_id != server_config.llm.model_id
+        if (
+            canonical_role == "swarm"
+            and server_config.swarm
+            and server_config.swarm.llm
+            and server_config.swarm.llm.max_tokens
         ):
-            is_swarm = True
-        if is_swarm:
-            role = "swarm"
-            llm_temp = server_config.swarm.llm.temperature
-            # Use swarm model's max_tokens (calculated by ConfigManager from models.dev)
-            # This respects per-model limits - different models have different constraints
-            llm_max = server_config.swarm.llm.max_tokens
-
-            # Defensive: Ensure valid max_tokens
-            if not isinstance(llm_max, int) or llm_max <= 0:
-                logger.warning(
-                    "Invalid swarm max_tokens=%s for model %s, falling back to 4096",
-                    llm_max,
-                    config.get("model_id"),
-                )
-                llm_max = 4096
+            llm_max = min(llm_max, server_config.swarm.llm.max_tokens)
+        elif (
+            server_config
+            and server_config.llm
+            and server_config.llm.max_tokens
+        ):
+            llm_max = min(llm_max, server_config.llm.max_tokens)
     except Exception:
-        llm_temp = config.get("temperature", DEFAULT_TEMPERATURE_SWARM if role == "swarm" else DEFAULT_TEMPERATURE_EXECUTION)
-        llm_max = config.get("max_tokens", 4096)
-        role = "unknown"
+        if "max_tokens" in config and isinstance(config["max_tokens"], int) and config["max_tokens"] > 0:
+            llm_max = config.get("max_tokens")
+        if "temperature" in config and config.get("temperature") is not None:
+            llm_temp = config.get("temperature")
+        out_role = "unknown"
 
-    if "max_tokens" in config:
+    if "max_tokens" in config and isinstance(config["max_tokens"], int) and config["max_tokens"] > 0:
         llm_max = min(llm_max, config.get("max_tokens"))
 
     return _CreateModelParameters(
         llm_temp=llm_temp,
         llm_max=llm_max,
-        role=role,
+        role=out_role,
+        top_k=top_k,
+        top_p=top_p,
+        reasoning_level=reasoning_level or ReasoningLevel.NONE,
     )
 
 
@@ -570,7 +577,19 @@ def create_bedrock_model(
     create_parameters = _get_parameters_by_role(provider, model_id, role, config)
     llm_temp = create_parameters.llm_temp
     llm_max = create_parameters.llm_max
+    reasoning_level = create_parameters.reasoning_level
     role = create_parameters.role
+
+    from modules.config.models.agent_profiles import ReasoningLevel, translate_reasoning_to_provider
+    translated = translate_reasoning_to_provider(provider, model_id, reasoning_level, llm_max)
+    effort = kwargs.get("effort") or translated.get("effort")
+
+    if effort and reasoning_level != ReasoningLevel.NONE:
+        additional_fields.setdefault("anthropic_beta", [])
+        if "effort-2025-11-24" not in additional_fields["anthropic_beta"]:
+            additional_fields["anthropic_beta"].append("effort-2025-11-24")
+        additional_fields.setdefault("output_config", {})
+        additional_fields["output_config"]["effort"] = effort
 
     logger.info(
         "Model build: role=%s provider=%s model=%s max_tokens=%s effort=%s",
@@ -592,7 +611,7 @@ def create_bedrock_model(
     model = BedrockModel(
         model_id=config["model_id"],
         region_name=config["region_name"],
-        temperature=llm_temp if capabilities.supports_temperature else None,
+        temperature=llm_temp if (capabilities.supports_temperature and llm_temp is not None) else None,
         max_tokens=llm_max,
         additional_request_fields=additional_fields if additional_fields else None,
         boto_client_config=boto_config,
@@ -639,6 +658,9 @@ def create_ollama_model(
     create_parameters = _get_parameters_by_role(provider, model_id, role, config)
     llm_temp = create_parameters.llm_temp
     llm_max = create_parameters.llm_max
+    top_k = create_parameters.top_k
+    top_p = create_parameters.top_p
+    reasoning_level = create_parameters.reasoning_level
     role = create_parameters.role
 
     logger.info(
@@ -648,24 +670,37 @@ def create_ollama_model(
         llm_max,
     )
 
+    options = dict(config.get("options", {}))
+    if top_k is not None and "top_k" not in options:
+        options["top_k"] = top_k
+    if top_p is not None and "top_p" not in options:
+        options["top_p"] = top_p
+
     additional_args = dict()
-    if role in ["primary", "swarm"]:
+    from modules.config.models.agent_profiles import ReasoningLevel
+    if reasoning_level == ReasoningLevel.NONE:
+        additional_args["think"] = False
+    else:
         if capabilities.pass_reasoning_effort:
-            additional_args["think"] = "medium"
+            additional_args["think"] = (
+                reasoning_level.value
+                if reasoning_level in (ReasoningLevel.LOW, ReasoningLevel.MEDIUM, ReasoningLevel.HIGH)
+                else "medium"
+            )
         elif capabilities.supports_reasoning:
-            additional_args["think"] = True
+            additional_args["think"] = reasoning_level.to_bool()
 
     model = OllamaModel(
         host=config["host"],
         model_id=config["model_id"],
-        temperature=llm_temp if capabilities.supports_temperature else None,
+        temperature=llm_temp if (capabilities.supports_temperature and llm_temp is not None) else None,
         max_tokens=llm_max,
         ollama_client_args={
             "timeout": config["timeout"],
         },
         keep_alive=config.get("keep_alive"),
         additional_args=additional_args,
-        options=config.get("options", {}),
+        options=options,
         stream=sdk_config.enable_streaming,
     )
     setattr(model, "_output_tokens", llm_max)
@@ -731,6 +766,9 @@ def create_litellm_model(
     create_parameters = _get_parameters_by_role(provider, model_id, role, config)
     llm_temp = create_parameters.llm_temp
     llm_max = create_parameters.llm_max
+    top_k = create_parameters.top_k
+    top_p = create_parameters.top_p
+    reasoning_level = create_parameters.reasoning_level
     role = create_parameters.role
 
     # LiteLLM best-effort output clamp (no new envs, best-effort only)
@@ -769,12 +807,16 @@ def create_litellm_model(
     params: Dict[str, Any] = {
         "max_tokens": llm_max,
     }
-    if capabilities.supports_temperature:
+    if capabilities.supports_temperature and llm_temp is not None:
         params["temperature"] = llm_temp
 
-    # Only include top_p if present in config (avoid provider conflicts)
-    if "top_p" in config:
+    if top_p is not None:
+        params["top_p"] = top_p
+    elif "top_p" in config:
         params["top_p"] = config["top_p"]
+
+    if top_k is not None:
+        params["top_k"] = top_k
 
     # Add request timeout and retries for robustness (env-overridable)
     timeout_secs = config_manager.getenv_int("LITELLM_TIMEOUT", 600)
@@ -788,8 +830,9 @@ def create_litellm_model(
     # Reasoning parameters for reasoning-capable models
     # https://docs.litellm.ai/docs/reasoning_content
     try:
-        if role in ["primary", "swarm"]:
-            reasoning_effort = config_manager.getenv("REASONING_EFFORT", "medium")
+        from modules.config.models.agent_profiles import ReasoningLevel
+        if reasoning_level != ReasoningLevel.NONE:
+            reasoning_effort = config_manager.getenv("REASONING_EFFORT") or reasoning_level.value
             if reasoning_effort and capabilities.pass_reasoning_effort:
                 client_args["reasoning_effort"] = reasoning_effort
             if capabilities.supports_reasoning:
@@ -876,11 +919,23 @@ def create_gemini_model(
     create_parameters = _get_parameters_by_role(provider, model_id, role, config)
     llm_temp = create_parameters.llm_temp
     llm_max = create_parameters.llm_max
+    top_k = create_parameters.top_k
+    top_p = create_parameters.top_p
+    reasoning_level = create_parameters.reasoning_level
 
     params: Dict[str, Any] = {}
-    if capabilities.supports_temperature:
+    if capabilities.supports_temperature and llm_temp is not None:
         params["temperature"] = llm_temp
+    if top_p is not None:
+        params["top_p"] = top_p
+    if top_k is not None:
+        params["top_k"] = top_k
     params["max_output_tokens"] = llm_max
+
+    from modules.config.models.agent_profiles import translate_reasoning_to_provider
+    gemini_thinking = translate_reasoning_to_provider("gemini", clean_model_id, reasoning_level, llm_max)
+    if "thinking_budget" in gemini_thinking:
+        client_args["thinking_config"] = {"thinking_budget": gemini_thinking["thinking_budget"]}
 
     logger.info(
         "Creating native GeminiModel: model=%s, temperature=%s, max_tokens=%s",
@@ -948,6 +1003,8 @@ def create_strands_model(
             raise ValueError(f"Unsupported provider: {provider}")
 
         apply_model_context_window(model, provider, model_id)
+        from modules.config.models.capabilities import wrap_model_with_fallback
+        model = wrap_model_with_fallback(model, provider, model_id)
         return model
 
     except Exception as e:
