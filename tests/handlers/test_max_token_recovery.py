@@ -114,3 +114,104 @@ def test_json_agent_workflow_adaptation_recovery():
     assert registry.get_settings("task_creator").reasoning_level == ReasoningLevel.NONE
     records = registry.export_adjustment_records()
     assert any(r.agent_type == "task_creator" and r.parameter_name == "reasoning_level" and r.new_value == "none" for r in records)
+
+
+def test_plan_critic_max_tokens_reduction_and_retry():
+    reset_agent_settings_registry()
+    registry = get_agent_settings_registry()
+
+    from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+
+    workflow = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+    workflow.json_retries = 1
+    workflow._workflow_activity_listeners = []
+    workflow._log_workflow = MagicMock()
+    workflow._record_max_token_exhaustion = MagicMock()
+    workflow._emit_workflow_activity = MagicMock()
+    workflow._json_max_token_retry_prompt = lambda prompt, kind: f"RETRY {prompt}"
+
+    # Verify plan_critic initial reasoning level is LOW
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.LOW
+
+    attempt_reasoning_levels = []
+
+    def plan_critic_runner(role, prompt, tools, system_prompt):
+        current_reasoning = registry.get_settings(role).reasoning_level
+        attempt_reasoning_levels.append(current_reasoning)
+        if len(attempt_reasoning_levels) == 1:
+            err = MaxTokensReachedException("Hit max tokens in plan_critic")
+            err.max_token_classification = MaxTokenClassification(
+                "reasoning_exhaustion", 0.0, None, 1000, is_reasoning_induced=True
+            )
+            raise err
+        return '{"approved": true, "critique": "looks good"}'
+
+    workflow.text_runner = plan_critic_runner
+
+    result = workflow._run_json_text_agent(
+        role="plan_critic",
+        prompt="Critique plan draft",
+        tools=[],
+        system_prompt="sys prompt",
+    )
+
+    assert result == {"approved": True, "critique": "looks good"}
+    # First attempt ran with LOW, retry attempt ran with NONE
+    assert attempt_reasoning_levels == [ReasoningLevel.LOW, ReasoningLevel.NONE]
+    # Now permanently NONE
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.NONE
+    records = registry.export_adjustment_records()
+    assert any(
+        r.agent_type == "plan_critic"
+        and r.parameter_name == "reasoning_level"
+        and r.old_value == "low"
+        and r.new_value == "none"
+        for r in records
+    )
+
+
+def test_non_reasoning_max_tokens_boost_and_retry():
+    reset_agent_settings_registry()
+    registry = get_agent_settings_registry()
+
+    from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+
+    workflow = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+    workflow.json_retries = 1
+    workflow._workflow_activity_listeners = []
+    workflow._log_workflow = MagicMock()
+    workflow._record_max_token_exhaustion = MagicMock()
+    workflow._emit_workflow_activity = MagicMock()
+    workflow._json_max_token_retry_prompt = lambda prompt, kind: f"RETRY {prompt}"
+
+    # task_evaluator has reasoning NONE and max_tokens 4096
+    assert registry.get_settings("task_evaluator").reasoning_level == ReasoningLevel.NONE
+    assert registry.get_settings("task_evaluator").max_tokens == 4096
+
+    attempt_max_tokens = []
+
+    def evaluator_runner(role, prompt, tools, system_prompt):
+        current_tokens = registry.get_settings(role).max_tokens
+        attempt_max_tokens.append(current_tokens)
+        if len(attempt_max_tokens) == 1:
+            err = MaxTokensReachedException("Hit output token limit")
+            err.max_token_classification = MaxTokenClassification(
+                "output_truncation", 0.0, None, 1000, is_reasoning_induced=False
+            )
+            raise err
+        return '{"status": "satisfied", "summary": "done"}'
+
+    workflow.text_runner = evaluator_runner
+
+    result = workflow._run_json_text_agent(
+        role="task_evaluator",
+        prompt="Evaluate task",
+        tools=[],
+        system_prompt="sys prompt",
+    )
+
+    assert result == {"status": "satisfied", "summary": "done"}
+    # First attempt ran with 4096, retry attempt ran with boosted 6144
+    assert attempt_max_tokens == [4096, 6144]
+    # Since 1st recovery (< 3 strikes), baseline remains 4096
+    assert registry.get_settings("task_evaluator").max_tokens == 4096

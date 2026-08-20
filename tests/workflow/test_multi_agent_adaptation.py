@@ -19,7 +19,7 @@ def test_multi_agent_adaptation_e2e_scenario():
     registry = get_agent_settings_registry()
 
     # 1. Verify initial baseline
-    assert registry.get_settings("plan_creator").reasoning_level == ReasoningLevel.HIGH
+    assert registry.get_settings("plan_creator").reasoning_level == ReasoningLevel.MEDIUM
     assert registry.get_settings("task_prompt_builder").reasoning_level == ReasoningLevel.MEDIUM
     assert registry.get_settings("task_evaluator").max_tokens == 4096
 
@@ -64,5 +64,5 @@ def test_multi_agent_adaptation_e2e_scenario():
     # Generate Appendix C and verify all adaptations are present
     appendix_c = _format_parameter_adjustments_appendix(registry)
     assert "## APPENDIX C: MODEL & AGENT PARAMETER ADJUSTMENTS" in appendix_c
-    assert "| `plan_creator` | `reasoning_level` | `high` | `none` | reasoning loop recovery success | True |" in appendix_c
+    assert "| `plan_creator` | `reasoning_level` | `medium` | `none` | reasoning loop recovery success | True |" in appendix_c
     assert "| `task_evaluator` | `max_tokens` | `4096` | `6144` | 3-strike token exhaustion escalation | True |" in appendix_c

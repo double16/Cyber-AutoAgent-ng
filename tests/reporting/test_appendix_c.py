@@ -16,7 +16,7 @@ def test_format_parameter_adjustments_appendix_nominal():
     assert '<a name="appendix-c-model-agent-parameter-adjustments"></a>' in appendix
     assert "### Agent Role Configurations" in appendix
     assert "| `plan_creator` | Multi-param |" in appendix
-    assert "Reasoning: high" in appendix
+    assert "Reasoning: medium" in appendix
     assert "Nominal" in appendix
     assert "No runtime parameter adaptations or provider fallback events were triggered" in appendix
 
@@ -41,6 +41,6 @@ def test_format_parameter_adjustments_appendix_with_adaptations():
     assert "Adjusted" in appendix
     assert "| `plan_creator` | Multi-param |" in appendix
     assert "### Runtime Parameter Adaptations and Fallback Log" in appendix
-    assert "| `plan_creator` | `reasoning_level` | `high` | `none` | reasoning loop repair | True |" in appendix
+    assert "| `plan_creator` | `reasoning_level` | `medium` | `none` | reasoning loop repair | True |" in appendix
     assert "| `task_evaluator` | `max_tokens` | `4096` | `6144` | 3-strike token exhaustion escalation | True |" in appendix
     assert "| `ollama/qwen` | `think` | `configured` | `True` | think string rejected | True |" in appendix

@@ -24,6 +24,7 @@ cyber_tools:
   whatweb:
     description: "Web technology fingerprinting"
     caps: [web_recon]
+    execution_caps: [request, analyze]
     canary: {args: ["-h"]}
   wafw00f:
     description: "WAF fingerprinting"
@@ -187,12 +188,12 @@ cyber_tools:
   httpx:
     description: "HTTP probing and technology detection (ProjectDiscovery)"
     caps: [web_recon, http_client]
-    execution_caps: [request]
+    execution_caps: [request, analyze]
     canary: {args: ["--help"]}
   katana:
     description: "Fast web crawler (ProjectDiscovery)"
     caps: [web_crawling, web_recon]
-    execution_caps: [crawl]
+    execution_caps: [crawl, analyze]
     canary: {args: ["-h"]}
   opengrep:
     description: "Static source code analysis"
@@ -330,7 +331,7 @@ cyber_tools:
   curl:
     description: "HTTP client for URL requests. Reflection, exploit, validation, and artifact-producing tasks must capture the body using -o [filename]."
     caps: [http_client, ftp_client]
-    execution_caps: [request]
+    execution_caps: [request, analyze]
     canary: {args: ["-h"]}
   tcpdump:
     description: "Network packet capture"

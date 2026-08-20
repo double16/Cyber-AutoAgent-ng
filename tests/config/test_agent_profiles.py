@@ -31,7 +31,7 @@ def test_recommended_agent_defaults():
     # plan_creator / plan_builder
     plan_creator = registry.get_settings("plan_creator")
     assert plan_creator.temperature == 0.2
-    assert plan_creator.reasoning_level == ReasoningLevel.HIGH
+    assert plan_creator.reasoning_level == ReasoningLevel.MEDIUM
     assert plan_creator.top_p == 0.95
     assert plan_creator.top_k == 40
     assert plan_creator.max_tokens == 8192
@@ -39,13 +39,13 @@ def test_recommended_agent_defaults():
     # alias plan_builder
     plan_builder = registry.get_settings("plan_builder")
     assert plan_builder.temperature == 0.2
-    assert plan_builder.reasoning_level == ReasoningLevel.HIGH
+    assert plan_builder.reasoning_level == ReasoningLevel.MEDIUM
     assert plan_builder.max_tokens == 8192
 
     # plan_critic
     plan_critic = registry.get_settings("plan_critic")
     assert plan_critic.temperature == 0.0
-    assert plan_critic.reasoning_level == ReasoningLevel.HIGH
+    assert plan_critic.reasoning_level == ReasoningLevel.LOW
     assert plan_critic.max_tokens == 4096
 
     # task_creator
@@ -58,7 +58,7 @@ def test_recommended_agent_defaults():
     prompt_builder = registry.get_settings("task_prompt_builder")
     assert prompt_builder.temperature == 0.2
     assert prompt_builder.reasoning_level == ReasoningLevel.MEDIUM
-    assert prompt_builder.max_tokens == 4096
+    assert prompt_builder.max_tokens == 8192
 
     # task_prompt_critic
     prompt_critic = registry.get_settings("task_prompt_critic")
@@ -68,8 +68,8 @@ def test_recommended_agent_defaults():
 
     # task_executor (alias: primary, default)
     task_executor = registry.get_settings("task_executor")
-    assert task_executor.temperature == 0.0
-    assert task_executor.reasoning_level == ReasoningLevel.LOW
+    assert task_executor.temperature == 0.5
+    assert task_executor.reasoning_level == ReasoningLevel.MEDIUM
     assert task_executor.max_tokens == 8192
     assert registry.get_settings("primary").max_tokens == 8192
     assert registry.get_settings("default").max_tokens == 8192
@@ -164,7 +164,7 @@ def test_profile_comparison_export():
 
     comparison = registry.export_profile_comparison()
     assert "plan_creator" in comparison
-    assert comparison["plan_creator"]["baseline"]["reasoning_level"] == "high"
+    assert comparison["plan_creator"]["baseline"]["reasoning_level"] == "medium"
     assert comparison["plan_creator"]["final"]["reasoning_level"] == "none"
     assert comparison["plan_creator"]["adjusted"] is True
 

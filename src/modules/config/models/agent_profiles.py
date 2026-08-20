@@ -117,14 +117,14 @@ ROLE_ALIASES: Dict[str, str] = {
 DEFAULT_AGENT_PROFILES: Dict[str, AgentModelSettings] = {
     "plan_creator": AgentModelSettings(
         temperature=0.2,
-        reasoning_level=ReasoningLevel.HIGH,
+        reasoning_level=ReasoningLevel.MEDIUM,
         top_p=0.95,
         top_k=40,
         max_tokens=8192,
     ),
     "plan_critic": AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.HIGH,
+        reasoning_level=ReasoningLevel.LOW,
         top_p=0.95,
         top_k=40,
         max_tokens=4096,
@@ -141,7 +141,7 @@ DEFAULT_AGENT_PROFILES: Dict[str, AgentModelSettings] = {
         reasoning_level=ReasoningLevel.MEDIUM,
         top_p=0.95,
         top_k=40,
-        max_tokens=4096,
+        max_tokens=8192,
     ),
     "task_prompt_critic": AgentModelSettings(
         temperature=0.0,
@@ -151,8 +151,8 @@ DEFAULT_AGENT_PROFILES: Dict[str, AgentModelSettings] = {
         max_tokens=2048,
     ),
     "task_executor": AgentModelSettings(
-        temperature=0.0,
-        reasoning_level=ReasoningLevel.LOW,
+        temperature=0.5,
+        reasoning_level=ReasoningLevel.MEDIUM,
         top_p=0.95,
         top_k=40,
         max_tokens=8192,
@@ -200,18 +200,18 @@ DEFAULT_AGENT_PROFILES: Dict[str, AgentModelSettings] = {
         max_tokens=4096,
     ),
     "swarm": AgentModelSettings(
-        temperature=0.2,
-        reasoning_level=ReasoningLevel.LOW,
+        temperature=0.6,
+        reasoning_level=ReasoningLevel.MEDIUM,
         top_p=0.95,
         top_k=40,
-        max_tokens=4096,
+        max_tokens=8192,
     ),
     "unknown": AgentModelSettings(
-        temperature=0.0,
-        reasoning_level=ReasoningLevel.NONE,
+        temperature=0.5,
+        reasoning_level=ReasoningLevel.MEDIUM,
         top_p=0.95,
         top_k=40,
-        max_tokens=4096,
+        max_tokens=8192,
     ),
 }
 
@@ -277,28 +277,63 @@ class AgentSettingsRegistry:
         reason: str,
         permanent: bool = True,
     ) -> None:
-        """Update the reasoning level for an agent role following a recovery event."""
+        """Update the reasoning level for an agent role following a recovery event.
+
+        Always updates the active profile so immediate retries and subsequent calls use target_level.
+        If permanent=True, additionally logs a parameter adjustment record for Appendix C.
+        """
         with self._lock:
             canonical = normalize_agent_type(agent_type)
             target_level = ReasoningLevel.from_value(level)
             current_settings = self._active.get(
                 canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
             )
-            old_level = current_settings.reasoning_level
+            baseline_level = self._baselines.get(
+                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+            ).reasoning_level
+
+            # Always update active reasoning level for retry and subsequent execution
+            current_settings.reasoning_level = target_level
+            self._active[canonical] = current_settings
 
             if permanent:
-                current_settings.reasoning_level = target_level
-                self._active[canonical] = current_settings
                 record = ParameterAdjustmentRecord(
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     agent_type=canonical,
                     parameter_name="reasoning_level",
-                    old_value=old_level.value,
+                    old_value=baseline_level.value,
                     new_value=target_level.value,
                     trigger_reason=reason,
                     permanent=True,
                 )
                 self._adjustment_records.append(record)
+
+    def boost_max_tokens_for_retry(
+        self,
+        agent_type: str,
+        boost_amount: int = 2048,
+        ceiling: Optional[int] = None,
+    ) -> int:
+        """Temporarily boost max_tokens for an agent role during a repair attempt."""
+        with self._lock:
+            canonical = normalize_agent_type(agent_type)
+            current_settings = self._active.get(
+                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+            )
+            old_tokens = current_settings.max_tokens
+            new_tokens = old_tokens + boost_amount
+            if ceiling is not None and ceiling > 0:
+                new_tokens = min(new_tokens, ceiling)
+            current_settings.max_tokens = new_tokens
+            self._active[canonical] = current_settings
+            return new_tokens
+
+    def revert_token_boost(self, agent_type: str, previous_tokens: int) -> None:
+        """Revert max_tokens back to previous unboosted value if retry was unpromoted."""
+        with self._lock:
+            canonical = normalize_agent_type(agent_type)
+            if canonical in self._active:
+                self._active[canonical].max_tokens = previous_tokens
 
     def record_token_recovery_success(
         self,
@@ -315,31 +350,38 @@ class AgentSettingsRegistry:
             count = self._token_recovery_counts.get(canonical, 0) + 1
             self._token_recovery_counts[canonical] = count
 
+            current_settings = self._active.get(
+                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+            )
+            baseline_tokens = self._baselines.get(
+                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+            ).max_tokens
+
             if count >= 3:
-                current_settings = self._active.get(
-                    canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
-                )
-                old_tokens = current_settings.max_tokens
-                new_tokens = old_tokens + boost_amount
+                new_tokens = baseline_tokens + boost_amount
                 if ceiling is not None and ceiling > 0:
                     new_tokens = min(new_tokens, ceiling)
 
-                if new_tokens != old_tokens:
-                    current_settings.max_tokens = new_tokens
-                    self._active[canonical] = current_settings
-                    record = ParameterAdjustmentRecord(
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                        agent_type=canonical,
-                        parameter_name="max_tokens",
-                        old_value=old_tokens,
-                        new_value=new_tokens,
-                        trigger_reason="3-strike token exhaustion escalation",
-                        permanent=True,
-                    )
-                    self._adjustment_records.append(record)
-                    self._token_recovery_counts[canonical] = 0
-                    return True
-            return False
+                current_settings.max_tokens = new_tokens
+                self._active[canonical] = current_settings
+
+                record = ParameterAdjustmentRecord(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    agent_type=canonical,
+                    parameter_name="max_tokens",
+                    old_value=baseline_tokens,
+                    new_value=new_tokens,
+                    trigger_reason="3-strike token exhaustion escalation",
+                    permanent=True,
+                )
+                self._adjustment_records.append(record)
+                self._token_recovery_counts[canonical] = 0
+                return True
+            else:
+                # Less than 3 strikes: revert active max_tokens to baseline
+                current_settings.max_tokens = baseline_tokens
+                self._active[canonical] = current_settings
+                return False
 
     def record_parameter_fallback(
         self,

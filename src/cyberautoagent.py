@@ -963,7 +963,7 @@ def run_workflow_agent_with_max_token_recovery(
             setattr(error, "max_token_classification", classification)
             repeated_pattern = is_repeated_max_token_pattern(agent, classification)
             output_limit = getattr(getattr(agent, "model", None), "_output_tokens", None)
-            can_retry = role == "task_executor" and max_token_recovery_attempts < 1 and not repeated_pattern
+            can_retry = max_token_recovery_attempts < 1 and not repeated_pattern
             logger.warning(
                 "MAX_TOKEN_RECOVERY role=%s classification=%s repetition_ratio=%.3f "
                 "discarded_tokens=%s partial_removed=%s output_limit=%s attempt=%s "
@@ -1000,6 +1000,7 @@ def run_workflow_agent_with_max_token_recovery(
             if classification.kind == "reasoning_loop":
                 # 1. Reasoning loop repair: retry with reasoning level NONE
                 mutate_agent_model_reasoning(agent, ReasoningLevel.NONE)
+                registry.apply_reasoning_repair(role, ReasoningLevel.NONE, "reasoning loop retry", permanent=False)
                 pending_reasoning_repair = (role, ReasoningLevel.NONE.value, "reasoning loop recovery success")
             elif current_settings.reasoning_level != ReasoningLevel.NONE or classification.is_reasoning_induced:
                 # 2. Reasoning-induced max tokens: step down reasoning level to LOW or NONE
@@ -1009,10 +1010,12 @@ def run_workflow_agent_with_max_token_recovery(
                     else ReasoningLevel.NONE
                 )
                 mutate_agent_model_reasoning(agent, target_level)
+                registry.apply_reasoning_repair(role, target_level, "reasoning max token retry", permanent=False)
                 pending_reasoning_repair = (role, target_level.value, "reasoning max token reduction success")
             else:
                 # 3. Non-reasoning max token exhaustion: bounded token increase (+2048)
                 mutate_agent_model_max_tokens(agent, boost_amount=2048)
+                registry.boost_max_tokens_for_retry(role, boost_amount=2048)
                 pending_token_escalation = role
 
             reset_agent_conversation_for_recovery(agent)

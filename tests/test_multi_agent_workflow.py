@@ -7019,6 +7019,8 @@ def test_plan_revision_prompt_describes_advisory_phase_contract():
 
     prompt = controller._plan_revision_prompt(plan_data, ["Preserve testing coverage"])
 
+    assert "Address each item in the critic feedback directly" in prompt
+    assert "ensuring all cited ambiguities, circularity, missing manifest synthesis responsibilities" in prompt
     assert "recommended minimum phase contract" in prompt
     assert "advisory rather than a required phase count" in prompt
     assert "merge only adjacent capabilities" in prompt
@@ -7159,7 +7161,7 @@ def test_plan_critic_rejection_runs_revision_and_persists_only_revision():
     ]
     assert len(plan_events) == 1
     assert "Add durable evidence criteria" in calls[2][1]
-    assert "Apply feedback only when it is consistent" in calls[2][1]
+    assert "Address each item in the critic feedback directly" in calls[2][1]
     activities = [
         event for event in controller.runtime.callback_handler.events
         if event.get("type") == "workflow_activity"

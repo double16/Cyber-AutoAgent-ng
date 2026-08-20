@@ -154,7 +154,7 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     monkeypatch.setattr(models_pkg, "get_capabilities", lambda *_args: fake_capabilities())
     monkeypatch.setattr(patches, "patch_ollama_model_json_toolcalls", Mock())
     ollama_model = mod.create_ollama_model("llama3", role="primary")
-    assert ollama_model.kwargs["additional_args"]["think"] == "low"
+    assert ollama_model.kwargs["additional_args"]["think"] == "medium"
     assert ollama_model.kwargs["stream"] is False
     assert ollama_model._output_tokens == 512
 
