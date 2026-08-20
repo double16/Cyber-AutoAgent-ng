@@ -59,37 +59,38 @@ from modules.agents.cyber_autoagent import (
     create_agent,
 )
 from modules.agents.run_policy import AgentRunPolicy
+from modules.config.taxonomy_catalog import get_taxonomy_catalog, validate_taxonomy_mappings
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import classify_and_discard_max_token_output
 from modules.handlers.operation_health import DEFAULT_INCOMPLETE_HEALTH_CAP, compute_operation_health
+from modules.handlers.tool_recovery import ToolOutcome, outcomes_to_toon
 from modules.handlers.utils import (
     get_tool_description,
     get_tool_name,
     sanitize_toon_value,
 )
-from modules.handlers.tool_recovery import ToolOutcome, outcomes_to_toon
 from modules.tools.artifact import create_bounded_artifact_reader
 from modules.tools.memory import (
+    DISCOVERY_PROCEDURE_LIMIT_KEYS,
+    TERMINAL_PLAN_STATUSES,
     AcceptanceContract,
     AcceptanceCriterion,
     ExecutionRequirement,
-    DISCOVERY_PROCEDURE_LIMIT_KEYS,
-    TERMINAL_PLAN_STATUSES,
     OperationPlan,
     OperationTarget,
     PlanPhase,
     Task,
-    build_create_tasks_tool,
-    build_record_task_acceptance_tool,
-    build_record_finding_validation_tool,
     _artifact_path_from_ref,
-    _operation_output_root,
     _coverage_route_groups,
     _finding_validation_contradictions,
     _load_inventory_manifest,
+    _operation_output_root,
     _route_scoped_phase_objective,
     _write_inventory_manifest_atomically,
+    build_create_tasks_tool,
+    build_record_finding_validation_tool,
+    build_record_task_acceptance_tool,
     canonical_artifact_reference,
     finalize_finding_validation,
     finalize_objective_validation,
@@ -107,7 +108,6 @@ from modules.tools.memory import (
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.tools.shell import scoped_shell_command_validator
 from modules.tools.shell_provenance import ShellExecutionProvenance, shell_execution_provenance
-from modules.config.taxonomy_catalog import get_taxonomy_catalog, validate_taxonomy_mappings
 from modules.tools.tool_catalog import (
     get_shell_command_execution_capabilities,
     get_shell_command_help_context,
@@ -1612,7 +1612,6 @@ class MultiAgentWorkflowController:
                 self._activate_task(pending_task)
                 continue
 
-            phase_continue_decision: Optional[WorkflowDecision] = None
             if should_evaluate_phase:
                 self._log_workflow("evaluating phase=%s pending_task=%s", self._phase_label(phase), self._task_label(pending_task))
                 decision = self._evaluate_phase(plan, phase)
@@ -1639,7 +1638,6 @@ class MultiAgentWorkflowController:
                     )
                     self._activate_task(pending_task)
                     continue
-                phase_continue_decision = decision
 
             if _phase_semantically_requires_finding_candidates(phase) and before_count == 0:
                 candidate_records = self.state.list_finding_records()
@@ -1694,51 +1692,13 @@ class MultiAgentWorkflowController:
             if task:
                 self._log_workflow("task available after creation task=%s phase=%s", self._task_label(task), phase.id)
                 continue
-            if before_count == 0:
-                reason = creation.failure_reason or f"No tasks created for phase {phase.id}"
-                self._log_workflow(
-                    "no tasks created for empty phase=%s; marking partial_failure reason=%s",
-                    self._phase_label(phase),
-                    self._short(reason),
-                )
-                previous_signature = self._plan_signature(plan)
-                updated_plan = self._mark_phase(plan, phase.id, "partial_failure")
-                self._emit_plan_output("updated", updated_plan, previous_signature)
-                if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
-                    self._emit_workflow_completion(updated_plan)
-                    return
-                continue
-            if phase_continue_decision is not None:
-                final_decision = self._evaluate_phase_after_task_creation_failure(
-                    plan,
-                    phase,
-                    creation,
-                )
-                if final_decision.status in TERMINAL_PLAN_STATUSES:
-                    final_status = final_decision.status
-                else:
-                    final_status = "partial_failure"
-                self._log_workflow(
-                    "closing phase after task creation failure phase=%s status=%s reason=%s",
-                    self._phase_label(phase),
-                    final_status,
-                    self._short(final_decision.reason),
-                )
-                previous_signature = self._plan_signature(plan)
-                updated_plan = self._mark_phase(plan, phase.id, final_status)
-                self._emit_plan_output("updated", updated_plan, previous_signature)
-                if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
-                    self._emit_workflow_completion(updated_plan)
-                    return
-                continue
-            self._log_workflow("no active/pending tasks after creation; marking phase=%s partial_failure", self._phase_label(phase))
-            previous_signature = self._plan_signature(plan)
-            updated_plan = self._mark_phase(plan, phase.id, "partial_failure")
-            self._emit_plan_output("updated", updated_plan, previous_signature)
-            if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
-                self._log_workflow("workflow terminal after partial_failure phase=%s", phase.id)
-                self._emit_workflow_completion(updated_plan)
-                return
+            reason = creation.failure_reason or f"No actionable tasks created for phase {phase.id}"
+            self._log_workflow(
+                "task creator failed to provide work for phase=%s; failing operation reason=%s",
+                self._phase_label(phase),
+                self._short(reason),
+            )
+            raise WorkflowInvariantError(f"Task creation failed for phase {phase.id}: {reason}")
         self._log_workflow("iteration limit reached max_iterations=%s", self.max_iterations)
         raise WorkflowInvariantError("Workflow iteration limit reached")
 

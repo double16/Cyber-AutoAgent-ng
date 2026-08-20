@@ -24,20 +24,20 @@ from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import MaxTokenClassification
 from modules.handlers.tool_recovery import ToolOutcome, ToolOutcomeJournal
+from modules.tools import memory as memory_mod
 from modules.tools.memory import (
     AcceptanceBasis,
     AcceptanceContract,
     AcceptanceCriterion,
+    AcceptanceResult,
     EvidenceRequirement,
     ExecutionRequirement,
-    AcceptanceResult,
     OperationPlan,
     OperationTarget,
     PlanPhase,
     SQLiteApplicationStore,
-    Task as TaskModel,
 )
-from modules.tools import memory as memory_mod
+from modules.tools.memory import Task as TaskModel
 
 
 def _acceptance(criterion_id="task-outcome"):
@@ -7474,10 +7474,9 @@ def test_controller_marks_empty_phase_partial_when_task_creator_creates_no_tasks
         max_iterations=1,
     )
 
-    controller.run()
+    with pytest.raises(WorkflowInvariantError, match="Task creation failed for phase 1"):
+        controller.run()
 
-    assert state.plan.phases[0].status == "partial_failure"
-    assert state.plan.assessment_complete is True
     assert work_calls == [
         ("task_creator", {"create_tasks"}),
         ("task_creator", {"create_tasks"}),
@@ -8091,12 +8090,11 @@ def test_continuing_phase_with_task_history_rechecks_then_advances_on_creator_fa
         executor_session_factory=retained_work_runner(work_runner),
     )
 
-    controller.run()
+    with pytest.raises(WorkflowInvariantError, match="Task creation failed for phase 1"):
+        controller.run()
 
-    assert len(evaluator_calls) == 2
-    assert "Controller Task-Creation Outcome" in evaluator_calls[1]
+    assert len(evaluator_calls) == 1
     assert len(creator_calls) == 3
-    assert state.plan.phases[0].status == "partial_failure"
 
 
 def test_task_creator_requires_create_tasks_tool():
