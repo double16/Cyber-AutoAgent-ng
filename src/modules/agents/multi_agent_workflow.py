@@ -7745,14 +7745,18 @@ review existing memories. Return only the requested JSON decision."""
 ```'''
         )
         return f"""## create_tasks Payload Contract (Non-negotiable)
+Every proposal MUST follow this exact structure:
+1. `limits` MUST be a dictionary/object (e.g., {{"max_requests": 50}}), NOT a list. DO NOT add extra fields to `limits` like `discovery_procedure_limits` or `scope`.
+2. `criteria` MUST be a list containing exactly one object with a `description` key: [{{"description": "..."}}].
+3. `objective` and `title` are required. `description` can be used as an alias for `objective`.
+4. `methods`, `snapshot_refs`, and `finding_refs` MUST be arrays (can be empty []). Use `depends_on_workstreams` for workstream prerequisites.
+5. DO NOT invent new field names such as `workstream_dependencies`, `methods_list`, or `methods_description`. Use ONLY canonical fields.
+
 Make exactly one successful `create_tasks` call. A rejected validation attempt does not count as the successful call.
 Python continues this conversation after a rejection, up to {max_corrections} correction(s). Preserve prior fixes and
 stop after this call.
 
-Every proposal MUST contain non-empty `title`, `objective`, explicit `methods`, `snapshot_refs`, and `finding_refs`
-arrays, a `limits`
-object, and exactly one `criteria` value. The
-criterion contains only a non-empty `description`. `basis_description` is optional and defaults to the objective.
+`basis_description` is optional and defaults to the objective.
 Python assigns active phase {phase.id} and pending status, infers target scope from `target_ids`, and compiles the full
 immutable acceptance contract. Never emit `acceptance`, `phase`, `status`, `target_scope`, task `evidence`, `context`,
 `stop_condition`, `gap_policy`, or unsupported top-level `description` fields.
@@ -7874,8 +7878,19 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
             if "requires exactly one snapshot proposal" in failure_reason
             else ""
         )
+
+        common_fixes = ""
+        lower_reason = failure_reason.lower()
+        if "limits" in lower_reason and "dict" in lower_reason:
+            common_fixes += "- FIX: Use an object for `limits`, e.g., `\"limits\": {\"max_requests\": 50}`. Do NOT use a list `[]`.\n"
+        if "criteria" in lower_reason and ("dict" in lower_reason or "list" in lower_reason):
+            common_fixes += "- FIX: Each criterion in the list must be an object, e.g., `\"criteria\": [{\"description\": \"...\"}]`. Do NOT use a string.\n"
+        if "extra_forbidden" in lower_reason:
+            common_fixes += "- FIX: Remove extra fields like `name` or `work_type` that are not in the schema.\n"
+
         return f"""The preceding `create_tasks` call was rejected or produced no new actionable task.
 Validation result: {failure_reason or "no actionable task was created"}
+{common_fixes}
 Preserve every correction already made in this conversation and every valid proposal intent. Change only the fields
 needed to resolve this validation result, then make exactly one corrected `create_tasks` call. If procedure and snapshot
 proposals were mixed, split them into separate valid proposal objects. If a snapshot producer is not yet eligible,

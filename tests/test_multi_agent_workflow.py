@@ -120,7 +120,7 @@ def test_execution_evidence_capabilities_are_derived_from_observed_tools():
     )
 
     assert MultiAgentWorkflowController._outcome_execution_capabilities(request) == {"request"}
-    assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"crawl"}
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"analyze", "crawl"}
     assert MultiAgentWorkflowController._outcome_execution_capabilities(source_analysis) == {"analyze"}
     assert MultiAgentWorkflowController._canonical_execution_method("web-spider") == "crawl"
 
@@ -136,7 +136,7 @@ def test_execution_evidence_capabilities_include_wrapped_shell_command():
         output_summary="",
     )
 
-    assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"crawl"}
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(crawl) == {"analyze", "crawl"}
 
 
 def test_execution_evidence_capabilities_use_environment_command_alias():
@@ -243,7 +243,7 @@ def test_journaled_katana_outcome_satisfies_crawl_execution_requirement(monkeypa
     assert outcome.structured_input == {
         "command": f"cd {artifact.parent} && katana -u http://target.test -o {artifact.name}",
     }
-    assert MultiAgentWorkflowController._outcome_execution_capabilities(outcome) == {"crawl"}
+    assert MultiAgentWorkflowController._outcome_execution_capabilities(outcome) == {"analyze","crawl"}
     assert resolved == {"criterion-1-execution-1": ["artifact:artifacts/katana_output.txt"]}
 
 
@@ -9023,7 +9023,7 @@ def test_task_creator_prompt_sets_execution_boundary_without_tool_selection():
 
     assert "Candidate optional tools" not in prompt
     assert "Your only action is one successful" in prompt
-    assert "Every proposal MUST contain non-empty `title`, `objective`, explicit `methods`" in prompt
+    assert "Every proposal MUST follow this exact structure:" in prompt
     assert "unsupported top-level `description` fields" in prompt
     assert "Stop immediately" in prompt
     assert "Python assigns active phase 1" in prompt

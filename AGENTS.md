@@ -110,6 +110,3 @@
 
 ## User Interface
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.
-
-## Cyber Operations Log and Trace Review
-- Only when the user asks to review an operation, see forensics.md for guidance.

@@ -145,6 +145,7 @@ def test_create_bedrock_model_standard_and_thinking(monkeypatch, config_manager)
 
 def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     import modules.config.models as models_pkg
+    models_pkg.reset_agent_settings_registry()
     import modules.config.models.ollama as ollama_mod
     import modules.agents.patches as patches
     import strands.models.gemini as gemini_mod

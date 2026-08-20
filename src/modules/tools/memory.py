@@ -4569,6 +4569,7 @@ class TaskProposalLimits(_StrictTaskWireModel):
     max_requests: Optional[PositiveInt] = None
     max_items: Optional[PositiveInt] = None
     max_depth: Optional[PositiveInt] = None
+    description: Optional[str] = Field(default=None, description="Allowed but ignored model-facing field")
 
 
 DEFAULT_TASK_PROPOSAL_LIMITS = {
@@ -4641,20 +4642,56 @@ class TaskProposal(_StrictTaskWireModel):
         aliases = {
             "limit": "limits",
             "method": "methods",
+            "methods_list": "methods",
             "snapshot_ref": "snapshot_refs",
             "criterion": "criteria",
             "target_id": "target_ids",
+            "workstream_dependencies": "depends_on_workstreams",
         }
         for alias, canonical in aliases.items():
             if alias in normalized and canonical not in normalized:
                 normalized[canonical] = normalized.pop(alias)
                 logger.info("Normalized task proposal field alias %s -> %s", alias, canonical)
 
+        # Remove extra fields that models often add
+        for extra in ["name", "work_type", "methods_description"]:
+            if extra in normalized:
+                normalized.pop(extra)
+
         if "description" in normalized:
             if "objective" not in normalized:
                 normalized["objective"] = normalized["description"]
                 logger.info("Normalized task proposal field alias description -> objective")
-            normalized.pop("description")
+            # Only pop if objective is now present (it should be)
+            if "objective" in normalized:
+                normalized.pop("description")
+
+        # Handle limits as list
+        limits = normalized.get("limits")
+        if isinstance(limits, list):
+            logger.info("Normalizing task proposal limits -> dict")
+            # For procedure proposals, a list (usually empty hallucination) should use defaults
+            if not normalized.get("snapshot_refs"):
+                normalized["limits"] = dict(DEFAULT_TASK_PROPOSAL_LIMITS)
+            else:
+                normalized["limits"] = {}
+        elif isinstance(limits, dict):
+            # Remove common hallucinations in limits
+            for extra_limit in ["discovery_procedure_limits", "scope"]:
+                if extra_limit in limits:
+                    limits.pop(extra_limit)
+                    logger.info("Removed hallucinated limit field: %s", extra_limit)
+
+        # Handle criteria as list of strings
+        criteria = normalized.get("criteria")
+        if isinstance(criteria, list):
+            new_criteria = []
+            for item in criteria:
+                if isinstance(item, str):
+                    new_criteria.append({"description": item})
+                else:
+                    new_criteria.append(item)
+            normalized["criteria"] = new_criteria
 
         output_aliases = {
             "report": "artifact",
@@ -4849,8 +4886,11 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                         "additionalProperties": False,
                         "default": DEFAULT_TASK_PROPOSAL_LIMITS,
                         "properties": {
-                            key: {"type": "integer", "exclusiveMinimum": 0}
-                            for key in DISCOVERY_PROCEDURE_LIMIT_KEYS
+                            **{
+                                key: {"type": "integer", "exclusiveMinimum": 0}
+                                for key in DISCOVERY_PROCEDURE_LIMIT_KEYS
+                            },
+                            "description": {"type": "string"},
                         },
                     },
                     "snapshot_refs": {"type": "array", "items": {"type": "string"}, "default": []},

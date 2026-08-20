@@ -80,7 +80,7 @@ class OllamaModel(Model):
         validate_config_keys(model_config, self.OllamaConfig)
         self.config = OllamaModel.OllamaConfig(**model_config)
 
-        logger.debug("config=<%s> | initializing", self.config)
+        logger.info("config=<%s> | initializing", self.config)
 
     @override
     def update_config(self, **model_config: Unpack[OllamaConfig]) -> None:  # type: ignore

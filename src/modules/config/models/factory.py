@@ -457,22 +457,21 @@ def _get_parameters_by_role(
         ):
             llm_max = min(llm_max, server_config.llm.max_tokens)
     except Exception:
-        if "max_tokens" in config and isinstance(config["max_tokens"], int) and config["max_tokens"] > 0:
-            llm_max = config.get("max_tokens")
-        if "temperature" in config and config.get("temperature") is not None:
-            llm_temp = config.get("temperature")
         out_role = "unknown"
 
-    if "max_tokens" in config and isinstance(config["max_tokens"], int) and config["max_tokens"] > 0:
-        llm_max = min(llm_max, config.get("max_tokens"))
+    if "max_tokens" in config and isinstance(config.get("max_tokens"), int) and config["max_tokens"] > 0:
+        llm_max = min(llm_max, config["max_tokens"])
+    if "temperature" in config and config.get("temperature") is not None:
+        llm_temp = config["temperature"]
 
+    from modules.config.models.agent_profiles import ReasoningLevel
     return _CreateModelParameters(
         llm_temp=llm_temp,
         llm_max=llm_max,
         role=out_role,
         top_k=top_k,
         top_p=top_p,
-        reasoning_level=reasoning_level or ReasoningLevel.NONE,
+        reasoning_level=ReasoningLevel.from_value(reasoning_level),
     )
 
 

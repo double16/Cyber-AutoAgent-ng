@@ -61,7 +61,7 @@ def test_discards_only_final_incomplete_assistant_message():
         {"role": "assistant", "content": [{"text": "untrusted partial success claim"}]},
     ])
 
-    text, removed = discard_incomplete_assistant_message(agent)
+    text, removed, has_reasoning = discard_incomplete_assistant_message(agent)
 
     assert removed is True
     assert text == "untrusted partial success claim"
@@ -72,7 +72,7 @@ def test_discards_only_final_incomplete_assistant_message():
 def test_does_not_remove_non_assistant_tail():
     agent = SimpleNamespace(messages=[{"role": "user", "content": [{"text": "continue"}]}])
 
-    text, removed = discard_incomplete_assistant_message(agent)
+    text, removed, has_reasoning = discard_incomplete_assistant_message(agent)
 
     assert (text, removed) == ("", False)
     assert len(agent.messages) == 1
