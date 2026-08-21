@@ -6540,6 +6540,8 @@ def _create_tasks_from_proposals(
     phase_objective: str = "",
     required_finding_refs: Optional[set[str]] = None,
     phase_task_contract: Any = None,
+    proposal_preflight_validator: Optional[Callable[[List[TaskProposal]], None]] = None,
+    reject_duplicate_proposals: bool = False,
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
@@ -6565,6 +6567,8 @@ def _create_tasks_from_proposals(
         from modules.operation_plugins.planning_contracts import validate_phase_task_proposals
 
         validate_phase_task_proposals(phase_task_contract, proposals)
+    if proposal_preflight_validator is not None:
+        proposal_preflight_validator(proposals)
     if coverage_item_ids is not None and len(proposals) != 1:
         raise ValueError(
             "controller-bound inventory batch requires exactly one snapshot proposal; "
@@ -6631,16 +6635,16 @@ def _create_tasks_from_proposals(
             target for target in plan.targets if not target_ids or target.target_id in set(target_ids)
         ]
         planning_context = {}
+        if proposal_preflight_validator is not None:
+            planning_context["task_preflight_validated"] = True
         if phase_task_contract is not None:
-            planning_context = {
-                "phase_task_contract": {
-                    "module": phase_task_contract.module,
-                    "phase_id": phase_task_contract.phase_id,
-                    "workstream": proposal.workstream,
-                    "task_role": proposal.task_role,
-                    "depends_on_workstreams": list(proposal.depends_on_workstreams),
-                    "inapplicability_reason": proposal.inapplicability_reason,
-                }
+            planning_context["phase_task_contract"] = {
+                "module": phase_task_contract.module,
+                "phase_id": phase_task_contract.phase_id,
+                "workstream": proposal.workstream,
+                "task_role": proposal.task_role,
+                "depends_on_workstreams": list(proposal.depends_on_workstreams),
+                "inapplicability_reason": proposal.inapplicability_reason,
             }
         _validate_procedure_proposal_route_atomicity(proposal, selected_targets)
         acceptance = _freeze_and_validate_acceptance(
@@ -6875,6 +6879,11 @@ def _create_tasks_from_proposals(
             proposal_duplicate_count,
         )
 
+    if reject_duplicate_proposals and duplicate_count:
+        raise ValueError(
+            "task_preflight:duplicate_task: generated proposal duplicates existing durable workflow work"
+        )
+
     for task in staged_tasks:
         client.store_task(task=task, user_id=user_id)
 
@@ -6923,6 +6932,8 @@ def build_create_tasks_tool(
     phase_objective: str = "",
     required_finding_refs: Optional[set[str]] = None,
     phase_task_contract: Any = None,
+    proposal_preflight_validator: Optional[Callable[[List[TaskProposal]], None]] = None,
+    reject_duplicate_proposals: bool = False,
     invocation_observer: Optional[Callable[[Dict[str, Any], Any, Optional[Exception]], None]] = None,
 ) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
@@ -6947,6 +6958,8 @@ def build_create_tasks_tool(
                 phase_objective=phase_objective,
                 required_finding_refs=required_finding_refs,
                 phase_task_contract=phase_task_contract,
+                proposal_preflight_validator=proposal_preflight_validator,
+                reject_duplicate_proposals=reject_duplicate_proposals,
             )
         except Exception as error:
             if invocation_observer is not None:

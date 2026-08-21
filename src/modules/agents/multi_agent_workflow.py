@@ -102,6 +102,7 @@ from modules.tools.memory import (
     objective_validation_submitted,
     resolve_operation_targets,
     store_finding,
+    store_observation,
     task_service_scope_validation_details,
     task_service_scope_violations,
 )
@@ -224,6 +225,9 @@ class WorkflowDecision:
     instructions: str = ""
     finding_recommendation_required: bool = False
     finding_recommendation_reason: str = ""
+    finding_advisory_required: bool = False
+    finding_advisory_reason: str = ""
+    finding_advisory_confidence: float = 0.0
     repair_kind: str = "none"
     unresolved_evidence_gaps: tuple[str, ...] = ()
 
@@ -2176,6 +2180,99 @@ class MultiAgentWorkflowController:
                 return True
         return False
 
+    def _available_task_execution_capabilities(self) -> set[str]:
+        """Return capabilities available to a normal task executor at this instant."""
+
+        capabilities = set()
+        tool_names = self._tool_names(build_role_tools(self.runtime, include_create_tasks=False))
+        for tool_name in tool_names:
+            capabilities.update(_TOOL_EXECUTION_CAPABILITIES.get(tool_name, frozenset()))
+        if "shell" in tool_names:
+            available_commands = list(getattr(self.runtime.config, "available_tools", []) or [])
+            for spec in get_shell_command_specs(available_commands):
+                command = str(spec.get("command") or "")
+                capabilities.update(get_shell_command_execution_capabilities(command))
+                capabilities.update(_SHELL_EXECUTION_CAPABILITIES.get(command, frozenset()))
+        return capabilities
+
+    def _validate_generated_task_proposals(self, phase: PlanPhase, proposals: List[Any]) -> None:
+        """Reject proposals that cannot satisfy controller-owned execution prerequisites."""
+
+        contract = self._phase_task_contract(phase)
+        if contract is not None and contract.phase_id != phase.id:
+            raise ValueError("task_preflight:phase_alignment: active phase contract does not match the active phase")
+        available_capabilities = self._available_task_execution_capabilities()
+        for proposal in proposals:
+            if getattr(proposal, "inferred_basis_kind", "") != "procedure":
+                continue
+            methods = list(getattr(proposal, "methods", []) or [])
+            if not methods:
+                raise ValueError("task_preflight:execution_capability: procedure proposal has no declared method")
+            unavailable = []
+            for method in methods:
+                capability = self._canonical_execution_method(method)
+                if capability not in available_capabilities:
+                    unavailable.append(f"{method} ({capability})")
+            if unavailable:
+                raise ValueError(
+                    "task_preflight:execution_capability: no available runtime capability for "
+                    + ", ".join(unavailable)
+                )
+
+    def _emit_task_preflight_validation(
+        self,
+        phase: PlanPhase,
+        tool_input: Dict[str, Any],
+        result: Any,
+        error: Optional[Exception],
+    ) -> None:
+        """Expose proposal preflight outcomes without using task prose as workflow control."""
+
+        task_count = len(tool_input.get("tasks", [])) if isinstance(tool_input.get("tasks"), list) else 0
+        message = str(error or "")
+        code = "accepted"
+        if error is not None:
+            code = message.split(":", 2)[1] if message.startswith("task_preflight:") else "rejected"
+        self._emit_workflow_event({
+            "type": "task_preflight_validation",
+            "phase": phase.id,
+            "proposal_count": task_count,
+            "outcome": "rejected" if error is not None else "accepted",
+            "code": code,
+            "reason": self._short(message, 500),
+            "created_count": (
+                int(json.loads(result).get("created_count", 0))
+                if error is None and isinstance(result, str)
+                else 0
+            ),
+        })
+
+    def _task_pre_execution_feedback(self, task: Task) -> List[str]:
+        """Detect runtime capability or artifact drift immediately before execution."""
+
+        feedback = []
+        procedure = task.acceptance.basis.procedure
+        if procedure is not None:
+            available_capabilities = self._available_task_execution_capabilities()
+            missing = [
+                method
+                for method in procedure.methods
+                if self._canonical_execution_method(method) not in available_capabilities
+            ]
+            if missing:
+                feedback.append("required execution capability unavailable for: " + ", ".join(missing))
+        for reference in task.acceptance.basis.source_refs:
+            if not reference.startswith("artifact:"):
+                continue
+            try:
+                if task.acceptance.basis.kind == "snapshot":
+                    _load_inventory_manifest(reference)
+                else:
+                    _artifact_path_from_ref(reference)
+            except ValueError as error:
+                feedback.append(f"artifact prerequisite is unavailable: {reference} ({error})")
+        return feedback
+
     def _run_task(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         with self._task_trace_context(plan, phase, task):
             self._run_task_in_trace(plan, phase, task)
@@ -2183,6 +2280,27 @@ class MultiAgentWorkflowController:
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         self._emit_task_started(task)
         self._log_workflow("running task=%s phase=%s", self._task_label(task), phase.id)
+        preflight_feedback = (
+            self._task_pre_execution_feedback(task)
+            if task.recovery_context.get("task_preflight_validated")
+            else []
+        )
+        if preflight_feedback:
+            self._emit_workflow_event({
+                "type": "task_preflight_validation",
+                "phase": phase.id,
+                "task_uid": task.task_uid,
+                "outcome": "blocked",
+                "code": "runtime_drift",
+                "reason": "; ".join(preflight_feedback),
+            })
+            updated_task = self.state.mark_task(
+                task,
+                "blocked",
+                "Task preflight detected runtime prerequisite drift: " + "; ".join(preflight_feedback),
+            )
+            self._emit_task_done(updated_task)
+            return
         inventory_feedback = self._task_inventory_route_feedback(plan, task)
         if inventory_feedback:
             reason = "Task endpoint is absent from its validated inventory snapshot: " + "; ".join(inventory_feedback)
@@ -2624,8 +2742,6 @@ class MultiAgentWorkflowController:
         recovery_used = False
         endpoint_evidence_recoveries = 0
         evaluator_corrections = 0
-        finding_observation_repairs = 0
-        finding_observation_store_recovery = False
         finding_acceptance_recovery = False
         acceptance_recovery_active = False
         missing_acceptance_recovery_active = False
@@ -2724,9 +2840,6 @@ class MultiAgentWorkflowController:
                     acceptance_failures,
                     acceptance_correction_limit,
                 ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit) + min(
-                    finding_observation_repairs,
-                    1,
-                ) + min(
                     evaluator_corrections,
                     evaluator_correction_limit,
                 ) + int(missing_acceptance_recovery_used)
@@ -2762,8 +2875,6 @@ class MultiAgentWorkflowController:
                     if output_prerequisite_recovery_active
                     else evaluator_synthesis_recovery_policy
                     if evaluator_synthesis_repair_active
-                    else finding_store_policy
-                    if finding_observation_store_recovery
                     else finding_acceptance_policy
                     if finding_acceptance_recovery
                     else acceptance_recovery_policy
@@ -2780,7 +2891,6 @@ class MultiAgentWorkflowController:
                     ]
                     if (
                         missing_acceptance_recovery_active
-                        or finding_observation_store_recovery
                         or evidence_prerequisite_recovery_active
                     )
                     else None
@@ -3171,25 +3281,6 @@ class MultiAgentWorkflowController:
                     finding_acceptance_recovery = False
                 if acceptance_recovery_active and successful_acceptance_calls:
                     acceptance_recovery_active = False
-                if finding_observation_store_recovery:
-                    if not any(
-                        outcome.tool_name == "store_finding" and outcome.success
-                        for outcome in cycle_result.outcomes
-                    ):
-                        decision = WorkflowDecision(
-                            status="partial_failure",
-                            reason=(
-                                "The evaluator-required store_finding call did not persist an artifact-backed "
-                                "security finding."
-                            ),
-                        )
-                        self._log_workflow(
-                            "task evaluator finding recovery failed task=%s cycle=%s",
-                            self._task_label(task),
-                            cycle,
-                        )
-                        break
-                    finding_observation_store_recovery = False
                 if repeated_tool_failure is not None:
                     decision = WorkflowDecision(
                         status="partial_failure",
@@ -3506,44 +3597,13 @@ class MultiAgentWorkflowController:
                                         attempt=1,
                                         outcome="completed",
                                     )
-                                if decision.finding_recommendation_required:
-                                    persisted_candidate = any(
-                                        outcome.tool_name == "store_finding" and outcome.success
-                                        for outcome in tool_outcomes
+                                if decision.finding_advisory_required:
+                                    self._persist_evaluator_finding_advisory(
+                                        task,
+                                        decision,
+                                        acceptance_results,
                                     )
-                                    if not persisted_candidate:
-                                        decision = WorkflowDecision(
-                                            status="partial_failure",
-                                            reason=(
-                                                "Evaluator prose suggested a finding, but no artifact-validated "
-                                                "store_finding receipt exists; the claim cannot enter the finding "
-                                                "workflow."
-                                            ),
-                                        )
-                                    elif finding_observation_repairs < 1:
-                                        finding_observation_repairs += 1
-                                        self._record_efficiency_correction("finding_observation_repair")
-                                        acceptance_submitted = False
-                                        finding_observation_store_recovery = True
-                                        continuation_criteria = [
-                                            "store the artifact-backed security finding identified by the evaluator"
-                                        ]
-                                        continuation_required_tool = "store_finding"
-                                        self._log_workflow(
-                                            "task evaluator requested finding repair task=%s cycle=%s reason=%s",
-                                            self._task_label(task),
-                                            cycle,
-                                            self._short(decision.finding_recommendation_reason),
-                                        )
-                                    else:
-                                        decision = WorkflowDecision(
-                                            status="partial_failure",
-                                            reason=(
-                                                "Evaluator still requires an artifact-backed finding after the "
-                                                "bounded store_finding repair."
-                                            ),
-                                        )
-                                elif decision.repair_kind == "execution":
+                                if decision.repair_kind == "execution":
                                     if evaluator_execution_repair_used:
                                         decision = WorkflowDecision(
                                             status="partial_failure",
@@ -4185,9 +4245,6 @@ class MultiAgentWorkflowController:
                     acceptance_failures,
                     acceptance_correction_limit,
                 ) + min(endpoint_evidence_recoveries, endpoint_evidence_correction_limit) + min(
-                    finding_observation_repairs,
-                    1,
-                ) + min(
                     evaluator_corrections,
                     evaluator_correction_limit,
                 ) + int(missing_acceptance_recovery_used) + int(evaluator_execution_repair_used)
@@ -4307,7 +4364,11 @@ class MultiAgentWorkflowController:
                 self._task_label(task),
                 resolution,
             )
-        updated_task = self.state.mark_task(task, decision.status, decision.reason)
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        updated_task = self.state.mark_task(current_task, decision.status, decision.reason)
         self._emit_task_done(updated_task, finding_resolution=resolution)
         if updated_task.replacement_of and updated_task.status in {"done", "superseded"}:
             self._reconcile_superseded_tasks(updated_task.phase)
@@ -6632,22 +6693,13 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             recommendation is not None
             and recommendation["required"]
             and recommendation["confidence"] >= FINDING_OBSERVATION_REPAIR_CONFIDENCE
+            and decision.status == "done"
             and self._has_artifact_backed_observation(acceptance_results or [])
             and not self._task_has_linked_finding(task.task_uid)
         ):
-            decision = WorkflowDecision(
-                status="partial_failure",
-                reason=(
-                    "Artifact-backed acceptance was recorded as an observation, but the evaluator identified a "
-                    "likely missing security finding."
-                ),
-                instructions=(
-                    "Call store_finding with the artifact-backed security claim. Do not alter the existing "
-                    "acceptance ledger."
-                ),
-                finding_recommendation_required=True,
-                finding_recommendation_reason=recommendation["reason"],
-            )
+            decision.finding_advisory_required = True
+            decision.finding_advisory_reason = recommendation["reason"]
+            decision.finding_advisory_confidence = recommendation["confidence"]
         self._log_workflow(
             "task evaluator decision task=%s status=%s reason=%s",
             self._task_label(task),
@@ -6655,6 +6707,67 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             self._short(decision.reason),
         )
         return decision
+
+    def _persist_evaluator_finding_advisory(
+        self,
+        task: Task,
+        decision: WorkflowDecision,
+        acceptance_results: List[Any],
+    ) -> None:
+        """Persist an evaluator suggestion as an explicit non-finding observation."""
+
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        existing = current_task.recovery_context.get("evaluator_finding_advisory")
+        if isinstance(existing, dict):
+            return
+        artifacts = list(dict.fromkeys(
+            str(reference)
+            for result in acceptance_results
+            for reference in getattr(result, "evidence_refs", ())
+            if str(reference).startswith("artifact:")
+        ))
+        metadata = {
+            "record_kind": "unverified_evaluator_suggestion",
+            "source_task_uid": task.task_uid,
+            "phase_id": task.phase,
+            "confidence": decision.finding_advisory_confidence,
+            "finding_status": "not_a_finding",
+        }
+        content = (
+            "Unverified evaluator suggestion (not a finding candidate): "
+            + decision.finding_advisory_reason
+        )
+        try:
+            response = json.loads(store_observation(content, artifacts=artifacts, metadata=metadata))
+            memory_ref = str(response.get("memory_ref") or "")
+            context = dict(current_task.recovery_context)
+            context["evaluator_finding_advisory"] = {
+                "memory_ref": memory_ref,
+                "reason": decision.finding_advisory_reason,
+                "confidence": decision.finding_advisory_confidence,
+                "artifacts": artifacts,
+            }
+            self.state.store_task(replace(current_task, recovery_context=context))
+            outcome = "stored"
+            error = ""
+        except (TypeError, ValueError, json.JSONDecodeError) as advisory_error:
+            memory_ref = ""
+            outcome = "unavailable"
+            error = str(advisory_error)
+            logger.warning("Unable to persist evaluator finding advisory task=%s", task.task_uid, exc_info=True)
+        self._emit_workflow_event({
+            "type": "evaluator_finding_advisory",
+            "task_uid": task.task_uid,
+            "phase": task.phase,
+            "outcome": outcome,
+            "memory_ref": memory_ref,
+            "confidence": decision.finding_advisory_confidence,
+            "reason": self._short(decision.finding_advisory_reason, 500),
+            "error": self._short(error, 500),
+        })
 
     def _controller_execution_gate_status(
         self,
@@ -8243,6 +8356,12 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
                 for record in self.state.list_finding_records()
                 if record.get("finding_uid") and not str(record.get("resolution") or "").strip()
             }
+        def observe_preflight(tool_input: Dict[str, Any], result: Any, error: Optional[Exception]) -> None:
+            if invocation_observer is not None:
+                invocation_observer(tool_input, result, error)
+            if phase is not None:
+                self._emit_task_preflight_validation(phase, tool_input, result, error)
+
         return [build_create_tasks_tool(
             prompt_token_limit=getattr(self.runtime, "prompt_token_limit", 48_000),
             coverage_item_ids=batch.item_ids if batch and batch.snapshot_ref else None,
@@ -8251,7 +8370,13 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
             phase_objective=phase.criteria if phase else "",
             required_finding_refs=required_finding_refs,
             phase_task_contract=self._phase_task_contract(phase),
-            invocation_observer=invocation_observer,
+            proposal_preflight_validator=(
+                lambda proposals: self._validate_generated_task_proposals(phase, proposals)
+                if phase is not None
+                else None
+            ),
+            reject_duplicate_proposals=True,
+            invocation_observer=observe_preflight,
         )]
 
     def _phase_task_contract(self, phase: PlanPhase) -> Any:

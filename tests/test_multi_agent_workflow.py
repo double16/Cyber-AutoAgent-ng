@@ -699,6 +699,7 @@ class FakeState:
             reference_id=task.reference_id,
             replacement_of=task.replacement_of,
             supersedes_criteria=task.supersedes_criteria,
+            recovery_context=task.recovery_context,
         ))
 
     def defer_task(self, task, reason=""):
@@ -4038,12 +4039,19 @@ def test_complete_acceptance_supersedes_repeated_rejection_after_recovery(replay
     assert state.tasks[0].status_reason == "durable acceptance approved"
 
 
-def test_evaluator_does_not_promote_high_confidence_observation_without_finding_receipt():
+def test_evaluator_persists_high_confidence_unverified_suggestion_without_failing_task(monkeypatch):
     runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1})
     task = Task(task_uid="active", title="Active", objective="test injection", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
     actor_prompts = []
     evaluator_calls = 0
+    advisories = []
+
+    def store_advisory(content, artifacts=None, metadata=None):
+        advisories.append((content, artifacts, metadata))
+        return json.dumps({"stored": True, "created": True, "memory_ref": "memory:advisory-1"})
+
+    monkeypatch.setattr(workflow_mod, "store_observation", store_advisory)
 
     def text_runner(role, prompt, tools, system_prompt):
         nonlocal evaluator_calls
@@ -4118,8 +4126,25 @@ def test_evaluator_does_not_promote_high_confidence_observation_without_finding_
 
     assert len(actor_prompts) == 1
     assert state.acceptance_results[task.task_uid][0].disposition == "observation"
-    assert state.tasks[0].status == "partial_failure"
-    assert "no artifact-validated store_finding receipt" in state.tasks[0].status_reason
+    assert state.tasks[0].status == "done"
+    assert not state.finding_records
+    assert advisories == [
+        (
+            (
+                "Unverified evaluator suggestion (not a finding candidate): "
+                "Artifact shows direct command execution and data disclosure."
+            ),
+            ["artifact:artifacts/command-injection.txt"],
+            {
+                "record_kind": "unverified_evaluator_suggestion",
+                "source_task_uid": task.task_uid,
+                "phase_id": 1,
+                "confidence": 0.96,
+                "finding_status": "not_a_finding",
+            },
+        )
+    ]
+    assert state.tasks[0].recovery_context["evaluator_finding_advisory"]["memory_ref"] == "memory:advisory-1"
 
 
 def test_evaluator_does_not_repair_low_confidence_observation_recommendation():
@@ -4148,6 +4173,33 @@ def test_evaluator_does_not_repair_low_confidence_observation_recommendation():
 
     assert decision.status == "done"
     assert decision.finding_recommendation_required is False
+
+
+def test_preflighted_task_blocks_when_runtime_capability_is_unavailable(monkeypatch):
+    task = Task(
+        task_uid="active",
+        title="Bounded crawl",
+        objective="Crawl target",
+        phase=1,
+        status="active",
+        acceptance=_acceptance(),
+        recovery_context={"task_preflight_validated": True},
+    )
+    state = FakeState(_plan(), tasks=[task])
+    events = []
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: pytest.fail("blocked task must not build a prompt"),
+    )
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert state.tasks[0].status == "blocked"
+    preflight_event = next(event for event in events if event["type"] == "task_preflight_validation")
+    assert preflight_event["code"] == "runtime_drift"
 
 
 @pytest.mark.parametrize(

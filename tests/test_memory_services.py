@@ -2563,6 +2563,63 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
     assert all(task.title.startswith("Trust Boundary & Workflow Mapping: Assess endpoint") for task in store.tasks)
     assert all("Map authentication mechanisms" in task.objective for task in store.tasks)
     assert all("Trust Boundary & Workflow Mapping" in task.acceptance.criteria[0].description for task in store.tasks)
+
+
+def test_bound_create_tasks_tool_rejects_preflight_batch_before_persisting(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+
+    def reject_unavailable_capability(_proposals):
+        raise ValueError("task_preflight:execution_capability: no available runtime capability for crawl")
+
+    create_tool = mod.build_create_tasks_tool(
+        proposal_preflight_validator=reject_unavailable_capability,
+        reject_duplicate_proposals=True,
+    )
+
+    with pytest.raises(ValueError, match="task_preflight:execution_capability"):
+        create_tool(tasks=[{
+            "title": "Crawl target",
+            "objective": "Perform bounded crawling",
+            "methods": ["crawl"],
+            "limits": {"max_requests": 5},
+            "criteria": [{"description": "Store bounded crawl evidence"}],
+            "target_ids": ["target-1"],
+        }])
+
+    assert store.tasks == []
+
+
+def test_bound_create_tasks_tool_rejects_duplicate_preflight_batch(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    proposal = {
+        "title": "Request target",
+        "objective": "Perform one bounded request",
+        "methods": ["request"],
+        "limits": {"max_requests": 1},
+        "criteria": [{"description": "Store the response artifact"}],
+        "target_ids": ["target-1"],
+    }
+
+    mod.build_create_tasks_tool()(tasks=[proposal])
+
+    with pytest.raises(ValueError, match="task_preflight:duplicate_task"):
+        mod.build_create_tasks_tool(reject_duplicate_proposals=True)(tasks=[proposal])
+
+    assert len(store.tasks) == 1
     assert all("baseline inventory" not in task.objective.lower() for task in store.tasks)
     assert all("baseline inventory" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
     assert all("key workflows" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
