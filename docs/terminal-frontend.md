@@ -221,6 +221,13 @@ interface CyberEvent {
 }
 ```
 
+### Plan validation event
+
+`plan_validation` records each created plan draft and plan-critic result. It includes `cycle`, `cycle_total`,
+`stage` (`draft` or `critic`), `outcome`, bounded `feedback_summaries`, and `approved` only when a valid critic
+result is available. It may include `repairable` or a failure `error_type`. The event never includes prompts, drafts,
+or raw model responses.
+
 ### Event Emission
 
 Python agent emits events using:

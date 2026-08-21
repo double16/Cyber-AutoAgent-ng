@@ -8,6 +8,7 @@ describe('event type definitions', () => {
         expect(EventType.SHELL_OUTPUT).toBe('shell_output');
         expect(EventType.SPECIALIST_END).toBe('specialist_end');
         expect(EventType.USAGE_UPDATE).toBe('usage_update');
+        expect(EventType.PLAN_VALIDATION).toBe('plan_validation');
         expect(EventType.AGENT_COMPLETE).toBe('agent_complete');
         expect(Object.values(EventType)).toContain('connection_error');
     });

@@ -134,7 +134,7 @@ ROLE_ALIASES: Dict[str, LLMRoleType] = {
 
 DEFAULT_AGENT_PROFILES: Dict[LLMRoleType, AgentModelSettings] = {
     LLMRoleType.PLAN_CREATOR: AgentModelSettings(
-        temperature=0.2,
+        temperature=0.4,
         reasoning_level=ReasoningLevel.MEDIUM,
         max_tokens=8192,
     ),

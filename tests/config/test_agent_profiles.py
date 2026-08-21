@@ -50,7 +50,7 @@ def test_recommended_agent_defaults():
 
     # plan_creator / plan_builder
     plan_creator = registry.get_settings("plan_creator")
-    assert plan_creator.temperature == 0.2
+    assert plan_creator.temperature == 0.4
     assert plan_creator.reasoning_level == ReasoningLevel.MEDIUM
     assert plan_creator.top_p is None
     assert plan_creator.top_k is None
@@ -58,7 +58,7 @@ def test_recommended_agent_defaults():
 
     # alias plan_builder
     plan_builder = registry.get_settings("plan_builder")
-    assert plan_builder.temperature == 0.2
+    assert plan_builder.temperature == 0.4
     assert plan_builder.reasoning_level == ReasoningLevel.MEDIUM
     assert plan_builder.max_tokens == 8192
 

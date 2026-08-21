@@ -7017,6 +7017,26 @@ def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
     assert "operational coverage phase is valid" in prompt
 
 
+def test_plan_critic_calibrates_semantic_equivalence_and_task_boundaries():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    prompt = controller._plan_critic_prompt(
+        {"objective": "assess", "constraints": [], "current_phase": 1, "phases": []},
+        ["Phase 1 must freeze the inventory"],
+    )
+
+    assert "Treat semantically equivalent criteria as satisfied" in prompt
+    assert '"produces and freezes the canonical inventory manifest"' in prompt
+    assert "Do not reject it for missing task-level fan-out details" in prompt
+    assert "Prior critic feedback" in prompt
+    assert "Phase 1 must freeze the inventory" in prompt
+    assert "do not repeat it merely because the wording changed" in prompt
+
+
 def test_module_termination_policy_directs_plan_creation_and_review():
     runtime = _runtime()
     runtime.termination_policy = "Require an evidenced flag and verified cleanup."
@@ -7089,6 +7109,29 @@ def test_plan_revision_prompt_describes_advisory_phase_contract():
     assert "one dominant outcome" in prompt
 
 
+def test_plan_revision_prompt_keeps_complete_creator_instructions_ahead_of_feedback():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    plan_data = {
+        "objective": "assess",
+        "constraints": [],
+        "current_phase": 1,
+        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence"}],
+    }
+
+    prompt = controller._plan_revision_prompt(plan_data, ["Add a report phase"])
+
+    assert controller._plan_creator_prompt() in prompt
+    assert "critic feedback is additive corrective input" in prompt
+    assert "If feedback conflicts with those instructions, follow the canonical instructions." in prompt
+    assert "Preserve criteria that already address prior feedback" in prompt
+    assert "Do not include a report" in prompt
+
+
 def test_plan_refinement_defaults_to_two_and_negative_values_disable_it():
     default_controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -7103,7 +7146,7 @@ def test_plan_refinement_defaults_to_two_and_negative_values_disable_it():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert default_controller.plan_refinement_iterations == 3
+    assert default_controller.plan_refinement_iterations == 7
     assert disabled_controller.plan_refinement_iterations == 0
 
 
@@ -7178,6 +7221,16 @@ def test_plan_critic_approval_skips_revision_and_persists_draft_once():
     assert len(plan_events) == 1
     assert "Proposed plan draft" in calls[1][1]
     assert '"title": "Recon"' in calls[1][1]
+    validation_events = [
+        event for event in controller.runtime.callback_handler.events if event["type"] == "plan_validation"
+    ]
+    assert [(event["stage"], event["outcome"]) for event in validation_events] == [
+        ("draft", "created"),
+        ("critic", "approved"),
+    ]
+    assert "approved" not in validation_events[0]
+    assert validation_events[1]["approved"] is True
+    assert validation_events[1]["feedback_summaries"] == []
 
 
 def test_plan_critic_rejection_runs_revision_and_persists_only_revision():
@@ -7223,6 +7276,8 @@ def test_plan_critic_rejection_runs_revision_and_persists_only_revision():
     assert len(plan_events) == 1
     assert "Add durable evidence criteria" in calls[2][1]
     assert "Address each item in the critic feedback directly" in calls[2][1]
+    assert "Prior critic feedback" in calls[3][1]
+    assert "Add durable evidence criteria" in calls[3][1]
     activities = [
         event for event in controller.runtime.callback_handler.events
         if event.get("type") == "workflow_activity"
@@ -7237,6 +7292,54 @@ def test_plan_critic_rejection_runs_revision_and_persists_only_revision():
         ("plan_critic", 2, 2),
         ("plan_critic", 2, 2),
     ]
+    validation_events = [
+        event for event in controller.runtime.callback_handler.events if event["type"] == "plan_validation"
+    ]
+    assert [(event["cycle"], event["stage"], event["outcome"]) for event in validation_events] == [
+        (1, "draft", "created"),
+        (1, "critic", "revision_requested"),
+        (2, "draft", "created"),
+        (2, "critic", "approved"),
+    ]
+    assert validation_events[1]["approved"] is False
+    assert validation_events[2]["feedback_summaries"] == ["Add durable evidence criteria"]
+
+
+def test_plan_validation_span_and_event_exclude_prompt_and_draft_content(monkeypatch):
+    span = Mock()
+    tracer = Mock()
+
+    @contextmanager
+    def span_context(*_args, **_kwargs):
+        yield span
+
+    tracer.start_as_current_span.side_effect = span_context
+    monkeypatch.setattr(workflow_mod.otel_trace, "get_tracer", lambda _name: tracer)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda *args: "{}",
+    )
+
+    controller._emit_plan_validation(
+        cycle=1,
+        cycle_total=2,
+        stage="critic",
+        outcome="revision_requested",
+        approved=False,
+        feedback=["Keep this concise\nwithout exposing a full prompt." * 20],
+    )
+
+    event = controller.runtime.callback_handler.events[-1]
+    attributes = tracer.start_as_current_span.call_args.kwargs["attributes"]
+    assert tracer.start_as_current_span.call_args.args[0] == "plan_validation"
+    assert event["type"] == "plan_validation"
+    assert event["approved"] is False
+    assert len(event["feedback_summaries"]) == 1
+    assert len(event["feedback_summaries"][0]) <= workflow_mod.PLAN_VALIDATION_MAX_FEEDBACK_CHARS + 3
+    assert "Proposed plan draft" not in json.dumps(event)
+    assert "Proposed plan draft" not in json.dumps(attributes)
 
 
 def test_plan_refinement_stops_after_later_approval():
@@ -7340,6 +7443,15 @@ def test_invalid_plan_critic_contract_retries_without_persisting(critique):
         event["type"] == "output" and event.get("metadata", {}).get("kind") == "plan"
         for event in controller.runtime.callback_handler.events
     )
+    validation_events = [
+        event for event in controller.runtime.callback_handler.events if event["type"] == "plan_validation"
+    ]
+    assert [(event["stage"], event["outcome"]) for event in validation_events] == [
+        ("draft", "created"),
+        ("critic", "failed"),
+    ]
+    assert "approved" not in validation_events[-1]
+    assert validation_events[-1]["error_type"] == "WorkflowInvariantError"
 
 
 def test_controller_creates_plan_when_missing():
