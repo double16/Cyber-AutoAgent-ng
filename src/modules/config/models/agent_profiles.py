@@ -520,9 +520,7 @@ def translate_reasoning_to_provider(
     # Reasoning is active (LOW, MEDIUM, HIGH, XHIGH)
     if provider_key == "ollama":
         # String level for Ollama; fallback logic will convert to bool if rejected
-        result["think"] = reasoning_level.value if reasoning_level in (
-            ReasoningLevel.LOW, ReasoningLevel.MEDIUM, ReasoningLevel.HIGH
-        ) else "high"
+        result["think"] = reasoning_level.value
     elif provider_key == "bedrock":
         effort_map = {
             ReasoningLevel.LOW: "low",
@@ -560,6 +558,18 @@ def mutate_agent_model_reasoning(agent: Any, level: Union[ReasoningLevel, str]) 
     target_level = ReasoningLevel.from_value(level)
     model = getattr(agent, "model", agent)
     if model is None:
+        return
+    provider = str(getattr(model, "_cyber_provider", "")).lower()
+
+    # OllamaModel also exposes client_args for transport configuration. It is
+    # not LiteLLM's request-parameter container, so adding reasoning_effort
+    # here makes Ollama's AsyncClient reject the next call.
+    if provider == "ollama":
+        config = getattr(model, "config", None)
+        if isinstance(config, dict):
+            additional_args = config.setdefault("additional_args", {})
+            if isinstance(additional_args, dict):
+                additional_args["think"] = target_level.to_bool()
         return
 
     # LiteLLMModel

@@ -2851,6 +2851,18 @@ Canonical operation data:
         f.write(param_adjustments_content)
     report_parts_files.append(param_adjustments_file)
 
+    # Appendix C is deterministic and visible in report progress, but it must
+    # not count as an additional LLM budget/accounting step.
+    report_step_index += 1
+    _emit_report_progress(
+        callback_handler,
+        operation_id,
+        report_step_index,
+        report_step_total,
+        "parameter_adjustments",
+        "Appendix C: Model & Agent Parameter Adjustments",
+    )
+
     return report_step_index
 
 
@@ -3388,7 +3400,9 @@ def generate_security_report(
             [finding for _index, finding in report_findings]
         )
         sections["taxonomy_coverage"] = taxonomy_coverage
-        report_step_total = 3 + len(report_findings) + len(report_validation_failures)
+        # Three model-authored global sections plus deterministic Appendix C,
+        # followed by any finding/validation-failure sections.
+        report_step_total = 4 + len(report_findings) + len(report_validation_failures)
         report_step_index = 0
 
         # Part 1: Executive Summary

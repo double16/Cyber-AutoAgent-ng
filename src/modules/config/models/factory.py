@@ -410,6 +410,7 @@ def _handle_model_creation_error(provider: str, error: Exception) -> None:
 class _CreateModelParameters:
     llm_temp: Optional[float]
     llm_max: int
+    profile_max_tokens: int
     role: LLMRoleType
     top_k: Optional[int] = None
     top_p: Optional[float] = None
@@ -439,39 +440,18 @@ def _get_parameters_by_role(
     reasoning_level = agent_settings.reasoning_level
     out_role = canonical_role
 
-    # Check server_config limits if available
-    try:
-        config_manager = _get_config_manager()
-        server_config = config_manager.get_server_config(provider)
-        if (
-            canonical_role == LLMRoleType.SWARM_AGENT
-            and server_config.swarm
-            and server_config.swarm.llm
-            and server_config.swarm.llm.max_tokens
-        ):
-            llm_max = min(llm_max, server_config.swarm.llm.max_tokens)
-        elif (
-            server_config
-            and server_config.llm
-            and server_config.llm.max_tokens
-        ):
-            llm_max = min(llm_max, server_config.llm.max_tokens)
-    except Exception as error:
-        logger.warning(
-            "Unable to resolve model output ceiling for role=%s provider=%s model=%s; "
-            "retaining the role profile: %s",
-            canonical_role.value,
-            provider,
-            model_id,
-            error,
-        )
-
-    if "max_tokens" in config and isinstance(config.get("max_tokens"), int) and config["max_tokens"] > 0:
-        llm_max = min(llm_max, config["max_tokens"])
+    # Role profiles are the normal output-token policy.  Generic provider
+    # defaults must not silently lower every profile (for example Ollama's old
+    # 6144 default lowered all 8192-token executor profiles).  Only an explicit
+    # configuration override is a global ceiling.
+    configured_ceiling = config.get("max_tokens_ceiling")
+    if isinstance(configured_ceiling, int) and configured_ceiling > 0:
+        llm_max = min(llm_max, configured_ceiling)
 
     return _CreateModelParameters(
         llm_temp=llm_temp,
         llm_max=llm_max,
+        profile_max_tokens=agent_settings.max_tokens,
         role=out_role,
         top_k=top_k,
         top_p=top_p,
@@ -589,6 +569,7 @@ def create_bedrock_model(
         model = BedrockModel(**bedrock_model_config)
         setattr(model, "_output_tokens", create_parameters.llm_max)
         setattr(model, "_cyber_llm_role", create_parameters.role.value)
+        setattr(model, "_cyber_provider", provider)
 
         return model
 
@@ -645,6 +626,7 @@ def create_bedrock_model(
     model = BedrockModel(**bedrock_model_config)
     setattr(model, "_output_tokens", llm_max)
     setattr(model, "_cyber_llm_role", role.value)
+    setattr(model, "_cyber_provider", provider)
 
     return model
 
@@ -691,9 +673,11 @@ def create_ollama_model(
     role = create_parameters.role
 
     logger.info(
-        "Model build: role=%s provider=ollama model=%s max_tokens=%s",
+        "Model build: role=%s provider=ollama model=%s profile_max_tokens=%s explicit_ceiling=%s max_tokens=%s",
         role,
         config.get("model_id"),
+        create_parameters.profile_max_tokens,
+        config.get("max_tokens_ceiling"),
         llm_max,
     )
 
@@ -709,11 +693,7 @@ def create_ollama_model(
         additional_args["think"] = False
     else:
         if capabilities.pass_reasoning_effort:
-            additional_args["think"] = (
-                reasoning_level.value
-                if reasoning_level in (ReasoningLevel.LOW, ReasoningLevel.MEDIUM, ReasoningLevel.HIGH)
-                else "medium"
-            )
+            additional_args["think"] = reasoning_level.value
         elif capabilities.supports_reasoning:
             additional_args["think"] = reasoning_level.to_bool()
 
@@ -732,6 +712,7 @@ def create_ollama_model(
     )
     setattr(model, "_output_tokens", llm_max)
     setattr(model, "_cyber_llm_role", role.value)
+    setattr(model, "_cyber_provider", provider)
     return model
 
 
@@ -896,6 +877,7 @@ def create_litellm_model(
     )
     setattr(model, "_output_tokens", llm_max)
     setattr(model, "_cyber_llm_role", role.value)
+    setattr(model, "_cyber_provider", provider)
     return model
 
 
@@ -987,6 +969,7 @@ def create_gemini_model(
     )
     setattr(model, "_output_tokens", llm_max)
     setattr(model, "_cyber_llm_role", create_parameters.role.value)
+    setattr(model, "_cyber_provider", provider)
     return model
 
 

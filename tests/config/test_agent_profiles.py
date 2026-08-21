@@ -6,8 +6,26 @@ from modules.config.models.agent_profiles import (
     LLMRoleType,
     ReasoningLevel,
     normalize_agent_type,
+    mutate_agent_model_reasoning,
     translate_reasoning_to_provider,
 )
+
+
+def test_ollama_reasoning_mutation_never_adds_reasoning_effort_to_transport_args():
+    model = type(
+        "OllamaModel",
+        (),
+        {
+            "_cyber_provider": "ollama",
+            "client_args": {"timeout": 30},
+            "config": {"additional_args": {"think": False}},
+        },
+    )()
+
+    mutate_agent_model_reasoning(model, ReasoningLevel.MEDIUM)
+
+    assert model.client_args == {"timeout": 30}
+    assert model.config["additional_args"]["think"] is True
 
 
 def test_reasoning_level_parsing_and_boolean_evaluation():
@@ -211,6 +229,9 @@ def test_translate_reasoning_to_provider():
 
     ollama_low = translate_reasoning_to_provider("ollama", "qwen", ReasoningLevel.LOW)
     assert ollama_low["think"] == "low"
+
+    ollama_xhigh = translate_reasoning_to_provider("ollama", "qwen", ReasoningLevel.XHIGH)
+    assert ollama_xhigh["think"] == "xhigh"
 
     # Gemini
     gemini_none = translate_reasoning_to_provider("gemini", "gemini-2.5", ReasoningLevel.NONE)

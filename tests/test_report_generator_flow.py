@@ -181,9 +181,17 @@ def test_report_progress_counts_only_llm_authored_sections():
     _emit_report_progress(callback, "OP_TEST", 1, 4, "validation_failure", "Requires validation")
     _emit_report_progress(callback, "OP_TEST", 2, 4, "observation", "Observation")
     _emit_report_progress(callback, "OP_TEST", 3, 4, "executive", "Executive summary")
+    _emit_report_progress(
+        callback,
+        "OP_TEST",
+        4,
+        4,
+        "parameter_adjustments",
+        "Appendix C: Model & Agent Parameter Adjustments",
+    )
 
     callback.mark_report_step_started.assert_called_once_with()
-    assert callback.emit_ui_event.call_count == 3
+    assert callback.emit_ui_event.call_count == 4
 
 
 def test_report_observations_exclude_workflow_bookkeeping_but_retain_real_observations():
@@ -2434,17 +2442,19 @@ def test_generate_security_report_emits_indexed_report_progress(
         if call.args[0].get("type") == "progress_update"
     ]
 
-    assert [event["report_step_index"] for event in progress_events] == [1, 2, 3, 4, 5]
-    assert {event["report_step_total"] for event in progress_events} == {5}
+    assert [event["report_step_index"] for event in progress_events] == [1, 2, 3, 4, 5, 6]
+    assert {event["report_step_total"] for event in progress_events} == {6}
     assert [event["report_step_kind"] for event in progress_events] == [
         "executive",
         "finding",
         "finding",
         "methodology",
         "next_steps",
+        "parameter_adjustments",
     ]
     assert all(event["operation_stage"] == "final_report" for event in progress_events)
     assert progress_events[1]["report_step_label"] == "Finding: High Finding"
+    assert progress_events[-1]["report_step_label"] == "Appendix C: Model & Agent Parameter Adjustments"
     callback_handler.set_report_items.assert_called_once_with(
         mock_build_sections.return_value["raw_evidence"],
         refinement_cycles=0,

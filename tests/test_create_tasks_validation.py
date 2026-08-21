@@ -1,5 +1,3 @@
-import pytest
-from pydantic import ValidationError
 from modules.tools.memory import TaskProposal, TaskProposalLimits
 
 def test_task_proposal_limits_relaxation():
@@ -46,6 +44,17 @@ def test_task_proposal_normalization_extra_fields():
     proposal = TaskProposal(**data)
     # If we reached here without ValidationError, it works.
     assert proposal.title == "Test Task"
+
+
+def test_task_proposal_normalizes_name_as_title_alias():
+    proposal = TaskProposal(
+        name="Legacy task title",
+        objective="Test Objective",
+        methods=["test"],
+        criteria=[{"description": "test criterion"}],
+    )
+
+    assert proposal.title == "Legacy task title"
 
 def test_task_proposal_description_alias():
     # 'description' should be moved to 'objective'

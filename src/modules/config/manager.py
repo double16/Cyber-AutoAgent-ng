@@ -217,6 +217,10 @@ class ConfigManager:
             "region_name": region_name,
             "temperature": llm_config.temperature,
             "max_tokens": max_tokens,
+            # A provider default is operational configuration, not an output
+            # ceiling for every role profile.  Factories use this value only
+            # when MAX_TOKENS explicitly requests a global ceiling.
+            "max_tokens_ceiling": self.getenv_int("MAX_TOKENS", 0) or None,
         }
 
         if "max_tokens" in llm_config.parameters:
@@ -272,6 +276,9 @@ class ConfigManager:
             "keep_alive": self.get_ollama_keep_alive(),
             "temperature": llm_config.temperature,
             "max_tokens": max_tokens,
+            # See get_standard_model_config: profiles own their normal output
+            # budgets, while an explicit MAX_TOKENS value remains a hard cap.
+            "max_tokens_ceiling": self.getenv_int("MAX_TOKENS", 0) or None,
             "options": self.get_ollama_options(),
         }
 

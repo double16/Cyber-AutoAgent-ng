@@ -53,7 +53,7 @@ def build_ollama_defaults() -> Dict[str, Any]:
             provider=ModelProvider.OLLAMA,
             model_id="qwen3.6:27b",
             temperature=DEFAULT_TEMPERATURE_EXECUTION,
-            max_tokens=6144,
+            max_tokens=12_000,
         ),
         "embedding": EmbeddingConfig(
             provider=ModelProvider.OLLAMA,
@@ -77,7 +77,7 @@ def build_ollama_defaults() -> Dict[str, Any]:
             provider=ModelProvider.OLLAMA,
             model_id="qwen3.6:27b",
             temperature=DEFAULT_TEMPERATURE_SWARM,
-            max_tokens=6144,
+            max_tokens=12_000,
         ),
         "host": None,  # Will be resolved dynamically
         "region": "ollama",

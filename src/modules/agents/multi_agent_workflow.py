@@ -2646,6 +2646,7 @@ class MultiAgentWorkflowController:
         seen_stagnation_actions: set[str] = set()
         repeat_loop_signatures: set[str] = set()
         repeat_loop_recovery_used = False
+        loop_evidence_acceptance_recovery_used = False
         max_token_recovery_used = False
         output_truncation_recovery_active = False
         output_truncation_recovery_mode = ""
@@ -3050,6 +3051,39 @@ class MultiAgentWorkflowController:
                 repeated_loop = cycle_result.repeat_loop_detected
                 if repeated_loop:
                     loop_signature = cycle_result.repeat_loop_signature or cycle_result.repeat_loop_reason
+                    # A loop may happen after the useful work has already
+                    # completed (for example, a model repeats a successful
+                    # curl).  Reconcile every retained outcome before turning
+                    # that control-flow failure into a replacement task.
+                    if (
+                        not loop_evidence_acceptance_recovery_used
+                        and self._all_execution_requirements_resolved(plan, task, tool_outcomes)
+                    ):
+                        loop_evidence_acceptance_recovery_used = True
+                        acceptance_recovery_active = True
+                        acceptance_recovery_evidence = self._acceptance_recovery_context(
+                            task,
+                            self.state.list_task_acceptance_results(task.task_uid),
+                            tool_outcomes,
+                            None,
+                        )
+                        actor_prompt = self._task_executor_critic_guidance(
+                            plan,
+                            task,
+                            self._missing_acceptance_criteria(
+                                task, self.state.list_task_acceptance_results(task.task_uid)
+                            ),
+                            acceptance_recovery_evidence,
+                            next_cycle=cycle + 1,
+                            required_tool="record_task_acceptance",
+                            loop_guidance=self._repeat_loop_recovery_guidance(cycle_result),
+                        )
+                        self._log_workflow(
+                            "task loop recovered with completed execution evidence task=%s cycle=%s",
+                            self._task_label(task),
+                            cycle,
+                        )
+                        continue
                     if self._repeat_loop_is_repeated(
                         repeat_loop_recovery_used,
                         repeat_loop_signatures,
@@ -7887,6 +7921,18 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
             common_fixes += "- FIX: Each criterion in the list must be an object, e.g., `\"criteria\": [{\"description\": \"...\"}]`. Do NOT use a string.\n"
         if "extra_forbidden" in lower_reason:
             common_fixes += "- FIX: Remove extra fields like `name` or `work_type` that are not in the schema.\n"
+        if "procedure methods or snapshot_refs" in lower_reason:
+            common_fixes += (
+                "- FIX: For every procedure proposal add a non-empty `methods` array and positive integer "
+                "`limits`; use `snapshot_refs` only for an existing frozen artifact.\n"
+            )
+        if "field required" in lower_reason and "title" in lower_reason:
+            common_fixes += "- FIX: Every task needs a non-empty `title`; `name` is accepted as a title alias.\n"
+        if "field required" in lower_reason and "criteria" in lower_reason:
+            common_fixes += (
+                "- FIX: Every task needs exactly one criterion object: "
+                "`criteria:[{\"description\":\"finite result\"}]`.\n"
+            )
 
         return f"""The preceding `create_tasks` call was rejected or produced no new actionable task.
 Validation result: {failure_reason or "no actionable task was created"}
@@ -10856,6 +10902,35 @@ tools and durable evidence before relying on it."""
             self.state.store_task(replace(current_task, recovery_context=context))
         self._emit_controller_execution_evidence(task, criterion, resolved, details, expected_capabilities)
         return resolved
+
+    def _all_execution_requirements_resolved(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        tool_outcomes: List[ToolOutcome],
+    ) -> bool:
+        """Reconcile all frozen execution bindings and report whether none remain.
+
+        This is intentionally controller-owned: tool-loop handling must not
+        discard a successful, subject-bound execution simply because the model
+        failed to transition from the result to task acceptance.
+        """
+
+        requirement_ids = {
+            requirement.id
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        }
+        if not requirement_ids:
+            return False
+        for criterion in task.acceptance.criteria:
+            self._resolve_controller_execution_evidence(plan, task, criterion, tool_outcomes)
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        receipts = dict(current_task.recovery_context.get("execution_evidence_receipts") or {})
+        return requirement_ids.issubset(receipts)
 
     def _valid_inventory_output_refs_linked_to_execution(
         self,

@@ -939,6 +939,67 @@ def test_controller_resolves_task_local_request_artifact_as_execution_evidence(m
     ] == ["request-1"]
 
 
+def test_controller_reconciles_curl_evidence_before_loop_replacement(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Request the root",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement("criterion-1-execution-1", "Request root", "/")],
+    )
+    task = TaskModel(
+        task_uid="loop-proof",
+        title="Request root",
+        objective="Request root",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded request",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["http_request"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state
+    )
+    artifact = tmp_path / "artifacts" / "root.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("HTTP/1.1 200 OK")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="curl-root",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary='{"command":"curl -sS -D - http://target.test/"}',
+        output_summary="artifact:artifacts/root.txt",
+        artifact_refs=("artifact:artifacts/root.txt",),
+    )
+
+    assert controller._all_execution_requirements_resolved(plan, task, [outcome]) is True
+
+
 @pytest.mark.parametrize("subject_ref", ["/api/products/:id", "target:target-1"])
 def test_controller_does_not_use_unrelated_analysis_artifact_as_execution_evidence(
     monkeypatch,

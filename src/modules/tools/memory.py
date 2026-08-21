@@ -4653,8 +4653,15 @@ class TaskProposal(_StrictTaskWireModel):
                 normalized[canonical] = normalized.pop(alias)
                 logger.info("Normalized task proposal field alias %s -> %s", alias, canonical)
 
-        # Remove extra fields that models often add
-        for extra in ["name", "work_type", "methods_description"]:
+        # ``name`` is a common, unambiguous title alias. Preserve it long
+        # enough to normalize older model responses instead of spending a
+        # task-creator correction solely on a missing title.
+        if not normalized.get("title") and isinstance(normalized.get("name"), str):
+            normalized["title"] = normalized["name"].strip()
+            logger.info("Normalized task proposal field alias name -> title")
+
+        # Remove extra fields that models often add.
+        for extra in ["name", "status", "work_type", "methods_description"]:
             if extra in normalized:
                 normalized.pop(extra)
 
