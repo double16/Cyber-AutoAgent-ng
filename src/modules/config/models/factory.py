@@ -25,7 +25,7 @@ from modules.config.providers import get_ollama_host, split_litellm_model_id
 from modules.config.providers.ollama_config import get_ollama_timeout
 from modules.config.system import EnvironmentReader
 from modules.config.system.logger import get_logger
-from modules.config.system.defaults import LLMRoleType
+from modules.config.models.agent_profiles import LLMRoleType
 from modules.config.models.capabilities import (
     get_model_input_limit,
     get_provider_default_limit,
@@ -410,7 +410,7 @@ def _handle_model_creation_error(provider: str, error: Exception) -> None:
 class _CreateModelParameters:
     llm_temp: Optional[float]
     llm_max: int
-    role: str
+    role: LLMRoleType
     top_k: Optional[int] = None
     top_p: Optional[float] = None
     reasoning_level: Any = None
@@ -429,7 +429,7 @@ def _get_parameters_by_role(
     )
 
     registry = get_agent_settings_registry()
-    canonical_role = normalize_agent_type(str(role) if role else None)
+    canonical_role = normalize_agent_type(role)
     agent_settings = registry.get_settings(canonical_role, provider, model_id)
 
     llm_temp = agent_settings.temperature
@@ -444,7 +444,7 @@ def _get_parameters_by_role(
         config_manager = _get_config_manager()
         server_config = config_manager.get_server_config(provider)
         if (
-            canonical_role == "swarm"
+            canonical_role == LLMRoleType.SWARM_AGENT
             and server_config.swarm
             and server_config.swarm.llm
             and server_config.swarm.llm.max_tokens
@@ -456,15 +456,19 @@ def _get_parameters_by_role(
             and server_config.llm.max_tokens
         ):
             llm_max = min(llm_max, server_config.llm.max_tokens)
-    except Exception:
-        out_role = "unknown"
+    except Exception as error:
+        logger.warning(
+            "Unable to resolve model output ceiling for role=%s provider=%s model=%s; "
+            "retaining the role profile: %s",
+            canonical_role.value,
+            provider,
+            model_id,
+            error,
+        )
 
     if "max_tokens" in config and isinstance(config.get("max_tokens"), int) and config["max_tokens"] > 0:
         llm_max = min(llm_max, config["max_tokens"])
-    if "temperature" in config and config.get("temperature") is not None:
-        llm_temp = config["temperature"]
 
-    from modules.config.models.agent_profiles import ReasoningLevel
     return _CreateModelParameters(
         llm_temp=llm_temp,
         llm_max=llm_max,
@@ -479,7 +483,7 @@ def create_bedrock_model(
     model_id: str,
     region_name: str,
     provider: str = "bedrock",
-    role: Optional[LLMRoleType] = None,
+    role: Optional[Union[LLMRoleType, str]] = None,
     **kwargs,
 ) -> "BedrockModel":
     """Create AWS Bedrock model instance using centralized configuration.
@@ -527,8 +531,9 @@ def create_bedrock_model(
     capabilities = get_capabilities(provider, model_id)
     sdk_config = config_manager.get_sdk_config(provider)
 
-    # FIXME: for bedrock, "is_thinking" means something more (?)
-    if role in ["primary", "swarm"] and config_manager.is_thinking_model(provider, model_id):
+    # Thinking-capable models need their provider request shape, but the role profile
+    # remains the source of its temperature, output limit, and reasoning level.
+    if config_manager.is_thinking_model(provider, model_id):
         # Use thinking model configuration
         config = config_manager.get_thinking_model_config(model_id, region_name)
 
@@ -540,25 +545,50 @@ def create_bedrock_model(
                 elif k not in additional_fields:
                     additional_fields[k] = v
 
+        create_parameters = _get_parameters_by_role(provider, model_id, role, config)
+        from modules.config.models.agent_profiles import ReasoningLevel, translate_reasoning_to_provider
+
+        translated = translate_reasoning_to_provider(
+            provider,
+            model_id,
+            create_parameters.reasoning_level,
+            create_parameters.llm_max,
+        )
+        if create_parameters.reasoning_level == ReasoningLevel.NONE:
+            additional_fields.pop("thinking", None)
+        elif "budget_tokens" in translated:
+            additional_fields["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": translated["budget_tokens"],
+            }
         logger.info(
             "Model build: thinking, role=%s provider=%s model=%s max_tokens=%s effort=%s",
-            role,
+            create_parameters.role.value,
             provider,
             config.get("model_id"),
-            config.get("max_tokens"),
+            create_parameters.llm_max,
             effort or "none",
         )
 
-        model = BedrockModel(
-            model_id=config["model_id"],
-            region_name=config["region_name"],
-            temperature=config["temperature"] if capabilities.supports_temperature else None,
-            max_tokens=config["max_tokens"],
-            additional_request_fields=additional_fields if additional_fields else None,
-            boto_client_config=boto_config,
-            streaming=sdk_config.enable_streaming,
-        )
-        setattr(model, "_output_tokens", config["max_tokens"])
+        bedrock_model_config: Dict[str, Any] = {
+            "model_id": config["model_id"],
+            "region_name": config["region_name"],
+            "temperature": (
+                create_parameters.llm_temp
+                if capabilities.supports_temperature and create_parameters.llm_temp is not None
+                else None
+            ),
+            "max_tokens": create_parameters.llm_max,
+            "additional_request_fields": additional_fields if additional_fields else None,
+            "boto_client_config": boto_config,
+            "streaming": sdk_config.enable_streaming,
+        }
+        if create_parameters.top_p is not None:
+            bedrock_model_config["top_p"] = create_parameters.top_p
+
+        model = BedrockModel(**bedrock_model_config)
+        setattr(model, "_output_tokens", create_parameters.llm_max)
+        setattr(model, "_cyber_llm_role", create_parameters.role.value)
 
         return model
 
@@ -576,6 +606,7 @@ def create_bedrock_model(
     create_parameters = _get_parameters_by_role(provider, model_id, role, config)
     llm_temp = create_parameters.llm_temp
     llm_max = create_parameters.llm_max
+    top_p = create_parameters.top_p
     reasoning_level = create_parameters.reasoning_level
     role = create_parameters.role
 
@@ -599,24 +630,21 @@ def create_bedrock_model(
         effort or "none",
     )
 
-    # If top_p is in config, add it to additional_fields
-    if config.get("top_p") is not None:
-        # BedrockModel doesn't support top_p in init directly in all versions, 
-        # but usually it's passed via model_kwargs if using LangChain, 
-        # or we might need to check Strands BedrockModel signature.
-        # Assuming Strands BedrockModel handles it via kwargs or we ignore it for now as per previous code.
-        pass
+    bedrock_model_config = {
+        "model_id": config["model_id"],
+        "region_name": config["region_name"],
+        "temperature": llm_temp if (capabilities.supports_temperature and llm_temp is not None) else None,
+        "max_tokens": llm_max,
+        "additional_request_fields": additional_fields if additional_fields else None,
+        "boto_client_config": boto_config,
+        "streaming": sdk_config.enable_streaming,
+    }
+    if top_p is not None:
+        bedrock_model_config["top_p"] = top_p
 
-    model = BedrockModel(
-        model_id=config["model_id"],
-        region_name=config["region_name"],
-        temperature=llm_temp if (capabilities.supports_temperature and llm_temp is not None) else None,
-        max_tokens=llm_max,
-        additional_request_fields=additional_fields if additional_fields else None,
-        boto_client_config=boto_config,
-        streaming=sdk_config.enable_streaming,
-    )
+    model = BedrockModel(**bedrock_model_config)
     setattr(model, "_output_tokens", llm_max)
+    setattr(model, "_cyber_llm_role", role.value)
 
     return model
 
@@ -624,7 +652,7 @@ def create_bedrock_model(
 def create_ollama_model(
     model_id: str,
     provider: str = "ollama",
-    role: Optional[LLMRoleType] = None,
+    role: Optional[Union[LLMRoleType, str]] = None,
 ) -> "OllamaModel":
     """Create Ollama model instance using centralized configuration.
 
@@ -703,6 +731,7 @@ def create_ollama_model(
         stream=sdk_config.enable_streaming,
     )
     setattr(model, "_output_tokens", llm_max)
+    setattr(model, "_cyber_llm_role", role.value)
     return model
 
 
@@ -710,7 +739,7 @@ def create_litellm_model(
     model_id: str,
     region_name: str,
     provider: str = "litellm",
-    role: Optional[LLMRoleType] = None,
+    role: Optional[Union[LLMRoleType, str]] = None,
 ) -> "LiteLLMModel":
     """Create LiteLLM model instance for universal provider access.
 
@@ -842,7 +871,7 @@ def create_litellm_model(
 
     # Reasoning text verbosity for Azure Responses API models (default: medium)
     reasoning_verbosity = config_manager.getenv("REASONING_VERBOSITY", "medium")
-    if role in ["primary", "swarm"] and reasoning_verbosity and "azure/responses/" in config["model_id"]:
+    if reasoning_verbosity and "azure/responses/" in config["model_id"]:
         params["text"] = {
             "format": {"type": "text"},
             "verbosity": reasoning_verbosity,
@@ -866,6 +895,7 @@ def create_litellm_model(
         stream=sdk_config.enable_streaming,
     )
     setattr(model, "_output_tokens", llm_max)
+    setattr(model, "_cyber_llm_role", role.value)
     return model
 
 
@@ -873,7 +903,7 @@ def create_gemini_model(
     model_id: str,
     region_name: str,
     provider: str = "gemini",
-    role: Optional[LLMRoleType] = None,
+    role: Optional[Union[LLMRoleType, str]] = None,
 ) -> "GeminiModel":
     """Create the native Gemini model instance using Google's genai SDK.
 
@@ -956,13 +986,14 @@ def create_gemini_model(
         params=params,
     )
     setattr(model, "_output_tokens", llm_max)
+    setattr(model, "_cyber_llm_role", create_parameters.role.value)
     return model
 
 
 def create_strands_model(
         provider: Optional[str] = None,
         model_id: Optional[str] = None,
-        role: Optional[LLMRoleType] = None,
+        role: Optional[Union[LLMRoleType, str]] = None,
 ) -> Model:
     """ Create model based on provider type """
     agent_logger = logging.getLogger("CyberAutoAgent")

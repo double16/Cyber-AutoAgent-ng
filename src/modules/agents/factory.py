@@ -188,7 +188,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 swarm_model_id = request_model_id
         # TODO: accept model parameters such as temperature
 
-        effective_role = agent_type or name or "swarm"
+        effective_role = agent_type or name or "swarm_agent"
         try:
             strands_model = create_strands_model(provider, swarm_model_id, effective_role)
         except Exception as exc:  # fall back to main LLM if swarm override is misconfigured

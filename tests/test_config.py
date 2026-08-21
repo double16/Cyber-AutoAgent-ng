@@ -334,7 +334,7 @@ class TestConfigManager:
         assert remote_config.llm.provider == ModelProvider.AWS_BEDROCK
         assert "claude" in remote_config.llm.model_id
         assert remote_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
-        assert remote_config.llm.max_tokens == 5000
+        assert remote_config.llm.max_tokens == 16_000
 
     def test_get_qdrant_memory_config(self):
         """Test Qdrant embedding configuration for local and remote providers."""
@@ -1063,7 +1063,7 @@ class TestEnvironmentIntegration:
             "us.anthropic.claude-opus-4-20250514-v1:0", "us-east-1"
         )
         assert thinking_config["temperature"] == 1.0
-        assert thinking_config["max_tokens"] == 10_000
+        assert thinking_config["max_tokens"] == 32_000
         assert "additional_request_fields" in thinking_config
         assert "anthropic_beta" in thinking_config["additional_request_fields"]
         assert "thinking" in thinking_config["additional_request_fields"]
@@ -1079,7 +1079,7 @@ class TestEnvironmentIntegration:
         # Test local model configuration
         local_config = config_manager.get_local_model_config("llama3.2:3b", "ollama")
         assert local_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
-        assert local_config["max_tokens"] == 4000
+        assert local_config["max_tokens"] == 6144
         assert "host" in local_config
         assert local_config["host"].startswith("http://")
 

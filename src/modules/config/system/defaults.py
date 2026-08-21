@@ -6,8 +6,9 @@ This module provides default configurations for LLM models, embeddings,
 and provider-specific settings across Bedrock, Ollama, and LiteLLM.
 """
 
-from typing import Any, Dict, Literal
+from typing import Any, Dict
 
+from modules.config.models.agent_profiles import LLMRoleType
 from modules.config.types import (
     EmbeddingConfig,
     LLMConfig,
@@ -17,8 +18,7 @@ from modules.config.types import (
     DEFAULT_TEMPERATURE_SWARM,
 )
 
-LLMRoleType = Literal["primary", "swarm", "report", "evaluation", "unknown"]
-
+__all__ = ["LLMRoleType", "build_default_configs"]
 
 def build_default_configs() -> Dict[str, Dict[str, Any]]:
     """Initialize default configurations for all provider types.

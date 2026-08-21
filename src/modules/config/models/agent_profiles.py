@@ -7,11 +7,35 @@ such as reasoning level reductions and 3-strike max token limit escalations.
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+
+logger = logging.getLogger(__name__)
+
+
+class LLMRoleType(StrEnum):
+    """Canonical roles that own a model profile and runtime adaptation state."""
+
+    PLAN_CREATOR = "plan_creator"
+    PLAN_CRITIC = "plan_critic"
+    TASK_CREATOR = "task_creator"
+    TASK_PROMPT_BUILDER = "task_prompt_builder"
+    TASK_PROMPT_CRITIC = "task_prompt_critic"
+    TASK_EXECUTOR = "task_executor"
+    TASK_EVALUATOR = "task_evaluator"
+    PHASE_EVALUATOR = "phase_evaluator"
+    TASK_PHASE_CLASSIFIER = "task_phase_classifier"
+    REPORT_AGENT = "report_agent"
+    REPORT_CRITIC = "report_critic"
+    TAXONOMY_ANNOTATOR = "taxonomy_annotator"
+    ATTACK_ENRICHER = "attack_enricher"
+    SWARM_AGENT = "swarm_agent"
+    UNKNOWN = "unknown"
 
 
 class ReasoningLevel(str, Enum):
@@ -101,127 +125,124 @@ class ParameterAdjustmentRecord:
         }
 
 
-ROLE_ALIASES: Dict[str, str] = {
-    "plan_builder": "plan_creator",
-    "phase_evaluator": "task_evaluator",
-    "evaluation": "task_evaluator",
-    "report": "report_agent",
-    "report_executive": "report_agent",
-    "report_finding": "report_agent",
-    "primary": "task_executor",
-    "default": "task_executor",
-    "executor": "task_executor",
+ROLE_ALIASES: Dict[str, LLMRoleType] = {
+    "plan_builder": LLMRoleType.PLAN_CREATOR,
+    "report_executive": LLMRoleType.REPORT_AGENT,
+    "report_finding": LLMRoleType.REPORT_AGENT,
 }
 
 
-DEFAULT_AGENT_PROFILES: Dict[str, AgentModelSettings] = {
-    "plan_creator": AgentModelSettings(
+DEFAULT_AGENT_PROFILES: Dict[LLMRoleType, AgentModelSettings] = {
+    LLMRoleType.PLAN_CREATOR: AgentModelSettings(
         temperature=0.2,
         reasoning_level=ReasoningLevel.MEDIUM,
-        top_p=0.95,
-        top_k=40,
         max_tokens=8192,
     ),
-    "plan_critic": AgentModelSettings(
+    LLMRoleType.PLAN_CRITIC: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.LOW,
-        top_p=0.95,
-        top_k=40,
         max_tokens=4096,
     ),
-    "task_creator": AgentModelSettings(
+    LLMRoleType.TASK_CREATOR: AgentModelSettings(
         temperature=0.2,
         reasoning_level=ReasoningLevel.MEDIUM,
-        top_p=0.95,
-        top_k=40,
         max_tokens=8192,
     ),
-    "task_prompt_builder": AgentModelSettings(
+    LLMRoleType.TASK_PROMPT_BUILDER: AgentModelSettings(
         temperature=0.2,
         reasoning_level=ReasoningLevel.MEDIUM,
-        top_p=0.95,
-        top_k=40,
         max_tokens=8192,
     ),
-    "task_prompt_critic": AgentModelSettings(
+    LLMRoleType.TASK_PROMPT_CRITIC: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.LOW,
-        top_p=0.95,
-        top_k=40,
         max_tokens=2048,
     ),
-    "task_executor": AgentModelSettings(
+    LLMRoleType.TASK_EXECUTOR: AgentModelSettings(
         temperature=0.5,
         reasoning_level=ReasoningLevel.MEDIUM,
-        top_p=0.95,
-        top_k=40,
         max_tokens=8192,
     ),
-    "task_evaluator": AgentModelSettings(
+    LLMRoleType.TASK_EVALUATOR: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.NONE,
-        top_p=0.95,
-        top_k=40,
         max_tokens=4096,
     ),
-    "task_phase_classifier": AgentModelSettings(
+    LLMRoleType.PHASE_EVALUATOR: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.NONE,
-        top_p=0.95,
-        top_k=40,
+        max_tokens=4096,
+    ),
+    LLMRoleType.TASK_PHASE_CLASSIFIER: AgentModelSettings(
+        temperature=0.0,
+        reasoning_level=ReasoningLevel.NONE,
         max_tokens=2048,
     ),
-    "report_agent": AgentModelSettings(
+    LLMRoleType.REPORT_AGENT: AgentModelSettings(
         temperature=0.2,
         reasoning_level=ReasoningLevel.NONE,
-        top_p=0.95,
-        top_k=40,
         max_tokens=8192,
     ),
-    "report_critic": AgentModelSettings(
+    LLMRoleType.REPORT_CRITIC: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.LOW,
-        top_p=0.95,
-        top_k=40,
         max_tokens=2048,
     ),
-    "taxonomy_annotator": AgentModelSettings(
+    LLMRoleType.TAXONOMY_ANNOTATOR: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.NONE,
-        top_p=0.95,
-        top_k=40,
         max_tokens=4096,
     ),
-    "attack_enricher": AgentModelSettings(
+    LLMRoleType.ATTACK_ENRICHER: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.NONE,
-        top_p=0.95,
-        top_k=40,
         max_tokens=4096,
     ),
-    "swarm": AgentModelSettings(
+    LLMRoleType.SWARM_AGENT: AgentModelSettings(
         temperature=0.6,
         reasoning_level=ReasoningLevel.MEDIUM,
-        top_p=0.95,
-        top_k=40,
         max_tokens=8192,
     ),
-    "unknown": AgentModelSettings(
+    LLMRoleType.UNKNOWN: AgentModelSettings(
         temperature=0.5,
         reasoning_level=ReasoningLevel.MEDIUM,
-        top_p=0.95,
-        top_k=40,
         max_tokens=8192,
     ),
 }
 
 
-def normalize_agent_type(agent_type: Optional[str]) -> str:
+def _validate_default_agent_profiles() -> None:
+    """Fail fast when the canonical role vocabulary and profiles diverge."""
+    expected_roles = set(LLMRoleType)
+    configured_roles = set(DEFAULT_AGENT_PROFILES)
+    if configured_roles != expected_roles:
+        missing = sorted(role.value for role in expected_roles - configured_roles)
+        unexpected = sorted(role.value for role in configured_roles - expected_roles)
+        raise ValueError(
+            "Agent profile roles must exactly match LLMRoleType "
+            f"(missing={missing}, unexpected={unexpected})"
+        )
+    invalid_aliases = {
+        alias: target.value for alias, target in ROLE_ALIASES.items() if target not in configured_roles
+    }
+    if invalid_aliases:
+        raise ValueError(f"Agent profile aliases reference unknown roles: {invalid_aliases}")
+
+
+def normalize_agent_type(agent_type: Optional[Union[LLMRoleType, str]]) -> LLMRoleType:
     """Normalize agent type name or alias to canonical role."""
+    if isinstance(agent_type, LLMRoleType):
+        return agent_type
     if not agent_type:
-        return "unknown"
+        return LLMRoleType.UNKNOWN
     role = str(agent_type).strip().lower()
-    return ROLE_ALIASES.get(role, role)
+    if role in ROLE_ALIASES:
+        return ROLE_ALIASES[role]
+    try:
+        return LLMRoleType(role)
+    except ValueError:
+        logger.warning("Unknown LLM agent role '%s'; using the unknown profile", agent_type)
+        return LLMRoleType.UNKNOWN
 
 
 class AgentSettingsRegistry:
@@ -235,6 +256,8 @@ class AgentSettingsRegistry:
         self._learned_fallbacks: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._adjustment_records: List[ParameterAdjustmentRecord] = []
 
+        if custom_defaults is None:
+            _validate_default_agent_profiles()
         defaults = custom_defaults or DEFAULT_AGENT_PROFILES
         for role, setting in defaults.items():
             canonical = normalize_agent_type(role)
@@ -251,7 +274,7 @@ class AgentSettingsRegistry:
         with self._lock:
             canonical = normalize_agent_type(agent_type)
             if canonical not in self._active:
-                fallback_setting = DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+                fallback_setting = DEFAULT_AGENT_PROFILES[LLMRoleType.UNKNOWN]
                 self._baselines[canonical] = fallback_setting.copy()
                 self._active[canonical] = fallback_setting.copy()
 
@@ -286,10 +309,10 @@ class AgentSettingsRegistry:
             canonical = normalize_agent_type(agent_type)
             target_level = ReasoningLevel.from_value(level)
             current_settings = self._active.get(
-                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+                canonical, DEFAULT_AGENT_PROFILES[LLMRoleType.UNKNOWN]
             )
             baseline_level = self._baselines.get(
-                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+                canonical, DEFAULT_AGENT_PROFILES[LLMRoleType.UNKNOWN]
             ).reasoning_level
 
             # Always update active reasoning level for retry and subsequent execution
@@ -318,7 +341,7 @@ class AgentSettingsRegistry:
         with self._lock:
             canonical = normalize_agent_type(agent_type)
             current_settings = self._active.get(
-                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+                canonical, DEFAULT_AGENT_PROFILES[LLMRoleType.UNKNOWN]
             )
             old_tokens = current_settings.max_tokens
             new_tokens = old_tokens + boost_amount
@@ -351,10 +374,10 @@ class AgentSettingsRegistry:
             self._token_recovery_counts[canonical] = count
 
             current_settings = self._active.get(
-                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+                canonical, DEFAULT_AGENT_PROFILES[LLMRoleType.UNKNOWN]
             )
             baseline_tokens = self._baselines.get(
-                canonical, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings())
+                canonical, DEFAULT_AGENT_PROFILES[LLMRoleType.UNKNOWN]
             ).max_tokens
 
             if count >= 3:
@@ -426,7 +449,7 @@ class AgentSettingsRegistry:
             comparison: Dict[str, Dict[str, Any]] = {}
             all_roles = sorted(set(list(self._baselines.keys()) + list(self._active.keys())))
             for role in all_roles:
-                base = self._baselines.get(role, DEFAULT_AGENT_PROFILES.get("unknown", AgentModelSettings()))
+                base = self._baselines.get(role, DEFAULT_AGENT_PROFILES[LLMRoleType.UNKNOWN])
                 final = self._active.get(role, base)
                 base_dict = base.to_dict()
                 final_dict = final.to_dict()

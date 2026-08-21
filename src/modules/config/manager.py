@@ -71,12 +71,10 @@ litellm.respect_retry_after_header = True
 logger = get_logger("Config.Manager")
 
 # Clamp model max tokens (a.k.a. output limit) to give more space to input and drive action (less reasoning).
-# MAX_TOKENS_LIMIT = 12_000
-MAX_TOKENS_LIMIT = 6144
+MAX_TOKENS_LIMIT = 12_000
 
 # Clamp thinking model max tokens (a.k.a. output limit) to give more space to input and drive action (less reasoning).
-# MAX_TOKENS_REASONING_LIMIT = 32_000
-MAX_TOKENS_REASONING_LIMIT = 10_000
+MAX_TOKENS_REASONING_LIMIT = 32_000
 
 
 class ConfigManager:
@@ -162,7 +160,7 @@ class ConfigManager:
         if input_tokens is None and provider:
             input_tokens = _resolve_prompt_token_limit(provider, model_id)
         if input_tokens:
-            max_tokens_limit = min(max_tokens_limit, ceil(input_tokens / 8))
+            max_tokens_limit = min(max_tokens_limit, ceil(input_tokens / 4))
 
         return max_tokens_limit
 

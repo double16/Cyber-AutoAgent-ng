@@ -131,16 +131,39 @@ def test_create_bedrock_model_standard_and_thinking(monkeypatch, config_manager)
     import strands.models
 
     monkeypatch.setattr(strands.models, "BedrockModel", FakeModel)
-    standard = mod.create_bedrock_model("standard", "us-east-1", role="primary", effort="medium")
+    standard = mod.create_bedrock_model("standard", "us-east-1", role="plan_creator", effort="medium")
     assert standard.model_id == "standard"
     assert standard.kwargs["additional_request_fields"]["output_config"]["effort"] == "medium"
     assert standard.kwargs["streaming"] is False
     assert standard._output_tokens == 600
+    assert "top_p" not in standard.kwargs
 
-    thinking = mod.create_bedrock_model("thinking", "us-east-1", role="primary")
-    assert thinking.kwargs["max_tokens"] == 999
+    thinking = mod.create_bedrock_model("thinking", "us-east-1", role="plan_creator")
+    assert thinking.kwargs["max_tokens"] == 600
     assert thinking.kwargs["streaming"] is False
     assert "existing" in thinking.kwargs["additional_request_fields"]["anthropic_beta"]
+
+
+def test_create_bedrock_model_passes_configured_profile_top_p(monkeypatch, config_manager):
+    import modules.config.models.agent_profiles as profiles
+    import strands.models
+
+    registry = profiles.AgentSettingsRegistry(
+        custom_defaults={
+            "plan_creator": profiles.AgentModelSettings(
+                temperature=0.2,
+                reasoning_level=profiles.ReasoningLevel.MEDIUM,
+                top_p=0.8,
+                max_tokens=8192,
+            )
+        }
+    )
+    monkeypatch.setattr(profiles, "get_agent_settings_registry", lambda: registry)
+    monkeypatch.setattr(strands.models, "BedrockModel", FakeModel)
+
+    model = mod.create_bedrock_model("standard", "us-east-1", role="plan_creator")
+
+    assert model.kwargs["top_p"] == 0.8
 
 
 def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
@@ -154,7 +177,7 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     monkeypatch.setattr(ollama_mod, "OllamaModel", FakeModel)
     monkeypatch.setattr(models_pkg, "get_capabilities", lambda *_args: fake_capabilities())
     monkeypatch.setattr(patches, "patch_ollama_model_json_toolcalls", Mock())
-    ollama_model = mod.create_ollama_model("llama3", role="primary")
+    ollama_model = mod.create_ollama_model("llama3", role="plan_creator")
     assert ollama_model.kwargs["additional_args"]["think"] == "medium"
     assert ollama_model.kwargs["stream"] is False
     assert ollama_model._output_tokens == 512
@@ -163,7 +186,7 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
     monkeypatch.setattr(litellm_mod, "LiteLLMModel", FakeModel)
     monkeypatch.setenv("CYBER_CONTEXT_WINDOW_FALLBACKS", "bedrock/model:bedrock/fallback")
-    litellm_model = mod.create_litellm_model("bedrock/model", "us-east-1", role="primary")
+    litellm_model = mod.create_litellm_model("bedrock/model", "us-east-1", role="plan_creator")
     assert litellm_model.kwargs["client_args"]["aws_region_name"] == "us-east-1"
     assert litellm_model.kwargs["client_args"]["aws_profile_name"] == "profile"
     assert litellm_model.kwargs["params"]["max_tokens"] == 500
@@ -171,13 +194,41 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     assert "thinking" in litellm_model.kwargs["client_args"]
 
     monkeypatch.setattr(gemini_mod, "GeminiModel", FakeModel)
-    gemini_model = mod.create_gemini_model("gemini/gemini-pro", "us-east-1", role="primary")
+    gemini_model = mod.create_gemini_model("gemini/gemini-pro", "us-east-1", role="plan_creator")
     assert gemini_model.model_id == "gemini-pro"
     assert gemini_model.kwargs["params"]["max_output_tokens"] == 600
 
     config_manager.env.pop("GEMINI_API_KEY")
     with pytest.raises(ValueError):
         mod.create_gemini_model("gemini/gemini-pro", "us-east-1")
+
+
+def test_provider_models_receive_plan_critic_profile(monkeypatch, config_manager):
+    import modules.agents.patches as patches
+    import modules.config.models as models_pkg
+    import modules.config.models.ollama as ollama_mod
+    import strands.models
+    import strands.models.gemini as gemini_mod
+    import strands.models.litellm as litellm_mod
+
+    models_pkg.reset_agent_settings_registry()
+    monkeypatch.setattr(strands.models, "BedrockModel", FakeModel)
+    monkeypatch.setattr(ollama_mod, "OllamaModel", FakeModel)
+    monkeypatch.setattr(gemini_mod, "GeminiModel", FakeModel)
+    monkeypatch.setattr(litellm_mod, "LiteLLMModel", FakeModel)
+    monkeypatch.setattr(patches, "patch_ollama_model_json_toolcalls", Mock())
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(get_max_tokens=Mock(return_value=None)))
+
+    bedrock = mod.create_bedrock_model("standard", "us-east-1", role="plan_critic")
+    ollama = mod.create_ollama_model("llama3", role="plan_critic")
+    litellm = mod.create_litellm_model("openai/model", "us-east-1", role="plan_critic")
+    gemini = mod.create_gemini_model("gemini/gemini-pro", "us-east-1", role="plan_critic")
+
+    assert bedrock.kwargs["temperature"] == 0.0
+    assert ollama.kwargs["temperature"] == 0.0
+    assert litellm.kwargs["params"]["temperature"] == 0.0
+    assert gemini.kwargs["params"]["temperature"] == 0.0
+    assert {model._cyber_llm_role for model in (bedrock, ollama, litellm, gemini)} == {"plan_critic"}
 
 
 def test_create_models_propagate_enabled_sdk_streaming(monkeypatch, config_manager):
@@ -196,9 +247,9 @@ def test_create_models_propagate_enabled_sdk_streaming(monkeypatch, config_manag
     monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
     monkeypatch.setattr(litellm_mod, "LiteLLMModel", FakeModel)
 
-    bedrock_model = mod.create_bedrock_model("standard", "us-east-1", role="primary")
-    ollama_model = mod.create_ollama_model("llama3", role="primary")
-    litellm_model = mod.create_litellm_model("bedrock/model", "us-east-1", role="primary")
+    bedrock_model = mod.create_bedrock_model("standard", "us-east-1", role="plan_creator")
+    ollama_model = mod.create_ollama_model("llama3", role="plan_creator")
+    litellm_model = mod.create_litellm_model("bedrock/model", "us-east-1", role="plan_creator")
 
     assert bedrock_model.kwargs["streaming"] is True
     assert ollama_model.kwargs["stream"] is True
@@ -271,19 +322,61 @@ def test_parse_and_apply_context_window_fallbacks(monkeypatch):
     assert fake_litellm.context_window_fallbacks == args["context_window_fallbacks"]
 
 
-def test_get_parameters_by_role_fallback_and_config_override(monkeypatch):
+def test_get_parameters_by_role_preserves_profile_when_server_config_lookup_fails(monkeypatch):
     monkeypatch.setattr(mod, "_get_config_manager", Mock(side_effect=RuntimeError("missing config")))
 
     params = mod._get_parameters_by_role(
         "litellm",
         "model",
-        "swarm",
+        "plan_creator",
         {"temperature": 0.2, "max_tokens": 123},
     )
 
     assert params.llm_temp == 0.2
     assert params.llm_max == 123
-    assert params.role == "unknown"
+    assert params.role == "plan_creator"
+
+
+def test_get_parameters_by_role_keeps_profile_temperature_over_generic_config(config_manager):
+    params = mod._get_parameters_by_role(
+        "litellm",
+        "model",
+        "plan_critic",
+        {"temperature": 0.9, "max_tokens": 10000},
+    )
+
+    assert params.role == "plan_critic"
+    assert params.llm_temp == 0.0
+    assert params.llm_max == 600
+
+
+def test_get_parameters_by_role_uses_swarm_agent_output_ceiling(config_manager):
+    params = mod._get_parameters_by_role(
+        "litellm",
+        "model",
+        "swarm_agent",
+        {"max_tokens": 999},
+    )
+
+    assert params.role == "swarm_agent"
+    assert params.llm_max == 700
+
+
+def test_thinking_model_disables_thinking_for_non_reasoning_profile(monkeypatch, config_manager):
+    import strands.models
+
+    config_manager.get_thinking_model_config = lambda model_id, region_name: {
+        "model_id": model_id,
+        "region_name": region_name,
+        "temperature": 0.1,
+        "max_tokens": 999,
+        "additional_request_fields": {"thinking": {"type": "enabled", "budget_tokens": 700}},
+    }
+    monkeypatch.setattr(strands.models, "BedrockModel", FakeModel)
+
+    model = mod.create_bedrock_model("thinking", "us-east-1", role="task_evaluator")
+
+    assert model.kwargs["additional_request_fields"] is None
 
 
 def test_get_model_and_provider_helpers():

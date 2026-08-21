@@ -3,7 +3,9 @@
 
 from modules.config.models.agent_profiles import (
     AgentSettingsRegistry,
+    LLMRoleType,
     ReasoningLevel,
+    normalize_agent_type,
     translate_reasoning_to_provider,
 )
 
@@ -32,8 +34,8 @@ def test_recommended_agent_defaults():
     plan_creator = registry.get_settings("plan_creator")
     assert plan_creator.temperature == 0.2
     assert plan_creator.reasoning_level == ReasoningLevel.MEDIUM
-    assert plan_creator.top_p == 0.95
-    assert plan_creator.top_k == 40
+    assert plan_creator.top_p is None
+    assert plan_creator.top_k is None
     assert plan_creator.max_tokens == 8192
 
     # alias plan_builder
@@ -66,15 +68,13 @@ def test_recommended_agent_defaults():
     assert prompt_critic.reasoning_level == ReasoningLevel.LOW
     assert prompt_critic.max_tokens == 2048
 
-    # task_executor (alias: primary, default)
+    # task_executor
     task_executor = registry.get_settings("task_executor")
     assert task_executor.temperature == 0.5
     assert task_executor.reasoning_level == ReasoningLevel.MEDIUM
     assert task_executor.max_tokens == 8192
-    assert registry.get_settings("primary").max_tokens == 8192
-    assert registry.get_settings("default").max_tokens == 8192
 
-    # task_evaluator / phase_evaluator
+    # task_evaluator / phase_evaluator have independent active state.
     evaluator = registry.get_settings("task_evaluator")
     assert evaluator.temperature == 0.0
     assert evaluator.reasoning_level == ReasoningLevel.NONE
@@ -86,7 +86,6 @@ def test_recommended_agent_defaults():
     assert report_agent.temperature == 0.2
     assert report_agent.reasoning_level == ReasoningLevel.NONE
     assert report_agent.max_tokens == 8192
-    assert registry.get_settings("report").max_tokens == 8192
 
     report_critic = registry.get_settings("report_critic")
     assert report_critic.temperature == 0.0
@@ -103,6 +102,23 @@ def test_recommended_agent_defaults():
     assert attack.temperature == 0.0
     assert attack.reasoning_level == ReasoningLevel.NONE
     assert attack.max_tokens == 4096
+
+
+def test_normalize_agent_type_uses_canonical_roles_and_limits_aliases():
+    assert normalize_agent_type("plan_creator") is LLMRoleType.PLAN_CREATOR
+    assert normalize_agent_type("plan_builder") is LLMRoleType.PLAN_CREATOR
+    assert normalize_agent_type("phase_evaluator") is LLMRoleType.PHASE_EVALUATOR
+    assert normalize_agent_type("primary") is LLMRoleType.UNKNOWN
+    assert normalize_agent_type("not-a-role") is LLMRoleType.UNKNOWN
+
+
+def test_phase_evaluator_adaptation_does_not_modify_task_evaluator():
+    registry = AgentSettingsRegistry()
+
+    registry.apply_reasoning_repair("phase_evaluator", ReasoningLevel.LOW, "phase recovery")
+
+    assert registry.get_settings("phase_evaluator").reasoning_level is ReasoningLevel.LOW
+    assert registry.get_settings("task_evaluator").reasoning_level is ReasoningLevel.NONE
 
 
 def test_reasoning_repair_and_permanent_lock():
