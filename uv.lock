@@ -288,16 +288,16 @@ wheels = [
 
 [[package]]
 name = "boto3"
-version = "1.43.72"
+version = "1.43.74"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
     { name = "jmespath" },
     { name = "s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/96/cc/f22093524c3b38e94ba2d0e6743d7e264f7190d149c8dceaf9603822c595/boto3-1.43.72.tar.gz", hash = "sha256:6280ce03cc85e9110fd9fb7e2fbf11eae0b1177cb041a0d69aa88edc9d178cf9", size = 112688, upload-time = "2026-08-14T19:24:53.29Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/02/3b/a8c14b2390a54189b0b14c03376e05150dcc4c1a875d18bff8f6594d7494/boto3-1.43.74.tar.gz", hash = "sha256:9d4d0dcf81c941cfe7d927486435521e0f3bf657cb68b10dfe445cfe311f8839", size = 112608, upload-time = "2026-08-18T21:20:33.506Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/b7/fa7b827ce0fc9bd697381e40f59d69a74c6ab553e246271685ec0acc75b2/boto3-1.43.72-py3-none-any.whl", hash = "sha256:f1bbbad5ed8d8a8c64edb0cd092dc443c95a85623b2ac88b6f6d633717605f00", size = 140025, upload-time = "2026-08-14T19:24:52.013Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/a1/61f89804cfa2f3517319bd92fffca12d35dfe90621f9d4f2ca95818eaa96/boto3-1.43.74-py3-none-any.whl", hash = "sha256:d7f6a921efbda61ed787b403df8b64a95bc66e66299e9772fc40c235c28a5bde", size = 140027, upload-time = "2026-08-18T21:20:31.615Z" },
 ]
 
 [[package]]
@@ -1474,7 +1474,7 @@ wheels = [
 
 [[package]]
 name = "langchain-aws"
-version = "1.7.1"
+version = "1.7.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "boto3" },
@@ -1482,9 +1482,9 @@ dependencies = [
     { name = "numpy" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/aa/c9/c9d525b8061ba96e06193013615674bc3e2625215684619211a375cb33cd/langchain_aws-1.7.1.tar.gz", hash = "sha256:7b4f7d85167751ee1e590ea659a867a5734aa07c1a169b8121683b98e733fdae", size = 649366, upload-time = "2026-08-14T14:23:00.946Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/5a/c381e4c2ed7d17e41d2462eda4aaac6113f911c25909623e6982184f498a/langchain_aws-1.7.2.tar.gz", hash = "sha256:2493abe9a3c9d4b36c0d6d056e5817ab730a77932082fe33d45e2ff2588be581", size = 660634, upload-time = "2026-08-18T15:02:32.082Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/5d/b34ab925a57d8488538add2edfe55ecdaf3d59a4bd2a7e3faddebfdb47c8/langchain_aws-1.7.1-py3-none-any.whl", hash = "sha256:f8eaca073e0fcfe275339bfe1e81c68df7b0098c81f81617b4783143ab72c779", size = 224143, upload-time = "2026-08-14T14:22:59.855Z" },
+    { url = "https://files.pythonhosted.org/packages/df/c6/d94f6957fb33b61e9144414f0095cbfdae32861140f391f09b9cba26b25e/langchain_aws-1.7.2-py3-none-any.whl", hash = "sha256:ae2f52842442f3078d47d02696c080881b1712968feedd9c7db9e34492970a15", size = 229328, upload-time = "2026-08-18T15:02:30.907Z" },
 ]
 
 [[package]]
